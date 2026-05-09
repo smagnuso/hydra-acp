@@ -1,0 +1,41 @@
+{
+  "name": "acp-hydra",
+  "version": "0.1.0",
+  "description": "Multi-client ACP session daemon: spawn agents, attach over WSS, multiplex sessions across editors.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "acp-hydra": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.0.0",
+    "fastify": "^5.0.0",
+    "nanoid": "^5.0.0",
+    "pino": "^9.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  }
+}
