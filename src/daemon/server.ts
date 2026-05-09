@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocketPlugin from "@fastify/websocket";
+import pino, { type Level } from "pino";
+import createPinoRoll from "pino-roll";
 import type { HydraConfig } from "../core/config.js";
 import { Registry } from "../core/registry.js";
 import { SessionManager } from "../core/session-manager.js";
@@ -37,8 +39,16 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
       }
     : undefined;
 
+  await fsp.mkdir(paths.home(), { recursive: true });
+  const { stream: logStream, fileStream } = await buildLogStream(
+    config.daemon.logLevel,
+  );
+
   const app = Fastify({
-    logger: { level: config.daemon.logLevel },
+    logger: {
+      level: config.daemon.logLevel,
+      stream: logStream,
+    },
     https: httpsOptions ?? null,
   });
 
@@ -93,9 +103,30 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     } catch {
       void 0;
     }
+    try {
+      fileStream.flushSync();
+    } catch {
+      void 0;
+    }
   };
 
   return { app, manager, registry, shutdown };
+}
+
+async function buildLogStream(level: string) {
+  const fileStream = await createPinoRoll({
+    file: paths.logFile(),
+    size: "10m",
+    frequency: "daily",
+    mkdir: true,
+    symlink: true,
+  });
+  const stderrStream = pino.destination(2);
+  const stream = pino.multistream([
+    { stream: fileStream, level: level as Level },
+    { stream: stderrStream, level: level as Level },
+  ]);
+  return { stream, fileStream };
 }
 
 function ensureLoopbackOrTls(config: HydraConfig): void {

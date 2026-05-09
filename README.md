@@ -239,13 +239,16 @@ The daemon refuses to bind to non-loopback hosts without TLS configured.
 ~/.acp-hydra/
 ├── config.json              # daemon config + auth token
 ├── daemon.pid               # PID + port lockfile (when running)
-├── daemon.log               # rotated by pino-roll
+├── daemon.<N>.log           # rotated daemon logs (10 MB or daily, whichever first)
+├── current.log              # symlink to the active daemon.<N>.log
 ├── registry.json            # cached ACP registry (24h TTL)
 └── agents/
     └── <agent-id>/
         ├── meta.json        # registry entry snapshot
         └── ...              # agent-specific install (npx cache, binary, etc.)
 ```
+
+Logs are also fanned out to stderr while the daemon is running. To follow live: `tail -F ~/.acp-hydra/current.log`.
 
 ## Wire protocol
 

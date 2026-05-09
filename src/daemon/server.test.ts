@@ -228,6 +228,25 @@ describe("startDaemon", () => {
       await expect(handle!.shutdown()).resolves.toBeUndefined();
       handle = null;
     });
+
+    it("rotates logs into daemon.<N>.log files with a current.log symlink", async () => {
+      handle!.app.log.warn("test-marker-line");
+
+      await handle!.shutdown();
+      handle = null;
+
+      const entries = await fs.readdir(tmpHome);
+      const logFiles = entries.filter((e) => /^daemon\.\d+\.log$/.test(e));
+      expect(logFiles.length).toBeGreaterThanOrEqual(1);
+      expect(entries).toContain("current.log");
+
+      const symlinkPath = path.join(tmpHome, "current.log");
+      const contents = await fs.readFile(symlinkPath, "utf8");
+      expect(contents.length).toBeGreaterThan(0);
+      expect(contents).toContain("test-marker-line");
+      const firstLine = contents.split("\n")[0];
+      expect(() => JSON.parse(firstLine!)).not.toThrow();
+    });
   });
 
   describe("non-loopback bind", () => {
