@@ -767,15 +767,12 @@ function firstLine(text: string): string {
 }
 
 function shortId(id: string): string {
-  // Keep enough context to be recognizable: full id when short, otherwise
-  // first segment + last 8 chars so the prefix (e.g. "hydra_session_") is
-  // still visible.
-  if (id.length <= 18) {
-    return id;
+  // The "hydra_session_" prefix is constant across every hydra session and
+  // doesn't help distinguish them. Strip it and show the random tail in full.
+  if (id.startsWith("hydra_session_")) {
+    return id.slice("hydra_session_".length);
   }
-  const tail = id.slice(-8);
-  const prefix = id.includes("_") ? id.slice(0, id.indexOf("_") + 1) : id.slice(0, 6);
-  return `${prefix}…${tail}`;
+  return id;
 }
 
 function formatUsage(usage: UsageState | undefined): string | null {
