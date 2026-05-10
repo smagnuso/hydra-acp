@@ -548,7 +548,7 @@ The accompanying icon lives at [`assets/icon.svg`](assets/icon.svg) — a single
 
 ## Status
 
-This is an early experiment. See `CHANGELOG.md` for what's working today.
+This is an early experiment.
 
 ## License
 
