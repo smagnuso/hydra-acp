@@ -56,7 +56,7 @@ export function registerAcpWsEndpoint(
     const stream = wsToMessageStream(socket);
     const connection = new JsonRpcConnection(stream);
     const state: ClientState = {
-      clientId: `cli_${nanoid(12)}`,
+      clientId: `hydra_client_${nanoid(12)}`,
       attached: new Map(),
     };
 
@@ -107,21 +107,24 @@ export function registerAcpWsEndpoint(
       const hydraHints = extractHydraMeta(params._meta).resume;
       let session = deps.manager.get(params.sessionId);
       if (!session) {
-        if (!hydraHints) {
+        let resurrectParams = hydraHints
+          ? {
+              hydraSessionId: params.sessionId,
+              upstreamSessionId: hydraHints.upstreamSessionId,
+              agentId: hydraHints.agentId,
+              cwd: hydraHints.cwd,
+              title: hydraHints.title,
+              agentArgs: hydraHints.agentArgs,
+            }
+          : await deps.manager.loadFromDisk(params.sessionId);
+        if (!resurrectParams) {
           const err = new Error(
             `session ${params.sessionId} not found and no resume hints provided`,
           ) as Error & { code: number };
           err.code = JsonRpcErrorCodes.SessionNotFound;
           throw err;
         }
-        session = await deps.manager.resurrect({
-          hydraSessionId: params.sessionId,
-          upstreamSessionId: hydraHints.upstreamSessionId,
-          agentId: hydraHints.agentId,
-          cwd: hydraHints.cwd,
-          title: hydraHints.title,
-          agentArgs: hydraHints.agentArgs,
-        });
+        session = await deps.manager.resurrect(resurrectParams);
       }
       const client = bindClientToSession(
         connection,
@@ -197,6 +200,44 @@ export function registerAcpWsEndpoint(
       return session.cancel(att.clientId);
     });
 
+    connection.onRequest("session/load", async (raw) => {
+      const rawObj = (raw ?? {}) as Record<string, unknown>;
+      const sessionId =
+        typeof rawObj.sessionId === "string" ? rawObj.sessionId : undefined;
+      if (!sessionId) {
+        const err = new Error("session/load requires sessionId") as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        throw err;
+      }
+      let session = deps.manager.get(sessionId);
+      if (!session) {
+        const fromDisk = await deps.manager.loadFromDisk(sessionId);
+        if (!fromDisk) {
+          const err = new Error(
+            `session ${sessionId} not found in memory or on disk`,
+          ) as Error & { code: number };
+          err.code = JsonRpcErrorCodes.SessionNotFound;
+          throw err;
+        }
+        session = await deps.manager.resurrect(fromDisk);
+      }
+      const client = bindClientToSession(connection, session, "controller", state);
+      const replay = session.attach(client, "pending_only");
+      state.attached.set(session.sessionId, {
+        sessionId: session.sessionId,
+        clientId: client.clientId,
+      });
+      for (const note of replay) {
+        await connection.notify(note.method, note.params);
+      }
+      return {
+        sessionId: session.sessionId,
+        _meta: buildResponseMeta(session),
+      };
+    });
+
     connection.setDefaultHandler(async (rawParams, method) => {
       if (
         !method.startsWith("session/") ||
@@ -262,7 +303,7 @@ function buildInitializeResult(): InitializeResult {
         http: true,
         sse: true,
       },
-      loadSession: false,
+      loadSession: true,
       sessionCapabilities: {
         attach: { roles: ["controller", "observer"] },
         list: true,

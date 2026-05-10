@@ -24,11 +24,48 @@ export async function runSessionsList(): Promise<void> {
     process.stdout.write("No active sessions.\n");
     return;
   }
-  for (const s of body.sessions) {
-    process.stdout.write(
-      `${s.sessionId}\t${s.agentId ?? "?"}\tclients=${s.attachedClients}\t${s.cwd}\n`,
-    );
+  const rows = body.sessions.map((s) => ({
+    session: s.sessionId,
+    clients: String(s.attachedClients),
+    agent: s.agentId ?? "?",
+    title: s.title ?? "-",
+    cwd: s.cwd,
+  }));
+  const header = {
+    session: "SESSION",
+    clients: "CLIENTS",
+    agent: "AGENT",
+    title: "TITLE",
+    cwd: "CWD",
+  };
+  const widths = {
+    session: maxLen(header.session, rows.map((r) => r.session)),
+    clients: maxLen(header.clients, rows.map((r) => r.clients)),
+    agent: maxLen(header.agent, rows.map((r) => r.agent)),
+    title: maxLen(header.title, rows.map((r) => r.title)),
+  };
+  const formatRow = (r: typeof header): string =>
+    [
+      r.session.padEnd(widths.session),
+      r.clients.padStart(widths.clients),
+      r.agent.padEnd(widths.agent),
+      r.title.padEnd(widths.title),
+      r.cwd,
+    ].join("  ");
+  process.stdout.write(formatRow(header) + "\n");
+  for (const r of rows) {
+    process.stdout.write(formatRow(r) + "\n");
   }
+}
+
+function maxLen(headerCell: string, values: string[]): number {
+  let max = headerCell.length;
+  for (const v of values) {
+    if (v.length > max) {
+      max = v.length;
+    }
+  }
+  return max;
 }
 
 export async function runSessionsKill(id: string | undefined): Promise<void> {

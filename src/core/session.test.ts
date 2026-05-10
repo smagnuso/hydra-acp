@@ -22,6 +22,19 @@ function makeClient(role: "controller" | "observer" = "controller"): {
   return { client, conn, stream };
 }
 
+describe("Session ID prefix", () => {
+  it("auto-generated sessionId starts with hydra_session_", () => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+    const s = new Session({
+      cwd: "/w",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u",
+    });
+    expect(s.sessionId.startsWith("hydra_session_")).toBe(true);
+  });
+});
+
 function makeSession(sessionId = "sess_test", upstream = "agent-sess-1") {
   const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
   const session = new Session({

@@ -47,7 +47,7 @@ export class Session {
   private closeHandlers: Array<() => void> = [];
 
   constructor(init: SessionInit) {
-    this.sessionId = init.sessionId ?? `sess_${nanoid(16)}`;
+    this.sessionId = init.sessionId ?? `hydra_session_${nanoid(16)}`;
     this.cwd = init.cwd;
     this.agentId = init.agentId;
     this.agent = init.agent;

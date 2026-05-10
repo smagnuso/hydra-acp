@@ -95,7 +95,7 @@ A hydra `session/new` response looks like:
 
 ```json
 {
-  "sessionId": "sess_abc123",
+  "sessionId": "hydra_session_abc123",
   "_meta": {
     "agent-vendor": { "sequence": 7 },
     "acp-hydra": {
@@ -113,7 +113,7 @@ For resurrection, the shim sends `session/attach` with a resume hint nested in t
 
 ```json
 {
-  "sessionId": "sess_abc123",
+  "sessionId": "hydra_session_abc123",
   "role": "controller",
   "historyPolicy": "pending_only",
   "_meta": {
@@ -153,7 +153,7 @@ acp-hydra daemon start
 acp-hydra sessions
 
 # 5. Attach a second client (read-only) to an existing session.
-acp-hydra --session-id sess_abc123 --role observer
+acp-hydra --session-id hydra_session_abc123 --role observer
 ```
 
 ## CLI
@@ -250,7 +250,7 @@ When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `ACP_H
   "daemon": {
     "host": "127.0.0.1",
     "port": 8765,
-    "authToken": "hyd_<random>",
+    "authToken": "hydra_token_<random>",
     "logLevel": "info"
   },
   "registry": {

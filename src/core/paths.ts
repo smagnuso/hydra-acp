@@ -19,4 +19,6 @@ export const paths = {
   registryCache: () => path.join(hydraHome(), "registry.json"),
   agentsDir: () => path.join(hydraHome(), "agents"),
   agentDir: (id: string) => path.join(hydraHome(), "agents", id),
+  sessionsDir: () => path.join(hydraHome(), "sessions"),
+  sessionFile: (id: string) => path.join(hydraHome(), "sessions", `${id}.json`),
 };

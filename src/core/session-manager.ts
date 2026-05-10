@@ -1,6 +1,7 @@
 import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
 import { Session } from "./session.js";
+import { SessionStore, recordFromMemorySession } from "./session-store.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
 
@@ -27,9 +28,15 @@ export class SessionManager {
   private sessions = new Map<string, Session>();
   private resurrectionInflight = new Map<string, Promise<Session>>();
   private spawner: AgentSpawner;
+  private store: SessionStore;
 
-  constructor(private registry: Registry, spawner?: AgentSpawner) {
+  constructor(
+    private registry: Registry,
+    spawner?: AgentSpawner,
+    store?: SessionStore,
+  ) {
     this.spawner = spawner ?? ((opts) => AgentInstance.spawn(opts));
+    this.store = store ?? new SessionStore();
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -76,8 +83,21 @@ export class SessionManager {
     });
     session.onClose(() => {
       this.sessions.delete(session.sessionId);
+      void this.store.delete(session.sessionId).catch(() => undefined);
     });
     this.sessions.set(session.sessionId, session);
+    await this.store
+      .write(
+        recordFromMemorySession({
+          sessionId: session.sessionId,
+          upstreamSessionId: session.upstreamSessionId,
+          agentId: session.agentId,
+          cwd: session.cwd,
+          title: session.title,
+          agentArgs: session.agentArgs,
+        }),
+      )
+      .catch(() => undefined);
     return session;
   }
 
@@ -162,9 +182,37 @@ export class SessionManager {
     });
     session.onClose(() => {
       this.sessions.delete(session.sessionId);
+      void this.store.delete(session.sessionId).catch(() => undefined);
     });
     this.sessions.set(session.sessionId, session);
+    await this.store
+      .write(
+        recordFromMemorySession({
+          sessionId: session.sessionId,
+          upstreamSessionId: session.upstreamSessionId,
+          agentId: session.agentId,
+          cwd: session.cwd,
+          title: session.title,
+          agentArgs: session.agentArgs,
+        }),
+      )
+      .catch(() => undefined);
     return session;
+  }
+
+  async loadFromDisk(sessionId: string): Promise<ResurrectParams | undefined> {
+    const record = await this.store.read(sessionId);
+    if (!record) {
+      return undefined;
+    }
+    return {
+      hydraSessionId: record.sessionId,
+      upstreamSessionId: record.upstreamSessionId,
+      agentId: record.agentId,
+      cwd: record.cwd,
+      title: record.title,
+      agentArgs: record.agentArgs,
+    };
   }
 
   get(sessionId: string): Session | undefined {
