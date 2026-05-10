@@ -435,7 +435,7 @@ describe("Session", () => {
   });
 
   describe("agent exit", () => {
-    it("notifies clients with session/closed and cleans up", () => {
+    it("notifies clients with acp-hydra/session_closed and cleans up", () => {
       const { session, mock } = makeSession("sess_x", "u");
       const { client, stream } = makeClient();
       session.attach(client, "full");
@@ -443,7 +443,7 @@ describe("Session", () => {
       mock.triggerExit(0, null);
 
       const closeMsg = stream.sent.find(
-        (m) => "method" in m && m.method === "session/closed",
+        (m) => "method" in m && m.method === "acp-hydra/session_closed",
       );
       expect(closeMsg).toMatchObject({
         params: { sessionId: "sess_x" },

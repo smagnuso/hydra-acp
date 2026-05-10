@@ -239,7 +239,7 @@ export class Session {
     this.cancelIdleTimer();
     for (const client of this.clients.values()) {
       void client.connection
-        .notify("session/closed", { sessionId: this.sessionId })
+        .notify("acp-hydra/session_closed", { sessionId: this.sessionId })
         .catch(() => undefined);
     }
     this.clients.clear();
