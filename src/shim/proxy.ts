@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ndjsonStreamFromStdio } from "../acp/framing.js";
-import { JsonRpcConnection } from "../acp/connection.js";
 import {
   type HydraConfig,
   loadConfig,
@@ -55,6 +54,36 @@ export async function runShim(opts: ShimOptions): Promise<void> {
     },
   });
 
+  wireShim({ opts, upstream, downstream, tracker });
+
+  upstream.onClose((err) => {
+    if (err) {
+      process.stderr.write(`acp-hydra: ${err.message}\n`);
+    }
+    void downstream.close();
+    process.exit(err ? 1 : 0);
+  });
+  downstream.onClose(() => {
+    void upstream.close();
+    process.exit(0);
+  });
+
+  await upstream.start();
+}
+
+export interface WireShimArgs {
+  opts: ShimOptions;
+  upstream: MessageStream;
+  downstream: MessageStream;
+  tracker: SessionTracker;
+}
+
+export function wireShim({
+  opts,
+  upstream,
+  downstream,
+  tracker,
+}: WireShimArgs): void {
   upstream.onMessage((msg) => {
     tracker.observeFromServer(msg);
     void downstream.send(msg);
@@ -85,23 +114,6 @@ export async function runShim(opts: ShimOptions): Promise<void> {
     }
     void upstream.send(msg);
   });
-
-  upstream.onClose((err) => {
-    if (err) {
-      process.stderr.write(`acp-hydra: ${err.message}\n`);
-    }
-    void downstream.close();
-    process.exit(err ? 1 : 0);
-  });
-  downstream.onClose(() => {
-    void upstream.close();
-    process.exit(0);
-  });
-
-  void new JsonRpcConnection(downstream);
-  void new JsonRpcConnection(upstream);
-
-  await upstream.start();
 }
 
 async function cancelPendingPermissions(
