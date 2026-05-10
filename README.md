@@ -154,8 +154,10 @@ For resurrection, the shim sends `session/attach` with a resume hint nested in t
 ## Install
 
 ```bash
-npm install -g acp-hydra
+npm install -g @acp-hydra/cli
 ```
+
+Drops `acp-hydra` (and `hydra`) on your PATH.
 
 ## Quick start
 
@@ -323,7 +325,7 @@ Configure in `~/.acp-hydra/config.json`:
 }
 ```
 
-If `command` is omitted, it defaults to `[<name>]` — useful when the package's `bin` matches its key (e.g. `npm install -g acp-hydra-slack` exposes `acp-hydra-slack` on PATH, so `"acp-hydra-slack": {}` is enough).
+If `command` is omitted, it defaults to `[<name>]` — useful when the package's `bin` matches its key (e.g. `npm install -g @acp-hydra/slack` exposes `acp-hydra-slack` on PATH, so `"acp-hydra-slack": {}` is enough).
 
 Each extension is launched with these env vars set:
 

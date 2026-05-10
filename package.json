@@ -1,9 +1,35 @@
 {
-  "name": "acp-hydra",
+  "name": "@acp-hydra/cli",
   "version": "0.1.0",
   "description": "Multi-client ACP session daemon: spawn agents, attach over WSS, multiplex sessions across editors.",
   "license": "MIT",
   "type": "module",
+  "homepage": "https://github.com/smagnuson/acp-hydra#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smagnuson/acp-hydra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/smagnuson/acp-hydra/issues"
+  },
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "claude",
+    "codex",
+    "gemini",
+    "daemon",
+    "websocket"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "acp-hydra": "dist/cli.js",
     "hydra": "dist/cli.js"
@@ -18,7 +44,8 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "dev": "tsx src/cli.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test"
   },
   "engines": {
     "node": ">=20"
