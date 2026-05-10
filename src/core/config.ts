@@ -30,7 +30,10 @@ const ExtensionConfig = z.object({
     .string()
     .min(1)
     .regex(/^[A-Za-z0-9._-]+$/, "extension name must be filename-safe"),
-  command: z.array(z.string()).min(1),
+  // Optional: if omitted, the spawn command defaults to [name], so a
+  // package called `acp-hydra-slack` that exposes a `acp-hydra-slack` bin
+  // can be enabled with just `{ name: "acp-hydra-slack" }`.
+  command: z.array(z.string()).default([]),
   args: z.array(z.string()).default([]),
   env: z.record(z.string()).default({}),
   enabled: z.boolean().default(true),
