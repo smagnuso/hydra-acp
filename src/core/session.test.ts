@@ -237,6 +237,89 @@ describe("Session", () => {
     });
   });
 
+  describe("idle timeout", () => {
+    it("starts a timer when last client detaches and closes after timeout", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_idle",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client } = makeClient();
+        session.attach(client, "full");
+        session.detach(client.clientId);
+
+        expect(closeSpy).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1_001);
+
+        expect(closeSpy).toHaveBeenCalledWith({ deleteRecord: false });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("cancels the idle timer when a client reattaches in time", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_renewed",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client: a } = makeClient();
+        session.attach(a, "full");
+        session.detach(a.clientId);
+
+        await vi.advanceTimersByTimeAsync(500);
+        const { client: b } = makeClient();
+        session.attach(b, "full");
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("idleTimeoutMs=0 disables auto-close", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_persistent",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 0,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client } = makeClient();
+        session.attach(client, "full");
+        session.detach(client.clientId);
+
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe("agent exit", () => {
     it("notifies clients with session/closed and cleans up", () => {
       const { session, mock } = makeSession("sess_x", "u");

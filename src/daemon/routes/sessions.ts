@@ -6,8 +6,10 @@ export function registerSessionRoutes(
   manager: SessionManager,
 ): void {
   app.get("/v1/sessions", async (request) => {
-    const cwd = (request.query as { cwd?: string } | undefined)?.cwd;
-    return { sessions: manager.list({ cwd }) };
+    const query = request.query as { cwd?: string; all?: string } | undefined;
+    const all = query?.all === "true" || query?.all === "1";
+    const sessions = await manager.list({ cwd: query?.cwd, all });
+    return { sessions };
   });
 
   app.post("/v1/sessions", async (request, reply) => {
@@ -43,11 +45,16 @@ export function registerSessionRoutes(
   app.delete("/v1/sessions/:id", async (request, reply) => {
     const id = (request.params as { id: string }).id;
     const session = manager.get(id);
-    if (!session) {
+    if (session) {
+      await session.close({ deleteRecord: true });
+      reply.code(204).send();
+      return;
+    }
+    const removed = await manager.deleteRecord(id);
+    if (!removed) {
       reply.code(404).send({ error: "session not found" });
       return;
     }
-    await session.close();
     reply.code(204).send();
   });
 }

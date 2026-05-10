@@ -7,6 +7,7 @@ import createPinoRoll from "pino-roll";
 import type { HydraConfig } from "../core/config.js";
 import { Registry } from "../core/registry.js";
 import { SessionManager } from "../core/session-manager.js";
+import { ExtensionManager } from "../core/extensions.js";
 import { paths } from "../core/paths.js";
 import { bearerAuth } from "./auth.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
@@ -26,6 +27,7 @@ export interface DaemonHandle {
   app: FastifyInstance;
   manager: SessionManager;
   registry: Registry;
+  extensions: ExtensionManager;
   shutdown: () => Promise<void>;
 }
 
@@ -66,7 +68,10 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   });
 
   const registry = new Registry(config);
-  const manager = new SessionManager(registry);
+  const manager = new SessionManager(registry, undefined, undefined, {
+    idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
+    recentMinutes: config.daemon.sessionRecentMinutes,
+  });
 
   registerHealthRoutes(app, HYDRA_VERSION);
   registerSessionRoutes(app, manager);
@@ -95,7 +100,20 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     { encoding: "utf8", mode: 0o600 },
   );
 
+  const scheme = config.daemon.tls ? "https" : "http";
+  const wsScheme = config.daemon.tls ? "wss" : "ws";
+  const extensions = new ExtensionManager(config.extensions, {
+    daemonUrl: `${scheme}://${config.daemon.host}:${boundPort}`,
+    daemonHost: config.daemon.host,
+    daemonPort: boundPort,
+    daemonToken: config.daemon.authToken,
+    daemonWsUrl: `${wsScheme}://${config.daemon.host}:${boundPort}/acp`,
+    hydraHome: paths.home(),
+  });
+  await extensions.start();
+
   const shutdown = async (): Promise<void> => {
+    await extensions.stop();
     await manager.closeAll();
     await app.close();
     try {
@@ -110,7 +128,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     }
   };
 
-  return { app, manager, registry, shutdown };
+  return { app, manager, registry, extensions, shutdown };
 }
 
 async function buildLogStream(level: string) {

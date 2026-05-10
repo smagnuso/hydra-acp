@@ -16,6 +16,8 @@ const DaemonConfig = z.object({
   authToken: z.string().min(16),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
+  sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(30),
+  sessionRecentMinutes: z.number().int().nonnegative().default(30),
 });
 
 const RegistryConfig = z.object({
@@ -23,10 +25,23 @@ const RegistryConfig = z.object({
   ttlHours: z.number().positive().default(24),
 });
 
+const ExtensionConfig = z.object({
+  name: z
+    .string()
+    .min(1)
+    .regex(/^[A-Za-z0-9._-]+$/, "extension name must be filename-safe"),
+  command: z.array(z.string()).min(1),
+  args: z.array(z.string()).default([]),
+  env: z.record(z.string()).default({}),
+  enabled: z.boolean().default(true),
+});
+export type ExtensionConfig = z.infer<typeof ExtensionConfig>;
+
 export const HydraConfig = z.object({
   daemon: DaemonConfig,
   registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
   defaultAgent: z.string().default("claude-code"),
+  extensions: z.array(ExtensionConfig).default([]),
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;

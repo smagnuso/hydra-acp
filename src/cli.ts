@@ -85,7 +85,7 @@ async function main(): Promise<void> {
     case "sessions": {
       const sub = positional[1];
       if (sub === undefined || sub === "list") {
-        await runSessionsList();
+        await runSessionsList({ all: flags.all === true });
         return;
       }
       if (sub === "kill") {
@@ -125,8 +125,8 @@ function printHelp(): void {
       "                                     Shim mode, attach to existing session",
       "  acp-hydra init [--rotate-token]    Initialize ~/.acp-hydra/config.json",
       "  acp-hydra daemon start|stop|status",
-      "  acp-hydra sessions [list]          List active sessions",
-      "  acp-hydra sessions kill <id>       Kill a session",
+      "  acp-hydra sessions [list] [--all]  List sessions (live + recent cold; --all for full disk view)",
+      "  acp-hydra sessions kill <id>       Kill a session (live or cold)",
       "  acp-hydra --version                Print version",
       "  acp-hydra --help                   Show this help",
       "",

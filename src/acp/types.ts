@@ -164,6 +164,7 @@ export const SessionListEntry = z.object({
   agentId: z.string().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
+  status: z.enum(["live", "cold"]).default("live"),
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntry>;

@@ -167,7 +167,7 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("session/list", async (raw) => {
       const params = SessionListParams.parse(raw ?? {});
-      const sessions = deps.manager.list({ cwd: params.cwd });
+      const sessions = await deps.manager.list({ cwd: params.cwd });
       const result: SessionListResult = { sessions };
       return result;
     });

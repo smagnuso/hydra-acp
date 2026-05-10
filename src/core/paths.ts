@@ -21,4 +21,9 @@ export const paths = {
   agentDir: (id: string) => path.join(hydraHome(), "agents", id),
   sessionsDir: () => path.join(hydraHome(), "sessions"),
   sessionFile: (id: string) => path.join(hydraHome(), "sessions", `${id}.json`),
+  extensionsDir: () => path.join(hydraHome(), "extensions"),
+  extensionLogFile: (name: string) =>
+    path.join(hydraHome(), "extensions", `${name}.log`),
+  extensionPidFile: (name: string) =>
+    path.join(hydraHome(), "extensions", `${name}.pid`),
 };

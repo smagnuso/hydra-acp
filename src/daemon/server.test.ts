@@ -16,12 +16,15 @@ function testConfig(): HydraConfig {
       port: 0,
       authToken: TEST_TOKEN,
       logLevel: "warn",
+      sessionIdleTimeoutSeconds: 30,
+      sessionRecentMinutes: 30,
     },
     registry: {
       url: "http://127.0.0.1:65535/never-reached",
       ttlHours: 24,
     },
     defaultAgent: "claude-code",
+    extensions: [],
   };
 }
 

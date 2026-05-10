@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { SessionManager } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
 import {
@@ -33,6 +36,17 @@ describe("SessionManager.resurrect", () => {
   let mocks: MockAgentControls[];
   let mockIndex: number;
   let manager: SessionManager;
+  let tmpHome: string;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-mgr-"));
+    process.env.ACP_HYDRA_HOME = tmpHome;
+  });
+
+  afterEach(async () => {
+    delete process.env.ACP_HYDRA_HOME;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     mocks = [];
@@ -193,7 +207,7 @@ describe("SessionManager.resurrect", () => {
       title: "feature-X",
     });
     expect(session.title).toBe("feature-X");
-    const entries = titledMgr.list();
+    const entries = await titledMgr.list();
     expect(entries[0]?.title).toBe("feature-X");
   });
 

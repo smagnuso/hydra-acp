@@ -26,6 +26,11 @@ export interface SessionInit {
   sessionId?: string;
   agentMeta?: Record<string, unknown>;
   agentArgs?: string[];
+  idleTimeoutMs?: number;
+}
+
+export interface CloseOptions {
+  deleteRecord?: boolean;
 }
 
 export class Session {
@@ -44,7 +49,9 @@ export class Session {
   private promptQueue: Array<() => Promise<void>> = [];
   private promptInFlight = false;
   private closed = false;
-  private closeHandlers: Array<() => void> = [];
+  private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
+  private idleTimeoutMs: number;
+  private idleTimer: NodeJS.Timeout | undefined;
 
   constructor(init: SessionInit) {
     this.sessionId = init.sessionId ?? `hydra_session_${nanoid(16)}`;
@@ -55,6 +62,7 @@ export class Session {
     this.agentMeta = init.agentMeta;
     this.agentArgs = init.agentArgs;
     this.title = init.title;
+    this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.updatedAt = Date.now();
 
     this.agent.connection.onNotification("session/update", (params) => {
@@ -64,7 +72,7 @@ export class Session {
       return this.handlePermissionRequest(params);
     });
     this.agent.onExit(() => {
-      this.markClosed();
+      this.markClosed({ deleteRecord: false });
     });
   }
 
@@ -87,6 +95,7 @@ export class Session {
     }
     this.clients.set(client.clientId, client);
     this.updatedAt = Date.now();
+    this.cancelIdleTimer();
     if (historyPolicy === "none") {
       return [];
     }
@@ -99,6 +108,7 @@ export class Session {
   detach(clientId: string): void {
     if (this.clients.delete(clientId)) {
       this.updatedAt = Date.now();
+      this.maybeStartIdleTimer();
     }
   }
 
@@ -151,23 +161,25 @@ export class Session {
     return params;
   }
 
-  async close(): Promise<void> {
+  async close(opts: CloseOptions = {}): Promise<void> {
     if (this.closed) {
       return;
     }
+    this.cancelIdleTimer();
     await this.agent.kill().catch(() => undefined);
-    this.markClosed();
+    this.markClosed({ deleteRecord: opts.deleteRecord ?? false });
   }
 
-  onClose(handler: () => void): void {
+  onClose(handler: (opts: { deleteRecord: boolean }) => void): void {
     this.closeHandlers.push(handler);
   }
 
-  private markClosed(): void {
+  private markClosed(opts: { deleteRecord: boolean }): void {
     if (this.closed) {
       return;
     }
     this.closed = true;
+    this.cancelIdleTimer();
     for (const client of this.clients.values()) {
       void client.connection
         .notify("session/closed", { sessionId: this.sessionId })
@@ -175,7 +187,30 @@ export class Session {
     }
     this.clients.clear();
     for (const handler of this.closeHandlers) {
-      handler();
+      handler(opts);
+    }
+  }
+
+  private maybeStartIdleTimer(): void {
+    if (this.closed || this.clients.size > 0 || this.idleTimeoutMs <= 0) {
+      return;
+    }
+    if (this.idleTimer) {
+      return;
+    }
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = undefined;
+      void this.close({ deleteRecord: false }).catch(() => undefined);
+    }, this.idleTimeoutMs);
+    if (typeof this.idleTimer.unref === "function") {
+      this.idleTimer.unref();
+    }
+  }
+
+  private cancelIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
     }
   }
 

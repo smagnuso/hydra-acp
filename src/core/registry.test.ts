@@ -35,12 +35,15 @@ function fakeConfig(): HydraConfig {
       port: 8765,
       authToken: "hyd_xxx",
       logLevel: "warn",
+      sessionIdleTimeoutSeconds: 30,
+      sessionRecentMinutes: 30,
     },
     registry: {
       url: "http://example.invalid/never",
       ttlHours: 24,
     },
     defaultAgent: "claude-acp",
+    extensions: [],
   };
 }
 

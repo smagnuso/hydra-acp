@@ -24,19 +24,29 @@ export interface ResurrectParams {
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
 
+export interface SessionManagerOptions {
+  idleTimeoutMs?: number;
+  recentMinutes?: number;
+}
+
 export class SessionManager {
   private sessions = new Map<string, Session>();
   private resurrectionInflight = new Map<string, Promise<Session>>();
   private spawner: AgentSpawner;
   private store: SessionStore;
+  private idleTimeoutMs: number;
+  private recentMinutes: number;
 
   constructor(
     private registry: Registry,
     spawner?: AgentSpawner,
     store?: SessionStore,
+    options: SessionManagerOptions = {},
   ) {
     this.spawner = spawner ?? ((opts) => AgentInstance.spawn(opts));
     this.store = store ?? new SessionStore();
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
+    this.recentMinutes = options.recentMinutes ?? 30;
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -80,10 +90,13 @@ export class SessionManager {
       agentMeta: newResult._meta,
       title: params.title,
       agentArgs: params.agentArgs,
+      idleTimeoutMs: this.idleTimeoutMs,
     });
-    session.onClose(() => {
+    session.onClose(({ deleteRecord }) => {
       this.sessions.delete(session.sessionId);
-      void this.store.delete(session.sessionId).catch(() => undefined);
+      if (deleteRecord) {
+        void this.store.delete(session.sessionId).catch(() => undefined);
+      }
     });
     this.sessions.set(session.sessionId, session);
     await this.store
@@ -179,10 +192,13 @@ export class SessionManager {
       agentMeta: loadResult?._meta,
       title: params.title,
       agentArgs: params.agentArgs,
+      idleTimeoutMs: this.idleTimeoutMs,
     });
-    session.onClose(() => {
+    session.onClose(({ deleteRecord }) => {
       this.sessions.delete(session.sessionId);
-      void this.store.delete(session.sessionId).catch(() => undefined);
+      if (deleteRecord) {
+        void this.store.delete(session.sessionId).catch(() => undefined);
+      }
     });
     this.sessions.set(session.sessionId, session);
     await this.store
@@ -231,12 +247,16 @@ export class SessionManager {
     return session;
   }
 
-  list(filter?: { cwd?: string }): SessionListEntry[] {
+  async list(
+    filter: { cwd?: string; all?: boolean } = {},
+  ): Promise<SessionListEntry[]> {
     const entries: SessionListEntry[] = [];
+    const liveIds = new Set<string>();
     for (const session of this.sessions.values()) {
-      if (filter?.cwd && session.cwd !== filter.cwd) {
+      if (filter.cwd && session.cwd !== filter.cwd) {
         continue;
       }
+      liveIds.add(session.sessionId);
       entries.push({
         sessionId: session.sessionId,
         cwd: session.cwd,
@@ -244,10 +264,46 @@ export class SessionManager {
         agentId: session.agentId,
         updatedAt: new Date(session.updatedAt).toISOString(),
         attachedClients: session.attachedCount,
+        status: "live",
+      });
+    }
+    const records = await this.store.list().catch(() => []);
+    const cutoffMs =
+      !filter.all && this.recentMinutes > 0
+        ? Date.now() - this.recentMinutes * 60_000
+        : 0;
+    for (const r of records) {
+      if (liveIds.has(r.sessionId)) {
+        continue;
+      }
+      if (filter.cwd && r.cwd !== filter.cwd) {
+        continue;
+      }
+      const ts = new Date(r.updatedAt).getTime();
+      if (cutoffMs > 0 && Number.isFinite(ts) && ts < cutoffMs) {
+        continue;
+      }
+      entries.push({
+        sessionId: r.sessionId,
+        cwd: r.cwd,
+        title: r.title,
+        agentId: r.agentId,
+        updatedAt: r.updatedAt,
+        attachedClients: 0,
+        status: "cold",
       });
     }
     entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     return entries;
+  }
+
+  async deleteRecord(sessionId: string): Promise<boolean> {
+    const record = await this.store.read(sessionId);
+    if (!record) {
+      return false;
+    }
+    await this.store.delete(sessionId).catch(() => undefined);
+    return true;
   }
 
   async closeAll(): Promise<void> {

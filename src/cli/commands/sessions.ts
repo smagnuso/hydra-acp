@@ -1,9 +1,13 @@
 import { loadConfig } from "../../core/config.js";
 
-export async function runSessionsList(): Promise<void> {
+export async function runSessionsList(opts: { all?: boolean } = {}): Promise<void> {
   const config = await loadConfig();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetch(`${baseUrl}/v1/sessions`, {
+  const url = new URL(`${baseUrl}/v1/sessions`);
+  if (opts.all) {
+    url.searchParams.set("all", "true");
+  }
+  const response = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${config.daemon.authToken}` },
   });
   if (!response.ok) {
@@ -18,6 +22,7 @@ export async function runSessionsList(): Promise<void> {
       title?: string;
       attachedClients: number;
       updatedAt: string;
+      status?: "live" | "cold";
     }>;
   };
   if (body.sessions.length === 0) {
@@ -26,13 +31,15 @@ export async function runSessionsList(): Promise<void> {
   }
   const rows = body.sessions.map((s) => ({
     session: s.sessionId,
-    clients: String(s.attachedClients),
+    status: (s.status ?? "live").toUpperCase(),
+    clients: s.status === "cold" ? "-" : String(s.attachedClients),
     agent: s.agentId ?? "?",
     title: s.title ?? "-",
     cwd: s.cwd,
   }));
   const header = {
     session: "SESSION",
+    status: "STATUS",
     clients: "CLIENTS",
     agent: "AGENT",
     title: "TITLE",
@@ -40,6 +47,7 @@ export async function runSessionsList(): Promise<void> {
   };
   const widths = {
     session: maxLen(header.session, rows.map((r) => r.session)),
+    status: maxLen(header.status, rows.map((r) => r.status)),
     clients: maxLen(header.clients, rows.map((r) => r.clients)),
     agent: maxLen(header.agent, rows.map((r) => r.agent)),
     title: maxLen(header.title, rows.map((r) => r.title)),
@@ -47,6 +55,7 @@ export async function runSessionsList(): Promise<void> {
   const formatRow = (r: typeof header): string =>
     [
       r.session.padEnd(widths.session),
+      r.status.padEnd(widths.status),
       r.clients.padStart(widths.clients),
       r.agent.padEnd(widths.agent),
       r.title.padEnd(widths.title),

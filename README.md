@@ -261,6 +261,46 @@ When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `ACP_H
 }
 ```
 
+`daemon.sessionIdleTimeoutSeconds` (default 30) controls how long a session with zero attached clients stays alive before the daemon closes it. The disk record stays so the session can be resurrected later via `session/load`. Set to `0` to disable.
+
+`daemon.sessionRecentMinutes` (default 30) controls how far back `acp-hydra sessions` (and the `/v1/sessions` REST endpoint without `?all=true`) looks for cold (disk-only) sessions. Set to `0` to never list cold sessions.
+
+### Extensions
+
+Hydra can spawn user-configured extension processes when the daemon starts. Extensions are arbitrary commands — written in any language — that talk to the daemon over its existing REST or WSS endpoints. Hydra handles their lifecycle (spawn on start, kill on stop, auto-restart on crash with exponential backoff up to ~60s) and injects daemon connection info via env vars.
+
+Configure in `~/.acp-hydra/config.json`:
+
+```json
+{
+  "extensions": [
+    {
+      "name": "acp-slack",
+      "command": ["acp-slack"],
+      "args": ["--channel", "#dev"],
+      "env": { "SLACK_BOT_TOKEN": "xoxb-..." },
+      "enabled": true
+    }
+  ]
+}
+```
+
+Each extension is launched with these env vars set:
+
+| Env var | Example |
+|---|---|
+| `ACP_HYDRA_DAEMON_URL` | `http://127.0.0.1:8765` |
+| `ACP_HYDRA_DAEMON_HOST` | `127.0.0.1` |
+| `ACP_HYDRA_DAEMON_PORT` | `8765` |
+| `ACP_HYDRA_TOKEN` | `hydra_token_<hex>` |
+| `ACP_HYDRA_WS_URL` | `ws://127.0.0.1:8765/acp` |
+| `ACP_HYDRA_HOME` | `~/.acp-hydra` |
+| `ACP_HYDRA_EXTENSION_NAME` | the `name` from config |
+
+Extension stdout/stderr are appended to `~/.acp-hydra/extensions/<name>.log`.
+
+**Trust model**: extensions run with the same privileges as the daemon and receive its full auth token. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism.
+
 The `authToken` is generated on `acp-hydra init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. Tokens never leave `~/.acp-hydra/`.
 
 For remote access (binding to a non-loopback address), enable TLS via:
