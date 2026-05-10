@@ -353,10 +353,31 @@ acp-hydra extensions logs acp-hydra-slack --follow
 
 **Trust model**: extensions run with the same privileges as the daemon and receive its full auth token. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism.
 
-#### Notable extensions
+#### Optional extensions
 
-- **[acp-hydra-slack](https://github.com/smagnuson/acp-hydra-slack)** — bridges hydra sessions into Slack threads. Each session gets its own thread; the agent's responses stream into Slack, and replies in the thread are forwarded back to the agent as prompts. Lets non-developers (or your phone) watch and drive an agent that lives in your editor. Implements `controller` so it can prompt; respects RFD #533's `prompt_received` and the `user_message_chunk` compat shim so cross-client prompts mirror correctly.
-- **[acp-hydra-browser](https://github.com/smagnuson/acp-hydra-browser)** — browser-based UI for hydra. Lists active sessions, attaches as `controller` or `observer`, renders the live transcript (agent messages, tool calls, plans, mode changes). Useful for quick supervision without firing up the editor.
+Two ready-made extensions ship under the same `@acp-hydra` npm scope. Both are optional and can be installed independently.
+
+**[`@acp-hydra/slack`](https://github.com/smagnuson/acp-hydra-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Attaches as `controller`, respects RFD #533's `prompt_received`, and survives daemon restarts via session resurrection.
+
+```sh
+npm install -g @acp-hydra/slack
+acp-hydra extensions add acp-hydra-slack --command acp-hydra-slack
+acp-hydra extensions start acp-hydra-slack   # if the daemon is already running
+```
+
+You'll also need a Slack app and a config at `~/.acp-hydra-slack.conf` — see the [package's setup section](https://github.com/smagnuson/acp-hydra-slack#setup) for scopes, tokens, and authorized users.
+
+**[`@acp-hydra/browser`](https://github.com/smagnuson/acp-hydra-browser) — local web UI.** Single-page app that lists live sessions, attaches as `controller` or `observer`, and renders the transcript (agent messages, tool calls, plans, mode/model changes) with a composer for prompting and permission widgets for approving tool use. Cheap to bring up when you want to spot-check an agent without firing up the editor.
+
+```sh
+npm install -g @acp-hydra/browser
+acp-hydra extensions add acp-hydra-browser --command acp-hydra-browser
+acp-hydra extensions start acp-hydra-browser
+```
+
+The first launch generates `~/.acp-hydra-browser/authkey` and writes the open URL (with `?authkey=…`) to `~/.acp-hydra-browser/link`. Defaults to localhost-only; see the [package's HTTPS section](https://github.com/smagnuson/acp-hydra-browser#https) for binding to a LAN address with TLS.
+
+Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.acp-hydra/config.json` — see the snippet above. `acp-hydra extensions logs <name> -f` tails an extension's stdout/stderr if you need to debug.
 
 The `authToken` is generated on `acp-hydra init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. Tokens never leave `~/.acp-hydra/`.
 
