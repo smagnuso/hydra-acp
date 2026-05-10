@@ -1,4 +1,13 @@
-import { nanoid } from "nanoid";
+import { customAlphabet } from "nanoid";
+
+// nanoid's default alphabet is URL-safe (alphanumerics + `-` + `_`). We
+// drop both punctuation chars: `-` collides with parsers that treat dashes
+// as field separators, and `_` looks doubled against the literal prefix
+// (`hydra_session__foo`). Plain alphanumeric is plenty of entropy at
+// length 16 (~95 bits).
+const HYDRA_ID_ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const generateHydraId = customAlphabet(HYDRA_ID_ALPHABET, 16);
 import { AgentInstance } from "./agent-instance.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import type { HistoryPolicy, SessionRole } from "../acp/types.js";
@@ -54,7 +63,7 @@ export class Session {
   private idleTimer: NodeJS.Timeout | undefined;
 
   constructor(init: SessionInit) {
-    this.sessionId = init.sessionId ?? `hydra_session_${nanoid(16)}`;
+    this.sessionId = init.sessionId ?? `hydra_session_${generateHydraId()}`;
     this.cwd = init.cwd;
     this.agentId = init.agentId;
     this.agent = init.agent;

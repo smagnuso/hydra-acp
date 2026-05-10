@@ -33,6 +33,24 @@ describe("Session ID prefix", () => {
     });
     expect(s.sessionId.startsWith("hydra_session_")).toBe(true);
   });
+
+  it("auto-generated sessionId tail is plain alphanumeric (no - or _)", () => {
+    // We use a custom nanoid alphabet of just alphanumerics. Dashes
+    // collide with separator-based parsers; underscores look doubled
+    // against the literal "hydra_session_" prefix. Run a batch so the
+    // test is resistant to luck.
+    for (let i = 0; i < 200; i++) {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+      const s = new Session({
+        cwd: "/w",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u",
+      });
+      const tail = s.sessionId.replace(/^hydra_session_/, "");
+      expect(tail).toMatch(/^[A-Za-z0-9]+$/);
+    }
+  });
 });
 
 function makeSession(sessionId = "sess_test", upstream = "agent-sess-1") {
