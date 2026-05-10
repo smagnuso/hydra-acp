@@ -59,15 +59,9 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
         },
       ];
     case "turn-complete":
-      return event.stopReason
-        ? [
-            {
-              prefix: "  ",
-              body: `(turn complete · ${event.stopReason})`,
-              bodyStyle: "dim",
-            },
-          ]
-        : [];
+      // Boundary is rendered as a blank separator only — see the
+      // ensureSeparator() call in app.ts after a turn-complete event.
+      return [];
     case "usage-update":
       // Usage is rendered in the header by the app, not in scrollback.
       return [];

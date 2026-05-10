@@ -195,11 +195,18 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const handleEffect = (effect: InputEffect): void => {
     switch (effect.type) {
       case "send":
-        void sendPrompt(effect.text, effect.planMode);
+        enqueuePrompt(effect.text, effect.planMode);
         return;
       case "cancel":
         if (turnInFlight) {
           turnInFlight.cancel();
+        }
+        // Drop any queued prompts beyond the one currently processing —
+        // Ctrl+C means stop, not "stop just this". The head (if any) keeps
+        // its current state until the in-flight turn settles.
+        if (promptQueue.length > (workerActive ? 1 : 0)) {
+          promptQueue.length = workerActive ? 1 : 0;
+          refreshQueueDisplay();
         }
         return;
       case "exit":
@@ -217,19 +224,61 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     }
   };
 
-  const sendPrompt = async (text: string, planMode: boolean): Promise<void> => {
+  // Serial prompt queue. While a turn is running, Enter pushes here; the
+  // worker dequeues and processes one at a time. The user echo is rendered
+  // when the prompt is *processed*, not enqueued, so each turn lands as a
+  // clean (user → reply) pair in scrollback even if the user typed several
+  // prompts back-to-back.
+  const promptQueue: Array<{ text: string; planMode: boolean }> = [];
+  let workerActive = false;
+
+  const refreshQueueDisplay = (): void => {
+    // Skip the head — that one is being processed and is already echoed in
+    // scrollback. Show only those still waiting.
+    const waiting = promptQueue.slice(workerActive ? 1 : 0);
+    screen.setQueuedPrompts(waiting.map((p) => p.text));
+    screen.setBanner({ queued: waiting.length });
+  };
+
+  const enqueuePrompt = (text: string, planMode: boolean): void => {
     history = appendEntry(history, text);
     dispatcher.setHistory(history);
     saveHistory(historyFile, history).catch(() => undefined);
+    promptQueue.push({ text, planMode });
+    refreshQueueDisplay();
+    if (!workerActive) {
+      void runQueueWorker();
+    }
+  };
 
+  const runQueueWorker = async (): Promise<void> => {
+    workerActive = true;
+    try {
+      while (promptQueue.length > 0) {
+        const next = promptQueue[0];
+        if (!next) {
+          break;
+        }
+        // Drop the head from the visual queue zone — it's about to be
+        // echoed into scrollback as a real user message.
+        refreshQueueDisplay();
+        await processPrompt(next.text, next.planMode);
+        // Now that processing is fully done (including turn-complete),
+        // shift the head off so the next iteration's slice(1) is correct.
+        promptQueue.shift();
+      }
+    } finally {
+      workerActive = false;
+      refreshQueueDisplay();
+    }
+  };
+
+  const processPrompt = async (text: string, planMode: boolean): Promise<void> => {
     const userBlocks = [{ type: "text", text }];
     const promptArr = planMode
       ? [{ type: "text", text: PLAN_PREFIX_TEXT }, ...userBlocks]
       : userBlocks;
 
-    // Echo the user prompt locally — the daemon's `prompt_received`
-    // notification will arrive too, but we want the buffer to feel
-    // responsive.
     appendRender({ kind: "user-text", text });
     dispatcher.setTurnRunning(true);
     screen.setBanner({ status: "running" });
@@ -246,11 +295,15 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         );
       },
     };
+    let stopReason: string | undefined;
     try {
-      await conn.request("session/prompt", {
+      const response = (await conn.request("session/prompt", {
         sessionId: resolvedSessionId,
         prompt: promptArr,
-      });
+      })) as { stopReason?: unknown };
+      if (response && typeof response.stopReason === "string") {
+        stopReason = response.stopReason;
+      }
     } catch (err) {
       appendRender({
         kind: "unknown",
@@ -261,6 +314,14 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       turnInFlight = null;
       dispatcher.setTurnRunning(false);
       screen.setBanner({ status: "ready" });
+      // Daemon broadcasts turn_complete to other clients but excludes the
+      // originator (core/session.ts:138). Synthesize it locally so the
+      // streaming buffer resets and a separator lands before the next turn.
+      appendRender(
+        stopReason !== undefined
+          ? { kind: "turn-complete", stopReason }
+          : { kind: "turn-complete" },
+      );
     }
   };
 

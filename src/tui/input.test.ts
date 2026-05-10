@@ -130,6 +130,16 @@ describe("InputDispatcher", () => {
     expect(feed(d, [k("ctrl-c")])).toEqual([{ type: "cancel" }]);
   });
 
+  it("Enter while turn running still emits send (caller queues)", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("h"), ch("i")]);
+    d.setTurnRunning(true);
+    expect(feed(d, [k("enter")])).toEqual([
+      { type: "send", text: "hi", planMode: false },
+    ]);
+    expect(d.state().buffer).toEqual([""]);
+  });
+
   it("Ctrl+D exits when buffer empty, no-op otherwise", () => {
     const d = new InputDispatcher();
     expect(feed(d, [k("ctrl-d")])).toEqual([{ type: "exit" }]);

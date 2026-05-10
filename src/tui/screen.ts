@@ -17,6 +17,7 @@ interface BannerState {
   status: string;
   planMode: boolean;
   hint: string;
+  queued: number;
 }
 
 interface HeaderState {
@@ -37,6 +38,7 @@ const HEADER_ROWS = 2;
 const BANNER_ROWS = 1;
 const SEPARATOR_ROWS = 1;
 const MAX_PROMPT_ROWS = 8;
+const MAX_QUEUED_ROWS = 5;
 
 export class Screen {
   private term: Terminal;
@@ -45,10 +47,12 @@ export class Screen {
   private lines: FormattedLine[] = [];
   private streamingActive = false;
   private lastPromptRows = 0;
+  private queuedTexts: string[] = [];
   private banner: BannerState = {
     status: "ready",
     planMode: false,
     hint: "⇧⇥ plan · ⌥⏎ newline · ⌃C cancel · ⌃D quit",
+    queued: 0,
   };
   private header: HeaderState = { agent: "?", cwd: "?", sessionId: "?" };
   private resizeHandler: () => void;
@@ -168,6 +172,11 @@ export class Screen {
     this.repaint();
   }
 
+  setQueuedPrompts(texts: string[]): void {
+    this.queuedTexts = [...texts];
+    this.repaint();
+  }
+
   // Adds a blank spacer line to the scrollback, but only if scrollback is
   // non-empty and the last line isn't already a spacer. Idempotent so callers
   // can request it freely at turn boundaries.
@@ -187,7 +196,8 @@ export class Screen {
   // The dispatcher is the source of truth for prompt state. If the prompt
   // row count changed (alt+enter added a line, backspace joined two), the
   // separator and scrollback bottom shift, so we need a full repaint;
-  // otherwise an in-place prompt redraw is enough.
+  // otherwise an in-place prompt redraw is enough. (Queued-zone changes
+  // already trigger a full repaint via setQueuedPrompts.)
   refreshPrompt(): void {
     if (this.promptRows() !== this.lastPromptRows) {
       this.repaint();
@@ -218,6 +228,7 @@ export class Screen {
     this.drawHeader();
     this.drawSeparator(HEADER_ROWS);
     this.drawScrollback();
+    this.drawQueuedZone();
     const promptRows = this.promptRows();
     // Separator goes on the row directly above the first prompt row.
     // drawPrompt computes its top as (h - promptRows - BANNER_ROWS + 1), so
@@ -259,7 +270,11 @@ export class Screen {
     const w = this.term.width;
     const top = HEADER_ROWS + SEPARATOR_ROWS;
     const bottom =
-      this.term.height - this.promptRows() - BANNER_ROWS - SEPARATOR_ROWS;
+      this.term.height -
+      this.promptRows() -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      this.queuedRows();
     const visibleRows = bottom - top + 1;
     if (visibleRows <= 0) {
       return;
@@ -274,6 +289,41 @@ export class Screen {
       if (line) {
         this.writeFormattedLine(line, w);
       }
+    }
+  }
+
+  private queuedRows(): number {
+    return Math.min(MAX_QUEUED_ROWS, this.queuedTexts.length);
+  }
+
+  private drawQueuedZone(): void {
+    const rows = this.queuedRows();
+    if (rows === 0) {
+      return;
+    }
+    const w = this.term.width;
+    const promptRows = this.promptRows();
+    // Queued zone sits directly above the separator, which is directly
+    // above the prompt. So queued bottom = separator - 1.
+    const separatorRow = this.term.height - promptRows - BANNER_ROWS;
+    const queuedBottom = separatorRow - 1;
+    const queuedTop = queuedBottom - rows + 1;
+    for (let i = 0; i < rows; i++) {
+      const row = queuedTop + i;
+      this.term.moveTo(1, row).eraseLineAfter();
+      const text = this.queuedTexts[i];
+      if (text === undefined) {
+        continue;
+      }
+      const isLast =
+        i === rows - 1 && this.queuedTexts.length > MAX_QUEUED_ROWS;
+      const overflow = this.queuedTexts.length - MAX_QUEUED_ROWS;
+      const summary = isLast
+        ? `+ ${overflow + 1} more queued`
+        : truncate(firstLine(text), w - 4);
+      const display = ` ⏳ ${summary}`;
+      const padded = display + " ".repeat(Math.max(0, w - display.length));
+      this.term.bgBlue.brightWhite(padded);
     }
   }
 
@@ -304,6 +354,9 @@ export class Screen {
       this.term.brightYellow(`${dot} ${this.banner.status}`);
     } else {
       this.term.brightGreen(`${dot} ${this.banner.status}`);
+    }
+    if (this.banner.queued > 0) {
+      this.term(" · ").brightYellow(`${this.banner.queued} queued`);
     }
     this.term(" · ");
     if (this.banner.planMode) {
@@ -437,6 +490,11 @@ function truncate(text: string, max: number): string {
     return text.slice(0, max);
   }
   return text.slice(0, max - 1) + "…";
+}
+
+function firstLine(text: string): string {
+  const idx = text.indexOf("\n");
+  return idx === -1 ? text : `${text.slice(0, idx)} ↵`;
 }
 
 function shortId(id: string): string {
