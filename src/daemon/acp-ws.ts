@@ -149,6 +149,7 @@ export function registerAcpWsEndpoint(
       for (const note of replay) {
         await connection.notify(note.method, note.params);
       }
+      session.replayPendingPermissions(client);
       return {
         sessionId: session.sessionId,
         role: params.role,
@@ -267,6 +268,7 @@ export function registerAcpWsEndpoint(
       for (const note of replay) {
         await connection.notify(note.method, note.params);
       }
+      session.replayPendingPermissions(client);
       return {
         sessionId: session.sessionId,
         _meta: buildResponseMeta(session),

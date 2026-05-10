@@ -126,9 +126,13 @@ describe("Session", () => {
       await new Promise((r) => setImmediate(r));
       expect(a.stream.sent).toHaveLength(1);
 
-      // Late-joining controller should receive the same in-flight request.
+      // Late-joining controller. attach() returns history without dispatching
+      // the in-flight permission; the WS handler is expected to drain history
+      // first and *then* call replayPendingPermissions so the prompt lands
+      // at the bottom of the transcript.
       const b = makeClient("controller");
       session.attach(b.client, "full");
+      session.replayPendingPermissions(b.client);
       const bReq = b.stream.sent.find(
         (m): m is { id: string | number; method: string; params: unknown } =>
           "method" in m && m.method === "session/request_permission",
@@ -178,10 +182,59 @@ describe("Session", () => {
       // request_permission.
       const b = makeClient("controller");
       session.attach(b.client, "full");
+      session.replayPendingPermissions(b.client);
       const stale = b.stream.sent.find(
         (m) => "method" in m && m.method === "session/request_permission",
       );
       expect(stale).toBeUndefined();
+    });
+
+    it("replayPendingPermissions runs after history so the prompt lands last", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient("controller");
+      session.attach(a.client, "full");
+
+      // Build up some history before the permission request.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_agent",
+        update: { kind: "agent_message_chunk", content: "hi" },
+      });
+
+      const reqPromise = mock.triggerRequest("session/request_permission", {
+        sessionId: "u_agent",
+        toolCall: { name: "edit_file", toolCallId: "tc_50" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Late attach. Drain history first (mirrors what acp-ws.ts does), then
+      // dispatch in-flight permissions.
+      const b = makeClient("controller");
+      const replay = session.attach(b.client, "full");
+      for (const note of replay) {
+        await b.client.connection.notify(note.method, note.params);
+      }
+      session.replayPendingPermissions(b.client);
+
+      const sentMethods = b.stream.sent
+        .filter((m): m is { method: string } => "method" in m)
+        .map((m) => m.method);
+      const updateIdx = sentMethods.indexOf("session/update");
+      const permIdx = sentMethods.indexOf("session/request_permission");
+      expect(updateIdx).toBeGreaterThanOrEqual(0);
+      expect(permIdx).toBeGreaterThan(updateIdx);
+
+      // Cleanup: A answers so the agent's promise resolves.
+      const aReq = a.stream.sent.find(
+        (m): m is { id: string | number; method: string } =>
+          "method" in m && m.method === "session/request_permission",
+      );
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: aReq!.id,
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      });
+      await reqPromise;
     });
 
     it("includes each sibling's own requestId in permission_resolved fan-out", async () => {

@@ -146,14 +146,6 @@ export class Session {
     this.clients.set(client.clientId, client);
     this.updatedAt = Date.now();
     this.cancelIdleTimer();
-    // Late-joining controllers receive any in-flight permission requests
-    // so the prompt UI surfaces in their client too. Observers don't get
-    // permission asks (they can't respond), so skip them.
-    if (client.role === "controller") {
-      for (const pending of this.inFlightPermissions) {
-        pending.addController(client);
-      }
-    }
     if (historyPolicy === "none") {
       return [];
     }
@@ -161,6 +153,19 @@ export class Session {
       return [];
     }
     return [...this.history];
+  }
+
+  // Dispatch in-flight permission requests to a freshly-attached
+  // controller. Called by the daemon's WS handler *after* it finishes
+  // replaying history, so the prompt lands at the bottom of the
+  // transcript rather than above the conversation.
+  replayPendingPermissions(client: AttachedClient): void {
+    if (client.role !== "controller") {
+      return;
+    }
+    for (const pending of this.inFlightPermissions) {
+      pending.addController(client);
+    }
   }
 
   detach(clientId: string): void {
