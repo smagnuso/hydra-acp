@@ -20,6 +20,7 @@ export type KeyName =
   | "ctrl-c"
   | "ctrl-d"
   | "ctrl-l"
+  | "ctrl-p"
   | "ctrl-u"
   | "ctrl-w"
   | "escape";
@@ -35,7 +36,8 @@ export type InputEffect =
   | { type: "exit" }
   | { type: "plan-toggle"; on: boolean }
   | { type: "redraw-banner" }
-  | { type: "redraw" };
+  | { type: "redraw" }
+  | { type: "switch-session" };
 
 export interface InputState {
   buffer: string[];
@@ -152,6 +154,8 @@ export class InputDispatcher {
         return this.bufferIsEmpty() ? [{ type: "exit" }] : [];
       case "ctrl-l":
         return [{ type: "redraw" }];
+      case "ctrl-p":
+        return [{ type: "switch-session" }];
       case "ctrl-u":
         this.killLine();
         return [];

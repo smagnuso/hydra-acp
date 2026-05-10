@@ -73,7 +73,7 @@ export class Screen {
   private banner: BannerState = {
     status: "ready",
     planMode: false,
-    hint: "⇧⇥ plan · ⌥⏎ newline · ⌃C cancel · ⌃D quit",
+    hint: "⇧⇥ plan · ⌥⏎ newline · ⌃P pick · ⌃C cancel · ⌃D quit",
     queued: 0,
   };
   private header: HeaderState = { agent: "?", cwd: "?", sessionId: "?" };
@@ -853,6 +853,8 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-d";
     case "CTRL_L":
       return "ctrl-l";
+    case "CTRL_P":
+      return "ctrl-p";
     case "CTRL_U":
       return "ctrl-u";
     case "CTRL_W":

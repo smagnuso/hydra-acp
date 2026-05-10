@@ -55,8 +55,19 @@ const PLAN_PREFIX_TEXT =
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const config = await ensureConfig();
   await ensureDaemonReachable(config);
-
   const term = termkit.terminal;
+
+  let nextOpts: TuiOptions | null = opts;
+  while (nextOpts !== null) {
+    nextOpts = await runSession(term, config, nextOpts);
+  }
+}
+
+async function runSession(
+  term: termkit.Terminal,
+  config: HydraConfig,
+  opts: TuiOptions,
+): Promise<TuiOptions | null> {
   const ctx = await resolveSession(term, config, opts);
   if (!ctx) {
     // Picker was aborted (Ctrl+C / Esc). singleColumnMenu leaves grabInput
@@ -501,7 +512,19 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     sessionId: resolvedSessionId,
   });
 
-  const stop = (code = 0): never => {
+  let finishSession: ((next: TuiOptions | null) => void) | null = null;
+  const sessionDone = new Promise<TuiOptions | null>((resolve) => {
+    finishSession = resolve;
+  });
+  const sigintHandler = (): void => {
+    if (turnInFlight) {
+      turnInFlight.cancel();
+      return;
+    }
+    stop(0);
+  };
+  const teardown = (): void => {
+    process.off("SIGINT", sigintHandler);
     screen.stop();
     saveHistory(historyFile, history).catch(() => undefined);
     try {
@@ -509,7 +532,51 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     } catch {
       void 0;
     }
-    process.exit(code);
+  };
+  const stop = (code = 0): void => {
+    teardown();
+    if (finishSession) {
+      finishSession(null);
+      finishSession = null;
+    }
+    if (code !== 0) {
+      process.exit(code);
+    }
+  };
+
+  const switchSession = async (): Promise<void> => {
+    const resume = finishSession;
+    if (!resume) {
+      return;
+    }
+    finishSession = null;
+    teardown();
+    const sessions = await listSessions(config);
+    const choice: PickerResult = await pickSession(term, {
+      cwd: resolvedCwd,
+      sessions,
+    });
+    if (choice.kind === "abort") {
+      // Stay on the current session: outer loop will re-attach with the same
+      // sessionId rather than re-running the picker.
+      resume({ ...opts, sessionId: resolvedSessionId, cwd: resolvedCwd });
+      return;
+    }
+    if (choice.kind === "new") {
+      const { sessionId: _drop, ...rest } = opts;
+      void _drop;
+      resume({ ...rest, cwd: resolvedCwd, forceNew: true });
+      return;
+    }
+    const nextOpts: TuiOptions = {
+      ...opts,
+      sessionId: choice.sessionId,
+      cwd: resolvedCwd,
+    };
+    if (choice.agentId !== undefined) {
+      nextOpts.agentId = choice.agentId;
+    }
+    resume(nextOpts);
   };
 
   const handleEffect = (effect: InputEffect): void => {
@@ -540,6 +607,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         return;
       case "redraw":
         screen.redraw();
+        return;
+      case "switch-session":
+        void switchSession();
         return;
     }
   };
@@ -788,13 +858,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     stop(err ? 1 : 0);
   });
 
-  process.on("SIGINT", () => {
-    if (turnInFlight) {
-      turnInFlight.cancel();
-      return;
-    }
-    stop(0);
-  });
+  process.on("SIGINT", sigintHandler);
+
+  return await sessionDone;
 }
 
 async function resolveSession(

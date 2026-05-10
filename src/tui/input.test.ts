@@ -66,6 +66,11 @@ describe("InputDispatcher", () => {
     ]);
   });
 
+  it("Ctrl+P emits switch-session", () => {
+    const d = new InputDispatcher();
+    expect(feed(d, [k("ctrl-p")])).toEqual([{ type: "switch-session" }]);
+  });
+
   it("Enter while plan mode on sends with planMode: true", () => {
     const d = new InputDispatcher({ planMode: true });
     feed(d, [ch("x")]);
