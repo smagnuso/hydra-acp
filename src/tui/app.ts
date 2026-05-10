@@ -55,7 +55,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const term = termkit.terminal;
   const ctx = await resolveSession(term, config, opts);
   if (!ctx) {
-    return;
+    // Picker was aborted (Ctrl+C / Esc). singleColumnMenu leaves grabInput
+    // engaged on cancel, which keeps the event loop alive past the return.
+    // Release it and exit explicitly so the user gets their shell back.
+    term.grabInput(false);
+    process.exit(0);
   }
 
   const ws = await openWs(config);
@@ -439,12 +443,12 @@ async function resolveSession(
       role: opts.role ?? "controller",
     };
   }
-  // Smart default: live picker if any live in cwd, else straight to new.
-  // Pull cold sessions too so the picker shows everything `acp-hydra sessions`
-  // would list.
-  const sessions = await listSessions(config, { cwd, all: true });
-  const live = sessions.filter((s) => s.cwd === cwd && s.status === "live");
-  if (live.length === 0) {
+  // Smart default: show the same table `acp-hydra sessions` produces (live
+  // sessions + recent cold within sessionRecentMinutes) and let the user
+  // pick. The picker defaults its cursor to "+ New session" so just pressing
+  // Enter creates a fresh one.
+  const sessions = await listSessions(config);
+  if (sessions.length === 0) {
     return newCtx(opts, cwd, config);
   }
   const choice: PickerResult = await pickSession(term, { cwd, sessions });

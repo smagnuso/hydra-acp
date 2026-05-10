@@ -1,5 +1,6 @@
-// Pre-screen interactive picker. Lists sessions for the given cwd plus a
-// "+ New session" entry, returns the user's choice. Lives outside the main
+// Pre-screen interactive picker. Lists every session the daemon knows about
+// using the same columns as `acp-hydra sessions`, plus a "+ New session"
+// entry at the bottom (the default cursor position). Lives outside the main
 // screen so it can run before fullscreen mode is engaged.
 
 import type { Terminal } from "terminal-kit";
@@ -15,57 +16,109 @@ export interface PickOptions {
   sessions: DiscoveredSession[];
 }
 
+interface Row {
+  session: string;
+  upstream: string;
+  status: string;
+  clients: string;
+  agent: string;
+  title: string;
+  cwd: string;
+}
+
+interface Widths {
+  session: number;
+  upstream: number;
+  status: number;
+  clients: number;
+  agent: number;
+  title: number;
+}
+
+const HEADER: Row = {
+  session: "SESSION",
+  upstream: "UPSTREAM",
+  status: "STATUS",
+  clients: "CLIENTS",
+  agent: "AGENT",
+  title: "TITLE",
+  cwd: "CWD",
+};
+
 export async function pickSession(
   term: Terminal,
   opts: PickOptions,
 ): Promise<PickerResult> {
-  const filtered = opts.sessions.filter((s) => s.cwd === opts.cwd);
-  if (filtered.length === 0) {
+  if (opts.sessions.length === 0) {
     return { kind: "new" };
   }
-  const sorted = [...filtered].sort((a, b) => {
+  const sorted = [...opts.sessions].sort((a, b) => {
     const liveDiff = (b.status === "live" ? 1 : 0) - (a.status === "live" ? 1 : 0);
     if (liveDiff !== 0) {
       return liveDiff;
     }
     return b.updatedAt.localeCompare(a.updatedAt);
   });
+  const rows = sorted.map(toRow);
+  const widths = computeWidths(rows);
+  const newSessionLabel = `+ New session in ${opts.cwd}`;
 
-  const widths = computeWidths(sorted);
-  const newSessionLabel = "+ New session in this cwd";
-  const cancelLabel = "× Cancel";
-
-  const items: string[] = [newSessionLabel];
-  for (const s of sorted) {
-    items.push(formatRow(s, widths));
-  }
-  items.push(cancelLabel);
+  const items: string[] = rows.map((r) => formatRow(r, widths));
+  items.push(newSessionLabel);
 
   term("\n");
-  term.bold("Sessions in ")(opts.cwd)("\n");
-  term.dim(formatHeader(widths))("\n");
+  term.bold("Select a session")("\n");
+  term.dim(formatRow(HEADER, widths))("\n");
 
-  const response = await term
-    .singleColumnMenu(items, {
-      cancelable: true,
-      exitOnUnexpectedKey: false,
-      style: term.brightWhite,
-      selectedStyle: term.brightWhite.bgBlue,
-    })
-    .promise;
+  // grabInput puts stdin in raw mode, so the kernel won't deliver SIGINT for
+  // Ctrl+C. Some terminal-kit versions also drop CTRL_C from menu key
+  // bindings entirely. Listen at the term level and force-exit on Ctrl+C so
+  // the picker is always escapable.
+  const onCtrlC = (name: string): void => {
+    if (name === "CTRL_C") {
+      term.grabInput(false);
+      term("\n");
+      process.exit(130);
+    }
+  };
+  term.on("key", onCtrlC);
+
+  let response;
+  try {
+    response = await term
+      .singleColumnMenu(items, {
+        cancelable: true,
+        exitOnUnexpectedKey: false,
+        selectedIndex: items.length - 1,
+        style: term.brightWhite,
+        selectedStyle: term.brightWhite.bgBlue,
+        keyBindings: {
+          ENTER: "submit",
+          KP_ENTER: "submit",
+          UP: "previous",
+          DOWN: "next",
+          TAB: "next",
+          SHIFT_TAB: "previous",
+          HOME: "first",
+          END: "last",
+          ESCAPE: "cancel",
+          CTRL_C: "cancel",
+        },
+      })
+      .promise;
+  } finally {
+    term.off("key", onCtrlC);
+  }
 
   term("\n");
 
   if (response.canceled || response.selectedIndex === undefined) {
     return { kind: "abort" };
   }
-  if (response.selectedIndex === 0) {
+  if (response.selectedIndex === items.length - 1) {
     return { kind: "new" };
   }
-  if (response.selectedIndex === items.length - 1) {
-    return { kind: "abort" };
-  }
-  const session = sorted[response.selectedIndex - 1];
+  const session = sorted[response.selectedIndex];
   if (!session) {
     return { kind: "abort" };
   }
@@ -79,89 +132,47 @@ export async function pickSession(
   return result;
 }
 
-interface Widths {
-  id: number;
-  agent: number;
-  clients: number;
-  age: number;
-}
-
-function computeWidths(sessions: DiscoveredSession[]): Widths {
-  const w: Widths = {
-    id: "session".length,
-    agent: "agent".length,
-    clients: "clients".length,
-    age: "age".length,
+function toRow(s: DiscoveredSession): Row {
+  return {
+    session: s.sessionId,
+    upstream: s.upstreamSessionId ?? "-",
+    status: s.status.toUpperCase(),
+    clients: s.status === "cold" ? "-" : String(s.attachedClients),
+    agent: s.agentId ?? "?",
+    title: s.title ?? "-",
+    cwd: s.cwd,
   };
-  const now = Date.now();
-  for (const s of sessions) {
-    w.id = Math.max(w.id, shortId(s.sessionId).length);
-    w.agent = Math.max(w.agent, (s.agentId ?? "?").length);
-    w.clients = Math.max(w.clients, formatClients(s).length);
-    w.age = Math.max(w.age, formatAge(s.updatedAt, now).length);
-  }
-  return w;
 }
 
-function formatHeader(w: Widths): string {
+function computeWidths(rows: Row[]): Widths {
+  return {
+    session: maxLen(HEADER.session, rows.map((r) => r.session)),
+    upstream: maxLen(HEADER.upstream, rows.map((r) => r.upstream)),
+    status: maxLen(HEADER.status, rows.map((r) => r.status)),
+    clients: maxLen(HEADER.clients, rows.map((r) => r.clients)),
+    agent: maxLen(HEADER.agent, rows.map((r) => r.agent)),
+    title: maxLen(HEADER.title, rows.map((r) => r.title)),
+  };
+}
+
+function maxLen(headerCell: string, values: string[]): number {
+  let max = headerCell.length;
+  for (const v of values) {
+    if (v.length > max) {
+      max = v.length;
+    }
+  }
+  return max;
+}
+
+function formatRow(r: Row, w: Widths): string {
   return [
-    " ", // status dot column
-    "session".padEnd(w.id),
-    "agent".padEnd(w.agent),
-    "clients".padEnd(w.clients),
-    "age".padEnd(w.age),
-    "title",
+    r.session.padEnd(w.session),
+    r.upstream.padEnd(w.upstream),
+    r.status.padEnd(w.status),
+    r.clients.padStart(w.clients),
+    r.agent.padEnd(w.agent),
+    r.title.padEnd(w.title),
+    r.cwd,
   ].join("  ");
-}
-
-function formatRow(s: DiscoveredSession, w: Widths): string {
-  const tag = s.status === "live" ? "●" : "○";
-  const title = s.title ?? "";
-  return [
-    tag,
-    shortId(s.sessionId).padEnd(w.id),
-    (s.agentId ?? "?").padEnd(w.agent),
-    formatClients(s).padEnd(w.clients),
-    formatAge(s.updatedAt, Date.now()).padEnd(w.age),
-    title,
-  ].join("  ");
-}
-
-function formatClients(s: DiscoveredSession): string {
-  if (s.status === "cold") {
-    return "-";
-  }
-  return String(s.attachedClients);
-}
-
-function formatAge(updatedAt: string, now: number): string {
-  const t = Date.parse(updatedAt);
-  if (Number.isNaN(t)) {
-    return "?";
-  }
-  const seconds = Math.max(0, Math.floor((now - t) / 1000));
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) {
-    return `${hours}h`;
-  }
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
-}
-
-function shortId(id: string): string {
-  if (id.length <= 18) {
-    return id;
-  }
-  const tail = id.slice(-8);
-  const prefix = id.includes("_")
-    ? id.slice(0, id.indexOf("_") + 1)
-    : id.slice(0, 6);
-  return `${prefix}…${tail}`;
 }
