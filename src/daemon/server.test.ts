@@ -44,8 +44,8 @@ describe("startDaemon", () => {
   let wsUrl: string;
 
   beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-test-"));
-    process.env.ACP_HYDRA_HOME = tmpHome;
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-test-"));
+    process.env.HYDRA_ACP_HOME = tmpHome;
     handle = await startDaemon(testConfig());
     const p = port(handle);
     baseUrl = `http://127.0.0.1:${p}`;
@@ -57,7 +57,7 @@ describe("startDaemon", () => {
       await handle.shutdown().catch(() => undefined);
       handle = null;
     }
-    delete process.env.ACP_HYDRA_HOME;
+    delete process.env.HYDRA_ACP_HOME;
     await fs.rm(tmpHome, { recursive: true, force: true });
   });
 
@@ -186,7 +186,7 @@ describe("startDaemon", () => {
       };
 
       expect(response.id).toBe(1);
-      expect(response.result.agentInfo.name).toBe("acp-hydra");
+      expect(response.result.agentInfo.name).toBe("hydra");
       expect(response.result.agentCapabilities.sessionCapabilities?.list).toBe(
         true,
       );
@@ -385,8 +385,8 @@ describe("startDaemon — extensions REST lifecycle", () => {
   let baseUrl: string;
 
   beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-test-"));
-    process.env.ACP_HYDRA_HOME = tmpHome;
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-test-"));
+    process.env.HYDRA_ACP_HOME = tmpHome;
     const cfg: HydraConfig = {
       daemon: {
         host: "127.0.0.1",
@@ -421,7 +421,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
       await handle.shutdown().catch(() => undefined);
       handle = null;
     }
-    delete process.env.ACP_HYDRA_HOME;
+    delete process.env.HYDRA_ACP_HOME;
     await fs.rm(tmpHome, { recursive: true, force: true });
   });
 

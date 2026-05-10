@@ -94,11 +94,11 @@ describe("flagString", () => {
 });
 
 describe("envKeyForFlag", () => {
-  it("maps kebab-case to ACP_HYDRA_UPPER_SNAKE", () => {
-    expect(envKeyForFlag("name")).toBe("ACP_HYDRA_NAME");
-    expect(envKeyForFlag("session-id")).toBe("ACP_HYDRA_SESSION_ID");
-    expect(envKeyForFlag("agent-id")).toBe("ACP_HYDRA_AGENT_ID");
-    expect(envKeyForFlag("role")).toBe("ACP_HYDRA_ROLE");
+  it("maps kebab-case to HYDRA_ACP_UPPER_SNAKE", () => {
+    expect(envKeyForFlag("name")).toBe("HYDRA_ACP_NAME");
+    expect(envKeyForFlag("session-id")).toBe("HYDRA_ACP_SESSION_ID");
+    expect(envKeyForFlag("agent-id")).toBe("HYDRA_ACP_AGENT_ID");
+    expect(envKeyForFlag("role")).toBe("HYDRA_ACP_ROLE");
   });
 });
 
@@ -106,10 +106,10 @@ describe("resolveOption", () => {
   const SAVED = { ...process.env };
 
   beforeEach(() => {
-    delete process.env.ACP_HYDRA_NAME;
-    delete process.env.ACP_HYDRA_SESSION_ID;
-    delete process.env.ACP_HYDRA_AGENT_ID;
-    delete process.env.ACP_HYDRA_ROLE;
+    delete process.env.HYDRA_ACP_NAME;
+    delete process.env.HYDRA_ACP_SESSION_ID;
+    delete process.env.HYDRA_ACP_AGENT_ID;
+    delete process.env.HYDRA_ACP_ROLE;
   });
 
   afterEach(() => {
@@ -117,12 +117,12 @@ describe("resolveOption", () => {
   });
 
   it("prefers flag over env", () => {
-    process.env.ACP_HYDRA_NAME = "from-env";
+    process.env.HYDRA_ACP_NAME = "from-env";
     expect(resolveOption({ name: "from-flag" }, "name")).toBe("from-flag");
   });
 
   it("falls back to env when flag is unset", () => {
-    process.env.ACP_HYDRA_SESSION_ID = "sess_env";
+    process.env.HYDRA_ACP_SESSION_ID = "sess_env";
     expect(resolveOption({}, "session-id")).toBe("sess_env");
   });
 
@@ -131,7 +131,7 @@ describe("resolveOption", () => {
   });
 
   it("treats boolean-true flags as unset (only string flags carry values)", () => {
-    process.env.ACP_HYDRA_NAME = "from-env";
+    process.env.HYDRA_ACP_NAME = "from-env";
     expect(resolveOption({ name: true }, "name")).toBe("from-env");
   });
 });

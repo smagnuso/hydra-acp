@@ -33,7 +33,7 @@ const ExtensionName = z
 
 const ExtensionBody = z.object({
   // Optional: if omitted, the spawn command defaults to [name], so a
-  // package called `acp-hydra-slack` that exposes a `acp-hydra-slack` bin
+  // package called `hydra-acp-slack` that exposes a `hydra-acp-slack` bin
   // can be enabled with just an empty body `{}`.
   command: z.array(z.string()).default([]),
   args: z.array(z.string()).default([]),
@@ -73,7 +73,7 @@ export async function loadConfig(): Promise<HydraConfig> {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") {
       throw new Error(
-        `No config found at ${configPath}. Run \`acp-hydra init\` to create one.`,
+        `No config found at ${configPath}. Run \`hydra-acp init\` to create one.`,
       );
     }
     throw err;

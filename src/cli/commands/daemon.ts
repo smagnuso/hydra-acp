@@ -13,7 +13,7 @@ export async function runDaemonStart(): Promise<void> {
   const config = await loadConfig();
   const handle = await startDaemon(config);
   process.stdout.write(
-    `acp-hydra daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
+    `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
   );
 
   const shutdown = async (): Promise<void> => {

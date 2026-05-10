@@ -301,7 +301,7 @@ export class Session {
           update: {
             sessionUpdate: "user_message_chunk",
             content: { type: "text", text },
-            _meta: { "acp-hydra": { compatFor: "prompt_received" } },
+            _meta: { "hydra": { compatFor: "prompt_received" } },
           },
         },
         client.clientId,
@@ -414,7 +414,7 @@ export class Session {
 
   // First-prompt heuristic: derive a session title from the first
   // session/prompt's text. Replaces whatever was set at session/new
-  // (typically an editor frame name like "Claude Agent @ acp-hydra")
+  // (typically an editor frame name like "Claude Agent @ hydra-acp")
   // — the first prompt is a better summary for cross-client display
   // than the editor's static frame label. Subsequent prompts don't
   // touch the title; that'd flap as conversations evolved.
@@ -619,9 +619,9 @@ export class Session {
         continue;
       }
       const meta = update._meta as
-        | { "acp-hydra"?: { synthetic?: boolean } }
+        | { "hydra"?: { synthetic?: boolean } }
         | undefined;
-      if (meta?.["acp-hydra"]?.synthetic) {
+      if (meta?.["hydra"]?.synthetic) {
         continue;
       }
       const kind = update.sessionUpdate as string | undefined;
@@ -681,7 +681,7 @@ export class Session {
   // listen for title updates pick this up; older clients ignore unknown
   // fields harmlessly) and (b) drop a visible banner into the transcript
   // so users see the switch rather than just suddenly getting answers
-  // from a different agent. Both updates carry _meta.acp-hydra.synthetic
+  // from a different agent. Both updates carry _meta.hydra.synthetic
   // so a future /hydra switch's transcript builder filters them out.
   private broadcastAgentSwitch(oldAgentId: string, newAgentId: string): void {
     this.recordAndBroadcast("session/update", {
@@ -689,7 +689,7 @@ export class Session {
       update: {
         sessionUpdate: "session_info_update",
         agentId: newAgentId,
-        _meta: { "acp-hydra": { synthetic: true } },
+        _meta: { "hydra": { synthetic: true } },
       },
     });
     this.recordAndBroadcast("session/update", {
@@ -700,7 +700,7 @@ export class Session {
           type: "text",
           text: `\n_(switched from \`${oldAgentId}\` to \`${newAgentId}\`)_\n`,
         },
-        _meta: { "acp-hydra": { synthetic: true } },
+        _meta: { "hydra": { synthetic: true } },
       },
     });
   }
@@ -713,7 +713,7 @@ export class Session {
     this.cancelIdleTimer();
     for (const client of this.clients.values()) {
       void client.connection
-        .notify("acp-hydra/session_closed", { sessionId: this.sessionId })
+        .notify("hydra/session_closed", { sessionId: this.sessionId })
         .catch(() => undefined);
     }
     this.clients.clear();

@@ -326,7 +326,7 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
 function buildInitializeResult(): InitializeResult {
   return {
     protocolVersion: HYDRA_PROTOCOL_VERSION,
-    agentInfo: { name: "acp-hydra", version: HYDRA_VERSION },
+    agentInfo: { name: "hydra", version: HYDRA_VERSION },
     agentCapabilities: {
       // hydra is a transparent proxy: prompt blocks and MCP server configs are
       // forwarded to the underlying agent unchanged. We claim the union of

@@ -1,4 +1,4 @@
-// Prompt history, persisted at ~/.acp-hydra/tui-history. One JSON-encoded
+// Prompt history, persisted at ~/.hydra-acp/tui-history. One JSON-encoded
 // string per line so multi-line prompts round-trip safely.
 
 import { promises as fs } from "node:fs";

@@ -394,7 +394,7 @@ export class Screen {
     const usage = formatUsage(this.header.usage);
     const cwdRoom = Math.max(8, w - 40 - (usage ? usage.length + 3 : 0));
     this.term
-      .bold("acp-hydra")(" · ")
+      .bold("hydra")(" · ")
       .cyan(this.header.agent)(" · ")
       .dim(truncate(this.header.cwd, cwdRoom))(" · ")
       .yellow(shortId(this.header.sessionId));

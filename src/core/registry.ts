@@ -180,7 +180,7 @@ export function planSpawn(agent: RegistryAgent, extraArgs: string[] = []): Spawn
   }
   if (agent.distribution.binary) {
     throw new Error(
-      `Agent ${agent.id} uses binary distribution; not yet supported in acp-hydra. PRs welcome.`,
+      `Agent ${agent.id} uses binary distribution; not yet supported in hydra-acp. PRs welcome.`,
     );
   }
   if (agent.distribution.uvx) {

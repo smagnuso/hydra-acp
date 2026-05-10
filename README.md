@@ -1,4 +1,4 @@
-# acp-hydra
+# hydra-acp
 
 ```
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀
@@ -27,11 +27,11 @@
 
 ## What it is
 
-`acp-hydra` is a daemon + CLI shim that implements four open ACP RFDs as a single coherent surface, plus the official ACP Registry as its agent-distribution mechanism.
+`hydra-acp` is a daemon + CLI shim that implements four open ACP RFDs as a single coherent surface, plus the official ACP Registry as its agent-distribution mechanism.
 
 ### The standards it stitches together
 
-ACP itself is the [Agent Client Protocol](https://agentclientprotocol.com/) — a JSON-RPC 2.0 protocol between editors (clients) and AI coding agents. Today the protocol is canonically a 1:1 stdio relationship: one editor spawns one agent and owns its stdin/stdout. Four RFDs in the [`agentclientprotocol/agent-client-protocol`](https://github.com/agentclientprotocol/agent-client-protocol) repo extend that model. `acp-hydra` is one daemon that implements all four together so they can be used as a coherent system rather than four independent extensions.
+ACP itself is the [Agent Client Protocol](https://agentclientprotocol.com/) — a JSON-RPC 2.0 protocol between editors (clients) and AI coding agents. Today the protocol is canonically a 1:1 stdio relationship: one editor spawns one agent and owns its stdin/stdout. Four RFDs in the [`agentclientprotocol/agent-client-protocol`](https://github.com/agentclientprotocol/agent-client-protocol) repo extend that model. `hydra-acp` is one daemon that implements all four together so they can be used as a coherent system rather than four independent extensions.
 
 #### 1. Multi-Client Session Attach — [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533)
 
@@ -44,7 +44,7 @@ Permission requests fan out to all controllers; the first response wins, and the
 
 #### 2. Agent Extensions via ACP Proxies — [RFD: proxy-chains](https://agentclientprotocol.com/rfds/proxy-chains)
 
-Defines the proxy-chain pattern: a component that sits between an ACP client and an ACP agent and either passes traffic through or transforms it. Proxies use `proxy/initialize` (instead of `initialize`) so the conductor of the chain can tell terminal agents apart from intermediate proxies. Proxies "send messages to successor and receive messages from successor" without knowing what or where the successor is — the conductor's job. `acp-hydra` operates as the conductor and as one such proxy: editors spawn it, and from their perspective it appears as a single ACP agent regardless of how many real agents the daemon is managing behind it.
+Defines the proxy-chain pattern: a component that sits between an ACP client and an ACP agent and either passes traffic through or transforms it. Proxies use `proxy/initialize` (instead of `initialize`) so the conductor of the chain can tell terminal agents apart from intermediate proxies. Proxies "send messages to successor and receive messages from successor" without knowing what or where the successor is — the conductor's job. `hydra-acp` operates as the conductor and as one such proxy: editors spawn it, and from their perspective it appears as a single ACP agent regardless of how many real agents the daemon is managing behind it.
 
 #### 3. Session List — [RFD: session-list](https://agentclientprotocol.com/rfds/session-list)
 
@@ -52,11 +52,11 @@ Adds **`session/list { cwd?, cursor?, limit? }`** — an optional capability for
 
 #### 4. Streamable HTTP & WebSocket Transport — [RFD: streamable-http-websocket-transport](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport)
 
-Defines the network transport that lets ACP run between processes that aren't parent and child. The relevant half for `acp-hydra` is the WebSocket binding: a client sends `GET /acp` with `Upgrade: websocket`, receives a `101 Switching Protocols` response, and the connection becomes a bidirectional stream of JSON-RPC text frames (binary frames are ignored). Authentication is layered on top — HTTP headers, query parameters, or WebSocket subprotocols — and is treated as orthogonal by the spec. `acp-hydra` exposes its WSS endpoint at `/acp` and authenticates via a bearer token carried in a WebSocket subprotocol or a query parameter.
+Defines the network transport that lets ACP run between processes that aren't parent and child. The relevant half for `hydra-acp` is the WebSocket binding: a client sends `GET /acp` with `Upgrade: websocket`, receives a `101 Switching Protocols` response, and the connection becomes a bidirectional stream of JSON-RPC text frames (binary frames are ignored). Authentication is layered on top — HTTP headers, query parameters, or WebSocket subprotocols — and is treated as orthogonal by the spec. `hydra-acp` exposes its WSS endpoint at `/acp` and authenticates via a bearer token carried in a WebSocket subprotocol or a query parameter.
 
 ### The registry it depends on
 
-Agents are sourced from the [ACP Registry](https://github.com/agentclientprotocol/registry) — a CDN-hosted JSON document at `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. Each entry declares `id`, `name`, `version`, `description`, and a `distribution` block that selects between `npx`, `binary`, or `uvx` installation. `acp-hydra` caches the registry locally with a 24-hour TTL, falls back to the cached copy on network failure, and resolves an agent's `distribution` to a spawn plan when a session needs that agent.
+Agents are sourced from the [ACP Registry](https://github.com/agentclientprotocol/registry) — a CDN-hosted JSON document at `https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json`. Each entry declares `id`, `name`, `version`, `description`, and a `distribution` block that selects between `npx`, `binary`, or `uvx` installation. `hydra-acp` caches the registry locally with a 24-hour TTL, falls back to the cached copy on network failure, and resolves an agent's `distribution` to a spawn plan when a session needs that agent.
 
 ## Architecture
 
@@ -65,11 +65,11 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
                             |
                        stdio (spawn)
                             |
-                   acp-hydra (shim mode)
+                   hydra-acp (shim mode)
                             |
                       WSS / HTTP
                             |
-                    acp-hydra daemon
+                    hydra-acp daemon
                             |
               ┌─────────────┼─────────────┐
               │             │             │
@@ -79,9 +79,9 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 
 ### How it works
 
-1. **Editor spawns `acp-hydra`** as it would any ACP agent. The shim looks like a normal stdio agent.
+1. **Editor spawns `hydra-acp`** as it would any ACP agent. The shim looks like a normal stdio agent.
 2. **Shim opens a WSS connection** to the daemon at `/acp`, authenticating via the bearer token.
-3. **`session/new` from the editor** → daemon resolves the requested agent against the cached ACP Registry, downloads it on first use under `~/.acp-hydra/agents/`, spawns it as a child process, and creates an ACP session inside it (per RFD: proxy-chains).
+3. **`session/new` from the editor** → daemon resolves the requested agent against the cached ACP Registry, downloads it on first use under `~/.hydra-acp/agents/`, spawns it as a child process, and creates an ACP session inside it (per RFD: proxy-chains).
 4. **`session/attach` from a second client** → daemon adds the new client to the session's broadcast list and replays history per `historyPolicy` (per RFD #533).
 5. **Notifications** fan out to every attached client. **Prompts** are serialized through the daemon's per-session queue. **Permission requests** broadcast to all controllers; first response wins and the rest receive `session/permission_resolved`.
 6. **`session/list`** returns the daemon's active sessions, filterable by `cwd` (per RFD: session-list).
@@ -89,7 +89,7 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 
 ### Why a shim?
 
-Existing ACP clients are stdio-based: they `spawn(command)` a process and exchange JSON-RPC over its stdin/stdout. A shim that *looks* like an ACP agent on stdio is zero-integration on the client side — the client doesn't need to know anything about hydra, the daemon, or WSS. It just spawns `acp-hydra` and starts talking ACP.
+Existing ACP clients are stdio-based: they `spawn(command)` a process and exchange JSON-RPC over its stdin/stdout. A shim that *looks* like an ACP agent on stdio is zero-integration on the client side — the client doesn't need to know anything about hydra, the daemon, or WSS. It just spawns `hydra-acp` and starts talking ACP.
 
 Clients that adopt the streamable-http-websocket-transport RFD natively can connect to the daemon's `/acp` endpoint directly without the shim.
 
@@ -97,10 +97,10 @@ Clients that adopt the streamable-http-websocket-transport RFD natively can conn
 
 The shim and daemon together implement a "resume hint" pattern that lets editor sessions survive a daemon restart without the editor noticing:
 
-1. **The daemon's `session/new` and `session/attach` responses include a `_meta` block**, with hydra-specific data namespaced under `_meta["acp-hydra"]` (per the [Session List RFD](https://agentclientprotocol.com/rfds/session-list)'s "agent-specific `_meta` fields" convention). The underlying agent's own `_meta` keys, if any, are passed through unchanged alongside `acp-hydra`.
+1. **The daemon's `session/new` and `session/attach` responses include a `_meta` block**, with hydra-specific data namespaced under `_meta["hydra"]` (per the [Session List RFD](https://agentclientprotocol.com/rfds/session-list)'s "agent-specific `_meta` fields" convention). The underlying agent's own `_meta` keys, if any, are passed through unchanged alongside `hydra-acp`.
 2. **The shim caches that namespaced data in a `SessionTracker`** as messages flow through, keyed by the hydra sessionId the editor knows.
 3. **The shim's WS connection is wrapped in a `ResilientWsStream`** that reconnects with exponential backoff (200ms → 5s, capped, max 60 attempts) and buffers outbound messages from the editor while disconnected.
-4. **After each successful reconnect, the shim replays a `session/attach`** for every cached session, including the resume hints under `_meta["acp-hydra"].resume`.
+4. **After each successful reconnect, the shim replays a `session/attach`** for every cached session, including the resume hints under `_meta["hydra"].resume`.
 5. **If the daemon already knows the session** (e.g., the daemon never died, just a network blip), it ignores the resume hint and does a normal attach.
 6. **If the daemon doesn't know the session**, it resurrects: spawns a fresh agent of `agentId` in `cwd`, runs `initialize`, calls ACP `session/load { sessionId: upstreamSessionId }` against the agent, and registers a new hydra `Session` *with the same hydra sessionId the shim claimed*. The editor sees nothing.
 
@@ -110,7 +110,7 @@ The resurrection is serialized per hydra sessionId, so two shims racing to reatt
 
 **What gets lost across restart:** the daemon's in-memory streaming history and in-flight tool calls. The agent's persisted state — past completed turns, conversation context — is recovered via `session/load`. The agent will need to re-issue any tool call that was mid-stream when the daemon died.
 
-**In-flight permission prompts:** the shim tracks open `session/request_permission` requests it has forwarded to the editor. On any reconnect (which always implies the previous daemon-side promise is gone), the shim emits a `session/permission_resolved` notification toward the editor for each pending request, with `resolvedBy: "acp-hydra"` and `outcome: { kind: "cancelled", reason: "daemon-disconnected" }`. Editors that handle `session/permission_resolved` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533) will dismiss their in-flight permission UI. Any response the editor still sends afterward is silently dropped by the new daemon (unknown request id).
+**In-flight permission prompts:** the shim tracks open `session/request_permission` requests it has forwarded to the editor. On any reconnect (which always implies the previous daemon-side promise is gone), the shim emits a `session/permission_resolved` notification toward the editor for each pending request, with `resolvedBy: "hydra"` and `outcome: { kind: "cancelled", reason: "daemon-disconnected" }`. Editors that handle `session/permission_resolved` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533) will dismiss their in-flight permission UI. Any response the editor still sends afterward is silently dropped by the new daemon (unknown request id).
 
 ### Wire shape of `_meta`
 
@@ -121,7 +121,7 @@ A hydra `session/new` response looks like:
   "sessionId": "hydra_session_abc123",
   "_meta": {
     "agent-vendor": { "sequence": 7 },
-    "acp-hydra": {
+    "hydra": {
       "upstreamSessionId": "u_xyz",
       "agentId": "claude-code",
       "cwd": "/path/to/project"
@@ -130,7 +130,7 @@ A hydra `session/new` response looks like:
 }
 ```
 
-The `agent-vendor` key (illustrative) is whatever the underlying agent put in *its* `_meta` block — hydra forwards that through unchanged. Only the `acp-hydra` namespace is hydra's. The same shape applies to `session/attach` responses.
+The `agent-vendor` key (illustrative) is whatever the underlying agent put in *its* `_meta` block — hydra forwards that through unchanged. Only the `hydra` namespace is hydra's. The same shape applies to `session/attach` responses.
 
 For resurrection, the shim sends `session/attach` with a resume hint nested in the same namespace:
 
@@ -140,7 +140,7 @@ For resurrection, the shim sends `session/attach` with a resume hint nested in t
   "role": "controller",
   "historyPolicy": "pending_only",
   "_meta": {
-    "acp-hydra": {
+    "hydra": {
       "resume": {
         "upstreamSessionId": "u_xyz",
         "agentId": "claude-code",
@@ -154,97 +154,97 @@ For resurrection, the shim sends `session/attach` with a resume hint nested in t
 ## Install
 
 ```bash
-npm install -g @acp-hydra/cli
+npm install -g @hydra-acp/cli
 ```
 
-Drops `acp-hydra` (and `hydra`) on your PATH.
+Drops `hydra-acp` (and `hydra`) on your PATH.
 
 ## Quick start
 
 ```bash
-# 1. Initialize: writes ~/.acp-hydra/config.json with a generated bearer token.
-acp-hydra init
+# 1. Initialize: writes ~/.hydra-acp/config.json with a generated bearer token.
+hydra-acp init
 
 # 2. (Optional) Start the daemon. If you skip this step, the shim will
 #    auto-start the daemon the first time an editor invokes it.
-acp-hydra daemon start
+hydra-acp daemon start
 
-# 3. Configure your editor to spawn `acp-hydra shim` instead of an agent
+# 3. Configure your editor to spawn `hydra-acp shim` instead of an agent
 #    directly. The `shim` verb forces shim mode — the right form for
 #    spawned-by-editor cases where stdio is already piped. The first
 #    session/new asks the daemon which agent to spawn (defaults to
 #    config.defaultAgent). If you'd rather the editor pin a specific agent,
-#    spawn `acp-hydra launch <agent-id>` (see "Launcher mode" below).
+#    spawn `hydra-acp launch <agent-id>` (see "Launcher mode" below).
 
 # 4. From a terminal, drive a session interactively (TUI).
-acp-hydra                                   # bare invocation in a TTY launches the TUI
-acp-hydra tui                               # explicit form
+hydra-acp                                   # bare invocation in a TTY launches the TUI
+hydra-acp tui                               # explicit form
 
 # 5. List live sessions.
-acp-hydra sessions
+hydra-acp sessions
 
 # 6. Attach a second client (read-only) to an existing session.
 #    Bare invocation auto-detects: TUI in a terminal, ACP shim when piped.
-acp-hydra --session-id hydra_session_abc123 --role observer
+hydra-acp --session-id hydra_session_abc123 --role observer
 ```
 
 ## CLI
 
 ```
-acp-hydra                                   # auto-dispatch: TUI in a TTY, shim when stdio is piped
-acp-hydra shim                              # explicit shim mode (forces shim regardless of TTY)
-acp-hydra tui                               # explicit terminal-UI mode
-acp-hydra launch <agent-id>                 # launcher mode: shim that forces the
+hydra-acp                                   # auto-dispatch: TUI in a TTY, shim when stdio is piped
+hydra-acp shim                              # explicit shim mode (forces shim regardless of TTY)
+hydra-acp tui                               # explicit terminal-UI mode
+hydra-acp launch <agent-id>                 # launcher mode: shim that forces the
                                             # daemon to spawn <agent-id> on session/new
-acp-hydra --session-id <id> [--role ...]    # attach to existing session
+hydra-acp --session-id <id> [--role ...]    # attach to existing session
                                             # (TUI in a TTY, shim otherwise)
                                             # role: controller (default) | observer
 
-acp-hydra init                              # generate config + auth token
-acp-hydra daemon start [--port N] [--host H]
-acp-hydra daemon stop
-acp-hydra daemon status
+hydra-acp init                              # generate config + auth token
+hydra-acp daemon start [--port N] [--host H]
+hydra-acp daemon stop
+hydra-acp daemon status
 
-acp-hydra sessions                          # list sessions
-acp-hydra sessions kill <id>                # terminate a session
+hydra-acp sessions                          # list sessions
+hydra-acp sessions kill <id>                # terminate a session
 
-acp-hydra extensions                        # list configured extensions and live state
-acp-hydra extensions add <name>             # add to config (--command, --args, --env, --disabled)
-acp-hydra extensions remove <name>          # remove from config
-acp-hydra extensions start|stop|restart <n> # lifecycle on a running extension
-acp-hydra extensions logs <name> [-f] [-n]  # tail (default 50) or follow an extension's log
+hydra-acp extensions                        # list configured extensions and live state
+hydra-acp extensions add <name>             # add to config (--command, --args, --env, --disabled)
+hydra-acp extensions remove <name>          # remove from config
+hydra-acp extensions start|stop|restart <n> # lifecycle on a running extension
+hydra-acp extensions logs <name> [-f] [-n]  # tail (default 50) or follow an extension's log
 
-acp-hydra agents                            # list agents in the registry
-acp-hydra agents install <id>               # pre-install an agent (else lazy on first use)
+hydra-acp agents                            # list agents in the registry
+hydra-acp agents install <id>               # pre-install an agent (else lazy on first use)
 
-acp-hydra config                            # print resolved config path/values
+hydra-acp config                            # print resolved config path/values
 ```
 
-A bare invocation (`acp-hydra` with no subcommand) auto-dispatches based on whether stdout is a TTY: a real terminal launches the TUI, a piped stdio (the editor-spawned case) drops into shim mode. Pass `shim` or `tui` explicitly to force one or the other. Editors should configure `acp-hydra shim` so the choice is unambiguous regardless of how the editor wires stdio.
+A bare invocation (`hydra-acp` with no subcommand) auto-dispatches based on whether stdout is a TTY: a real terminal launches the TUI, a piped stdio (the editor-spawned case) drops into shim mode. Pass `shim` or `tui` explicitly to force one or the other. Editors should configure `hydra-acp shim` so the choice is unambiguous regardless of how the editor wires stdio.
 
 ### Launcher mode
 
-`acp-hydra launch <agent-id>` is a convenience for "shim me, and use *this* registry agent." It's the easiest way to wrap an existing ACP-speaking editor configuration whose agent-spawn surface is just a command and arguments:
+`hydra-acp launch <agent-id>` is a convenience for "shim me, and use *this* registry agent." It's the easiest way to wrap an existing ACP-speaking editor configuration whose agent-spawn surface is just a command and arguments:
 
 ```text
 # Configure your editor's ACP-launch command to:
-acp-hydra launch claude-code
+hydra-acp launch claude-code
 ```
 
-When the editor sends `session/new`, the shim rewrites the params to `{ ..., agentId: "claude-code" }` before forwarding to the daemon. The daemon resolves `claude-code` against the cached ACP Registry, downloads/installs the agent on first use under `~/.acp-hydra/agents/`, and spawns the subprocess. The editor sees a normal ACP agent. From then on, `acp-hydra sessions` lists the live session and any other client can `session/attach` to it.
+When the editor sends `session/new`, the shim rewrites the params to `{ ..., agentId: "claude-code" }` before forwarding to the daemon. The daemon resolves `claude-code` against the cached ACP Registry, downloads/installs the agent on first use under `~/.hydra-acp/agents/`, and spawns the subprocess. The editor sees a normal ACP agent. From then on, `hydra-acp sessions` lists the live session and any other client can `session/attach` to it.
 
-`<agent-id>` is the registry ID — e.g. `claude-code`, `gemini-cli`, `codex`. Run `acp-hydra agents` to browse what's available, or fetch the registry CDN URL directly.
+`<agent-id>` is the registry ID — e.g. `claude-code`, `gemini-cli`, `codex`. Run `hydra-acp agents` to browse what's available, or fetch the registry CDN URL directly.
 
 If both `launch <agent-id>` and `--session-id` are given, `--session-id` wins (attach mode); the agent ID is ignored because the agent process is already running.
 
 ### Naming sessions from the editor
 
-Pass `--name <label>` or set `ACP_HYDRA_NAME` and the first `session/new` from that shim is labeled accordingly. The label flows through `_meta["acp-hydra"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `acp-hydra sessions`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
+Pass `--name <label>` or set `HYDRA_ACP_NAME` and the first `session/new` from that shim is labeled accordingly. The label flows through `_meta["hydra"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `hydra-acp sessions`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
 
 ```text
-ACP_HYDRA_NAME="$BUFFER_NAME" acp-hydra launch claude-acp
+HYDRA_ACP_NAME="$BUFFER_NAME" hydra-acp launch claude-acp
 # or
-acp-hydra --name "$BUFFER_NAME" launch claude-acp
+hydra-acp --name "$BUFFER_NAME" launch claude-acp
 ```
 
 After the first user prompt lands, hydra automatically replaces the label with the first line of that prompt (truncated, ≤80 chars) and emits a `session_info_update` so every attached client (TUI, slack, browser) refreshes its header. Agents that emit their own `session_info_update` override that — last write wins.
@@ -257,36 +257,36 @@ Slash commands of the form `/hydra <verb> [args]` are intercepted by hydra befor
 |---|---|
 | `/hydra title` | Asks the agent for a one-line summary, applies it as the new title via `session_info_update`. The sub-prompt and reply are suppressed from clients. |
 | `/hydra title <text>` | Sets the title to `<text>` directly. No agent call. |
-| `/hydra switch <agent>` | Swaps the agent process backing this session. Spawns the new agent (must be in the registry — see `acp-hydra agents list`), kills the old one, and feeds the conversation transcript so far back in as the first prompt to the new agent. `session_info_update` carries the new `agentId`; a synthetic `agent_message_chunk` banner marks the switch in the transcript. The on-disk session record is updated so resurrection brings the session back on the new agent. |
+| `/hydra switch <agent>` | Swaps the agent process backing this session. Spawns the new agent (must be in the registry — see `hydra-acp agents list`), kills the old one, and feeds the conversation transcript so far back in as the first prompt to the new agent. `session_info_update` carries the new `agentId`; a synthetic `agent_message_chunk` banner marks the switch in the transcript. The on-disk session record is updated so resurrection brings the session back on the new agent. |
 
 These work from anywhere a session prompt can be typed — the TUI's input box, agent-shell, the slack thread composer, the browser chat composer. Hydra detects them server-side; clients send them as ordinary `session/prompt` requests.
 
-### Forwarding agent args (`acp-hydra launch <agent-id> ...`)
+### Forwarding agent args (`hydra-acp launch <agent-id> ...`)
 
 Anything you put after `<agent-id>` in launcher mode is forwarded to the underlying agent's command. Hydra appends the extra args to the registry-provided spawn plan. Example:
 
 ```text
-acp-hydra launch codex-acp -c sandbox_mode=danger-full-access
+hydra-acp launch codex-acp -c sandbox_mode=danger-full-access
 ```
 
 The daemon spawns `npx -y @zed-industries/codex-acp@<version> -c sandbox_mode=danger-full-access`. Args survive daemon restart — they're stored alongside the resume hints, so a resurrected session re-spawns its agent with the same arguments.
 
 ### Flag/env equivalence
 
-Every config-knob flag has an `ACP_HYDRA_FOO_BAR` env-var equivalent. Flag wins over env; env wins over default.
+Every config-knob flag has an `HYDRA_ACP_FOO_BAR` env-var equivalent. Flag wins over env; env wins over default.
 
 | Flag | Env var |
 |---|---|
-| `--name` | `ACP_HYDRA_NAME` |
-| `--agent-id` | `ACP_HYDRA_AGENT_ID` |
-| `--session-id` | `ACP_HYDRA_SESSION_ID` |
-| `--role` | `ACP_HYDRA_ROLE` |
+| `--name` | `HYDRA_ACP_NAME` |
+| `--agent-id` | `HYDRA_ACP_AGENT_ID` |
+| `--session-id` | `HYDRA_ACP_SESSION_ID` |
+| `--role` | `HYDRA_ACP_ROLE` |
 
 Action commands (`init`, `daemon`, `sessions`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
 
 ### Registry id resolution
 
-When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `ACP_HYDRA_AGENT_ID`), the daemon first tries an exact match against the ACP Registry's `id` field. If nothing matches, it falls back to matching against the **npx package basename** (the segment after the last `/` and before the version `@`). That means common binary names work transparently:
+When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `HYDRA_ACP_AGENT_ID`), the daemon first tries an exact match against the ACP Registry's `id` field. If nothing matches, it falls back to matching against the **npx package basename** (the segment after the last `/` and before the version `@`). That means common binary names work transparently:
 
 | You spawn… | Registry `id` | Resolves via |
 |---|---|---|
@@ -298,7 +298,7 @@ When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `ACP_H
 
 ## Config
 
-`~/.acp-hydra/config.json`:
+`~/.hydra-acp/config.json`:
 
 ```json
 {
@@ -318,20 +318,20 @@ When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `ACP_H
 
 `daemon.sessionIdleTimeoutSeconds` (default 30) controls how long a session with zero attached clients stays alive before the daemon closes it. The disk record stays so the session can be resurrected later via `session/load`. Set to `0` to disable.
 
-`daemon.sessionRecentMinutes` (default 30) controls how far back `acp-hydra sessions` (and the `/v1/sessions` REST endpoint without `?all=true`) looks for cold (disk-only) sessions. Set to `0` to never list cold sessions.
+`daemon.sessionRecentMinutes` (default 30) controls how far back `hydra-acp sessions` (and the `/v1/sessions` REST endpoint without `?all=true`) looks for cold (disk-only) sessions. Set to `0` to never list cold sessions.
 
 ### Extensions
 
 Hydra can spawn user-configured extension processes when the daemon starts. Extensions are arbitrary commands — written in any language — that talk to the daemon over its existing REST or WSS endpoints. Hydra handles their lifecycle (spawn on start, kill on stop, auto-restart on crash with exponential backoff up to ~60s) and injects daemon connection info via env vars.
 
-Configure in `~/.acp-hydra/config.json`:
+Configure in `~/.hydra-acp/config.json`:
 
 ```json
 {
   "extensions": {
-    "acp-hydra-slack": {},
-    "acp-hydra-web-ui": {
-      "command": ["acp-hydra-web-ui"],
+    "hydra-acp-slack": {},
+    "hydra-acp-web-ui": {
+      "command": ["hydra-acp-web-ui"],
       "args": ["--port", "9999"],
       "env": { "UI_THEME": "dark" }
     }
@@ -339,28 +339,28 @@ Configure in `~/.acp-hydra/config.json`:
 }
 ```
 
-If `command` is omitted, it defaults to `[<name>]` — useful when the package's `bin` matches its key (e.g. `npm install -g @acp-hydra/slack` exposes `acp-hydra-slack` on PATH, so `"acp-hydra-slack": {}` is enough).
+If `command` is omitted, it defaults to `[<name>]` — useful when the package's `bin` matches its key (e.g. `npm install -g @hydra-acp/slack` exposes `hydra-acp-slack` on PATH, so `"hydra-acp-slack": {}` is enough).
 
 Each extension is launched with these env vars set:
 
 | Env var | Example |
 |---|---|
-| `ACP_HYDRA_DAEMON_URL` | `http://127.0.0.1:8765` |
-| `ACP_HYDRA_DAEMON_HOST` | `127.0.0.1` |
-| `ACP_HYDRA_DAEMON_PORT` | `8765` |
-| `ACP_HYDRA_TOKEN` | `hydra_token_<hex>` |
-| `ACP_HYDRA_WS_URL` | `ws://127.0.0.1:8765/acp` |
-| `ACP_HYDRA_HOME` | `~/.acp-hydra` |
-| `ACP_HYDRA_EXTENSION_NAME` | the `name` from config |
+| `HYDRA_ACP_DAEMON_URL` | `http://127.0.0.1:8765` |
+| `HYDRA_ACP_DAEMON_HOST` | `127.0.0.1` |
+| `HYDRA_ACP_DAEMON_PORT` | `8765` |
+| `HYDRA_ACP_TOKEN` | `hydra_token_<hex>` |
+| `HYDRA_ACP_WS_URL` | `ws://127.0.0.1:8765/acp` |
+| `HYDRA_ACP_HOME` | `~/.hydra-acp` |
+| `HYDRA_ACP_EXTENSION_NAME` | the `name` from config |
 
-Extension stdout/stderr are appended to `~/.acp-hydra/extensions/<name>.log`.
+Extension stdout/stderr are appended to `~/.hydra-acp/extensions/<name>.log`.
 
 While the daemon is running you can manage extensions without bouncing it:
 
 ```text
-acp-hydra extensions               # table of name/status/pid/restarts/started/log
-acp-hydra extensions restart acp-hydra-slack
-acp-hydra extensions logs acp-hydra-slack --follow
+hydra-acp extensions               # table of name/status/pid/restarts/started/log
+hydra-acp extensions restart hydra-acp-slack
+hydra-acp extensions logs hydra-acp-slack --follow
 ```
 
 `stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply.
@@ -369,31 +369,31 @@ acp-hydra extensions logs acp-hydra-slack --follow
 
 #### Optional extensions
 
-Two ready-made extensions ship under the same `@acp-hydra` npm scope. Both are optional and can be installed independently.
+Two ready-made extensions ship under the same `@hydra-acp` npm scope. Both are optional and can be installed independently.
 
-**[`@acp-hydra/slack`](https://github.com/smagnuson/acp-hydra-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Attaches as `controller`, respects RFD #533's `prompt_received`, and survives daemon restarts via session resurrection.
-
-```sh
-npm install -g @acp-hydra/slack
-acp-hydra extensions add acp-hydra-slack --command acp-hydra-slack
-acp-hydra extensions start acp-hydra-slack   # if the daemon is already running
-```
-
-You'll also need a Slack app and a config at `~/.acp-hydra-slack.conf` — see the [package's setup section](https://github.com/smagnuson/acp-hydra-slack#setup) for scopes, tokens, and authorized users.
-
-**[`@acp-hydra/browser`](https://github.com/smagnuson/acp-hydra-browser) — local web UI.** Single-page app that lists live sessions, attaches as `controller` or `observer`, and renders the transcript (agent messages, tool calls, plans, mode/model changes) with a composer for prompting and permission widgets for approving tool use. Cheap to bring up when you want to spot-check an agent without firing up the editor.
+**[`@hydra-acp/slack`](https://github.com/smagnuso/hydra-acp-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Attaches as `controller`, respects RFD #533's `prompt_received`, and survives daemon restarts via session resurrection.
 
 ```sh
-npm install -g @acp-hydra/browser
-acp-hydra extensions add acp-hydra-browser --command acp-hydra-browser
-acp-hydra extensions start acp-hydra-browser
+npm install -g @hydra-acp/slack
+hydra-acp extensions add hydra-acp-slack --command hydra-acp-slack
+hydra-acp extensions start hydra-acp-slack   # if the daemon is already running
 ```
 
-The first launch generates `~/.acp-hydra-browser/authkey` and writes the open URL (with `?authkey=…`) to `~/.acp-hydra-browser/link`. Defaults to localhost-only; see the [package's HTTPS section](https://github.com/smagnuson/acp-hydra-browser#https) for binding to a LAN address with TLS.
+You'll also need a Slack app and a config at `~/.hydra-acp-slack.conf` — see the [package's setup section](https://github.com/smagnuso/hydra-acp-slack#setup) for scopes, tokens, and authorized users.
 
-Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.acp-hydra/config.json` — see the snippet above. `acp-hydra extensions logs <name> -f` tails an extension's stdout/stderr if you need to debug.
+**[`@hydra-acp/browser`](https://github.com/smagnuso/hydra-acp-browser) — local web UI.** Single-page app that lists live sessions, attaches as `controller` or `observer`, and renders the transcript (agent messages, tool calls, plans, mode/model changes) with a composer for prompting and permission widgets for approving tool use. Cheap to bring up when you want to spot-check an agent without firing up the editor.
 
-The `authToken` is generated on `acp-hydra init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. Tokens never leave `~/.acp-hydra/`.
+```sh
+npm install -g @hydra-acp/browser
+hydra-acp extensions add hydra-acp-browser --command hydra-acp-browser
+hydra-acp extensions start hydra-acp-browser
+```
+
+The first launch generates `~/.hydra-acp-browser/authkey` and writes the open URL (with `?authkey=…`) to `~/.hydra-acp-browser/link`. Defaults to localhost-only; see the [package's HTTPS section](https://github.com/smagnuso/hydra-acp-browser#https) for binding to a LAN address with TLS.
+
+Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extensions logs <name> -f` tails an extension's stdout/stderr if you need to debug.
+
+The `authToken` is generated on `hydra-acp init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. Tokens never leave `~/.hydra-acp/`.
 
 For remote access (binding to a non-loopback address), enable TLS via:
 
@@ -413,7 +413,7 @@ The daemon refuses to bind to non-loopback hosts without TLS configured.
 ## Disk layout
 
 ```
-~/.acp-hydra/
+~/.hydra-acp/
 ├── config.json              # daemon config + auth token
 ├── daemon.pid               # PID + port lockfile (when running)
 ├── daemon.<N>.log           # rotated daemon logs (10 MB or daily, whichever first)
@@ -425,7 +425,7 @@ The daemon refuses to bind to non-loopback hosts without TLS configured.
         └── ...              # agent-specific install (npx cache, binary, etc.)
 ```
 
-Logs are also fanned out to stderr while the daemon is running. To follow live: `tail -F ~/.acp-hydra/current.log`.
+Logs are also fanned out to stderr while the daemon is running. To follow live: `tail -F ~/.hydra-acp/current.log`.
 
 ## Wire protocol
 
@@ -435,7 +435,7 @@ The daemon's WSS endpoint follows the [Streamable HTTP & WebSocket Transport RFD
 GET /acp HTTP/1.1
 Host: localhost:8765
 Upgrade: websocket
-Sec-WebSocket-Protocol: acp.v1, acp-hydra-token.<token>
+Sec-WebSocket-Protocol: acp.v1, hydra-token.<token>
 ```
 
 Frames are JSON-RPC 2.0 text frames; binary frames are ignored.
@@ -506,28 +506,28 @@ The daemon exposes a process-management surface. Treat the auth token like an SS
 
 - **Default bind is `127.0.0.1`.** Cross-host access requires TLS + a strong token.
 - **No anonymous access.** Every request — REST and WSS — must present the bearer token.
-- **Token rotation:** `acp-hydra init --rotate-token` invalidates the old token; running clients are kicked.
+- **Token rotation:** `hydra-acp init --rotate-token` invalidates the old token; running clients are kicked.
 - **Sandboxing is the user's responsibility.** Spawned agents inherit the daemon's filesystem and shell. Run the daemon under a restricted user or inside a container if you don't trust agents fully.
 - **Subprocess scope:** agent processes inherit `cwd` and a sanitized environment. The daemon does not pass its auth token through to spawned agents.
 
 ## Registry entry mockup
 
-If accepted, `acp-hydra` would land in the [ACP Registry](https://github.com/agentclientprotocol/registry) under either `agent.json` or `extension.json` (TBD with maintainers — likely `extension.json`, since hydra is a session-multiplexer rather than an LLM-backed coding agent).
+If accepted, `hydra-acp` would land in the [ACP Registry](https://github.com/agentclientprotocol/registry) under either `agent.json` or `extension.json` (TBD with maintainers — likely `extension.json`, since hydra is a session-multiplexer rather than an LLM-backed coding agent).
 
 ```json
 {
-  "id": "acp-hydra",
+  "id": "hydra",
   "name": "ACP Hydra",
   "version": "0.1.0",
   "description": "Multi-client session daemon. Spawn agents, attach over WSS, multiplex sessions across editors.",
   "authors": ["Sam Magnuson"],
   "license": "MIT",
   "icon": "icon.svg",
-  "repository": "https://github.com/smagnuson/acp-hydra",
-  "website": "https://github.com/smagnuson/acp-hydra",
+  "repository": "https://github.com/smagnuso/hydra-acp",
+  "website": "https://github.com/smagnuso/hydra-acp",
   "distribution": {
     "npx": {
-      "package": "acp-hydra",
+      "package": "hydra",
       "args": ["shim"]
     }
   },

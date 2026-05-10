@@ -39,12 +39,12 @@ describe("SessionManager.resurrect", () => {
   let tmpHome: string;
 
   beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-mgr-"));
-    process.env.ACP_HYDRA_HOME = tmpHome;
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-mgr-"));
+    process.env.HYDRA_ACP_HOME = tmpHome;
   });
 
   afterEach(async () => {
-    delete process.env.ACP_HYDRA_HOME;
+    delete process.env.HYDRA_ACP_HOME;
     await fs.rm(tmpHome, { recursive: true, force: true });
   });
 
@@ -226,11 +226,11 @@ describe("SessionManager.resurrect", () => {
 describe("SessionManager: /hydra switch persistence", () => {
   let tmpHome: string;
   beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-switch-"));
-    process.env.ACP_HYDRA_HOME = tmpHome;
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-switch-"));
+    process.env.HYDRA_ACP_HOME = tmpHome;
   });
   afterEach(async () => {
-    delete process.env.ACP_HYDRA_HOME;
+    delete process.env.HYDRA_ACP_HOME;
     await fs.rm(tmpHome, { recursive: true, force: true });
   });
 

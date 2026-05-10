@@ -123,7 +123,7 @@ export class SessionManager {
     await agent.connection.request("initialize", {
       protocolVersion: 1,
       clientCapabilities: {},
-      clientInfo: { name: "acp-hydra", version: "0.1.0" },
+      clientInfo: { name: "hydra", version: "0.1.0" },
     });
 
     let loadResult: { _meta?: Record<string, unknown> } | undefined;
@@ -190,7 +190,7 @@ export class SessionManager {
       await agent.connection.request("initialize", {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: "acp-hydra", version: "0.1.0" },
+        clientInfo: { name: "hydra", version: "0.1.0" },
       });
       const newResult = await agent.connection.request<{
         sessionId: string;

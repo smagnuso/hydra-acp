@@ -1,5 +1,5 @@
 // Pre-screen interactive picker. Lists every session the daemon knows about
-// using the same columns as `acp-hydra sessions`, plus a "+ New session"
+// using the same columns as `hydra-acp sessions`, plus a "+ New session"
 // entry at the bottom (the default cursor position). Lives outside the main
 // screen so it can run before fullscreen mode is engaged.
 

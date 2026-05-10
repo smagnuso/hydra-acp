@@ -8,12 +8,12 @@ describe("SessionStore", () => {
   let tmpHome: string;
 
   beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-store-"));
-    process.env.ACP_HYDRA_HOME = tmpHome;
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-store-"));
+    process.env.HYDRA_ACP_HOME = tmpHome;
   });
 
   afterEach(async () => {
-    delete process.env.ACP_HYDRA_HOME;
+    delete process.env.HYDRA_ACP_HOME;
     await fs.rm(tmpHome, { recursive: true, force: true });
   });
 

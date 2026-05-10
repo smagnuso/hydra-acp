@@ -261,7 +261,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
       },
-      clientInfo: { name: "acp-hydra-tui", version: "0.1.0" },
+      clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
     })) as { agentInfo?: { name?: string } };
     agentInfoName = initResult?.agentInfo?.name;
   } catch {
@@ -293,7 +293,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       sessionId: ctx.sessionId,
       role: ctx.role,
       historyPolicy: "full",
-      clientInfo: { name: "acp-hydra-tui", version: "0.1.0" },
+      clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
     })) as { sessionId: string; _meta?: Record<string, unknown> };
     resolvedSessionId = attached.sessionId;
     const hydraMeta = extractHydraMeta(attached._meta ?? undefined);
@@ -624,7 +624,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         screen.appendLines([
           {
             prefix: "  ",
-            body: "Run `acp-hydra sessions` (or `hydra sessions`) for the full list.",
+            body: "Run `hydra-acp sessions` (or `hydra sessions`) for the full list.",
             bodyStyle: "info",
           },
         ]);
@@ -828,7 +828,7 @@ async function resolveSession(
       role: opts.role ?? "controller",
     };
   }
-  // Smart default: show the same table `acp-hydra sessions` produces (live
+  // Smart default: show the same table `hydra-acp sessions` produces (live
   // sessions + recent cold within sessionRecentMinutes) and let the user
   // pick. The picker defaults its cursor to "+ New session" so just pressing
   // Enter creates a fresh one.
@@ -869,7 +869,7 @@ async function openWs(config: HydraConfig): Promise<WebSocket> {
   const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
   const ws = new WebSocket(url, [
     "acp.v1",
-    `acp-hydra-token.${config.daemon.authToken}`,
+    `hydra-token.${config.daemon.authToken}`,
   ]);
   await once(ws, "open");
   return ws;

@@ -37,7 +37,7 @@ async function main(): Promise<void> {
       positionalAgentId ?? resolveOption(flags, "agent-id");
     if (!agentId) {
       process.stderr.write(
-        "Usage: acp-hydra launch <agent-id> [agent-args...]\n",
+        "Usage: hydra-acp launch <agent-id> [agent-args...]\n",
       );
       process.exit(2);
       return;
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   const { positional, flags } = parseArgs(argv);
 
   if (flags.version === true || positional[0] === "--version") {
-    process.stdout.write("acp-hydra 0.1.0\n");
+    process.stdout.write("hydra-acp 0.1.0\n");
     return;
   }
   if (flags.help === true) {
@@ -69,8 +69,8 @@ async function main(): Promise<void> {
   if (!subcommand) {
     // Auto-dispatch when invoked with no subcommand: TUI when attached to
     // a terminal, shim when stdio is piped (the editor-spawned case).
-    // Either path is forced explicitly via `acp-hydra tui` or
-    // `acp-hydra shim` if the caller wants to bypass detection.
+    // Either path is forced explicitly via `hydra-acp tui` or
+    // `hydra-acp shim` if the caller wants to bypass detection.
     if (process.stdout.isTTY) {
       await dispatchTui(flags, {
         sessionId,
@@ -238,45 +238,45 @@ function resolveSessionRole(raw: string | undefined): SessionRole | undefined {
 function printHelp(): void {
   process.stdout.write(
     [
-      "acp-hydra — multi-client ACP session daemon",
+      "hydra-acp — multi-client ACP session daemon",
       "",
       "Usage:",
-      "  acp-hydra                          Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case)",
-      "  acp-hydra shim                     Run as ACP shim explicitly (forces shim mode regardless of TTY)",
-      "  acp-hydra tui [opts]               Run the terminal UI explicitly (see below for opts)",
-      "  acp-hydra launch <agent-id> [agent-args...]",
+      "  hydra-acp                          Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case)",
+      "  hydra-acp shim                     Run as ACP shim explicitly (forces shim mode regardless of TTY)",
+      "  hydra-acp tui [opts]               Run the terminal UI explicitly (see below for opts)",
+      "  hydra-acp launch <agent-id> [agent-args...]",
       "                                     Shim mode, force daemon to spawn <agent-id>",
       "                                     from the registry. Args after <agent-id>",
       "                                     are forwarded to the agent's command.",
-      "  acp-hydra --session-id <id> [--role controller|observer]",
+      "  hydra-acp --session-id <id> [--role controller|observer]",
       "                                     Attach to an existing session (TUI when in a terminal, shim otherwise)",
-      "  acp-hydra init [--rotate-token]    Initialize ~/.acp-hydra/config.json",
-      "  acp-hydra daemon start|stop|restart|status",
-      "  acp-hydra sessions [list] [--all]  List sessions (live + recent cold; --all for full disk view)",
-      "  acp-hydra sessions kill <id>       Kill a session (live or cold)",
-      "  acp-hydra extensions list                   List configured extensions and live state",
-      "  acp-hydra extensions add <name> [opts]      Add an extension to config",
-      "  acp-hydra extensions remove <name>          Remove an extension from config",
-      "  acp-hydra extensions start|stop|restart <n>|all  Lifecycle on one or all",
-      "  acp-hydra extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
-      "  acp-hydra agents [list]                     List agents in the cached registry",
-      "  acp-hydra agents refresh                    Force a registry re-fetch",
-      "  acp-hydra tui flags: [--session-id <id>] [--resume] [--new] [--agent-id <id>] [--cwd <path>] [--role controller|observer] [--name <label>]",
+      "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
+      "  hydra-acp daemon start|stop|restart|status",
+      "  hydra-acp sessions [list] [--all]  List sessions (live + recent cold; --all for full disk view)",
+      "  hydra-acp sessions kill <id>       Kill a session (live or cold)",
+      "  hydra-acp extensions list                   List configured extensions and live state",
+      "  hydra-acp extensions add <name> [opts]      Add an extension to config",
+      "  hydra-acp extensions remove <name>          Remove an extension from config",
+      "  hydra-acp extensions start|stop|restart <n>|all  Lifecycle on one or all",
+      "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
+      "  hydra-acp agents [list]                     List agents in the cached registry",
+      "  hydra-acp agents refresh                    Force a registry re-fetch",
+      "  hydra-acp tui flags: [--session-id <id>] [--resume] [--new] [--agent-id <id>] [--cwd <path>] [--role controller|observer] [--name <label>]",
       "                                     Smart default: picks an existing live session if any exist in cwd, else creates a new one",
-      "  acp-hydra --version                Print version",
-      "  acp-hydra --help                   Show this help",
+      "  hydra-acp --version                Print version",
+      "  hydra-acp --help                   Show this help",
       "",
       "Config knob flags accept env-var equivalents (flag wins):",
-      "  --agent-id    ACP_HYDRA_AGENT_ID",
-      "  --session-id  ACP_HYDRA_SESSION_ID",
-      "  --role        ACP_HYDRA_ROLE",
-      "  --name        ACP_HYDRA_NAME",
+      "  --agent-id    HYDRA_ACP_AGENT_ID",
+      "  --session-id  HYDRA_ACP_SESSION_ID",
+      "  --role        HYDRA_ACP_ROLE",
+      "  --name        HYDRA_ACP_NAME",
       "",
     ].join("\n"),
   );
 }
 
 main().catch((err) => {
-  process.stderr.write(`acp-hydra: ${(err as Error).message}\n`);
+  process.stderr.write(`hydra-acp: ${(err as Error).message}\n`);
   process.exit(1);
 });

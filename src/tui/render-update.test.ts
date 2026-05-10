@@ -58,7 +58,7 @@ describe("mapUpdate", () => {
       mapUpdate({
         sessionUpdate: "user_message_chunk",
         content: { type: "text", text: "duplicate" },
-        _meta: { "acp-hydra": { compatFor: "prompt_received" } },
+        _meta: { "hydra": { compatFor: "prompt_received" } },
       }),
     ).toBeNull();
   });

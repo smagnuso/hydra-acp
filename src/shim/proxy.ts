@@ -28,7 +28,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
 
   const protocol = config.daemon.tls ? "wss" : "ws";
   const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const subprotocols = ["acp.v1", `acp-hydra-token.${config.daemon.authToken}`];
+  const subprotocols = ["acp.v1", `hydra-token.${config.daemon.authToken}`];
   const upstream = new ResilientWsStream({
     url,
     subprotocols,
@@ -43,7 +43,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
         return;
       }
       process.stderr.write(
-        `acp-hydra: reconnected; resuming ${contexts.length} session(s)\n`,
+        `hydra-acp: reconnected; resuming ${contexts.length} session(s)\n`,
       );
       for (const ctx of contexts) {
         await replayAttach(upstream, ctx);
@@ -55,7 +55,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
 
   upstream.onClose((err) => {
     if (err) {
-      process.stderr.write(`acp-hydra: ${err.message}\n`);
+      process.stderr.write(`hydra-acp: ${err.message}\n`);
     }
     void downstream.close();
     process.exit(err ? 1 : 0);
@@ -162,12 +162,12 @@ async function cancelPendingPermissions(
     return;
   }
   process.stderr.write(
-    `acp-hydra: cancelling ${pendings.length} pending permission request(s)\n`,
+    `hydra-acp: cancelling ${pendings.length} pending permission request(s)\n`,
   );
   for (const pending of pendings) {
     const params = {
       ...pending.params,
-      resolvedBy: "acp-hydra",
+      resolvedBy: "hydra",
       result: {
         outcome: { kind: "cancelled", reason: "daemon-disconnected" },
       },
@@ -207,7 +207,7 @@ async function replayAttach(
       role: ctx.role,
       historyPolicy: "pending_only",
       _meta: {
-        "acp-hydra": {
+        "hydra": {
           resume: resumeHints,
         },
       },
@@ -217,7 +217,7 @@ async function replayAttach(
     await stream.send(request);
   } catch (err) {
     process.stderr.write(
-      `acp-hydra: failed to replay attach for ${ctx.sessionId}: ${(err as Error).message}\n`,
+      `hydra-acp: failed to replay attach for ${ctx.sessionId}: ${(err as Error).message}\n`,
     );
   }
 }
@@ -266,14 +266,14 @@ function injectHydraMeta(
   const params = (msg.params ?? {}) as Record<string, unknown>;
   const existingMeta = (params._meta ?? {}) as Record<string, unknown>;
   const existingHydra =
-    (existingMeta["acp-hydra"] as Record<string, unknown> | undefined) ?? {};
+    (existingMeta["hydra"] as Record<string, unknown> | undefined) ?? {};
   return {
     ...msg,
     params: {
       ...params,
       _meta: {
         ...existingMeta,
-        "acp-hydra": {
+        "hydra": {
           ...existingHydra,
           ...additions,
         },

@@ -316,24 +316,24 @@ export class ExtensionManager {
       flags: "a",
     });
     logStream.write(
-      `[acp-hydra] ${new Date().toISOString()} starting extension ${ext.name} (attempt ${attempt + 1})\n`,
+      `[hydra-acp] ${new Date().toISOString()} starting extension ${ext.name} (attempt ${attempt + 1})\n`,
     );
 
     const env = {
       ...process.env,
-      ACP_HYDRA_DAEMON_URL: ctx.daemonUrl,
-      ACP_HYDRA_DAEMON_HOST: ctx.daemonHost,
-      ACP_HYDRA_DAEMON_PORT: String(ctx.daemonPort),
-      ACP_HYDRA_TOKEN: ctx.daemonToken,
-      ACP_HYDRA_WS_URL: ctx.daemonWsUrl,
-      ACP_HYDRA_HOME: ctx.hydraHome,
-      ACP_HYDRA_EXTENSION_NAME: ext.name,
+      HYDRA_ACP_DAEMON_URL: ctx.daemonUrl,
+      HYDRA_ACP_DAEMON_HOST: ctx.daemonHost,
+      HYDRA_ACP_DAEMON_PORT: String(ctx.daemonPort),
+      HYDRA_ACP_TOKEN: ctx.daemonToken,
+      HYDRA_ACP_WS_URL: ctx.daemonWsUrl,
+      HYDRA_ACP_HOME: ctx.hydraHome,
+      HYDRA_ACP_EXTENSION_NAME: ext.name,
       ...ext.env,
     };
 
     const [cmd, ...baseArgs] = command;
     if (cmd === undefined) {
-      logStream.write(`[acp-hydra] extension ${ext.name} has empty command\n`);
+      logStream.write(`[hydra-acp] extension ${ext.name} has empty command\n`);
       logStream.end();
       return;
     }
@@ -348,7 +348,7 @@ export class ExtensionManager {
       });
     } catch (err) {
       logStream.write(
-        `[acp-hydra] failed to spawn ${ext.name}: ${(err as Error).message}\n`,
+        `[hydra-acp] failed to spawn ${ext.name}: ${(err as Error).message}\n`,
       );
       logStream.end();
       this.scheduleRestart(entry, attempt);
@@ -370,7 +370,7 @@ export class ExtensionManager {
         });
       } catch (err) {
         logStream.write(
-          `[acp-hydra] failed to write pid file for ${ext.name}: ${(err as Error).message}\n`,
+          `[hydra-acp] failed to write pid file for ${ext.name}: ${(err as Error).message}\n`,
         );
       }
     }
@@ -383,7 +383,7 @@ export class ExtensionManager {
 
     child.on("error", (err) => {
       logStream.write(
-        `[acp-hydra] extension ${ext.name} error: ${err.message}\n`,
+        `[hydra-acp] extension ${ext.name} error: ${err.message}\n`,
       );
     });
 
@@ -394,7 +394,7 @@ export class ExtensionManager {
         void 0;
       }
       logStream.write(
-        `[acp-hydra] extension ${ext.name} exited code=${code ?? "null"} signal=${signal ?? "null"}\n`,
+        `[hydra-acp] extension ${ext.name} exited code=${code ?? "null"} signal=${signal ?? "null"}\n`,
       );
       entry.child = undefined;
       entry.pid = undefined;

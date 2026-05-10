@@ -85,7 +85,7 @@ export async function runExtensionsAdd(
 ): Promise<void> {
   if (!name) {
     process.stderr.write(
-      "Usage: acp-hydra extensions add <name> [--command CMD] [--args A,B,C] [--env K=V]... [--disabled]\n",
+      "Usage: hydra-acp extensions add <name> [--command CMD] [--args A,B,C] [--env K=V]... [--disabled]\n",
     );
     process.exit(2);
     return;
@@ -133,13 +133,13 @@ export async function runExtensionsAdd(
   await writeRawConfig(raw);
   process.stdout.write(`Added extension '${name}' to ${paths.config()}\n`);
   process.stdout.write(
-    "Restart the daemon (or `acp-hydra daemon stop && acp-hydra daemon start`) to apply.\n",
+    "Restart the daemon (or `hydra-acp daemon stop && hydra-acp daemon start`) to apply.\n",
   );
 }
 
 export async function runExtensionsRemove(name: string | undefined): Promise<void> {
   if (!name) {
-    process.stderr.write("Usage: acp-hydra extensions remove <name>\n");
+    process.stderr.write("Usage: hydra-acp extensions remove <name>\n");
     process.exit(2);
     return;
   }
@@ -188,7 +188,7 @@ async function postLifecycle(
 ): Promise<void> {
   if (!name) {
     process.stderr.write(
-      `Usage: acp-hydra extensions ${verb} <name|all>\n`,
+      `Usage: hydra-acp extensions ${verb} <name|all>\n`,
     );
     process.exit(2);
     return;
@@ -314,7 +314,7 @@ export async function runExtensionsLogs(
 ): Promise<void> {
   if (!name) {
     process.stderr.write(
-      "Usage: acp-hydra extensions logs <name> [--tail N] [--follow]\n",
+      "Usage: hydra-acp extensions logs <name> [--tail N] [--follow]\n",
     );
     process.exit(2);
     return;

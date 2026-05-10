@@ -91,7 +91,7 @@ export const SessionAttachParams = z.object({
 });
 export type SessionAttachParams = z.infer<typeof SessionAttachParams>;
 
-export const HYDRA_META_KEY = "acp-hydra";
+export const HYDRA_META_KEY = "hydra";
 
 export interface HydraMeta {
   upstreamSessionId?: string;

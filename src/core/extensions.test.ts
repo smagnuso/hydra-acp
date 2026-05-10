@@ -20,13 +20,13 @@ const PROBE_SCRIPT = `
 const fs = require('node:fs');
 const out = process.env.PROBE_OUT;
 fs.writeFileSync(out, JSON.stringify({
-  url: process.env.ACP_HYDRA_DAEMON_URL,
-  host: process.env.ACP_HYDRA_DAEMON_HOST,
-  port: process.env.ACP_HYDRA_DAEMON_PORT,
-  token: process.env.ACP_HYDRA_TOKEN,
-  ws: process.env.ACP_HYDRA_WS_URL,
-  home: process.env.ACP_HYDRA_HOME,
-  name: process.env.ACP_HYDRA_EXTENSION_NAME,
+  url: process.env.HYDRA_ACP_DAEMON_URL,
+  host: process.env.HYDRA_ACP_DAEMON_HOST,
+  port: process.env.HYDRA_ACP_DAEMON_PORT,
+  token: process.env.HYDRA_ACP_TOKEN,
+  ws: process.env.HYDRA_ACP_WS_URL,
+  home: process.env.HYDRA_ACP_HOME,
+  name: process.env.HYDRA_ACP_EXTENSION_NAME,
   custom: process.env.MY_CUSTOM_ENV,
 }));
 process.stdout.write('probe ready\\n');
@@ -39,8 +39,8 @@ describe("ExtensionManager", () => {
   let manager: ExtensionManager | undefined;
 
   beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-ext-"));
-    process.env.ACP_HYDRA_HOME = tmpHome;
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-ext-"));
+    process.env.HYDRA_ACP_HOME = tmpHome;
     probeOut = path.join(tmpHome, "probe-out.json");
   });
 
@@ -49,7 +49,7 @@ describe("ExtensionManager", () => {
       await manager.stop();
       manager = undefined;
     }
-    delete process.env.ACP_HYDRA_HOME;
+    delete process.env.HYDRA_ACP_HOME;
     await fs.rm(tmpHome, { recursive: true, force: true });
   });
 
@@ -209,7 +209,7 @@ describe("ExtensionManager", () => {
     expect(probe.name).toBe("node");
   });
 
-  it("writes a log file at ~/.acp-hydra/extensions/<name>.log", async () => {
+  it("writes a log file at ~/.hydra-acp/extensions/<name>.log", async () => {
     const cfg: ExtensionConfig = {
       name: "loggy",
       command: ["node", "-e", PROBE_SCRIPT],

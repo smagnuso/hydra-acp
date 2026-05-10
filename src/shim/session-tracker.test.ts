@@ -18,7 +18,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_abc",
         _meta: {
-          "acp-hydra": {
+          "hydra": {
             upstreamSessionId: "u_xyz",
             agentId: "claude-code",
             cwd: "/work",
@@ -52,7 +52,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_named",
         _meta: {
-          "acp-hydra": {
+          "hydra": {
             upstreamSessionId: "u_x",
             agentId: "claude-code",
             cwd: "/work",
@@ -78,7 +78,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_abc",
         _meta: {
-          "acp-hydra": {
+          "hydra": {
             upstreamSessionId: "u_xyz",
             agentId: "claude-code",
             cwd: "/work",
@@ -90,7 +90,7 @@ describe("SessionTracker", () => {
     expect(tracker.list()[0]?.role).toBe("observer");
   });
 
-  it("ignores meta when the acp-hydra namespace is missing", () => {
+  it("ignores meta when the hydra namespace is missing", () => {
     const tracker = new SessionTracker();
     tracker.observeFromClient({
       jsonrpc: "2.0",
@@ -155,7 +155,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_a",
         _meta: {
-          "acp-hydra": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+          "hydra": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
         },
       },
     });
@@ -243,7 +243,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_x",
         _meta: {
-          "acp-hydra": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+          "hydra": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
         },
       },
     });

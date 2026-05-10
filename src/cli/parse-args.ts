@@ -55,7 +55,7 @@ export function flagBool(
   return flags[key] === true || flags[key] === "true";
 }
 
-const ENV_PREFIX = "ACP_HYDRA_";
+const ENV_PREFIX = "HYDRA_ACP_";
 
 export function envKeyForFlag(flagKey: string): string {
   return ENV_PREFIX + flagKey.toUpperCase().replace(/-/g, "_");

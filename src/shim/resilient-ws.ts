@@ -84,7 +84,7 @@ export class ResilientWsStream implements MessageStream {
             await this.opts.onConnect(wasFirst);
           } catch (err) {
             this.log(
-              `acp-hydra: post-connect handler failed: ${(err as Error).message}`,
+              `hydra-acp: post-connect handler failed: ${(err as Error).message}`,
             );
           }
         }
@@ -96,11 +96,11 @@ export class ResilientWsStream implements MessageStream {
         }
         if (attempt >= MAX_RECONNECT_ATTEMPTS) {
           throw new Error(
-            `acp-hydra: gave up reconnecting after ${attempt} attempts: ${(err as Error).message}`,
+            `hydra-acp: gave up reconnecting after ${attempt} attempts: ${(err as Error).message}`,
           );
         }
         this.log(
-          `acp-hydra: connect attempt ${attempt} failed (${(err as Error).message}); retrying in ${backoff}ms`,
+          `hydra-acp: connect attempt ${attempt} failed (${(err as Error).message}); retrying in ${backoff}ms`,
         );
         await sleep(backoff);
         backoff = Math.min(backoff * BACKOFF_MULTIPLIER, BACKOFF_MAX_MS);
@@ -146,7 +146,7 @@ export class ResilientWsStream implements MessageStream {
       return;
     }
     this.log(
-      `acp-hydra: connection lost (${err?.message ?? "no error"}); reconnecting...`,
+      `hydra-acp: connection lost (${err?.message ?? "no error"}); reconnecting...`,
     );
     this.reconnectInFlight = (async () => {
       try {

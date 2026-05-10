@@ -6,7 +6,7 @@ export async function ensureDaemonReachable(config: HydraConfig): Promise<void> 
   if (await pingHealth(config)) {
     return;
   }
-  process.stderr.write("acp-hydra: daemon not running; starting it...\n");
+  process.stderr.write("hydra-acp: daemon not running; starting it...\n");
   spawnDaemonDetached();
   await waitForDaemonReady(config);
 }
@@ -27,7 +27,7 @@ export async function pingHealth(config: HydraConfig): Promise<boolean> {
 export function spawnDaemonDetached(): void {
   const cliPath = process.argv[1];
   if (!cliPath) {
-    throw new Error("Cannot determine acp-hydra binary path to spawn daemon");
+    throw new Error("Cannot determine hydra-acp binary path to spawn daemon");
   }
   const child = spawn(process.execPath, [cliPath, "daemon", "start"], {
     detached: true,
@@ -49,6 +49,6 @@ export async function waitForDaemonReady(
     await sleep(150);
   }
   throw new Error(
-    `acp-hydra daemon did not become ready within ${timeoutMs}ms`,
+    `hydra-acp daemon did not become ready within ${timeoutMs}ms`,
   );
 }

@@ -85,7 +85,7 @@ function maxLen(headerCell: string, values: string[]): number {
 
 export async function runSessionsKill(id: string | undefined): Promise<void> {
   if (!id) {
-    process.stderr.write("Usage: acp-hydra sessions kill <session-id>\n");
+    process.stderr.write("Usage: hydra-acp sessions kill <session-id>\n");
     process.exit(2);
   }
   const config = await loadConfig();

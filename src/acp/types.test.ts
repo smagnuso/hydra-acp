@@ -11,7 +11,7 @@ describe("extractHydraMeta", () => {
     expect(extractHydraMeta(undefined)).toEqual({});
   });
 
-  it("returns empty when the acp-hydra key is absent", () => {
+  it("returns empty when the hydra key is absent", () => {
     expect(extractHydraMeta({ "some.other": { foo: 1 } })).toEqual({});
   });
 
@@ -59,7 +59,7 @@ describe("extractHydraMeta", () => {
 });
 
 describe("mergeMeta", () => {
-  it("preserves passthrough keys and adds acp-hydra namespace", () => {
+  it("preserves passthrough keys and adds hydra namespace", () => {
     const merged = mergeMeta({ "some.other": { foo: 1 } }, { agentId: "x" });
     expect(merged).toEqual({
       "some.other": { foo: 1 },
@@ -67,7 +67,7 @@ describe("mergeMeta", () => {
     });
   });
 
-  it("overwrites a colliding acp-hydra key in passthrough", () => {
+  it("overwrites a colliding hydra key in passthrough", () => {
     const merged = mergeMeta(
       { [HYDRA_META_KEY]: { stale: true } },
       { upstreamSessionId: "u" },
