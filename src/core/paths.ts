@@ -16,6 +16,7 @@ export const paths = {
   config: () => path.join(hydraHome(), "config.json"),
   pidFile: () => path.join(hydraHome(), "daemon.pid"),
   logFile: () => path.join(hydraHome(), "daemon.log"),
+  currentLogFile: () => path.join(hydraHome(), "current.log"),
   registryCache: () => path.join(hydraHome(), "registry.json"),
   agentsDir: () => path.join(hydraHome(), "agents"),
   agentDir: (id: string) => path.join(hydraHome(), "agents", id),

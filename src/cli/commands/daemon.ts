@@ -8,6 +8,7 @@ import {
   spawnDaemonDetached,
   waitForDaemonReady,
 } from "../../core/daemon-bootstrap.js";
+import { runLogTail } from "./log-tail.js";
 
 export async function runDaemonStart(): Promise<void> {
   const config = await ensureConfig();
@@ -82,6 +83,14 @@ async function waitForExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
     await sleep(50);
   }
   return false;
+}
+
+export async function runDaemonLogs(argv: string[]): Promise<void> {
+  await runLogTail(
+    paths.currentLogFile(),
+    argv,
+    "No daemon log file (daemon never ran?)",
+  );
 }
 
 export async function runDaemonStatus(): Promise<void> {

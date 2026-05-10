@@ -1,7 +1,7 @@
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import { loadConfig } from "../../core/config.js";
 import { paths } from "../../core/paths.js";
+import { runLogTail } from "./log-tail.js";
 import { httpBase } from "./sessions.js";
 
 interface ExtensionInfo {
@@ -319,104 +319,8 @@ export async function runExtensionsLogs(
     process.exit(2);
     return;
   }
-  const { tail, follow } = parseLogsFlags(argv);
   const logPath = paths.extensionLogFile(name);
-
-  let stat: fs.Stats;
-  try {
-    stat = await fsp.stat(logPath);
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
-      process.stderr.write(`No log file at ${logPath} (extension never ran?)\n`);
-      process.exit(1);
-      return;
-    }
-    throw err;
-  }
-
-  let position = await printTail(logPath, stat.size, tail);
-
-  if (!follow) {
-    return;
-  }
-
-  process.stdout.write(`-- following ${logPath} --\n`);
-  let pending = false;
-  const watcher = fs.watch(logPath, () => {
-    if (pending) {
-      return;
-    }
-    pending = true;
-    setImmediate(async () => {
-      pending = false;
-      try {
-        const s = await fsp.stat(logPath);
-        if (s.size <= position) {
-          // truncated or no new bytes; reset to current size to avoid loop
-          if (s.size < position) {
-            position = s.size;
-          }
-          return;
-        }
-        const fd = await fsp.open(logPath, "r");
-        try {
-          const buf = Buffer.alloc(s.size - position);
-          await fd.read(buf, 0, buf.length, position);
-          process.stdout.write(buf);
-          position = s.size;
-        } finally {
-          await fd.close();
-        }
-      } catch {
-        void 0;
-      }
-    });
-  });
-
-  await new Promise<void>((resolve) => {
-    const finish = (): void => {
-      watcher.close();
-      resolve();
-    };
-    process.once("SIGINT", finish);
-    process.once("SIGTERM", finish);
-  });
-}
-
-async function printTail(
-  logPath: string,
-  fileSize: number,
-  lines: number,
-): Promise<number> {
-  if (lines <= 0 || fileSize === 0) {
-    return fileSize;
-  }
-  const CHUNK = 64 * 1024;
-  const fd = await fsp.open(logPath, "r");
-  try {
-    let position = fileSize;
-    let collected = "";
-    let newlineCount = 0;
-    while (position > 0 && newlineCount <= lines) {
-      const readSize = Math.min(CHUNK, position);
-      position -= readSize;
-      const buf = Buffer.alloc(readSize);
-      await fd.read(buf, 0, readSize, position);
-      const piece = buf.toString("utf8");
-      collected = piece + collected;
-      newlineCount = (collected.match(/\n/g) ?? []).length;
-    }
-    const allLines = collected.split("\n");
-    const tail = allLines.slice(-lines - 1);
-    process.stdout.write(tail.join("\n"));
-    if (!collected.endsWith("\n")) {
-      process.stdout.write("\n");
-    }
-  } finally {
-    await fd.close();
-  }
-  return fileSize;
+  await runLogTail(logPath, argv, "No log file (extension never ran?)");
 }
 
 function parseAddFlags(argv: string[]): {
@@ -477,35 +381,6 @@ function parseAddFlags(argv: string[]): {
     return { command: [], args: [], env: {}, enabled: true };
   }
   return { command, args: argList, env, enabled };
-}
-
-function parseLogsFlags(argv: string[]): { tail: number; follow: boolean } {
-  let tail = 50;
-  let follow = false;
-  let i = 0;
-  while (i < argv.length) {
-    const tok = argv[i];
-    if (tok === "--tail" || tok === "-n") {
-      const v = argv[i + 1];
-      const n = Number.parseInt(v ?? "", 10);
-      if (!Number.isInteger(n) || n < 0) {
-        process.stderr.write(`Invalid --tail value: ${v}\n`);
-        process.exit(2);
-      }
-      tail = n;
-      i += 2;
-      continue;
-    }
-    if (tok === "--follow" || tok === "-f") {
-      follow = true;
-      i += 1;
-      continue;
-    }
-    process.stderr.write(`Unknown flag: ${tok}\n`);
-    process.exit(2);
-    return { tail: 50, follow: false };
-  }
-  return { tail, follow };
 }
 
 function splitShellWords(s: string): string[] {

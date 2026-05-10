@@ -2,6 +2,7 @@
 import { parseArgs, resolveOption } from "./cli/parse-args.js";
 import { runInit } from "./cli/commands/init.js";
 import {
+  runDaemonLogs,
   runDaemonRestart,
   runDaemonStart,
   runDaemonStatus,
@@ -92,7 +93,9 @@ async function main(): Promise<void> {
       await runInit(flags);
       return;
     case "daemon": {
-      const sub = positional[1];
+      const daemonIdx = argv.indexOf("daemon");
+      const tail = argv.slice(daemonIdx + 1);
+      const sub = tail[0];
       if (sub === "start" || sub === undefined) {
         await runDaemonStart();
         return;
@@ -107,6 +110,10 @@ async function main(): Promise<void> {
       }
       if (sub === "status") {
         await runDaemonStatus();
+        return;
+      }
+      if (sub === "logs") {
+        await runDaemonLogs(tail.slice(1));
         return;
       }
       process.stderr.write(`Unknown daemon subcommand: ${sub}\n`);
@@ -252,6 +259,7 @@ function printHelp(): void {
       "                                     Attach to an existing session (TUI when in a terminal, shim otherwise)",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
       "  hydra-acp daemon start|stop|restart|status",
+      "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
       "  hydra-acp sessions [list] [--all]  List sessions (live + recent cold; --all for full disk view)",
       "  hydra-acp sessions kill <id>       Kill a session (live or cold)",
       "  hydra-acp extensions list                   List configured extensions and live state",
