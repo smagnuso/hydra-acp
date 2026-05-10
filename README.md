@@ -198,6 +198,12 @@ acp-hydra daemon status
 acp-hydra sessions                          # list sessions
 acp-hydra sessions kill <id>                # terminate a session
 
+acp-hydra extensions                        # list configured extensions and live state
+acp-hydra extensions add <name>             # add to config (--command, --args, --env, --disabled)
+acp-hydra extensions remove <name>          # remove from config
+acp-hydra extensions start|stop|restart <n> # lifecycle on a running extension
+acp-hydra extensions logs <name> [-f] [-n]  # tail (default 50) or follow an extension's log
+
 acp-hydra agents                            # list agents in the registry
 acp-hydra agents install <id>               # pre-install an agent (else lazy on first use)
 
@@ -324,6 +330,16 @@ Each extension is launched with these env vars set:
 | `ACP_HYDRA_EXTENSION_NAME` | the `name` from config |
 
 Extension stdout/stderr are appended to `~/.acp-hydra/extensions/<name>.log`.
+
+While the daemon is running you can manage extensions without bouncing it:
+
+```text
+acp-hydra extensions               # table of name/status/pid/restarts/started/log
+acp-hydra extensions restart acp-hydra-slack
+acp-hydra extensions logs acp-hydra-slack --follow
+```
+
+`stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply.
 
 **Trust model**: extensions run with the same privileges as the daemon and receive its full auth token. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism.
 

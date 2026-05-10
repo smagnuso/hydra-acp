@@ -7,6 +7,15 @@ import {
   runDaemonStop,
 } from "./cli/commands/daemon.js";
 import { runSessionsKill, runSessionsList } from "./cli/commands/sessions.js";
+import {
+  runExtensionsAdd,
+  runExtensionsList,
+  runExtensionsLogs,
+  runExtensionsRemove,
+  runExtensionsRestart,
+  runExtensionsStart,
+  runExtensionsStop,
+} from "./cli/commands/extensions.js";
 import { runShim } from "./shim/proxy.js";
 import type { SessionRole } from "./acp/types.js";
 
@@ -96,6 +105,44 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "extensions": {
+      const extIdx = argv.indexOf("extensions");
+      const tail = argv.slice(extIdx + 1);
+      const sub = tail[0];
+      const name = tail[1];
+      const rest = tail.slice(2);
+      if (sub === undefined || sub === "list") {
+        await runExtensionsList();
+        return;
+      }
+      if (sub === "add") {
+        await runExtensionsAdd(name, rest);
+        return;
+      }
+      if (sub === "remove") {
+        await runExtensionsRemove(name);
+        return;
+      }
+      if (sub === "start") {
+        await runExtensionsStart(name);
+        return;
+      }
+      if (sub === "stop") {
+        await runExtensionsStop(name);
+        return;
+      }
+      if (sub === "restart") {
+        await runExtensionsRestart(name);
+        return;
+      }
+      if (sub === "logs") {
+        await runExtensionsLogs(name, rest);
+        return;
+      }
+      process.stderr.write(`Unknown extensions subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
     default:
       process.stderr.write(`Unknown command: ${subcommand}\n`);
       printHelp();
@@ -127,6 +174,11 @@ function printHelp(): void {
       "  acp-hydra daemon start|stop|status",
       "  acp-hydra sessions [list] [--all]  List sessions (live + recent cold; --all for full disk view)",
       "  acp-hydra sessions kill <id>       Kill a session (live or cold)",
+      "  acp-hydra extensions list                   List configured extensions and live state",
+      "  acp-hydra extensions add <name> [opts]      Add an extension to config",
+      "  acp-hydra extensions remove <name>          Remove an extension from config",
+      "  acp-hydra extensions start|stop|restart <n> Lifecycle on a running extension",
+      "  acp-hydra extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  acp-hydra --version                Print version",
       "  acp-hydra --help                   Show this help",
       "",

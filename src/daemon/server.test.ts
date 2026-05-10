@@ -97,6 +97,28 @@ describe("startDaemon", () => {
       });
       expect(r.status).toBe(404);
     });
+
+    it("rejects /v1/extensions without bearer token", async () => {
+      const r = await fetch(`${baseUrl}/v1/extensions`);
+      expect(r.status).toBe(401);
+    });
+
+    it("returns an empty extensions list with a valid bearer token", async () => {
+      const r = await fetch(`${baseUrl}/v1/extensions`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as { extensions: unknown[] };
+      expect(body.extensions).toEqual([]);
+    });
+
+    it("returns 404 starting an unknown extension", async () => {
+      const r = await fetch(`${baseUrl}/v1/extensions/ghost/start`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(r.status).toBe(404);
+    });
   });
 
   describe("WSS handshake + initialize", () => {
@@ -258,5 +280,117 @@ describe("startDaemon", () => {
       cfg.daemon.host = "0.0.0.0";
       await expect(startDaemon(cfg)).rejects.toThrow(/non-loopback/);
     });
+  });
+});
+
+const PROBE_SCRIPT = `setInterval(() => {}, 60_000);`;
+
+describe("startDaemon — extensions REST lifecycle", () => {
+  let tmpHome: string;
+  let handle: DaemonHandle | null = null;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-test-"));
+    process.env.ACP_HYDRA_HOME = tmpHome;
+    const cfg: HydraConfig = {
+      daemon: {
+        host: "127.0.0.1",
+        port: 0,
+        authToken: TEST_TOKEN,
+        logLevel: "warn",
+        sessionIdleTimeoutSeconds: 30,
+        sessionRecentMinutes: 30,
+      },
+      registry: {
+        url: "http://127.0.0.1:65535/never-reached",
+        ttlHours: 24,
+      },
+      defaultAgent: "claude-code",
+      extensions: {
+        probe: {
+          command: ["node", "-e", PROBE_SCRIPT],
+          args: [],
+          env: {},
+          enabled: true,
+        },
+      },
+    };
+    handle = await startDaemon(cfg);
+    const p = port(handle);
+    baseUrl = `http://127.0.0.1:${p}`;
+  });
+
+  afterEach(async () => {
+    if (handle) {
+      await handle.shutdown().catch(() => undefined);
+      handle = null;
+    }
+    delete process.env.ACP_HYDRA_HOME;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it("list shows the configured probe extension as running", async () => {
+    // give the probe a moment to spawn
+    await new Promise((r) => setTimeout(r, 200));
+    const r = await fetch(`${baseUrl}/v1/extensions`, {
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as {
+      extensions: Array<{ name: string; status: string; pid: number | null }>;
+    };
+    expect(body.extensions).toHaveLength(1);
+    expect(body.extensions[0]?.name).toBe("probe");
+    expect(body.extensions[0]?.status).toBe("running");
+    expect(body.extensions[0]?.pid).toBeGreaterThan(0);
+  });
+
+  it("stop then start cycles a probe extension", async () => {
+    await new Promise((r) => setTimeout(r, 200));
+    const stopR = await fetch(`${baseUrl}/v1/extensions/probe/stop`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(stopR.status).toBe(200);
+    const stopped = (await stopR.json()) as { status: string };
+    expect(stopped.status).toBe("stopped");
+
+    const startR = await fetch(`${baseUrl}/v1/extensions/probe/start`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(startR.status).toBe(200);
+    const started = (await startR.json()) as { status: string; pid: number };
+    expect(started.status).toBe("running");
+    expect(started.pid).toBeGreaterThan(0);
+  });
+
+  it("returns 409 starting an already-running extension", async () => {
+    await new Promise((r) => setTimeout(r, 200));
+    const r = await fetch(`${baseUrl}/v1/extensions/probe/start`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(r.status).toBe(409);
+  });
+
+  it("restart returns a new pid", async () => {
+    await new Promise((r) => setTimeout(r, 200));
+    const before = (await (
+      await fetch(`${baseUrl}/v1/extensions/probe`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      })
+    ).json()) as { pid: number };
+
+    const r = await fetch(`${baseUrl}/v1/extensions/probe/restart`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+    expect(r.status).toBe(200);
+    const after = (await r.json()) as { status: string; pid: number };
+    expect(after.status).toBe("running");
+    expect(after.pid).toBeGreaterThan(0);
+    expect(after.pid).not.toBe(before.pid);
   });
 });

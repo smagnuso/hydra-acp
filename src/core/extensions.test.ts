@@ -226,4 +226,129 @@ describe("ExtensionManager", () => {
     expect(content).toContain("starting extension loggy");
     expect(content).toContain("probe ready");
   });
+
+  describe("per-name lifecycle", () => {
+    it("list() reports running with pid + restartCount + status + logPath", async () => {
+      const cfg: ExtensionConfig = {
+        name: "lst",
+        command: ["node", "-e", PROBE_SCRIPT],
+        args: [],
+        env: { PROBE_OUT: probeOut },
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome));
+      await manager.start();
+      await waitForProbe();
+
+      const info = manager.list();
+      expect(info).toHaveLength(1);
+      expect(info[0]?.name).toBe("lst");
+      expect(info[0]?.status).toBe("running");
+      expect(info[0]?.pid).toBeGreaterThan(0);
+      expect(info[0]?.enabled).toBe(true);
+      expect(info[0]?.restartCount).toBe(0);
+      expect(info[0]?.startedAt).toBeGreaterThan(0);
+      expect(info[0]?.logPath).toContain("extensions/lst.log");
+    });
+
+    it("stopByName() suppresses auto-restart (manuallyStopped flag)", async () => {
+      const cfg: ExtensionConfig = {
+        name: "manual",
+        command: ["node", "-e", PROBE_SCRIPT],
+        args: [],
+        env: { PROBE_OUT: probeOut },
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome));
+      await manager.start();
+      await waitForProbe();
+
+      const before = manager.list()[0];
+      expect(before?.status).toBe("running");
+      const pidBefore = before?.pid;
+
+      await manager.stopByName("manual");
+
+      const afterStop = manager.list()[0];
+      expect(afterStop?.status).toBe("stopped");
+      expect(afterStop?.pid).toBeUndefined();
+      if (typeof pidBefore === "number") {
+        expect(() => process.kill(pidBefore, 0)).toThrow();
+      }
+
+      // wait longer than the default restart backoff to confirm
+      // the supervisor doesn't respawn manually-stopped children.
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(manager.list()[0]?.status).toBe("stopped");
+    });
+
+    it("startByName() respawns a previously stopped extension", async () => {
+      const cfg: ExtensionConfig = {
+        name: "respawn",
+        command: ["node", "-e", PROBE_SCRIPT],
+        args: [],
+        env: { PROBE_OUT: probeOut },
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome));
+      await manager.start();
+      await waitForProbe();
+      await manager.stopByName("respawn");
+      expect(manager.list()[0]?.status).toBe("stopped");
+
+      await fs.unlink(probeOut).catch(() => undefined);
+      await manager.startByName("respawn");
+      await waitForProbe();
+      expect(manager.list()[0]?.status).toBe("running");
+      expect(manager.list()[0]?.pid).toBeGreaterThan(0);
+    });
+
+    it("restartByName() returns a different pid", async () => {
+      const cfg: ExtensionConfig = {
+        name: "bounce",
+        command: ["node", "-e", PROBE_SCRIPT],
+        args: [],
+        env: { PROBE_OUT: probeOut },
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome));
+      await manager.start();
+      await waitForProbe();
+      const pidBefore = manager.list()[0]?.pid;
+
+      await fs.unlink(probeOut).catch(() => undefined);
+      await manager.restartByName("bounce");
+      await waitForProbe();
+      const pidAfter = manager.list()[0]?.pid;
+
+      expect(pidAfter).toBeGreaterThan(0);
+      expect(pidAfter).not.toBe(pidBefore);
+      expect(manager.list()[0]?.status).toBe("running");
+    });
+
+    it("startByName() throws CONFLICT if already running", async () => {
+      const cfg: ExtensionConfig = {
+        name: "dup",
+        command: ["node", "-e", PROBE_SCRIPT],
+        args: [],
+        env: { PROBE_OUT: probeOut },
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome));
+      await manager.start();
+      await waitForProbe();
+
+      await expect(manager.startByName("dup")).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+    });
+
+    it("startByName() throws NOT_FOUND for unknown extension", async () => {
+      manager = new ExtensionManager([], makeContext(tmpHome));
+      await manager.start();
+      await expect(manager.startByName("ghost")).rejects.toMatchObject({
+        code: "NOT_FOUND",
+      });
+    });
+  });
 });

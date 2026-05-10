@@ -13,6 +13,7 @@ import { bearerAuth } from "./auth.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerExtensionRoutes } from "./routes/extensions.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
 
 const HYDRA_VERSION = "0.1.0";
@@ -73,9 +74,12 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     recentMinutes: config.daemon.sessionRecentMinutes,
   });
 
+  const extensions = new ExtensionManager(extensionList(config));
+
   registerHealthRoutes(app, HYDRA_VERSION);
   registerSessionRoutes(app, manager);
   registerAgentRoutes(app, registry);
+  registerExtensionRoutes(app, extensions);
   registerAcpWsEndpoint(app, {
     config,
     manager,
@@ -102,7 +106,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
 
   const scheme = config.daemon.tls ? "https" : "http";
   const wsScheme = config.daemon.tls ? "wss" : "ws";
-  const extensions = new ExtensionManager(extensionList(config), {
+  extensions.setContext({
     daemonUrl: `${scheme}://${config.daemon.host}:${boundPort}`,
     daemonHost: config.daemon.host,
     daemonPort: boundPort,
