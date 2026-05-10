@@ -231,6 +231,99 @@ describe("startDaemon", () => {
 
       ws.close();
     });
+
+    it("accepts session/cancel as a notification (spec form)", async () => {
+      // Regression: pre-fix the daemon registered onRequest only, so a
+      // spec-compliant client (no `id`) had its cancel silently dropped.
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+
+      let gotMessage: unknown = null;
+      ws.on("message", (data) => {
+        gotMessage = JSON.parse(data.toString("utf8"));
+      });
+
+      // Send session/cancel as a *notification* — no `id` field.
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "session/cancel",
+          params: { sessionId: "no-such-session" },
+        }),
+      );
+
+      // Followed by a real request whose response we can wait for; if the
+      // notification got mishandled (e.g. processed as a request and
+      // produced an error response with id:undefined), the next
+      // round-trip's response would be wrong.
+      const followUp = new Promise<{ id: number; result: unknown }>(
+        (resolve) => {
+          ws.on("message", (data) => {
+            const parsed = JSON.parse(data.toString("utf8")) as {
+              id?: number;
+              result?: unknown;
+            };
+            if (parsed.id === 42) {
+              resolve(parsed as { id: number; result: unknown });
+            }
+          });
+        },
+      );
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 42,
+          method: "session/list",
+          params: {},
+        }),
+      );
+      const response = await followUp;
+      expect(response.id).toBe(42);
+      // Notifications produce no response — gotMessage should be the
+      // session/list response, not anything synthesized for cancel.
+      expect((gotMessage as { id?: number }).id).toBe(42);
+
+      ws.close();
+    });
+
+    it("accepts session/cancel as a request for backward compat", async () => {
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+
+      const responsePromise = new Promise<{
+        id: number;
+        result?: unknown;
+        error?: unknown;
+      }>((resolve) => {
+        ws.on("message", (data) => {
+          resolve(JSON.parse(data.toString("utf8")));
+        });
+      });
+
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 7,
+          method: "session/cancel",
+          params: { sessionId: "no-such-session" },
+        }),
+      );
+
+      const response = await responsePromise;
+      expect(response.id).toBe(7);
+      // No session attached → no error surfaced to the client (the cancel
+      // is a no-op when the session can't be found, matching the
+      // notification path's silent behavior).
+      expect(response.error).toBeUndefined();
+
+      ws.close();
+    });
   });
 
   describe("lifecycle", () => {

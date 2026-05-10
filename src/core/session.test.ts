@@ -198,6 +198,93 @@ describe("Session", () => {
     });
   });
 
+  describe("session/cancel", () => {
+    it("forwards cancel to the agent as a notification, not a request", async () => {
+      const { session, mock } = makeSession("hydra_session_x", "upstream_x");
+      const { client } = makeClient("controller");
+      session.attach(client, "full");
+
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
+        typeof vi.fn
+      >;
+
+      await session.cancel(client.clientId);
+
+      expect(requestMock).not.toHaveBeenCalledWith(
+        "session/cancel",
+        expect.anything(),
+      );
+      expect(notifyMock).toHaveBeenCalledWith("session/cancel", {
+        sessionId: "upstream_x",
+      });
+    });
+
+    it("rewrites the hydra sessionId to the upstream id", async () => {
+      const { session, mock } = makeSession("hydra_session_y", "upstream_y");
+      const { client } = makeClient("controller");
+      session.attach(client, "full");
+
+      const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      await session.cancel(client.clientId);
+      // Ensure the agent sees its OWN session id, not hydra's wrapper id.
+      expect(notifyMock).toHaveBeenCalledWith("session/cancel", {
+        sessionId: "upstream_y",
+      });
+      expect(notifyMock).not.toHaveBeenCalledWith(
+        "session/cancel",
+        expect.objectContaining({ sessionId: "hydra_session_y" }),
+      );
+    });
+
+    it("rejects cancel from an observer with RoleNotPermitted", async () => {
+      const { session, mock } = makeSession();
+      const { client: observer } = makeClient("observer");
+      session.attach(observer, "full");
+      await expect(session.cancel(observer.clientId)).rejects.toMatchObject({
+        code: JsonRpcErrorCodes.RoleNotPermitted,
+      });
+      const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      expect(notifyMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects cancel from a non-attached client with RoleNotPermitted", async () => {
+      const { session, mock } = makeSession();
+      await expect(session.cancel("never-attached-id")).rejects.toMatchObject({
+        code: JsonRpcErrorCodes.RoleNotPermitted,
+      });
+      const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      expect(notifyMock).not.toHaveBeenCalled();
+    });
+
+    it("returns immediately without awaiting the agent", async () => {
+      // Regression: pre-fix the agent forwarding used .request which awaited a
+      // response that agents (per spec) never send, hanging the cancel
+      // promise indefinitely.
+      const { session, mock } = makeSession();
+      const { client } = makeClient("controller");
+      session.attach(client, "full");
+
+      const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      // Make notify resolve immediately (the default vi.fn() does too, but
+      // be explicit).
+      notifyMock.mockResolvedValueOnce(undefined);
+
+      // Should resolve without any agent reply being scheduled.
+      await expect(session.cancel(client.clientId)).resolves.toBeUndefined();
+    });
+  });
+
   describe("synthesized prompt_received and turn_complete (RFD #533)", () => {
     it("broadcasts prompt_received to non-originators only", async () => {
       const { session, mock } = makeSession("hydra_session_S", "u_S");
