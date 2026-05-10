@@ -175,6 +175,7 @@ export class SessionManager {
       }>("session/load", {
         sessionId: params.upstreamSessionId,
         cwd: params.cwd,
+        mcpServers: [],
       });
     } catch (err) {
       await agent.kill().catch(() => undefined);
