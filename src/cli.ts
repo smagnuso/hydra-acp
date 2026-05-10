@@ -2,6 +2,7 @@
 import { parseArgs, resolveOption } from "./cli/parse-args.js";
 import { runInit } from "./cli/commands/init.js";
 import {
+  runDaemonRestart,
   runDaemonStart,
   runDaemonStatus,
   runDaemonStop,
@@ -98,6 +99,10 @@ async function main(): Promise<void> {
       }
       if (sub === "stop") {
         await runDaemonStop();
+        return;
+      }
+      if (sub === "restart") {
+        await runDaemonRestart();
         return;
       }
       if (sub === "status") {
@@ -246,7 +251,7 @@ function printHelp(): void {
       "  acp-hydra --session-id <id> [--role controller|observer]",
       "                                     Attach to an existing session (TUI when in a terminal, shim otherwise)",
       "  acp-hydra init [--rotate-token]    Initialize ~/.acp-hydra/config.json",
-      "  acp-hydra daemon start|stop|status",
+      "  acp-hydra daemon start|stop|restart|status",
       "  acp-hydra sessions [list] [--all]  List sessions (live + recent cold; --all for full disk view)",
       "  acp-hydra sessions kill <id>       Kill a session (live or cold)",
       "  acp-hydra extensions list                   List configured extensions and live state",

@@ -1,7 +1,13 @@
 import * as fsp from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { paths } from "../../core/paths.js";
 import { loadConfig } from "../../core/config.js";
 import { startDaemon } from "../../daemon/server.js";
+import {
+  pingHealth,
+  spawnDaemonDetached,
+  waitForDaemonReady,
+} from "../../core/daemon-bootstrap.js";
 
 export async function runDaemonStart(): Promise<void> {
   const config = await loadConfig();
@@ -31,6 +37,51 @@ export async function runDaemonStop(): Promise<void> {
   } catch (err) {
     process.stderr.write(`Failed to signal daemon: ${(err as Error).message}\n`);
   }
+}
+
+export async function runDaemonRestart(): Promise<void> {
+  const config = await loadConfig();
+  const info = await readPidFile();
+  if (info && isProcessAlive(info.pid)) {
+    process.stdout.write(`Stopping daemon pid ${info.pid}...\n`);
+    try {
+      process.kill(info.pid, "SIGTERM");
+    } catch (err) {
+      process.stderr.write(
+        `Failed to signal daemon: ${(err as Error).message}\n`,
+      );
+      process.exit(1);
+    }
+    if (!(await waitForExit(info.pid))) {
+      process.stderr.write(
+        `Daemon pid ${info.pid} did not exit after SIGTERM; aborting restart.\n`,
+      );
+      process.exit(1);
+    }
+  } else {
+    process.stdout.write("No running daemon found; starting a fresh one.\n");
+  }
+  spawnDaemonDetached();
+  await waitForDaemonReady(config);
+  if (await pingHealth(config)) {
+    const fresh = await readPidFile();
+    process.stdout.write(
+      `Daemon restarted on ${config.daemon.host}:${config.daemon.port}` +
+        (fresh ? ` pid=${fresh.pid}` : "") +
+        "\n",
+    );
+  }
+}
+
+async function waitForExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) {
+      return true;
+    }
+    await sleep(50);
+  }
+  return false;
 }
 
 export async function runDaemonStatus(): Promise<void> {
