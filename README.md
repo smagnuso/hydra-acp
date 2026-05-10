@@ -517,7 +517,7 @@ If accepted, `hydra-acp` would land in the [ACP Registry](https://github.com/age
 ```json
 {
   "id": "hydra",
-  "name": "ACP Hydra",
+  "name": "Hydra ACP",
   "version": "0.1.0",
   "description": "Multi-client session daemon. Spawn agents, attach over WSS, multiplex sessions across editors.",
   "authors": ["Sam Magnuson"],
@@ -527,7 +527,7 @@ If accepted, `hydra-acp` would land in the [ACP Registry](https://github.com/age
   "website": "https://github.com/smagnuso/hydra-acp",
   "distribution": {
     "npx": {
-      "package": "hydra",
+      "package": "@hydra-acp/cli",
       "args": ["shim"]
     }
   },
