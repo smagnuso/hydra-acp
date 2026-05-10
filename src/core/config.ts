@@ -25,29 +25,39 @@ const RegistryConfig = z.object({
   ttlHours: z.number().positive().default(24),
 });
 
-const ExtensionConfig = z.object({
-  name: z
-    .string()
-    .min(1)
-    .regex(/^[A-Za-z0-9._-]+$/, "extension name must be filename-safe"),
+const ExtensionName = z
+  .string()
+  .min(1)
+  .regex(/^[A-Za-z0-9._-]+$/, "extension name must be filename-safe");
+
+const ExtensionBody = z.object({
   // Optional: if omitted, the spawn command defaults to [name], so a
   // package called `acp-hydra-slack` that exposes a `acp-hydra-slack` bin
-  // can be enabled with just `{ name: "acp-hydra-slack" }`.
+  // can be enabled with just an empty body `{}`.
   command: z.array(z.string()).default([]),
   args: z.array(z.string()).default([]),
   env: z.record(z.string()).default({}),
   enabled: z.boolean().default(true),
 });
-export type ExtensionConfig = z.infer<typeof ExtensionConfig>;
+
+export type ExtensionBody = z.infer<typeof ExtensionBody>;
+export type ExtensionConfig = ExtensionBody & { name: string };
 
 export const HydraConfig = z.object({
   daemon: DaemonConfig,
   registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
   defaultAgent: z.string().default("claude-code"),
-  extensions: z.array(ExtensionConfig).default([]),
+  extensions: z.record(ExtensionName, ExtensionBody).default({}),
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;
+
+export function extensionList(config: HydraConfig): ExtensionConfig[] {
+  return Object.entries(config.extensions).map(([name, body]) => ({
+    name,
+    ...body,
+  }));
+}
 
 export async function loadConfig(): Promise<HydraConfig> {
   const configPath = paths.config();

@@ -24,7 +24,7 @@ function testConfig(): HydraConfig {
       ttlHours: 24,
     },
     defaultAgent: "claude-code",
-    extensions: [],
+    extensions: {},
   };
 }
 

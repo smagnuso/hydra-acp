@@ -298,19 +298,18 @@ Configure in `~/.acp-hydra/config.json`:
 
 ```json
 {
-  "extensions": [
-    { "name": "acp-hydra-slack" },
-    {
-      "name": "acp-hydra-web-ui",
+  "extensions": {
+    "acp-hydra-slack": {},
+    "acp-hydra-web-ui": {
       "command": ["acp-hydra-web-ui"],
       "args": ["--port", "9999"],
       "env": { "UI_THEME": "dark" }
     }
-  ]
+  }
 }
 ```
 
-If `command` is omitted, it defaults to `[name]` — useful when the package's `bin` matches its name (e.g. `npm install -g acp-hydra-slack` exposes `acp-hydra-slack` on PATH, so `{ "name": "acp-hydra-slack" }` is enough).
+If `command` is omitted, it defaults to `[<name>]` — useful when the package's `bin` matches its key (e.g. `npm install -g acp-hydra-slack` exposes `acp-hydra-slack` on PATH, so `"acp-hydra-slack": {}` is enough).
 
 Each extension is launched with these env vars set:
 

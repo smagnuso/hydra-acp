@@ -4,7 +4,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import websocketPlugin from "@fastify/websocket";
 import pino, { type Level } from "pino";
 import createPinoRoll from "pino-roll";
-import type { HydraConfig } from "../core/config.js";
+import { type HydraConfig, extensionList } from "../core/config.js";
 import { Registry } from "../core/registry.js";
 import { SessionManager } from "../core/session-manager.js";
 import { ExtensionManager } from "../core/extensions.js";
@@ -102,7 +102,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
 
   const scheme = config.daemon.tls ? "https" : "http";
   const wsScheme = config.daemon.tls ? "wss" : "ws";
-  const extensions = new ExtensionManager(config.extensions, {
+  const extensions = new ExtensionManager(extensionList(config), {
     daemonUrl: `${scheme}://${config.daemon.host}:${boundPort}`,
     daemonHost: config.daemon.host,
     daemonPort: boundPort,
