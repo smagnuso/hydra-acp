@@ -4,6 +4,7 @@
 // redraws.
 
 import type { Terminal } from "terminal-kit";
+import { stripHydraSessionPrefix } from "../core/session.js";
 import type { FormattedLine, Style } from "./format.js";
 import type { InputDispatcher, KeyEvent, KeyName } from "./input.js";
 
@@ -776,14 +777,9 @@ function firstLine(text: string): string {
   return idx === -1 ? text : `${text.slice(0, idx)} ↵`;
 }
 
-function shortId(id: string): string {
-  // The "hydra_session_" prefix is constant across every hydra session and
-  // doesn't help distinguish them. Strip it and show the random tail in full.
-  if (id.startsWith("hydra_session_")) {
-    return id.slice("hydra_session_".length);
-  }
-  return id;
-}
+// Re-export for clarity at call sites that read `shortId(id)`. The shared
+// helper lives in core/session.ts alongside the prefix constant.
+const shortId = stripHydraSessionPrefix;
 
 function formatUsage(usage: UsageState | undefined): string | null {
   if (!usage) {

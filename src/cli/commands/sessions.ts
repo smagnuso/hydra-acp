@@ -1,4 +1,5 @@
 import { loadConfig } from "../../core/config.js";
+import { stripHydraSessionPrefix } from "../../core/session.js";
 
 export async function runSessionsList(opts: { all?: boolean } = {}): Promise<void> {
   const config = await loadConfig();
@@ -31,7 +32,7 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
     return;
   }
   const rows = body.sessions.map((s) => ({
-    session: s.sessionId,
+    session: stripHydraSessionPrefix(s.sessionId),
     upstream: s.upstreamSessionId ?? "-",
     status: (s.status ?? "live").toUpperCase(),
     clients: s.status === "cold" ? "-" : String(s.attachedClients),

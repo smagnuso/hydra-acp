@@ -1,6 +1,6 @@
 import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
-import { Session } from "./session.js";
+import { HYDRA_SESSION_PREFIX, Session } from "./session.js";
 import { SessionStore, recordFromMemorySession } from "./session-store.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
@@ -240,6 +240,26 @@ export class SessionManager {
 
   get(sessionId: string): Session | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  // Resolve a user-typed session id (which may have the hydra_session_
+  // prefix stripped — that's what `sessions list` and the picker show) to
+  // the canonical form that actually exists. Tries the input as-given
+  // first, then with the prefix prepended. Returns undefined if neither
+  // form resolves to a live or stored session. Foreign ids (anything not
+  // following our prefix convention) pass through via the first lookup.
+  async resolveCanonicalId(input: string): Promise<string | undefined> {
+    if (this.sessions.has(input) || (await this.store.read(input))) {
+      return input;
+    }
+    if (input.startsWith(HYDRA_SESSION_PREFIX)) {
+      return undefined;
+    }
+    const prefixed = HYDRA_SESSION_PREFIX + input;
+    if (this.sessions.has(prefixed) || (await this.store.read(prefixed))) {
+      return prefixed;
+    }
+    return undefined;
   }
 
   require(sessionId: string): Session {

@@ -105,7 +105,15 @@ export function registerAcpWsEndpoint(
     connection.onRequest("session/attach", async (raw) => {
       const params = SessionAttachParams.parse(raw);
       const hydraHints = extractHydraMeta(params._meta).resume;
-      let session = deps.manager.get(params.sessionId);
+      // Without explicit hydraHints (the shim's reconnect path provides
+      // the canonical id), the session id may have been typed by a human
+      // from `sessions list` — accept the prefix-stripped form by resolving
+      // to whichever form actually exists.
+      const lookupId = hydraHints
+        ? params.sessionId
+        : (await deps.manager.resolveCanonicalId(params.sessionId)) ??
+          params.sessionId;
+      let session = deps.manager.get(lookupId);
       if (!session) {
         let resurrectParams = hydraHints
           ? {
@@ -116,7 +124,7 @@ export function registerAcpWsEndpoint(
               title: hydraHints.title,
               agentArgs: hydraHints.agentArgs,
             }
-          : await deps.manager.loadFromDisk(params.sessionId);
+          : await deps.manager.loadFromDisk(lookupId);
         if (!resurrectParams) {
           const err = new Error(
             `session ${params.sessionId} not found and no resume hints provided`,
@@ -227,21 +235,23 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("session/load", async (raw) => {
       const rawObj = (raw ?? {}) as Record<string, unknown>;
-      const sessionId =
+      const rawSessionId =
         typeof rawObj.sessionId === "string" ? rawObj.sessionId : undefined;
-      if (!sessionId) {
+      if (!rawSessionId) {
         const err = new Error("session/load requires sessionId") as Error & {
           code: number;
         };
         err.code = JsonRpcErrorCodes.InvalidParams;
         throw err;
       }
+      const sessionId =
+        (await deps.manager.resolveCanonicalId(rawSessionId)) ?? rawSessionId;
       let session = deps.manager.get(sessionId);
       if (!session) {
         const fromDisk = await deps.manager.loadFromDisk(sessionId);
         if (!fromDisk) {
           const err = new Error(
-            `session ${sessionId} not found in memory or on disk`,
+            `session ${rawSessionId} not found in memory or on disk`,
           ) as Error & { code: number };
           err.code = JsonRpcErrorCodes.SessionNotFound;
           throw err;

@@ -4,6 +4,7 @@
 // screen so it can run before fullscreen mode is engaged.
 
 import type { Terminal } from "terminal-kit";
+import { stripHydraSessionPrefix } from "../core/session.js";
 import type { DiscoveredSession } from "./discovery.js";
 
 export type PickerResult =
@@ -134,7 +135,7 @@ export async function pickSession(
 
 function toRow(s: DiscoveredSession): Row {
   return {
-    session: s.sessionId,
+    session: stripHydraSessionPrefix(s.sessionId),
     upstream: s.upstreamSessionId ?? "-",
     status: s.status.toUpperCase(),
     clients: s.status === "cold" ? "-" : String(s.attachedClients),

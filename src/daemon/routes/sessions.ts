@@ -44,7 +44,8 @@ export function registerSessionRoutes(
   });
 
   app.delete("/v1/sessions/:id", async (request, reply) => {
-    const id = (request.params as { id: string }).id;
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const session = manager.get(id);
     if (session) {
       await session.close({ deleteRecord: true });
