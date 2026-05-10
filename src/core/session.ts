@@ -212,7 +212,7 @@ export class Session {
     );
   }
 
-  async cancel(clientId: string): Promise<unknown> {
+  async cancel(clientId: string): Promise<void> {
     const client = this.clients.get(clientId);
     if (!client || client.role !== "controller") {
       throw withCode(
@@ -220,7 +220,10 @@ export class Session {
         JsonRpcErrorCodes.RoleNotPermitted,
       );
     }
-    return this.agent.connection.request("session/cancel", {
+    // session/cancel is a notification per the ACP spec — agents process it
+    // and don't reply. Sending it as a request would hang our promise
+    // forever waiting for a response that never comes.
+    await this.agent.connection.notify("session/cancel", {
       sessionId: this.upstreamSessionId,
     });
   }

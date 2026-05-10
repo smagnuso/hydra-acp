@@ -186,18 +186,43 @@ export function registerAcpWsEndpoint(
       return session.prompt(att.clientId, params);
     });
 
-    connection.onRequest("session/cancel", async (raw) => {
-      const params = SessionCancelParams.parse(raw);
+    // session/cancel is a *notification* per the ACP spec — clients send it
+    // without an id and don't expect a response. Register it as a
+    // notification so messages from spec-compliant clients (Zed, agent-shell,
+    // hydra-tui) actually land. Errors from cancel propagate to logs but
+    // can't be surfaced to the client (notifications have no reply channel).
+    const handleCancelParams = (raw: unknown): void => {
+      let params;
+      try {
+        params = SessionCancelParams.parse(raw);
+      } catch (err) {
+        app.log.warn(
+          `session/cancel: invalid params: ${(err as Error).message}`,
+        );
+        return;
+      }
       const att = state.attached.get(params.sessionId);
       if (!att) {
-        const err = new Error("not attached to session") as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
+        return;
       }
-      const session = deps.manager.require(params.sessionId);
-      return session.cancel(att.clientId);
+      const session = deps.manager.get(params.sessionId);
+      if (!session) {
+        return;
+      }
+      session.cancel(att.clientId).catch((err: unknown) => {
+        app.log.warn(
+          `session/cancel for ${params.sessionId}: ${(err as Error).message}`,
+        );
+      });
+    };
+    connection.onNotification("session/cancel", handleCancelParams);
+    // Some older clients (and hydra's own tests) sent it as a request before
+    // the spec settled. Accept both shapes so we don't regress them; the
+    // request form just gets a null response since cancel itself yields
+    // nothing meaningful.
+    connection.onRequest("session/cancel", async (raw) => {
+      handleCancelParams(raw);
+      return null;
     });
 
     connection.onRequest("session/load", async (raw) => {
