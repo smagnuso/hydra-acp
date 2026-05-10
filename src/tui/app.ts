@@ -87,15 +87,84 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     appendRender(mapUpdate(update));
   });
 
-  conn.onRequest("session/request_permission", async (params) => {
-    appendRender({
-      kind: "unknown",
-      sessionUpdate: "permission_request",
-      raw: params,
+  // Permission requests are handled with a modal in the prompt area. While
+  // one is pending: ↑/↓ navigate options, Enter submits, Esc cancels, and
+  // 1..9 are quick-pick shortcuts.
+  type PermissionOption = {
+    optionId: string;
+    name: string;
+    kind?: string;
+  };
+  let pendingPermission:
+    | {
+        title: string;
+        options: PermissionOption[];
+        selectedIndex: number;
+        resolve: (result: unknown) => void;
+      }
+    | null = null;
+
+  const refreshPermissionPrompt = (): void => {
+    if (!pendingPermission) {
+      screen.setPermissionPrompt(null);
+      return;
+    }
+    screen.setPermissionPrompt({
+      title: pendingPermission.title,
+      options: pendingPermission.options.map((o) => ({ label: o.name })),
+      selectedIndex: pendingPermission.selectedIndex,
     });
-    // Auto-deny for v1 so the agent doesn't hang. Interactive approval is a
-    // follow-up.
-    return { outcome: { kind: "cancelled", reason: "tui-v1-no-permission-ui" } };
+  };
+
+  const renderPermissionResolved = (label: string, denied: boolean): void => {
+    screen.appendLines([
+      {
+        prefix: "  ",
+        body: `${denied ? "✗" : "✓"} ${label}`,
+        bodyStyle: denied ? "tool-status-fail" : "tool-status-ok",
+      },
+    ]);
+  };
+
+  const resolvePermission = (optionId: string | null): void => {
+    if (!pendingPermission) {
+      return;
+    }
+    const { options, resolve } = pendingPermission;
+    pendingPermission = null;
+    screen.setPermissionPrompt(null);
+    if (optionId === null) {
+      resolve({ outcome: { outcome: "cancelled" } });
+      renderPermissionResolved("Cancelled", true);
+      return;
+    }
+    const opt = options.find((o) => o.optionId === optionId);
+    resolve({ outcome: { outcome: "selected", optionId } });
+    const denied = (opt?.kind ?? "").startsWith("reject");
+    renderPermissionResolved(opt?.name ?? optionId, denied);
+  };
+
+  conn.onRequest("session/request_permission", async (params) => {
+    const p = (params ?? {}) as {
+      toolCall?: { name?: string; title?: string };
+      options?: PermissionOption[];
+    };
+    const options = Array.isArray(p.options) ? p.options : [];
+    const title = p.toolCall?.title ?? p.toolCall?.name ?? "tool";
+    if (options.length === 0) {
+      screen.appendLines([
+        {
+          prefix: "🔒 ",
+          body: `Permission requested · ${title} · (no options offered, cancelling)`,
+          bodyStyle: "tool-status-fail",
+        },
+      ]);
+      return { outcome: { outcome: "cancelled" } };
+    }
+    return new Promise<unknown>((resolve) => {
+      pendingPermission = { title, options, selectedIndex: 0, resolve };
+      refreshPermissionPrompt();
+    });
   });
 
   conn.setDefaultHandler(async () => {
@@ -168,6 +237,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     dispatcher,
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
+        if (pendingPermission && tryHandlePermissionKey(ev)) {
+          continue;
+        }
         const effects = dispatcher.feed(ev);
         for (const effect of effects) {
           handleEffect(effect);
@@ -176,6 +248,58 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       screen.refreshPrompt();
     },
   });
+
+  // While a permission is pending the modal owns input: arrow keys navigate,
+  // Enter submits, Esc cancels, 1–9 are quick-pick shortcuts. All other
+  // keys are dropped so the user can't draft a prompt mid-decision.
+  const tryHandlePermissionKey = (ev: KeyEvent): boolean => {
+    if (!pendingPermission) {
+      return false;
+    }
+    const opts = pendingPermission.options;
+    if (ev.type === "key") {
+      switch (ev.name) {
+        case "up":
+          pendingPermission.selectedIndex = Math.max(
+            0,
+            pendingPermission.selectedIndex - 1,
+          );
+          refreshPermissionPrompt();
+          return true;
+        case "down":
+          pendingPermission.selectedIndex = Math.min(
+            opts.length - 1,
+            pendingPermission.selectedIndex + 1,
+          );
+          refreshPermissionPrompt();
+          return true;
+        case "enter": {
+          const opt = opts[pendingPermission.selectedIndex];
+          if (opt) {
+            resolvePermission(opt.optionId);
+          }
+          return true;
+        }
+        case "escape":
+        case "ctrl-c":
+          resolvePermission(null);
+          return true;
+        default:
+          return true;
+      }
+    }
+    if (ev.type === "char" && /^[1-9]$/.test(ev.ch)) {
+      const idx = parseInt(ev.ch, 10) - 1;
+      const opt = opts[idx];
+      if (opt) {
+        resolvePermission(opt.optionId);
+      }
+      return true;
+    }
+    // Swallow anything else so it doesn't land in the prompt buffer behind
+    // the modal.
+    return true;
+  };
 
   const headerName = resolvedAgentId || agentInfoName || "?";
   screen.start();

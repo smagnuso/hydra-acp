@@ -34,11 +34,18 @@ export interface UsageState {
   costCurrency?: string;
 }
 
+export interface PermissionPromptSpec {
+  title: string;
+  options: Array<{ label: string }>;
+  selectedIndex: number;
+}
+
 const HEADER_ROWS = 2;
 const BANNER_ROWS = 1;
 const SEPARATOR_ROWS = 1;
 const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
+const MAX_PERMISSION_ROWS = 12;
 
 export class Screen {
   private term: Terminal;
@@ -50,6 +57,7 @@ export class Screen {
   private queuedTexts: string[] = [];
   private repaintPaused = 0;
   private repaintPending = false;
+  private permissionPrompt: PermissionPromptSpec | null = null;
   private banner: BannerState = {
     status: "ready",
     planMode: false,
@@ -194,6 +202,13 @@ export class Screen {
 
   setQueuedPrompts(texts: string[]): void {
     this.queuedTexts = [...texts];
+    this.repaint();
+  }
+
+  // While a permission prompt is active, the prompt area is replaced with
+  // an interactive options list. Pass null to dismiss.
+  setPermissionPrompt(spec: PermissionPromptSpec | null): void {
+    this.permissionPrompt = spec ? { ...spec } : null;
     this.repaint();
   }
 
@@ -352,6 +367,10 @@ export class Screen {
   }
 
   private drawPrompt(): void {
+    if (this.permissionPrompt) {
+      this.drawPermissionPrompt();
+      return;
+    }
     const w = this.term.width;
     const promptRows = this.promptRows();
     const top = this.term.height - promptRows - BANNER_ROWS + 1;
@@ -367,6 +386,56 @@ export class Screen {
       const lineText = state.buffer[i] ?? "";
       this.term(truncate(lineText, w - 2));
     }
+  }
+
+  private drawPermissionPrompt(): void {
+    const spec = this.permissionPrompt;
+    if (!spec) {
+      return;
+    }
+    const w = this.term.width;
+    const rows = this.permissionRows();
+    const top = this.term.height - rows - BANNER_ROWS + 1;
+    let row = top;
+    const writeRow = (paint: () => void): void => {
+      if (row >= top + rows) {
+        return;
+      }
+      this.term.moveTo(1, row).eraseLineAfter();
+      paint();
+      row += 1;
+    };
+    writeRow(() => {
+      this.term.brightYellow(` 🔒 ${truncate(spec.title, w - 5)}`);
+    });
+    writeRow(() => {
+      this.term.dim(" This action requires approval");
+    });
+    writeRow(() => {
+      this.term(" Do you want to proceed?");
+    });
+    for (let i = 0; i < spec.options.length; i++) {
+      if (row >= top + rows - 1) {
+        break;
+      }
+      const opt = spec.options[i];
+      if (!opt) {
+        continue;
+      }
+      const isSel = i === spec.selectedIndex;
+      const marker = isSel ? "❯" : " ";
+      const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
+      writeRow(() => {
+        if (isSel) {
+          this.term.brightCyan(body);
+        } else {
+          this.term.dim(body);
+        }
+      });
+    }
+    writeRow(() => {
+      this.term.dim(" ↑/↓ choose · Enter submit · Esc cancel · 1–9 quick-pick");
+    });
   }
 
   private drawBanner(): void {
@@ -392,6 +461,15 @@ export class Screen {
   }
 
   private placeCursor(): void {
+    if (this.permissionPrompt) {
+      // Park cursor on the selected option line — visual feedback while the
+      // user navigates with arrows.
+      const rows = this.permissionRows();
+      const top = this.term.height - rows - BANNER_ROWS + 1;
+      const optionRow = top + 3 + this.permissionPrompt.selectedIndex;
+      this.term.moveTo(2, Math.min(optionRow, this.term.height - BANNER_ROWS));
+      return;
+    }
     const promptRows = this.promptRows();
     const top = this.term.height - promptRows - BANNER_ROWS + 1;
     const state = this.dispatcher.state();
@@ -401,8 +479,22 @@ export class Screen {
   }
 
   private promptRows(): number {
+    if (this.permissionPrompt) {
+      return this.permissionRows();
+    }
     const state = this.dispatcher.state();
     return Math.min(MAX_PROMPT_ROWS, Math.max(1, state.buffer.length));
+  }
+
+  private permissionRows(): number {
+    if (!this.permissionPrompt) {
+      return 0;
+    }
+    // title + blank + question + N options + hint = 4 + N
+    return Math.min(
+      MAX_PERMISSION_ROWS,
+      4 + this.permissionPrompt.options.length,
+    );
   }
 
   private wrapLines(lines: FormattedLine[], width: number): FormattedLine[] {
@@ -609,6 +701,8 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-u";
     case "CTRL_W":
       return "ctrl-w";
+    case "ESCAPE":
+      return "escape";
     default:
       return null;
   }

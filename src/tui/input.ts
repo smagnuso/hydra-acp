@@ -21,7 +21,8 @@ export type KeyName =
   | "ctrl-d"
   | "ctrl-l"
   | "ctrl-u"
-  | "ctrl-w";
+  | "ctrl-w"
+  | "escape";
 
 export type KeyEvent =
   | { type: "char"; ch: string }
@@ -146,6 +147,9 @@ export class InputDispatcher {
         return [];
       case "ctrl-w":
         this.killWord();
+        return [];
+      case "escape":
+        // Reserved for modal flows (permission prompt). No-op here.
         return [];
     }
   }
