@@ -98,6 +98,9 @@ export class SessionManager {
         void this.store.delete(session.sessionId).catch(() => undefined);
       }
     });
+    session.onTitleChange((title) => {
+      void this.persistTitle(session.sessionId, title).catch(() => undefined);
+    });
     this.sessions.set(session.sessionId, session);
     await this.store
       .write(
@@ -200,6 +203,9 @@ export class SessionManager {
       if (deleteRecord) {
         void this.store.delete(session.sessionId).catch(() => undefined);
       }
+    });
+    session.onTitleChange((title) => {
+      void this.persistTitle(session.sessionId, title).catch(() => undefined);
     });
     this.sessions.set(session.sessionId, session);
     await this.store
@@ -307,6 +313,22 @@ export class SessionManager {
     }
     await this.store.delete(sessionId).catch(() => undefined);
     return true;
+  }
+
+  // Persist a title update from Session.setTitle. The on-disk record
+  // was written at create time; updating it here keeps the session
+  // record's title in sync with what was broadcast to clients so a
+  // daemon restart (and later resurrect) restores the same title.
+  private async persistTitle(sessionId: string, title: string): Promise<void> {
+    const record = await this.store.read(sessionId);
+    if (!record) {
+      return;
+    }
+    await this.store.write({
+      ...record,
+      title,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   async closeAll(): Promise<void> {

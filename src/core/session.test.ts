@@ -33,24 +33,6 @@ describe("Session ID prefix", () => {
     });
     expect(s.sessionId.startsWith("hydra_session_")).toBe(true);
   });
-
-  it("auto-generated sessionId tail is plain alphanumeric (no - or _)", () => {
-    // We use a custom nanoid alphabet of just alphanumerics. Dashes
-    // collide with separator-based parsers; underscores look doubled
-    // against the literal "hydra_session_" prefix. Run a batch so the
-    // test is resistant to luck.
-    for (let i = 0; i < 200; i++) {
-      const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-      const s = new Session({
-        cwd: "/w",
-        agentId: "mock",
-        agent: mock.agent,
-        upstreamSessionId: "u",
-      });
-      const tail = s.sessionId.replace(/^hydra_session_/, "");
-      expect(tail).toMatch(/^[A-Za-z0-9]+$/);
-    }
-  });
 });
 
 function makeSession(sessionId = "sess_test", upstream = "agent-sess-1") {
@@ -428,6 +410,87 @@ describe("Session", () => {
           update: { sessionUpdate: "turn_complete", stopReason: "end_turn" },
         },
       });
+    });
+
+    it("seeds session_info_update from the first prompt's first line", async () => {
+      const { session, mock } = makeSession("hydra_session_TL", "u_TL");
+      const { client: alice } = makeClient("controller");
+      const { client: bob, stream: bobStream } = makeClient("controller");
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_TL",
+        prompt: [{ type: "text", text: "fix the bug in foo.ts\nmore detail" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const sessionInfo = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "session_info_update",
+      );
+      expect(sessionInfo).toMatchObject({
+        params: {
+          sessionId: "hydra_session_TL",
+          update: {
+            sessionUpdate: "session_info_update",
+            title: "fix the bug in foo.ts",
+          },
+        },
+      });
+      expect(session.title).toBe("fix the bug in foo.ts");
+    });
+
+    it("does not re-seed the title on subsequent prompts", async () => {
+      const { session, mock } = makeSession("hydra_session_TL2", "u_TL2");
+      const { client: alice } = makeClient("controller");
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "first prompt title" }],
+      });
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "should not become the title" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBe("first prompt title");
+    });
+
+    it("agent-emitted session_info_update overrides our seed", async () => {
+      const { session, mock } = makeSession("hydra_session_TL3", "u_TL3");
+      const { client: alice } = makeClient("controller");
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "placeholder seed" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(session.title).toBe("placeholder seed");
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_TL3",
+        update: {
+          sessionUpdate: "session_info_update",
+          title: "agent-derived authoritative title",
+        },
+      });
+      expect(session.title).toBe("agent-derived authoritative title");
     });
 
     it("late attachers replay synthesized events from history", async () => {

@@ -59,6 +59,10 @@ export class Session {
   private promptInFlight = false;
   private closed = false;
   private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
+  private titleHandlers: Array<(title: string) => void> = [];
+  // True once we've observed our first session/prompt; gates the
+  // first-prompt-seeded title so subsequent prompts don't churn it.
+  private firstPromptSeeded = false;
   private idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
 
@@ -75,6 +79,10 @@ export class Session {
     this.updatedAt = Date.now();
 
     this.agent.connection.onNotification("session/update", (params) => {
+      // Pick up agent-emitted session_info_update so the canonical
+      // title in this Session matches what clients see broadcast.
+      // Forwarded as-is through recordAndBroadcast below.
+      this.maybeApplyAgentSessionInfo(params);
       this.recordAndBroadcast("session/update", params);
     });
     this.agent.connection.onRequest("session/request_permission", async (params) => {
@@ -136,6 +144,7 @@ export class Session {
       );
     }
     this.broadcastPromptReceived(client, params);
+    this.maybeSeedTitleFromPrompt(params);
     return this.enqueuePrompt(async () => {
       const response = await this.agent.connection.request<unknown>(
         "session/prompt",
@@ -262,6 +271,90 @@ export class Session {
 
   onClose(handler: (opts: { deleteRecord: boolean }) => void): void {
     this.closeHandlers.push(handler);
+  }
+
+  // Subscribe to title updates. The SessionManager hooks this to
+  // persist the new title to disk so a daemon restart restores it.
+  onTitleChange(handler: (title: string) => void): void {
+    this.titleHandlers.push(handler);
+  }
+
+  // Update the canonical title and broadcast a session_info_update to
+  // every attached client. Clients that already speak the spec's
+  // session_info_update need no hydra-specific wiring to pick this up.
+  // Idempotent on identical values.
+  private setTitle(title: string): void {
+    const trimmed = title.trim();
+    if (!trimmed || trimmed === this.title) {
+      return;
+    }
+    this.title = trimmed;
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "session_info_update",
+        title: trimmed,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    for (const handler of this.titleHandlers) {
+      try {
+        handler(trimmed);
+      } catch {
+        void 0;
+      }
+    }
+  }
+
+  // First-prompt heuristic: derive a session title from the first
+  // session/prompt's text. Replaces whatever was set at session/new
+  // (typically an editor frame name like "Claude Agent @ acp-hydra")
+  // — the first prompt is a better summary for cross-client display
+  // than the editor's static frame label. Subsequent prompts don't
+  // touch the title; that'd flap as conversations evolved.
+  private maybeSeedTitleFromPrompt(params: unknown): void {
+    if (this.firstPromptSeeded) {
+      return;
+    }
+    const promptParams = (params ?? {}) as { prompt?: unknown };
+    const text = extractPromptText(promptParams.prompt);
+    const seed = firstLine(text, 80);
+    if (!seed) {
+      return;
+    }
+    this.firstPromptSeeded = true;
+    this.setTitle(seed);
+  }
+
+  // Pick up an agent-emitted session_info_update and store its title
+  // as our canonical record. The notification is also forwarded to
+  // clients via the surrounding recordAndBroadcast call. Authoritative
+  // — overrides our placeholder.
+  private maybeApplyAgentSessionInfo(params: unknown): void {
+    const obj = (params ?? {}) as { update?: unknown };
+    const update = (obj.update ?? {}) as {
+      sessionUpdate?: unknown;
+      title?: unknown;
+    };
+    if (update.sessionUpdate !== "session_info_update") {
+      return;
+    }
+    if (typeof update.title !== "string") {
+      return;
+    }
+    const trimmed = update.title.trim();
+    if (!trimmed || trimmed === this.title) {
+      return;
+    }
+    this.title = trimmed;
+    this.firstPromptSeeded = true;
+    for (const handler of this.titleHandlers) {
+      try {
+        handler(trimmed);
+      } catch {
+        void 0;
+      }
+    }
   }
 
   private markClosed(opts: { deleteRecord: boolean }): void {
@@ -430,4 +523,18 @@ function extractPromptText(prompt: unknown): string {
       return "";
     })
     .join("");
+}
+
+// First non-empty line of `text`, truncated to `max` chars with a
+// trailing ellipsis if needed. Used to seed a session title from the
+// first user prompt's leading line.
+function firstLine(text: string, max: number): string | undefined {
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    return line.length > max ? `${line.slice(0, max)}…` : line;
+  }
+  return undefined;
 }
