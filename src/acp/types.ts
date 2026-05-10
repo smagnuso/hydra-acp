@@ -159,6 +159,7 @@ export type SessionListParams = z.infer<typeof SessionListParams>;
 
 export const SessionListEntry = z.object({
   sessionId: z.string(),
+  upstreamSessionId: z.string().optional(),
   cwd: z.string(),
   title: z.string().optional(),
   agentId: z.string().optional(),

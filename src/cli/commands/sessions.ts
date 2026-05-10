@@ -17,6 +17,7 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   const body = (await response.json()) as {
     sessions: Array<{
       sessionId: string;
+      upstreamSessionId?: string;
       cwd: string;
       agentId?: string;
       title?: string;
@@ -31,6 +32,7 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   }
   const rows = body.sessions.map((s) => ({
     session: s.sessionId,
+    upstream: s.upstreamSessionId ?? "-",
     status: (s.status ?? "live").toUpperCase(),
     clients: s.status === "cold" ? "-" : String(s.attachedClients),
     agent: s.agentId ?? "?",
@@ -39,6 +41,7 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   }));
   const header = {
     session: "SESSION",
+    upstream: "UPSTREAM",
     status: "STATUS",
     clients: "CLIENTS",
     agent: "AGENT",
@@ -47,6 +50,7 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   };
   const widths = {
     session: maxLen(header.session, rows.map((r) => r.session)),
+    upstream: maxLen(header.upstream, rows.map((r) => r.upstream)),
     status: maxLen(header.status, rows.map((r) => r.status)),
     clients: maxLen(header.clients, rows.map((r) => r.clients)),
     agent: maxLen(header.agent, rows.map((r) => r.agent)),
@@ -55,6 +59,7 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   const formatRow = (r: typeof header): string =>
     [
       r.session.padEnd(widths.session),
+      r.upstream.padEnd(widths.upstream),
       r.status.padEnd(widths.status),
       r.clients.padStart(widths.clients),
       r.agent.padEnd(widths.agent),

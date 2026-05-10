@@ -259,6 +259,7 @@ export class SessionManager {
       liveIds.add(session.sessionId);
       entries.push({
         sessionId: session.sessionId,
+        upstreamSessionId: session.upstreamSessionId,
         cwd: session.cwd,
         title: session.title,
         agentId: session.agentId,
@@ -285,6 +286,7 @@ export class SessionManager {
       }
       entries.push({
         sessionId: r.sessionId,
+        upstreamSessionId: r.upstreamSessionId,
         cwd: r.cwd,
         title: r.title,
         agentId: r.agentId,
