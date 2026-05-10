@@ -16,6 +16,7 @@ import {
   runExtensionsStart,
   runExtensionsStop,
 } from "./cli/commands/extensions.js";
+import { runAgentsList, runAgentsRefresh } from "./cli/commands/agents.js";
 import { runShim } from "./shim/proxy.js";
 import type { SessionRole } from "./acp/types.js";
 
@@ -143,6 +144,20 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "agents": {
+      const sub = positional[1];
+      if (sub === undefined || sub === "list") {
+        await runAgentsList();
+        return;
+      }
+      if (sub === "refresh") {
+        await runAgentsRefresh();
+        return;
+      }
+      process.stderr.write(`Unknown agents subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
     default:
       process.stderr.write(`Unknown command: ${subcommand}\n`);
       printHelp();
@@ -179,6 +194,8 @@ function printHelp(): void {
       "  acp-hydra extensions remove <name>          Remove an extension from config",
       "  acp-hydra extensions start|stop|restart <n> Lifecycle on a running extension",
       "  acp-hydra extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
+      "  acp-hydra agents [list]                     List agents in the cached registry",
+      "  acp-hydra agents refresh                    Force a registry re-fetch",
       "  acp-hydra --version                Print version",
       "  acp-hydra --help                   Show this help",
       "",
