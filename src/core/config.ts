@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { homedir } from "node:os";
 import { z } from "zod";
 import { paths } from "./paths.js";
 
@@ -46,7 +47,11 @@ export type ExtensionConfig = ExtensionBody & { name: string };
 export const HydraConfig = z.object({
   daemon: DaemonConfig,
   registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
-  defaultAgent: z.string().default("claude-code"),
+  defaultAgent: z.string().default("claude-acp"),
+  // Where new sessions land when POST /v1/sessions omits cwd. Stored as
+  // a literal string ("~", "~/dev", "$HOME/work") so the config file is
+  // portable across machines; expanded via expandHome at use time.
+  defaultCwd: z.string().default("~"),
   extensions: z.record(ExtensionName, ExtensionBody).default({}),
 });
 
@@ -101,4 +106,21 @@ export function defaultConfig(): HydraConfig {
       authToken: generateAuthToken(),
     },
   });
+}
+
+// Expand a leading "~", "~/...", "$HOME", or "$HOME/..." to the current
+// user's home directory. Other paths pass through unchanged. Used so
+// defaultCwd in the config can be portable across linux ("/home/x")
+// and mac ("/Users/x") machines.
+export function expandHome(p: string): string {
+  if (p === "~" || p === "$HOME") {
+    return homedir();
+  }
+  if (p.startsWith("~/")) {
+    return homedir() + p.slice(1);
+  }
+  if (p.startsWith("$HOME/")) {
+    return homedir() + p.slice("$HOME".length);
+  }
+  return p;
 }

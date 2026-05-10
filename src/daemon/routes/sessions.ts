@@ -1,9 +1,16 @@
 import type { FastifyInstance } from "fastify";
+import { expandHome } from "../../core/config.js";
 import type { SessionManager } from "../../core/session-manager.js";
+
+export interface SessionRouteDefaults {
+  agentId: string;
+  cwd: string;
+}
 
 export function registerSessionRoutes(
   app: FastifyInstance,
   manager: SessionManager,
+  defaults: SessionRouteDefaults,
 ): void {
   app.get("/v1/sessions", async (request) => {
     const query = request.query as { cwd?: string; all?: string } | undefined;
@@ -13,23 +20,17 @@ export function registerSessionRoutes(
   });
 
   app.post("/v1/sessions", async (request, reply) => {
-    const body = request.body as {
+    const body = (request.body ?? {}) as {
       cwd?: string;
       agentId?: string;
       mcpServers?: unknown[];
     };
-    if (!body?.cwd) {
-      reply.code(400).send({ error: "cwd is required" });
-      return;
-    }
-    if (!body.agentId) {
-      reply.code(400).send({ error: "agentId is required" });
-      return;
-    }
+    const cwd = expandHome(body.cwd ?? defaults.cwd);
+    const agentId = body.agentId ?? defaults.agentId;
     try {
       const session = await manager.create({
-        cwd: body.cwd,
-        agentId: body.agentId,
+        cwd,
+        agentId,
         mcpServers: body.mcpServers,
       });
       reply.code(201).send({

@@ -23,7 +23,8 @@ function testConfig(): HydraConfig {
       url: "http://127.0.0.1:65535/never-reached",
       ttlHours: 24,
     },
-    defaultAgent: "claude-code",
+    defaultAgent: "claude-acp",
+    defaultCwd: os.homedir(),
     extensions: {},
   };
 }
@@ -306,7 +307,8 @@ describe("startDaemon — extensions REST lifecycle", () => {
         url: "http://127.0.0.1:65535/never-reached",
         ttlHours: 24,
       },
-      defaultAgent: "claude-code",
+      defaultAgent: "claude-acp",
+      defaultCwd: os.homedir(),
       extensions: {
         probe: {
           command: ["node", "-e", PROBE_SCRIPT],

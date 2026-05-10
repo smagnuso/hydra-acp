@@ -77,7 +77,10 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   const extensions = new ExtensionManager(extensionList(config));
 
   registerHealthRoutes(app, HYDRA_VERSION);
-  registerSessionRoutes(app, manager);
+  registerSessionRoutes(app, manager, {
+    agentId: config.defaultAgent,
+    cwd: config.defaultCwd,
+  });
   registerAgentRoutes(app, registry);
   registerExtensionRoutes(app, extensions);
   registerAcpWsEndpoint(app, {

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { homedir } from "node:os";
 import { Registry, planSpawn, type RegistryAgent } from "./registry.js";
 import type { HydraConfig } from "./config.js";
 
@@ -43,7 +44,8 @@ function fakeConfig(): HydraConfig {
       ttlHours: 24,
     },
     defaultAgent: "claude-acp",
-    extensions: [],
+    defaultCwd: homedir(),
+    extensions: {},
   };
 }
 
