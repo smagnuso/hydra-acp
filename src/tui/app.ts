@@ -211,8 +211,8 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       case "redraw-banner":
         screen.setBanner({});
         return;
-      case "clear-screen":
-        screen.clearScrollback();
+      case "redraw":
+        screen.redraw();
         return;
     }
   };
@@ -372,7 +372,9 @@ async function resolveSession(
     };
   }
   // Smart default: live picker if any live in cwd, else straight to new.
-  const sessions = await listSessions(config, { cwd });
+  // Pull cold sessions too so the picker shows everything `acp-hydra sessions`
+  // would list.
+  const sessions = await listSessions(config, { cwd, all: true });
   const live = sessions.filter((s) => s.cwd === cwd && s.status === "live");
   if (live.length === 0) {
     return newCtx(opts, cwd, config);

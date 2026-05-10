@@ -44,6 +44,7 @@ export class Screen {
   private onKey: (events: KeyEvent[]) => void;
   private lines: FormattedLine[] = [];
   private streamingActive = false;
+  private lastPromptRows = 0;
   private banner: BannerState = {
     status: "ready",
     planMode: false,
@@ -163,6 +164,10 @@ export class Screen {
     this.repaint();
   }
 
+  redraw(): void {
+    this.repaint();
+  }
+
   // Adds a blank spacer line to the scrollback, but only if scrollback is
   // non-empty and the last line isn't already a spacer. Idempotent so callers
   // can request it freely at turn boundaries.
@@ -179,9 +184,15 @@ export class Screen {
     this.repaint();
   }
 
-  // The dispatcher is the source of truth for prompt state; we just redraw
-  // the prompt + cursor wherever it currently lives.
+  // The dispatcher is the source of truth for prompt state. If the prompt
+  // row count changed (alt+enter added a line, backspace joined two), the
+  // separator and scrollback bottom shift, so we need a full repaint;
+  // otherwise an in-place prompt redraw is enough.
   refreshPrompt(): void {
+    if (this.promptRows() !== this.lastPromptRows) {
+      this.repaint();
+      return;
+    }
     this.drawPrompt();
     this.placeCursor();
   }
@@ -207,11 +218,16 @@ export class Screen {
     this.drawHeader();
     this.drawSeparator(HEADER_ROWS);
     this.drawScrollback();
-    const promptTop = h - this.promptRows() - BANNER_ROWS;
-    this.drawSeparator(promptTop - 1);
+    const promptRows = this.promptRows();
+    // Separator goes on the row directly above the first prompt row.
+    // drawPrompt computes its top as (h - promptRows - BANNER_ROWS + 1), so
+    // the separator belongs at (h - promptRows - BANNER_ROWS).
+    const separatorRow = h - promptRows - BANNER_ROWS;
+    this.drawSeparator(separatorRow);
     this.drawPrompt();
     this.drawBanner();
     this.placeCursor();
+    this.lastPromptRows = promptRows;
   }
 
   private drawHeader(): void {

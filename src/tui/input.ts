@@ -34,7 +34,7 @@ export type InputEffect =
   | { type: "exit" }
   | { type: "plan-toggle"; on: boolean }
   | { type: "redraw-banner" }
-  | { type: "clear-screen" };
+  | { type: "redraw" };
 
 export interface InputState {
   buffer: string[];
@@ -140,7 +140,7 @@ export class InputDispatcher {
       case "ctrl-d":
         return this.bufferIsEmpty() ? [{ type: "exit" }] : [];
       case "ctrl-l":
-        return [{ type: "clear-screen" }];
+        return [{ type: "redraw" }];
       case "ctrl-u":
         this.killLine();
         return [];
