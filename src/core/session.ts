@@ -126,12 +126,69 @@ export class Session {
         JsonRpcErrorCodes.RoleNotPermitted,
       );
     }
+    this.broadcastPromptReceived(client, params);
     return this.enqueuePrompt(async () => {
-      return this.agent.connection.request("session/prompt", {
-        ...(params as object),
-        sessionId: this.upstreamSessionId,
-      });
+      const response = await this.agent.connection.request<unknown>(
+        "session/prompt",
+        {
+          ...(params as object),
+          sessionId: this.upstreamSessionId,
+        },
+      );
+      this.broadcastTurnComplete(client.clientId, response);
+      return response;
     });
+  }
+
+  private broadcastPromptReceived(
+    client: AttachedClient,
+    params: unknown,
+  ): void {
+    const promptParams = (params ?? {}) as Record<string, unknown>;
+    const sentBy: Record<string, unknown> = { clientId: client.clientId };
+    if (client.clientInfo?.name) {
+      sentBy.name = client.clientInfo.name;
+    }
+    if (client.clientInfo?.version) {
+      sentBy.version = client.clientInfo.version;
+    }
+    this.recordAndBroadcast(
+      "session/update",
+      {
+        sessionId: this.sessionId,
+        update: {
+          type: "prompt_received",
+          prompt: promptParams.prompt,
+          sentBy,
+        },
+      },
+      client.clientId,
+    );
+  }
+
+  private broadcastTurnComplete(
+    originatorClientId: string,
+    response: unknown,
+  ): void {
+    const stopReason =
+      response &&
+      typeof response === "object" &&
+      "stopReason" in response &&
+      typeof (response as { stopReason: unknown }).stopReason === "string"
+        ? (response as { stopReason: string }).stopReason
+        : undefined;
+    const update: Record<string, unknown> = { type: "turn_complete" };
+    if (stopReason !== undefined) {
+      update.stopReason = stopReason;
+    }
+    this.recordAndBroadcast(
+      "session/update",
+      {
+        sessionId: this.sessionId,
+        update,
+      },
+      originatorClientId,
+    );
   }
 
   async cancel(clientId: string): Promise<unknown> {
@@ -224,7 +281,11 @@ export class Session {
     return params;
   }
 
-  private recordAndBroadcast(method: string, params: unknown): void {
+  private recordAndBroadcast(
+    method: string,
+    params: unknown,
+    excludeClientId?: string,
+  ): void {
     const rewritten = this.rewriteForClient(params);
     this.history.push({ method, params: rewritten, recordedAt: Date.now() });
     if (this.history.length > 1000) {
@@ -232,6 +293,9 @@ export class Session {
     }
     this.updatedAt = Date.now();
     for (const client of this.clients.values()) {
+      if (excludeClientId && client.clientId === excludeClientId) {
+        continue;
+      }
       void client.connection.notify(method, rewritten).catch(() => undefined);
     }
   }

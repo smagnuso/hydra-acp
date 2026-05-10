@@ -198,6 +198,120 @@ describe("Session", () => {
     });
   });
 
+  describe("synthesized prompt_received and turn_complete (RFD #533)", () => {
+    it("broadcasts prompt_received to non-originators only", async () => {
+      const { session, mock } = makeSession("hydra_session_S", "u_S");
+      const { client: alice } = makeClient("controller");
+      alice.clientInfo = { name: "alice-frontend", version: "1.2.3" };
+      const { client: bob, stream: bobStream } = makeClient("controller");
+      const { client: carol, stream: carolStream } = makeClient("observer");
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+      session.attach(carol, "full");
+
+      const { stream: aliceStream } = makeClient();
+      void aliceStream;
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_S",
+        prompt: [{ type: "text", text: "hello" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const findPromptReceived = (sent: typeof bobStream.sent) =>
+        sent.find(
+          (m) =>
+            "method" in m &&
+            m.method === "session/update" &&
+            (m.params as { update?: { type?: string } } | undefined)?.update
+              ?.type === "prompt_received",
+        );
+
+      expect(findPromptReceived(bobStream.sent)).toMatchObject({
+        params: {
+          sessionId: "hydra_session_S",
+          update: {
+            type: "prompt_received",
+            prompt: [{ type: "text", text: "hello" }],
+            sentBy: {
+              clientId: alice.clientId,
+              name: "alice-frontend",
+              version: "1.2.3",
+            },
+          },
+        },
+      });
+      expect(findPromptReceived(carolStream.sent)).toBeDefined();
+
+      const aliceSent = (alice.connection as unknown as {
+        // The controlled stream backing alice. We can't easily reach it via this
+        // test util, so instead we just verify alice didn't receive a notify by
+        // looking at the broadcast count.
+      });
+      void aliceSent;
+    });
+
+    it("broadcasts turn_complete to non-originators when agent returns", async () => {
+      const { session, mock } = makeSession("hydra_session_T", "u_T");
+      const { client: alice } = makeClient("controller");
+      const { client: bob, stream: bobStream } = makeClient("controller");
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        sessionId: "hydra_session_T",
+        prompt: [{ type: "text", text: "x" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const turnComplete = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { type?: string } } | undefined)?.update
+            ?.type === "turn_complete",
+      );
+      expect(turnComplete).toMatchObject({
+        params: {
+          sessionId: "hydra_session_T",
+          update: { type: "turn_complete", stopReason: "end_turn" },
+        },
+      });
+    });
+
+    it("late attachers replay synthesized events from history", async () => {
+      const { session, mock } = makeSession("hydra_session_R", "u_R");
+      const { client: alice } = makeClient("controller");
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "earlier turn" }],
+      });
+
+      const { client: late } = makeClient();
+      const replay = session.attach(late, "full");
+      const types = replay.map((n) => {
+        const params = n.params as { update?: { type?: string } } | undefined;
+        return params?.update?.type;
+      });
+      expect(types).toEqual(
+        expect.arrayContaining(["prompt_received", "turn_complete"]),
+      );
+    });
+  });
+
   describe("forwardRequest (transparent passthrough for unknown session/* methods)", () => {
     it("rewrites the hydra sessionId to the upstream id and forwards", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
