@@ -83,7 +83,9 @@ export class JsonRpcConnection {
   private handleIncoming(message: JsonRpcMessage): void {
     if ("method" in message) {
       if ("id" in message && message.id !== undefined) {
-        void this.handleRequest(message);
+        // Never let a failed reply (e.g. ws closed mid-handle) bubble out as
+        // an unhandled rejection — that would crash the daemon.
+        this.handleRequest(message).catch(() => undefined);
       } else {
         this.handleNotification(message);
       }
@@ -99,7 +101,7 @@ export class JsonRpcConnection {
       await this.sendError(req.id, {
         code: JsonRpcErrorCodes.MethodNotFound,
         message: `Method not found: ${req.method}`,
-      });
+      }).catch(() => undefined);
       return;
     }
     try {
@@ -109,14 +111,14 @@ export class JsonRpcConnection {
         id: req.id,
         result,
       };
-      await this.stream.send(response);
+      await this.stream.send(response).catch(() => undefined);
     } catch (err) {
       const error = err as Error & { code?: number; data?: unknown };
       await this.sendError(req.id, {
         code: error.code ?? JsonRpcErrorCodes.InternalError,
         message: error.message,
         data: error.data,
-      });
+      }).catch(() => undefined);
     }
   }
 
