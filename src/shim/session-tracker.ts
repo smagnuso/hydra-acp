@@ -140,6 +140,14 @@ export class SessionTracker {
     this.pendingPermissions.clear();
     return out;
   }
+
+  takePendingPermission(requestId: JsonRpcId): PendingPermission | undefined {
+    const found = this.pendingPermissions.get(requestId);
+    if (found) {
+      this.pendingPermissions.delete(requestId);
+    }
+    return found;
+  }
 }
 
 function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {

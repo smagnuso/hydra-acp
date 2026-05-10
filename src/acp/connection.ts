@@ -48,12 +48,25 @@ export class JsonRpcConnection {
   }
 
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
+    return this.requestWithId<T>(method, params).response;
+  }
+
+  // Same as request() but exposes the JSON-RPC id assigned to the outbound
+  // message. Used when the caller needs to correlate later sideband signals
+  // (e.g. permission fan-out) with the specific recipient's request id.
+  requestWithId<T = unknown>(
+    method: string,
+    params?: unknown,
+  ): { id: JsonRpcId; response: Promise<T> } {
     if (this.closed) {
-      throw new Error("connection is closed");
+      return {
+        id: "",
+        response: Promise.reject(new Error("connection is closed")),
+      };
     }
     const id = nanoid();
     const message: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
-    return new Promise<T>((resolve, reject) => {
+    const response = new Promise<T>((resolve, reject) => {
       this.pending.set(id, {
         resolve: (result) => resolve(result as T),
         reject,
@@ -63,6 +76,7 @@ export class JsonRpcConnection {
         reject(err);
       });
     });
+    return { id, response };
   }
 
   notify(method: string, params?: unknown): Promise<void> {

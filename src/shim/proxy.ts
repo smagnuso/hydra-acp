@@ -2,6 +2,7 @@ import { ndjsonStreamFromStdio } from "../acp/framing.js";
 import { loadConfig } from "../core/config.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import {
+  type JsonRpcId,
   type JsonRpcMessage,
   type JsonRpcRequest,
   type SessionRole,
@@ -82,6 +83,11 @@ export function wireShim({
 }: WireShimArgs): void {
   upstream.onMessage((msg) => {
     tracker.observeFromServer(msg);
+    // Daemon-side `session/permission_resolved` (sibling answered first).
+    // Forward the notification AND synthesize a JSON-RPC response so local
+    // clients (agent-shell, hydra-tui) that only register an `onRequest`
+    // handler still see their pending request resolve and their UI clear.
+    maybeReplyToResolvedPermission(msg, tracker, downstream);
     void downstream.send(msg);
   });
 
@@ -110,6 +116,41 @@ export function wireShim({
     }
     void upstream.send(msg);
   });
+}
+
+function maybeReplyToResolvedPermission(
+  msg: JsonRpcMessage,
+  tracker: SessionTracker,
+  downstream: MessageStream,
+): void {
+  if (!isPermissionResolvedNotification(msg)) {
+    return;
+  }
+  const params = (msg.params ?? {}) as { requestId?: JsonRpcId; result?: unknown };
+  if (params.requestId === undefined) {
+    return;
+  }
+  const pending = tracker.takePendingPermission(params.requestId);
+  if (!pending) {
+    return;
+  }
+  void downstream
+    .send({
+      jsonrpc: "2.0",
+      id: pending.requestId,
+      result: params.result ?? null,
+    })
+    .catch(() => undefined);
+}
+
+function isPermissionResolvedNotification(
+  msg: JsonRpcMessage,
+): msg is JsonRpcMessage & { method: "session/permission_resolved" } {
+  return (
+    "method" in msg &&
+    msg.method === "session/permission_resolved" &&
+    !("id" in msg && msg.id !== undefined)
+  );
 }
 
 async function cancelPendingPermissions(

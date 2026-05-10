@@ -10,7 +10,7 @@ const HYDRA_ID_ALPHABET =
 const generateHydraId = customAlphabet(HYDRA_ID_ALPHABET, 16);
 import { AgentInstance } from "./agent-instance.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
-import type { HistoryPolicy, SessionRole } from "../acp/types.js";
+import type { HistoryPolicy, JsonRpcId, SessionRole } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
 
 export interface AttachedClient {
@@ -537,21 +537,31 @@ export class Session {
         settled = true;
         fn();
       };
+      // Track each outbound request id so the resolved-sibling notification
+      // can carry the recipient's *own* id — that's the key the slack/browser
+      // clients (and the shim's pendingPermissions tracker) match against.
+      const outbound: Array<{ controller: AttachedClient; id: JsonRpcId }> = [];
       for (const controller of controllers) {
-        void controller.connection
-          .request("session/request_permission", clientParams)
+        const { id, response } = controller.connection.requestWithId(
+          "session/request_permission",
+          clientParams,
+        );
+        outbound.push({ controller, id });
+        void response
           .then((result) => {
             settle(() => {
-              for (const c of controllers) {
-                if (c.clientId !== controller.clientId) {
-                  void c.connection
-                    .notify("session/permission_resolved", {
-                      ...(clientParams as object),
-                      resolvedBy: controller.clientId,
-                      result,
-                    })
-                    .catch(() => undefined);
+              for (const o of outbound) {
+                if (o.controller.clientId === controller.clientId) {
+                  continue;
                 }
+                void o.controller.connection
+                  .notify("session/permission_resolved", {
+                    ...(clientParams as object),
+                    requestId: o.id,
+                    resolvedBy: controller.clientId,
+                    result,
+                  })
+                  .catch(() => undefined);
               }
               resolve(result);
             });

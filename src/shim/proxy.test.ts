@@ -149,6 +149,107 @@ describe("wireShim forwarding", () => {
     expect(second.params._meta?.["acp-hydra"]?.name).toBeUndefined();
   });
 
+  it("synthesizes a downstream response when daemon resolves a sibling-answered permission", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    // Daemon sends request_permission to this shim — the tracker records it.
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: "daemon-req-7",
+      method: "session/request_permission",
+      params: { sessionId: "sess_h", toolCall: { name: "edit" } },
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(downstream.sent).toHaveLength(1);
+
+    // Sibling answers first; daemon now sends permission_resolved
+    // carrying *this* shim's requestId.
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      method: "session/permission_resolved",
+      params: {
+        sessionId: "sess_h",
+        toolCall: { name: "edit" },
+        requestId: "daemon-req-7",
+        resolvedBy: "cli_other",
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Downstream should receive both the synthesized response (so its
+    // pending request_permission resolves) and the forwarded notification
+    // (so any client that wants the metadata still gets it).
+    const synthesized = downstream.sent.find(
+      (m): m is { jsonrpc: "2.0"; id: string | number; result: unknown } =>
+        "id" in m && !("method" in m),
+    );
+    expect(synthesized).toBeDefined();
+    expect(synthesized?.id).toBe("daemon-req-7");
+    expect(synthesized?.result).toMatchObject({
+      outcome: { kind: "allow", optionId: "allow" },
+    });
+
+    const forwardedNotification = downstream.sent.find(
+      (m) => "method" in m && m.method === "session/permission_resolved",
+    );
+    expect(forwardedNotification).toBeDefined();
+  });
+
+  it("does not double-respond when downstream already answered the permission", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: "daemon-req-8",
+      method: "session/request_permission",
+      params: { sessionId: "sess_h", toolCall: { name: "edit" } },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Downstream answers — tracker should drop its pending entry.
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: "daemon-req-8",
+      result: { outcome: { kind: "allow", optionId: "allow" } },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const beforeResolved = downstream.sent.length;
+
+    // A late `permission_resolved` should be a no-op for the downstream
+    // (just forwarded as a notification, no second synthesized response).
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      method: "session/permission_resolved",
+      params: {
+        sessionId: "sess_h",
+        requestId: "daemon-req-8",
+        resolvedBy: "cli_other",
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const newMessages = downstream.sent.slice(beforeResolved);
+    const synthesized = newMessages.find(
+      (m) => "id" in m && !("method" in m),
+    );
+    expect(synthesized).toBeUndefined();
+    const forwardedNotification = newMessages.find(
+      (m) => "method" in m && m.method === "session/permission_resolved",
+    );
+    expect(forwardedNotification).toBeDefined();
+  });
+
   it("translates session/new to session/attach in attach mode", async () => {
     const upstream = makeControlledStream();
     const downstream = makeControlledStream();

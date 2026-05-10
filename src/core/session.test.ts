@@ -111,6 +111,59 @@ describe("Session", () => {
         outcome: { kind: "allow" },
       });
     });
+
+    it("includes each sibling's own requestId in permission_resolved fan-out", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient("controller");
+      const b = makeClient("controller");
+      session.attach(a.client, "full");
+      session.attach(b.client, "full");
+
+      const requestPromise = mock.triggerRequest("session/request_permission", {
+        sessionId: "u_agent",
+        toolCall: { name: "edit_file" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const aReq = a.stream.sent[0] as { id: string | number };
+      const bReq = b.stream.sent[0] as { id: string | number };
+      expect(aReq.id).toBeDefined();
+      expect(bReq.id).toBeDefined();
+      expect(aReq.id).not.toEqual(bReq.id);
+
+      // A answers first.
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: aReq.id,
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      });
+
+      await expect(requestPromise).resolves.toMatchObject({
+        outcome: { kind: "allow" },
+      });
+
+      // B should now have received a permission_resolved notification
+      // carrying B's *own* request id — that's how slack/browser correlate
+      // their pending UI with the resolution event.
+      const bResolved = b.stream.sent.find(
+        (m): m is { method: string; params: { requestId: string | number } } =>
+          "method" in m && m.method === "session/permission_resolved",
+      );
+      expect(bResolved).toBeDefined();
+      expect(bResolved?.params.requestId).toEqual(bReq.id);
+      expect(bResolved?.params).toMatchObject({
+        sessionId: "sess_hyd",
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      });
+
+      // A must not get a permission_resolved — its own request already resolved.
+      const aResolved = a.stream.sent.find(
+        (m) =>
+          "method" in m && m.method === "session/permission_resolved",
+      );
+      expect(aResolved).toBeUndefined();
+    });
   });
 
   describe("history replay", () => {
