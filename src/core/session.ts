@@ -164,6 +164,25 @@ export class Session {
       },
       client.clientId,
     );
+
+    // Compat shim for clients that don't yet implement RFD #533's
+    // prompt_received. The marker in _meta lets prompt_received-aware
+    // clients short-circuit this duplicate.
+    const text = extractPromptText(promptParams.prompt);
+    if (text.length > 0) {
+      this.recordAndBroadcast(
+        "session/update",
+        {
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text },
+            _meta: { "acp-hydra": { compatFor: "prompt_received" } },
+          },
+        },
+        client.clientId,
+      );
+    }
   }
 
   private broadcastTurnComplete(
@@ -382,4 +401,21 @@ export class Session {
 function withCode(err: Error, code: number): Error & { code: number } {
   (err as Error & { code: number }).code = code;
   return err as Error & { code: number };
+}
+
+function extractPromptText(prompt: unknown): string {
+  if (typeof prompt === "string") {
+    return prompt;
+  }
+  if (!Array.isArray(prompt)) {
+    return "";
+  }
+  return prompt
+    .map((b) => {
+      if (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string") {
+        return (b as { text: string }).text;
+      }
+      return "";
+    })
+    .join("");
 }

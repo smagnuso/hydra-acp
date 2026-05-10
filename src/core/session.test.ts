@@ -255,6 +255,43 @@ describe("Session", () => {
       void aliceSent;
     });
 
+    it("broadcasts a marked user_message_chunk alongside prompt_received for compat", async () => {
+      const { session, mock } = makeSession("hydra_session_C", "u_C");
+      const { client: alice } = makeClient("controller");
+      const { client: bob, stream: bobStream } = makeClient("controller");
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_C",
+        prompt: [{ type: "text", text: "hello compat" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const compat = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "user_message_chunk",
+      );
+      expect(compat).toMatchObject({
+        params: {
+          sessionId: "hydra_session_C",
+          update: {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text: "hello compat" },
+            _meta: { "acp-hydra": { compatFor: "prompt_received" } },
+          },
+        },
+      });
+    });
+
     it("broadcasts turn_complete to non-originators when agent returns", async () => {
       const { session, mock } = makeSession("hydra_session_T", "u_T");
       const { client: alice } = makeClient("controller");
