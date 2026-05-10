@@ -167,25 +167,35 @@ acp-hydra init
 #    auto-start the daemon the first time an editor invokes it.
 acp-hydra daemon start
 
-# 3. Configure your editor to spawn `acp-hydra` instead of an agent directly.
-#    The first session/new asks the daemon which agent to spawn (defaults to
+# 3. Configure your editor to spawn `acp-hydra shim` instead of an agent
+#    directly. The `shim` verb forces shim mode — the right form for
+#    spawned-by-editor cases where stdio is already piped. The first
+#    session/new asks the daemon which agent to spawn (defaults to
 #    config.defaultAgent). If you'd rather the editor pin a specific agent,
 #    spawn `acp-hydra launch <agent-id>` (see "Launcher mode" below).
 
-# 4. List live sessions.
+# 4. From a terminal, drive a session interactively (TUI).
+acp-hydra                                   # bare invocation in a TTY launches the TUI
+acp-hydra tui                               # explicit form
+
+# 5. List live sessions.
 acp-hydra sessions
 
-# 5. Attach a second client (read-only) to an existing session.
+# 6. Attach a second client (read-only) to an existing session.
+#    Bare invocation auto-detects: TUI in a terminal, ACP shim when piped.
 acp-hydra --session-id hydra_session_abc123 --role observer
 ```
 
 ## CLI
 
 ```
-acp-hydra                                   # default: shim mode (stdio ACP agent)
+acp-hydra                                   # auto-dispatch: TUI in a TTY, shim when stdio is piped
+acp-hydra shim                              # explicit shim mode (forces shim regardless of TTY)
+acp-hydra tui                               # explicit terminal-UI mode
 acp-hydra launch <agent-id>                 # launcher mode: shim that forces the
                                             # daemon to spawn <agent-id> on session/new
-acp-hydra --session-id <id> [--role ...]    # shim mode, attach to existing session
+acp-hydra --session-id <id> [--role ...]    # attach to existing session
+                                            # (TUI in a TTY, shim otherwise)
                                             # role: controller (default) | observer
 
 acp-hydra init                              # generate config + auth token
@@ -208,7 +218,7 @@ acp-hydra agents install <id>               # pre-install an agent (else lazy on
 acp-hydra config                            # print resolved config path/values
 ```
 
-The default invocation (`acp-hydra` with no subcommand and no positional args, or with only `--session-id`/`--role`) drops into **shim mode** — bridging stdin/stdout to the daemon's WSS endpoint. This is what editors invoke.
+A bare invocation (`acp-hydra` with no subcommand) auto-dispatches based on whether stdout is a TTY: a real terminal launches the TUI, a piped stdio (the editor-spawned case) drops into shim mode. Pass `shim` or `tui` explicitly to force one or the other. Editors should configure `acp-hydra shim` so the choice is unambiguous regardless of how the editor wires stdio.
 
 ### Launcher mode
 
@@ -481,7 +491,7 @@ If accepted, `acp-hydra` would land in the [ACP Registry](https://github.com/age
   "distribution": {
     "npx": {
       "package": "acp-hydra",
-      "args": []
+      "args": ["shim"]
     }
   },
   "capabilities": {
