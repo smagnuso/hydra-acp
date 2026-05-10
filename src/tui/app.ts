@@ -264,6 +264,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     { name: "/quit", description: "Exit the TUI" },
     { name: "/clear", description: "Clear scrollback" },
     { name: "/sessions", description: "List sessions" },
+    {
+      name: "/hydra title",
+      description:
+        "Regenerate the session title via the agent (or set manually with an arg)",
+    },
   ];
   let agentCommands: AvailableCommand[] = [];
 

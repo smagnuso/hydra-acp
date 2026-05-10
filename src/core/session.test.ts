@@ -468,6 +468,114 @@ describe("Session", () => {
       expect(session.title).toBe("first prompt title");
     });
 
+    it("/hydra title <text> sets the title without forwarding to the agent", async () => {
+      const { session, mock } = makeSession("hydra_session_HT", "u_HT");
+      const { client: alice } = makeClient("controller");
+      const { client: bob, stream: bobStream } = makeClient("controller");
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra title an explicit title" }],
+      });
+
+      expect(session.title).toBe("an explicit title");
+      // No prompt_received broadcast for the slash command.
+      const promptReceived = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "prompt_received",
+      );
+      expect(promptReceived).toBeUndefined();
+      // session_info_update IS broadcast — that's the visible signal.
+      const sessionInfo = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "session_info_update",
+      );
+      expect(sessionInfo).toMatchObject({
+        params: {
+          sessionId: "hydra_session_HT",
+          update: {
+            sessionUpdate: "session_info_update",
+            title: "an explicit title",
+          },
+        },
+      });
+      // Agent's session/prompt was never called for the slash command.
+      const promptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(promptCalls.length).toBe(0);
+    });
+
+    it("/hydra title (no arg) regenerates via a suppressed sub-prompt", async () => {
+      const { session, mock } = makeSession("hydra_session_HR", "u_HR");
+      const { client: alice } = makeClient("controller");
+      const { client: bob, stream: bobStream } = makeClient("controller");
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // Agent will emit chunks and eventually resolve.
+      requestMock.mockImplementation(async () => {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_HR",
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Refactor auth flow" },
+          },
+        });
+        return { stopReason: "end_turn" };
+      });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra title" }],
+      });
+
+      expect(session.title).toBe("Refactor auth flow");
+      // The sub-prompt's agent_message_chunk was suppressed — bob never
+      // sees it.
+      const chunkLeak = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "agent_message_chunk",
+      );
+      expect(chunkLeak).toBeUndefined();
+      // session_info_update did go out.
+      const sessionInfo = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "session_info_update",
+      );
+      expect(sessionInfo).toBeDefined();
+    });
+
+    it("unknown /hydra verbs throw", async () => {
+      const { session } = makeSession("hydra_session_HX", "u_HX");
+      const { client: alice } = makeClient("controller");
+      session.attach(alice, "full");
+
+      await expect(
+        session.prompt(alice.clientId, {
+          prompt: [{ type: "text", text: "/hydra wat" }],
+        }),
+      ).rejects.toThrow(/unknown \/hydra verb/);
+    });
+
     it("agent-emitted session_info_update overrides our seed", async () => {
       const { session, mock } = makeSession("hydra_session_TL3", "u_TL3");
       const { client: alice } = makeClient("controller");

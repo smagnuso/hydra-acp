@@ -63,6 +63,12 @@ export class Session {
   // True once we've observed our first session/prompt; gates the
   // first-prompt-seeded title so subsequent prompts don't churn it.
   private firstPromptSeeded = false;
+  // While set, agent-emitted session/update notifications are
+  // captured into `chunks` and NOT broadcast to clients. Used by
+  // /hydra slash-command sub-prompts (e.g. title regeneration) so
+  // the conversation log doesn't get polluted with the meta-prompt
+  // and its reply.
+  private internalPromptCapture: { chunks: string[] } | undefined;
   private idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
 
@@ -79,6 +85,13 @@ export class Session {
     this.updatedAt = Date.now();
 
     this.agent.connection.onNotification("session/update", (params) => {
+      // /hydra slash-command sub-prompts (e.g. title regeneration)
+      // run "behind the scenes" — the agent's chunks for those are
+      // captured into a private buffer instead of being broadcast.
+      if (this.internalPromptCapture) {
+        captureInternalChunk(this.internalPromptCapture, params);
+        return;
+      }
       // Pick up agent-emitted session_info_update so the canonical
       // title in this Session matches what clients see broadcast.
       // Forwarded as-is through recordAndBroadcast below.
@@ -142,6 +155,18 @@ export class Session {
         new Error("only controllers may send prompts"),
         JsonRpcErrorCodes.RoleNotPermitted,
       );
+    }
+    // Slash commands (e.g. "/hydra title", "/hydra title some name")
+    // are intercepted before any broadcasting or first-prompt seeding.
+    // They never reach the agent as a normal turn — hydra dispatches
+    // them, optionally runs a side-channel sub-prompt, and emits
+    // whatever notifications the verb implies (e.g. session_info_update
+    // for /hydra title). The conversation log stays clean.
+    const promptText = extractPromptText(
+      ((params ?? {}) as { prompt?: unknown }).prompt,
+    ).trim();
+    if (promptText.startsWith("/hydra")) {
+      return this.handleSlashCommand(promptText);
     }
     this.broadcastPromptReceived(client, params);
     this.maybeSeedTitleFromPrompt(params);
@@ -357,6 +382,74 @@ export class Session {
     }
   }
 
+  // Dispatch a /hydra <verb> [args] slash command typed in any client's
+  // composer. Returns a synthesized session/prompt response so the
+  // caller's promise resolves like a normal turn. New verbs slot in by
+  // adding cases here.
+  private async handleSlashCommand(text: string): Promise<unknown> {
+    const rest = text.slice("/hydra".length).trim();
+    const match = rest.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+    const verb = match?.[1] ?? "";
+    const arg = (match?.[2] ?? "").trim();
+    switch (verb) {
+      case "title":
+        return this.runTitleCommand(arg);
+      case "":
+        // "/hydra" alone: no-op, return success so the user's
+        // composer doesn't show an error.
+        return { stopReason: "end_turn" };
+      default: {
+        const err = new Error(`unknown /hydra verb: ${verb}`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        throw err;
+      }
+    }
+  }
+
+  // Runs as a normal queued prompt (so it serializes after any in-flight
+  // turn). With an arg, sets the title directly. Without one, runs a
+  // suppressed sub-prompt to the agent and uses its reply as the title.
+  // Either path ends with setTitle, which broadcasts session_info_update
+  // — that's what every other client observes.
+  private runTitleCommand(arg: string): Promise<unknown> {
+    return this.enqueuePrompt(async () => {
+      if (arg) {
+        this.setTitle(arg);
+        return { stopReason: "end_turn" };
+      }
+      return this.runTitleRegen();
+    });
+  }
+
+  private async runTitleRegen(): Promise<unknown> {
+    if (this.internalPromptCapture) {
+      throw new Error("internal prompt already in flight");
+    }
+    const capture: { chunks: string[] } = { chunks: [] };
+    this.internalPromptCapture = capture;
+    try {
+      await this.agent.connection.request<unknown>("session/prompt", {
+        sessionId: this.upstreamSessionId,
+        prompt: [
+          {
+            type: "text",
+            text: "Reply with ONLY a short title (≤80 chars) summarizing this conversation so far. No quotes, no markdown, no explanation.",
+          },
+        ],
+      });
+      const collected = capture.chunks.join("").trim();
+      const title = firstLine(collected, 80);
+      if (title) {
+        this.setTitle(title);
+      }
+      return { stopReason: "end_turn" };
+    } finally {
+      this.internalPromptCapture = undefined;
+    }
+  }
+
   private markClosed(opts: { deleteRecord: boolean }): void {
     if (this.closed) {
       return;
@@ -506,6 +599,28 @@ export class Session {
 function withCode(err: Error, code: number): Error & { code: number } {
   (err as Error & { code: number }).code = code;
   return err as Error & { code: number };
+}
+
+// Pull text out of an agent_message_chunk session/update notification
+// and append it to a /hydra-slash-command's private capture buffer.
+// Other update kinds (thoughts, tool calls, plans, etc.) are swallowed
+// — we only need the prose reply.
+function captureInternalChunk(
+  capture: { chunks: string[] },
+  params: unknown,
+): void {
+  const obj = (params ?? {}) as { update?: unknown };
+  const update = (obj.update ?? {}) as {
+    sessionUpdate?: unknown;
+    content?: unknown;
+  };
+  if (update.sessionUpdate !== "agent_message_chunk") {
+    return;
+  }
+  const content = (update.content ?? {}) as { text?: unknown };
+  if (typeof content.text === "string") {
+    capture.chunks.push(content.text);
+  }
 }
 
 function extractPromptText(prompt: unknown): string {

@@ -247,6 +247,19 @@ ACP_HYDRA_NAME="$BUFFER_NAME" acp-hydra launch claude-acp
 acp-hydra --name "$BUFFER_NAME" launch claude-acp
 ```
 
+After the first user prompt lands, hydra automatically replaces the label with the first line of that prompt (truncated, ≤80 chars) and emits a `session_info_update` so every attached client (TUI, slack, browser) refreshes its header. Agents that emit their own `session_info_update` override that — last write wins.
+
+### Slash commands (typed in any composer)
+
+Slash commands of the form `/hydra <verb> [args]` are intercepted by hydra before the prompt reaches the agent. They never appear in the conversation log; the only client-visible signal is the notification(s) the verb implies.
+
+| Command | Effect |
+|---|---|
+| `/hydra title` | Asks the agent for a one-line summary, applies it as the new title via `session_info_update`. The sub-prompt and reply are suppressed from clients. |
+| `/hydra title <text>` | Sets the title to `<text>` directly. No agent call. |
+
+These work from anywhere a session prompt can be typed — the TUI's input box, agent-shell, the slack thread composer, the browser chat composer. Hydra detects them server-side; clients send them as ordinary `session/prompt` requests.
+
 ### Forwarding agent args (`acp-hydra launch <agent-id> ...`)
 
 Anything you put after `<agent-id>` in launcher mode is forwarded to the underlying agent's command. Hydra appends the extra args to the registry-provided spawn plan. Example:
