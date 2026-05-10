@@ -1,9 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { homedir } from "node:os";
 import {
   generateAuthToken,
   defaultConfig,
+  ensureConfig,
   expandHome,
+  loadConfig,
+  writeConfig,
 } from "./config.js";
 
 describe("generateAuthToken", () => {
@@ -30,6 +36,40 @@ describe("defaultConfig", () => {
 
   it("defaults defaultCwd to the literal '~' (expanded at use time)", () => {
     expect(defaultConfig().defaultCwd).toBe("~");
+  });
+});
+
+describe("ensureConfig", () => {
+  let tmpHome: string;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-cfg-"));
+    process.env.HYDRA_ACP_HOME = tmpHome;
+  });
+
+  afterEach(async () => {
+    delete process.env.HYDRA_ACP_HOME;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it("writes a fresh default config when none exists", async () => {
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const cfg = await ensureConfig();
+    expect(cfg.daemon.authToken.startsWith("hydra_token_")).toBe(true);
+    const written = await loadConfig();
+    expect(written.daemon.authToken).toBe(cfg.daemon.authToken);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("returns the existing config without rewriting it", async () => {
+    const initial = defaultConfig();
+    await writeConfig(initial);
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const cfg = await ensureConfig();
+    expect(cfg.daemon.authToken).toBe(initial.daemon.authToken);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 

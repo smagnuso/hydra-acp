@@ -7,7 +7,13 @@ export { JsonRpcConnection } from "./acp/connection.js";
 export type { MessageStream } from "./acp/framing.js";
 export { ndjsonStreamFromStdio } from "./acp/framing.js";
 export { wsToMessageStream } from "./acp/ws-stream.js";
-export { loadConfig, writeConfig, defaultConfig, generateAuthToken } from "./core/config.js";
+export {
+  loadConfig,
+  ensureConfig,
+  writeConfig,
+  defaultConfig,
+  generateAuthToken,
+} from "./core/config.js";
 export type { HydraConfig } from "./core/config.js";
 export { paths } from "./core/paths.js";
 export type {

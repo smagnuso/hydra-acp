@@ -1,5 +1,5 @@
 import { ndjsonStreamFromStdio } from "../acp/framing.js";
-import { loadConfig } from "../core/config.js";
+import { ensureConfig } from "../core/config.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import {
   type JsonRpcId,
@@ -20,7 +20,7 @@ export interface ShimOptions {
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
-  const config = await loadConfig();
+  const config = await ensureConfig();
   await ensureDaemonReachable(config);
 
   const tracker = new SessionTracker();

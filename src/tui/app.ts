@@ -11,7 +11,7 @@ import {
   type SessionRole,
   extractHydraMeta,
 } from "../acp/types.js";
-import { loadConfig, type HydraConfig } from "../core/config.js";
+import { ensureConfig, type HydraConfig } from "../core/config.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import { paths } from "../core/paths.js";
 import {
@@ -53,7 +53,7 @@ const PLAN_PREFIX_TEXT =
   "produce a plan only.";
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
-  const config = await loadConfig();
+  const config = await ensureConfig();
   await ensureDaemonReachable(config);
 
   const term = termkit.terminal;

@@ -162,7 +162,10 @@ Drops `hydra-acp` (and `hydra`) on your PATH.
 ## Quick start
 
 ```bash
-# 1. Initialize: writes ~/.hydra-acp/config.json with a generated bearer token.
+# 1. (Optional) Initialize: writes ~/.hydra-acp/config.json with a generated
+#    bearer token. If you skip this, the first invocation of `daemon start`,
+#    `shim`, or `tui` writes the config for you. Run init explicitly only
+#    when you want to rotate the token (`hydra-acp init --rotate-token`).
 hydra-acp init
 
 # 2. (Optional) Start the daemon. If you skip this step, the shim will

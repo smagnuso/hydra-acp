@@ -82,6 +82,29 @@ export async function loadConfig(): Promise<HydraConfig> {
   return HydraConfig.parse(parsed);
 }
 
+// Like loadConfig, but writes a default if the file is missing. Used by
+// entry points that imply "actually running hydra" (daemon start, shim,
+// TUI) so a first-run user doesn't need to call `hydra-acp init` first —
+// matters especially for the registry-distribution case, where editors
+// just spawn `hydra-acp shim` and expect it to work.
+export async function ensureConfig(): Promise<HydraConfig> {
+  try {
+    await fs.access(paths.config());
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code !== "ENOENT") {
+      throw err;
+    }
+    const config = defaultConfig();
+    await writeConfig(config);
+    process.stderr.write(
+      `hydra-acp: initialized ${paths.config()} with a fresh auth token.\n`,
+    );
+    return config;
+  }
+  return loadConfig();
+}
+
 export async function writeConfig(config: HydraConfig): Promise<void> {
   await fs.mkdir(paths.home(), { recursive: true });
   await fs.writeFile(paths.config(), JSON.stringify(config, null, 2) + "\n", {
