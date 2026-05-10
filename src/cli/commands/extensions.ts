@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
-import { loadConfig, writeConfig } from "../../core/config.js";
+import { loadConfig } from "../../core/config.js";
 import { paths } from "../../core/paths.js";
 import { httpBase } from "./sessions.js";
 
@@ -98,27 +98,42 @@ export async function runExtensionsAdd(
     return;
   }
 
-  const config = await loadConfig();
-  if (config.extensions[name]) {
+  // Validate the existing config parses cleanly (so we don't blindly write
+  // alongside a broken file), then mutate the raw JSON so we only touch
+  // the targeted entry — going through writeConfig would re-emit every
+  // existing extension's defaults explicitly.
+  await loadConfig();
+  const raw = await readRawConfig();
+  if (!raw.extensions || typeof raw.extensions !== "object") {
+    raw.extensions = {};
+  }
+  const exts = raw.extensions as Record<string, unknown>;
+  if (exts[name]) {
     process.stderr.write(`Extension '${name}' already exists in config.\n`);
     process.exit(1);
     return;
   }
 
   const { command, args, env, enabled } = parseAddFlags(argv);
+  const body: Record<string, unknown> = {};
+  if (command.length > 0) {
+    body.command = command;
+  }
+  if (args.length > 0) {
+    body.args = args;
+  }
+  if (Object.keys(env).length > 0) {
+    body.env = env;
+  }
+  if (!enabled) {
+    body.enabled = false;
+  }
+  exts[name] = body;
 
-  config.extensions[name] = {
-    command,
-    args,
-    env,
-    enabled,
-  };
-  await writeConfig(config);
+  await writeRawConfig(raw);
   process.stdout.write(`Added extension '${name}' to ${paths.config()}\n`);
   process.stdout.write(
-    "If the daemon is running, restart it or use `acp-hydra extensions start " +
-      name +
-      "` once the daemon picks up the change.\n",
+    "Restart the daemon (or `acp-hydra daemon stop && acp-hydra daemon start`) to apply.\n",
   );
 }
 
@@ -128,15 +143,31 @@ export async function runExtensionsRemove(name: string | undefined): Promise<voi
     process.exit(2);
     return;
   }
-  const config = await loadConfig();
-  if (!config.extensions[name]) {
+  await loadConfig();
+  const raw = await readRawConfig();
+  const exts = (raw.extensions ?? {}) as Record<string, unknown>;
+  if (!exts[name]) {
     process.stderr.write(`Extension '${name}' not found in config.\n`);
     process.exit(1);
     return;
   }
-  delete config.extensions[name];
-  await writeConfig(config);
+  delete exts[name];
+  raw.extensions = exts;
+  await writeRawConfig(raw);
   process.stdout.write(`Removed extension '${name}' from ${paths.config()}\n`);
+}
+
+async function readRawConfig(): Promise<Record<string, unknown>> {
+  const raw = await fsp.readFile(paths.config(), "utf8");
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+async function writeRawConfig(raw: Record<string, unknown>): Promise<void> {
+  await fsp.writeFile(
+    paths.config(),
+    JSON.stringify(raw, null, 2) + "\n",
+    { encoding: "utf8", mode: 0o600 },
+  );
 }
 
 export async function runExtensionsStart(name: string | undefined): Promise<void> {
