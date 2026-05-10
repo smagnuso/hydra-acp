@@ -196,6 +196,37 @@ export function registerAcpWsEndpoint(
       const session = deps.manager.require(params.sessionId);
       return session.cancel(att.clientId);
     });
+
+    connection.setDefaultHandler(async (rawParams, method) => {
+      if (
+        !method.startsWith("session/") ||
+        rawParams === null ||
+        typeof rawParams !== "object"
+      ) {
+        const err = new Error(`Method not found: ${method}`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.MethodNotFound;
+        throw err;
+      }
+      const sessionId = (rawParams as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId !== "string") {
+        const err = new Error(`Method not found: ${method}`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.MethodNotFound;
+        throw err;
+      }
+      const session = deps.manager.get(sessionId);
+      if (!session) {
+        const err = new Error(`session ${sessionId} not found`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      return session.forwardRequest(method, rawParams);
+    });
   });
 }
 

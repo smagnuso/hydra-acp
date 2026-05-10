@@ -137,6 +137,20 @@ export class Session {
     });
   }
 
+  async forwardRequest(method: string, params: unknown): Promise<unknown> {
+    return this.agent.connection.request(method, this.rewriteForAgent(params));
+  }
+
+  private rewriteForAgent(params: unknown): unknown {
+    if (params && typeof params === "object" && !Array.isArray(params)) {
+      const obj = params as Record<string, unknown>;
+      if (obj.sessionId === this.sessionId) {
+        return { ...obj, sessionId: this.upstreamSessionId };
+      }
+    }
+    return params;
+  }
+
   async close(): Promise<void> {
     if (this.closed) {
       return;

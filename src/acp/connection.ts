@@ -20,6 +20,7 @@ interface PendingRequest {
 
 export class JsonRpcConnection {
   private requestHandlers = new Map<string, RequestHandler>();
+  private defaultRequestHandler: RequestHandler | undefined;
   private notificationHandlers = new Map<string, NotificationHandler>();
   private pending = new Map<JsonRpcId, PendingRequest>();
   private closed = false;
@@ -32,6 +33,10 @@ export class JsonRpcConnection {
 
   onRequest(method: string, handler: RequestHandler): void {
     this.requestHandlers.set(method, handler);
+  }
+
+  setDefaultHandler(handler: RequestHandler): void {
+    this.defaultRequestHandler = handler;
   }
 
   onNotification(method: string, handler: NotificationHandler): void {
@@ -88,7 +93,8 @@ export class JsonRpcConnection {
   }
 
   private async handleRequest(req: JsonRpcRequest): Promise<void> {
-    const handler = this.requestHandlers.get(req.method);
+    const handler =
+      this.requestHandlers.get(req.method) ?? this.defaultRequestHandler;
     if (!handler) {
       await this.sendError(req.id, {
         code: JsonRpcErrorCodes.MethodNotFound,

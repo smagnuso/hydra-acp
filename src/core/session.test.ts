@@ -185,6 +185,45 @@ describe("Session", () => {
     });
   });
 
+  describe("forwardRequest (transparent passthrough for unknown session/* methods)", () => {
+    it("rewrites the hydra sessionId to the upstream id and forwards", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValueOnce({ ok: true });
+
+      const result = await session.forwardRequest("session/set_model", {
+        sessionId: "sess_hyd",
+        modelId: "claude-opus-4-7",
+      });
+
+      expect(result).toEqual({ ok: true });
+      expect(requestMock).toHaveBeenCalledWith("session/set_model", {
+        sessionId: "u_agent",
+        modelId: "claude-opus-4-7",
+      });
+    });
+
+    it("leaves params alone when sessionId doesn't match the hydra id", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValueOnce("ok");
+
+      await session.forwardRequest("session/whatever", {
+        sessionId: "different",
+        x: 1,
+      });
+
+      expect(requestMock).toHaveBeenCalledWith("session/whatever", {
+        sessionId: "different",
+        x: 1,
+      });
+    });
+  });
+
   describe("agent exit", () => {
     it("notifies clients with session/closed and cleans up", () => {
       const { session, mock } = makeSession("sess_x", "u");

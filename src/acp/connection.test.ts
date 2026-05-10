@@ -108,6 +108,46 @@ describe("JsonRpcConnection", () => {
     expect(handler).toHaveBeenCalledWith({ foo: 1 }, "update");
   });
 
+  it("falls through to setDefaultHandler when no specific method is registered", async () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    const seen: Array<{ params: unknown; method: string }> = [];
+    conn.setDefaultHandler(async (params, method) => {
+      seen.push({ params, method });
+      return { handled: method };
+    });
+
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session/something_new",
+      params: { sessionId: "x" },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(seen).toEqual([
+      { params: { sessionId: "x" }, method: "session/something_new" },
+    ]);
+    expect(stream.sent[0]).toMatchObject({
+      id: 5,
+      result: { handled: "session/something_new" },
+    });
+  });
+
+  it("specific handler wins over default handler", async () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    const defaultSpy = vi.fn();
+    conn.setDefaultHandler(defaultSpy);
+    conn.onRequest("ping", async () => ({ pong: true }));
+
+    stream.emitMessage({ jsonrpc: "2.0", id: 1, method: "ping" });
+    await new Promise((r) => setImmediate(r));
+
+    expect(defaultSpy).not.toHaveBeenCalled();
+    expect(stream.sent[0]).toMatchObject({ id: 1, result: { pong: true } });
+  });
+
   it("notifies onClose handlers", () => {
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
