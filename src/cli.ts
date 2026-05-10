@@ -158,6 +158,33 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "tui": {
+      const cwd = resolveOption(flags, "cwd");
+      const resume = flags.resume === true;
+      const forceNew = flags.new === true;
+      const { runTui } = await import("./tui/index.js");
+      const tuiOpts: Parameters<typeof runTui>[0] = {
+        resume,
+        forceNew,
+      };
+      if (sessionId !== undefined) {
+        tuiOpts.sessionId = sessionId;
+      }
+      if (role !== undefined) {
+        tuiOpts.role = role;
+      }
+      if (agentIdFromFlag !== undefined) {
+        tuiOpts.agentId = agentIdFromFlag;
+      }
+      if (cwd !== undefined) {
+        tuiOpts.cwd = cwd;
+      }
+      if (name !== undefined) {
+        tuiOpts.name = name;
+      }
+      await runTui(tuiOpts);
+      return;
+    }
     default:
       process.stderr.write(`Unknown command: ${subcommand}\n`);
       printHelp();
@@ -196,6 +223,8 @@ function printHelp(): void {
       "  acp-hydra extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  acp-hydra agents [list]                     List agents in the cached registry",
       "  acp-hydra agents refresh                    Force a registry re-fetch",
+      "  acp-hydra tui [--session-id <id>] [--resume] [--new] [--agent-id <id>] [--cwd <path>] [--role controller|observer] [--name <label>]",
+      "                                     Launch the terminal UI; smart default picks an existing live session if any exist in cwd, else creates a new one",
       "  acp-hydra --version                Print version",
       "  acp-hydra --help                   Show this help",
       "",
