@@ -122,11 +122,13 @@ function formatToolCallUpdate(
   event: Extract<RenderEvent, { kind: "tool-call-update" }>,
 ): FormattedLine[] {
   const status = event.status ?? "updated";
-  const title = event.title ?? event.toolCallId;
+  // Prefer the human title; if absent, use a compact "↳" gutter so we
+  // don't expose the agent's opaque toolCallId in the scrollback.
+  const body = event.title ? `${event.title} → ${status}` : `↳ ${status}`;
   return [
     {
       prefix: "  ",
-      body: `${title} → ${status}`,
+      body,
       bodyStyle: toolStatusStyle(status),
     },
   ];

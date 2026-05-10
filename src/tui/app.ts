@@ -89,6 +89,18 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   conn.onNotification("session/update", (params) => {
     const { update } = (params ?? {}) as { update?: unknown };
     appendRender(mapUpdate(update));
+    maybeDismissPermissionByToolUpdate(update);
+  });
+
+  // Sibling client answered the permission first. The daemon stamps the
+  // notification with our request id (post-fix) and the toolCall echo, so
+  // matching by toolCallId works regardless of how we keyed the modal.
+  conn.onNotification("session/permission_resolved", (params) => {
+    const p = (params ?? {}) as {
+      toolCall?: { toolCallId?: string };
+      result?: unknown;
+    };
+    dismissPermissionExternally(p.toolCall?.toolCallId, p.result);
   });
 
   // Permission requests are handled with a modal in the prompt area. While
@@ -105,8 +117,66 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         options: PermissionOption[];
         selectedIndex: number;
         resolve: (result: unknown) => void;
+        toolCallId: string | undefined;
       }
     | null = null;
+
+  // Tear down the modal because someone/something else answered the
+  // permission (sibling client, or agent already moved the toolCall off
+  // "pending"). Resolves the awaited Promise so the JSON-RPC layer sends
+  // a response back — the daemon already settled the original request,
+  // so this response is silently dropped on its end.
+  const dismissPermissionExternally = (
+    toolCallId: string | undefined,
+    result: unknown,
+  ): void => {
+    if (!pendingPermission) {
+      return;
+    }
+    if (
+      pendingPermission.toolCallId &&
+      toolCallId &&
+      pendingPermission.toolCallId !== toolCallId
+    ) {
+      return;
+    }
+    const resolve = pendingPermission.resolve;
+    pendingPermission = null;
+    screen.setPermissionPrompt(null);
+    resolve(result ?? { outcome: { outcome: "cancelled" } });
+    screen.appendLines([
+      {
+        prefix: "  ",
+        body: "(resolved by another client)",
+        bodyStyle: "info",
+      },
+    ]);
+  };
+
+  // Fallback for the case where session/permission_resolved didn't arrive:
+  // if the agent emits a tool_call/tool_call_update for our pending
+  // permission's toolCallId in any non-pending state, the decision was
+  // clearly made elsewhere — clear the modal.
+  const maybeDismissPermissionByToolUpdate = (update: unknown): void => {
+    if (!pendingPermission?.toolCallId) {
+      return;
+    }
+    const u = (update ?? {}) as {
+      sessionUpdate?: string;
+      toolCallId?: string;
+      status?: string;
+    };
+    if (u.sessionUpdate !== "tool_call" && u.sessionUpdate !== "tool_call_update") {
+      return;
+    }
+    if (u.toolCallId !== pendingPermission.toolCallId) {
+      return;
+    }
+    if (!u.status || u.status === "pending") {
+      return;
+    }
+    dismissPermissionExternally(u.toolCallId, undefined);
+  };
 
   const refreshPermissionPrompt = (): void => {
     if (!pendingPermission) {
@@ -150,11 +220,12 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
 
   conn.onRequest("session/request_permission", async (params) => {
     const p = (params ?? {}) as {
-      toolCall?: { name?: string; title?: string };
+      toolCall?: { name?: string; title?: string; toolCallId?: string };
       options?: PermissionOption[];
     };
     const options = Array.isArray(p.options) ? p.options : [];
     const title = p.toolCall?.title ?? p.toolCall?.name ?? "tool";
+    const toolCallId = p.toolCall?.toolCallId;
     if (options.length === 0) {
       screen.appendLines([
         {
@@ -166,7 +237,13 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       return { outcome: { outcome: "cancelled" } };
     }
     return new Promise<unknown>((resolve) => {
-      pendingPermission = { title, options, selectedIndex: 0, resolve };
+      pendingPermission = {
+        title,
+        options,
+        selectedIndex: 0,
+        resolve,
+        toolCallId,
+      };
       refreshPermissionPrompt();
     });
   });

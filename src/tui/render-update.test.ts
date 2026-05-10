@@ -133,6 +133,33 @@ describe("mapUpdate", () => {
     });
   });
 
+  it("suppresses intermediate tool_call_update with no title and non-terminal status", () => {
+    // Agents fan out a stream of "updated" pings during a tool call;
+    // those would clutter the scrollback with one line per chunk if we
+    // rendered them.
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        status: "updated",
+      }),
+    ).toBeNull();
+    // A title update IS meaningful even if the status is still in flight.
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        title: "Edit foo.ts",
+        status: "in_progress",
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      title: "Edit foo.ts",
+      status: "in_progress",
+    });
+  });
+
   it("normalizes plan entries", () => {
     expect(
       mapUpdate({

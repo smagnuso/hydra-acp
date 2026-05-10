@@ -220,6 +220,19 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
   }
   const title = readString(u, "title");
   const status = readString(u, "status");
+  // Suppress intermediate "updated" pings that carry nothing new —
+  // they're a fan-out artifact, not user-visible signal. Render only
+  // updates that change the title or land on a terminal status; the
+  // initial tool_call line already shows "[pending]".
+  const meaningful =
+    title !== undefined ||
+    status === "completed" ||
+    status === "failed" ||
+    status === "rejected" ||
+    status === "cancelled";
+  if (!meaningful) {
+    return null;
+  }
   const event: RenderEvent = { kind: "tool-call-update", toolCallId };
   if (title !== undefined) {
     event.title = title;
