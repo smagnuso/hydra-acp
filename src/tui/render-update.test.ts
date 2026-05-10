@@ -205,13 +205,14 @@ describe("mapUpdate", () => {
     ).toEqual({ kind: "usage-update", used: 100 });
   });
 
-  it("handles available_commands_update", () => {
+  it("handles available_commands_update and normalizes names with a leading slash", () => {
     expect(
       mapUpdate({
         sessionUpdate: "available_commands_update",
         availableCommands: [
-          { name: "/init", description: "Initialize" },
-          { name: "/clear" },
+          { name: "create_plan", description: "Create a plan" }, // bare → slash-prepended
+          { name: "/init", description: "Initialize" }, // already prefixed
+          { name: "research_codebase" },
           { description: "no name — skipped" },
           "garbage",
         ],
@@ -219,8 +220,9 @@ describe("mapUpdate", () => {
     ).toEqual({
       kind: "available-commands",
       commands: [
+        { name: "/create_plan", description: "Create a plan" },
         { name: "/init", description: "Initialize" },
-        { name: "/clear" },
+        { name: "/research_codebase" },
       ],
     });
   });

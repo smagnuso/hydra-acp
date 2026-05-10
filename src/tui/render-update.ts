@@ -105,7 +105,11 @@ function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
     if (typeof c.name !== "string" || c.name.length === 0) {
       continue;
     }
-    const cmd: AvailableCommand = { name: c.name };
+    // Per the ACP schema, agent commands are advertised by bare name
+    // (e.g. "create_plan"). The TUI's completion model expects all
+    // entries to be slash-prefixed so they match what the user types.
+    const name = c.name.startsWith("/") ? c.name : `/${c.name}`;
+    const cmd: AvailableCommand = { name };
     if (typeof c.description === "string") {
       cmd.description = c.description;
     }
