@@ -74,6 +74,14 @@ export class Session {
   // True once we've observed our first session/prompt; gates the
   // first-prompt-seeded title so subsequent prompts don't churn it.
   private firstPromptSeeded = false;
+  // Permission requests that have been broadcast to one or more
+  // controllers but have not yet resolved. Replayed to controllers that
+  // attach mid-flight so a late joiner sees the prompt instead of an
+  // empty session waiting on something they can't see. Settled entries
+  // are removed so this map only ever contains live requests.
+  private inFlightPermissions = new Set<{
+    addController: (client: AttachedClient) => void;
+  }>();
   // While set, agent-emitted session/update notifications are
   // captured into `chunks` and NOT broadcast to clients. Used by
   // /hydra slash-command sub-prompts (e.g. title regeneration) so
@@ -138,6 +146,14 @@ export class Session {
     this.clients.set(client.clientId, client);
     this.updatedAt = Date.now();
     this.cancelIdleTimer();
+    // Late-joining controllers receive any in-flight permission requests
+    // so the prompt UI surfaces in their client too. Observers don't get
+    // permission asks (they can't respond), so skip them.
+    if (client.role === "controller") {
+      for (const pending of this.inFlightPermissions) {
+        pending.addController(client);
+      }
+    }
     if (historyPolicy === "none") {
       return [];
     }
@@ -532,8 +548,10 @@ export class Session {
   }
 
   private async handlePermissionRequest(params: unknown): Promise<unknown> {
-    const controllers = [...this.clients.values()].filter((c) => c.role === "controller");
-    if (controllers.length === 0) {
+    const initialControllers = [...this.clients.values()].filter(
+      (c) => c.role === "controller",
+    );
+    if (initialControllers.length === 0) {
       throw withCode(
         new Error("no controllers attached to handle permission request"),
         JsonRpcErrorCodes.PermissionDenied,
@@ -542,18 +560,28 @@ export class Session {
     const clientParams = this.rewriteForClient(params);
     return new Promise<unknown>((resolve, reject) => {
       let settled = false;
+      // Track each outbound request id so the resolved-sibling notification
+      // can carry the recipient's *own* id — that's the key the slack/browser
+      // clients (and the shim's pendingPermissions tracker) match against.
+      const outbound: Array<{ controller: AttachedClient; id: JsonRpcId }> = [];
+      // The Set entry is what attach() consults; storing it ahead of time
+      // lets the settle path delete by identity.
+      const entry = { addController: sendTo };
+      this.inFlightPermissions.add(entry);
+
       const settle = (fn: () => void): void => {
         if (settled) {
           return;
         }
         settled = true;
+        this.inFlightPermissions.delete(entry);
         fn();
       };
-      // Track each outbound request id so the resolved-sibling notification
-      // can carry the recipient's *own* id — that's the key the slack/browser
-      // clients (and the shim's pendingPermissions tracker) match against.
-      const outbound: Array<{ controller: AttachedClient; id: JsonRpcId }> = [];
-      for (const controller of controllers) {
+
+      function sendTo(controller: AttachedClient): void {
+        if (settled) {
+          return;
+        }
         const { id, response } = controller.connection.requestWithId(
           "session/request_permission",
           clientParams,
@@ -581,6 +609,10 @@ export class Session {
           .catch((err) => {
             settle(() => reject(err));
           });
+      }
+
+      for (const controller of initialControllers) {
+        sendTo(controller);
       }
     });
   }

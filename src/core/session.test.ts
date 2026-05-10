@@ -112,6 +112,78 @@ describe("Session", () => {
       });
     });
 
+    it("replays in-flight permission requests to controllers that attach late", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient("controller");
+      session.attach(a.client, "full");
+
+      const requestPromise = mock.triggerRequest("session/request_permission", {
+        sessionId: "u_agent",
+        toolCall: { name: "edit_file", toolCallId: "tc_42" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+
+      await new Promise((r) => setImmediate(r));
+      expect(a.stream.sent).toHaveLength(1);
+
+      // Late-joining controller should receive the same in-flight request.
+      const b = makeClient("controller");
+      session.attach(b.client, "full");
+      const bReq = b.stream.sent.find(
+        (m): m is { id: string | number; method: string; params: unknown } =>
+          "method" in m && m.method === "session/request_permission",
+      );
+      expect(bReq).toBeDefined();
+
+      // B answers — A should now get a permission_resolved notification
+      // with A's request id, just like the eager-attach case.
+      b.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: bReq!.id,
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      });
+
+      await expect(requestPromise).resolves.toMatchObject({
+        outcome: { kind: "allow" },
+      });
+
+      const aResolved = a.stream.sent.find(
+        (m) =>
+          "method" in m && m.method === "session/permission_resolved",
+      );
+      expect(aResolved).toBeDefined();
+    });
+
+    it("does not replay already-settled permissions to late attachers", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const a = makeClient("controller");
+      session.attach(a.client, "full");
+
+      const requestPromise = mock.triggerRequest("session/request_permission", {
+        sessionId: "u_agent",
+        toolCall: { name: "edit_file", toolCallId: "tc_43" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const aReq = a.stream.sent[0] as { id: string | number };
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: aReq.id,
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      });
+      await requestPromise;
+
+      // Late attach AFTER the permission settled — should not see a stale
+      // request_permission.
+      const b = makeClient("controller");
+      session.attach(b.client, "full");
+      const stale = b.stream.sent.find(
+        (m) => "method" in m && m.method === "session/request_permission",
+      );
+      expect(stale).toBeUndefined();
+    });
+
     it("includes each sibling's own requestId in permission_resolved fan-out", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const a = makeClient("controller");
