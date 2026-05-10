@@ -88,6 +88,7 @@ export function registerAcpWsEndpoint(
         agentId: params.agentId ?? deps.defaultAgent,
         mcpServers: params.mcpServers,
         title: hydraMeta.name,
+        agentArgs: hydraMeta.agentArgs,
       });
       const client = bindClientToSession(connection, session, "controller", state);
       session.attach(client, "full");
@@ -119,6 +120,7 @@ export function registerAcpWsEndpoint(
           agentId: hydraHints.agentId,
           cwd: hydraHints.cwd,
           title: hydraHints.title,
+          agentArgs: hydraHints.agentArgs,
         });
       }
       const client = bindClientToSession(
@@ -205,6 +207,9 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
   };
   if (session.title !== undefined) {
     ours.name = session.title;
+  }
+  if (session.agentArgs && session.agentArgs.length > 0) {
+    ours.agentArgs = session.agentArgs;
   }
   return mergeMeta(session.agentMeta, ours);
 }

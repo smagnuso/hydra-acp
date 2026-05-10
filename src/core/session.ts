@@ -25,6 +25,7 @@ export interface SessionInit {
   title?: string;
   sessionId?: string;
   agentMeta?: Record<string, unknown>;
+  agentArgs?: string[];
 }
 
 export class Session {
@@ -34,6 +35,7 @@ export class Session {
   readonly agent: AgentInstance;
   readonly upstreamSessionId: string;
   readonly agentMeta: Record<string, unknown> | undefined;
+  readonly agentArgs: string[] | undefined;
   title: string | undefined;
   updatedAt: number;
 
@@ -51,6 +53,7 @@ export class Session {
     this.agent = init.agent;
     this.upstreamSessionId = init.upstreamSessionId;
     this.agentMeta = init.agentMeta;
+    this.agentArgs = init.agentArgs;
     this.title = init.title;
     this.updatedAt = Date.now();
 

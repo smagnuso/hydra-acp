@@ -13,6 +13,7 @@ export interface ResumeContext {
   cwd: string;
   role: "controller" | "observer";
   title?: string;
+  agentArgs?: string[];
 }
 
 interface PendingNew {
@@ -118,6 +119,7 @@ export class SessionTracker {
       cwd,
       role,
       title: hydraMeta.name,
+      agentArgs: hydraMeta.agentArgs,
     });
   }
 

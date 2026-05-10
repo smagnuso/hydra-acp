@@ -73,6 +73,7 @@ export const SessionResumeHints = z.object({
   agentId: z.string(),
   cwd: z.string(),
   title: z.string().optional(),
+  agentArgs: z.array(z.string()).optional(),
 });
 export type SessionResumeHints = z.infer<typeof SessionResumeHints>;
 
@@ -97,6 +98,7 @@ export interface HydraMeta {
   agentId?: string;
   cwd?: string;
   name?: string;
+  agentArgs?: string[];
   resume?: SessionResumeHints;
 }
 
@@ -123,6 +125,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.name === "string") {
     out.name = obj.name;
+  }
+  if (Array.isArray(obj.agentArgs) && obj.agentArgs.every((a) => typeof a === "string")) {
+    out.agentArgs = obj.agentArgs as string[];
   }
   if (obj.resume) {
     const parsed = SessionResumeHints.safeParse(obj.resume);

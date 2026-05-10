@@ -9,6 +9,7 @@ export interface CreateSessionParams {
   agentId: string;
   mcpServers?: unknown[];
   title?: string;
+  agentArgs?: string[];
 }
 
 export interface ResurrectParams {
@@ -17,6 +18,7 @@ export interface ResurrectParams {
   agentId: string;
   cwd: string;
   title?: string;
+  agentArgs?: string[];
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -39,7 +41,7 @@ export class SessionManager {
       err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
-    const plan = planSpawn(agentDef);
+    const plan = planSpawn(agentDef, params.agentArgs ?? []);
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
@@ -70,6 +72,7 @@ export class SessionManager {
       upstreamSessionId: newResult.sessionId,
       agentMeta: newResult._meta,
       title: params.title,
+      agentArgs: params.agentArgs,
     });
     session.onClose(() => {
       this.sessions.delete(session.sessionId);
@@ -119,7 +122,7 @@ export class SessionManager {
       err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
-    const plan = planSpawn(agentDef);
+    const plan = planSpawn(agentDef, params.agentArgs ?? []);
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
@@ -155,6 +158,7 @@ export class SessionManager {
       upstreamSessionId: params.upstreamSessionId,
       agentMeta: loadResult?._meta,
       title: params.title,
+      agentArgs: params.agentArgs,
     });
     session.onClose(() => {
       this.sessions.delete(session.sessionId);

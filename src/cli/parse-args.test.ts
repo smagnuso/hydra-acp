@@ -1,5 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { parseArgs, flagString, flagBool } from "./parse-args.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import {
+  parseArgs,
+  flagString,
+  flagBool,
+  envKeyForFlag,
+  resolveOption,
+} from "./parse-args.js";
 
 describe("parseArgs", () => {
   it("returns empty result for no args", () => {
@@ -84,6 +90,49 @@ describe("flagString", () => {
 
   it("returns undefined for boolean-true flags", () => {
     expect(flagString({ help: true }, "help")).toBeUndefined();
+  });
+});
+
+describe("envKeyForFlag", () => {
+  it("maps kebab-case to ACP_HYDRA_UPPER_SNAKE", () => {
+    expect(envKeyForFlag("name")).toBe("ACP_HYDRA_NAME");
+    expect(envKeyForFlag("session-id")).toBe("ACP_HYDRA_SESSION_ID");
+    expect(envKeyForFlag("agent-id")).toBe("ACP_HYDRA_AGENT_ID");
+    expect(envKeyForFlag("role")).toBe("ACP_HYDRA_ROLE");
+  });
+});
+
+describe("resolveOption", () => {
+  const SAVED = { ...process.env };
+
+  beforeEach(() => {
+    delete process.env.ACP_HYDRA_NAME;
+    delete process.env.ACP_HYDRA_SESSION_ID;
+    delete process.env.ACP_HYDRA_AGENT_ID;
+    delete process.env.ACP_HYDRA_ROLE;
+  });
+
+  afterEach(() => {
+    Object.assign(process.env, SAVED);
+  });
+
+  it("prefers flag over env", () => {
+    process.env.ACP_HYDRA_NAME = "from-env";
+    expect(resolveOption({ name: "from-flag" }, "name")).toBe("from-flag");
+  });
+
+  it("falls back to env when flag is unset", () => {
+    process.env.ACP_HYDRA_SESSION_ID = "sess_env";
+    expect(resolveOption({}, "session-id")).toBe("sess_env");
+  });
+
+  it("returns undefined when neither is set", () => {
+    expect(resolveOption({}, "agent-id")).toBeUndefined();
+  });
+
+  it("treats boolean-true flags as unset (only string flags carry values)", () => {
+    process.env.ACP_HYDRA_NAME = "from-env";
+    expect(resolveOption({ name: true }, "name")).toBe("from-env");
   });
 });
 

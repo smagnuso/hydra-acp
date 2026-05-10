@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { parseArgs, flagString } from "./cli/parse-args.js";
+import { parseArgs, resolveOption } from "./cli/parse-args.js";
 import { runInit } from "./cli/commands/init.js";
 import {
   runDaemonStart,
@@ -12,6 +12,32 @@ import type { SessionRole } from "./acp/types.js";
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  const launchIdx = argv.indexOf("launch");
+
+  if (launchIdx !== -1) {
+    const beforeLaunch = argv.slice(0, launchIdx);
+    const afterLaunch = argv.slice(launchIdx + 1);
+    const positionalAgentId = afterLaunch[0];
+    const agentArgs = afterLaunch.slice(1);
+
+    const { flags } = parseArgs(beforeLaunch);
+    const agentId =
+      positionalAgentId ?? resolveOption(flags, "agent-id");
+    if (!agentId) {
+      process.stderr.write(
+        "Usage: acp-hydra launch <agent-id> [agent-args...]\n",
+      );
+      process.exit(2);
+      return;
+    }
+    const sessionId = resolveOption(flags, "session-id");
+    const role = resolveSessionRole(resolveOption(flags, "role"));
+    const name = resolveOption(flags, "name");
+    await runShim({ sessionId, role, agentId, agentArgs, name });
+    return;
+  }
+
   const { positional, flags } = parseArgs(argv);
 
   if (flags.version === true || positional[0] === "--version") {
@@ -24,13 +50,13 @@ async function main(): Promise<void> {
   }
 
   const subcommand = positional[0];
-  const sessionId = flagString(flags, "session-id");
-  const roleFlag = flagString(flags, "role");
-  const role: SessionRole | undefined =
-    roleFlag === "controller" || roleFlag === "observer" ? roleFlag : undefined;
+  const sessionId = resolveOption(flags, "session-id");
+  const role = resolveSessionRole(resolveOption(flags, "role"));
+  const name = resolveOption(flags, "name");
+  const agentIdFromFlag = resolveOption(flags, "agent-id");
 
   if (!subcommand) {
-    await runShim({ sessionId, role });
+    await runShim({ sessionId, role, name, agentId: agentIdFromFlag });
     return;
   }
 
@@ -70,21 +96,18 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
-    case "launch": {
-      const agentId = positional[1];
-      if (!agentId) {
-        process.stderr.write("Usage: acp-hydra launch <agent-id>\n");
-        process.exit(2);
-        return;
-      }
-      await runShim({ sessionId, role, agentId });
-      return;
-    }
     default:
       process.stderr.write(`Unknown command: ${subcommand}\n`);
       printHelp();
       process.exit(2);
   }
+}
+
+function resolveSessionRole(raw: string | undefined): SessionRole | undefined {
+  if (raw === "controller" || raw === "observer") {
+    return raw;
+  }
+  return undefined;
 }
 
 function printHelp(): void {
@@ -94,8 +117,10 @@ function printHelp(): void {
       "",
       "Usage:",
       "  acp-hydra                          Run as ACP shim (default; spawned by editors)",
-      "  acp-hydra launch <agent-id>        Shim mode, but force the daemon to spawn",
-      "                                     <agent-id> from the registry on session/new",
+      "  acp-hydra launch <agent-id> [agent-args...]",
+      "                                     Shim mode, force daemon to spawn <agent-id>",
+      "                                     from the registry. Args after <agent-id>",
+      "                                     are forwarded to the agent's command.",
       "  acp-hydra --session-id <id> [--role controller|observer]",
       "                                     Shim mode, attach to existing session",
       "  acp-hydra init [--rotate-token]    Initialize ~/.acp-hydra/config.json",
@@ -104,6 +129,12 @@ function printHelp(): void {
       "  acp-hydra sessions kill <id>       Kill a session",
       "  acp-hydra --version                Print version",
       "  acp-hydra --help                   Show this help",
+      "",
+      "Config knob flags accept env-var equivalents (flag wins):",
+      "  --agent-id    ACP_HYDRA_AGENT_ID",
+      "  --session-id  ACP_HYDRA_SESSION_ID",
+      "  --role        ACP_HYDRA_ROLE",
+      "  --name        ACP_HYDRA_NAME",
       "",
     ].join("\n"),
   );

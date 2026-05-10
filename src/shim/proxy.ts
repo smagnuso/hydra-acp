@@ -19,6 +19,8 @@ export interface ShimOptions {
   sessionId?: string;
   role?: SessionRole;
   agentId?: string;
+  agentArgs?: string[];
+  name?: string;
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
@@ -58,7 +60,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
     void downstream.send(msg);
   });
 
-  const namingState = { name: process.env.ACP_HYDRA_NAME, used: false };
+  const namingState = { name: opts.name, used: false };
 
   downstream.onMessage((msg) => {
     tracker.observeFromClient(msg);
@@ -71,8 +73,11 @@ export async function runShim(opts: ShimOptions): Promise<void> {
       if (opts.agentId) {
         outgoing = rewriteSessionNewWithAgent(outgoing, opts.agentId);
       }
+      if (opts.agentArgs && opts.agentArgs.length > 0) {
+        outgoing = injectHydraMeta(outgoing, { agentArgs: opts.agentArgs });
+      }
       if (namingState.name && !namingState.used) {
-        outgoing = injectSessionName(outgoing, namingState.name);
+        outgoing = injectHydraMeta(outgoing, { name: namingState.name });
         namingState.used = true;
       }
       void upstream.send(outgoing);
@@ -193,6 +198,9 @@ async function replayAttach(
   if (ctx.title !== undefined) {
     resumeHints.title = ctx.title;
   }
+  if (ctx.agentArgs && ctx.agentArgs.length > 0) {
+    resumeHints.agentArgs = ctx.agentArgs;
+  }
   const request: JsonRpcRequest = {
     jsonrpc: "2.0",
     id: `resume-${ctx.sessionId}-${Date.now()}`,
@@ -254,9 +262,9 @@ function rewriteSessionNewWithAgent(
   };
 }
 
-function injectSessionName(
+function injectHydraMeta(
   msg: JsonRpcRequest,
-  name: string,
+  additions: Record<string, unknown>,
 ): JsonRpcRequest {
   const params = (msg.params ?? {}) as Record<string, unknown>;
   const existingMeta = (params._meta ?? {}) as Record<string, unknown>;
@@ -270,7 +278,7 @@ function injectSessionName(
         ...existingMeta,
         "acp-hydra": {
           ...existingHydra,
-          name,
+          ...additions,
         },
       },
     },

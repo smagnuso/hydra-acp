@@ -198,13 +198,48 @@ If both `launch <agent-id>` and `--session-id` are given, `--session-id` wins (a
 
 ### Naming sessions from the editor
 
-Set `ACP_HYDRA_NAME` in the environment when spawning the shim and the first `session/new` from that shim is labeled with the given name. The label flows through `_meta["acp-hydra"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `acp-hydra sessions`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
-
-Example for an editor that maps a buffer name to the env var:
+Pass `--name <label>` or set `ACP_HYDRA_NAME` and the first `session/new` from that shim is labeled accordingly. The label flows through `_meta["acp-hydra"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `acp-hydra sessions`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
 
 ```text
-ACP_HYDRA_NAME="$BUFFER_NAME" acp-hydra launch claude-code
+ACP_HYDRA_NAME="$BUFFER_NAME" acp-hydra launch claude-acp
+# or
+acp-hydra --name "$BUFFER_NAME" launch claude-acp
 ```
+
+### Forwarding agent args (`acp-hydra launch <agent-id> ...`)
+
+Anything you put after `<agent-id>` in launcher mode is forwarded to the underlying agent's command. Hydra appends the extra args to the registry-provided spawn plan. Example:
+
+```text
+acp-hydra launch codex-acp -c sandbox_mode=danger-full-access
+```
+
+The daemon spawns `npx -y @zed-industries/codex-acp@<version> -c sandbox_mode=danger-full-access`. Args survive daemon restart — they're stored alongside the resume hints, so a resurrected session re-spawns its agent with the same arguments.
+
+### Flag/env equivalence
+
+Every config-knob flag has an `ACP_HYDRA_FOO_BAR` env-var equivalent. Flag wins over env; env wins over default.
+
+| Flag | Env var |
+|---|---|
+| `--name` | `ACP_HYDRA_NAME` |
+| `--agent-id` | `ACP_HYDRA_AGENT_ID` |
+| `--session-id` | `ACP_HYDRA_SESSION_ID` |
+| `--role` | `ACP_HYDRA_ROLE` |
+
+Action commands (`init`, `daemon`, `sessions`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
+
+### Registry id resolution
+
+When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `ACP_HYDRA_AGENT_ID`), the daemon first tries an exact match against the ACP Registry's `id` field. If nothing matches, it falls back to matching against the **npx package basename** (the segment after the last `/` and before the version `@`). That means common binary names work transparently:
+
+| You spawn… | Registry `id` | Resolves via |
+|---|---|---|
+| `claude-acp` | `claude-acp` | exact id |
+| `claude-agent-acp` | `claude-acp` | npx package basename `claude-agent-acp` |
+| `gemini` | `gemini` | exact id |
+| `gemini-cli` | `gemini` | npx package basename `gemini-cli` |
+| `codex-acp` | `codex-acp` | exact id |
 
 ## Config
 

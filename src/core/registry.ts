@@ -98,7 +98,11 @@ export class Registry {
 
   async getAgent(id: string): Promise<RegistryAgent | undefined> {
     const doc = await this.load();
-    return doc.agents.find((a) => a.id === id);
+    const exact = doc.agents.find((a) => a.id === id);
+    if (exact) {
+      return exact;
+    }
+    return doc.agents.find((a) => npxPackageBasename(a) === id);
   }
 
   private isFresh(fetchedAt: number): boolean {
@@ -153,10 +157,21 @@ export interface SpawnPlan {
   env: Record<string, string>;
 }
 
-export function planSpawn(agent: RegistryAgent): SpawnPlan {
+function npxPackageBasename(agent: RegistryAgent): string | undefined {
+  const pkg = agent.distribution.npx?.package;
+  if (!pkg) {
+    return undefined;
+  }
+  const lastSlash = pkg.lastIndexOf("/");
+  const afterSlash = lastSlash === -1 ? pkg : pkg.slice(lastSlash + 1);
+  const atIdx = afterSlash.lastIndexOf("@");
+  return atIdx <= 0 ? afterSlash : afterSlash.slice(0, atIdx);
+}
+
+export function planSpawn(agent: RegistryAgent, extraArgs: string[] = []): SpawnPlan {
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
-    const args = ["-y", npx.package, ...(npx.args ?? [])];
+    const args = ["-y", npx.package, ...(npx.args ?? []), ...extraArgs];
     return {
       command: "npx",
       args,
@@ -170,7 +185,7 @@ export function planSpawn(agent: RegistryAgent): SpawnPlan {
   }
   if (agent.distribution.uvx) {
     const uvx = agent.distribution.uvx;
-    const args = [uvx.package, ...(uvx.args ?? [])];
+    const args = [uvx.package, ...(uvx.args ?? []), ...extraArgs];
     return {
       command: "uvx",
       args,

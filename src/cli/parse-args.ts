@@ -54,3 +54,20 @@ export function flagBool(
 ): boolean {
   return flags[key] === true || flags[key] === "true";
 }
+
+const ENV_PREFIX = "ACP_HYDRA_";
+
+export function envKeyForFlag(flagKey: string): string {
+  return ENV_PREFIX + flagKey.toUpperCase().replace(/-/g, "_");
+}
+
+export function resolveOption(
+  flags: Record<string, string | boolean>,
+  key: string,
+): string | undefined {
+  const fromFlag = flagString(flags, key);
+  if (fromFlag !== undefined) {
+    return fromFlag;
+  }
+  return process.env[envKeyForFlag(key)];
+}
