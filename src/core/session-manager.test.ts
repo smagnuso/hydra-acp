@@ -222,3 +222,86 @@ describe("SessionManager.resurrect", () => {
     ).rejects.toMatchObject({ code: JsonRpcErrorCodes.AgentNotInstalled });
   });
 });
+
+describe("SessionManager: /hydra switch persistence", () => {
+  let tmpHome: string;
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "acp-hydra-switch-"));
+    process.env.ACP_HYDRA_HOME = tmpHome;
+  });
+  afterEach(async () => {
+    delete process.env.ACP_HYDRA_HOME;
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it("rewrites the on-disk record's agentId + upstreamSessionId after a switch", async () => {
+    const oldMock = makeMockAgent({ agentId: "old", cwd: "/work" });
+    const newMock = makeMockAgent({ agentId: "new", cwd: "/work" });
+    const handed: MockAgentControls[] = [oldMock, newMock];
+    let idx = 0;
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("old"), fakeRegistryAgent("new")]),
+      ({ agentId }) => {
+        const m = handed[idx++];
+        if (!m) throw new Error("unexpected extra spawner call");
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        // initialize + session/new (bootstrapAgent), then session/prompt
+        // (transcript injection during /hydra switch — only the new agent).
+        if (agentId === "old") {
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockResolvedValueOnce({ sessionId: "u_old" });
+        } else {
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockResolvedValueOnce({ sessionId: "u_new" })
+            .mockResolvedValueOnce({ stopReason: "end_turn" });
+        }
+        return m.agent;
+      },
+    );
+
+    const session = await manager.create({
+      cwd: "/work",
+      agentId: "old",
+    });
+
+    // Attach a controller so prompt() will accept the slash command.
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import(
+      "../__tests__/test-utils.js"
+    );
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    session.attach(
+      { clientId: "c1", role: "controller", connection: conn },
+      "full",
+    );
+
+    await session.prompt("c1", {
+      prompt: [{ type: "text", text: "/hydra switch new" }],
+    });
+
+    expect(session.agentId).toBe("new");
+    expect(session.upstreamSessionId).toBe("u_new");
+
+    const recordPath = path.join(
+      tmpHome,
+      "sessions",
+      `${session.sessionId}.json`,
+    );
+    // persistAgentChange is fire-and-forget (void) and itself does
+    // read-then-write, so two async hops separate "switch returned"
+    // from "disk reflects the new agent". Poll briefly.
+    let record: { agentId: string; upstreamSessionId: string } | undefined;
+    for (let i = 0; i < 20; i++) {
+      const raw = await fs.readFile(recordPath, "utf8");
+      record = JSON.parse(raw);
+      if (record!.agentId === "new") break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(record?.agentId).toBe("new");
+    expect(record?.upstreamSessionId).toBe("u_new");
+  });
+});

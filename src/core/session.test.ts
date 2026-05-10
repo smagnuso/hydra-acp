@@ -742,6 +742,159 @@ describe("Session", () => {
       expect(sessionInfo).toBeDefined();
     });
 
+    it("/hydra switch swaps the agent, broadcasts info+banner, and feeds transcript to new agent", async () => {
+      const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
+      const newMock = makeMockAgent({ agentId: "new", cwd: "/w" });
+      let spawnCalls = 0;
+      const session = new Session({
+        sessionId: "hydra_session_SW",
+        cwd: "/w",
+        agentId: "old",
+        agent: oldMock.agent,
+        upstreamSessionId: "u_old",
+        spawnReplacementAgent: async (p) => {
+          spawnCalls++;
+          expect(p.agentId).toBe("new");
+          expect(p.cwd).toBe("/w");
+          return {
+            agent: newMock.agent,
+            upstreamSessionId: "u_new",
+          };
+        },
+      });
+      const { client: alice, stream: aliceStream } = makeClient("controller");
+      session.attach(alice, "full");
+
+      // Build a tiny history first: one user prompt + one agent reply.
+      const oldRequest = oldMock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      oldRequest.mockImplementationOnce(async () => {
+        oldMock.triggerNotification("session/update", {
+          sessionId: "u_old",
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Hello." },
+          },
+        });
+        return { stopReason: "end_turn" };
+      });
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "say hi" }],
+      });
+
+      // The new agent's session/prompt resolves immediately; we just want to
+      // assert it was *invoked* with the synthesized transcript.
+      const newRequest = newMock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      newRequest.mockResolvedValue({ stopReason: "end_turn" });
+
+      let agentChangePayload: { agentId: string; upstreamSessionId: string } | undefined;
+      session.onAgentChange((info) => {
+        agentChangePayload = info;
+      });
+
+      const oldKill = oldMock.agent.kill as ReturnType<typeof vi.fn>;
+
+      const result = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra switch new" }],
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+      expect(spawnCalls).toBe(1);
+      expect(session.agentId).toBe("new");
+      expect(session.upstreamSessionId).toBe("u_new");
+      expect(session.agent).toBe(newMock.agent);
+      expect(oldKill).toHaveBeenCalled();
+
+      // Transcript was sent to the new agent.
+      const promptCalls = newRequest.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(promptCalls.length).toBe(1);
+      const [, params] = promptCalls[0] as [string, { prompt: Array<{ text: string }> }];
+      const sentText = params.prompt[0]!.text;
+      expect(sentText).toContain("taking over this conversation from old");
+      expect(sentText).toContain("<user>: say hi");
+      expect(sentText).toContain("<agent: old>: Hello.");
+
+      // Broadcast: session_info_update with new agentId + banner.
+      const infoUpdate = aliceStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string; agentId?: string } } | undefined)
+            ?.update?.sessionUpdate === "session_info_update" &&
+          (m.params as { update?: { agentId?: string } } | undefined)?.update?.agentId === "new",
+      );
+      expect(infoUpdate).toBeDefined();
+      const banner = aliceStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (
+            (m.params as { update?: { content?: { text?: string } } } | undefined)?.update
+              ?.content?.text ?? ""
+          ).includes("(switched from `old` to `new`)"),
+      );
+      expect(banner).toBeDefined();
+
+      expect(agentChangePayload).toEqual({
+        agentId: "new",
+        upstreamSessionId: "u_new",
+      });
+    });
+
+    it("/hydra switch with no agent id rejects", async () => {
+      const { session } = makeSession("hydra_session_S0", "u_S0");
+      const { client: alice } = makeClient("controller");
+      session.attach(alice, "full");
+
+      await expect(
+        session.prompt(alice.clientId, {
+          prompt: [{ type: "text", text: "/hydra switch" }],
+        }),
+      ).rejects.toThrow(/requires an agent id/);
+    });
+
+    it("/hydra switch to the current agentId rejects", async () => {
+      const { session } = makeSession("hydra_session_SS", "u_SS");
+      const { client: alice } = makeClient("controller");
+      session.attach(alice, "full");
+
+      await expect(
+        session.prompt(alice.clientId, {
+          prompt: [{ type: "text", text: "/hydra switch mock" }],
+        }),
+      ).rejects.toThrow(/already on agent mock/);
+    });
+
+    it("/hydra switch leaves the old agent in place when the new spawn fails", async () => {
+      const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
+      const session = new Session({
+        sessionId: "hydra_session_SF",
+        cwd: "/w",
+        agentId: "old",
+        agent: oldMock.agent,
+        upstreamSessionId: "u_old",
+        spawnReplacementAgent: async () => {
+          throw new Error("registry: agent missing");
+        },
+      });
+      const { client: alice } = makeClient("controller");
+      session.attach(alice, "full");
+      const oldKill = oldMock.agent.kill as ReturnType<typeof vi.fn>;
+
+      await expect(
+        session.prompt(alice.clientId, {
+          prompt: [{ type: "text", text: "/hydra switch nope" }],
+        }),
+      ).rejects.toThrow(/registry: agent missing/);
+      expect(session.agentId).toBe("old");
+      expect(session.agent).toBe(oldMock.agent);
+      expect(oldKill).not.toHaveBeenCalled();
+    });
+
     it("unknown /hydra verbs throw", async () => {
       const { session } = makeSession("hydra_session_HX", "u_HX");
       const { client: alice } = makeClient("controller");

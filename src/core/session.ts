@@ -37,6 +37,22 @@ interface CachedNotification {
   recordedAt: number;
 }
 
+export interface SpawnReplacementAgentParams {
+  agentId: string;
+  cwd: string;
+  agentArgs?: string[];
+}
+
+export interface SpawnReplacementAgentResult {
+  agent: AgentInstance;
+  upstreamSessionId: string;
+  agentMeta?: Record<string, unknown>;
+}
+
+export type SpawnReplacementAgent = (
+  params: SpawnReplacementAgentParams,
+) => Promise<SpawnReplacementAgentResult>;
+
 export interface SessionInit {
   cwd: string;
   agentId: string;
@@ -47,6 +63,10 @@ export interface SessionInit {
   agentMeta?: Record<string, unknown>;
   agentArgs?: string[];
   idleTimeoutMs?: number;
+  // Optional callback used by /hydra switch to spawn a fresh agent
+  // process and run initialize + session/new on it. Provided by
+  // SessionManager so Session doesn't have to depend on the registry.
+  spawnReplacementAgent?: SpawnReplacementAgent;
 }
 
 export interface CloseOptions {
@@ -56,10 +76,14 @@ export interface CloseOptions {
 export class Session {
   readonly sessionId: string;
   readonly cwd: string;
-  readonly agentId: string;
-  readonly agent: AgentInstance;
-  readonly upstreamSessionId: string;
-  readonly agentMeta: Record<string, unknown> | undefined;
+  // agent / agentId / upstreamSessionId are mutable so /hydra switch can
+  // replace the underlying agent process while keeping the same Session
+  // record. agentMeta is the metadata returned by the agent at session/new
+  // time; it gets refreshed on switch too.
+  agentId: string;
+  agent: AgentInstance;
+  upstreamSessionId: string;
+  agentMeta: Record<string, unknown> | undefined;
   readonly agentArgs: string[] | undefined;
   title: string | undefined;
   updatedAt: number;
@@ -90,6 +114,10 @@ export class Session {
   private internalPromptCapture: { chunks: string[] } | undefined;
   private idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
+  private spawnReplacementAgent: SpawnReplacementAgent | undefined;
+  private agentChangeHandlers: Array<
+    (info: { agentId: string; upstreamSessionId: string }) => void
+  > = [];
 
   constructor(init: SessionInit) {
     this.sessionId =
@@ -102,9 +130,20 @@ export class Session {
     this.agentArgs = init.agentArgs;
     this.title = init.title;
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
+    this.spawnReplacementAgent = init.spawnReplacementAgent;
     this.updatedAt = Date.now();
 
-    this.agent.connection.onNotification("session/update", (params) => {
+    this.wireAgent(this.agent);
+  }
+
+  // Register session/update, session/request_permission, and onExit
+  // handlers on an agent connection. Re-run on every /hydra switch so
+  // the new agent is plumbed identically. The exit handler's identity
+  // check is what makes switching safe: when the *old* agent exits as
+  // part of a swap, this.agent has already been replaced, so we no-op
+  // and don't tear the session down.
+  private wireAgent(agent: AgentInstance): void {
+    agent.connection.onNotification("session/update", (params) => {
       // /hydra slash-command sub-prompts (e.g. title regeneration)
       // run "behind the scenes" — the agent's chunks for those are
       // captured into a private buffer instead of being broadcast.
@@ -118,12 +157,21 @@ export class Session {
       this.maybeApplyAgentSessionInfo(params);
       this.recordAndBroadcast("session/update", params);
     });
-    this.agent.connection.onRequest("session/request_permission", async (params) => {
+    agent.connection.onRequest("session/request_permission", async (params) => {
       return this.handlePermissionRequest(params);
     });
-    this.agent.onExit(() => {
+    agent.onExit(() => {
+      if (this.agent !== agent) {
+        return;
+      }
       this.markClosed({ deleteRecord: false });
     });
+  }
+
+  onAgentChange(
+    handler: (info: { agentId: string; upstreamSessionId: string }) => void,
+  ): void {
+    this.agentChangeHandlers.push(handler);
   }
 
   get attachedCount(): number {
@@ -427,6 +475,8 @@ export class Session {
     switch (verb) {
       case "title":
         return this.runTitleCommand(arg);
+      case "switch":
+        return this.runSwitchCommand(arg);
       case "":
         // "/hydra" alone: no-op, return success so the user's
         // composer doesn't show an error.
@@ -457,6 +507,21 @@ export class Session {
   }
 
   private async runTitleRegen(): Promise<unknown> {
+    const collected = await this.runInternalPrompt(
+      "Reply with ONLY a short title (≤80 chars) summarizing this conversation so far. No quotes, no markdown, no explanation.",
+    );
+    const title = firstLine(collected.trim(), 80);
+    if (title) {
+      this.setTitle(title);
+    }
+    return { stopReason: "end_turn" };
+  }
+
+  // Send a prompt to the underlying agent and capture its reply chunks
+  // privately (no fan-out to clients, no recording into history). Used
+  // by /hydra title's regen path and /hydra switch's transcript-injection
+  // path. Returns the joined agent_message_chunk text.
+  private async runInternalPrompt(text: string): Promise<string> {
     if (this.internalPromptCapture) {
       throw new Error("internal prompt already in flight");
     }
@@ -465,22 +530,179 @@ export class Session {
     try {
       await this.agent.connection.request<unknown>("session/prompt", {
         sessionId: this.upstreamSessionId,
-        prompt: [
-          {
-            type: "text",
-            text: "Reply with ONLY a short title (≤80 chars) summarizing this conversation so far. No quotes, no markdown, no explanation.",
-          },
-        ],
+        prompt: [{ type: "text", text }],
       });
-      const collected = capture.chunks.join("").trim();
-      const title = firstLine(collected, 80);
-      if (title) {
-        this.setTitle(title);
-      }
-      return { stopReason: "end_turn" };
+      return capture.chunks.join("");
     } finally {
       this.internalPromptCapture = undefined;
     }
+  }
+
+  // Swap the underlying agent process while keeping the same Session
+  // record. Spawns the new agent first so a failure leaves the old one
+  // intact; then injects a synthesized transcript so the new agent has
+  // context for the next turn.
+  private runSwitchCommand(newAgentId: string): Promise<unknown> {
+    if (!newAgentId) {
+      throw withCode(
+        new Error("/hydra switch requires an agent id"),
+        JsonRpcErrorCodes.InvalidParams,
+      );
+    }
+    if (newAgentId === this.agentId) {
+      throw withCode(
+        new Error(`already on agent ${newAgentId}`),
+        JsonRpcErrorCodes.InvalidParams,
+      );
+    }
+    if (!this.spawnReplacementAgent) {
+      throw withCode(
+        new Error("agent switching not configured for this session"),
+        JsonRpcErrorCodes.InternalError,
+      );
+    }
+    const spawnAgent = this.spawnReplacementAgent;
+    return this.enqueuePrompt(async () => {
+      const oldAgentId = this.agentId;
+      const transcript = this.buildSwitchTranscript(oldAgentId);
+
+      const fresh = await spawnAgent({
+        agentId: newAgentId,
+        cwd: this.cwd,
+        agentArgs: this.agentArgs,
+      });
+      this.wireAgent(fresh.agent);
+
+      const oldAgent = this.agent;
+      this.agent = fresh.agent;
+      this.agentId = newAgentId;
+      this.upstreamSessionId = fresh.upstreamSessionId;
+      this.agentMeta = fresh.agentMeta;
+      await oldAgent.kill().catch(() => undefined);
+
+      if (transcript) {
+        await this.runInternalPrompt(transcript).catch(() => undefined);
+      }
+
+      this.broadcastAgentSwitch(oldAgentId, newAgentId);
+
+      const info = {
+        agentId: this.agentId,
+        upstreamSessionId: this.upstreamSessionId,
+      };
+      for (const handler of this.agentChangeHandlers) {
+        try {
+          handler(info);
+        } catch {
+          void 0;
+        }
+      }
+      return { stopReason: "end_turn" };
+    });
+  }
+
+  // Walk this.history (rewritten-for-clients notification cache) and
+  // produce a labeled transcript suitable for handing to a fresh agent.
+  // Includes user prompts, agent replies, and tool-call outcomes; skips
+  // hydra-synthesized markers (so multi-hop switches don't accumulate
+  // banners) and other update kinds we don't think the next agent
+  // benefits from re-seeing (plans, thoughts, mode/model/usage).
+  private buildSwitchTranscript(prevAgentId: string): string {
+    const lines: Array<{ speaker: string; text: string }> = [];
+    for (const note of this.history) {
+      if (note.method !== "session/update") {
+        continue;
+      }
+      const params = (note.params ?? {}) as { update?: Record<string, unknown> };
+      const update = params.update;
+      if (!update) {
+        continue;
+      }
+      const meta = update._meta as
+        | { "acp-hydra"?: { synthetic?: boolean } }
+        | undefined;
+      if (meta?.["acp-hydra"]?.synthetic) {
+        continue;
+      }
+      const kind = update.sessionUpdate as string | undefined;
+      if (kind === "prompt_received") {
+        const text = extractPromptText(update.prompt);
+        if (text) {
+          lines.push({ speaker: "user", text });
+        }
+      } else if (kind === "agent_message_chunk") {
+        const content = update.content as { text?: string } | undefined;
+        const text = content?.text;
+        if (text) {
+          lines.push({ speaker: `agent: ${prevAgentId}`, text });
+        }
+      } else if (kind === "tool_call" || kind === "tool_call_update") {
+        const status = update.status as string | undefined;
+        const title = update.title as string | undefined;
+        if (status === "completed" || status === "failed") {
+          lines.push({
+            speaker: "tool",
+            text: `${title ?? "?"} ${status}`,
+          });
+        }
+      }
+    }
+    if (lines.length === 0) {
+      return "";
+    }
+    // Coalesce consecutive same-speaker entries (chunks → paragraph).
+    const coalesced: string[] = [];
+    let current: { speaker: string; text: string } | undefined;
+    for (const line of lines) {
+      if (current && current.speaker === line.speaker) {
+        current.text += line.text;
+      } else {
+        if (current) {
+          coalesced.push(`<${current.speaker}>: ${current.text.trim()}`);
+        }
+        current = { speaker: line.speaker, text: line.text };
+      }
+    }
+    if (current) {
+      coalesced.push(`<${current.speaker}>: ${current.text.trim()}`);
+    }
+    return [
+      `You are taking over this conversation from ${prevAgentId}. Below is the transcript so far.`,
+      `Each line is prefixed with its speaker. Continue from where ${prevAgentId} left off, responding to the user's most recent message.`,
+      "",
+      "--- begin transcript ---",
+      ...coalesced,
+      "--- end transcript ---",
+    ].join("\n");
+  }
+
+  // Tell every attached client (a) the agent identity has changed
+  // (session_info_update with an agentId field — clients that already
+  // listen for title updates pick this up; older clients ignore unknown
+  // fields harmlessly) and (b) drop a visible banner into the transcript
+  // so users see the switch rather than just suddenly getting answers
+  // from a different agent. Both updates carry _meta.acp-hydra.synthetic
+  // so a future /hydra switch's transcript builder filters them out.
+  private broadcastAgentSwitch(oldAgentId: string, newAgentId: string): void {
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "session_info_update",
+        agentId: newAgentId,
+        _meta: { "acp-hydra": { synthetic: true } },
+      },
+    });
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: `\n_(switched from \`${oldAgentId}\` to \`${newAgentId}\`)_\n`,
+        },
+        _meta: { "acp-hydra": { synthetic: true } },
+      },
+    });
   }
 
   private markClosed(opts: { deleteRecord: boolean }): void {

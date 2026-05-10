@@ -346,6 +346,10 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       description:
         "Regenerate the session title via the agent (or set manually with an arg)",
     },
+    {
+      name: "/hydra switch <agent>",
+      description: "Swap the agent backing this session, preserving context",
+    },
   ];
   let agentCommands: AvailableCommand[] = [];
 

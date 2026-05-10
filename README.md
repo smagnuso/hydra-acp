@@ -257,6 +257,7 @@ Slash commands of the form `/hydra <verb> [args]` are intercepted by hydra befor
 |---|---|
 | `/hydra title` | Asks the agent for a one-line summary, applies it as the new title via `session_info_update`. The sub-prompt and reply are suppressed from clients. |
 | `/hydra title <text>` | Sets the title to `<text>` directly. No agent call. |
+| `/hydra switch <agent>` | Swaps the agent process backing this session. Spawns the new agent (must be in the registry — see `acp-hydra agents list`), kills the old one, and feeds the conversation transcript so far back in as the first prompt to the new agent. `session_info_update` carries the new `agentId`; a synthetic `agent_message_chunk` banner marks the switch in the transcript. The on-disk session record is updated so resurrection brings the session back on the new agent. |
 
 These work from anywhere a session prompt can be typed — the TUI's input box, agent-shell, the slack thread composer, the browser chat composer. Hydra detects them server-side; clients send them as ordinary `session/prompt` requests.
 

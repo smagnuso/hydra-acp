@@ -50,70 +50,25 @@ export class SessionManager {
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
-    const agentDef = await this.registry.getAgent(params.agentId);
-    if (!agentDef) {
-      const err = new Error(
-        `agent ${params.agentId} not found in registry`,
-      ) as Error & { code: number };
-      err.code = JsonRpcErrorCodes.AgentNotInstalled;
-      throw err;
-    }
-    const plan = planSpawn(agentDef, params.agentArgs ?? []);
-    const agent = this.spawner({
+    const fresh = await this.bootstrapAgent({
       agentId: params.agentId,
       cwd: params.cwd,
-      plan,
+      agentArgs: params.agentArgs,
+      mcpServers: params.mcpServers,
     });
-
-    const initResult = await agent.connection.request<{
-      protocolVersion?: number;
-    }>("initialize", {
-      protocolVersion: 1,
-      clientCapabilities: {},
-      clientInfo: { name: "acp-hydra", version: "0.1.0" },
-    });
-    void initResult;
-
-    const newResult = await agent.connection.request<{
-      sessionId: string;
-      _meta?: Record<string, unknown>;
-    }>("session/new", {
-      cwd: params.cwd,
-      mcpServers: params.mcpServers ?? [],
-    });
-
     const session = new Session({
       cwd: params.cwd,
       agentId: params.agentId,
-      agent,
-      upstreamSessionId: newResult.sessionId,
-      agentMeta: newResult._meta,
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      agentMeta: fresh.agentMeta,
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      spawnReplacementAgent: (p) =>
+        this.bootstrapAgent({ ...p, mcpServers: [] }),
     });
-    session.onClose(({ deleteRecord }) => {
-      this.sessions.delete(session.sessionId);
-      if (deleteRecord) {
-        void this.store.delete(session.sessionId).catch(() => undefined);
-      }
-    });
-    session.onTitleChange((title) => {
-      void this.persistTitle(session.sessionId, title).catch(() => undefined);
-    });
-    this.sessions.set(session.sessionId, session);
-    await this.store
-      .write(
-        recordFromMemorySession({
-          sessionId: session.sessionId,
-          upstreamSessionId: session.upstreamSessionId,
-          agentId: session.agentId,
-          cwd: session.cwd,
-          title: session.title,
-          agentArgs: session.agentArgs,
-        }),
-      )
-      .catch(() => undefined);
+    await this.attachManagerHooks(session);
     return session;
   }
 
@@ -197,7 +152,71 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      spawnReplacementAgent: (p) =>
+        this.bootstrapAgent({ ...p, mcpServers: [] }),
     });
+    await this.attachManagerHooks(session);
+    return session;
+  }
+
+  // Bootstrap a fresh agent process: registry resolve → spawn → initialize
+  // → session/new. Shared by create() and the /hydra switch path so both
+  // go through the same env / capabilities / error-handling.
+  private async bootstrapAgent(params: {
+    agentId: string;
+    cwd: string;
+    agentArgs?: string[];
+    mcpServers?: unknown[];
+  }): Promise<{
+    agent: AgentInstance;
+    upstreamSessionId: string;
+    agentMeta?: Record<string, unknown>;
+  }> {
+    const agentDef = await this.registry.getAgent(params.agentId);
+    if (!agentDef) {
+      const err = new Error(
+        `agent ${params.agentId} not found in registry`,
+      ) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.AgentNotInstalled;
+      throw err;
+    }
+    const plan = planSpawn(agentDef, params.agentArgs ?? []);
+    const agent = this.spawner({
+      agentId: params.agentId,
+      cwd: params.cwd,
+      plan,
+    });
+    try {
+      await agent.connection.request("initialize", {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: "acp-hydra", version: "0.1.0" },
+      });
+      const newResult = await agent.connection.request<{
+        sessionId: string;
+        _meta?: Record<string, unknown>;
+      }>("session/new", {
+        cwd: params.cwd,
+        mcpServers: params.mcpServers ?? [],
+      });
+      return {
+        agent,
+        upstreamSessionId: newResult.sessionId,
+        agentMeta: newResult._meta,
+      };
+    } catch (err) {
+      await agent.kill().catch(() => undefined);
+      throw err;
+    }
+  }
+
+  // Hooks that bridge a Session into the manager's persistence/listing
+  // bookkeeping. Called from both create() and resurrect() so the same
+  // session record + lifecycle handlers are wired regardless of origin.
+  // Returns once the initial disk record is written — callers should
+  // await so a subsequent /hydra switch's persistAgentChange (which
+  // does read-then-write) finds the file in place.
+  private async attachManagerHooks(session: Session): Promise<void> {
     session.onClose(({ deleteRecord }) => {
       this.sessions.delete(session.sessionId);
       if (deleteRecord) {
@@ -206,6 +225,11 @@ export class SessionManager {
     });
     session.onTitleChange((title) => {
       void this.persistTitle(session.sessionId, title).catch(() => undefined);
+    });
+    session.onAgentChange(({ agentId, upstreamSessionId }) => {
+      void this.persistAgentChange(session.sessionId, agentId, upstreamSessionId).catch(
+        () => undefined,
+      );
     });
     this.sessions.set(session.sessionId, session);
     await this.store
@@ -220,7 +244,6 @@ export class SessionManager {
         }),
       )
       .catch(() => undefined);
-    return session;
   }
 
   async loadFromDisk(sessionId: string): Promise<ResurrectParams | undefined> {
@@ -347,6 +370,27 @@ export class SessionManager {
     await this.store.write({
       ...record,
       title,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  // Persist an agent swap from /hydra switch. The on-disk record's
+  // agentId + upstreamSessionId both rotate so a daemon restart (and
+  // later resurrect) brings the session back up on the agent the user
+  // most recently switched to, not the one it was originally created on.
+  private async persistAgentChange(
+    sessionId: string,
+    agentId: string,
+    upstreamSessionId: string,
+  ): Promise<void> {
+    const record = await this.store.read(sessionId);
+    if (!record) {
+      return;
+    }
+    await this.store.write({
+      ...record,
+      agentId,
+      upstreamSessionId,
       updatedAt: new Date().toISOString(),
     });
   }
