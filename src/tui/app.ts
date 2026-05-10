@@ -475,6 +475,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   };
 
   const enqueuePrompt = (text: string, planMode: boolean): void => {
+    // Sending a prompt always snaps the view to the bottom — the user
+    // wants to see their own input and the agent's reply.
+    screen.scrollToBottom();
     if (handleBuiltinCommand(text)) {
       return;
     }

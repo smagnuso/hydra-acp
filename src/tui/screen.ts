@@ -65,6 +65,10 @@ export class Screen {
   private repaintPending = false;
   private permissionPrompt: PermissionPromptSpec | null = null;
   private completions: CompletionItem[] = [];
+  // Scrollback offset: 0 = pinned to bottom (live), N = N wrapped lines
+  // above the bottom. Mouse wheel and PgUp/PgDn adjust this; new content
+  // pushes the view down naturally when at 0.
+  private scrollOffset = 0;
   private banner: BannerState = {
     status: "ready",
     planMode: false,
@@ -90,7 +94,10 @@ export class Screen {
     }
     this.started = true;
     this.term.fullscreen(true);
-    this.term.grabInput({});
+    // mouse: "button" enables wheel + click reporting so we can intercept
+    // mouse-wheel events for scrollback. terminal-kit emits these through
+    // the same "key" channel as MOUSE_WHEEL_UP / MOUSE_WHEEL_DOWN names.
+    this.term.grabInput({ mouse: "button" });
     this.term.hideCursor(false);
     this.term.on("key", this.keyHandler);
     this.term.on("resize", this.resizeHandler);
@@ -275,10 +282,71 @@ export class Screen {
       this.onKey([{ type: "char", ch: name }]);
       return;
     }
+    // Scrollback navigation — handled in the screen so it doesn't reach the
+    // dispatcher (PgUp/PgDn aren't text-editing in our buffer model).
+    if (name === "MOUSE_WHEEL_UP") {
+      this.scrollBy(3);
+      return;
+    }
+    if (name === "MOUSE_WHEEL_DOWN") {
+      this.scrollBy(-3);
+      return;
+    }
+    if (name === "PAGE_UP") {
+      this.scrollBy(this.scrollPageSize());
+      return;
+    }
+    if (name === "PAGE_DOWN") {
+      this.scrollBy(-this.scrollPageSize());
+      return;
+    }
     const mapped = mapKeyName(name);
     if (mapped) {
       this.onKey([{ type: "key", name: mapped }]);
     }
+  }
+
+  scrollBy(delta: number): void {
+    if (delta === 0) {
+      return;
+    }
+    const max = this.maxScrollOffset();
+    const next = Math.min(max, Math.max(0, this.scrollOffset + delta));
+    if (next === this.scrollOffset) {
+      return;
+    }
+    this.scrollOffset = next;
+    this.repaint();
+  }
+
+  scrollToBottom(): void {
+    if (this.scrollOffset === 0) {
+      return;
+    }
+    this.scrollOffset = 0;
+    this.repaint();
+  }
+
+  private scrollPageSize(): number {
+    return Math.max(1, this.scrollbackVisibleRows() - 2);
+  }
+
+  private scrollbackVisibleRows(): number {
+    const top = HEADER_ROWS + SEPARATOR_ROWS;
+    const bottom =
+      this.term.height -
+      this.promptRows() -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      this.queuedRows() -
+      this.completionRows();
+    return Math.max(0, bottom - top + 1);
+  }
+
+  private maxScrollOffset(): number {
+    const wrapped = this.wrapLines(this.lines, this.term.width);
+    const visible = this.scrollbackVisibleRows();
+    return Math.max(0, wrapped.length - visible);
   }
 
   private repaint(): void {
@@ -337,20 +405,19 @@ export class Screen {
   private drawScrollback(): void {
     const w = this.term.width;
     const top = HEADER_ROWS + SEPARATOR_ROWS;
-    const bottom =
-      this.term.height -
-      this.promptRows() -
-      BANNER_ROWS -
-      SEPARATOR_ROWS -
-      this.queuedRows() -
-      this.completionRows();
-    const visibleRows = bottom - top + 1;
+    const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
       return;
     }
     const wrapped = this.wrapLines(this.lines, w);
-    const start = Math.max(0, wrapped.length - visibleRows);
-    const slice = wrapped.slice(start);
+    // Clamp scrollOffset in case content shrank or window resized.
+    const max = Math.max(0, wrapped.length - visibleRows);
+    if (this.scrollOffset > max) {
+      this.scrollOffset = max;
+    }
+    const end = wrapped.length - this.scrollOffset;
+    const start = Math.max(0, end - visibleRows);
+    const slice = wrapped.slice(start, end);
     for (let i = 0; i < visibleRows; i++) {
       const row = top + i;
       this.term.moveTo(1, row).eraseLineAfter();
@@ -533,6 +600,9 @@ export class Screen {
     }
     if (this.banner.queued > 0) {
       this.term(" · ").brightYellow(`${this.banner.queued} queued`);
+    }
+    if (this.scrollOffset > 0) {
+      this.term(" · ").brightCyan(`↑ ${this.scrollOffset}`);
     }
     this.term(" · ");
     if (this.banner.planMode) {
