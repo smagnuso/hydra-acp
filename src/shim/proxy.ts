@@ -28,7 +28,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
 
   const protocol = config.daemon.tls ? "wss" : "ws";
   const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const subprotocols = ["acp.v1", `hydra-token.${config.daemon.authToken}`];
+  const subprotocols = ["acp.v1", `hydra-acp-token.${config.daemon.authToken}`];
   const upstream = new ResilientWsStream({
     url,
     subprotocols,
@@ -167,7 +167,7 @@ async function cancelPendingPermissions(
   for (const pending of pendings) {
     const params = {
       ...pending.params,
-      resolvedBy: "hydra",
+      resolvedBy: "hydra-acp",
       result: {
         outcome: { kind: "cancelled", reason: "daemon-disconnected" },
       },
@@ -207,7 +207,7 @@ async function replayAttach(
       role: ctx.role,
       historyPolicy: "pending_only",
       _meta: {
-        "hydra": {
+        "hydra-acp": {
           resume: resumeHints,
         },
       },
@@ -266,14 +266,14 @@ function injectHydraMeta(
   const params = (msg.params ?? {}) as Record<string, unknown>;
   const existingMeta = (params._meta ?? {}) as Record<string, unknown>;
   const existingHydra =
-    (existingMeta["hydra"] as Record<string, unknown> | undefined) ?? {};
+    (existingMeta["hydra-acp"] as Record<string, unknown> | undefined) ?? {};
   return {
     ...msg,
     params: {
       ...params,
       _meta: {
         ...existingMeta,
-        "hydra": {
+        "hydra-acp": {
           ...existingHydra,
           ...additions,
         },

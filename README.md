@@ -97,10 +97,10 @@ Clients that adopt the streamable-http-websocket-transport RFD natively can conn
 
 The shim and daemon together implement a "resume hint" pattern that lets editor sessions survive a daemon restart without the editor noticing:
 
-1. **The daemon's `session/new` and `session/attach` responses include a `_meta` block**, with hydra-specific data namespaced under `_meta["hydra"]` (per the [Session List RFD](https://agentclientprotocol.com/rfds/session-list)'s "agent-specific `_meta` fields" convention). The underlying agent's own `_meta` keys, if any, are passed through unchanged alongside `hydra-acp`.
+1. **The daemon's `session/new` and `session/attach` responses include a `_meta` block**, with hydra-specific data namespaced under `_meta["hydra-acp"]` (per the [Session List RFD](https://agentclientprotocol.com/rfds/session-list)'s "agent-specific `_meta` fields" convention). The underlying agent's own `_meta` keys, if any, are passed through unchanged alongside `hydra-acp`.
 2. **The shim caches that namespaced data in a `SessionTracker`** as messages flow through, keyed by the hydra sessionId the editor knows.
 3. **The shim's WS connection is wrapped in a `ResilientWsStream`** that reconnects with exponential backoff (200ms → 5s, capped, max 60 attempts) and buffers outbound messages from the editor while disconnected.
-4. **After each successful reconnect, the shim replays a `session/attach`** for every cached session, including the resume hints under `_meta["hydra"].resume`.
+4. **After each successful reconnect, the shim replays a `session/attach`** for every cached session, including the resume hints under `_meta["hydra-acp"].resume`.
 5. **If the daemon already knows the session** (e.g., the daemon never died, just a network blip), it ignores the resume hint and does a normal attach.
 6. **If the daemon doesn't know the session**, it resurrects: spawns a fresh agent of `agentId` in `cwd`, runs `initialize`, calls ACP `session/load { sessionId: upstreamSessionId }` against the agent, and registers a new hydra `Session` *with the same hydra sessionId the shim claimed*. The editor sees nothing.
 
@@ -110,7 +110,7 @@ The resurrection is serialized per hydra sessionId, so two shims racing to reatt
 
 **What gets lost across restart:** the daemon's in-memory streaming history and in-flight tool calls. The agent's persisted state — past completed turns, conversation context — is recovered via `session/load`. The agent will need to re-issue any tool call that was mid-stream when the daemon died.
 
-**In-flight permission prompts:** the shim tracks open `session/request_permission` requests it has forwarded to the editor. On any reconnect (which always implies the previous daemon-side promise is gone), the shim emits a `session/permission_resolved` notification toward the editor for each pending request, with `resolvedBy: "hydra"` and `outcome: { kind: "cancelled", reason: "daemon-disconnected" }`. Editors that handle `session/permission_resolved` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533) will dismiss their in-flight permission UI. Any response the editor still sends afterward is silently dropped by the new daemon (unknown request id).
+**In-flight permission prompts:** the shim tracks open `session/request_permission` requests it has forwarded to the editor. On any reconnect (which always implies the previous daemon-side promise is gone), the shim emits a `session/permission_resolved` notification toward the editor for each pending request, with `resolvedBy: "hydra-acp"` and `outcome: { kind: "cancelled", reason: "daemon-disconnected" }`. Editors that handle `session/permission_resolved` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533) will dismiss their in-flight permission UI. Any response the editor still sends afterward is silently dropped by the new daemon (unknown request id).
 
 ### Wire shape of `_meta`
 
@@ -121,7 +121,7 @@ A hydra `session/new` response looks like:
   "sessionId": "hydra_session_abc123",
   "_meta": {
     "agent-vendor": { "sequence": 7 },
-    "hydra": {
+    "hydra-acp": {
       "upstreamSessionId": "u_xyz",
       "agentId": "claude-code",
       "cwd": "/path/to/project"
@@ -130,7 +130,7 @@ A hydra `session/new` response looks like:
 }
 ```
 
-The `agent-vendor` key (illustrative) is whatever the underlying agent put in *its* `_meta` block — hydra forwards that through unchanged. Only the `hydra` namespace is hydra's. The same shape applies to `session/attach` responses.
+The `agent-vendor` key (illustrative) is whatever the underlying agent put in *its* `_meta` block — hydra forwards that through unchanged. Only the `hydra-acp` namespace is hydra's. The same shape applies to `session/attach` responses.
 
 For resurrection, the shim sends `session/attach` with a resume hint nested in the same namespace:
 
@@ -140,7 +140,7 @@ For resurrection, the shim sends `session/attach` with a resume hint nested in t
   "role": "controller",
   "historyPolicy": "pending_only",
   "_meta": {
-    "hydra": {
+    "hydra-acp": {
       "resume": {
         "upstreamSessionId": "u_xyz",
         "agentId": "claude-code",
@@ -242,7 +242,7 @@ If both `launch <agent-id>` and `--session-id` are given, `--session-id` wins (a
 
 ### Naming sessions from the editor
 
-Pass `--name <label>` or set `HYDRA_ACP_NAME` and the first `session/new` from that shim is labeled accordingly. The label flows through `_meta["hydra"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `hydra-acp sessions`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
+Pass `--name <label>` or set `HYDRA_ACP_NAME` and the first `session/new` from that shim is labeled accordingly. The label flows through `_meta["hydra-acp"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `hydra-acp sessions`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
 
 ```text
 HYDRA_ACP_NAME="$BUFFER_NAME" hydra-acp launch claude-acp
@@ -438,7 +438,7 @@ The daemon's WSS endpoint follows the [Streamable HTTP & WebSocket Transport RFD
 GET /acp HTTP/1.1
 Host: localhost:8765
 Upgrade: websocket
-Sec-WebSocket-Protocol: acp.v1, hydra-token.<token>
+Sec-WebSocket-Protocol: acp.v1, hydra-acp-token.<token>
 ```
 
 Frames are JSON-RPC 2.0 text frames; binary frames are ignored.
@@ -519,7 +519,7 @@ If accepted, `hydra-acp` would land in the [ACP Registry](https://github.com/age
 
 ```json
 {
-  "id": "hydra",
+  "id": "hydra-acp",
   "name": "Hydra ACP",
   "version": "0.1.0",
   "description": "Multi-client session daemon. Spawn agents, attach over WSS, multiplex sessions across editors.",

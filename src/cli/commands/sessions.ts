@@ -31,7 +31,14 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
     process.stdout.write("No active sessions.\n");
     return;
   }
-  const rows = body.sessions.map((s) => ({
+  const sorted = body.sessions.slice().sort((a, b) => {
+    const liveDiff = (b.status === "live" ? 1 : 0) - (a.status === "live" ? 1 : 0);
+    if (liveDiff !== 0) {
+      return liveDiff;
+    }
+    return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+  });
+  const rows = sorted.map((s) => ({
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: s.upstreamSessionId ?? "-",
     status: (s.status ?? "live").toUpperCase(),

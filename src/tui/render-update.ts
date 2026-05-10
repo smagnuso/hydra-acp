@@ -161,7 +161,7 @@ function mapUserText(u: UpdateLike): RenderEvent | null {
   // already renders the same text (with sentBy attribution).
   const meta = u._meta;
   if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-    const hydra = (meta as Record<string, unknown>)["hydra"];
+    const hydra = (meta as Record<string, unknown>)["hydra-acp"];
     if (
       hydra &&
       typeof hydra === "object" &&

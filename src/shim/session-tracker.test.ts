@@ -18,7 +18,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_abc",
         _meta: {
-          "hydra": {
+          "hydra-acp": {
             upstreamSessionId: "u_xyz",
             agentId: "claude-code",
             cwd: "/work",
@@ -52,7 +52,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_named",
         _meta: {
-          "hydra": {
+          "hydra-acp": {
             upstreamSessionId: "u_x",
             agentId: "claude-code",
             cwd: "/work",
@@ -78,7 +78,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_abc",
         _meta: {
-          "hydra": {
+          "hydra-acp": {
             upstreamSessionId: "u_xyz",
             agentId: "claude-code",
             cwd: "/work",
@@ -155,7 +155,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_a",
         _meta: {
-          "hydra": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+          "hydra-acp": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
         },
       },
     });
@@ -243,7 +243,7 @@ describe("SessionTracker", () => {
       result: {
         sessionId: "sess_x",
         _meta: {
-          "hydra": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
+          "hydra-acp": { upstreamSessionId: "u", agentId: "a", cwd: "/w" },
         },
       },
     });

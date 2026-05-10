@@ -33,7 +33,7 @@ export function tokenFromUpgradeRequest(
   if (protoString) {
     for (const part of protoString.split(",")) {
       const trimmed = part.trim();
-      const prefix = "hydra-token.";
+      const prefix = "hydra-acp-token.";
       if (trimmed.startsWith(prefix)) {
         return trimmed.slice(prefix.length);
       }

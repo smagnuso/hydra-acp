@@ -301,7 +301,7 @@ export class Session {
           update: {
             sessionUpdate: "user_message_chunk",
             content: { type: "text", text },
-            _meta: { "hydra": { compatFor: "prompt_received" } },
+            _meta: { "hydra-acp": { compatFor: "prompt_received" } },
           },
         },
         client.clientId,
@@ -619,9 +619,9 @@ export class Session {
         continue;
       }
       const meta = update._meta as
-        | { "hydra"?: { synthetic?: boolean } }
+        | { "hydra-acp"?: { synthetic?: boolean } }
         | undefined;
-      if (meta?.["hydra"]?.synthetic) {
+      if (meta?.["hydra-acp"]?.synthetic) {
         continue;
       }
       const kind = update.sessionUpdate as string | undefined;
@@ -681,7 +681,7 @@ export class Session {
   // listen for title updates pick this up; older clients ignore unknown
   // fields harmlessly) and (b) drop a visible banner into the transcript
   // so users see the switch rather than just suddenly getting answers
-  // from a different agent. Both updates carry _meta.hydra.synthetic
+  // from a different agent. Both updates carry _meta["hydra-acp"].synthetic
   // so a future /hydra switch's transcript builder filters them out.
   private broadcastAgentSwitch(oldAgentId: string, newAgentId: string): void {
     this.recordAndBroadcast("session/update", {
@@ -689,7 +689,7 @@ export class Session {
       update: {
         sessionUpdate: "session_info_update",
         agentId: newAgentId,
-        _meta: { "hydra": { synthetic: true } },
+        _meta: { "hydra-acp": { synthetic: true } },
       },
     });
     this.recordAndBroadcast("session/update", {
@@ -700,7 +700,7 @@ export class Session {
           type: "text",
           text: `\n_(switched from \`${oldAgentId}\` to \`${newAgentId}\`)_\n`,
         },
-        _meta: { "hydra": { synthetic: true } },
+        _meta: { "hydra-acp": { synthetic: true } },
       },
     });
   }
@@ -713,7 +713,7 @@ export class Session {
     this.cancelIdleTimer();
     for (const client of this.clients.values()) {
       void client.connection
-        .notify("hydra/session_closed", { sessionId: this.sessionId })
+        .notify("hydra-acp/session_closed", { sessionId: this.sessionId })
         .catch(() => undefined);
     }
     this.clients.clear();

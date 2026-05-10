@@ -869,7 +869,7 @@ async function openWs(config: HydraConfig): Promise<WebSocket> {
   const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
   const ws = new WebSocket(url, [
     "acp.v1",
-    `hydra-token.${config.daemon.authToken}`,
+    `hydra-acp-token.${config.daemon.authToken}`,
   ]);
   await once(ws, "open");
   return ws;
