@@ -58,6 +58,8 @@ export async function runShim(opts: ShimOptions): Promise<void> {
     void downstream.send(msg);
   });
 
+  const namingState = { name: process.env.ACP_HYDRA_NAME, used: false };
+
   downstream.onMessage((msg) => {
     tracker.observeFromClient(msg);
     if (isSessionNewRequest(msg)) {
@@ -65,10 +67,16 @@ export async function runShim(opts: ShimOptions): Promise<void> {
         void upstream.send(buildAttachFromNew(msg, opts.sessionId, opts.role));
         return;
       }
+      let outgoing = msg;
       if (opts.agentId) {
-        void upstream.send(rewriteSessionNewWithAgent(msg, opts.agentId));
-        return;
+        outgoing = rewriteSessionNewWithAgent(outgoing, opts.agentId);
       }
+      if (namingState.name && !namingState.used) {
+        outgoing = injectSessionName(outgoing, namingState.name);
+        namingState.used = true;
+      }
+      void upstream.send(outgoing);
+      return;
     }
     void upstream.send(msg);
   });
@@ -177,6 +185,14 @@ async function replayAttach(
   stream: ResilientWsStream,
   ctx: ResumeContext,
 ): Promise<void> {
+  const resumeHints: Record<string, unknown> = {
+    upstreamSessionId: ctx.upstreamSessionId,
+    agentId: ctx.agentId,
+    cwd: ctx.cwd,
+  };
+  if (ctx.title !== undefined) {
+    resumeHints.title = ctx.title;
+  }
   const request: JsonRpcRequest = {
     jsonrpc: "2.0",
     id: `resume-${ctx.sessionId}-${Date.now()}`,
@@ -187,11 +203,7 @@ async function replayAttach(
       historyPolicy: "pending_only",
       _meta: {
         "acp-hydra": {
-          resume: {
-            upstreamSessionId: ctx.upstreamSessionId,
-            agentId: ctx.agentId,
-            cwd: ctx.cwd,
-          },
+          resume: resumeHints,
         },
       },
     },
@@ -239,6 +251,29 @@ function rewriteSessionNewWithAgent(
   return {
     ...msg,
     params: { ...params, agentId },
+  };
+}
+
+function injectSessionName(
+  msg: JsonRpcRequest,
+  name: string,
+): JsonRpcRequest {
+  const params = (msg.params ?? {}) as Record<string, unknown>;
+  const existingMeta = (params._meta ?? {}) as Record<string, unknown>;
+  const existingHydra =
+    (existingMeta["acp-hydra"] as Record<string, unknown> | undefined) ?? {};
+  return {
+    ...msg,
+    params: {
+      ...params,
+      _meta: {
+        ...existingMeta,
+        "acp-hydra": {
+          ...existingHydra,
+          name,
+        },
+      },
+    },
   };
 }
 

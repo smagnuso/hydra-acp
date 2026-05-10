@@ -80,10 +80,14 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("session/new", async (raw) => {
       const params = SessionNewParams.parse(raw);
+      const hydraMeta = extractHydraMeta(
+        (raw as { _meta?: Record<string, unknown> } | undefined)?._meta,
+      );
       const session = await deps.manager.create({
         cwd: params.cwd,
         agentId: params.agentId ?? deps.defaultAgent,
         mcpServers: params.mcpServers,
+        title: hydraMeta.name,
       });
       const client = bindClientToSession(connection, session, "controller", state);
       session.attach(client, "full");
@@ -114,6 +118,7 @@ export function registerAcpWsEndpoint(
           upstreamSessionId: hydraHints.upstreamSessionId,
           agentId: hydraHints.agentId,
           cwd: hydraHints.cwd,
+          title: hydraHints.title,
         });
       }
       const client = bindClientToSession(
@@ -193,11 +198,15 @@ export function registerAcpWsEndpoint(
 }
 
 function buildResponseMeta(session: Session): Record<string, unknown> {
-  return mergeMeta(session.agentMeta, {
+  const ours: Record<string, unknown> = {
     upstreamSessionId: session.upstreamSessionId,
     agentId: session.agentId,
     cwd: session.cwd,
-  });
+  };
+  if (session.title !== undefined) {
+    ours.name = session.title;
+  }
+  return mergeMeta(session.agentMeta, ours);
 }
 
 function buildInitializeResult(): InitializeResult {

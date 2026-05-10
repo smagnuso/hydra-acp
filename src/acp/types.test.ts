@@ -22,12 +22,14 @@ describe("extractHydraMeta", () => {
           upstreamSessionId: "u_x",
           agentId: "claude-code",
           cwd: "/work",
+          name: "MyBuffer",
         },
       }),
     ).toEqual({
       upstreamSessionId: "u_x",
       agentId: "claude-code",
       cwd: "/work",
+      name: "MyBuffer",
     });
   });
 

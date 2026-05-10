@@ -196,6 +196,16 @@ When the editor sends `session/new`, the shim rewrites the params to `{ ..., age
 
 If both `launch <agent-id>` and `--session-id` are given, `--session-id` wins (attach mode); the agent ID is ignored because the agent process is already running.
 
+### Naming sessions from the editor
+
+Set `ACP_HYDRA_NAME` in the environment when spawning the shim and the first `session/new` from that shim is labeled with the given name. The label flows through `_meta["acp-hydra"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `acp-hydra sessions`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
+
+Example for an editor that maps a buffer name to the env var:
+
+```text
+ACP_HYDRA_NAME="$BUFFER_NAME" acp-hydra launch claude-code
+```
+
 ## Config
 
 `~/.acp-hydra/config.json`:

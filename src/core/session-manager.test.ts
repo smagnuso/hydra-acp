@@ -172,6 +172,31 @@ describe("SessionManager.resurrect", () => {
     expect(session.agentMeta).toEqual({ "agent-vendor": { sequence: 7 } });
   });
 
+  it("propagates title onto the resurrected session and into list()", async () => {
+    const titledMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({});
+        return m.agent;
+      },
+    );
+    const session = await titledMgr.resurrect({
+      hydraSessionId: "sess_titled",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: "/w",
+      title: "feature-X",
+    });
+    expect(session.title).toBe("feature-X");
+    const entries = titledMgr.list();
+    expect(entries[0]?.title).toBe("feature-X");
+  });
+
   it("rejects when the agent ID is not in the registry", async () => {
     await expect(
       manager.resurrect({

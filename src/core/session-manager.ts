@@ -8,6 +8,7 @@ export interface CreateSessionParams {
   cwd: string;
   agentId: string;
   mcpServers?: unknown[];
+  title?: string;
 }
 
 export interface ResurrectParams {
@@ -15,6 +16,7 @@ export interface ResurrectParams {
   upstreamSessionId: string;
   agentId: string;
   cwd: string;
+  title?: string;
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -67,6 +69,7 @@ export class SessionManager {
       agent,
       upstreamSessionId: newResult.sessionId,
       agentMeta: newResult._meta,
+      title: params.title,
     });
     session.onClose(() => {
       this.sessions.delete(session.sessionId);
@@ -151,6 +154,7 @@ export class SessionManager {
       agent,
       upstreamSessionId: params.upstreamSessionId,
       agentMeta: loadResult?._meta,
+      title: params.title,
     });
     session.onClose(() => {
       this.sessions.delete(session.sessionId);

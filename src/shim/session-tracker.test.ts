@@ -38,6 +38,32 @@ describe("SessionTracker", () => {
     ]);
   });
 
+  it("captures title from response meta when provided", () => {
+    const tracker = new SessionTracker();
+    tracker.observeFromClient({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "session/new",
+      params: { cwd: "/work" },
+    });
+    tracker.observeFromServer({
+      jsonrpc: "2.0",
+      id: 11,
+      result: {
+        sessionId: "sess_named",
+        _meta: {
+          "acp-hydra": {
+            upstreamSessionId: "u_x",
+            agentId: "claude-code",
+            cwd: "/work",
+            name: "feature-X",
+          },
+        },
+      },
+    });
+    expect(tracker.list()[0]?.title).toBe("feature-X");
+  });
+
   it("captures observer role from session/attach", () => {
     const tracker = new SessionTracker();
     tracker.observeFromClient({
