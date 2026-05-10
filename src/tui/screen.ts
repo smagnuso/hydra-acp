@@ -78,6 +78,7 @@ export class Screen {
   private header: HeaderState = { agent: "?", cwd: "?", sessionId: "?" };
   private resizeHandler: () => void;
   private keyHandler: (name: string, _matches: string[], data: { isCharacter?: boolean }) => void;
+  private mouseHandler: (name: string, data: unknown) => void;
   private started = false;
 
   constructor(opts: ScreenOptions) {
@@ -86,6 +87,7 @@ export class Screen {
     this.onKey = opts.onKey;
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
+    this.mouseHandler = (name) => this.handleMouse(name);
   }
 
   start(): void {
@@ -100,6 +102,7 @@ export class Screen {
     this.term.grabInput({ mouse: "button" });
     this.term.hideCursor(false);
     this.term.on("key", this.keyHandler);
+    this.term.on("mouse", this.mouseHandler);
     this.term.on("resize", this.resizeHandler);
     this.repaint();
   }
@@ -110,6 +113,7 @@ export class Screen {
     }
     this.started = false;
     this.term.off("key", this.keyHandler);
+    this.term.off("mouse", this.mouseHandler);
     this.term.off("resize", this.resizeHandler);
     this.term.grabInput(false);
     this.term.hideCursor(false);
@@ -282,16 +286,8 @@ export class Screen {
       this.onKey([{ type: "char", ch: name }]);
       return;
     }
-    // Scrollback navigation — handled in the screen so it doesn't reach the
-    // dispatcher (PgUp/PgDn aren't text-editing in our buffer model).
-    if (name === "MOUSE_WHEEL_UP") {
-      this.scrollBy(3);
-      return;
-    }
-    if (name === "MOUSE_WHEEL_DOWN") {
-      this.scrollBy(-3);
-      return;
-    }
+    // Keyboard scroll-back navigation. Mouse wheel is handled separately
+    // via the "mouse" event channel — see handleMouse.
     if (name === "PAGE_UP") {
       this.scrollBy(this.scrollPageSize());
       return;
@@ -303,6 +299,20 @@ export class Screen {
     const mapped = mapKeyName(name);
     if (mapped) {
       this.onKey([{ type: "key", name: mapped }]);
+    }
+  }
+
+  private handleMouse(name: string): void {
+    // terminal-kit emits MOUSE_WHEEL_{UP,DOWN} (and MOUSE_LEFT_BUTTON_*,
+    // etc.) on the "mouse" event channel, not "key", when grabInput's
+    // mouse: "button" is set.
+    if (name === "MOUSE_WHEEL_UP") {
+      this.scrollBy(3);
+      return;
+    }
+    if (name === "MOUSE_WHEEL_DOWN") {
+      this.scrollBy(-3);
+      return;
     }
   }
 
