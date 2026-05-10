@@ -121,6 +121,21 @@ function mapAgentThought(u: UpdateLike): RenderEvent | null {
 }
 
 function mapUserText(u: UpdateLike): RenderEvent | null {
+  // Hydra broadcasts a compat user_message_chunk alongside prompt_received
+  // for clients that don't yet implement RFD #533. Skip it — prompt_received
+  // already renders the same text (with sentBy attribution).
+  const meta = u._meta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    const hydra = (meta as Record<string, unknown>)["acp-hydra"];
+    if (
+      hydra &&
+      typeof hydra === "object" &&
+      !Array.isArray(hydra) &&
+      (hydra as Record<string, unknown>).compatFor === "prompt_received"
+    ) {
+      return null;
+    }
+  }
   const text = extractContentText(u.content);
   if (text === null) {
     return null;

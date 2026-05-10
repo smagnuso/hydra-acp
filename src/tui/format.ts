@@ -85,9 +85,9 @@ function formatBlock(
   const out: FormattedLine[] = [];
   if (sentBy) {
     out.push({
-      prefix,
-      prefixStyle: prefixStyle ?? bodyStyle,
-      body: `(${sentBy})`,
+      prefix: "↳ ",
+      prefixStyle: "dim",
+      body: `from ${sentBy}`,
       bodyStyle: "dim",
     });
   }

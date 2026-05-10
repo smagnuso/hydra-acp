@@ -53,6 +53,16 @@ describe("mapUpdate", () => {
     ).toEqual({ kind: "user-text", text: "from user" });
   });
 
+  it("suppresses user_message_chunk that is a compat shim for prompt_received", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "user_message_chunk",
+        content: { type: "text", text: "duplicate" },
+        _meta: { "acp-hydra": { compatFor: "prompt_received" } },
+      }),
+    ).toBeNull();
+  });
+
   it("handles prompt_received with sentBy.name", () => {
     expect(
       mapUpdate({
