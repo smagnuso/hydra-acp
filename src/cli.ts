@@ -192,7 +192,7 @@ function printHelp(): void {
       "  acp-hydra extensions list                   List configured extensions and live state",
       "  acp-hydra extensions add <name> [opts]      Add an extension to config",
       "  acp-hydra extensions remove <name>          Remove an extension from config",
-      "  acp-hydra extensions start|stop|restart <n> Lifecycle on a running extension",
+      "  acp-hydra extensions start|stop|restart <n>|all  Lifecycle on one or all",
       "  acp-hydra extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  acp-hydra agents [list]                     List agents in the cached registry",
       "  acp-hydra agents refresh                    Force a registry re-fetch",

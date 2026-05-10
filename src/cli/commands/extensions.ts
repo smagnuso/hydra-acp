@@ -187,8 +187,14 @@ async function postLifecycle(
   verb: "start" | "stop" | "restart",
 ): Promise<void> {
   if (!name) {
-    process.stderr.write(`Usage: acp-hydra extensions ${verb} <name>\n`);
+    process.stderr.write(
+      `Usage: acp-hydra extensions ${verb} <name|all>\n`,
+    );
     process.exit(2);
+    return;
+  }
+  if (name === "all") {
+    await postLifecycleAll(verb);
     return;
   }
   const config = await loadConfig();
@@ -223,6 +229,83 @@ async function postLifecycle(
   const info = (await r.json()) as ExtensionInfo;
   const pid = info.pid != null ? ` pid=${info.pid}` : "";
   process.stdout.write(`${name}: ${info.status}${pid}\n`);
+}
+
+async function postLifecycleAll(
+  verb: "start" | "stop" | "restart",
+): Promise<void> {
+  const config = await loadConfig();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const auth = { Authorization: `Bearer ${config.daemon.authToken}` };
+
+  let listBody: { extensions: ExtensionInfo[] };
+  try {
+    const r = await fetch(`${baseUrl}/v1/extensions`, { headers: auth });
+    if (!r.ok) {
+      process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
+      process.exit(1);
+    }
+    listBody = (await r.json()) as { extensions: ExtensionInfo[] };
+  } catch (err) {
+    process.stderr.write(
+      `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
+    );
+    process.exit(1);
+    return;
+  }
+
+  // Filter by what makes sense for each verb. start touches enabled-but-not-running;
+  // stop and restart touch only currently-running extensions.
+  const targets = listBody.extensions.filter((e) => {
+    if (verb === "start") {
+      return e.enabled && e.status !== "running";
+    }
+    return e.status === "running";
+  });
+
+  if (targets.length === 0) {
+    const reason =
+      verb === "start"
+        ? "no enabled extensions are stopped"
+        : "no extensions are running";
+    process.stdout.write(`Nothing to ${verb}: ${reason}.\n`);
+    return;
+  }
+
+  let failed = 0;
+  for (const ext of targets) {
+    try {
+      const r = await fetch(
+        `${baseUrl}/v1/extensions/${encodeURIComponent(ext.name)}/${verb}`,
+        { method: "POST", headers: auth },
+      );
+      if (!r.ok) {
+        let detail = "";
+        try {
+          const body = (await r.json()) as { error?: string };
+          if (body.error) {
+            detail = `: ${body.error}`;
+          }
+        } catch {
+          void 0;
+        }
+        process.stdout.write(`${ext.name}: ERROR HTTP ${r.status}${detail}\n`);
+        failed += 1;
+        continue;
+      }
+      const info = (await r.json()) as ExtensionInfo;
+      const pid = info.pid != null ? ` pid=${info.pid}` : "";
+      process.stdout.write(`${ext.name}: ${info.status}${pid}\n`);
+    } catch (err) {
+      process.stdout.write(
+        `${ext.name}: ERROR ${(err as Error).message}\n`,
+      );
+      failed += 1;
+    }
+  }
+  if (failed > 0) {
+    process.exit(1);
+  }
 }
 
 export async function runExtensionsLogs(
