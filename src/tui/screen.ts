@@ -48,6 +48,8 @@ export class Screen {
   private streamingActive = false;
   private lastPromptRows = 0;
   private queuedTexts: string[] = [];
+  private repaintPaused = 0;
+  private repaintPending = false;
   private banner: BannerState = {
     status: "ready",
     planMode: false,
@@ -172,6 +174,24 @@ export class Screen {
     this.repaint();
   }
 
+  // While paused, append* methods buffer state but don't repaint. Calls are
+  // counter-based so they nest safely. Resume triggers exactly one repaint
+  // if any was requested while paused.
+  pauseRepaint(): void {
+    this.repaintPaused += 1;
+  }
+
+  resumeRepaint(): void {
+    if (this.repaintPaused === 0) {
+      return;
+    }
+    this.repaintPaused -= 1;
+    if (this.repaintPaused === 0 && this.repaintPending) {
+      this.repaintPending = false;
+      this.repaint();
+    }
+  }
+
   setQueuedPrompts(texts: string[]): void {
     this.queuedTexts = [...texts];
     this.repaint();
@@ -219,6 +239,10 @@ export class Screen {
   }
 
   private repaint(): void {
+    if (this.repaintPaused > 0) {
+      this.repaintPending = true;
+      return;
+    }
     const w = this.term.width;
     const h = this.term.height;
     if (w < 20 || h < 8) {

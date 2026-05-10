@@ -378,11 +378,18 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   };
 
   // Drain anything that arrived during the attach handshake (history replay,
-  // early usage updates, etc.) into the freshly initialized screen.
+  // early usage updates, etc.) into the freshly initialized screen. Pause
+  // repaints while draining so a long session doesn't visibly scroll
+  // chunk-by-chunk; one repaint at the end shows the final state.
   const buffered = bufferedEvents;
   bufferedEvents = [];
-  for (const event of buffered) {
-    applyRenderEvent(event);
+  screen.pauseRepaint();
+  try {
+    for (const event of buffered) {
+      applyRenderEvent(event);
+    }
+  } finally {
+    screen.resumeRepaint();
   }
 
   conn.onClose((err) => {
