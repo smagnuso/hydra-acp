@@ -40,12 +40,18 @@ export interface PermissionPromptSpec {
   selectedIndex: number;
 }
 
+export interface CompletionItem {
+  name: string;
+  description?: string;
+}
+
 const HEADER_ROWS = 2;
 const BANNER_ROWS = 1;
 const SEPARATOR_ROWS = 1;
 const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
+const MAX_COMPLETION_ROWS = 6;
 
 export class Screen {
   private term: Terminal;
@@ -58,6 +64,7 @@ export class Screen {
   private repaintPaused = 0;
   private repaintPending = false;
   private permissionPrompt: PermissionPromptSpec | null = null;
+  private completions: CompletionItem[] = [];
   private banner: BannerState = {
     status: "ready",
     planMode: false,
@@ -212,6 +219,27 @@ export class Screen {
     this.repaint();
   }
 
+  // Slash-command completion list shown directly above the separator. App
+  // calls this after each keystroke; pass [] to dismiss. Suppressed when
+  // the permission modal is active (the modal owns the prompt area).
+  setCompletions(items: CompletionItem[]): void {
+    const same =
+      items.length === this.completions.length &&
+      items.every((c, i) => {
+        const prev = this.completions[i];
+        return (
+          prev !== undefined &&
+          prev.name === c.name &&
+          prev.description === c.description
+        );
+      });
+    if (same) {
+      return;
+    }
+    this.completions = [...items];
+    this.repaint();
+  }
+
   // Adds a blank spacer line to the scrollback, but only if scrollback is
   // non-empty and the last line isn't already a spacer. Idempotent so callers
   // can request it freely at turn boundaries.
@@ -267,6 +295,7 @@ export class Screen {
     this.drawHeader();
     this.drawSeparator(HEADER_ROWS);
     this.drawScrollback();
+    this.drawCompletionZone();
     this.drawQueuedZone();
     const promptRows = this.promptRows();
     // Separator goes on the row directly above the first prompt row.
@@ -313,7 +342,8 @@ export class Screen {
       this.promptRows() -
       BANNER_ROWS -
       SEPARATOR_ROWS -
-      this.queuedRows();
+      this.queuedRows() -
+      this.completionRows();
     const visibleRows = bottom - top + 1;
     if (visibleRows <= 0) {
       return;
@@ -333,6 +363,59 @@ export class Screen {
 
   private queuedRows(): number {
     return Math.min(MAX_QUEUED_ROWS, this.queuedTexts.length);
+  }
+
+  private completionRows(): number {
+    if (this.permissionPrompt) {
+      // Completions are pointless when the prompt area is taken over by
+      // the permission modal — the user can't be typing into it.
+      return 0;
+    }
+    return Math.min(MAX_COMPLETION_ROWS, this.completions.length);
+  }
+
+  private drawCompletionZone(): void {
+    const rows = this.completionRows();
+    if (rows === 0) {
+      return;
+    }
+    const w = this.term.width;
+    const promptRows = this.promptRows();
+    const separatorRow = this.term.height - promptRows - BANNER_ROWS;
+    const queuedRows = this.queuedRows();
+    // Completion sits above queued (queued is closer to the separator).
+    const completionBottom = separatorRow - 1 - queuedRows;
+    const completionTop = completionBottom - rows + 1;
+    // Width of the longest command name so descriptions line up.
+    let nameWidth = 0;
+    for (const item of this.completions.slice(0, rows)) {
+      if (item.name.length > nameWidth) {
+        nameWidth = item.name.length;
+      }
+    }
+    for (let i = 0; i < rows; i++) {
+      const row = completionTop + i;
+      this.term.moveTo(1, row).eraseLineAfter();
+      const item = this.completions[i];
+      if (!item) {
+        continue;
+      }
+      const isLast = i === rows - 1 && this.completions.length > MAX_COMPLETION_ROWS;
+      if (isLast) {
+        this.term.dim(
+          `  + ${this.completions.length - MAX_COMPLETION_ROWS + 1} more match(es)`,
+        );
+        continue;
+      }
+      const namePadded = item.name.padEnd(nameWidth);
+      const desc = item.description ?? "";
+      const remaining = w - namePadded.length - 4;
+      const truncated = remaining > 0 ? truncate(desc, remaining) : "";
+      this.term("  ").brightCyan(namePadded);
+      if (truncated.length > 0) {
+        this.term("  ").dim(truncated);
+      }
+    }
   }
 
   private drawQueuedZone(): void {

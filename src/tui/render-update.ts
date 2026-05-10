@@ -29,7 +29,13 @@ export type RenderEvent =
       costAmount?: number;
       costCurrency?: string;
     }
+  | { kind: "available-commands"; commands: AvailableCommand[] }
   | { kind: "unknown"; sessionUpdate: string; raw: unknown };
+
+export interface AvailableCommand {
+  name: string;
+  description?: string;
+}
 
 export interface PlanEntry {
   content: string;
@@ -78,9 +84,34 @@ export function mapUpdate(update: unknown): RenderEvent | null {
       return mapTurnComplete(u);
     case "usage_update":
       return mapUsage(u);
+    case "available_commands_update":
+      return mapAvailableCommands(u);
     default:
       return { kind: "unknown", sessionUpdate: tag, raw: update };
   }
+}
+
+function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
+  const list = u.availableCommands ?? u.commands;
+  if (!Array.isArray(list)) {
+    return null;
+  }
+  const out: AvailableCommand[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const c = raw as Record<string, unknown>;
+    if (typeof c.name !== "string" || c.name.length === 0) {
+      continue;
+    }
+    const cmd: AvailableCommand = { name: c.name };
+    if (typeof c.description === "string") {
+      cmd.description = c.description;
+    }
+    out.push(cmd);
+  }
+  return { kind: "available-commands", commands: out };
 }
 
 function mapUsage(u: UpdateLike): RenderEvent {

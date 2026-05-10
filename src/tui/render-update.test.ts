@@ -205,6 +205,26 @@ describe("mapUpdate", () => {
     ).toEqual({ kind: "usage-update", used: 100 });
   });
 
+  it("handles available_commands_update", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "available_commands_update",
+        availableCommands: [
+          { name: "/init", description: "Initialize" },
+          { name: "/clear" },
+          { description: "no name — skipped" },
+          "garbage",
+        ],
+      }),
+    ).toEqual({
+      kind: "available-commands",
+      commands: [
+        { name: "/init", description: "Initialize" },
+        { name: "/clear" },
+      ],
+    });
+  });
+
   it("returns unknown for unrecognized sessionUpdate", () => {
     expect(
       mapUpdate({ sessionUpdate: "config_option_update", foo: "bar" }),

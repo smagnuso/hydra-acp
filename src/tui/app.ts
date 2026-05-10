@@ -23,7 +23,11 @@ import { listSessions, pickMostRecent } from "./discovery.js";
 import { pickSession, type PickerResult } from "./picker.js";
 import { Screen } from "./screen.js";
 import { InputDispatcher, type InputEffect, type KeyEvent } from "./input.js";
-import { mapUpdate, type RenderEvent } from "./render-update.js";
+import {
+  mapUpdate,
+  type AvailableCommand,
+  type RenderEvent,
+} from "./render-update.js";
 import { formatEvent, type FormattedLine } from "./format.js";
 
 export interface TuiOptions {
@@ -240,14 +244,116 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         if (pendingPermission && tryHandlePermissionKey(ev)) {
           continue;
         }
+        if (tryHandleCompletionKey(ev)) {
+          continue;
+        }
         const effects = dispatcher.feed(ev);
         for (const effect of effects) {
           handleEffect(effect);
         }
       }
+      refreshCompletions();
       screen.refreshPrompt();
     },
   });
+
+  // Slash-command completion. Built-ins are always present; the agent
+  // contributes more via available_commands_update.
+  const builtinCommands: AvailableCommand[] = [
+    { name: "/help", description: "Show TUI built-in commands" },
+    { name: "/quit", description: "Exit the TUI" },
+    { name: "/clear", description: "Clear scrollback" },
+    { name: "/sessions", description: "List sessions" },
+  ];
+  let agentCommands: AvailableCommand[] = [];
+
+  const allCommands = (): AvailableCommand[] => {
+    const seen = new Set<string>();
+    const out: AvailableCommand[] = [];
+    for (const c of [...builtinCommands, ...agentCommands]) {
+      if (seen.has(c.name)) {
+        continue;
+      }
+      seen.add(c.name);
+      out.push(c);
+    }
+    return out;
+  };
+
+  const currentCompletions = (): AvailableCommand[] => {
+    const buf = dispatcher.state().buffer;
+    const firstLine = buf[0] ?? "";
+    if (!firstLine.startsWith("/")) {
+      return [];
+    }
+    const space = firstLine.indexOf(" ");
+    const prefix = space === -1 ? firstLine : firstLine.slice(0, space);
+    const matches = allCommands().filter((c) => c.name.startsWith(prefix));
+    // If the user has typed an exact command name (no args yet), don't
+    // bother showing a single-element list — they're done picking.
+    if (
+      matches.length === 1 &&
+      matches[0]?.name === prefix &&
+      space === -1
+    ) {
+      return [];
+    }
+    return matches;
+  };
+
+  const refreshCompletions = (): void => {
+    screen.setCompletions(currentCompletions());
+  };
+
+  // Tab when completions are visible commits the first match; ESC dismisses
+  // the list. Other keys fall through.
+  const tryHandleCompletionKey = (ev: KeyEvent): boolean => {
+    if (ev.type !== "key") {
+      return false;
+    }
+    if (ev.name === "tab") {
+      const matches = currentCompletions();
+      const first = matches[0];
+      if (!first) {
+        return false;
+      }
+      // If multiple matches share a longer common prefix, prefer that;
+      // otherwise commit the first match outright (with a trailing space
+      // ready for an argument).
+      const commonPrefix = longestCommonPrefix(matches.map((m) => m.name));
+      const buf = dispatcher.state().buffer;
+      const firstLine = buf[0] ?? "";
+      const space = firstLine.indexOf(" ");
+      const typedPrefix = space === -1 ? firstLine : firstLine.slice(0, space);
+      const tail = space === -1 ? "" : firstLine.slice(space);
+      let next = commonPrefix;
+      if (commonPrefix.length <= typedPrefix.length || matches.length === 1) {
+        next = first.name + (tail.startsWith(" ") ? "" : " ");
+      }
+      dispatcher.replaceFirstLine(next + tail);
+      return true;
+    }
+    return false;
+  };
+
+  function longestCommonPrefix(names: string[]): string {
+    if (names.length === 0) {
+      return "";
+    }
+    let prefix = names[0] ?? "";
+    for (let i = 1; i < names.length; i++) {
+      const n = names[i] ?? "";
+      let j = 0;
+      while (j < prefix.length && j < n.length && prefix[j] === n[j]) {
+        j += 1;
+      }
+      prefix = prefix.slice(0, j);
+      if (prefix.length === 0) {
+        break;
+      }
+    }
+    return prefix;
+  }
 
   // While a permission is pending the modal owns input: arrow keys navigate,
   // Enter submits, Esc cancels, 1–9 are quick-pick shortcuts. All other
@@ -369,6 +475,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   };
 
   const enqueuePrompt = (text: string, planMode: boolean): void => {
+    if (handleBuiltinCommand(text)) {
+      return;
+    }
     history = appendEntry(history, text);
     dispatcher.setHistory(history);
     saveHistory(historyFile, history).catch(() => undefined);
@@ -376,6 +485,64 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     refreshQueueDisplay();
     if (!workerActive) {
       void runQueueWorker();
+    }
+  };
+
+  // Returns true if the input was a TUI built-in slash command and was
+  // handled locally; the caller should skip enqueueing / sending it.
+  const handleBuiltinCommand = (text: string): boolean => {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("/")) {
+      return false;
+    }
+    const space = trimmed.indexOf(" ");
+    const cmd = space === -1 ? trimmed : trimmed.slice(0, space);
+    switch (cmd) {
+      case "/quit":
+      case "/exit":
+        stop(0);
+        return true;
+      case "/clear":
+        screen.clearScrollback();
+        return true;
+      case "/help": {
+        const lines: FormattedLine[] = [
+          { prefix: "  ", body: "Built-in commands:", bodyStyle: "system" },
+        ];
+        for (const c of builtinCommands) {
+          lines.push({
+            prefix: "  ",
+            body: `  ${c.name.padEnd(12)} ${c.description ?? ""}`,
+            bodyStyle: "info",
+          });
+        }
+        if (agentCommands.length > 0) {
+          lines.push({ prefix: "  ", body: "Agent commands:", bodyStyle: "system" });
+          for (const c of agentCommands) {
+            lines.push({
+              prefix: "  ",
+              body: `  ${c.name.padEnd(12)} ${c.description ?? ""}`,
+              bodyStyle: "info",
+            });
+          }
+        }
+        screen.appendLines(lines);
+        return true;
+      }
+      case "/sessions":
+        // Defer to a future implementation — for now, hint that the daemon
+        // CLI provides this view.
+        screen.appendLines([
+          {
+            prefix: "  ",
+            body: "Run `acp-hydra sessions` (or `hydra sessions`) for the full list.",
+            bodyStyle: "info",
+          },
+        ]);
+        return true;
+      default:
+        // Not a built-in — fall through so the agent can handle it.
+        return false;
     }
   };
 
@@ -456,6 +623,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const usage: { used?: number; size?: number; costAmount?: number; costCurrency?: string } = {};
 
   applyRenderEvent = (event: RenderEvent): void => {
+    if (event.kind === "available-commands") {
+      agentCommands = event.commands;
+      refreshCompletions();
+      return;
+    }
     if (event.kind === "usage-update") {
       let changed = false;
       if (event.used !== undefined && usage.used !== event.used) {

@@ -86,6 +86,16 @@ export class InputDispatcher {
     this.savedDraft = null;
   }
 
+  // Replace the contents of the first row, leaving subsequent rows alone.
+  // Used by slash-command completion: the partial /foo gets swapped for the
+  // matched command name. Cursor moves to the end of the replacement.
+  replaceFirstLine(text: string): void {
+    this.buffer[0] = text;
+    if (this.row === 0) {
+      this.col = text.length;
+    }
+  }
+
   feed(event: KeyEvent): InputEffect[] {
     if (event.type === "char") {
       this.insertChar(event.ch);
