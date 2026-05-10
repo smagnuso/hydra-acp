@@ -227,15 +227,15 @@ describe("Session", () => {
           (m) =>
             "method" in m &&
             m.method === "session/update" &&
-            (m.params as { update?: { type?: string } } | undefined)?.update
-              ?.type === "prompt_received",
+            (m.params as { update?: { sessionUpdate?: string } } | undefined)
+              ?.update?.sessionUpdate === "prompt_received",
         );
 
       expect(findPromptReceived(bobStream.sent)).toMatchObject({
         params: {
           sessionId: "hydra_session_S",
           update: {
-            type: "prompt_received",
+            sessionUpdate: "prompt_received",
             prompt: [{ type: "text", text: "hello" }],
             sentBy: {
               clientId: alice.clientId,
@@ -277,13 +277,13 @@ describe("Session", () => {
         (m) =>
           "method" in m &&
           m.method === "session/update" &&
-          (m.params as { update?: { type?: string } } | undefined)?.update
-            ?.type === "turn_complete",
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "turn_complete",
       );
       expect(turnComplete).toMatchObject({
         params: {
           sessionId: "hydra_session_T",
-          update: { type: "turn_complete", stopReason: "end_turn" },
+          update: { sessionUpdate: "turn_complete", stopReason: "end_turn" },
         },
       });
     });
@@ -303,8 +303,10 @@ describe("Session", () => {
       const { client: late } = makeClient();
       const replay = session.attach(late, "full");
       const types = replay.map((n) => {
-        const params = n.params as { update?: { type?: string } } | undefined;
-        return params?.update?.type;
+        const params = n.params as
+          | { update?: { sessionUpdate?: string } }
+          | undefined;
+        return params?.update?.sessionUpdate;
       });
       expect(types).toEqual(
         expect.arrayContaining(["prompt_received", "turn_complete"]),

@@ -157,7 +157,7 @@ export class Session {
       {
         sessionId: this.sessionId,
         update: {
-          type: "prompt_received",
+          sessionUpdate: "prompt_received",
           prompt: promptParams.prompt,
           sentBy,
         },
@@ -177,7 +177,9 @@ export class Session {
       typeof (response as { stopReason: unknown }).stopReason === "string"
         ? (response as { stopReason: string }).stopReason
         : undefined;
-    const update: Record<string, unknown> = { type: "turn_complete" };
+    const update: Record<string, unknown> = {
+      sessionUpdate: "turn_complete",
+    };
     if (stopReason !== undefined) {
       update.stopReason = stopReason;
     }
