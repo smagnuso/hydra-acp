@@ -7,7 +7,7 @@ import { WebSocket } from "ws";
 import { startDaemon, type DaemonHandle } from "./server.js";
 import type { HydraConfig } from "../core/config.js";
 
-const TEST_TOKEN = "hyd_0123456789abcdef0123456789abcdef";
+const TEST_TOKEN = "hydra_token_0123456789abcdef0123456789abcdef";
 
 function testConfig(): HydraConfig {
   return {
@@ -76,7 +76,7 @@ describe("startDaemon", () => {
 
     it("rejects /v1/sessions with the wrong bearer token", async () => {
       const r = await fetch(`${baseUrl}/v1/sessions`, {
-        headers: { Authorization: "Bearer hyd_wrong" },
+        headers: { Authorization: "Bearer hydra_token_wrong" },
       });
       expect(r.status).toBe(403);
     });

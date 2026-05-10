@@ -33,7 +33,7 @@ function fakeConfig(): HydraConfig {
     daemon: {
       host: "127.0.0.1",
       port: 8765,
-      authToken: "hyd_xxx",
+      authToken: "hydra_token_xxx",
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
       sessionRecentMinutes: 30,
