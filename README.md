@@ -23,7 +23,7 @@
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⠉⠛⠙⠋⠉⠁⠀⠀⠀⠀⠀⠁⠀⠀⠋⠙⠉⠟⠉⠀⠈⠈⠁⠉
 ```
 
-> **Status: experimental.** A multi-client session daemon for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/). Many heads, one body: multiple clients (editors, dashboards, Slack bridges) attach to one daemon that manages the real ACP agent processes underneath. Every attached client sees the same live session in real time.
+> **Status: experimental.** A multi-client session daemon for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/). Many heads, one body, many feet: multiple clients (editors, dashboards, Slack bridges) attach to one daemon that manages the real ACP agent processes underneath. Every attached client sees the same live session in real time.
 
 ## What it is
 
@@ -61,19 +61,21 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 ## Architecture
 
 ```
-                        any ACP client
-                            |
-                       stdio (spawn)
-                            |
-                   hydra-acp (shim mode)
-                            |
-                      WSS / HTTP
-                            |
-                    hydra-acp daemon
-                            |
+            editor       browser        Slack       ← clients (the heads)
+              │             │             │
+            stdio           │             │
+              │             │             │
+       hydra-acp shim       │             │
+              │             │             │
+              └─────────────┼─────────────┘
+                            │
+                       WSS / HTTP
+                            │
+                    hydra-acp daemon                ← daemon (the body)
+                            │
               ┌─────────────┼─────────────┐
               │             │             │
-       ACP agent A      ACP agent B   ACP agent C   ← stdio child processes
+       ACP agent A      ACP agent B   ACP agent C   ← agents (the feet)
        (one per session, sourced from the ACP Registry)
 ```
 
