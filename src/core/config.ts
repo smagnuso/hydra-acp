@@ -18,7 +18,6 @@ const DaemonConfig = z.object({
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
   sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(30),
-  sessionRecentMinutes: z.number().int().nonnegative().default(30),
 });
 
 const RegistryConfig = z.object({
@@ -52,6 +51,10 @@ export const HydraConfig = z.object({
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.
   defaultCwd: z.string().default("~"),
+  // Cap on cold sessions shown in CLI `sessions` listing and the TUI
+  // picker. Live sessions are always included; cold are sorted by
+  // recency and truncated to this count. `--all` overrides in the CLI.
+  sessionListColdLimit: z.number().int().nonnegative().default(20),
   extensions: z.record(ExtensionName, ExtensionBody).default({}),
 });
 

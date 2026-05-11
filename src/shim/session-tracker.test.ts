@@ -90,6 +90,39 @@ describe("SessionTracker", () => {
     expect(tracker.list()[0]?.role).toBe("observer");
   });
 
+  it("captures resume context from session/load request + response", () => {
+    const tracker = new SessionTracker();
+    tracker.observeFromClient({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "session/load",
+      params: { sessionId: "sess_resume", cwd: "/work" },
+    });
+    tracker.observeFromServer({
+      jsonrpc: "2.0",
+      id: 21,
+      result: {
+        sessionId: "sess_resume",
+        _meta: {
+          "hydra-acp": {
+            upstreamSessionId: "u_resumed",
+            agentId: "claude-acp",
+            cwd: "/work",
+          },
+        },
+      },
+    });
+    expect(tracker.list()).toEqual([
+      {
+        sessionId: "sess_resume",
+        upstreamSessionId: "u_resumed",
+        agentId: "claude-acp",
+        cwd: "/work",
+        role: "controller",
+      },
+    ]);
+  });
+
   it("ignores meta when the hydra namespace is missing", () => {
     const tracker = new SessionTracker();
     tracker.observeFromClient({

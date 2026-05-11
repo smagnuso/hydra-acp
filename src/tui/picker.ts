@@ -1,7 +1,8 @@
-// Pre-screen interactive picker. Lists every session the daemon knows about
-// using the same columns as `hydra-acp sessions`, plus a "+ New session"
-// entry at the bottom (the default cursor position). Lives outside the main
-// screen so it can run before fullscreen mode is engaged.
+// Pre-screen interactive picker. Lists every live session plus the most
+// recently-touched cold ones (capped at coldLimit) to keep the table
+// scannable when the on-disk history is deep, plus a "+ New session"
+// entry at the bottom (the default cursor position). Lives outside the
+// main screen so it can run before fullscreen mode is engaged.
 
 import type { Terminal } from "terminal-kit";
 import { stripHydraSessionPrefix } from "../core/session.js";
@@ -15,6 +16,8 @@ export type PickerResult =
 export interface PickOptions {
   cwd: string;
   sessions: DiscoveredSession[];
+  // Maximum cold sessions to render. Live sessions are always included.
+  coldLimit: number;
 }
 
 interface Row {
@@ -60,7 +63,11 @@ export async function pickSession(
     }
     return b.updatedAt.localeCompare(a.updatedAt);
   });
-  const rows = sorted.map(toRow);
+  const liveCount = sorted.filter((s) => s.status !== "cold").length;
+  const coldSlice = sorted.slice(liveCount, liveCount + opts.coldLimit);
+  const hiddenCold = sorted.length - liveCount - coldSlice.length;
+  const visible = [...sorted.slice(0, liveCount), ...coldSlice];
+  const rows = visible.map(toRow);
   const widths = computeWidths(rows);
   const newSessionLabel = `+ New session in ${opts.cwd}`;
 
@@ -69,6 +76,9 @@ export async function pickSession(
 
   term("\n");
   term.bold("Select a session")("\n");
+  if (hiddenCold > 0) {
+    term.dim(`(${hiddenCold} older cold session${hiddenCold === 1 ? "" : "s"} hidden; use \`hydra-acp sessions --all\` to view)\n`);
+  }
   term.dim(formatRow(HEADER, widths))("\n");
 
   // grabInput puts stdin in raw mode, so the kernel won't deliver SIGINT for
@@ -119,7 +129,7 @@ export async function pickSession(
   if (response.selectedIndex === items.length - 1) {
     return { kind: "new" };
   }
-  const session = sorted[response.selectedIndex];
+  const session = visible[response.selectedIndex];
   if (!session) {
     return { kind: "abort" };
   }

@@ -37,7 +37,6 @@ function fakeConfig(): HydraConfig {
       authToken: "hydra_token_xxx",
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
-      sessionRecentMinutes: 30,
     },
     registry: {
       url: "http://example.invalid/never",

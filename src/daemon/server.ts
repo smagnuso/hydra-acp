@@ -71,7 +71,6 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   const registry = new Registry(config);
   const manager = new SessionManager(registry, undefined, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
-    recentMinutes: config.daemon.sessionRecentMinutes,
   });
 
   const extensions = new ExtensionManager(extensionList(config));

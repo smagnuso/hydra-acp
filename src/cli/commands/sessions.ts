@@ -5,9 +5,6 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   const config = await loadConfig();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const url = new URL(`${baseUrl}/v1/sessions`);
-  if (opts.all) {
-    url.searchParams.set("all", "true");
-  }
   const response = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${config.daemon.authToken}` },
   });
@@ -38,7 +35,20 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
     }
     return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
   });
-  const rows = sorted.map((s) => ({
+  // Always keep every live session; cap cold at sessionListColdLimit (most
+  // recent first) unless --all is passed. Sort is live-first then
+  // recency, so cold entries are already contiguous at the tail.
+  let visible = sorted;
+  let truncated = 0;
+  if (!opts.all) {
+    const liveCount = sorted.filter((s) => s.status !== "cold").length;
+    const limit = config.sessionListColdLimit;
+    const coldSlice = sorted.slice(liveCount, liveCount + limit);
+    const hiddenCold = sorted.length - liveCount - coldSlice.length;
+    visible = [...sorted.slice(0, liveCount), ...coldSlice];
+    truncated = hiddenCold;
+  }
+  const rows = visible.map((s) => ({
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: s.upstreamSessionId ?? "-",
     status: (s.status ?? "live").toUpperCase(),
@@ -77,6 +87,11 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   process.stdout.write(formatRow(header) + "\n");
   for (const r of rows) {
     process.stdout.write(formatRow(r) + "\n");
+  }
+  if (truncated > 0) {
+    process.stdout.write(
+      `\n... ${truncated} more cold session${truncated === 1 ? "" : "s"} hidden. Use --all to show.\n`,
+    );
   }
 }
 

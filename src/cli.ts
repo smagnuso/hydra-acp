@@ -260,7 +260,7 @@ function printHelp(): void {
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
       "  hydra-acp daemon start|stop|restart|status",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
-      "  hydra-acp sessions [list] [--all]  List sessions (live + recent cold; --all for full disk view)",
+      "  hydra-acp sessions [list] [--all]  List sessions (live + 20 most-recent cold; --all for everything)",
       "  hydra-acp sessions kill <id>       Kill a session (live or cold)",
       "  hydra-acp extensions list                   List configured extensions and live state",
       "  hydra-acp extensions add <name> [opts]      Add an extension to config",

@@ -549,6 +549,7 @@ async function runSession(
     const choice: PickerResult = await pickSession(term, {
       cwd: resolvedCwd,
       sessions,
+      coldLimit: config.sessionListColdLimit,
     });
     if (choice.kind === "abort") {
       // Stay on the current session: outer loop will re-attach with the same
@@ -888,15 +889,19 @@ async function resolveSession(
       role: opts.role ?? "controller",
     };
   }
-  // Smart default: show the same table `hydra-acp sessions` produces (live
-  // sessions + recent cold within sessionRecentMinutes) and let the user
-  // pick. The picker defaults its cursor to "+ New session" so just pressing
-  // Enter creates a fresh one.
+  // Smart default: show every live session plus up to PICKER_COLD_LIMIT
+  // most-recently-touched cold ones so the list stays scannable even with
+  // a deep on-disk history. The picker defaults its cursor to
+  // "+ New session" so just pressing Enter creates a fresh one.
   const sessions = await listSessions(config);
   if (sessions.length === 0) {
     return newCtx(opts, cwd, config);
   }
-  const choice: PickerResult = await pickSession(term, { cwd, sessions });
+  const choice: PickerResult = await pickSession(term, {
+    cwd,
+    sessions,
+    coldLimit: config.sessionListColdLimit,
+  });
   if (choice.kind === "abort") {
     return null;
   }

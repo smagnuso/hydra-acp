@@ -26,7 +26,6 @@ export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
 
 export interface SessionManagerOptions {
   idleTimeoutMs?: number;
-  recentMinutes?: number;
 }
 
 export class SessionManager {
@@ -35,7 +34,6 @@ export class SessionManager {
   private spawner: AgentSpawner;
   private store: SessionStore;
   private idleTimeoutMs: number;
-  private recentMinutes: number;
 
   constructor(
     private registry: Registry,
@@ -46,7 +44,6 @@ export class SessionManager {
     this.spawner = spawner ?? ((opts) => AgentInstance.spawn(opts));
     this.store = store ?? new SessionStore();
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
-    this.recentMinutes = options.recentMinutes ?? 30;
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -297,9 +294,7 @@ export class SessionManager {
     return session;
   }
 
-  async list(
-    filter: { cwd?: string; all?: boolean } = {},
-  ): Promise<SessionListEntry[]> {
+  async list(filter: { cwd?: string } = {}): Promise<SessionListEntry[]> {
     const entries: SessionListEntry[] = [];
     const liveIds = new Set<string>();
     for (const session of this.sessions.values()) {
@@ -319,19 +314,11 @@ export class SessionManager {
       });
     }
     const records = await this.store.list().catch(() => []);
-    const cutoffMs =
-      !filter.all && this.recentMinutes > 0
-        ? Date.now() - this.recentMinutes * 60_000
-        : 0;
     for (const r of records) {
       if (liveIds.has(r.sessionId)) {
         continue;
       }
       if (filter.cwd && r.cwd !== filter.cwd) {
-        continue;
-      }
-      const ts = new Date(r.updatedAt).getTime();
-      if (cutoffMs > 0 && Number.isFinite(ts) && ts < cutoffMs) {
         continue;
       }
       entries.push({

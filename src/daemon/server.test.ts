@@ -17,7 +17,6 @@ function testConfig(): HydraConfig {
       authToken: TEST_TOKEN,
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
-      sessionRecentMinutes: 30,
     },
     registry: {
       url: "http://127.0.0.1:65535/never-reached",
@@ -394,7 +393,6 @@ describe("startDaemon — extensions REST lifecycle", () => {
         authToken: TEST_TOKEN,
         logLevel: "warn",
         sessionIdleTimeoutSeconds: 30,
-        sessionRecentMinutes: 30,
       },
       registry: {
         url: "http://127.0.0.1:65535/never-reached",

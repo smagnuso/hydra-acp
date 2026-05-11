@@ -25,9 +25,15 @@ interface PendingAttach {
   role: "controller" | "observer";
 }
 
+interface PendingLoad {
+  sessionId: string;
+  cwd: string;
+}
+
 type Pending =
   | { kind: "new"; data: PendingNew }
-  | { kind: "attach"; data: PendingAttach };
+  | { kind: "attach"; data: PendingAttach }
+  | { kind: "load"; data: PendingLoad };
 
 export interface PendingPermission {
   requestId: JsonRpcId;
@@ -64,6 +70,17 @@ export class SessionTracker {
       const role: "controller" | "observer" =
         roleRaw === "observer" ? "observer" : "controller";
       this.pending.set(msg.id, { kind: "attach", data: { sessionId, role } });
+      return;
+    }
+    // session/load (older) and session/resume (newer ACP draft) both
+    // bind the client to an existing session as a controller. Track
+    // them so a daemon restart's replayAttach loop can find them.
+    if (msg.method === "session/load" || msg.method === "session/resume") {
+      const params = (msg.params ?? {}) as Record<string, unknown>;
+      const sessionId =
+        typeof params.sessionId === "string" ? params.sessionId : "";
+      const cwd = typeof params.cwd === "string" ? params.cwd : "";
+      this.pending.set(msg.id, { kind: "load", data: { sessionId, cwd } });
     }
   }
 
@@ -105,8 +122,11 @@ export class SessionTracker {
     const hydraMeta = extractHydraMeta(meta);
     const upstreamSessionId = hydraMeta.upstreamSessionId;
     const agentId = hydraMeta.agentId;
-    const cwd =
-      hydraMeta.cwd ?? (pending.kind === "new" ? pending.data.cwd : "");
+    let pendingCwd = "";
+    if (pending.kind === "new" || pending.kind === "load") {
+      pendingCwd = pending.data.cwd;
+    }
+    const cwd = hydraMeta.cwd ?? pendingCwd;
     if (!upstreamSessionId || !agentId || !cwd) {
       return;
     }
