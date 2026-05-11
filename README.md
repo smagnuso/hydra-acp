@@ -372,7 +372,7 @@ hydra-acp extensions logs hydra-acp-slack --follow
 
 #### Optional extensions
 
-Two ready-made extensions ship under the same `@hydra-acp` npm scope. Both are optional and can be installed independently.
+Various ready-made extensions ship under the same `@hydra-acp` npm scope. All are optional and can be installed independently.
 
 **[`@hydra-acp/slack`](https://github.com/smagnuso/hydra-acp-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Attaches as `controller`, respects RFD #533's `prompt_received`, and survives daemon restarts via session resurrection.
 
@@ -393,6 +393,24 @@ hydra-acp extensions start hydra-acp-browser
 ```
 
 The first launch generates `~/.hydra-acp-browser/authkey` and writes the open URL (with `?authkey=…`) to `~/.hydra-acp-browser/link`. Defaults to localhost-only; see the [package's HTTPS section](https://github.com/smagnuso/hydra-acp-browser#https) for binding to a LAN address with TLS.
+
+**[`@hydra-acp/notifier`](https://github.com/smagnuso/hydra-acp-notifier) — desktop notifications.** Always-on companion that fires `notify-send` (Linux) or `osascript` (macOS) when sessions emit notable events — by default, `turn_complete`. The default title is `🐉 <agentId> · <short-session-id> · <session-title-or-cwd>` and the body renders the agent's stop reason as friendly text (`Finished`, `Max token limit reached`, etc.). Drop a JS rule at `~/.hydra-acp/notifier.config.js` to customize per-event, or set `HYDRA_ACP_NOTIFY_CMD` to route everything to ntfy/Pushover/your phone.
+
+```sh
+npm install -g @hydra-acp/notifier
+hydra-acp extensions add hydra-acp-notifier --command hydra-acp-notifier
+hydra-acp extensions start hydra-acp-notifier
+```
+
+**[`@hydra-acp/approver`](https://github.com/smagnuso/hydra-acp-approver) — headless permission auto-responder.** Attaches as a controller and answers `session/request_permission` based on a JS rule at `~/.hydra-acp/approver.config.js`. When the rule returns an `optionId` it wins the race and dismisses the prompt before any human client sees it; when it abstains (returns `null`), the prompt stays open for your interactive clients. Useful for centralizing approval policy in one place so per-client approve lambdas can go away.
+
+```sh
+npm install -g @hydra-acp/approver
+hydra-acp extensions add hydra-acp-approver --command hydra-acp-approver
+hydra-acp extensions start hydra-acp-approver
+```
+
+Without a config file the approver abstains on everything — installing it has no behavioral effect until you write a rule.
 
 Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extensions logs <name> -f` tails an extension's stdout/stderr if you need to debug.
 
