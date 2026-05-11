@@ -246,13 +246,25 @@ export class Screen {
     }
     this.streamingActive = false;
     this.lines.push(...lines);
+    this.adjustScrollForLineChange(lines.length);
     this.repaint();
   }
 
   appendLine(line: FormattedLine): void {
     this.streamingActive = false;
     this.lines.push(line);
+    this.adjustScrollForLineChange(1);
     this.repaint();
+  }
+
+  // When scrolled away from the bottom, shift scrollOffset to keep the
+  // user's visible window anchored on the same content as the lines
+  // array grows. Without this, every new line silently scrolls the view
+  // up by one row — the original bug the user reported.
+  private adjustScrollForLineChange(delta: number): void {
+    if (this.scrollOffset > 0 && delta !== 0) {
+      this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+    }
   }
 
   // Append-or-replace a single-line block keyed by `key`. Thin wrapper
@@ -277,10 +289,12 @@ export class Screen {
     // would be treated as a fresh utterance and get a blank-line
     // separator inserted mid-message.
     let touchesEnd = false;
+    let scrollDelta = 0;
     if (existing) {
       const oldEnd = existing.start + existing.count;
       touchesEnd = oldEnd >= this.lines.length;
       const delta = newLines.length - existing.count;
+      scrollDelta = delta;
       this.lines.splice(existing.start, existing.count, ...newLines);
       existing.count = newLines.length;
       if (delta !== 0) {
@@ -294,6 +308,7 @@ export class Screen {
       // Appending a new block at the bottom always displaces whatever
       // was the last line.
       touchesEnd = true;
+      scrollDelta = newLines.length;
       this.keyedBlocks.set(key, {
         start: this.lines.length,
         count: newLines.length,
@@ -303,6 +318,7 @@ export class Screen {
     if (touchesEnd) {
       this.streamingActive = false;
     }
+    this.adjustScrollForLineChange(scrollDelta);
     this.repaint();
   }
 
@@ -321,6 +337,7 @@ export class Screen {
     }
     const fragments = text.split("\n");
     const [first, ...rest] = fragments;
+    let added = 0;
     if (this.streamingActive && this.lines.length > 0) {
       const last = this.lines[this.lines.length - 1];
       if (last) {
@@ -337,6 +354,7 @@ export class Screen {
           last && last.body === "" && (!last.prefix || last.prefix === "");
         if (!isBlank) {
           this.lines.push({ body: "" });
+          added += 1;
         }
       }
       const initial: FormattedLine = {
@@ -348,6 +366,7 @@ export class Screen {
         initial.prefixStyle = prefixStyle;
       }
       this.lines.push(initial);
+      added += 1;
     }
     const continuationPrefix = " ".repeat(prefix.length);
     for (const piece of rest) {
@@ -356,8 +375,10 @@ export class Screen {
         body: piece,
         bodyStyle,
       });
+      added += 1;
     }
     this.streamingActive = true;
+    this.adjustScrollForLineChange(added);
     this.repaint();
   }
 
@@ -376,6 +397,7 @@ export class Screen {
     this.lines = [];
     this.keyedBlocks.clear();
     this.streamingActive = false;
+    this.scrollOffset = 0;
     this.repaint();
   }
 
@@ -409,6 +431,7 @@ export class Screen {
     if (touchesEnd) {
       this.streamingActive = false;
     }
+    this.adjustScrollForLineChange(-existing.count);
     this.repaint();
   }
 
@@ -488,6 +511,7 @@ export class Screen {
     }
     this.lines.push({ body: "" });
     this.streamingActive = false;
+    this.adjustScrollForLineChange(1);
     this.repaint();
   }
 
