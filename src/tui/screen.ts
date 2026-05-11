@@ -19,6 +19,11 @@ interface BannerState {
   planMode: boolean;
   hint: string;
   queued: number;
+  // Elapsed time the current turn has been running, in milliseconds.
+  // Surfaced as "running · 1m 30s" in the banner so the user has
+  // continuous feedback that the agent is alive even when it falls
+  // silent mid-thought.
+  elapsedMs?: number;
 }
 
 interface HeaderState {
@@ -41,6 +46,14 @@ export interface PermissionPromptSpec {
   selectedIndex: number;
 }
 
+// Tiny modal used by the TUI to confirm a destructive exit (e.g. "agent
+// is still working — interrupt before quitting?"). Two-line layout:
+// the question, then a one-line hint listing the accepted keys.
+export interface ConfirmPromptSpec {
+  question: string;
+  hint: string;
+}
+
 export interface CompletionItem {
   name: string;
   description?: string;
@@ -53,6 +66,7 @@ const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
 const MAX_COMPLETION_ROWS = 6;
+const CONFIRM_PROMPT_ROWS = 2;
 
 export class Screen {
   private term: Terminal;
@@ -72,6 +86,7 @@ export class Screen {
   private repaintPaused = 0;
   private repaintPending = false;
   private permissionPrompt: PermissionPromptSpec | null = null;
+  private confirmPrompt: ConfirmPromptSpec | null = null;
   private completions: CompletionItem[] = [];
   // Scrollback offset: 0 = pinned to bottom (live), N = N wrapped lines
   // above the bottom. Mouse wheel and PgUp/PgDn adjust this; new content
@@ -281,6 +296,14 @@ export class Screen {
   // an interactive options list. Pass null to dismiss.
   setPermissionPrompt(spec: PermissionPromptSpec | null): void {
     this.permissionPrompt = spec ? { ...spec } : null;
+    this.repaint();
+  }
+
+  // Two-line confirmation modal that takes over the prompt area. Used to
+  // ask "interrupt before exit?" when the user quits during an in-flight
+  // turn that no one else is watching. Pass null to dismiss.
+  setConfirmPrompt(spec: ConfirmPromptSpec | null): void {
+    this.confirmPrompt = spec ? { ...spec } : null;
     this.repaint();
   }
 
@@ -585,6 +608,10 @@ export class Screen {
       this.drawPermissionPrompt();
       return;
     }
+    if (this.confirmPrompt) {
+      this.drawConfirmPrompt();
+      return;
+    }
     const w = this.term.width;
     const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
@@ -610,6 +637,19 @@ export class Screen {
       const line = state.buffer[vr.bufferIdx] ?? "";
       this.term(line.slice(vr.startCol, vr.endCol));
     }
+  }
+
+  private drawConfirmPrompt(): void {
+    const spec = this.confirmPrompt;
+    if (!spec) {
+      return;
+    }
+    const w = this.term.width;
+    const top = this.term.height - CONFIRM_PROMPT_ROWS - BANNER_ROWS + 1;
+    this.term.moveTo(1, top).eraseLineAfter();
+    this.term.brightYellow(` ? ${truncate(spec.question, w - 4)}`);
+    this.term.moveTo(1, top + 1).eraseLineAfter();
+    this.term.dim(` ${truncate(spec.hint, w - 2)}`);
   }
 
   private drawPermissionPrompt(): void {
@@ -669,6 +709,12 @@ export class Screen {
     const planLabel = this.banner.planMode ? "plan: ON " : "plan: off";
     if (this.banner.status === "running") {
       this.term.brightYellow(`${dot} ${this.banner.status}`);
+      if (
+        this.banner.elapsedMs !== undefined &&
+        this.banner.elapsedMs >= 1000
+      ) {
+        this.term(" ").dim(formatElapsed(this.banner.elapsedMs));
+      }
     } else {
       this.term.brightGreen(`${dot} ${this.banner.status}`);
     }
@@ -697,6 +743,13 @@ export class Screen {
       this.term.moveTo(2, Math.min(optionRow, this.term.height - BANNER_ROWS));
       return;
     }
+    if (this.confirmPrompt) {
+      // Park cursor at the end of the question — there's no field to type
+      // into, but a visible cursor reads as "waiting for your keypress".
+      const top = this.term.height - CONFIRM_PROMPT_ROWS - BANNER_ROWS + 1;
+      this.term.moveTo(2, top);
+      return;
+    }
     const w = this.term.width;
     const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
@@ -714,6 +767,9 @@ export class Screen {
   private promptRows(): number {
     if (this.permissionPrompt) {
       return this.permissionRows();
+    }
+    if (this.confirmPrompt) {
+      return CONFIRM_PROMPT_ROWS;
     }
     const w = this.term.width;
     const room = Math.max(1, w - 2);
@@ -754,6 +810,9 @@ export class Screen {
         if (line.bodyStyle !== undefined) {
           wrappedLine.bodyStyle = line.bodyStyle;
         }
+        if (line.fillRow) {
+          wrappedLine.fillRow = true;
+        }
         out.push(wrappedLine);
       }
     }
@@ -765,7 +824,14 @@ export class Screen {
       writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle);
     }
     const remaining = Math.max(0, width - (line.prefix?.length ?? 0));
-    writeStyled(this.term, truncate(line.body, remaining), line.bodyStyle);
+    const bodyText = truncate(line.body, remaining);
+    writeStyled(this.term, bodyText, line.bodyStyle);
+    if (line.fillRow) {
+      const pad = remaining - bodyText.length;
+      if (pad > 0) {
+        writeStyled(this.term, " ".repeat(pad), line.bodyStyle);
+      }
+    }
   }
 }
 
@@ -871,7 +937,12 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
   }
   switch (style) {
     case "user":
-      term.brightCyan(text);
+      // Subtle gray background spans the full row (see FormattedLine.fillRow)
+      // so each user turn reads as a distinct banded block when scrolling.
+      // Keeping brightCyan as the foreground preserves the existing color
+      // semantics while the band makes it readable on terminals where
+      // pure cyan-on-default is washed out.
+      term.bgBrightBlack.brightCyan(text);
       return;
     case "agent":
       term(text);
@@ -996,6 +1067,21 @@ function formatUsage(usage: UsageState | undefined): string | null {
     parts.push(formatCost(usage.costAmount, usage.costCurrency));
   }
   return parts.length === 0 ? null : parts.join(" · ");
+}
+
+function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) {
+    return `${totalSec}s`;
+  }
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min < 60) {
+    return sec === 0 ? `${min}m` : `${min}m ${sec}s`;
+  }
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return remMin === 0 ? `${hr}h` : `${hr}h ${remMin}m`;
 }
 
 function formatTokens(n: number): string {

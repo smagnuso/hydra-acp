@@ -99,9 +99,25 @@ async function runSession(
     }
   };
 
+  // Count of prompts currently in flight on the daemon — across ALL
+  // clients, not just ours. Incremented when we observe a peer's
+  // prompt_received (the daemon excludes us from our own broadcasts, so
+  // a user-text notification arriving here is always a peer) or when we
+  // start one of our own (in processPrompt). Decremented on every
+  // turn_complete (peer's, observed here; ours, in processPrompt's
+  // finally). The worker refuses to fire session/prompt while this is
+  // non-zero so we don't barge into a sibling's turn.
+  let pendingTurns = 0;
   conn.onNotification("session/update", (params) => {
     const { update } = (params ?? {}) as { update?: unknown };
-    appendRender(mapUpdate(update));
+    const event = mapUpdate(update);
+    if (event?.kind === "user-text") {
+      pendingTurns += 1;
+    } else if (event?.kind === "turn-complete") {
+      pendingTurns = Math.max(0, pendingTurns - 1);
+      tickWorker();
+    }
+    appendRender(event);
     maybeDismissPermissionByToolUpdate(update);
   });
 
@@ -329,6 +345,9 @@ async function runSession(
         if (pendingPermission && tryHandlePermissionKey(ev)) {
           continue;
         }
+        if (exitConfirmation && tryHandleExitConfirmKey(ev)) {
+          continue;
+        }
         if (tryHandleCompletionKey(ev)) {
           continue;
         }
@@ -514,7 +533,99 @@ async function runSession(
       turnInFlight.cancel();
       return;
     }
-    stop(0);
+    void requestExit();
+  };
+
+  // Pending interrupt-before-exit modal, if one is showing. Set by
+  // requestExit when the user tries to leave during a turn that no other
+  // client is observing — handled inline by tryHandleExitConfirmKey.
+  let exitConfirmation: { offered: true } | null = null;
+
+  // Mediated quit. If a turn is mid-flight and no peer client is watching,
+  // pop a "interrupt or just detach?" modal so the user isn't unknowingly
+  // leaving an agent running for nobody. Otherwise (no turn, or peers
+  // attached) just exit silently as before.
+  const requestExit = async (): Promise<void> => {
+    if (exitConfirmation) {
+      // Modal already up — second exit attempt collapses to a silent quit.
+      stop(0);
+      return;
+    }
+    if (pendingTurns === 0) {
+      stop(0);
+      return;
+    }
+    let onlyClient = false;
+    try {
+      const sessions = await listSessions(config);
+      const me = sessions.find((s) => s.sessionId === resolvedSessionId);
+      onlyClient = !me || me.attachedClients <= 1;
+    } catch {
+      // If the daemon is unreachable, the user almost certainly wants to
+      // bail. Default to silent exit rather than block on the network.
+      stop(0);
+      return;
+    }
+    if (!onlyClient) {
+      stop(0);
+      return;
+    }
+    exitConfirmation = { offered: true };
+    screen.setConfirmPrompt({
+      question: "Agent is still working. Interrupt it before exit?",
+      hint: "y interrupt then exit · n / Enter detach silently · Esc cancel",
+    });
+  };
+
+  const dismissExitConfirmation = (): void => {
+    exitConfirmation = null;
+    screen.setConfirmPrompt(null);
+  };
+
+  const tryHandleExitConfirmKey = (ev: KeyEvent): boolean => {
+    if (!exitConfirmation) {
+      return false;
+    }
+    if (ev.type === "char") {
+      const ch = ev.ch.toLowerCase();
+      if (ch === "y") {
+        dismissExitConfirmation();
+        conn
+          .notify("session/cancel", { sessionId: resolvedSessionId })
+          .catch(() => undefined);
+        stop(0);
+        return true;
+      }
+      if (ch === "n") {
+        dismissExitConfirmation();
+        stop(0);
+        return true;
+      }
+      // Any other char is a no-op so a fat-finger doesn't accidentally
+      // confirm or cancel a destructive action.
+      return true;
+    }
+    if (ev.type === "key") {
+      if (ev.name === "enter") {
+        // Default to the safe option: detach silently.
+        dismissExitConfirmation();
+        stop(0);
+        return true;
+      }
+      if (ev.name === "escape") {
+        // Esc backs out of the modal so the user can keep working.
+        dismissExitConfirmation();
+        return true;
+      }
+      if (ev.name === "ctrl-c" || ev.name === "ctrl-d") {
+        // Treat a second exit signal as "yes, get me out" — silent
+        // detach (not interrupt) so we don't surprise-kill the agent.
+        dismissExitConfirmation();
+        stop(0);
+        return true;
+      }
+    }
+    return true;
   };
   const teardown = (): void => {
     process.off("SIGINT", sigintHandler);
@@ -591,7 +702,7 @@ async function runSession(
         }
         return;
       case "exit":
-        stop(0);
+        void requestExit();
         return;
       case "plan-toggle":
         screen.setBanner({ planMode: effect.on });
@@ -636,9 +747,17 @@ async function runSession(
     saveHistory(historyFile, history).catch(() => undefined);
     promptQueue.push({ text, planMode });
     refreshQueueDisplay();
-    if (!workerActive) {
-      void runQueueWorker();
+    tickWorker();
+  };
+
+  // Start the worker iff there's queued work and the session is idle.
+  // Called from enqueuePrompt and from the turn_complete observer, so a
+  // queued prompt fires the moment a peer's turn finishes.
+  const tickWorker = (): void => {
+    if (workerActive || pendingTurns > 0 || promptQueue.length === 0) {
+      return;
     }
+    void runQueueWorker();
   };
 
   // Returns true if the input was a TUI built-in slash command and was
@@ -653,7 +772,7 @@ async function runSession(
     switch (cmd) {
       case "/quit":
       case "/exit":
-        stop(0);
+        void requestExit();
         return true;
       case "/clear":
         toolStates.clear();
@@ -761,7 +880,7 @@ async function runSession(
   const runQueueWorker = async (): Promise<void> => {
     workerActive = true;
     try {
-      while (promptQueue.length > 0) {
+      while (promptQueue.length > 0 && pendingTurns === 0) {
         const next = promptQueue[0];
         if (!next) {
           break;
@@ -786,9 +905,22 @@ async function runSession(
       ? [{ type: "text", text: PLAN_PREFIX_TEXT }, ...userBlocks]
       : userBlocks;
 
+    // Mark a turn as in-flight before any await so a near-simultaneous
+    // enqueue from this client (or a peer broadcast) doesn't slip a
+    // second session/prompt past the gate.
+    pendingTurns += 1;
     appendRender({ kind: "user-text", text });
     dispatcher.setTurnRunning(true);
-    screen.setBanner({ status: "running" });
+    const turnStartedAt = Date.now();
+    screen.setBanner({ status: "running", elapsedMs: 0 });
+    // Refresh the banner's elapsed counter every 5s so the user has
+    // continuous "still working" feedback even when the agent is silent
+    // (thinking, waiting on a tool with no streamed output yet). 5s is a
+    // sweet spot — frequent enough to feel alive, infrequent enough to
+    // avoid burning repaints.
+    const elapsedTimer = setInterval(() => {
+      screen.setBanner({ elapsedMs: Date.now() - turnStartedAt });
+    }, 5_000);
 
     let cancelled = false;
     turnInFlight = {
@@ -820,7 +952,9 @@ async function runSession(
     } finally {
       turnInFlight = null;
       dispatcher.setTurnRunning(false);
-      screen.setBanner({ status: "ready" });
+      clearInterval(elapsedTimer);
+      screen.setBanner({ status: "ready", elapsedMs: undefined });
+      pendingTurns = Math.max(0, pendingTurns - 1);
       // Daemon broadcasts turn_complete to other clients but excludes the
       // originator (core/session.ts:138). Synthesize it locally so the
       // streaming buffer resets and a separator lands before the next turn.

@@ -26,12 +26,17 @@ export interface FormattedLine {
   prefixStyle?: Style;
   body: string;
   bodyStyle?: Style;
+  // When set, the screen layer pads the body with spaces (using bodyStyle)
+  // to fill the remainder of the terminal row, so a background-colored
+  // style extends as a continuous stripe across the whole line. Used to
+  // visually band user turns in scrollback.
+  fillRow?: boolean;
 }
 
 export function formatEvent(event: RenderEvent): FormattedLine[] {
   switch (event.kind) {
     case "user-text":
-      return formatBlock(event.text, "▎ ", "user", undefined, event.sentBy);
+      return formatBlock(event.text, "▎ ", "user", undefined, event.sentBy, true);
     case "agent-text":
       return formatBlock(event.text, "  ", "agent");
     case "agent-thought":
@@ -88,6 +93,7 @@ function formatBlock(
   bodyStyle: Style,
   prefixStyle?: Style,
   sentBy?: string,
+  fillRow?: boolean,
 ): FormattedLine[] {
   const lines = text.split("\n");
   const out: FormattedLine[] = [];
@@ -100,12 +106,16 @@ function formatBlock(
     });
   }
   for (const line of lines) {
-    out.push({
+    const entry: FormattedLine = {
       prefix,
       prefixStyle: prefixStyle ?? bodyStyle,
       body: line,
       bodyStyle,
-    });
+    };
+    if (fillRow) {
+      entry.fillRow = true;
+    }
+    out.push(entry);
   }
   return out;
 }
