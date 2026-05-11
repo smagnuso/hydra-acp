@@ -883,6 +883,15 @@ export class Screen {
         writeStyled(this.term, " ".repeat(pad), line.bodyStyle);
       }
     }
+    // Defensive reset: if the body contained terminal-kit markup
+    // (`^+bold^:` etc.) and our char-counting wrap/truncate split it
+    // mid-span, the dangling open would otherwise leak bold/color into
+    // every subsequent row's eraseLineAfter + writes. Emitting an SGR
+    // reset here costs ~4 bytes per row and bounds the damage to the
+    // affected row.
+    if (line.body.includes("^")) {
+      this.term.styleReset();
+    }
   }
 }
 
@@ -1054,6 +1063,22 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       return;
     case "dim":
       term.dim(text);
+      return;
+    case "code":
+      // Tinted dark-blue band for fenced code blocks. Different hue from
+      // the user-text band so the two never get confused at a glance.
+      (term as unknown as {
+        bgColorGrayscale: { brightCyan: (g: number, t: string) => void };
+      }).bgColorGrayscale.brightCyan(28, text);
+      return;
+    case "heading-1":
+      term.bold.brightYellow(text);
+      return;
+    case "heading-2":
+      term.bold.brightCyan(text);
+      return;
+    case "heading-3":
+      term.bold(text);
       return;
     default:
       term(text);

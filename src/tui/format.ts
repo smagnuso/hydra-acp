@@ -19,7 +19,11 @@ export type Style =
   | "plan-pending"
   | "system"
   | "info"
-  | "dim";
+  | "dim"
+  | "code"
+  | "heading-1"
+  | "heading-2"
+  | "heading-3";
 
 export interface FormattedLine {
   prefix?: string;
@@ -85,6 +89,102 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
       // in the future.
       return [];
   }
+}
+
+// Inline-mark pass — converts a subset of markdown's inline syntax into
+// terminal-kit's `^X…^:` markup, which `term(text)` processes inside the
+// formatter so a single line can mix styles. Order matters: we escape
+// literal carets FIRST so user-typed `^` doesn't get mistaken for our own
+// markup, then apply each pattern.
+//
+// Supported:
+//   **bold**         → ^+bold^:
+//   `inline code`    → ^Cinline code^:    (bright-cyan tint)
+//
+// Skipped intentionally:
+//   *italic* / _italic_  — `*` and `_` are too common in code/paths/
+//                          shell args, false-positives would litter the
+//                          UI with spurious italics.
+function applyInlineMarkup(text: string): string {
+  let s = text.replace(/\^/g, "^^");
+  s = s.replace(/\*\*(.+?)\*\*/g, "^+$1^:");
+  s = s.replace(/`([^`]+)`/g, "^C$1^:");
+  return s;
+}
+
+// Block-level markdown → FormattedLines. Mirrors the regex-based approach
+// in @hydra-acp/browser's markdown.ts: each newline-separated line is
+// classified once and emitted with a matching style. Streamed agent text
+// is fed through this on every chunk and the resulting lines are upserted
+// as a single keyed block (so re-parsing is idempotent and the block
+// mutates in place as more content arrives). Inline marks for bold + code
+// are applied to plain prose / list items (see applyInlineMarkup); they
+// are intentionally NOT applied inside code fences (literal display) or
+// headings (already styled at the block level).
+export function parseAgentMarkdown(text: string): FormattedLine[] {
+  const out: FormattedLine[] = [];
+  const lines = text.split("\n");
+  let inCode = false;
+  for (const line of lines) {
+    const fence = line.match(/^\s*```\s*\w*\s*$/);
+    if (fence) {
+      inCode = !inCode;
+      // Don't render the ``` fence line itself — the styled bg of the
+      // following code lines is the visual cue that we're in a block.
+      continue;
+    }
+    if (inCode) {
+      out.push({
+        prefix: "  ",
+        body: line,
+        bodyStyle: "code",
+        fillRow: true,
+      });
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const level = heading[1]!.length;
+      const text = heading[2] ?? "";
+      const style: Style =
+        level === 1 ? "heading-1" : level === 2 ? "heading-2" : "heading-3";
+      out.push({
+        prefix: "  ",
+        body: text,
+        bodyStyle: style,
+      });
+      continue;
+    }
+    const bullet = line.match(/^(\s*)[-*+]\s+(.*)$/);
+    if (bullet) {
+      const indent = bullet[1] ?? "";
+      const item = bullet[2] ?? "";
+      out.push({
+        prefix: "  ",
+        body: `${indent}• ${applyInlineMarkup(item)}`,
+        bodyStyle: "agent",
+      });
+      continue;
+    }
+    const ordered = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+    if (ordered) {
+      const indent = ordered[1] ?? "";
+      const num = ordered[2] ?? "";
+      const item = ordered[3] ?? "";
+      out.push({
+        prefix: "  ",
+        body: `${indent}${num}. ${applyInlineMarkup(item)}`,
+        bodyStyle: "agent",
+      });
+      continue;
+    }
+    out.push({
+      prefix: "  ",
+      body: applyInlineMarkup(line),
+      bodyStyle: "agent",
+    });
+  }
+  return out;
 }
 
 function formatBlock(

@@ -30,6 +30,7 @@ import {
 import {
   formatEvent,
   formatToolLine,
+  parseAgentMarkdown,
   type FormattedLine,
   type ToolLineState,
 } from "./format.js";
@@ -250,16 +251,6 @@ async function runSession(
     });
   };
 
-  const renderPermissionResolved = (label: string, denied: boolean): void => {
-    screen.appendLines([
-      {
-        prefix: "  ",
-        body: `${denied ? "✗" : "✓"} ${label}`,
-        bodyStyle: denied ? "tool-status-fail" : "tool-status-ok",
-      },
-    ]);
-  };
-
   const resolvePermission = (optionId: string | null): void => {
     if (!pendingPermission) {
       return;
@@ -267,15 +258,18 @@ async function runSession(
     const { options, resolve } = pendingPermission;
     pendingPermission = null;
     screen.setPermissionPrompt(null);
+    // The tool-call row updates to "running" / "done" / "failed" in
+    // response to the decision, so a separate "✓ Allow" or "✗ Reject"
+    // line in scrollback is redundant and sticky-feeling. Just dismiss
+    // the modal and let the tool row carry the outcome.
     if (optionId === null) {
       resolve({ outcome: { outcome: "cancelled" } });
-      renderPermissionResolved("Cancelled", true);
       return;
     }
-    const opt = options.find((o) => o.optionId === optionId);
     resolve({ outcome: { outcome: "selected", optionId } });
-    const denied = (opt?.kind ?? "").startsWith("reject");
-    renderPermissionResolved(opt?.name ?? optionId, denied);
+    // options is unused now that we don't echo the chosen label, but
+    // keep the destructure to assert pendingPermission's shape.
+    void options;
   };
 
   conn.onRequest("session/request_permission", async (params) => {
@@ -1021,6 +1015,50 @@ async function runSession(
   // rolled into the "N hidden" counter in the header.
   const TOOLS_COLLAPSED_LIMIT = 5;
 
+  // Buffered text + a stable key for the current agent utterance. Agent
+  // chunks accumulate here; on each chunk the whole buffer is re-parsed
+  // through parseAgentMarkdown and upserted as one keyed block — same
+  // pattern @hydra-acp/browser uses. The block "closes" (key forgotten)
+  // when any interrupting event (tool call, plan, thought, turn end, peer
+  // prompt) lands, so the next agent_text starts a fresh block below.
+  let agentBuffer = "";
+  let agentKey: string | null = null;
+  let agentSeq = 0;
+
+  const renderAgentBlock = (): void => {
+    if (agentKey === null) {
+      return;
+    }
+    const lines = parseAgentMarkdown(agentBuffer);
+    if (lines.length === 0) {
+      return;
+    }
+    screen.upsertLines(agentKey, lines);
+  };
+
+  const appendAgentText = (text: string): void => {
+    if (text.length === 0) {
+      return;
+    }
+    if (agentKey === null) {
+      // Starting a new agent utterance — drop a blank separator above so
+      // the new block reads as visually distinct from prior content.
+      // appendStreaming would do this for us in the old streaming-line
+      // model, but we bypass that path for markdown rendering.
+      screen.ensureSeparator();
+      agentKey = `agent:${agentSeq}`;
+      agentSeq += 1;
+      agentBuffer = "";
+    }
+    agentBuffer += text;
+    renderAgentBlock();
+  };
+
+  const closeAgentText = (): void => {
+    agentKey = null;
+    agentBuffer = "";
+  };
+
   const renderToolsBlock = (): void => {
     if (toolsBlockStartedAt === null) {
       return;
@@ -1160,6 +1198,7 @@ async function runSession(
       // appends to the bottom of scrollback, so if we called it before
       // emitting user-text the block would land above the prompt and the
       // chronology would read backwards.
+      closeAgentText();
       screen.ensureSeparator();
       const formatted = formatEvent(event);
       if (formatted.length > 0) {
@@ -1169,14 +1208,19 @@ async function runSession(
       return;
     }
     if (event.kind === "agent-text") {
-      screen.appendStreaming(event.text, "  ", "agent");
+      appendAgentText(event.text);
       return;
     }
     if (event.kind === "agent-thought") {
+      // Thoughts get the streaming-line treatment — short, dim, italic,
+      // no markdown. Closing the agent block first ensures the next
+      // text chunk starts a fresh block below the thought.
+      closeAgentText();
       screen.appendStreaming(event.text, "· ", "thought", "thought");
       return;
     }
     if (event.kind === "tool-call") {
+      closeAgentText();
       recordToolCall(event.toolCallId, event.title, event.status);
       renderToolsBlock();
       return;
@@ -1185,6 +1229,7 @@ async function runSession(
       // The agent emits a full plan snapshot each time entries get added
       // or checked off; render it as a single mutating block so the
       // scrollback doesn't accumulate one copy per update.
+      closeAgentText();
       const lines = formatEvent(event);
       if (lines.length > 0) {
         screen.upsertLines("plan", lines);
@@ -1192,6 +1237,7 @@ async function runSession(
       return;
     }
     if (event.kind === "tool-call-update") {
+      closeAgentText();
       recordToolCall(event.toolCallId, event.title, event.status);
       renderToolsBlock();
       return;
@@ -1206,6 +1252,7 @@ async function runSession(
       // turn's first plan event appends as a fresh block below — otherwise
       // it would splice into the previous turn's plan, possibly far up in
       // (or off the top of) scrollback.
+      closeAgentText();
       screen.clearKey("plan");
       // Freeze the tools block (header switches from live "Xs" to
       // "took Xs") and then drop the key so next turn's tool calls
