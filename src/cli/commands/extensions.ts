@@ -132,9 +132,42 @@ export async function runExtensionsAdd(
 
   await writeRawConfig(raw);
   process.stdout.write(`Added extension '${name}' to ${paths.config()}\n`);
-  process.stdout.write(
-    "Restart the daemon (or `hydra-acp daemon stop && hydra-acp daemon start`) to apply.\n",
-  );
+
+  const config = await loadConfig();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const registerBody = { name, ...body };
+  try {
+    const r = await fetch(`${baseUrl}/v1/extensions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.daemon.authToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(registerBody),
+    });
+    if (r.ok) {
+      const info = (await r.json()) as ExtensionInfo;
+      const pid = info.pid != null ? ` pid=${info.pid}` : "";
+      process.stdout.write(`${name}: ${info.status}${pid}\n`);
+      return;
+    }
+    let detail = "";
+    try {
+      const errBody = (await r.json()) as { error?: string };
+      if (errBody.error) {
+        detail = `: ${errBody.error}`;
+      }
+    } catch {
+      void 0;
+    }
+    process.stderr.write(
+      `Daemon refused to register ${name} (HTTP ${r.status}${detail}). Restart the daemon to apply.\n`,
+    );
+  } catch (err) {
+    process.stderr.write(
+      `Daemon not reachable (${(err as Error).message}). Config saved; the new extension will start on next daemon launch.\n`,
+    );
+  }
 }
 
 export async function runExtensionsRemove(name: string | undefined): Promise<void> {
@@ -155,6 +188,35 @@ export async function runExtensionsRemove(name: string | undefined): Promise<voi
   raw.extensions = exts;
   await writeRawConfig(raw);
   process.stdout.write(`Removed extension '${name}' from ${paths.config()}\n`);
+
+  const config = await loadConfig();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  try {
+    const r = await fetch(`${baseUrl}/v1/extensions/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    });
+    if (r.status === 204 || r.status === 404) {
+      process.stdout.write(`${name}: stopped\n`);
+      return;
+    }
+    let detail = "";
+    try {
+      const errBody = (await r.json()) as { error?: string };
+      if (errBody.error) {
+        detail = `: ${errBody.error}`;
+      }
+    } catch {
+      void 0;
+    }
+    process.stderr.write(
+      `Daemon refused to unregister ${name} (HTTP ${r.status}${detail}).\n`,
+    );
+  } catch (err) {
+    process.stderr.write(
+      `Daemon not reachable (${(err as Error).message}). Config saved.\n`,
+    );
+  }
 }
 
 async function readRawConfig(): Promise<Record<string, unknown>> {

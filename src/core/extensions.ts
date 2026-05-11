@@ -183,6 +183,49 @@ export class ExtensionManager {
     return this.startByName(name);
   }
 
+  // Register a new extension and (if enabled) start it. Used by the
+  // POST /v1/extensions endpoint so `hydra-acp extensions add` can take
+  // effect without a daemon restart.
+  register(config: ExtensionConfig): ExtensionInfo {
+    if (this.entries.has(config.name)) {
+      throw withCode(
+        new Error(`extension ${config.name} already exists`),
+        "CONFLICT",
+      );
+    }
+    if (!this.context) {
+      throw new Error("ExtensionManager: setContext must be called before register");
+    }
+    const entry = this.makeEntry(config);
+    this.entries.set(config.name, entry);
+    if (config.enabled) {
+      this.spawn(entry, 0);
+    }
+    return this.infoFor(entry);
+  }
+
+  async unregister(name: string): Promise<void> {
+    const entry = this.entries.get(name);
+    if (!entry) {
+      throw withCode(new Error(`unknown extension: ${name}`), "NOT_FOUND");
+    }
+    entry.manuallyStopped = true;
+    if (entry.restartTimer) {
+      clearTimeout(entry.restartTimer);
+      entry.restartTimer = undefined;
+    }
+    const child = entry.child;
+    if (child) {
+      await this.terminate(entry, child);
+    }
+    try {
+      entry.logStream?.end();
+    } catch {
+      void 0;
+    }
+    this.entries.delete(name);
+  }
+
   private async terminate(
     entry: ExtensionEntry,
     child: ChildProcess,
