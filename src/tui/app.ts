@@ -108,14 +108,49 @@ async function runSession(
   // finally). The worker refuses to fire session/prompt while this is
   // non-zero so we don't barge into a sibling's turn.
   let pendingTurns = 0;
+  // Wall-clock moment the session became busy (pendingTurns went 0 → >0).
+  // Drives the banner's elapsed counter so the user sees "● running 30s"
+  // for peer-triggered turns too, not just our own.
+  let sessionBusySince: number | null = null;
+  let sessionElapsedTimer: NodeJS.Timeout | null = null;
+  // Centralized pending-turn arithmetic so banner state, elapsed timer,
+  // and (on decrement) tickWorker all stay in sync regardless of whether
+  // the underlying turn was ours or a peer's. Without this the banner
+  // would stay on "ready" while a peer is mid-turn.
+  const adjustPendingTurns = (delta: number): void => {
+    const before = pendingTurns;
+    pendingTurns = Math.max(0, pendingTurns + delta);
+    if (before === 0 && pendingTurns > 0) {
+      sessionBusySince = Date.now();
+      screen.setBanner({ status: "running", elapsedMs: 0 });
+      if (sessionElapsedTimer === null) {
+        sessionElapsedTimer = setInterval(() => {
+          if (sessionBusySince === null) {
+            return;
+          }
+          screen.setBanner({ elapsedMs: Date.now() - sessionBusySince });
+          renderToolsBlock();
+        }, 5_000);
+      }
+    } else if (before > 0 && pendingTurns === 0) {
+      sessionBusySince = null;
+      if (sessionElapsedTimer !== null) {
+        clearInterval(sessionElapsedTimer);
+        sessionElapsedTimer = null;
+      }
+      screen.setBanner({ status: "ready", elapsedMs: undefined });
+    }
+    if (delta < 0) {
+      tickWorker();
+    }
+  };
   conn.onNotification("session/update", (params) => {
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
     if (event?.kind === "user-text") {
-      pendingTurns += 1;
+      adjustPendingTurns(1);
     } else if (event?.kind === "turn-complete") {
-      pendingTurns = Math.max(0, pendingTurns - 1);
-      tickWorker();
+      adjustPendingTurns(-1);
     }
     appendRender(event);
     maybeDismissPermissionByToolUpdate(update);
@@ -915,23 +950,12 @@ async function runSession(
 
     // Mark a turn as in-flight before any await so a near-simultaneous
     // enqueue from this client (or a peer broadcast) doesn't slip a
-    // second session/prompt past the gate.
-    pendingTurns += 1;
+    // second session/prompt past the gate. The adjust helper handles
+    // banner status and the elapsed timer in one place so peer-triggered
+    // turns get the same "running · 30s" treatment as ours.
+    adjustPendingTurns(1);
     appendRender({ kind: "user-text", text });
     dispatcher.setTurnRunning(true);
-    const turnStartedAt = Date.now();
-    screen.setBanner({ status: "running", elapsedMs: 0 });
-    // Refresh the banner's elapsed counter every 5s so the user has
-    // continuous "still working" feedback even when the agent is silent
-    // (thinking, waiting on a tool with no streamed output yet). 5s is a
-    // sweet spot — frequent enough to feel alive, infrequent enough to
-    // avoid burning repaints.
-    const elapsedTimer = setInterval(() => {
-      screen.setBanner({ elapsedMs: Date.now() - turnStartedAt });
-      // Re-render the tools block too so its "Xs" header advances on the
-      // same cadence as the banner counter.
-      renderToolsBlock();
-    }, 5_000);
 
     let cancelled = false;
     turnInFlight = {
@@ -963,9 +987,7 @@ async function runSession(
     } finally {
       turnInFlight = null;
       dispatcher.setTurnRunning(false);
-      clearInterval(elapsedTimer);
-      screen.setBanner({ status: "ready", elapsedMs: undefined });
-      pendingTurns = Math.max(0, pendingTurns - 1);
+      adjustPendingTurns(-1);
       // Daemon broadcasts turn_complete to other clients but excludes the
       // originator (core/session.ts:138). Synthesize it locally so the
       // streaming buffer resets and a separator lands before the next turn.
@@ -1133,11 +1155,18 @@ async function runSession(
       return;
     }
     if (event.kind === "user-text") {
+      // Render the user prompt first, then anchor the "thinking…" tools
+      // block directly below it. The order matters — startToolsBlock
+      // appends to the bottom of scrollback, so if we called it before
+      // emitting user-text the block would land above the prompt and the
+      // chronology would read backwards.
       screen.ensureSeparator();
-      // Anchor a "thinking…" tools block immediately so the user has
-      // continuous "agent is doing something" feedback even before any
-      // tool fires (or for text-only turns).
+      const formatted = formatEvent(event);
+      if (formatted.length > 0) {
+        screen.appendLines(formatted);
+      }
       startToolsBlock();
+      return;
     }
     if (event.kind === "agent-text") {
       screen.appendStreaming(event.text, "  ", "agent");

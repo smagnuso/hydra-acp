@@ -134,10 +134,10 @@ export interface ToolLineState {
 // Render the single line that represents a tool call. Combines the initial
 // (generic) title with the refined update title when they add information,
 // and folds them into one when the refinement subsumes the initial label.
-// A single status icon sits between the ⚒ gutter and the title so a stack
-// of tool calls scans as a clean column without burning horizontal space
-// on text labels. Color + weight encode state: dim while queued, bold
-// while running, normal-weight when done.
+// The leading status icon sits in a 2-space-indented gutter so individual
+// rows nest visibly under the tools block's ⚒ header without repeating
+// the tool glyph on every row. Color + weight encode state: dim while
+// queued, bold while running, normal-weight when done.
 export function formatToolLine(state: ToolLineState): FormattedLine {
   const initial = state.initialTitle;
   const latest = state.latestTitle;
@@ -152,8 +152,7 @@ export function formatToolLine(state: ToolLineState): FormattedLine {
     title = `${initial} · ${latest}`;
   }
   return {
-    prefix: "⚒ ",
-    prefixStyle: "tool",
+    prefix: "  ",
     body: `${toolStatusIcon(state.status)} ${title}`,
     bodyStyle: toolStatusStyle(state.status),
   };

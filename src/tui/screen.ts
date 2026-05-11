@@ -174,7 +174,16 @@ export class Screen {
       return;
     }
     const existing = this.keyedBlocks.get(key);
+    // Only reset the streaming flag when this op actually disturbs the
+    // last line of scrollback. Mid-array splices (e.g. the 5-second
+    // tools-block elapsed tick happening while agent text streams
+    // below) must NOT mark streaming as stopped, or the next chunk
+    // would be treated as a fresh utterance and get a blank-line
+    // separator inserted mid-message.
+    let touchesEnd = false;
     if (existing) {
+      const oldEnd = existing.start + existing.count;
+      touchesEnd = oldEnd >= this.lines.length;
       const delta = newLines.length - existing.count;
       this.lines.splice(existing.start, existing.count, ...newLines);
       existing.count = newLines.length;
@@ -186,13 +195,18 @@ export class Screen {
         }
       }
     } else {
+      // Appending a new block at the bottom always displaces whatever
+      // was the last line.
+      touchesEnd = true;
       this.keyedBlocks.set(key, {
         start: this.lines.length,
         count: newLines.length,
       });
       this.lines.push(...newLines);
     }
-    this.streamingActive = false;
+    if (touchesEnd) {
+      this.streamingActive = false;
+    }
     this.repaint();
   }
 
@@ -217,6 +231,18 @@ export class Screen {
         last.body += first ?? "";
       }
     } else {
+      // Fresh streaming utterance — insert a blank separator unless the
+      // last line is already one, so successive agent messages (split by
+      // tool calls, plan updates, thoughts, etc.) read as visually
+      // distinct paragraphs instead of running together.
+      if (this.lines.length > 0) {
+        const last = this.lines[this.lines.length - 1];
+        const isBlank =
+          last && last.body === "" && (!last.prefix || last.prefix === "");
+        if (!isBlank) {
+          this.lines.push({ body: "" });
+        }
+      }
       const initial: FormattedLine = {
         prefix,
         body: first ?? "",
@@ -275,6 +301,8 @@ export class Screen {
     if (!existing) {
       return;
     }
+    const touchesEnd =
+      existing.start + existing.count >= this.lines.length;
     this.lines.splice(existing.start, existing.count);
     this.keyedBlocks.delete(key);
     for (const [, range] of this.keyedBlocks) {
@@ -282,7 +310,9 @@ export class Screen {
         range.start -= existing.count;
       }
     }
-    this.streamingActive = false;
+    if (touchesEnd) {
+      this.streamingActive = false;
+    }
     this.repaint();
   }
 
@@ -958,12 +988,26 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
   }
   switch (style) {
     case "user":
-      // Subtle gray background spans the full row (see FormattedLine.fillRow)
-      // so each user turn reads as a distinct banded block when scrolling.
-      // Keeping brightCyan as the foreground preserves the existing color
-      // semantics while the band makes it readable on terminals where
-      // pure cyan-on-default is washed out.
-      term.bgBrightBlack.brightCyan(text);
+      // Subtle dim-gray band — bold + default foreground (white on dark
+      // themes) on a soft #303030-ish background. Earlier attempts at
+      // "lighter" gray pushed contrast in the wrong direction or made
+      // the band feel like a highlight stripe rather than a quiet
+      // boundary marker. 256-color index 236 is a touch lighter than
+      // most terminals' default bg, enough to read as a row of its own
+      // without screaming.
+      //
+      // Param/text order matters: terminal-kit's chain consumes param-
+      // taking methods immediately when invoked early (emitting `on`
+      // without `off`), turning the screen gray. Passing all params +
+      // the text to the FINAL call keeps the chain intact so the off
+      // sequence fires after the text.
+      // bgColorGrayscale(g) takes 0–255 (24-bit grayscale if the terminal
+      // supports it, otherwise rounds to the nearest 256-color step).
+      // Gives finer steps than the fixed 256-color grayscale ramp where
+      // 235 → 236 was a perceptible jump.
+      (term as unknown as {
+        bgColorGrayscale: { bold: (g: number, t: string) => void };
+      }).bgColorGrayscale.bold(43, text);
       return;
     case "agent":
       term(text);
