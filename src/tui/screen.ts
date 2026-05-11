@@ -746,7 +746,9 @@ export class Screen {
         : truncate(firstLine(text), w - 4);
       const display = ` ⏳ ${summary}`;
       const padded = display + " ".repeat(Math.max(0, w - display.length));
-      this.term.bgBlue.brightWhite(padded);
+      // noFormat: the queued summary contains user-typed prompt text, so
+      // literal `^X` should not be interpreted as terminal-kit markup.
+      this.term.bgBlue.brightWhite.noFormat(padded);
     }
   }
 
@@ -782,7 +784,9 @@ export class Screen {
         this.term("  ");
       }
       const line = state.buffer[vr.bufferIdx] ?? "";
-      this.term(line.slice(vr.startCol, vr.endCol));
+      // noFormat so literal `^X` typed by the user is rendered verbatim
+      // and not interpreted as terminal-kit's color/style markup.
+      this.term.noFormat(line.slice(vr.startCol, vr.endCol));
     }
   }
 
@@ -1091,6 +1095,13 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
   if (text.length === 0) {
     return;
   }
+  // The "agent" style is the only one that opts INTO terminal-kit's
+  // format processing — parseAgentMarkdown deliberately produces
+  // `^+bold^:` / `^Cinline^:` markup that should be interpreted. Every
+  // other style renders literal text (user input, code blocks, headings,
+  // tool labels, etc.), so we route through `.noFormat` to keep stray
+  // carets typed/emitted by the user from being eaten as markup
+  // commands.
   switch (style) {
     case "user":
       // Subtle dim-gray band — bold + default foreground (white on dark
@@ -1111,73 +1122,77 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       // Gives finer steps than the fixed 256-color grayscale ramp where
       // 235 → 236 was a perceptible jump.
       (term as unknown as {
-        bgColorGrayscale: { bold: (g: number, t: string) => void };
-      }).bgColorGrayscale.bold(43, text);
+        bgColorGrayscale: {
+          bold: { noFormat: (g: number, t: string) => void };
+        };
+      }).bgColorGrayscale.bold.noFormat(43, text);
       return;
     case "agent":
       term(text);
       return;
     case "thought":
-      term.dim.italic(text);
+      term.dim.italic.noFormat(text);
       return;
     case "tool":
-      term.brightBlue(text);
+      term.brightBlue.noFormat(text);
       return;
     case "tool-status-ok":
-      term.green(text);
+      term.green.noFormat(text);
       return;
     case "tool-status-fail":
-      term.bold.red(text);
+      term.bold.red.noFormat(text);
       return;
     case "tool-status-pending":
       // "queued" — work hasn't started yet; subdued so running calls
       // stand out next to it.
-      term.dim.yellow(text);
+      term.dim.yellow.noFormat(text);
       return;
     case "tool-status-running":
       // Bold so an in-flight tool call jumps out of a column of queued
       // and completed siblings.
-      term.bold.yellow(text);
+      term.bold.yellow.noFormat(text);
       return;
     case "tool-status-cancelled":
-      term.dim(text);
+      term.dim.noFormat(text);
       return;
     case "plan":
-      term.magenta(text);
+      term.magenta.noFormat(text);
       return;
     case "plan-done":
-      term.green(text);
+      term.green.noFormat(text);
       return;
     case "plan-pending":
-      term.dim(text);
+      term.dim.noFormat(text);
       return;
     case "system":
-      term.brightYellow(text);
+      term.brightYellow.noFormat(text);
       return;
     case "info":
-      term.cyan(text);
+      term.cyan.noFormat(text);
       return;
     case "dim":
-      term.dim(text);
+      term.dim.noFormat(text);
       return;
     case "code":
       // Tinted dark-blue band for fenced code blocks. Different hue from
       // the user-text band so the two never get confused at a glance.
       (term as unknown as {
-        bgColorGrayscale: { brightCyan: (g: number, t: string) => void };
-      }).bgColorGrayscale.brightCyan(28, text);
+        bgColorGrayscale: {
+          brightCyan: { noFormat: (g: number, t: string) => void };
+        };
+      }).bgColorGrayscale.brightCyan.noFormat(28, text);
       return;
     case "heading-1":
-      term.bold.brightYellow(text);
+      term.bold.brightYellow.noFormat(text);
       return;
     case "heading-2":
-      term.bold.brightCyan(text);
+      term.bold.brightCyan.noFormat(text);
       return;
     case "heading-3":
-      term.bold(text);
+      term.bold.noFormat(text);
       return;
     default:
-      term(text);
+      term.noFormat(text);
   }
 }
 
