@@ -369,6 +369,7 @@ async function runSession(
   const screen = new Screen({
     term,
     dispatcher,
+    repaintThrottleMs: config.tui.repaintThrottleMs,
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
         if (pendingPermission && tryHandlePermissionKey(ev)) {

@@ -12,6 +12,10 @@ export interface ScreenOptions {
   term: Terminal;
   dispatcher: InputDispatcher;
   onKey: (events: KeyEvent[]) => void;
+  // Minimum ms between full-screen repaints driven by content events.
+  // 0 disables throttling. User-action repaints (scroll, modal, resize,
+  // /clear, ^L) bypass this regardless. Default 1000 (1 Hz).
+  repaintThrottleMs?: number;
 }
 
 interface BannerState {
@@ -67,6 +71,12 @@ const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
 const MAX_COMPLETION_ROWS = 6;
 const CONFIRM_PROMPT_ROWS = 2;
+// Default minimum interval between content-driven repaints (agent text
+// chunks, tool/plan upserts, elapsed ticks). Without this we full-redraw
+// 10–50× per second during streaming, which is wasteful and made flicker
+// more visible. User-action repaints (scrolling, modal open/close, /clear)
+// bypass the throttle. Override via `tui.repaintThrottleMs` in config.
+const DEFAULT_CONTENT_REPAINT_THROTTLE_MS = 1000;
 
 export class Screen {
   private term: Terminal;
@@ -85,6 +95,9 @@ export class Screen {
   private queuedTexts: string[] = [];
   private repaintPaused = 0;
   private repaintPending = false;
+  private lastRepaintAt = 0;
+  private throttledRepaintTimer: NodeJS.Timeout | null = null;
+  private contentRepaintThrottleMs: number;
   private permissionPrompt: PermissionPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
   private completions: CompletionItem[] = [];
@@ -119,6 +132,8 @@ export class Screen {
     this.term = opts.term;
     this.dispatcher = opts.dispatcher;
     this.onKey = opts.onKey;
+    this.contentRepaintThrottleMs =
+      opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name) => this.handleMouse(name);
@@ -247,14 +262,14 @@ export class Screen {
     this.streamingActive = false;
     this.lines.push(...lines);
     this.adjustScrollForLineChange(lines.length);
-    this.repaint();
+    this.scheduleRepaint();
   }
 
   appendLine(line: FormattedLine): void {
     this.streamingActive = false;
     this.lines.push(line);
     this.adjustScrollForLineChange(1);
-    this.repaint();
+    this.scheduleRepaint();
   }
 
   // When scrolled away from the bottom, shift scrollOffset to keep the
@@ -319,7 +334,7 @@ export class Screen {
       this.streamingActive = false;
     }
     this.adjustScrollForLineChange(scrollDelta);
-    this.repaint();
+    this.scheduleRepaint();
   }
 
   // Append fragments of a streaming message (e.g. agent_message_chunk). The
@@ -379,7 +394,7 @@ export class Screen {
     }
     this.streamingActive = true;
     this.adjustScrollForLineChange(added);
-    this.repaint();
+    this.scheduleRepaint();
   }
 
   setHeader(header: Partial<HeaderState>): void {
@@ -432,7 +447,7 @@ export class Screen {
       this.streamingActive = false;
     }
     this.adjustScrollForLineChange(-existing.count);
-    this.repaint();
+    this.scheduleRepaint();
   }
 
   redraw(): void {
@@ -512,7 +527,7 @@ export class Screen {
     this.lines.push({ body: "" });
     this.streamingActive = false;
     this.adjustScrollForLineChange(1);
-    this.repaint();
+    this.scheduleRepaint();
   }
 
   // The dispatcher is the source of truth for prompt state. If the prompt
@@ -607,17 +622,60 @@ export class Screen {
     return Math.max(0, wrapped.length - visible);
   }
 
+  // Used by content mutators to coalesce rapid updates. Repaints fire
+  // at most once per contentRepaintThrottleMs; if a paint happened
+  // recently, schedule one for the remainder of the window. Setting the
+  // throttle to 0 disables coalescing entirely.
+  private scheduleRepaint(): void {
+    if (this.repaintPaused > 0) {
+      this.repaintPending = true;
+      return;
+    }
+    if (this.contentRepaintThrottleMs <= 0) {
+      this.repaint();
+      return;
+    }
+    const now = Date.now();
+    const elapsed = now - this.lastRepaintAt;
+    if (elapsed >= this.contentRepaintThrottleMs) {
+      if (this.throttledRepaintTimer) {
+        clearTimeout(this.throttledRepaintTimer);
+        this.throttledRepaintTimer = null;
+      }
+      this.repaint();
+      return;
+    }
+    if (this.throttledRepaintTimer !== null) {
+      return;
+    }
+    this.throttledRepaintTimer = setTimeout(() => {
+      this.throttledRepaintTimer = null;
+      this.repaint();
+    }, this.contentRepaintThrottleMs - elapsed);
+  }
+
   private repaint(): void {
     if (this.repaintPaused > 0) {
       this.repaintPending = true;
       return;
+    }
+    this.lastRepaintAt = Date.now();
+    if (this.throttledRepaintTimer) {
+      clearTimeout(this.throttledRepaintTimer);
+      this.throttledRepaintTimer = null;
     }
     const w = this.term.width;
     const h = this.term.height;
     if (w < 20 || h < 8) {
       return;
     }
-    this.term.clear();
+    // Don't call term.clear() here. Each draw* method moves to its row
+    // and emits eraseLineAfter before writing, so every row is overwritten
+    // anyway. The full-screen clear caused a visible black-flash flicker
+    // on each repaint because there's a non-trivial gap between clearing
+    // and the first row write. (Fullscreen alternate-screen mode means
+    // the buffer starts clean; resize triggers a repaint that covers all
+    // rows in the new size.)
     this.drawHeader();
     this.drawSeparator(HEADER_ROWS);
     this.drawScrollback();

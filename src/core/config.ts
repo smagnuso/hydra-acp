@@ -25,6 +25,16 @@ const RegistryConfig = z.object({
   ttlHours: z.number().positive().default(24),
 });
 
+const TuiConfig = z.object({
+  // Minimum interval (ms) between full-screen repaints driven by content
+  // events (agent text chunks, tool/plan updates, elapsed-tick refreshes).
+  // User-action repaints — scrolling, prompt-row changes, modal open/close,
+  // /clear, ^L, resize — bypass this throttle. Default 1000 (1 Hz) keeps
+  // CPU low during heavy streaming; bump to 250 for 4 Hz, 100 for ~10 Hz,
+  // or 0 to disable throttling entirely.
+  repaintThrottleMs: z.number().int().nonnegative().default(1000),
+});
+
 const ExtensionName = z
   .string()
   .min(1)
@@ -56,6 +66,7 @@ export const HydraConfig = z.object({
   // recency and truncated to this count. `--all` overrides in the CLI.
   sessionListColdLimit: z.number().int().nonnegative().default(20),
   extensions: z.record(ExtensionName, ExtensionBody).default({}),
+  tui: TuiConfig.default({ repaintThrottleMs: 1000 }),
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;
