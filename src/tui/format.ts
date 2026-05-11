@@ -12,6 +12,8 @@ export type Style =
   | "tool-status-ok"
   | "tool-status-fail"
   | "tool-status-pending"
+  | "tool-status-running"
+  | "tool-status-cancelled"
   | "plan"
   | "plan-done"
   | "plan-pending"
@@ -35,9 +37,12 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
     case "agent-thought":
       return formatBlock(event.text, "· ", "thought", "thought");
     case "tool-call":
-      return formatToolCall(event);
     case "tool-call-update":
-      return formatToolCallUpdate(event);
+      // Tool calls render as a single mutating line keyed by toolCallId —
+      // see formatToolLine + Screen.upsertLine. app.ts intercepts these
+      // events before reaching here, so this case is unreachable in
+      // production but kept exhaustive for the switch.
+      return [];
     case "plan":
       return formatPlan(event);
     case "mode-changed":
@@ -105,33 +110,67 @@ function formatBlock(
   return out;
 }
 
-function formatToolCall(event: Extract<RenderEvent, { kind: "tool-call" }>): FormattedLine[] {
-  const status = event.status ?? "pending";
-  const statusStyle = toolStatusStyle(status);
-  return [
-    {
-      prefix: "⚒ ",
-      prefixStyle: "tool",
-      body: `${event.title}  [${status}]`,
-      bodyStyle: statusStyle,
-    },
-  ];
+export interface ToolLineState {
+  // The title from the initial `tool_call` event — usually the tool's
+  // generic name (e.g. "Terminal", "Read File").
+  initialTitle: string;
+  // The most recent title from a `tool_call_update` event, if one carried
+  // a refined label (e.g. the actual command, the file path). Falls back
+  // to initialTitle.
+  latestTitle: string;
+  status: string;
 }
 
-function formatToolCallUpdate(
-  event: Extract<RenderEvent, { kind: "tool-call-update" }>,
-): FormattedLine[] {
-  const status = event.status ?? "updated";
-  // Prefer the human title; if absent, use a compact "↳" gutter so we
-  // don't expose the agent's opaque toolCallId in the scrollback.
-  const body = event.title ? `${event.title} → ${status}` : `↳ ${status}`;
-  return [
-    {
-      prefix: "  ",
-      body,
-      bodyStyle: toolStatusStyle(status),
-    },
-  ];
+// Render the single line that represents a tool call. Combines the initial
+// (generic) title with the refined update title when they add information,
+// and folds them into one when the refinement subsumes the initial label.
+// A single status icon sits between the ⚒ gutter and the title so a stack
+// of tool calls scans as a clean column without burning horizontal space
+// on text labels. Color + weight encode state: dim while queued, bold
+// while running, normal-weight when done.
+export function formatToolLine(state: ToolLineState): FormattedLine {
+  const initial = state.initialTitle;
+  const latest = state.latestTitle;
+  const initialLc = initial.toLowerCase();
+  const latestLc = latest.toLowerCase();
+  let title: string;
+  if (latest === initial || latestLc.includes(initialLc)) {
+    title = latest;
+  } else if (initialLc.includes(latestLc)) {
+    title = initial;
+  } else {
+    title = `${initial} · ${latest}`;
+  }
+  return {
+    prefix: "⚒ ",
+    prefixStyle: "tool",
+    body: `${toolStatusIcon(state.status)} ${title}`,
+    bodyStyle: toolStatusStyle(state.status),
+  };
+}
+
+function toolStatusIcon(status: string): string {
+  switch (status) {
+    case "completed":
+    case "succeeded":
+    case "ok":
+      return "✓";
+    case "failed":
+    case "error":
+      return "✗";
+    case "rejected":
+      return "⊘";
+    case "cancelled":
+      return "⊝";
+    case "in_progress":
+    case "running":
+    case "updated":
+    case "pending":
+    default:
+      // Same spinner glyph for queued vs. running — bodyStyle distinguishes
+      // them visually (dim vs. bold).
+      return "◐";
+  }
 }
 
 function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLine[] {
@@ -181,7 +220,14 @@ function toolStatusStyle(status: string): Style {
     case "error":
     case "rejected":
       return "tool-status-fail";
+    case "in_progress":
+    case "running":
+    case "updated":
+      return "tool-status-running";
+    case "cancelled":
+      return "tool-status-cancelled";
     default:
+      // pending / unknown — the "waiting" state
       return "tool-status-pending";
   }
 }

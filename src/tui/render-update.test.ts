@@ -73,14 +73,14 @@ describe("mapUpdate", () => {
     ).toEqual({ kind: "user-text", text: "hi there", sentBy: "alice" });
   });
 
-  it("falls back to sentBy.clientId when name missing", () => {
+  it("omits sentBy when only clientId is present (avoids noisy 'from cli_*' lines)", () => {
     expect(
       mapUpdate({
         sessionUpdate: "prompt_received",
         prompt: [{ type: "text", text: "hi" }],
         sentBy: { clientId: "c1" },
       }),
-    ).toEqual({ kind: "user-text", text: "hi", sentBy: "c1" });
+    ).toEqual({ kind: "user-text", text: "hi" });
   });
 
   it("handles tool_call with status and rawKind", () => {

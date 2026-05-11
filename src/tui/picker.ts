@@ -1,8 +1,9 @@
 // Pre-screen interactive picker. Lists every live session plus the most
 // recently-touched cold ones (capped at coldLimit) to keep the table
 // scannable when the on-disk history is deep, plus a "+ New session"
-// entry at the bottom (the default cursor position). Lives outside the
-// main screen so it can run before fullscreen mode is engaged.
+// entry at the top (the default cursor position) so the user can press
+// Enter for a new session or arrow down into the session list. Lives
+// outside the main screen so it can run before fullscreen mode is engaged.
 
 import type { Terminal } from "terminal-kit";
 import { stripHydraSessionPrefix } from "../core/session.js";
@@ -56,10 +57,19 @@ export async function pickSession(
   if (opts.sessions.length === 0) {
     return { kind: "new" };
   }
+  // Tier sessions so live ones come first, and within the live group prefer
+  // sessions whose cwd matches the caller's. This puts the most relevant
+  // session at the top of the list, just below the "+ New session" entry.
+  const score = (s: DiscoveredSession): number => {
+    if (s.status !== "live") {
+      return 0;
+    }
+    return s.cwd === opts.cwd ? 2 : 1;
+  };
   const sorted = [...opts.sessions].sort((a, b) => {
-    const liveDiff = (b.status === "live" ? 1 : 0) - (a.status === "live" ? 1 : 0);
-    if (liveDiff !== 0) {
-      return liveDiff;
+    const tier = score(b) - score(a);
+    if (tier !== 0) {
+      return tier;
     }
     return b.updatedAt.localeCompare(a.updatedAt);
   });
@@ -71,8 +81,7 @@ export async function pickSession(
   const widths = computeWidths(rows);
   const newSessionLabel = `+ New session in ${opts.cwd}`;
 
-  const items: string[] = rows.map((r) => formatRow(r, widths));
-  items.push(newSessionLabel);
+  const items: string[] = [newSessionLabel, ...rows.map((r) => formatRow(r, widths))];
 
   term("\n");
   term.bold("Select a session")("\n");
@@ -100,7 +109,7 @@ export async function pickSession(
       .singleColumnMenu(items, {
         cancelable: true,
         exitOnUnexpectedKey: false,
-        selectedIndex: items.length - 1,
+        selectedIndex: 0,
         style: term.brightWhite,
         selectedStyle: term.brightWhite.bgBlue,
         keyBindings: {
@@ -126,10 +135,10 @@ export async function pickSession(
   if (response.canceled || response.selectedIndex === undefined) {
     return { kind: "abort" };
   }
-  if (response.selectedIndex === items.length - 1) {
+  if (response.selectedIndex === 0) {
     return { kind: "new" };
   }
-  const session = visible[response.selectedIndex];
+  const session = visible[response.selectedIndex - 1];
   if (!session) {
     return { kind: "abort" };
   }

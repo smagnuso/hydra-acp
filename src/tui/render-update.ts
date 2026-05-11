@@ -183,12 +183,16 @@ function mapPromptReceived(u: UpdateLike): RenderEvent | null {
   if (promptText === null) {
     return null;
   }
+  // Attribute only when the sender has a human-meaningful name. The bare
+  // clientId fallback (e.g. "cli_abc123") is noise — it points at the
+  // user's own auto-generated client identity in single-user usage.
   const sentBy =
     u.sentBy && typeof u.sentBy === "object"
-      ? (u.sentBy as { name?: string; clientId?: string }).name ??
-        (u.sentBy as { clientId?: string }).clientId
+      ? (u.sentBy as { name?: string }).name
       : undefined;
-  return { kind: "user-text", text: promptText, sentBy };
+  return sentBy !== undefined
+    ? { kind: "user-text", text: promptText, sentBy }
+    : { kind: "user-text", text: promptText };
 }
 
 function mapToolCall(u: UpdateLike): RenderEvent | null {

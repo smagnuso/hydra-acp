@@ -27,7 +27,12 @@ import {
   type AvailableCommand,
   type RenderEvent,
 } from "./render-update.js";
-import { formatEvent, type FormattedLine } from "./format.js";
+import {
+  formatEvent,
+  formatToolLine,
+  type FormattedLine,
+  type ToolLineState,
+} from "./format.js";
 
 export interface TuiOptions {
   sessionId?: string;
@@ -152,13 +157,9 @@ async function runSession(
     pendingPermission = null;
     screen.setPermissionPrompt(null);
     resolve(result ?? { outcome: { outcome: "cancelled" } });
-    screen.appendLines([
-      {
-        prefix: "  ",
-        body: "(resolved by another client)",
-        bodyStyle: "info",
-      },
-    ]);
+    // The modal vanishing is signal enough; the tool-call row will update
+    // to running/completed/failed on the next status change, so we don't
+    // need a sticky scrollback line announcing the resolution.
   };
 
   // Fallback for the case where session/permission_resolved didn't arrive:
@@ -351,6 +352,8 @@ async function runSession(
     { name: "/quit", description: "Exit the TUI" },
     { name: "/clear", description: "Clear scrollback" },
     { name: "/sessions", description: "List sessions" },
+    { name: "/demo-plan", description: "Inject synthetic plan events (UI test)" },
+    { name: "/demo-tool", description: "Inject a synthetic tool-call sequence (UI test)" },
   ];
   let agentCommands: AvailableCommand[] = [];
 
@@ -653,8 +656,67 @@ async function runSession(
         stop(0);
         return true;
       case "/clear":
+        toolStates.clear();
         screen.clearScrollback();
         return true;
+      case "/demo-plan": {
+        // Force a fresh plan block at the bottom of scrollback even if a
+        // prior turn or history-replay already anchored the "plan" key.
+        screen.clearKey("plan");
+        const steps = ["Step 1", "Step 2", "Step 3", "Step 4", "Step 5"];
+        const sequences: string[][] = [
+          ["pending", "pending", "pending", "pending", "pending"],
+          ["in_progress", "pending", "pending", "pending", "pending"],
+          ["completed", "in_progress", "pending", "pending", "pending"],
+          ["completed", "completed", "in_progress", "pending", "pending"],
+          ["completed", "completed", "completed", "in_progress", "pending"],
+          ["completed", "completed", "completed", "completed", "in_progress"],
+          ["completed", "completed", "completed", "completed", "completed"],
+        ];
+        let i = 0;
+        const tick = (): void => {
+          const statuses = sequences[i];
+          if (!statuses) {
+            return;
+          }
+          appendRender({
+            kind: "plan",
+            entries: steps.map((content, j) => ({
+              content,
+              status: statuses[j] ?? "pending",
+            })),
+          });
+          i += 1;
+          setTimeout(tick, 600);
+        };
+        tick();
+        return true;
+      }
+      case "/demo-tool": {
+        const id = `demo-${Date.now()}`;
+        appendRender({
+          kind: "tool-call",
+          toolCallId: id,
+          title: "Terminal",
+          status: "pending",
+        });
+        setTimeout(() => {
+          appendRender({
+            kind: "tool-call-update",
+            toolCallId: id,
+            title: "echo hello world",
+            status: "in_progress",
+          });
+        }, 500);
+        setTimeout(() => {
+          appendRender({
+            kind: "tool-call-update",
+            toolCallId: id,
+            status: "completed",
+          });
+        }, 1500);
+        return true;
+      }
       case "/help": {
         const lines: FormattedLine[] = [
           { prefix: "  ", body: "Built-in commands:", bodyStyle: "system" },
@@ -772,6 +834,19 @@ async function runSession(
 
   const usage: { used?: number; size?: number; costAmount?: number; costCurrency?: string } = {};
 
+  // toolCallId → merged state for the single in-place row that represents
+  // the tool call. Lives for the screen's lifetime; cleared on /clear so
+  // newly-arriving tool calls don't accidentally upsert into vacated rows.
+  const toolStates = new Map<string, ToolLineState>();
+
+  const renderToolLine = (id: string): void => {
+    const state = toolStates.get(id);
+    if (!state) {
+      return;
+    }
+    screen.upsertLine(`tool:${id}`, formatToolLine(state));
+  };
+
   applyRenderEvent = (event: RenderEvent): void => {
     if (event.kind === "available-commands") {
       agentCommands = event.commands;
@@ -818,11 +893,53 @@ async function runSession(
       screen.appendStreaming(event.text, "· ", "thought", "thought");
       return;
     }
+    if (event.kind === "tool-call") {
+      toolStates.set(event.toolCallId, {
+        initialTitle: event.title,
+        latestTitle: event.title,
+        status: event.status ?? "pending",
+      });
+      renderToolLine(event.toolCallId);
+      return;
+    }
+    if (event.kind === "plan") {
+      // The agent emits a full plan snapshot each time entries get added
+      // or checked off; render it as a single mutating block so the
+      // scrollback doesn't accumulate one copy per update.
+      const lines = formatEvent(event);
+      if (lines.length > 0) {
+        screen.upsertLines("plan", lines);
+      }
+      return;
+    }
+    if (event.kind === "tool-call-update") {
+      const existing = toolStates.get(event.toolCallId);
+      const state: ToolLineState = existing ?? {
+        initialTitle: event.title ?? "tool",
+        latestTitle: event.title ?? "tool",
+        status: event.status ?? "pending",
+      };
+      if (event.title !== undefined) {
+        state.latestTitle = event.title;
+      }
+      if (event.status !== undefined) {
+        state.status = event.status;
+      }
+      toolStates.set(event.toolCallId, state);
+      renderToolLine(event.toolCallId);
+      return;
+    }
     const formatted = formatEvent(event);
     if (formatted.length > 0) {
       screen.appendLines(formatted);
     }
     if (event.kind === "turn-complete") {
+      // The plan upsert is keyed by "plan" so within a turn each update
+      // splices in place. Reset that key at the turn boundary so the next
+      // turn's first plan event appends as a fresh block below — otherwise
+      // it would splice into the previous turn's plan, possibly far up in
+      // (or off the top of) scrollback.
+      screen.clearKey("plan");
       screen.ensureSeparator();
     }
   };

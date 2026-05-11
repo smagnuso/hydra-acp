@@ -17,9 +17,15 @@ export type KeyName =
   | "end"
   | "backspace"
   | "delete"
+  | "ctrl-a"
+  | "ctrl-b"
   | "ctrl-c"
   | "ctrl-d"
+  | "ctrl-e"
+  | "ctrl-f"
+  | "ctrl-k"
   | "ctrl-l"
+  | "ctrl-n"
   | "ctrl-p"
   | "ctrl-u"
   | "ctrl-w"
@@ -137,11 +143,24 @@ export class InputDispatcher {
         this.moveRight();
         return [];
       case "home":
+      case "ctrl-a":
         this.col = 0;
         return [];
       case "end":
+      case "ctrl-e":
         this.col = this.currentLine().length;
         return [];
+      case "ctrl-b":
+        this.moveLeft();
+        return [];
+      case "ctrl-f":
+        this.moveRight();
+        return [];
+      case "ctrl-k":
+        this.killToEnd();
+        return [];
+      case "ctrl-n":
+        return this.handleDown();
       case "backspace":
         this.backspace();
         return [];
@@ -269,6 +288,11 @@ export class InputDispatcher {
     const line = this.currentLine();
     this.setCurrentLine(line.slice(this.col));
     this.col = 0;
+  }
+
+  private killToEnd(): void {
+    const line = this.currentLine();
+    this.setCurrentLine(line.slice(0, this.col));
   }
 
   private killWord(): void {

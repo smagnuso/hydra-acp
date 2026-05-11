@@ -59,6 +59,13 @@ export class Screen {
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
   private lines: FormattedLine[] = [];
+  // Tracks contiguous blocks of lines that callers may want to mutate in
+  // place (e.g. tool-call rows that update from "pending" to "completed",
+  // or the agent's plan as entries get checked off). Each block is keyed
+  // by an opaque caller-chosen string and remembers its start index and
+  // current line count so subsequent upserts splice in-place — adjusting
+  // the starts of any later keyed blocks if the size changes.
+  private keyedBlocks = new Map<string, { start: number; count: number }>();
   private streamingActive = false;
   private lastPromptRows = 0;
   private queuedTexts: string[] = [];
@@ -137,6 +144,43 @@ export class Screen {
     this.repaint();
   }
 
+  // Append-or-replace a single-line block keyed by `key`. Thin wrapper
+  // around upsertLines for the common one-row case (tool calls).
+  upsertLine(key: string, line: FormattedLine): void {
+    this.upsertLines(key, [line]);
+  }
+
+  // Append-or-replace a contiguous block of lines keyed by `key`. First
+  // call appends; later calls splice the new lines in over the previous
+  // ones. If the block changes size, the start indices of any later keyed
+  // blocks are shifted to stay in sync with the new `lines` array.
+  upsertLines(key: string, newLines: FormattedLine[]): void {
+    if (newLines.length === 0) {
+      return;
+    }
+    const existing = this.keyedBlocks.get(key);
+    if (existing) {
+      const delta = newLines.length - existing.count;
+      this.lines.splice(existing.start, existing.count, ...newLines);
+      existing.count = newLines.length;
+      if (delta !== 0) {
+        for (const [k, range] of this.keyedBlocks) {
+          if (k !== key && range.start > existing.start) {
+            range.start += delta;
+          }
+        }
+      }
+    } else {
+      this.keyedBlocks.set(key, {
+        start: this.lines.length,
+        count: newLines.length,
+      });
+      this.lines.push(...newLines);
+    }
+    this.streamingActive = false;
+    this.repaint();
+  }
+
   // Append fragments of a streaming message (e.g. agent_message_chunk). The
   // first fragment after a non-streaming event starts a new line; subsequent
   // fragments extend that line in place. Embedded newlines split into rows
@@ -193,8 +237,17 @@ export class Screen {
 
   clearScrollback(): void {
     this.lines = [];
+    this.keyedBlocks.clear();
     this.streamingActive = false;
     this.repaint();
+  }
+
+  // Forget an upsert key without touching scrollback. The next upsertLines
+  // for this key will append at the bottom instead of splicing in place —
+  // used to scope a logical block (e.g. an agent's plan) to one turn so
+  // the next turn starts a fresh block below.
+  clearKey(key: string): void {
+    this.keyedBlocks.delete(key);
   }
 
   redraw(): void {
@@ -533,19 +586,29 @@ export class Screen {
       return;
     }
     const w = this.term.width;
-    const promptRows = this.promptRows();
-    const top = this.term.height - promptRows - BANNER_ROWS + 1;
+    const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
-    for (let i = 0; i < promptRows; i++) {
+    const visualRows = computePromptVisualRows(state.buffer, room);
+    const layout = computePromptLayout(visualRows, state, MAX_PROMPT_ROWS);
+    const top = this.term.height - layout.rendered - BANNER_ROWS + 1;
+    for (let i = 0; i < layout.rendered; i++) {
+      const vr = visualRows[layout.windowStart + i];
       const row = top + i;
       this.term.moveTo(1, row).eraseLineAfter();
-      if (i === 0) {
-        this.term.brightWhite("> ");
-      } else {
-        this.term.dim("· ");
+      if (!vr) {
+        continue;
       }
-      const lineText = state.buffer[i] ?? "";
-      this.term(truncate(lineText, w - 2));
+      // Gutter: "> " on the very first visual row, "· " on the start of a
+      // logical newline, blank on a soft-wrap continuation.
+      if (vr.bufferIdx === 0 && vr.startCol === 0) {
+        this.term.brightWhite("> ");
+      } else if (vr.startCol === 0) {
+        this.term.dim("· ");
+      } else {
+        this.term("  ");
+      }
+      const line = state.buffer[vr.bufferIdx] ?? "";
+      this.term(line.slice(vr.startCol, vr.endCol));
     }
   }
 
@@ -634,20 +697,29 @@ export class Screen {
       this.term.moveTo(2, Math.min(optionRow, this.term.height - BANNER_ROWS));
       return;
     }
-    const promptRows = this.promptRows();
-    const top = this.term.height - promptRows - BANNER_ROWS + 1;
+    const w = this.term.width;
+    const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
-    const row = top + Math.min(state.row, promptRows - 1);
-    const col = state.col + 3; // "> " or "· " gutter
-    this.term.moveTo(Math.min(col, this.term.width), row);
+    const visualRows = computePromptVisualRows(state.buffer, room);
+    const layout = computePromptLayout(visualRows, state, MAX_PROMPT_ROWS);
+    const top = this.term.height - layout.rendered - BANNER_ROWS + 1;
+    const row = top + Math.max(0, layout.cursorVisualRow - layout.windowStart);
+    const col = layout.cursorVisualCol + 3; // gutter (2) + 1-based column
+    this.term.moveTo(
+      Math.min(col, this.term.width),
+      Math.min(row, this.term.height - BANNER_ROWS),
+    );
   }
 
   private promptRows(): number {
     if (this.permissionPrompt) {
       return this.permissionRows();
     }
+    const w = this.term.width;
+    const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
-    return Math.min(MAX_PROMPT_ROWS, Math.max(1, state.buffer.length));
+    const visualRows = computePromptVisualRows(state.buffer, room);
+    return Math.min(MAX_PROMPT_ROWS, Math.max(1, visualRows.length));
   }
 
   private permissionRows(): number {
@@ -697,6 +769,102 @@ export class Screen {
   }
 }
 
+interface PromptVisualRow {
+  bufferIdx: number;
+  startCol: number;
+  endCol: number;
+}
+
+// Split each logical buffer line into visual rows of at most `room` chars
+// each, so very long pasted/typed input soft-wraps in the prompt area
+// instead of running off-screen. An empty buffer line still yields one
+// visual row so the cursor has somewhere to land.
+function computePromptVisualRows(buffer: string[], room: number): PromptVisualRow[] {
+  const rows: PromptVisualRow[] = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer[i] ?? "";
+    if (line.length === 0) {
+      rows.push({ bufferIdx: i, startCol: 0, endCol: 0 });
+      continue;
+    }
+    let pos = 0;
+    while (pos < line.length) {
+      const end = Math.min(line.length, pos + room);
+      rows.push({ bufferIdx: i, startCol: pos, endCol: end });
+      pos = end;
+    }
+  }
+  if (rows.length === 0) {
+    rows.push({ bufferIdx: 0, startCol: 0, endCol: 0 });
+  }
+  return rows;
+}
+
+interface PromptLayout {
+  // Visual row index (into the unwindowed visualRows array) the cursor
+  // sits on, and its column within that row.
+  cursorVisualRow: number;
+  cursorVisualCol: number;
+  // First visual row to actually draw; allows scrolling the prompt
+  // window when the buffer exceeds MAX_PROMPT_ROWS so the cursor stays
+  // visible.
+  windowStart: number;
+  // Number of visual rows we'll render this frame.
+  rendered: number;
+}
+
+function computePromptLayout(
+  visualRows: PromptVisualRow[],
+  state: { buffer: string[]; row: number; col: number },
+  maxRows: number,
+): PromptLayout {
+  let cursorVisualRow = 0;
+  let cursorVisualCol = 0;
+  // Find the visual row containing (state.row, state.col). If the cursor
+  // sits exactly at the boundary between two soft-wrapped rows (col equals
+  // an interior row's endCol) prefer the next row — that matches what the
+  // user expects after typing the wrapping character.
+  let lastMatchIdx = -1;
+  for (let i = 0; i < visualRows.length; i++) {
+    const vr = visualRows[i];
+    if (!vr || vr.bufferIdx !== state.row) {
+      continue;
+    }
+    lastMatchIdx = i;
+    if (state.col >= vr.startCol && state.col < vr.endCol) {
+      cursorVisualRow = i;
+      cursorVisualCol = state.col - vr.startCol;
+      lastMatchIdx = -1;
+      break;
+    }
+  }
+  if (lastMatchIdx !== -1) {
+    const vr = visualRows[lastMatchIdx];
+    if (vr) {
+      cursorVisualRow = lastMatchIdx;
+      cursorVisualCol = state.col - vr.startCol;
+    }
+  }
+  const rendered = Math.min(maxRows, Math.max(1, visualRows.length));
+  let windowStart = 0;
+  if (visualRows.length > rendered) {
+    // Keep the cursor row inside the visible window. Anchor the window to
+    // the cursor's row when possible, then clamp so we don't scroll past
+    // either end of the buffer.
+    windowStart = Math.max(
+      0,
+      Math.min(visualRows.length - rendered, cursorVisualRow - (rendered - 1)),
+    );
+    if (cursorVisualRow < windowStart) {
+      windowStart = cursorVisualRow;
+    }
+    if (cursorVisualRow >= windowStart + rendered) {
+      windowStart = cursorVisualRow - rendered + 1;
+    }
+  }
+  return { cursorVisualRow, cursorVisualCol, windowStart, rendered };
+}
+
 function writeStyled(term: Terminal, text: string, style: Style | undefined): void {
   if (text.length === 0) {
     return;
@@ -718,10 +886,20 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       term.green(text);
       return;
     case "tool-status-fail":
-      term.red(text);
+      term.bold.red(text);
       return;
     case "tool-status-pending":
-      term.yellow(text);
+      // "queued" — work hasn't started yet; subdued so running calls
+      // stand out next to it.
+      term.dim.yellow(text);
+      return;
+    case "tool-status-running":
+      // Bold so an in-flight tool call jumps out of a column of queued
+      // and completed siblings.
+      term.bold.yellow(text);
+      return;
+    case "tool-status-cancelled":
+      term.dim(text);
       return;
     case "plan":
       term.magenta(text);
@@ -754,11 +932,30 @@ function wrap(text: string, width: number): string[] {
     return [""];
   }
   const out: string[] = [];
-  let i = 0;
-  while (i < text.length) {
-    out.push(text.slice(i, i + width));
-    i += width;
+  let remaining = text;
+  while (remaining.length > width) {
+    // Prefer breaking at the last whitespace within the window so words
+    // stay intact. Falls back to a hard break when no whitespace fits —
+    // e.g. a long URL or path with no spaces.
+    const window = remaining.slice(0, width + 1);
+    let breakAt = -1;
+    for (let i = Math.min(width, window.length - 1); i >= 0; i--) {
+      if (window[i] === " ") {
+        breakAt = i;
+        break;
+      }
+    }
+    if (breakAt <= 0) {
+      out.push(remaining.slice(0, width));
+      remaining = remaining.slice(width);
+    } else {
+      out.push(remaining.slice(0, breakAt));
+      // Drop the breaking space so continuation lines start with text,
+      // not a leading space.
+      remaining = remaining.slice(breakAt + 1);
+    }
   }
+  out.push(remaining);
   return out;
 }
 
@@ -847,12 +1044,24 @@ function mapKeyName(name: string): KeyName | null {
       return "backspace";
     case "DELETE":
       return "delete";
+    case "CTRL_A":
+      return "ctrl-a";
+    case "CTRL_B":
+      return "ctrl-b";
     case "CTRL_C":
       return "ctrl-c";
     case "CTRL_D":
       return "ctrl-d";
+    case "CTRL_E":
+      return "ctrl-e";
+    case "CTRL_F":
+      return "ctrl-f";
+    case "CTRL_K":
+      return "ctrl-k";
     case "CTRL_L":
       return "ctrl-l";
+    case "CTRL_N":
+      return "ctrl-n";
     case "CTRL_P":
       return "ctrl-p";
     case "CTRL_U":
