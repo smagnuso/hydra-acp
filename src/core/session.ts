@@ -20,6 +20,11 @@ export function stripHydraSessionPrefix(id: string): string {
     : id;
 }
 import { AgentInstance } from "./agent-instance.js";
+import {
+  HYDRA_COMMANDS,
+  hydraCommandsAsAdvertised,
+  type AdvertisedCommand,
+} from "./hydra-commands.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import type { HistoryPolicy, JsonRpcId, SessionRole } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
@@ -118,6 +123,12 @@ export class Session {
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
   > = [];
+  // Last available_commands_update we observed from the agent. Stored so
+  // we can re-broadcast a merged (hydra ∪ agent) list whenever either
+  // half changes — most importantly when a fresh client attaches and
+  // replays history, since the in-cache update is the daemon's merged
+  // form (the agent's raw form is never broadcast).
+  private agentAdvertisedCommands: AdvertisedCommand[] = [];
 
   constructor(init: SessionInit) {
     this.sessionId =
@@ -134,6 +145,24 @@ export class Session {
     this.updatedAt = Date.now();
 
     this.wireAgent(this.agent);
+    // Seed the broadcast cache with our /hydra verbs so clients see them
+    // immediately (and on history replay) even if the agent never emits
+    // an available_commands_update of its own.
+    this.broadcastMergedCommands();
+  }
+
+  private broadcastMergedCommands(): void {
+    const merged: AdvertisedCommand[] = [
+      ...hydraCommandsAsAdvertised(),
+      ...this.agentAdvertisedCommands,
+    ];
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: merged,
+      },
+    });
   }
 
   // Register session/update, session/request_permission, and onExit
@@ -149,6 +178,15 @@ export class Session {
       // captured into a private buffer instead of being broadcast.
       if (this.internalPromptCapture) {
         captureInternalChunk(this.internalPromptCapture, params);
+        return;
+      }
+      // available_commands_update is intercepted: we cache the agent's
+      // list and re-emit a merged (hydra ∪ agent) version so clients
+      // always see both halves through one update.
+      const agentCmds = extractAdvertisedCommands(params);
+      if (agentCmds !== null) {
+        this.agentAdvertisedCommands = agentCmds;
+        this.broadcastMergedCommands();
         return;
       }
       // Pick up agent-emitted session_info_update so the canonical
@@ -465,27 +503,38 @@ export class Session {
 
   // Dispatch a /hydra <verb> [args] slash command typed in any client's
   // composer. Returns a synthesized session/prompt response so the
-  // caller's promise resolves like a normal turn. New verbs slot in by
-  // adding cases here.
+  // caller's promise resolves like a normal turn. To add a verb: append
+  // an entry to HYDRA_COMMANDS (drives validation + client advertising)
+  // and a dispatch case in the switch below.
   private async handleSlashCommand(text: string): Promise<unknown> {
     const rest = text.slice("/hydra".length).trim();
     const match = rest.match(/^(\S+)(?:\s+([\s\S]*))?$/);
     const verb = match?.[1] ?? "";
     const arg = (match?.[2] ?? "").trim();
+    if (verb === "") {
+      // "/hydra" alone: no-op, return success so the user's
+      // composer doesn't show an error.
+      return { stopReason: "end_turn" };
+    }
+    if (!HYDRA_COMMANDS.some((c) => c.verb === verb)) {
+      const known = HYDRA_COMMANDS.map((c) => c.verb).join(", ");
+      const err = new Error(
+        `unknown /hydra verb: ${verb} (known: ${known})`,
+      ) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.InvalidParams;
+      throw err;
+    }
     switch (verb) {
       case "title":
         return this.runTitleCommand(arg);
       case "switch":
         return this.runSwitchCommand(arg);
-      case "":
-        // "/hydra" alone: no-op, return success so the user's
-        // composer doesn't show an error.
-        return { stopReason: "end_turn" };
       default: {
-        const err = new Error(`unknown /hydra verb: ${verb}`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.InvalidParams;
+        // Listed in HYDRA_COMMANDS but no dispatch case — wired up wrong.
+        const err = new Error(
+          `no dispatcher for /hydra verb ${verb}`,
+        ) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.InternalError;
         throw err;
       }
     }
@@ -578,6 +627,11 @@ export class Session {
       this.agentId = newAgentId;
       this.upstreamSessionId = fresh.upstreamSessionId;
       this.agentMeta = fresh.agentMeta;
+      // Old agent's commands no longer apply; clear and re-broadcast
+      // a merged update with just /hydra verbs until the new agent
+      // advertises its own.
+      this.agentAdvertisedCommands = [];
+      this.broadcastMergedCommands();
       await oldAgent.kill().catch(() => undefined);
 
       if (transcript) {
@@ -902,6 +956,44 @@ function captureInternalChunk(
   if (typeof content.text === "string") {
     capture.chunks.push(content.text);
   }
+}
+
+// Returns the agent-advertised command list when params is a session/update
+// of kind available_commands_update; null otherwise. Used to intercept the
+// agent's raw update so we can re-emit a merged (hydra ∪ agent) version
+// to clients via broadcastMergedCommands.
+function extractAdvertisedCommands(
+  params: unknown,
+): AdvertisedCommand[] | null {
+  const obj = (params ?? {}) as { update?: unknown };
+  const update = (obj.update ?? {}) as {
+    sessionUpdate?: unknown;
+    availableCommands?: unknown;
+    commands?: unknown;
+  };
+  if (update.sessionUpdate !== "available_commands_update") {
+    return null;
+  }
+  const list = update.availableCommands ?? update.commands;
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const out: AdvertisedCommand[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const c = raw as { name?: unknown; description?: unknown };
+    if (typeof c.name !== "string" || c.name.length === 0) {
+      continue;
+    }
+    const cmd: AdvertisedCommand = { name: c.name };
+    if (typeof c.description === "string") {
+      cmd.description = c.description;
+    }
+    out.push(cmd);
+  }
+  return out;
 }
 
 function extractPromptText(prompt: unknown): string {

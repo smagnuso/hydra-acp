@@ -345,22 +345,16 @@ async function runSession(
     },
   });
 
-  // Slash-command completion. Built-ins are always present; the agent
-  // contributes more via available_commands_update.
+  // Slash-command completion. Built-ins listed here are TUI-only verbs
+  // handled locally in handleBuiltinCommand (so they never reach the
+  // daemon). /hydra verbs and the agent's own commands both arrive via
+  // available_commands_update — the daemon merges its /hydra registry
+  // with whatever the agent advertises, so we just consume that channel.
   const builtinCommands: AvailableCommand[] = [
     { name: "/help", description: "Show TUI built-in commands" },
     { name: "/quit", description: "Exit the TUI" },
     { name: "/clear", description: "Clear scrollback" },
     { name: "/sessions", description: "List sessions" },
-    {
-      name: "/hydra title",
-      description:
-        "Regenerate the session title via the agent (or set manually with an arg)",
-    },
-    {
-      name: "/hydra switch <agent>",
-      description: "Swap the agent backing this session, preserving context",
-    },
   ];
   let agentCommands: AvailableCommand[] = [];
 

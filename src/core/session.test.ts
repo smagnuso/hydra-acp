@@ -301,8 +301,12 @@ describe("Session", () => {
 
       const { client: coldClient } = makeClient();
       const replay = session.attach(coldClient, "full");
-      expect(replay).toHaveLength(2);
-      expect(replay[0]?.params).toMatchObject({ sessionId: "sess_h", n: 1 });
+      // History starts with the initial available_commands_update the
+      // Session emits at construction (carrying just /hydra verbs) plus
+      // the two notifications triggered above.
+      expect(replay).toHaveLength(3);
+      expect(replay[1]?.params).toMatchObject({ sessionId: "sess_h", n: 1 });
+      expect(replay[2]?.params).toMatchObject({ sessionId: "sess_h", n: 2 });
     });
 
     it("returns no history for historyPolicy=none", () => {
@@ -314,6 +318,62 @@ describe("Session", () => {
       const { client: cold } = makeClient();
       const replay = session.attach(cold, "none");
       expect(replay).toEqual([]);
+    });
+  });
+
+  describe("available_commands_update merging", () => {
+    it("emits an initial available_commands_update with hydra verbs", () => {
+      const { session } = makeSession();
+      const { client: cold } = makeClient();
+      // The broadcast at construction goes into history before any
+      // client attaches; pick it up from the replay return.
+      const replay = session.attach(cold, "full");
+      const cmds = replay.find((n) => {
+        if (n.method !== "session/update") {
+          return false;
+        }
+        const u = (n.params as { update?: { sessionUpdate?: string } })?.update;
+        return u?.sessionUpdate === "available_commands_update";
+      });
+      expect(cmds).toBeDefined();
+      const list = (cmds as {
+        params: { update: { availableCommands: Array<{ name: string }> } };
+      }).params.update.availableCommands;
+      const names = list.map((c) => c.name);
+      expect(names).toContain("/hydra title");
+      expect(names).toContain("/hydra switch <agent>");
+    });
+
+    it("merges agent-emitted commands with hydra verbs", () => {
+      const { session, mock } = makeSession("sess_h", "u");
+      const { client } = makeClient();
+      session.attach(client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u",
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [
+            { name: "create_plan", description: "Plan a thing" },
+          ],
+        },
+      });
+      // Latecomer attach replays history; the most recent
+      // available_commands_update should be the merged set.
+      const { client: late } = makeClient();
+      const replay = session.attach(late, "full");
+      const updates = replay.filter((n) => {
+        if (n.method !== "session/update") {
+          return false;
+        }
+        const u = (n.params as { update?: { sessionUpdate?: string } })?.update;
+        return u?.sessionUpdate === "available_commands_update";
+      });
+      const last = updates[updates.length - 1] as {
+        params: { update: { availableCommands: Array<{ name: string }> } };
+      };
+      const names = last.params.update.availableCommands.map((c) => c.name);
+      expect(names).toContain("/hydra title");
+      expect(names).toContain("create_plan");
     });
   });
 
