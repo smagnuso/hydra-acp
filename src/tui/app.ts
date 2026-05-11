@@ -1206,6 +1206,13 @@ async function runSession(
         screen.appendLines(formatted);
       }
       startToolsBlock();
+      // Force an immediate paint past the content-repaint throttle. The
+      // user-text event is the user's "I just sent this" signal — they
+      // need to see their prompt + the thinking indicator without
+      // waiting for the next throttled paint window. Otherwise a fast
+      // text-only turn can complete inside one throttle window and the
+      // user never sees a thinking indicator at all.
+      screen.redraw();
       return;
     }
     if (event.kind === "agent-text") {
