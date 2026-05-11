@@ -265,6 +265,27 @@ export class Screen {
     this.keyedBlocks.delete(key);
   }
 
+  // Splice a keyed block's lines out of scrollback entirely and drop the
+  // key. Used when a placeholder block (e.g. "thinking…" with no tool
+  // calls ever fired) shouldn't be kept as a historical artifact after
+  // its turn ends. Indices of later keyed blocks are shifted in step
+  // with the splice so they continue to point at the right rows.
+  removeBlock(key: string): void {
+    const existing = this.keyedBlocks.get(key);
+    if (!existing) {
+      return;
+    }
+    this.lines.splice(existing.start, existing.count);
+    this.keyedBlocks.delete(key);
+    for (const [, range] of this.keyedBlocks) {
+      if (range.start > existing.start) {
+        range.start -= existing.count;
+      }
+    }
+    this.streamingActive = false;
+    this.repaint();
+  }
+
   redraw(): void {
     this.repaint();
   }
@@ -1069,7 +1090,7 @@ function formatUsage(usage: UsageState | undefined): string | null {
   return parts.length === 0 ? null : parts.join(" · ");
 }
 
-function formatElapsed(ms: number): string {
+export function formatElapsed(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
   if (totalSec < 60) {
     return `${totalSec}s`;
@@ -1148,6 +1169,8 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-l";
     case "CTRL_N":
       return "ctrl-n";
+    case "CTRL_O":
+      return "ctrl-o";
     case "CTRL_P":
       return "ctrl-p";
     case "CTRL_U":

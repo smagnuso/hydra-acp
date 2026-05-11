@@ -20,7 +20,7 @@ import {
 } from "./history.js";
 import { listSessions, pickMostRecent } from "./discovery.js";
 import { pickSession, type PickerResult } from "./picker.js";
-import { Screen } from "./screen.js";
+import { formatElapsed, Screen } from "./screen.js";
 import { InputDispatcher, type InputEffect, type KeyEvent } from "./input.js";
 import {
   mapUpdate,
@@ -716,6 +716,10 @@ async function runSession(
       case "switch-session":
         void switchSession();
         return;
+      case "toggle-tools":
+        toolsExpanded = !toolsExpanded;
+        renderToolsBlock();
+        return;
     }
   };
 
@@ -776,6 +780,10 @@ async function runSession(
         return true;
       case "/clear":
         toolStates.clear();
+        toolCallOrder.length = 0;
+        toolsBlockStartedAt = null;
+        toolsBlockEndedAt = null;
+        toolsExpanded = false;
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -920,6 +928,9 @@ async function runSession(
     // avoid burning repaints.
     const elapsedTimer = setInterval(() => {
       screen.setBanner({ elapsedMs: Date.now() - turnStartedAt });
+      // Re-render the tools block too so its "Xs" header advances on the
+      // same cadence as the banner counter.
+      renderToolsBlock();
     }, 5_000);
 
     let cancelled = false;
@@ -968,17 +979,122 @@ async function runSession(
 
   const usage: { used?: number; size?: number; costAmount?: number; costCurrency?: string } = {};
 
-  // toolCallId → merged state for the single in-place row that represents
-  // the tool call. Lives for the screen's lifetime; cleared on /clear so
-  // newly-arriving tool calls don't accidentally upsert into vacated rows.
+  // toolCallId → merged state for the per-call row inside the current
+  // turn's tools block. Cleared at turn boundaries (the block gets
+  // frozen into scrollback first) so each turn starts fresh.
   const toolStates = new Map<string, ToolLineState>();
+  // Ordered toolCallIds for the current turn — drives the rolling
+  // "most recent K" window in the tools block and is the source of
+  // truth for the "ran N tools" header count.
+  const toolCallOrder: string[] = [];
+  // Toggled by ^O. Resets each turn so a turn always starts collapsed.
+  let toolsExpanded = false;
+  // Wall-clock bounds for the active tools block. startedAt is set on
+  // the first tool call of the turn; endedAt is set when the turn
+  // completes and freezes the block (header switches from "Xs" to
+  // "took Xs"). Both null when there's no live block.
+  let toolsBlockStartedAt: number | null = null;
+  let toolsBlockEndedAt: number | null = null;
+  // How many recent tool rows the collapsed view shows; older ones get
+  // rolled into the "N hidden" counter in the header.
+  const TOOLS_COLLAPSED_LIMIT = 5;
 
-  const renderToolLine = (id: string): void => {
-    const state = toolStates.get(id);
-    if (!state) {
+  const renderToolsBlock = (): void => {
+    if (toolsBlockStartedAt === null) {
       return;
     }
-    screen.upsertLine(`tool:${id}`, formatToolLine(state));
+    const total = toolCallOrder.length;
+    const visibleIds = toolsExpanded
+      ? toolCallOrder
+      : toolCallOrder.slice(Math.max(0, total - TOOLS_COLLAPSED_LIMIT));
+    const hidden = total - visibleIds.length;
+    const inProgress = toolsBlockEndedAt === null;
+    const end = toolsBlockEndedAt ?? Date.now();
+    const elapsed = end - toolsBlockStartedAt;
+    let summary: string;
+    if (total === 0) {
+      // Pre-tool state — the block exists purely as a "still working"
+      // indicator while the agent is thinking.
+      summary = inProgress
+        ? `thinking · ${formatElapsed(elapsed)}`
+        : `no tools · took ${formatElapsed(elapsed)}`;
+    } else {
+      const noun = total === 1 ? "tool" : "tools";
+      const timing = inProgress
+        ? formatElapsed(elapsed)
+        : `took ${formatElapsed(elapsed)}`;
+      const parts: string[] = [`${total} ${noun}`, timing];
+      // Only advertise the hotkey while the block is live — once frozen,
+      // ^O no longer affects it and the hint would be misleading.
+      if (inProgress) {
+        if (hidden > 0) {
+          parts.push(`${hidden} hidden — ^O expand`);
+        } else if (toolsExpanded && total > TOOLS_COLLAPSED_LIMIT) {
+          parts.push("^O collapse");
+        }
+      }
+      summary = parts.join(" · ");
+    }
+    const lines: FormattedLine[] = [
+      {
+        prefix: "⚒ ",
+        prefixStyle: "tool",
+        body: summary,
+        bodyStyle: "dim",
+      },
+    ];
+    for (const id of visibleIds) {
+      const state = toolStates.get(id);
+      if (state) {
+        lines.push(formatToolLine(state));
+      }
+    }
+    screen.upsertLines("tools", lines);
+  };
+
+  // Anchor a fresh tools block at the current bottom of scrollback so the
+  // user has a visible "agent is working" indicator from the moment a turn
+  // starts — even if no tool calls fire for a while. Called from the
+  // user-text handler so it fires for both our own prompts (synthesized
+  // via processPrompt) and peers' prompts (broadcast by the daemon).
+  const startToolsBlock = (): void => {
+    toolsBlockStartedAt = Date.now();
+    toolsBlockEndedAt = null;
+    renderToolsBlock();
+  };
+
+  const recordToolCall = (
+    id: string,
+    title: string | undefined,
+    status: string | undefined,
+  ): void => {
+    const wasNew = !toolStates.has(id);
+    const existing = toolStates.get(id);
+    const state: ToolLineState = existing ?? {
+      initialTitle: title ?? "tool",
+      latestTitle: title ?? "tool",
+      status: status ?? "pending",
+    };
+    if (existing && title !== undefined) {
+      state.latestTitle = title;
+    }
+    if (existing && status !== undefined) {
+      state.status = status;
+    }
+    if (!existing) {
+      state.status = status ?? "pending";
+    }
+    toolStates.set(id, state);
+    if (wasNew) {
+      // The block is normally anchored by startToolsBlock on the user-text
+      // event; this fallback covers replay/edge cases where a tool call
+      // arrives without a preceding prompt visible to us.
+      if (toolsBlockStartedAt === null) {
+        toolsBlockStartedAt = Date.now();
+        toolsBlockEndedAt = null;
+      }
+      toolCallOrder.push(id);
+    }
   };
 
   applyRenderEvent = (event: RenderEvent): void => {
@@ -1018,6 +1134,10 @@ async function runSession(
     }
     if (event.kind === "user-text") {
       screen.ensureSeparator();
+      // Anchor a "thinking…" tools block immediately so the user has
+      // continuous "agent is doing something" feedback even before any
+      // tool fires (or for text-only turns).
+      startToolsBlock();
     }
     if (event.kind === "agent-text") {
       screen.appendStreaming(event.text, "  ", "agent");
@@ -1028,12 +1148,8 @@ async function runSession(
       return;
     }
     if (event.kind === "tool-call") {
-      toolStates.set(event.toolCallId, {
-        initialTitle: event.title,
-        latestTitle: event.title,
-        status: event.status ?? "pending",
-      });
-      renderToolLine(event.toolCallId);
+      recordToolCall(event.toolCallId, event.title, event.status);
+      renderToolsBlock();
       return;
     }
     if (event.kind === "plan") {
@@ -1047,20 +1163,8 @@ async function runSession(
       return;
     }
     if (event.kind === "tool-call-update") {
-      const existing = toolStates.get(event.toolCallId);
-      const state: ToolLineState = existing ?? {
-        initialTitle: event.title ?? "tool",
-        latestTitle: event.title ?? "tool",
-        status: event.status ?? "pending",
-      };
-      if (event.title !== undefined) {
-        state.latestTitle = event.title;
-      }
-      if (event.status !== undefined) {
-        state.status = event.status;
-      }
-      toolStates.set(event.toolCallId, state);
-      renderToolLine(event.toolCallId);
+      recordToolCall(event.toolCallId, event.title, event.status);
+      renderToolsBlock();
       return;
     }
     const formatted = formatEvent(event);
@@ -1074,6 +1178,23 @@ async function runSession(
       // it would splice into the previous turn's plan, possibly far up in
       // (or off the top of) scrollback.
       screen.clearKey("plan");
+      // Freeze the tools block (header switches from live "Xs" to
+      // "took Xs") and then drop the key so next turn's tool calls
+      // append a fresh block below. If no tool ever fired this turn the
+      // block is just a thinking-indicator with no info worth keeping;
+      // splice it out of scrollback entirely.
+      if (toolCallOrder.length > 0) {
+        toolsBlockEndedAt = Date.now();
+        renderToolsBlock();
+        screen.clearKey("tools");
+      } else if (toolsBlockStartedAt !== null) {
+        screen.removeBlock("tools");
+      }
+      toolStates.clear();
+      toolCallOrder.length = 0;
+      toolsBlockStartedAt = null;
+      toolsBlockEndedAt = null;
+      toolsExpanded = false;
       screen.ensureSeparator();
     }
   };

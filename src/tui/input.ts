@@ -26,6 +26,7 @@ export type KeyName =
   | "ctrl-k"
   | "ctrl-l"
   | "ctrl-n"
+  | "ctrl-o"
   | "ctrl-p"
   | "ctrl-u"
   | "ctrl-w"
@@ -43,7 +44,8 @@ export type InputEffect =
   | { type: "plan-toggle"; on: boolean }
   | { type: "redraw-banner" }
   | { type: "redraw" }
-  | { type: "switch-session" };
+  | { type: "switch-session" }
+  | { type: "toggle-tools" };
 
 export interface InputState {
   buffer: string[];
@@ -161,6 +163,8 @@ export class InputDispatcher {
         return [];
       case "ctrl-n":
         return this.handleDown();
+      case "ctrl-o":
+        return [{ type: "toggle-tools" }];
       case "backspace":
         this.backspace();
         return [];
