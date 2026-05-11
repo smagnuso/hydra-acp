@@ -183,16 +183,11 @@ function mapPromptReceived(u: UpdateLike): RenderEvent | null {
   if (promptText === null) {
     return null;
   }
-  // Attribute only when the sender has a human-meaningful name. The bare
-  // clientId fallback (e.g. "cli_abc123") is noise — it points at the
-  // user's own auto-generated client identity in single-user usage.
-  const sentBy =
-    u.sentBy && typeof u.sentBy === "object"
-      ? (u.sentBy as { name?: string }).name
-      : undefined;
-  return sentBy !== undefined
-    ? { kind: "user-text", text: promptText, sentBy }
-    : { kind: "user-text", text: promptText };
+  // No sentBy attribution. The names available on the wire are either
+  // auto-generated clientIds ("cli_abc123") or application names
+  // ("hydra-acp-tui"/"hydra-acp-slack") — none of which read as
+  // human-meaningful info for the user, just clutter under each prompt.
+  return { kind: "user-text", text: promptText };
 }
 
 function mapToolCall(u: UpdateLike): RenderEvent | null {

@@ -63,22 +63,30 @@ describe("mapUpdate", () => {
     ).toBeNull();
   });
 
-  it("handles prompt_received with sentBy.name", () => {
+  it("drops sentBy attribution entirely — names are app-level noise, not human signal", () => {
+    // sentBy.name (e.g. "hydra-acp-tui") and sentBy.clientId (e.g. "c1")
+    // are both internal client identifiers, neither readable to a user.
+    // We unconditionally drop the attribution rather than render "from
+    // hydra-acp-tui" / "from cli_abc123" under every replayed prompt.
     expect(
       mapUpdate({
         sessionUpdate: "prompt_received",
         prompt: [{ type: "text", text: "hi" }, { type: "text", text: " there" }],
         sentBy: { name: "alice", clientId: "c1" },
       }),
-    ).toEqual({ kind: "user-text", text: "hi there", sentBy: "alice" });
-  });
-
-  it("omits sentBy when only clientId is present (avoids noisy 'from cli_*' lines)", () => {
+    ).toEqual({ kind: "user-text", text: "hi there" });
     expect(
       mapUpdate({
         sessionUpdate: "prompt_received",
         prompt: [{ type: "text", text: "hi" }],
         sentBy: { clientId: "c1" },
+      }),
+    ).toEqual({ kind: "user-text", text: "hi" });
+    expect(
+      mapUpdate({
+        sessionUpdate: "prompt_received",
+        prompt: [{ type: "text", text: "hi" }],
+        sentBy: { name: "hydra-acp-tui", clientId: "c1" },
       }),
     ).toEqual({ kind: "user-text", text: "hi" });
   });

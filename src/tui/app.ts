@@ -121,15 +121,27 @@ async function runSession(
   const adjustPendingTurns = (delta: number): void => {
     const before = pendingTurns;
     pendingTurns = Math.max(0, pendingTurns + delta);
+    // Banner updates reference `screen`, which is declared (as `const`)
+    // later in this function. During the attach handshake the daemon
+    // sends history notifications BEFORE control returns to the line
+    // where `screen` is initialized, so direct access would throw a
+    // ReferenceError (TDZ) and abort the onNotification handler before
+    // appendRender(event) runs — silently dropping every user-text and
+    // turn-complete from history. Skip banner state changes when
+    // screen isn't ready yet; the eventual drain still renders the
+    // events correctly.
+    const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
     if (before === 0 && pendingTurns > 0) {
       sessionBusySince = Date.now();
-      screen.setBanner({ status: "running", elapsedMs: 0 });
-      if (sessionElapsedTimer === null) {
+      if (screenReady) {
+        screenRef!.setBanner({ status: "running", elapsedMs: 0 });
+      }
+      if (sessionElapsedTimer === null && screenReady) {
         sessionElapsedTimer = setInterval(() => {
-          if (sessionBusySince === null) {
+          if (sessionBusySince === null || screenRef === null) {
             return;
           }
-          screen.setBanner({ elapsedMs: Date.now() - sessionBusySince });
+          screenRef.setBanner({ elapsedMs: Date.now() - sessionBusySince });
           renderToolsBlock();
         }, 5_000);
       }
@@ -139,12 +151,18 @@ async function runSession(
         clearInterval(sessionElapsedTimer);
         sessionElapsedTimer = null;
       }
-      screen.setBanner({ status: "ready", elapsedMs: undefined });
+      if (screenReady) {
+        screenRef!.setBanner({ status: "ready", elapsedMs: undefined });
+      }
     }
     if (delta < 0) {
       tickWorker();
     }
   };
+  // Late-bound reference to the Screen instance so adjustPendingTurns
+  // (which can run via onNotification before `screen` is assigned) can
+  // tell whether it's safe to touch the screen.
+  let screenRef: Screen | null = null;
   conn.onNotification("session/update", (params) => {
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
@@ -366,7 +384,7 @@ async function runSession(
 
   let turnInFlight: { cancel: () => void } | null = null;
 
-  const screen = new Screen({
+  const screen: Screen = new Screen({
     term,
     dispatcher,
     repaintThrottleMs: config.tui.repaintThrottleMs,
@@ -390,6 +408,9 @@ async function runSession(
       screen.refreshPrompt();
     },
   });
+  // Make Screen visible to closures that can run during the attach
+  // handshake (notably adjustPendingTurns via conn.onNotification).
+  screenRef = screen;
 
   // Slash-command completion. Built-ins listed here are TUI-only verbs
   // handled locally in handleBuiltinCommand (so they never reach the
