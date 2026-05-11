@@ -4,12 +4,19 @@ import type { MessageStream } from "../acp/framing.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
 import {
   JsonRpcErrorCodes,
+  type JsonRpcId,
   type JsonRpcMessage,
+  type JsonRpcRequest,
+  type JsonRpcResponse,
 } from "../acp/types.js";
 
 export interface ResilientWsOptions {
   url: string;
   subprotocols: string[];
+  // onConnect runs after WS open. During its execution, regular send() is
+  // gated (queued) and the queued downstream backlog is held back; use
+  // request() inside onConnect for raw, awaitable writes so things like
+  // session/attach can complete BEFORE any queued prompts get flushed.
   onConnect?: (firstConnect: boolean) => Promise<void> | void;
   onConnectFailure?: (err: Error) => void;
   log?: (line: string) => void;
@@ -28,6 +35,15 @@ export class ResilientWsStream implements MessageStream {
   private destroyed = false;
   private firstConnect = true;
   private reconnectInFlight: Promise<void> | undefined;
+  private connectGate: Promise<void> | undefined;
+  private releaseConnectGate: (() => void) | undefined;
+  private pendingRequests = new Map<
+    JsonRpcId,
+    {
+      resolve: (r: JsonRpcResponse) => void;
+      reject: (err: Error) => void;
+    }
+  >();
 
   constructor(private opts: ResilientWsOptions) {}
 
@@ -47,7 +63,10 @@ export class ResilientWsStream implements MessageStream {
     if (this.destroyed) {
       throw new Error("resilient ws stream is destroyed");
     }
-    if (!this.current) {
+    // Hold back routine sends while onConnect is running — it's mid-replay
+    // of session/attach requests and any prompts that slip past would race
+    // against an in-flight resurrect on the daemon.
+    if (this.connectGate || !this.current) {
       this.outboundQueue.push(message);
       return;
     }
@@ -57,6 +76,30 @@ export class ResilientWsStream implements MessageStream {
       this.outboundQueue.push(message);
       this.scheduleReconnect(err as Error);
     }
+  }
+
+  // Send a request directly and resolve when the matching response arrives
+  // on the same connection. Used by onConnect handlers to await replay-attach
+  // responses before letting the outbound queue drain. Bypasses the
+  // connectGate intentionally.
+  async request(message: JsonRpcRequest): Promise<JsonRpcResponse> {
+    if (this.destroyed) {
+      throw new Error("resilient ws stream is destroyed");
+    }
+    if (!this.current) {
+      throw new Error("resilient ws stream not connected");
+    }
+    const id = message.id;
+    const promise = new Promise<JsonRpcResponse>((resolve, reject) => {
+      this.pendingRequests.set(id, { resolve, reject });
+    });
+    try {
+      await this.current.send(message);
+    } catch (err) {
+      this.pendingRequests.delete(id);
+      throw err;
+    }
+    return promise;
   }
 
   async close(): Promise<void> {
@@ -76,18 +119,30 @@ export class ResilientWsStream implements MessageStream {
       try {
         const stream = await openWs(this.opts.url, this.opts.subprotocols);
         this.bindStream(stream);
-        await this.flushQueue();
         const wasFirst = this.firstConnect;
         this.firstConnect = false;
-        if (this.opts.onConnect) {
-          try {
-            await this.opts.onConnect(wasFirst);
-          } catch (err) {
-            this.log(
-              `hydra-acp: post-connect handler failed: ${(err as Error).message}`,
-            );
+        // Gate routine outbound traffic while onConnect runs. onConnect can
+        // call request() to send AND await responses (e.g. replayAttach) —
+        // those bypass the gate. Once onConnect returns the queue drains.
+        this.connectGate = new Promise<void>((resolve) => {
+          this.releaseConnectGate = resolve;
+        });
+        try {
+          if (this.opts.onConnect) {
+            try {
+              await this.opts.onConnect(wasFirst);
+            } catch (err) {
+              this.log(
+                `hydra-acp: post-connect handler failed: ${(err as Error).message}`,
+              );
+            }
           }
+        } finally {
+          this.releaseConnectGate?.();
+          this.releaseConnectGate = undefined;
+          this.connectGate = undefined;
         }
+        await this.flushQueue();
         return;
       } catch (err) {
         attempt += 1;
@@ -111,6 +166,13 @@ export class ResilientWsStream implements MessageStream {
   private bindStream(stream: MessageStream): void {
     this.current = stream;
     stream.onMessage((msg) => {
+      if (isResponse(msg)) {
+        const pending = this.pendingRequests.get(msg.id);
+        if (pending) {
+          this.pendingRequests.delete(msg.id);
+          pending.resolve(msg);
+        }
+      }
       for (const handler of this.messageHandlers) {
         handler(msg);
       }
@@ -120,6 +182,16 @@ export class ResilientWsStream implements MessageStream {
         return;
       }
       this.current = undefined;
+      // Reject any in-flight request() promises; their response would have
+      // come back on this now-dead stream and never will.
+      if (this.pendingRequests.size > 0) {
+        const reason =
+          err ?? new Error("ws closed before response");
+        for (const { reject } of this.pendingRequests.values()) {
+          reject(reason);
+        }
+        this.pendingRequests.clear();
+      }
       this.scheduleReconnect(err);
     });
   }
@@ -169,6 +241,14 @@ export class ResilientWsStream implements MessageStream {
     }
     process.stderr.write(`${line}\n`);
   }
+}
+
+function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
+  return (
+    !("method" in msg) &&
+    "id" in msg &&
+    (msg as JsonRpcResponse).id !== undefined
+  );
 }
 
 async function openWs(

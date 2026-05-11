@@ -128,4 +128,72 @@ describe("ResilientWsStream", () => {
 
     await stream.close();
   });
+
+  it("holds back routine send() until onConnect awaits a request response", async () => {
+    // Server: respond to "session/attach" requests after a 200ms delay,
+    // and record the order frames are received. Any other request gets
+    // an immediate response.
+    const wireOrder: string[] = [];
+    server.wss.on("connection", (ws) => {
+      ws.on("message", async (data) => {
+        const msg = JSON.parse(data.toString("utf8")) as {
+          id?: number | string;
+          method?: string;
+        };
+        if (msg.method !== undefined) {
+          wireOrder.push(msg.method);
+        }
+        if (msg.method === "session/attach") {
+          await new Promise((r) => setTimeout(r, 200));
+          ws.send(
+            JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { ok: true } }),
+          );
+        }
+      });
+    });
+
+    const stream = new ResilientWsStream({
+      url: `ws://127.0.0.1:${server.port}`,
+      subprotocols: [],
+      log: () => undefined,
+      onConnect: async (firstConnect) => {
+        if (firstConnect) {
+          return;
+        }
+        // Mimics replayAttach: send + await response on a single request.
+        await stream.request({
+          jsonrpc: "2.0",
+          id: "resume-1",
+          method: "session/attach",
+          params: {},
+        });
+      },
+    });
+    await stream.start();
+    expect(wireOrder).toEqual([]);
+
+    // Drop the server connection to trigger reconnect; while onConnect is
+    // running we'll fire a routine send() that should be held until the
+    // gate releases.
+    server.connections[0]!.terminate();
+    await new Promise((r) => setTimeout(r, 50));
+    // After reconnect WS opens but before onConnect resolves, send a
+    // session/prompt. The gate should queue it; it must hit the wire
+    // AFTER the attach response is observed.
+    void stream.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session/prompt",
+      params: {},
+    });
+    await new Promise((r) => setTimeout(r, 600));
+
+    // After both have travelled the wire the order must be attach then prompt.
+    const idxAttach = wireOrder.indexOf("session/attach");
+    const idxPrompt = wireOrder.indexOf("session/prompt");
+    expect(idxAttach).toBeGreaterThanOrEqual(0);
+    expect(idxPrompt).toBeGreaterThan(idxAttach);
+
+    await stream.close();
+  });
 });

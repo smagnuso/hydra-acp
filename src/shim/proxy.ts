@@ -214,7 +214,12 @@ async function replayAttach(
     },
   };
   try {
-    await stream.send(request);
+    const resp = await stream.request(request);
+    if (resp.error) {
+      process.stderr.write(
+        `hydra-acp: replay attach for ${ctx.sessionId} failed: ${resp.error.message}\n`,
+      );
+    }
   } catch (err) {
     process.stderr.write(
       `hydra-acp: failed to replay attach for ${ctx.sessionId}: ${(err as Error).message}\n`,

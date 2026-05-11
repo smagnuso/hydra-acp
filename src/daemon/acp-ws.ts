@@ -105,6 +105,9 @@ export function registerAcpWsEndpoint(
     connection.onRequest("session/attach", async (raw) => {
       const params = SessionAttachParams.parse(raw);
       const hydraHints = extractHydraMeta(params._meta).resume;
+      app.log.info(
+        `session/attach sessionId=${params.sessionId} role=${params.role} hasResumeHints=${!!hydraHints}`,
+      );
       // Without explicit hydraHints (the shim's reconnect path provides
       // the canonical id), the session id may have been typed by a human
       // from `sessions list` — accept the prefix-stripped form by resolving
@@ -146,6 +149,9 @@ export function registerAcpWsEndpoint(
         sessionId: session.sessionId,
         clientId: client.clientId,
       });
+      app.log.info(
+        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size}`,
+      );
       for (const note of replay) {
         await connection.notify(note.method, note.params);
       }
@@ -185,6 +191,9 @@ export function registerAcpWsEndpoint(
       const params = SessionPromptParams.parse(raw);
       const att = state.attached.get(params.sessionId);
       if (!att) {
+        app.log.warn(
+          `session/prompt rejected: not attached sessionId=${params.sessionId} attachedKeys=[${[...state.attached.keys()].join(",")}]`,
+        );
         const err = new Error("not attached to session") as Error & {
           code: number;
         };
