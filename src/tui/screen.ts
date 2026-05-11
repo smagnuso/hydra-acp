@@ -103,6 +103,17 @@ export class Screen {
   private keyHandler: (name: string, _matches: string[], data: { isCharacter?: boolean }) => void;
   private mouseHandler: (name: string, data: unknown) => void;
   private started = false;
+  // Bracketed-paste-mode state. terminal-kit doesn't natively support
+  // bracketed paste, so on start() we enable the mode in the terminal
+  // (\x1b[?2004h) and wrap the stdin data listener with our own that
+  // splits out paste content (delimited by \x1b[200~ … \x1b[201~) from
+  // regular keystrokes. Paste content gets dispatched as a single
+  // "paste" KeyEvent so input.ts can insert newlines into the buffer
+  // instead of treating each \n as an Enter that submits the prompt.
+  private terminalKitStdinHandler: ((chunk: Buffer) => void) | null = null;
+  private pasteActive = false;
+  private pasteBuffer = "";
+  private rawStdinHandler: (chunk: Buffer) => void;
 
   constructor(opts: ScreenOptions) {
     this.term = opts.term;
@@ -111,6 +122,7 @@ export class Screen {
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name) => this.handleMouse(name);
+    this.rawStdinHandler = (chunk) => this.handleRawStdin(chunk);
   }
 
   start(): void {
@@ -127,6 +139,7 @@ export class Screen {
     this.term.on("key", this.keyHandler);
     this.term.on("mouse", this.mouseHandler);
     this.term.on("resize", this.resizeHandler);
+    this.installBracketedPaste();
     this.repaint();
   }
 
@@ -135,6 +148,7 @@ export class Screen {
       return;
     }
     this.started = false;
+    this.uninstallBracketedPaste();
     this.term.off("key", this.keyHandler);
     this.term.off("mouse", this.mouseHandler);
     this.term.off("resize", this.resizeHandler);
@@ -142,6 +156,88 @@ export class Screen {
     this.term.hideCursor(false);
     this.term.fullscreen(false);
     this.term("\n");
+  }
+
+  // Enables bracketed paste mode on the terminal and rewires stdin so we
+  // see the \x1b[200~/\x1b[201~ markers BEFORE terminal-kit's key
+  // parser. Non-paste data is forwarded to terminal-kit unchanged; paste
+  // content is buffered and dispatched as a single "paste" KeyEvent.
+  private installBracketedPaste(): void {
+    // Enable bracketed paste — terminals that don't support it ignore
+    // the sequence harmlessly.
+    process.stdout.write("\x1b[?2004h");
+    const t = this.term as unknown as {
+      stdin: NodeJS.ReadableStream;
+      onStdin: (chunk: Buffer) => void;
+    };
+    if (!t.stdin || typeof t.onStdin !== "function") {
+      return;
+    }
+    this.terminalKitStdinHandler = t.onStdin;
+    t.stdin.removeListener("data", t.onStdin);
+    t.stdin.on("data", this.rawStdinHandler);
+  }
+
+  private uninstallBracketedPaste(): void {
+    process.stdout.write("\x1b[?2004l");
+    const t = this.term as unknown as {
+      stdin: NodeJS.ReadableStream;
+    };
+    if (!t.stdin || this.terminalKitStdinHandler === null) {
+      return;
+    }
+    t.stdin.removeListener("data", this.rawStdinHandler);
+    t.stdin.on("data", this.terminalKitStdinHandler);
+    this.terminalKitStdinHandler = null;
+    this.pasteActive = false;
+    this.pasteBuffer = "";
+  }
+
+  private handleRawStdin(chunk: Buffer): void {
+    // Use 'binary' encoding so each byte maps to a single code unit —
+    // important because the paste markers are byte-precise and we need
+    // to slice them out cleanly. UTF-8 multibyte chars within paste
+    // content are reassembled by insertText when we hand off the
+    // string. (binary preserves the byte sequence; node's binary↔Buffer
+    // round-trip is lossless.)
+    let text = chunk.toString("binary");
+    const startMarker = "\x1b[200~";
+    const endMarker = "\x1b[201~";
+    while (text.length > 0) {
+      if (this.pasteActive) {
+        const endIdx = text.indexOf(endMarker);
+        if (endIdx === -1) {
+          this.pasteBuffer += text;
+          return;
+        }
+        this.pasteBuffer += text.slice(0, endIdx);
+        text = text.slice(endIdx + endMarker.length);
+        this.pasteActive = false;
+        // Normalize line endings; some terminals deliver \r within
+        // paste content even though the source had \n.
+        const pasted = Buffer.from(this.pasteBuffer, "binary")
+          .toString("utf-8")
+          .replace(/\r\n?/g, "\n");
+        this.pasteBuffer = "";
+        this.onKey([{ type: "paste", text: pasted }]);
+        continue;
+      }
+      const startIdx = text.indexOf(startMarker);
+      if (startIdx === -1) {
+        // No paste markers in this chunk — forward to terminal-kit as-is.
+        if (this.terminalKitStdinHandler) {
+          this.terminalKitStdinHandler(Buffer.from(text, "binary"));
+        }
+        return;
+      }
+      if (startIdx > 0 && this.terminalKitStdinHandler) {
+        this.terminalKitStdinHandler(
+          Buffer.from(text.slice(0, startIdx), "binary"),
+        );
+      }
+      text = text.slice(startIdx + startMarker.length);
+      this.pasteActive = true;
+    }
   }
 
   appendLines(lines: FormattedLine[]): void {
