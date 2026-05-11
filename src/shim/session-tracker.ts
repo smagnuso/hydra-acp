@@ -11,7 +11,6 @@ export interface ResumeContext {
   upstreamSessionId: string;
   agentId: string;
   cwd: string;
-  role: "controller" | "observer";
   title?: string;
   agentArgs?: string[];
 }
@@ -22,7 +21,6 @@ interface PendingNew {
 
 interface PendingAttach {
   sessionId: string;
-  role: "controller" | "observer";
 }
 
 interface PendingLoad {
@@ -66,10 +64,7 @@ export class SessionTracker {
       const params = (msg.params ?? {}) as Record<string, unknown>;
       const sessionId =
         typeof params.sessionId === "string" ? params.sessionId : "";
-      const roleRaw = params.role;
-      const role: "controller" | "observer" =
-        roleRaw === "observer" ? "observer" : "controller";
-      this.pending.set(msg.id, { kind: "attach", data: { sessionId, role } });
+      this.pending.set(msg.id, { kind: "attach", data: { sessionId } });
       return;
     }
     // session/load (older) and session/resume (newer ACP draft) both
@@ -130,14 +125,11 @@ export class SessionTracker {
     if (!upstreamSessionId || !agentId || !cwd) {
       return;
     }
-    const role: "controller" | "observer" =
-      pending.kind === "attach" ? pending.data.role : "controller";
     this.contexts.set(sessionId, {
       sessionId,
       upstreamSessionId,
       agentId,
       cwd,
-      role,
       title: hydraMeta.name,
       agentArgs: hydraMeta.agentArgs,
     });

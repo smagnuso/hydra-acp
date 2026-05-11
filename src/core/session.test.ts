@@ -7,7 +7,7 @@ import {
 } from "../__tests__/test-utils.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
 
-function makeClient(role: "controller" | "observer" = "controller"): {
+function makeClient(): {
   client: AttachedClient;
   conn: JsonRpcConnection;
   stream: ReturnType<typeof makeControlledStream>;
@@ -15,8 +15,7 @@ function makeClient(role: "controller" | "observer" = "controller"): {
   const stream = makeControlledStream();
   const conn = new JsonRpcConnection(stream);
   const client: AttachedClient = {
-    clientId: `c_${role}_${Math.random().toString(36).slice(2, 8)}`,
-    role,
+    clientId: `c_${Math.random().toString(36).slice(2, 8)}`,
     connection: conn,
   };
   return { client, conn, stream };
@@ -82,9 +81,9 @@ describe("Session", () => {
       });
     });
 
-    it("rewrites sessionId in permission requests forwarded to controllers", async () => {
+    it("rewrites sessionId in permission requests forwarded to attached clients", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const { client, stream } = makeClient("controller");
+      const { client, stream } = makeClient();
       session.attach(client, "full");
 
       const requestPromise = mock.triggerRequest("session/request_permission", {
@@ -112,9 +111,9 @@ describe("Session", () => {
       });
     });
 
-    it("replays in-flight permission requests to controllers that attach late", async () => {
+    it("replays in-flight permission requests to clients that attach late", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient("controller");
+      const a = makeClient();
       session.attach(a.client, "full");
 
       const requestPromise = mock.triggerRequest("session/request_permission", {
@@ -126,11 +125,11 @@ describe("Session", () => {
       await new Promise((r) => setImmediate(r));
       expect(a.stream.sent).toHaveLength(1);
 
-      // Late-joining controller. attach() returns history without dispatching
+      // Late-joining client. attach() returns history without dispatching
       // the in-flight permission; the WS handler is expected to drain history
       // first and *then* call replayPendingPermissions so the prompt lands
       // at the bottom of the transcript.
-      const b = makeClient("controller");
+      const b = makeClient();
       session.attach(b.client, "full");
       session.replayPendingPermissions(b.client);
       const bReq = b.stream.sent.find(
@@ -160,7 +159,7 @@ describe("Session", () => {
 
     it("does not replay already-settled permissions to late attachers", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient("controller");
+      const a = makeClient();
       session.attach(a.client, "full");
 
       const requestPromise = mock.triggerRequest("session/request_permission", {
@@ -180,7 +179,7 @@ describe("Session", () => {
 
       // Late attach AFTER the permission settled — should not see a stale
       // request_permission.
-      const b = makeClient("controller");
+      const b = makeClient();
       session.attach(b.client, "full");
       session.replayPendingPermissions(b.client);
       const stale = b.stream.sent.find(
@@ -191,7 +190,7 @@ describe("Session", () => {
 
     it("replayPendingPermissions runs after history so the prompt lands last", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient("controller");
+      const a = makeClient();
       session.attach(a.client, "full");
 
       // Build up some history before the permission request.
@@ -209,7 +208,7 @@ describe("Session", () => {
 
       // Late attach. Drain history first (mirrors what acp-ws.ts does), then
       // dispatch in-flight permissions.
-      const b = makeClient("controller");
+      const b = makeClient();
       const replay = session.attach(b.client, "full");
       for (const note of replay) {
         await b.client.connection.notify(note.method, note.params);
@@ -239,8 +238,8 @@ describe("Session", () => {
 
     it("includes each sibling's own requestId in permission_resolved fan-out", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient("controller");
-      const b = makeClient("controller");
+      const a = makeClient();
+      const b = makeClient();
       session.attach(a.client, "full");
       session.attach(b.client, "full");
 
@@ -288,6 +287,39 @@ describe("Session", () => {
           "method" in m && m.method === "session/permission_resolved",
       );
       expect(aResolved).toBeUndefined();
+    });
+
+    it("broadcasts permission requests to every attached client", async () => {
+      const { session, mock } = makeSession("hydra_session_z", "u_z");
+      const a = makeClient();
+      const b = makeClient();
+      const c = makeClient();
+      session.attach(a.client, "full");
+      session.attach(b.client, "full");
+      session.attach(c.client, "full");
+
+      const reqPromise = mock.triggerRequest("session/request_permission", {
+        sessionId: "u_z",
+        toolCall: { name: "edit_file" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      for (const stream of [a.stream, b.stream, c.stream]) {
+        const req = stream.sent.find(
+          (m) =>
+            "method" in m && m.method === "session/request_permission",
+        );
+        expect(req).toBeDefined();
+      }
+
+      const aReq = a.stream.sent[0] as { id: string | number };
+      a.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: aReq.id,
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      });
+      await reqPromise;
     });
   });
 
@@ -397,19 +429,10 @@ describe("Session", () => {
     });
   });
 
-  describe("prompt queue + role enforcement", () => {
-    it("rejects prompts from an observer", async () => {
-      const { session } = makeSession();
-      const { client } = makeClient("observer");
-      session.attach(client, "full");
-      await expect(
-        session.prompt(client.clientId, { sessionId: "sess_test", prompt: [] }),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCodes.RoleNotPermitted });
-    });
-
+  describe("prompt queue", () => {
     it("serializes prompts (second prompt waits for first to settle)", async () => {
       const { session, mock } = makeSession();
-      const { client } = makeClient("controller");
+      const { client } = makeClient();
       session.attach(client, "full");
 
       let firstResolve: ((v: unknown) => void) | undefined;
@@ -439,7 +462,7 @@ describe("Session", () => {
   describe("session/cancel", () => {
     it("forwards cancel to the agent as a notification, not a request", async () => {
       const { session, mock } = makeSession("hydra_session_x", "upstream_x");
-      const { client } = makeClient("controller");
+      const { client } = makeClient();
       session.attach(client, "full");
 
       const requestMock = mock.agent.connection.request as unknown as ReturnType<
@@ -462,7 +485,7 @@ describe("Session", () => {
 
     it("rewrites the hydra sessionId to the upstream id", async () => {
       const { session, mock } = makeSession("hydra_session_y", "upstream_y");
-      const { client } = makeClient("controller");
+      const { client } = makeClient();
       session.attach(client, "full");
 
       const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
@@ -479,23 +502,10 @@ describe("Session", () => {
       );
     });
 
-    it("rejects cancel from an observer with RoleNotPermitted", async () => {
-      const { session, mock } = makeSession();
-      const { client: observer } = makeClient("observer");
-      session.attach(observer, "full");
-      await expect(session.cancel(observer.clientId)).rejects.toMatchObject({
-        code: JsonRpcErrorCodes.RoleNotPermitted,
-      });
-      const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
-        typeof vi.fn
-      >;
-      expect(notifyMock).not.toHaveBeenCalled();
-    });
-
-    it("rejects cancel from a non-attached client with RoleNotPermitted", async () => {
+    it("rejects cancel from a non-attached client with SessionNotFound", async () => {
       const { session, mock } = makeSession();
       await expect(session.cancel("never-attached-id")).rejects.toMatchObject({
-        code: JsonRpcErrorCodes.RoleNotPermitted,
+        code: JsonRpcErrorCodes.SessionNotFound,
       });
       const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
         typeof vi.fn
@@ -508,7 +518,7 @@ describe("Session", () => {
       // response that agents (per spec) never send, hanging the cancel
       // promise indefinitely.
       const { session, mock } = makeSession();
-      const { client } = makeClient("controller");
+      const { client } = makeClient();
       session.attach(client, "full");
 
       const notifyMock = mock.agent.connection.notify as unknown as ReturnType<
@@ -526,10 +536,10 @@ describe("Session", () => {
   describe("synthesized prompt_received and turn_complete (RFD #533)", () => {
     it("broadcasts prompt_received to non-originators only", async () => {
       const { session, mock } = makeSession("hydra_session_S", "u_S");
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       alice.clientInfo = { name: "alice-frontend", version: "1.2.3" };
-      const { client: bob, stream: bobStream } = makeClient("controller");
-      const { client: carol, stream: carolStream } = makeClient("observer");
+      const { client: bob, stream: bobStream } = makeClient();
+      const { client: carol, stream: carolStream } = makeClient();
       session.attach(alice, "full");
       session.attach(bob, "full");
       session.attach(carol, "full");
@@ -582,8 +592,8 @@ describe("Session", () => {
 
     it("broadcasts a marked user_message_chunk alongside prompt_received for compat", async () => {
       const { session, mock } = makeSession("hydra_session_C", "u_C");
-      const { client: alice } = makeClient("controller");
-      const { client: bob, stream: bobStream } = makeClient("controller");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
       session.attach(alice, "full");
       session.attach(bob, "full");
 
@@ -619,8 +629,8 @@ describe("Session", () => {
 
     it("broadcasts turn_complete to non-originators when agent returns", async () => {
       const { session, mock } = makeSession("hydra_session_T", "u_T");
-      const { client: alice } = makeClient("controller");
-      const { client: bob, stream: bobStream } = makeClient("controller");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
       session.attach(alice, "full");
       session.attach(bob, "full");
 
@@ -652,8 +662,8 @@ describe("Session", () => {
 
     it("seeds session_info_update from the first prompt's first line", async () => {
       const { session, mock } = makeSession("hydra_session_TL", "u_TL");
-      const { client: alice } = makeClient("controller");
-      const { client: bob, stream: bobStream } = makeClient("controller");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
       session.attach(alice, "full");
       session.attach(bob, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
@@ -688,7 +698,7 @@ describe("Session", () => {
 
     it("does not re-seed the title on subsequent prompts", async () => {
       const { session, mock } = makeSession("hydra_session_TL2", "u_TL2");
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       session.attach(alice, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
         typeof vi.fn
@@ -708,8 +718,8 @@ describe("Session", () => {
 
     it("/hydra title <text> sets the title without forwarding to the agent", async () => {
       const { session, mock } = makeSession("hydra_session_HT", "u_HT");
-      const { client: alice } = makeClient("controller");
-      const { client: bob, stream: bobStream } = makeClient("controller");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
       session.attach(alice, "full");
       session.attach(bob, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
@@ -757,8 +767,8 @@ describe("Session", () => {
 
     it("/hydra title (no arg) regenerates via a suppressed sub-prompt", async () => {
       const { session, mock } = makeSession("hydra_session_HR", "u_HR");
-      const { client: alice } = makeClient("controller");
-      const { client: bob, stream: bobStream } = makeClient("controller");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
       session.attach(alice, "full");
       session.attach(bob, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
@@ -822,7 +832,7 @@ describe("Session", () => {
           };
         },
       });
-      const { client: alice, stream: aliceStream } = makeClient("controller");
+      const { client: alice, stream: aliceStream } = makeClient();
       session.attach(alice, "full");
 
       // Build a tiny history first: one user prompt + one agent reply.
@@ -907,7 +917,7 @@ describe("Session", () => {
 
     it("/hydra switch with no agent id rejects", async () => {
       const { session } = makeSession("hydra_session_S0", "u_S0");
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       session.attach(alice, "full");
 
       await expect(
@@ -919,7 +929,7 @@ describe("Session", () => {
 
     it("/hydra switch to the current agentId rejects", async () => {
       const { session } = makeSession("hydra_session_SS", "u_SS");
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       session.attach(alice, "full");
 
       await expect(
@@ -941,7 +951,7 @@ describe("Session", () => {
           throw new Error("registry: agent missing");
         },
       });
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       session.attach(alice, "full");
       const oldKill = oldMock.agent.kill as ReturnType<typeof vi.fn>;
 
@@ -957,7 +967,7 @@ describe("Session", () => {
 
     it("unknown /hydra verbs throw", async () => {
       const { session } = makeSession("hydra_session_HX", "u_HX");
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       session.attach(alice, "full");
 
       await expect(
@@ -969,7 +979,7 @@ describe("Session", () => {
 
     it("agent-emitted session_info_update overrides our seed", async () => {
       const { session, mock } = makeSession("hydra_session_TL3", "u_TL3");
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       session.attach(alice, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
         typeof vi.fn
@@ -994,7 +1004,7 @@ describe("Session", () => {
 
     it("late attachers replay synthesized events from history", async () => {
       const { session, mock } = makeSession("hydra_session_R", "u_R");
-      const { client: alice } = makeClient("controller");
+      const { client: alice } = makeClient();
       session.attach(alice, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
         typeof vi.fn

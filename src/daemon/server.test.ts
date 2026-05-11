@@ -176,7 +176,7 @@ describe("startDaemon", () => {
           agentInfo: { name: string };
           agentCapabilities: {
             sessionCapabilities?: {
-              attach?: { roles: string[] };
+              attach?: Record<string, never>;
               list?: boolean;
             };
             promptCapabilities?: { image?: boolean };
@@ -190,8 +190,8 @@ describe("startDaemon", () => {
         true,
       );
       expect(
-        response.result.agentCapabilities.sessionCapabilities?.attach?.roles,
-      ).toEqual(expect.arrayContaining(["controller", "observer"]));
+        response.result.agentCapabilities.sessionCapabilities?.attach,
+      ).toBeDefined();
       expect(response.result.agentCapabilities.promptCapabilities?.image).toBe(
         true,
       );

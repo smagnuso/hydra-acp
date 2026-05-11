@@ -20,7 +20,6 @@ import {
 } from "./cli/commands/extensions.js";
 import { runAgentsList, runAgentsRefresh } from "./cli/commands/agents.js";
 import { runShim } from "./shim/proxy.js";
-import type { SessionRole } from "./acp/types.js";
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -44,9 +43,8 @@ async function main(): Promise<void> {
       return;
     }
     const sessionId = resolveOption(flags, "session-id");
-    const role = resolveSessionRole(resolveOption(flags, "role"));
     const name = resolveOption(flags, "name");
-    await runShim({ sessionId, role, agentId, agentArgs, name });
+    await runShim({ sessionId, agentId, agentArgs, name });
     return;
   }
 
@@ -63,7 +61,6 @@ async function main(): Promise<void> {
 
   const subcommand = positional[0];
   const sessionId = resolveOption(flags, "session-id");
-  const role = resolveSessionRole(resolveOption(flags, "role"));
   const name = resolveOption(flags, "name");
   const agentIdFromFlag = resolveOption(flags, "agent-id");
 
@@ -75,19 +72,18 @@ async function main(): Promise<void> {
     if (process.stdout.isTTY) {
       await dispatchTui(flags, {
         sessionId,
-        role,
         agentId: agentIdFromFlag,
         name,
       });
       return;
     }
-    await runShim({ sessionId, role, name, agentId: agentIdFromFlag });
+    await runShim({ sessionId, name, agentId: agentIdFromFlag });
     return;
   }
 
   switch (subcommand) {
     case "shim":
-      await runShim({ sessionId, role, name, agentId: agentIdFromFlag });
+      await runShim({ sessionId, name, agentId: agentIdFromFlag });
       return;
     case "init":
       await runInit(flags);
@@ -189,7 +185,6 @@ async function main(): Promise<void> {
     case "tui":
       await dispatchTui(flags, {
         sessionId,
-        role,
         agentId: agentIdFromFlag,
         name,
       });
@@ -203,7 +198,6 @@ async function main(): Promise<void> {
 
 interface TuiBaseOpts {
   sessionId?: string | undefined;
-  role?: SessionRole | undefined;
   agentId?: string | undefined;
   name?: string | undefined;
 }
@@ -220,9 +214,6 @@ async function dispatchTui(
   if (base.sessionId !== undefined) {
     tuiOpts.sessionId = base.sessionId;
   }
-  if (base.role !== undefined) {
-    tuiOpts.role = base.role;
-  }
   if (base.agentId !== undefined) {
     tuiOpts.agentId = base.agentId;
   }
@@ -233,13 +224,6 @@ async function dispatchTui(
     tuiOpts.name = base.name;
   }
   await runTui(tuiOpts);
-}
-
-function resolveSessionRole(raw: string | undefined): SessionRole | undefined {
-  if (raw === "controller" || raw === "observer") {
-    return raw;
-  }
-  return undefined;
 }
 
 function printHelp(): void {
@@ -255,8 +239,7 @@ function printHelp(): void {
       "                                     Shim mode, force daemon to spawn <agent-id>",
       "                                     from the registry. Args after <agent-id>",
       "                                     are forwarded to the agent's command.",
-      "  hydra-acp --session-id <id> [--role controller|observer]",
-      "                                     Attach to an existing session (TUI when in a terminal, shim otherwise)",
+      "  hydra-acp --session-id <id>        Attach to an existing session (TUI when in a terminal, shim otherwise)",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
       "  hydra-acp daemon start|stop|restart|status",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
@@ -269,7 +252,7 @@ function printHelp(): void {
       "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  hydra-acp agents [list]                     List agents in the cached registry",
       "  hydra-acp agents refresh                    Force a registry re-fetch",
-      "  hydra-acp tui flags: [--session-id <id>] [--resume] [--new] [--agent-id <id>] [--cwd <path>] [--role controller|observer] [--name <label>]",
+      "  hydra-acp tui flags: [--session-id <id>] [--resume] [--new] [--agent-id <id>] [--cwd <path>] [--name <label>]",
       "                                     Smart default: picks an existing live session if any exist in cwd, else creates a new one",
       "  hydra-acp --version                Print version",
       "  hydra-acp --help                   Show this help",
@@ -277,7 +260,6 @@ function printHelp(): void {
       "Config knob flags accept env-var equivalents (flag wins):",
       "  --agent-id    HYDRA_ACP_AGENT_ID",
       "  --session-id  HYDRA_ACP_SESSION_ID",
-      "  --role        HYDRA_ACP_ROLE",
       "  --name        HYDRA_ACP_NAME",
       "",
     ].join("\n"),

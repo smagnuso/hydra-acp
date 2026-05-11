@@ -267,17 +267,14 @@ describe("SessionManager: /hydra switch persistence", () => {
       agentId: "old",
     });
 
-    // Attach a controller so prompt() will accept the slash command.
+    // Attach a client so prompt() will accept the slash command.
     const { JsonRpcConnection } = await import("../acp/connection.js");
     const { makeControlledStream } = await import(
       "../__tests__/test-utils.js"
     );
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    session.attach(
-      { clientId: "c1", role: "controller", connection: conn },
-      "full",
-    );
+    session.attach({ clientId: "c1", connection: conn }, "full");
 
     await session.prompt("c1", {
       prompt: [{ type: "text", text: "/hydra switch new" }],

@@ -256,7 +256,7 @@ describe("wireShim forwarding", () => {
     const tracker = new SessionTracker();
 
     wireShim({
-      opts: { sessionId: "sess_existing", role: "observer" },
+      opts: { sessionId: "sess_existing" },
       upstream,
       downstream,
       tracker,
@@ -274,12 +274,11 @@ describe("wireShim forwarding", () => {
     expect(upstream.sent).toHaveLength(1);
     const sent = upstream.sent[0] as {
       method: string;
-      params: { sessionId: string; role: string };
+      params: { sessionId: string };
     };
     expect(sent.method).toBe("session/attach");
     expect(sent.params).toMatchObject({
       sessionId: "sess_existing",
-      role: "observer",
     });
   });
 });

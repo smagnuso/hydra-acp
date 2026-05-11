@@ -25,6 +25,5 @@ export type {
   InitializeResult,
   AgentCapabilities,
   SessionCapabilities,
-  SessionRole,
   HistoryPolicy,
 } from "./acp/types.js";

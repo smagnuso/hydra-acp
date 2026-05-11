@@ -90,7 +90,7 @@ export function registerAcpWsEndpoint(
         title: hydraMeta.name,
         agentArgs: hydraMeta.agentArgs,
       });
-      const client = bindClientToSession(connection, session, "controller", state);
+      const client = bindClientToSession(connection, session, state);
       session.attach(client, "full");
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
@@ -106,7 +106,7 @@ export function registerAcpWsEndpoint(
       const params = SessionAttachParams.parse(raw);
       const hydraHints = extractHydraMeta(params._meta).resume;
       app.log.info(
-        `session/attach sessionId=${params.sessionId} role=${params.role} hasResumeHints=${!!hydraHints}`,
+        `session/attach sessionId=${params.sessionId} hasResumeHints=${!!hydraHints}`,
       );
       // Without explicit hydraHints (the shim's reconnect path provides
       // the canonical id), the session id may have been typed by a human
@@ -140,7 +140,6 @@ export function registerAcpWsEndpoint(
       const client = bindClientToSession(
         connection,
         session,
-        params.role,
         state,
         params.clientInfo,
       );
@@ -158,7 +157,6 @@ export function registerAcpWsEndpoint(
       session.replayPendingPermissions(client);
       return {
         sessionId: session.sessionId,
-        role: params.role,
         replayed: replay.length,
         _meta: buildResponseMeta(session),
       };
@@ -268,7 +266,7 @@ export function registerAcpWsEndpoint(
         }
         session = await deps.manager.resurrect(fromDisk);
       }
-      const client = bindClientToSession(connection, session, "controller", state);
+      const client = bindClientToSession(connection, session, state);
       const replay = session.attach(client, "pending_only");
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
@@ -351,7 +349,7 @@ function buildInitializeResult(): InitializeResult {
       },
       loadSession: true,
       sessionCapabilities: {
-        attach: { roles: ["controller", "observer"] },
+        attach: {},
         list: true,
       },
     },
@@ -367,7 +365,6 @@ function buildInitializeResult(): InitializeResult {
 function bindClientToSession(
   connection: JsonRpcConnection,
   session: Session,
-  role: "controller" | "observer",
   state: ClientState,
   clientInfo?: { name: string; version?: string },
 ): AttachedClient {
@@ -375,7 +372,6 @@ function bindClientToSession(
   void session;
   return {
     clientId: `cli_${nanoid(8)}`,
-    role,
     connection,
     clientInfo,
   };

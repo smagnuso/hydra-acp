@@ -37,10 +37,10 @@ ACP itself is the [Agent Client Protocol](https://agentclientprotocol.com/) — 
 
 Adds two new methods that turn ACP from 1:1 into 1:N:
 
-- **`session/attach { sessionId, role, historyPolicy, clientInfo? }`** — a second (or third, or N-th) client connects to a session that's already live. `role` is `"controller"` (can prompt and respond to permission requests) or `"observer"` (read-only). `historyPolicy` controls replay on attach: `"full"`, `"pending_only"`, or `"none"`.
-- **`session/detach { sessionId }`** — graceful disconnect; the session continues as long as one controller remains.
+- **`session/attach { sessionId, historyPolicy, clientInfo? }`** — a second (or third, or N-th) client connects to a session that's already live. `historyPolicy` controls replay on attach: `"full"`, `"pending_only"`, or `"none"`.
+- **`session/detach { sessionId }`** — graceful disconnect; the session continues as long as one client remains attached.
 
-Permission requests fan out to all controllers; the first response wins, and the rest receive a `session/permission_resolved` notification. Capability is advertised in `initialize` under `agentCapabilities.sessionCapabilities.attach.roles`.
+Every event the agent emits is broadcast to every attached client; clients self-filter what they act on. Permission requests broadcast the same way: the first response wins, and the rest receive a `session/permission_resolved` notification. Capability is advertised in `initialize` under `agentCapabilities.sessionCapabilities.attach`.
 
 #### 2. Agent Extensions via ACP Proxies — [RFD: proxy-chains](https://agentclientprotocol.com/rfds/proxy-chains)
 
@@ -83,9 +83,9 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 2. **Shim opens a WSS connection** to the daemon at `/acp`, authenticating via the bearer token.
 3. **`session/new` from the editor** → daemon resolves the requested agent against the cached ACP Registry, downloads it on first use under `~/.hydra-acp/agents/`, spawns it as a child process, and creates an ACP session inside it (per RFD: proxy-chains).
 4. **`session/attach` from a second client** → daemon adds the new client to the session's broadcast list and replays history per `historyPolicy` (per RFD #533).
-5. **Notifications** fan out to every attached client. **Prompts** are serialized through the daemon's per-session queue. **Permission requests** broadcast to all controllers; first response wins and the rest receive `session/permission_resolved`.
+5. **Notifications** fan out to every attached client. **Prompts** are serialized through the daemon's per-session queue. **Permission requests** broadcast to every attached client; first response wins and the rest receive `session/permission_resolved`.
 6. **`session/list`** returns the daemon's active sessions, filterable by `cwd` (per RFD: session-list).
-7. **`session/detach`** lets a client leave voluntarily; the session continues until the last controller detaches (per RFD #533).
+7. **`session/detach`** lets a client leave voluntarily; the session continues until the last client detaches (per RFD #533).
 
 ### Why a shim?
 
@@ -137,7 +137,6 @@ For resurrection, the shim sends `session/attach` with a resume hint nested in t
 ```json
 {
   "sessionId": "hydra_session_abc123",
-  "role": "controller",
   "historyPolicy": "pending_only",
   "_meta": {
     "hydra-acp": {
@@ -186,9 +185,9 @@ hydra-acp tui                               # explicit form
 # 5. List live sessions.
 hydra-acp sessions
 
-# 6. Attach a second client (read-only) to an existing session.
+# 6. Attach a second client to an existing session.
 #    Bare invocation auto-detects: TUI in a terminal, ACP shim when piped.
-hydra-acp --session-id hydra_session_abc123 --role observer
+hydra-acp --session-id hydra_session_abc123
 ```
 
 ## CLI
@@ -199,9 +198,8 @@ hydra-acp shim                              # explicit shim mode (forces shim re
 hydra-acp tui                               # explicit terminal-UI mode
 hydra-acp launch <agent-id>                 # launcher mode: shim that forces the
                                             # daemon to spawn <agent-id> on session/new
-hydra-acp --session-id <id> [--role ...]    # attach to existing session
+hydra-acp --session-id <id>                 # attach to existing session
                                             # (TUI in a TTY, shim otherwise)
-                                            # role: controller (default) | observer
 
 hydra-acp init                              # generate config + auth token
 hydra-acp daemon start [--port N] [--host H]
@@ -283,7 +281,6 @@ Every config-knob flag has an `HYDRA_ACP_FOO_BAR` env-var equivalent. Flag wins 
 | `--name` | `HYDRA_ACP_NAME` |
 | `--agent-id` | `HYDRA_ACP_AGENT_ID` |
 | `--session-id` | `HYDRA_ACP_SESSION_ID` |
-| `--role` | `HYDRA_ACP_ROLE` |
 
 Action commands (`init`, `daemon`, `sessions`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
 
@@ -374,7 +371,7 @@ hydra-acp extensions logs hydra-acp-slack --follow
 
 Various ready-made extensions ship under the same `@hydra-acp` npm scope. All are optional and can be installed independently.
 
-**[`@hydra-acp/slack`](https://github.com/smagnuso/hydra-acp-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Attaches as `controller`, respects RFD #533's `prompt_received`, and survives daemon restarts via session resurrection.
+**[`@hydra-acp/slack`](https://github.com/smagnuso/hydra-acp-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Respects RFD #533's `prompt_received` and survives daemon restarts via session resurrection.
 
 ```sh
 npm install -g @hydra-acp/slack
@@ -384,7 +381,7 @@ hydra-acp extensions start hydra-acp-slack   # if the daemon is already running
 
 You'll also need a Slack app and a config at `~/.hydra-acp-slack.conf` — see the [package's setup section](https://github.com/smagnuso/hydra-acp-slack#setup) for scopes, tokens, and authorized users.
 
-**[`@hydra-acp/browser`](https://github.com/smagnuso/hydra-acp-browser) — local web UI.** Single-page app that lists live sessions, attaches as `controller` or `observer`, and renders the transcript (agent messages, tool calls, plans, mode/model changes) with a composer for prompting and permission widgets for approving tool use. Cheap to bring up when you want to spot-check an agent without firing up the editor.
+**[`@hydra-acp/browser`](https://github.com/smagnuso/hydra-acp-browser) — local web UI.** Single-page app that lists live sessions, attaches to each one, and renders the transcript (agent messages, tool calls, plans, mode/model changes) with a composer for prompting and permission widgets for approving tool use. Cheap to bring up when you want to spot-check an agent without firing up the editor.
 
 ```sh
 npm install -g @hydra-acp/browser
@@ -402,7 +399,7 @@ hydra-acp extensions add hydra-acp-notifier --command hydra-acp-notifier
 hydra-acp extensions start hydra-acp-notifier
 ```
 
-**[`@hydra-acp/approver`](https://github.com/smagnuso/hydra-acp-approver) — headless permission auto-responder.** Attaches as a controller and answers `session/request_permission` based on a JS rule at `~/.hydra-acp/approver.config.js`. When the rule returns an `optionId` it wins the race and dismisses the prompt before any human client sees it; when it abstains (returns `null`), the prompt stays open for your interactive clients. Useful for centralizing approval policy in one place so per-client approve lambdas can go away.
+**[`@hydra-acp/approver`](https://github.com/smagnuso/hydra-acp-approver) — headless permission auto-responder.** Attaches to every live session and answers `session/request_permission` based on a JS rule at `~/.hydra-acp/approver.config.js`. When the rule returns an `optionId` it wins the race and dismisses the prompt before any human client sees it; when it abstains (returns `null`), the prompt stays open for your interactive clients. Useful for centralizing approval policy in one place so per-client approve lambdas can go away.
 
 ```sh
 npm install -g @hydra-acp/approver
@@ -469,12 +466,12 @@ Standard ACP:
 
 - `initialize` — capability negotiation
 - `session/new` — create a new session, spawning the requested agent
-- `session/prompt` — controller-only when attached
+- `session/prompt`
 - `session/cancel`
 
 RFD additions:
 
-- `session/attach { sessionId, role: "controller"|"observer", historyPolicy: "full"|"pending_only"|"none" }` — RFD #533
+- `session/attach { sessionId, historyPolicy: "full"|"pending_only"|"none" }` — RFD #533
 - `session/detach { sessionId }` — RFD #533
 - `session/list { cwd?, cursor?, limit? }` — RFD: session-list
 - `proxy/initialize` — RFD: proxy-chains
@@ -495,7 +492,7 @@ Capabilities advertised in the `initialize` response:
     },
     "loadSession": false,
     "sessionCapabilities": {
-      "attach": { "roles": ["controller", "observer"] },
+      "attach": {},
       "list": true
     }
   }
@@ -554,7 +551,7 @@ If accepted, `hydra-acp` would land in the [ACP Registry](https://github.com/age
   },
   "capabilities": {
     "session": {
-      "attach": { "roles": ["controller", "observer"] },
+      "attach": {},
       "list": true,
       "proxy": true
     },

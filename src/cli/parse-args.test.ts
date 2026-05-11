@@ -45,10 +45,10 @@ describe("parseArgs", () => {
 
   it("interleaves positionals and flags", () => {
     expect(
-      parseArgs(["launch", "claude-code", "--role", "observer"]),
+      parseArgs(["launch", "claude-code", "--name", "foo"]),
     ).toEqual({
       positional: ["launch", "claude-code"],
-      flags: { role: "observer" },
+      flags: { name: "foo" },
     });
   });
 
@@ -98,7 +98,6 @@ describe("envKeyForFlag", () => {
     expect(envKeyForFlag("name")).toBe("HYDRA_ACP_NAME");
     expect(envKeyForFlag("session-id")).toBe("HYDRA_ACP_SESSION_ID");
     expect(envKeyForFlag("agent-id")).toBe("HYDRA_ACP_AGENT_ID");
-    expect(envKeyForFlag("role")).toBe("HYDRA_ACP_ROLE");
   });
 });
 
@@ -109,7 +108,6 @@ describe("resolveOption", () => {
     delete process.env.HYDRA_ACP_NAME;
     delete process.env.HYDRA_ACP_SESSION_ID;
     delete process.env.HYDRA_ACP_AGENT_ID;
-    delete process.env.HYDRA_ACP_ROLE;
   });
 
   afterEach(() => {

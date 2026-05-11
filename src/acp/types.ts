@@ -39,7 +39,6 @@ export const JsonRpcErrorCodes = {
   SessionNotFound: -32001,
   PermissionDenied: -32002,
   AlreadyAttached: -32003,
-  RoleNotPermitted: -32004,
   AgentNotInstalled: -32005,
 } as const;
 
@@ -54,9 +53,6 @@ export const InitializeParams = z.object({
     .optional(),
 });
 export type InitializeParams = z.infer<typeof InitializeParams>;
-
-export const SessionRole = z.enum(["controller", "observer"]);
-export type SessionRole = z.infer<typeof SessionRole>;
 
 export const HistoryPolicy = z.enum(["full", "pending_only", "none"]);
 export type HistoryPolicy = z.infer<typeof HistoryPolicy>;
@@ -79,7 +75,6 @@ export type SessionResumeHints = z.infer<typeof SessionResumeHints>;
 
 export const SessionAttachParams = z.object({
   sessionId: z.string(),
-  role: SessionRole.default("controller"),
   historyPolicy: HistoryPolicy.default("full"),
   clientInfo: z
     .object({
@@ -187,12 +182,8 @@ export const SessionCancelParams = z.object({
 });
 export type SessionCancelParams = z.infer<typeof SessionCancelParams>;
 
-export interface AttachCapability {
-  roles: SessionRole[];
-}
-
 export interface SessionCapabilities {
-  attach?: AttachCapability;
+  attach?: Record<string, never>;
   list?: boolean;
 }
 

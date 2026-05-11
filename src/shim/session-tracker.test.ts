@@ -33,7 +33,6 @@ describe("SessionTracker", () => {
         upstreamSessionId: "u_xyz",
         agentId: "claude-code",
         cwd: "/work",
-        role: "controller",
       },
     ]);
   });
@@ -64,13 +63,13 @@ describe("SessionTracker", () => {
     expect(tracker.list()[0]?.title).toBe("feature-X");
   });
 
-  it("captures observer role from session/attach", () => {
+  it("captures resume context from session/attach", () => {
     const tracker = new SessionTracker();
     tracker.observeFromClient({
       jsonrpc: "2.0",
       id: "x",
       method: "session/attach",
-      params: { sessionId: "sess_abc", role: "observer" },
+      params: { sessionId: "sess_abc" },
     });
     tracker.observeFromServer({
       jsonrpc: "2.0",
@@ -87,7 +86,7 @@ describe("SessionTracker", () => {
       },
     });
 
-    expect(tracker.list()[0]?.role).toBe("observer");
+    expect(tracker.list()[0]?.sessionId).toBe("sess_abc");
   });
 
   it("captures resume context from session/load request + response", () => {
@@ -118,7 +117,6 @@ describe("SessionTracker", () => {
         upstreamSessionId: "u_resumed",
         agentId: "claude-acp",
         cwd: "/work",
-        role: "controller",
       },
     ]);
   });

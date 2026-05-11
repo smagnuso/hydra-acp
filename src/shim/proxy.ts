@@ -5,7 +5,6 @@ import {
   type JsonRpcId,
   type JsonRpcMessage,
   type JsonRpcRequest,
-  type SessionRole,
 } from "../acp/types.js";
 import { ResilientWsStream } from "./resilient-ws.js";
 import { SessionTracker, type ResumeContext } from "./session-tracker.js";
@@ -13,7 +12,6 @@ import type { MessageStream } from "../acp/framing.js";
 
 export interface ShimOptions {
   sessionId?: string;
-  role?: SessionRole;
   agentId?: string;
   agentArgs?: string[];
   name?: string;
@@ -97,7 +95,7 @@ export function wireShim({
     tracker.observeFromClient(msg);
     if (isSessionNewRequest(msg)) {
       if (opts.sessionId) {
-        void upstream.send(buildAttachFromNew(msg, opts.sessionId, opts.role));
+        void upstream.send(buildAttachFromNew(msg, opts.sessionId));
         return;
       }
       let outgoing = msg;
@@ -204,7 +202,6 @@ async function replayAttach(
     method: "session/attach",
     params: {
       sessionId: ctx.sessionId,
-      role: ctx.role,
       historyPolicy: "pending_only",
       _meta: {
         "hydra-acp": {
@@ -239,7 +236,6 @@ function isSessionNewRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
 function buildAttachFromNew(
   msg: JsonRpcRequest,
   sessionId: string,
-  role: SessionRole | undefined,
 ): JsonRpcRequest {
   return {
     jsonrpc: "2.0",
@@ -247,7 +243,6 @@ function buildAttachFromNew(
     method: "session/attach",
     params: {
       sessionId,
-      role: role ?? "controller",
       historyPolicy: "full",
     },
   };

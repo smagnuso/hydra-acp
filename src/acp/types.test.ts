@@ -106,7 +106,6 @@ describe("SessionAttachParams schema", () => {
 
   it("accepts attach with only sessionId (defaults applied)", () => {
     const parsed = SessionAttachParams.parse({ sessionId: "sess" });
-    expect(parsed.role).toBe("controller");
     expect(parsed.historyPolicy).toBe("full");
     expect(parsed._meta).toBeUndefined();
   });

@@ -8,7 +8,6 @@ import { JsonRpcConnection } from "../acp/connection.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
 import {
   HYDRA_META_KEY,
-  type SessionRole,
   extractHydraMeta,
 } from "../acp/types.js";
 import { ensureConfig, type HydraConfig } from "../core/config.js";
@@ -32,7 +31,6 @@ import { formatEvent, type FormattedLine } from "./format.js";
 
 export interface TuiOptions {
   sessionId?: string;
-  role?: SessionRole;
   agentId?: string;
   cwd?: string;
   name?: string;
@@ -44,7 +42,6 @@ interface SessionContext {
   sessionId: string;
   agentId: string;
   cwd: string;
-  role: SessionRole;
 }
 
 const PLAN_PREFIX_TEXT =
@@ -302,7 +299,6 @@ async function runSession(
   } else {
     const attached = (await conn.request("session/attach", {
       sessionId: ctx.sessionId,
-      role: ctx.role,
       historyPolicy: "full",
       clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
     })) as { sessionId: string; _meta?: Record<string, unknown> };
@@ -869,7 +865,6 @@ async function resolveSession(
       sessionId: opts.sessionId,
       agentId: opts.agentId ?? "",
       cwd,
-      role: opts.role ?? "controller",
     };
   }
   if (opts.forceNew) {
@@ -886,7 +881,6 @@ async function resolveSession(
       sessionId: target.sessionId,
       agentId: target.agentId ?? "",
       cwd,
-      role: opts.role ?? "controller",
     };
   }
   // Smart default: show every live session plus up to PICKER_COLD_LIMIT
@@ -912,7 +906,6 @@ async function resolveSession(
     sessionId: choice.sessionId,
     agentId: choice.agentId ?? "",
     cwd,
-    role: opts.role ?? "controller",
   };
 }
 
@@ -925,7 +918,6 @@ function newCtx(
     sessionId: "__new__",
     agentId: opts.agentId ?? config.defaultAgent ?? "",
     cwd,
-    role: opts.role ?? "controller",
   };
 }
 
