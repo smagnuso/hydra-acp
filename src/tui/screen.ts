@@ -716,8 +716,12 @@ export class Screen {
     let cwdRoom: number;
     let titleRoom: number;
     if (title) {
-      titleRoom = Math.min(title.length, Math.max(10, Math.floor(variableRoom / 2)));
-      cwdRoom = Math.max(8, variableRoom - titleRoom);
+      // Let cwd take its natural width, but cap at half of variableRoom so a
+      // long path can't squeeze the title out entirely. Title gets whatever
+      // remains — up to and including the gap before the usage block.
+      const cwdCap = Math.max(8, Math.floor(variableRoom / 2));
+      cwdRoom = Math.min(this.header.cwd.length, cwdCap);
+      titleRoom = Math.max(8, variableRoom - cwdRoom);
     } else {
       titleRoom = 0;
       cwdRoom = variableRoom;
@@ -728,7 +732,7 @@ export class Screen {
       .dim(truncate(this.header.cwd, cwdRoom))(" · ")
       .yellow(sid);
     if (title) {
-      this.term(" · ").italic(truncate(title, titleRoom));
+      this.term(" · ").bold(truncate(title, titleRoom));
     }
     if (usage) {
       const col = Math.max(1, w - usage.length + 1);
