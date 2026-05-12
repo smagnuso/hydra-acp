@@ -118,6 +118,16 @@ export class Screen {
   private lineIds = new WeakMap<FormattedLine, number>();
   private wrapCache = new Map<number, FormattedLine[]>();
   private wrapCacheWidth = 0;
+  // Per-row signature of what was painted to each terminal row on the
+  // previous repaint. drawX methods funnel through paintRow(), which
+  // skips the moveTo+eraseLineAfter+write sequence when the new
+  // signature matches the previous frame. Eliminates flicker during
+  // the 1Hz busy-tick: only rows whose content actually changed
+  // (banner elapsed, tools-block summary) get re-emitted instead of
+  // every visible row. Cleared on dimension change.
+  private lastFrameRows = new Map<number, string>();
+  private lastFrameW = 0;
+  private lastFrameH = 0;
   private permissionPrompt: PermissionPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
   private completions: CompletionItem[] = [];
@@ -769,6 +779,23 @@ export class Screen {
     }, this.contentRepaintThrottleMs - elapsed);
   }
 
+  // Funnel for every row that any drawX method renders. Skips emitting
+  // moveTo+eraseLineAfter+paint when the row's signature matches the
+  // previous frame's. The signature must capture everything that affects
+  // visible output for that row (width, FormattedLine fields, banner
+  // state, etc.) so identical sigs guarantee identical bytes.
+  private paintRow(row: number, signature: string, paint: () => void): void {
+    if (row < 1 || row > this.term.height) {
+      return;
+    }
+    if (this.lastFrameRows.get(row) === signature) {
+      return;
+    }
+    this.lastFrameRows.set(row, signature);
+    this.term.moveTo(1, row).eraseLineAfter();
+    paint();
+  }
+
   private repaint(): void {
     if (this.repaintPaused > 0) {
       this.repaintPending = true;
@@ -783,6 +810,11 @@ export class Screen {
     const h = this.term.height;
     if (w < 20 || h < 8) {
       return;
+    }
+    if (w !== this.lastFrameW || h !== this.lastFrameH) {
+      this.lastFrameRows.clear();
+      this.lastFrameW = w;
+      this.lastFrameH = h;
     }
     // Don't call term.clear() here. Each draw* method moves to its row
     // and emits eraseLineAfter before writing, so every row is overwritten
@@ -810,58 +842,59 @@ export class Screen {
 
   private drawHeader(): void {
     const w = this.term.width;
-    this.term.moveTo(1, 1).eraseLineAfter();
     const usage = formatUsage(this.header.usage);
     const sid = shortId(this.header.sessionId);
     const title = this.header.title?.trim();
-    // Fixed pieces: "hydra · " + agent + " · " + cwd + " · " + sessionId
-    // [+ " · " + title] and the right-aligned usage block.
-    const fixed =
-      "hydra · ".length +
-      this.header.agent.length +
-      " · ".length +
-      " · ".length +
-      sid.length +
-      (title ? " · ".length : 0) +
-      (usage ? usage.length + 3 : 0);
-    const variableRoom = Math.max(8, w - fixed);
-    let cwdRoom: number;
-    let titleRoom: number;
-    if (title) {
-      // Title is the most useful identifier — give it its natural width
-      // first, capped so cwd retains at least a minimum slice. cwd takes
-      // whatever remains.
-      const cwdMin = Math.min(this.header.cwd.length, 12);
-      const titleCap = Math.max(8, variableRoom - cwdMin);
-      titleRoom = Math.min(title.length, titleCap);
-      cwdRoom = Math.max(8, variableRoom - titleRoom);
-    } else {
-      titleRoom = 0;
-      cwdRoom = variableRoom;
-    }
-    // noFormat on the user-controlled cells (agent name, cwd, title) so a
-    // literal `^X` in any of them isn't eaten as terminal-kit markup.
-    this.term
-      .bold("hydra")(" · ")
-      .cyan.noFormat(this.header.agent)(" · ")
-      .dim.noFormat(truncate(this.header.cwd, cwdRoom))(" · ")
-      .yellow(sid);
-    if (title) {
-      this.term(" · ").bold.noFormat(truncate(title, titleRoom));
-    }
-    if (usage) {
-      const col = Math.max(1, w - usage.length + 1);
-      this.term.moveTo(col, 1);
-      this.term.dim(usage);
-    }
+    const sig = `hdr|${w}|${this.header.agent}|${this.header.cwd}|${sid}|${title ?? ""}|${usage ?? ""}`;
+    this.paintRow(1, sig, () => {
+      // Fixed pieces: "hydra · " + agent + " · " + cwd + " · " + sessionId
+      // [+ " · " + title] and the right-aligned usage block.
+      const fixed =
+        "hydra · ".length +
+        this.header.agent.length +
+        " · ".length +
+        " · ".length +
+        sid.length +
+        (title ? " · ".length : 0) +
+        (usage ? usage.length + 3 : 0);
+      const variableRoom = Math.max(8, w - fixed);
+      let cwdRoom: number;
+      let titleRoom: number;
+      if (title) {
+        // Title is the most useful identifier — give it its natural width
+        // first, capped so cwd retains at least a minimum slice. cwd takes
+        // whatever remains.
+        const cwdMin = Math.min(this.header.cwd.length, 12);
+        const titleCap = Math.max(8, variableRoom - cwdMin);
+        titleRoom = Math.min(title.length, titleCap);
+        cwdRoom = Math.max(8, variableRoom - titleRoom);
+      } else {
+        titleRoom = 0;
+        cwdRoom = variableRoom;
+      }
+      // noFormat on the user-controlled cells (agent name, cwd, title) so a
+      // literal `^X` in any of them isn't eaten as terminal-kit markup.
+      this.term
+        .bold("hydra")(" · ")
+        .cyan.noFormat(this.header.agent)(" · ")
+        .dim.noFormat(truncate(this.header.cwd, cwdRoom))(" · ")
+        .yellow(sid);
+      if (title) {
+        this.term(" · ").bold.noFormat(truncate(title, titleRoom));
+      }
+      if (usage) {
+        const col = Math.max(1, w - usage.length + 1);
+        this.term.moveTo(col, 1);
+        this.term.dim(usage);
+      }
+    });
   }
 
   private drawSeparator(row: number): void {
-    if (row < 1 || row > this.term.height) {
-      return;
-    }
-    this.term.moveTo(1, row).eraseLineAfter();
-    this.term.dim("─".repeat(this.term.width));
+    const w = this.term.width;
+    this.paintRow(row, `sep|${w}`, () => {
+      this.term.dim("─".repeat(w));
+    });
   }
 
   private drawScrollback(): void {
@@ -894,14 +927,14 @@ export class Screen {
     const padTop = Math.max(0, visibleRows - slice.length);
     for (let i = 0; i < visibleRows; i++) {
       const row = top + i;
-      this.term.moveTo(1, row).eraseLineAfter();
       const sliceIdx = i - padTop;
-      if (sliceIdx >= 0) {
-        const line = slice[sliceIdx];
+      const line = sliceIdx >= 0 ? slice[sliceIdx] : undefined;
+      const sig = formattedLineSig("sb", w, line);
+      this.paintRow(row, sig, () => {
         if (line) {
           this.writeFormattedLine(line, w);
         }
-      }
+      });
     }
   }
 
@@ -939,26 +972,31 @@ export class Screen {
     }
     for (let i = 0; i < rows; i++) {
       const row = completionTop + i;
-      this.term.moveTo(1, row).eraseLineAfter();
       const item = this.completions[i];
-      if (!item) {
-        continue;
-      }
       const isLast = i === rows - 1 && this.completions.length > MAX_COMPLETION_ROWS;
-      if (isLast) {
-        this.term.dim(
-          `  + ${this.completions.length - MAX_COMPLETION_ROWS + 1} more match(es)`,
-        );
-        continue;
-      }
-      const namePadded = item.name.padEnd(nameWidth);
-      const desc = item.description ?? "";
-      const remaining = w - namePadded.length - 4;
-      const truncated = remaining > 0 ? truncate(desc, remaining) : "";
-      this.term("  ").brightCyan(namePadded);
-      if (truncated.length > 0) {
-        this.term("  ").dim(truncated);
-      }
+      const overflow = this.completions.length - MAX_COMPLETION_ROWS + 1;
+      const sig = item
+        ? isLast
+          ? `comp|${w}|overflow|${overflow}`
+          : `comp|${w}|${nameWidth}|${item.name}|${item.description ?? ""}`
+        : `comp|${w}|empty`;
+      this.paintRow(row, sig, () => {
+        if (!item) {
+          return;
+        }
+        if (isLast) {
+          this.term.dim(`  + ${overflow} more match(es)`);
+          return;
+        }
+        const namePadded = item.name.padEnd(nameWidth);
+        const desc = item.description ?? "";
+        const remaining = w - namePadded.length - 4;
+        const truncated = remaining > 0 ? truncate(desc, remaining) : "";
+        this.term("  ").brightCyan(namePadded);
+        if (truncated.length > 0) {
+          this.term("  ").dim(truncated);
+        }
+      });
     }
   }
 
@@ -976,22 +1014,30 @@ export class Screen {
     const queuedTop = queuedBottom - rows + 1;
     for (let i = 0; i < rows; i++) {
       const row = queuedTop + i;
-      this.term.moveTo(1, row).eraseLineAfter();
       const text = this.queuedTexts[i];
-      if (text === undefined) {
-        continue;
-      }
       const isLast =
         i === rows - 1 && this.queuedTexts.length > MAX_QUEUED_ROWS;
       const overflow = this.queuedTexts.length - MAX_QUEUED_ROWS;
-      const summary = isLast
-        ? `+ ${overflow + 1} more queued`
-        : truncate(firstLine(text), w - 4);
-      const display = ` ⏳ ${summary}`;
-      const padded = display + " ".repeat(Math.max(0, w - display.length));
-      // noFormat: the queued summary contains user-typed prompt text, so
-      // literal `^X` should not be interpreted as terminal-kit markup.
-      this.term.bgBlue.brightWhite.noFormat(padded);
+      const summary =
+        text === undefined
+          ? ""
+          : isLast
+            ? `+ ${overflow + 1} more queued`
+            : truncate(firstLine(text), w - 4);
+      const sig =
+        text === undefined
+          ? `queued|${w}|empty`
+          : `queued|${w}|${isLast ? "ovf" : "row"}|${summary}`;
+      this.paintRow(row, sig, () => {
+        if (text === undefined) {
+          return;
+        }
+        const display = ` ⏳ ${summary}`;
+        const padded = display + " ".repeat(Math.max(0, w - display.length));
+        // noFormat: the queued summary contains user-typed prompt text, so
+        // literal `^X` should not be interpreted as terminal-kit markup.
+        this.term.bgBlue.brightWhite.noFormat(padded);
+      });
     }
   }
 
@@ -1013,23 +1059,36 @@ export class Screen {
     for (let i = 0; i < layout.rendered; i++) {
       const vr = visualRows[layout.windowStart + i];
       const row = top + i;
-      this.term.moveTo(1, row).eraseLineAfter();
-      if (!vr) {
-        continue;
+      let gutter: "first" | "newline" | "wrap" = "wrap";
+      let slice = "";
+      if (vr) {
+        if (vr.bufferIdx === 0 && vr.startCol === 0) {
+          gutter = "first";
+        } else if (vr.startCol === 0) {
+          gutter = "newline";
+        }
+        slice = (state.buffer[vr.bufferIdx] ?? "").slice(vr.startCol, vr.endCol);
       }
-      // Gutter: "> " on the very first visual row, "· " on the start of a
-      // logical newline, blank on a soft-wrap continuation.
-      if (vr.bufferIdx === 0 && vr.startCol === 0) {
-        this.term.brightWhite("> ");
-      } else if (vr.startCol === 0) {
-        this.term.dim("· ");
-      } else {
-        this.term("  ");
-      }
-      const line = state.buffer[vr.bufferIdx] ?? "";
-      // noFormat so literal `^X` typed by the user is rendered verbatim
-      // and not interpreted as terminal-kit's color/style markup.
-      this.term.noFormat(line.slice(vr.startCol, vr.endCol));
+      const sig = vr
+        ? `prompt|${this.term.width}|${gutter}|${slice}`
+        : `prompt|${this.term.width}|empty`;
+      this.paintRow(row, sig, () => {
+        if (!vr) {
+          return;
+        }
+        // Gutter: "> " on the very first visual row, "· " on the start of a
+        // logical newline, blank on a soft-wrap continuation.
+        if (gutter === "first") {
+          this.term.brightWhite("> ");
+        } else if (gutter === "newline") {
+          this.term.dim("· ");
+        } else {
+          this.term("  ");
+        }
+        // noFormat so literal `^X` typed by the user is rendered verbatim
+        // and not interpreted as terminal-kit's color/style markup.
+        this.term.noFormat(slice);
+      });
     }
   }
 
@@ -1040,10 +1099,12 @@ export class Screen {
     }
     const w = this.term.width;
     const top = this.term.height - CONFIRM_PROMPT_ROWS - BANNER_ROWS + 1;
-    this.term.moveTo(1, top).eraseLineAfter();
-    this.term.brightYellow(` ? ${truncate(spec.question, w - 4)}`);
-    this.term.moveTo(1, top + 1).eraseLineAfter();
-    this.term.dim(` ${truncate(spec.hint, w - 2)}`);
+    this.paintRow(top, `confirm|q|${w}|${spec.question}`, () => {
+      this.term.brightYellow(` ? ${truncate(spec.question, w - 4)}`);
+    });
+    this.paintRow(top + 1, `confirm|h|${w}|${spec.hint}`, () => {
+      this.term.dim(` ${truncate(spec.hint, w - 2)}`);
+    });
   }
 
   private drawPermissionPrompt(): void {
@@ -1055,21 +1116,20 @@ export class Screen {
     const rows = this.permissionRows();
     const top = this.term.height - rows - BANNER_ROWS + 1;
     let row = top;
-    const writeRow = (paint: () => void): void => {
+    const writeRow = (sig: string, paint: () => void): void => {
       if (row >= top + rows) {
         return;
       }
-      this.term.moveTo(1, row).eraseLineAfter();
-      paint();
+      this.paintRow(row, sig, paint);
       row += 1;
     };
-    writeRow(() => {
+    writeRow(`perm|t|${w}|${spec.title}`, () => {
       this.term.brightYellow(` 🔒 ${truncate(spec.title, w - 5)}`);
     });
-    writeRow(() => {
+    writeRow(`perm|sub|${w}`, () => {
       this.term.dim(" This action requires approval");
     });
-    writeRow(() => {
+    writeRow(`perm|q|${w}`, () => {
       this.term(" Do you want to proceed?");
     });
     for (let i = 0; i < spec.options.length; i++) {
@@ -1083,7 +1143,7 @@ export class Screen {
       const isSel = i === spec.selectedIndex;
       const marker = isSel ? "❯" : " ";
       const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
-      writeRow(() => {
+      writeRow(`perm|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
         if (isSel) {
           this.term.brightCyan(body);
         } else {
@@ -1091,42 +1151,54 @@ export class Screen {
         }
       });
     }
-    writeRow(() => {
+    writeRow(`perm|hint|${w}`, () => {
       this.term.dim(" ↑/↓ choose · Enter submit · Esc cancel · 1–9 quick-pick");
     });
   }
 
   private drawBanner(): void {
     const row = this.term.height;
-    this.term.moveTo(1, row).eraseLineAfter();
-    const dot = this.banner.status === "busy" ? "●" : "○";
-    const planLabel = this.banner.planMode ? "plan: ON " : "plan: off";
-    if (this.banner.status === "busy") {
-      this.term.brightYellow(`${dot} ${this.banner.status}`);
-      if (
-        this.banner.elapsedMs !== undefined &&
-        this.banner.elapsedMs >= 1000
-      ) {
-        this.term(" ").dim(formatElapsed(this.banner.elapsedMs));
+    const w = this.term.width;
+    // Use the rendered elapsed string in the sig (not raw ms), so a tick
+    // landing within the same displayed-second skips the repaint. Tied to
+    // formatElapsed exactly: identical sig ⇒ identical bytes.
+    const elapsedStr =
+      this.banner.status === "busy" &&
+      this.banner.elapsedMs !== undefined &&
+      this.banner.elapsedMs >= 1000
+        ? formatElapsed(this.banner.elapsedMs)
+        : "";
+    const sig =
+      `bnr|${w}|${this.banner.status}|${elapsedStr}|` +
+      `${this.banner.queued}|${this.scrollOffset}|` +
+      `${this.banner.planMode ? "1" : "0"}|${this.banner.hint}`;
+    this.paintRow(row, sig, () => {
+      const dot = this.banner.status === "busy" ? "●" : "○";
+      const planLabel = this.banner.planMode ? "plan: ON " : "plan: off";
+      if (this.banner.status === "busy") {
+        this.term.brightYellow(`${dot} ${this.banner.status}`);
+        if (elapsedStr) {
+          this.term(" ").dim(elapsedStr);
+        }
+      } else if (this.banner.status === "disconnected") {
+        this.term.brightRed(`${dot} ${this.banner.status}`);
+      } else {
+        this.term.brightGreen(`${dot} ${this.banner.status}`);
       }
-    } else if (this.banner.status === "disconnected") {
-      this.term.brightRed(`${dot} ${this.banner.status}`);
-    } else {
-      this.term.brightGreen(`${dot} ${this.banner.status}`);
-    }
-    if (this.banner.queued > 0) {
-      this.term(" · ").brightYellow(`${this.banner.queued} queued`);
-    }
-    if (this.scrollOffset > 0) {
-      this.term(" · ").brightCyan(`↑ ${this.scrollOffset}`);
-    }
-    this.term(" · ");
-    if (this.banner.planMode) {
-      this.term.brightMagenta(planLabel);
-    } else {
-      this.term.dim(planLabel);
-    }
-    this.term(" · ").dim(this.banner.hint);
+      if (this.banner.queued > 0) {
+        this.term(" · ").brightYellow(`${this.banner.queued} queued`);
+      }
+      if (this.scrollOffset > 0) {
+        this.term(" · ").brightCyan(`↑ ${this.scrollOffset}`);
+      }
+      this.term(" · ");
+      if (this.banner.planMode) {
+        this.term.brightMagenta(planLabel);
+      } else {
+        this.term.dim(planLabel);
+      }
+      this.term(" · ").dim(this.banner.hint);
+    });
   }
 
   private placeCursor(): void {
@@ -1300,6 +1372,27 @@ export class Screen {
       this.term.styleReset();
     }
   }
+}
+
+// Compact, deterministic key for a row's rendered FormattedLine. Captures
+// every field that affects writeFormattedLine output bytes; identical sigs
+// guarantee identical output, so paintRow can skip the re-emit. `zone`
+// distinguishes which draw block painted the row so a scrollback row's
+// sig can't accidentally match a completion row's.
+function formattedLineSig(
+  zone: string,
+  width: number,
+  line: FormattedLine | undefined,
+): string {
+  if (!line) {
+    return `${zone}|${width}|empty`;
+  }
+  return (
+    `${zone}|${width}|` +
+    `${line.prefix ?? ""}|${line.prefixStyle ?? ""}|` +
+    `${line.body}|${line.bodyStyle ?? ""}|` +
+    `${line.ansi ? "1" : "0"}|${line.fillRow ? "1" : "0"}`
+  );
 }
 
 interface PromptVisualRow {
