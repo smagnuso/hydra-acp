@@ -371,6 +371,7 @@ async function runSession(
   let resolvedSessionId = ctx.sessionId;
   let resolvedAgentId = ctx.agentId;
   let resolvedCwd = ctx.cwd;
+  let resolvedTitle: string | undefined;
   if (ctx.sessionId === "__new__") {
     const created = (await conn.request("session/new", {
       cwd: ctx.cwd,
@@ -388,6 +389,9 @@ async function runSession(
     if (hydraMeta.cwd) {
       resolvedCwd = hydraMeta.cwd;
     }
+    if (hydraMeta.name) {
+      resolvedTitle = hydraMeta.name;
+    }
   } else {
     const attached = (await conn.request("session/attach", {
       sessionId: ctx.sessionId,
@@ -402,6 +406,9 @@ async function runSession(
     }
     if (hydraMeta.cwd) {
       resolvedCwd = hydraMeta.cwd;
+    }
+    if (hydraMeta.name) {
+      resolvedTitle = hydraMeta.name;
     }
   }
 
@@ -600,6 +607,7 @@ async function runSession(
     agent: headerName,
     cwd: resolvedCwd,
     sessionId: resolvedSessionId,
+    title: resolvedTitle,
   });
 
   let finishSession: ((next: TuiOptions | null) => void) | null = null;
@@ -1206,6 +1214,12 @@ async function runSession(
     if (event.kind === "available-commands") {
       agentCommands = event.commands;
       refreshCompletions();
+      return;
+    }
+    if (event.kind === "session-info") {
+      if (event.title !== undefined) {
+        screen.setHeader({ title: event.title });
+      }
       return;
     }
     if (event.kind === "usage-update") {

@@ -36,6 +36,7 @@ interface HeaderState {
   agent: string;
   cwd: string;
   sessionId: string;
+  title?: string;
   usage?: UsageState;
 }
 
@@ -699,12 +700,36 @@ export class Screen {
     const w = this.term.width;
     this.term.moveTo(1, 1).eraseLineAfter();
     const usage = formatUsage(this.header.usage);
-    const cwdRoom = Math.max(8, w - 40 - (usage ? usage.length + 3 : 0));
+    const sid = shortId(this.header.sessionId);
+    const title = this.header.title?.trim();
+    // Fixed pieces: "hydra · " + agent + " · " + cwd + " · " + sessionId
+    // [+ " · " + title] and the right-aligned usage block.
+    const fixed =
+      "hydra · ".length +
+      this.header.agent.length +
+      " · ".length +
+      " · ".length +
+      sid.length +
+      (title ? " · ".length : 0) +
+      (usage ? usage.length + 3 : 0);
+    const variableRoom = Math.max(8, w - fixed);
+    let cwdRoom: number;
+    let titleRoom: number;
+    if (title) {
+      titleRoom = Math.min(title.length, Math.max(10, Math.floor(variableRoom / 2)));
+      cwdRoom = Math.max(8, variableRoom - titleRoom);
+    } else {
+      titleRoom = 0;
+      cwdRoom = variableRoom;
+    }
     this.term
       .bold("hydra")(" · ")
       .cyan(this.header.agent)(" · ")
       .dim(truncate(this.header.cwd, cwdRoom))(" · ")
-      .yellow(shortId(this.header.sessionId));
+      .yellow(sid);
+    if (title) {
+      this.term(" · ").italic(truncate(title, titleRoom));
+    }
     if (usage) {
       const col = Math.max(1, w - usage.length + 1);
       this.term.moveTo(col, 1);

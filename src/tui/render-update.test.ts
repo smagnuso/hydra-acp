@@ -262,6 +262,22 @@ describe("mapUpdate", () => {
     });
   });
 
+  it("maps session_info_update to a session-info event", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "session_info_update",
+        title: "fix the bug in foo.ts",
+        updatedAt: "2026-05-11T00:00:00.000Z",
+      }),
+    ).toEqual({ kind: "session-info", title: "fix the bug in foo.ts" });
+  });
+
+  it("ignores session_info_update without a title", () => {
+    expect(
+      mapUpdate({ sessionUpdate: "session_info_update", updatedAt: "x" }),
+    ).toBeNull();
+  });
+
   it("returns unknown for unrecognized sessionUpdate", () => {
     expect(
       mapUpdate({ sessionUpdate: "config_option_update", foo: "bar" }),

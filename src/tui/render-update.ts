@@ -30,6 +30,7 @@ export type RenderEvent =
       costCurrency?: string;
     }
   | { kind: "available-commands"; commands: AvailableCommand[] }
+  | { kind: "session-info"; title?: string }
   | { kind: "unknown"; sessionUpdate: string; raw: unknown };
 
 export interface AvailableCommand {
@@ -86,9 +87,19 @@ export function mapUpdate(update: unknown): RenderEvent | null {
       return mapUsage(u);
     case "available_commands_update":
       return mapAvailableCommands(u);
+    case "session_info_update":
+      return mapSessionInfo(u);
     default:
       return { kind: "unknown", sessionUpdate: tag, raw: update };
   }
+}
+
+function mapSessionInfo(u: UpdateLike): RenderEvent | null {
+  const title = readString(u, "title");
+  if (title === undefined) {
+    return null;
+  }
+  return { kind: "session-info", title };
 }
 
 function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
