@@ -14,6 +14,7 @@ import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerExtensionRoutes } from "./routes/extensions.js";
+import { registerConfigRoutes } from "./routes/config.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
 
 const HYDRA_VERSION = "0.1.0";
@@ -82,6 +83,10 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   });
   registerAgentRoutes(app, registry);
   registerExtensionRoutes(app, extensions);
+  registerConfigRoutes(app, {
+    defaultAgent: config.defaultAgent,
+    defaultCwd: config.defaultCwd,
+  });
   registerAcpWsEndpoint(app, {
     config,
     manager,
