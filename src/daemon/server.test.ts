@@ -92,9 +92,17 @@ describe("startDaemon", () => {
       expect(body.sessions).toEqual([]);
     });
 
-    it("returns 404 when killing an unknown session", async () => {
+    it("returns 404 when removing an unknown session", async () => {
       const r = await fetch(`${baseUrl}/v1/sessions/sess_unknown`, {
         method: "DELETE",
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(r.status).toBe(404);
+    });
+
+    it("returns 404 when killing an unknown session", async () => {
+      const r = await fetch(`${baseUrl}/v1/sessions/sess_unknown/kill`, {
+        method: "POST",
         headers: { Authorization: `Bearer ${TEST_TOKEN}` },
       });
       expect(r.status).toBe(404);

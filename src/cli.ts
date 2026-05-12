@@ -8,7 +8,11 @@ import {
   runDaemonStatus,
   runDaemonStop,
 } from "./cli/commands/daemon.js";
-import { runSessionsKill, runSessionsList } from "./cli/commands/sessions.js";
+import {
+  runSessionsKill,
+  runSessionsList,
+  runSessionsRm,
+} from "./cli/commands/sessions.js";
 import {
   runExtensionsAdd,
   runExtensionsList,
@@ -124,6 +128,10 @@ async function main(): Promise<void> {
       }
       if (sub === "kill") {
         await runSessionsKill(positional[2]);
+        return;
+      }
+      if (sub === "rm") {
+        await runSessionsRm(positional[2]);
         return;
       }
       process.stderr.write(`Unknown sessions subcommand: ${sub}\n`);
@@ -244,7 +252,8 @@ function printHelp(): void {
       "  hydra-acp daemon start|stop|restart|status",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
       "  hydra-acp sessions [list] [--all]  List sessions (live + 20 most-recent cold; --all for everything)",
-      "  hydra-acp sessions kill <id>       Kill a session (live or cold)",
+      "  hydra-acp sessions kill <id>       Demote a live session to cold (keeps the on-disk record)",
+      "  hydra-acp sessions rm <id>         Remove a session entirely (live or cold)",
       "  hydra-acp extensions list                   List configured extensions and live state",
       "  hydra-acp extensions add <name> [opts]      Add an extension to config",
       "  hydra-acp extensions remove <name>          Remove an extension from config",

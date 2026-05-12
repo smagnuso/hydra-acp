@@ -42,6 +42,27 @@ export function registerSessionRoutes(
     }
   });
 
+  // Demote a live session to cold: close the in-memory session but keep
+  // the on-disk record so it can be resurrected later. Idempotent — a
+  // session that's already cold returns 204 without touching disk. Use
+  // DELETE /v1/sessions/:id when you want the record gone too.
+  app.post("/v1/sessions/:id/kill", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const session = manager.get(id);
+    if (session) {
+      await session.close({ deleteRecord: false });
+      reply.code(204).send();
+      return;
+    }
+    const exists = await manager.hasRecord(id);
+    if (!exists) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    reply.code(204).send();
+  });
+
   app.delete("/v1/sessions/:id", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;

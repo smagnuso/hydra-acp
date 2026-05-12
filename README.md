@@ -209,7 +209,8 @@ hydra-acp daemon stop
 hydra-acp daemon status
 
 hydra-acp sessions                          # list sessions
-hydra-acp sessions kill <id>                # terminate a session
+hydra-acp sessions kill <id>                # close a live session (keeps the on-disk record so it can be resurrected)
+hydra-acp sessions rm <id>                  # remove a session entirely (live or cold)
 
 hydra-acp extensions                        # list configured extensions and live state
 hydra-acp extensions add <name>             # add to config (--command, --args, --env, --disabled)
@@ -511,7 +512,8 @@ All REST endpoints require `Authorization: Bearer <token>`.
 GET    /v1/health                 # liveness
 GET    /v1/sessions               # list sessions
 POST   /v1/sessions               # create session (alternative to ACP session/new)
-DELETE /v1/sessions/:id           # terminate
+POST   /v1/sessions/:id/kill      # demote a live session to cold (keeps the on-disk record); idempotent
+DELETE /v1/sessions/:id           # remove a session entirely (live or cold)
 GET    /v1/agents                 # list known agents (registry + installed)
 POST   /v1/agents/:id/install     # pre-install an agent
 GET    /v1/registry               # current cached registry contents

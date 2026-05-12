@@ -112,6 +112,24 @@ export async function runSessionsKill(id: string | undefined): Promise<void> {
   }
   const config = await loadConfig();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const response = await fetch(`${baseUrl}/v1/sessions/${id}/kill`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+  });
+  if (!response.ok && response.status !== 204) {
+    process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(`Killed ${id}\n`);
+}
+
+export async function runSessionsRm(id: string | undefined): Promise<void> {
+  if (!id) {
+    process.stderr.write("Usage: hydra-acp sessions rm <session-id>\n");
+    process.exit(2);
+  }
+  const config = await loadConfig();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetch(`${baseUrl}/v1/sessions/${id}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${config.daemon.authToken}` },
@@ -120,7 +138,7 @@ export async function runSessionsKill(id: string | undefined): Promise<void> {
     process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
     process.exit(1);
   }
-  process.stdout.write(`Killed ${id}\n`);
+  process.stdout.write(`Removed ${id}\n`);
 }
 
 export function httpBase(host: string, port: number, tls: boolean): string {

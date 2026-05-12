@@ -429,6 +429,11 @@ export class SessionManager {
     return true;
   }
 
+  async hasRecord(sessionId: string): Promise<boolean> {
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    return record !== undefined;
+  }
+
   // Persist a title update from Session.setTitle. The on-disk record
   // was written at create time; updating it here keeps the session
   // record's title in sync with what was broadcast to clients so a
