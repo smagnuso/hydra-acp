@@ -3,7 +3,9 @@
 // and delegates them to an `InputDispatcher` (held by the app), then
 // redraws.
 
+import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
+import wrapAnsi from "wrap-ansi";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import type { FormattedLine, Style } from "./format.js";
 import type { InputDispatcher, KeyEvent, KeyName } from "./input.js";
@@ -1030,7 +1032,9 @@ export class Screen {
     for (const line of lines) {
       const prefix = line.prefix ?? "";
       const room = Math.max(1, width - prefix.length);
-      const chunks = wrap(line.body, room);
+      const chunks = line.ansi
+        ? wrapAnsiBody(line.body, room)
+        : wrap(line.body, room);
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i] ?? "";
         const wrappedLine: FormattedLine = {
@@ -1046,6 +1050,9 @@ export class Screen {
         if (line.fillRow) {
           wrappedLine.fillRow = true;
         }
+        if (line.ansi) {
+          wrappedLine.ansi = true;
+        }
         out.push(wrappedLine);
       }
     }
@@ -1057,10 +1064,16 @@ export class Screen {
       writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle);
     }
     const remaining = Math.max(0, width - (line.prefix?.length ?? 0));
-    const bodyText = truncate(line.body, remaining);
+    // ANSI lines are already wrapped to the visible-width budget by
+    // wrap-ansi, so we don't truncate further — that would re-introduce
+    // the char-counting bug the ansi path exists to avoid. Width for
+    // fillRow padding is measured with string-width so escape bytes
+    // don't shrink the apparent line.
+    const bodyText = line.ansi ? line.body : truncate(line.body, remaining);
     writeStyled(this.term, bodyText, line.bodyStyle);
     if (line.fillRow) {
-      const pad = remaining - bodyText.length;
+      const visible = line.ansi ? stringWidth(bodyText) : bodyText.length;
+      const pad = remaining - visible;
       if (pad > 0) {
         writeStyled(this.term, " ".repeat(pad), line.bodyStyle);
       }
@@ -1070,8 +1083,9 @@ export class Screen {
     // mid-span, the dangling open would otherwise leak bold/color into
     // every subsequent row's eraseLineAfter + writes. Emitting an SGR
     // reset here costs ~4 bytes per row and bounds the damage to the
-    // affected row.
-    if (line.body.includes("^")) {
+    // affected row. ANSI-bearing lines always get a reset since
+    // highlighter output may end mid-token after wrap-ansi splits it.
+    if (line.ansi || line.body.includes("^")) {
       this.term.styleReset();
     }
   }
@@ -1276,6 +1290,21 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
     default:
       term.noFormat(text);
   }
+}
+
+// ANSI-aware wrap. Delegates to wrap-ansi which counts visible width
+// (ignoring SGR escape sequences) when splitting, so syntax-highlighted
+// code blocks don't get truncated early or split mid-escape. `hard: true`
+// hard-breaks lines that exceed `width` even when no break-friendly
+// character is available (long unspaced tokens — typical for code).
+function wrapAnsiBody(text: string, width: number): string[] {
+  if (width <= 0) {
+    return [text];
+  }
+  if (text.length === 0) {
+    return [""];
+  }
+  return wrapAnsi(text, width, { hard: true, trim: false }).split("\n");
 }
 
 function wrap(text: string, width: number): string[] {

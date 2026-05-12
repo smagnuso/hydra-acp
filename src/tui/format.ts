@@ -2,6 +2,8 @@
 // screen layer is the only place that knows how to translate Style names
 // into ANSI/terminal-kit calls.
 
+import chalk from "chalk";
+import { highlight, supportsLanguage } from "cli-highlight";
 import type { RenderEvent } from "./render-update.js";
 
 export type Style =
@@ -35,6 +37,11 @@ export interface FormattedLine {
   // style extends as a continuous stripe across the whole line. Used to
   // visually band user turns in scrollback.
   fillRow?: boolean;
+  // When set, the body contains embedded ANSI escape sequences (from a
+  // syntax highlighter). The screen layer routes such lines through
+  // ANSI-aware wrap/width helpers so escape bytes don't inflate column
+  // counts. Only used today for highlighted code blocks inside fences.
+  ansi?: boolean;
 }
 
 export function formatEvent(event: RenderEvent): FormattedLine[] {
@@ -125,21 +132,44 @@ export function parseAgentMarkdown(text: string): FormattedLine[] {
   const out: FormattedLine[] = [];
   const lines = text.split("\n");
   let inCode = false;
+  let codeLang = "";
+  let codeBuffer: string[] = [];
+  const flushCode = (): void => {
+    if (codeBuffer.length === 0) {
+      return;
+    }
+    const highlighted = highlightFencedBlock(codeLang, codeBuffer);
+    for (const piece of highlighted) {
+      const entry: FormattedLine = {
+        prefix: "  ",
+        body: piece.body,
+        bodyStyle: "code",
+        fillRow: true,
+      };
+      if (piece.ansi) {
+        entry.ansi = true;
+      }
+      out.push(entry);
+    }
+    codeBuffer = [];
+    codeLang = "";
+  };
   for (const line of lines) {
-    const fence = line.match(/^\s*```\s*\w*\s*$/);
+    const fence = line.match(/^\s*```\s*(\w*)\s*$/);
     if (fence) {
-      inCode = !inCode;
+      if (!inCode) {
+        inCode = true;
+        codeLang = fence[1] ?? "";
+      } else {
+        flushCode();
+        inCode = false;
+      }
       // Don't render the ``` fence line itself — the styled bg of the
       // following code lines is the visual cue that we're in a block.
       continue;
     }
     if (inCode) {
-      out.push({
-        prefix: "  ",
-        body: line,
-        bodyStyle: "code",
-        fillRow: true,
-      });
+      codeBuffer.push(line);
       continue;
     }
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
@@ -184,7 +214,80 @@ export function parseAgentMarkdown(text: string): FormattedLine[] {
       bodyStyle: "agent",
     });
   }
+  // Mid-stream: the closing fence hasn't arrived yet but we still need
+  // the in-progress code visible. Flush the buffer with whatever language
+  // hint was captured (or none) so the user sees content as it streams.
+  if (inCode) {
+    flushCode();
+  }
   return out;
+}
+
+// Forced-color chalk instance so highlight.js output carries ANSI escapes
+// even when stdout isn't a TTY (vitest, piped runs). The actual terminal
+// strips/renders these correctly in the TUI's fullscreen mode.
+const highlightChalk = new chalk.Instance({ level: 3 });
+
+// Theme keyed by highlight.js token classes. Picks per-token colors that
+// read well on the dark grayscale background stripe the screen layer
+// paints behind code blocks. Diff tokens (addition/deletion/meta) are
+// the common case the user asked us to handle first.
+const HIGHLIGHT_THEME = {
+  keyword: highlightChalk.blueBright,
+  built_in: highlightChalk.cyan,
+  type: highlightChalk.cyanBright,
+  literal: highlightChalk.blue,
+  number: highlightChalk.greenBright,
+  string: highlightChalk.yellow,
+  regexp: highlightChalk.red,
+  comment: highlightChalk.gray,
+  function: highlightChalk.yellow,
+  title: highlightChalk.yellow,
+  class: highlightChalk.yellowBright,
+  attr: highlightChalk.cyan,
+  attribute: highlightChalk.cyan,
+  variable: highlightChalk.white,
+  params: highlightChalk.white,
+  meta: highlightChalk.magenta,
+  symbol: highlightChalk.magenta,
+  addition: highlightChalk.greenBright,
+  deletion: highlightChalk.redBright,
+  section: highlightChalk.cyan,
+  tag: highlightChalk.cyan,
+  name: highlightChalk.cyanBright,
+};
+
+// Run highlight.js over a fenced block. Returns one entry per source
+// line. When the language is unknown / unsupported, or highlight.js
+// throws on malformed input, falls back to plain lines with ansi=false
+// so the caller still gets a 1:1 mapping back to FormattedLines.
+function highlightFencedBlock(
+  lang: string,
+  lines: string[],
+): { body: string; ansi: boolean }[] {
+  if (lang.length === 0 || !supportsLanguage(lang)) {
+    return lines.map((body) => ({ body, ansi: false }));
+  }
+  let highlighted: string;
+  try {
+    highlighted = highlight(lines.join("\n"), {
+      language: lang,
+      theme: HIGHLIGHT_THEME,
+      ignoreIllegals: true,
+    });
+  } catch {
+    return lines.map((body) => ({ body, ansi: false }));
+  }
+  const out = highlighted.split("\n");
+  // Defensive: highlight.js should preserve newline count, but if it
+  // didn't, prefer the source line count to keep wrap math sane.
+  if (out.length !== lines.length) {
+    return lines.map((body) => ({ body, ansi: false }));
+  }
+  return out.map((body, i) => ({
+    body,
+    ansi: body !== lines[i],
+  }));
 }
 
 function formatBlock(
