@@ -1065,9 +1065,9 @@ export class Screen {
   private drawBanner(): void {
     const row = this.term.height;
     this.term.moveTo(1, row).eraseLineAfter();
-    const dot = this.banner.status === "running" ? "●" : "○";
+    const dot = this.banner.status === "busy" ? "●" : "○";
     const planLabel = this.banner.planMode ? "plan: ON " : "plan: off";
-    if (this.banner.status === "running") {
+    if (this.banner.status === "busy") {
       this.term.brightYellow(`${dot} ${this.banner.status}`);
       if (
         this.banner.elapsedMs !== undefined &&

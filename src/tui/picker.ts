@@ -121,8 +121,12 @@ export async function pickSession(
           SHIFT_TAB: "previous",
           HOME: "first",
           END: "last",
-          ESCAPE: "cancel",
-          CTRL_C: "cancel",
+          // terminal-kit distinguishes "cancel" (emits a cancel event but
+          // does NOT exit the menu) from "escape" (with cancelable: true,
+          // ends the menu and reports canceled). Use "escape" for both
+          // bindings so the picker actually closes.
+          ESCAPE: "escape",
+          CTRL_C: "escape",
         },
       })
       .promise;

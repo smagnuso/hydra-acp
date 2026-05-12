@@ -162,7 +162,7 @@ async function runSession(
     if (before === 0 && pendingTurns > 0) {
       sessionBusySince = Date.now();
       if (screenReady) {
-        screenRef!.setBanner({ status: "running", elapsedMs: 0 });
+        screenRef!.setBanner({ status: "busy", elapsedMs: 0 });
       }
       if (sessionElapsedTimer === null && screenReady) {
         sessionElapsedTimer = setInterval(() => {
@@ -765,12 +765,26 @@ async function runSession(
   };
 
   const switchSession = async (): Promise<void> => {
-    const resume = finishSession;
-    if (!resume) {
+    if (!finishSession) {
       return;
     }
-    finishSession = null;
-    teardown();
+    // If the user has half-typed text in the prompt, snapshot it into
+    // history before opening the picker. Picking a different session
+    // tears down the dispatcher and loses the draft; even on abort the
+    // user gets up-arrow recall.
+    const pendingDraft = dispatcher.state().buffer.join("\n");
+    if (pendingDraft.replace(/\s+$/, "").length > 0) {
+      history = appendEntry(history, pendingDraft);
+      dispatcher.setHistory(history);
+    }
+    // Suspend the live screen but keep the daemon stream (and SIGINT
+    // handler) alive — that way an aborted picker drops us right back
+    // in the current session without a reconnect or history replay.
+    // Updates that arrive while the picker is up land in the Screen's
+    // in-memory state; repaints are deferred until we resume.
+    screen.pauseRepaint();
+    screen.stop();
+    saveHistory(historyFile, history).catch(() => undefined);
     const sessions = await listSessions(config);
     const choice: PickerResult = await pickSession(term, {
       cwd: resolvedCwd,
@@ -778,11 +792,16 @@ async function runSession(
       coldLimit: config.sessionListColdLimit,
     });
     if (choice.kind === "abort") {
-      // Stay on the current session: outer loop will re-attach with the same
-      // sessionId rather than re-running the picker.
-      resume({ ...opts, sessionId: resolvedSessionId, cwd: resolvedCwd });
+      screen.start();
+      screen.resumeRepaint();
       return;
     }
+    // The user is actually switching: finish the teardown and let the
+    // outer loop attach the chosen session.
+    const resume = finishSession;
+    finishSession = null;
+    process.off("SIGINT", sigintHandler);
+    void stream.close().catch(() => undefined);
     if (choice.kind === "new") {
       const { sessionId: _drop, ...rest } = opts;
       void _drop;
@@ -1499,7 +1518,7 @@ async function runSession(
       ]);
     }
     screen.setBanner({
-      status: pendingTurns > 0 ? "running" : "ready",
+      status: pendingTurns > 0 ? "busy" : "ready",
       elapsedMs: pendingTurns > 0 ? 0 : undefined,
     });
   };
