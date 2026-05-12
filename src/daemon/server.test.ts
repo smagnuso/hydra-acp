@@ -24,7 +24,9 @@ function testConfig(): HydraConfig {
     },
     defaultAgent: "claude-acp",
     defaultCwd: os.homedir(),
+    sessionListColdLimit: 20,
     extensions: {},
+    tui: { repaintThrottleMs: 1000 },
   };
 }
 
@@ -415,6 +417,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
       },
       defaultAgent: "claude-acp",
       defaultCwd: os.homedir(),
+      sessionListColdLimit: 20,
       extensions: {
         probe: {
           command: ["node", "-e", PROBE_SCRIPT],
@@ -423,6 +426,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
           enabled: true,
         },
       },
+      tui: { repaintThrottleMs: 1000 },
     };
     handle = await startDaemon(cfg);
     const p = port(handle);

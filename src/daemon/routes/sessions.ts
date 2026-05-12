@@ -13,9 +13,8 @@ export function registerSessionRoutes(
   defaults: SessionRouteDefaults,
 ): void {
   app.get("/v1/sessions", async (request) => {
-    const query = request.query as { cwd?: string; all?: string } | undefined;
-    const all = query?.all === "true" || query?.all === "1";
-    const sessions = await manager.list({ cwd: query?.cwd, all });
+    const query = request.query as { cwd?: string } | undefined;
+    const sessions = await manager.list({ cwd: query?.cwd });
     return { sessions };
   });
 

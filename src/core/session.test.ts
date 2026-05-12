@@ -5,7 +5,11 @@ import {
   makeControlledStream,
   makeMockAgent,
 } from "../__tests__/test-utils.js";
-import { JsonRpcErrorCodes } from "../acp/types.js";
+import {
+  JsonRpcErrorCodes,
+  type JsonRpcNotification,
+  type JsonRpcRequest,
+} from "../acp/types.js";
 
 function makeClient(): {
   client: AttachedClient;
@@ -133,7 +137,7 @@ describe("Session", () => {
       session.attach(b.client, "full");
       session.replayPendingPermissions(b.client);
       const bReq = b.stream.sent.find(
-        (m): m is { id: string | number; method: string; params: unknown } =>
+        (m): m is JsonRpcRequest =>
           "method" in m && m.method === "session/request_permission",
       );
       expect(bReq).toBeDefined();
@@ -216,7 +220,7 @@ describe("Session", () => {
       session.replayPendingPermissions(b.client);
 
       const sentMethods = b.stream.sent
-        .filter((m): m is { method: string } => "method" in m)
+        .filter((m): m is JsonRpcRequest | JsonRpcNotification => "method" in m)
         .map((m) => m.method);
       const updateIdx = sentMethods.indexOf("session/update");
       const permIdx = sentMethods.indexOf("session/request_permission");
@@ -225,7 +229,7 @@ describe("Session", () => {
 
       // Cleanup: A answers so the agent's promise resolves.
       const aReq = a.stream.sent.find(
-        (m): m is { id: string | number; method: string } =>
+        (m): m is JsonRpcRequest =>
           "method" in m && m.method === "session/request_permission",
       );
       a.stream.emitMessage({
@@ -271,12 +275,15 @@ describe("Session", () => {
       // carrying B's *own* request id — that's how slack/browser correlate
       // their pending UI with the resolution event.
       const bResolved = b.stream.sent.find(
-        (m): m is { method: string; params: { requestId: string | number } } =>
+        (m): m is JsonRpcNotification =>
           "method" in m && m.method === "session/permission_resolved",
       );
       expect(bResolved).toBeDefined();
-      expect(bResolved?.params.requestId).toEqual(bReq.id);
-      expect(bResolved?.params).toMatchObject({
+      const bResolvedParams = bResolved?.params as
+        | { requestId: string | number; sessionId: string; result: unknown }
+        | undefined;
+      expect(bResolvedParams?.requestId).toEqual(bReq.id);
+      expect(bResolvedParams).toMatchObject({
         sessionId: "sess_hyd",
         result: { outcome: { kind: "allow", optionId: "allow" } },
       });

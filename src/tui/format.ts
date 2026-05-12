@@ -89,6 +89,9 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
     case "available-commands":
       // Commands are stored as completion data, not rendered to scrollback.
       return [];
+    case "session-info":
+      // Title is rendered in the header by the app, not in scrollback.
+      return [];
     case "unknown":
       // Silently drop notification kinds we don't have a styled rendering
       // for (available_commands_update, config_option_update, etc.). The

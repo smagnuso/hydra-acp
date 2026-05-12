@@ -4,6 +4,7 @@ import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import {
   type JsonRpcId,
   type JsonRpcMessage,
+  type JsonRpcNotification,
   type JsonRpcRequest,
 } from "../acp/types.js";
 import { ResilientWsStream } from "./resilient-ws.js";
@@ -143,7 +144,7 @@ function maybeReplyToResolvedPermission(
 
 function isPermissionResolvedNotification(
   msg: JsonRpcMessage,
-): msg is JsonRpcMessage & { method: "session/permission_resolved" } {
+): msg is JsonRpcNotification & { method: "session/permission_resolved" } {
   return (
     "method" in msg &&
     msg.method === "session/permission_resolved" &&

@@ -44,7 +44,9 @@ function fakeConfig(): HydraConfig {
     },
     defaultAgent: "claude-acp",
     defaultCwd: homedir(),
+    sessionListColdLimit: 20,
     extensions: {},
+    tui: { repaintThrottleMs: 1000 },
   };
 }
 
