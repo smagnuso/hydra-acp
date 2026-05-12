@@ -361,13 +361,26 @@ export class Session {
     this.broadcastPromptReceived(client, params);
     this.maybeSeedTitleFromPrompt(params);
     return this.enqueuePrompt(async () => {
-      const response = await this.agent.connection.request<unknown>(
-        "session/prompt",
-        {
-          ...(params as object),
-          sessionId: this.upstreamSessionId,
-        },
-      );
+      // We always pair broadcastPromptReceived with a broadcastTurnComplete,
+      // even when the agent request throws. The recorded history is what
+      // late-joining clients replay on attach — leaving prompts unmatched
+      // means the next turn's keyed blocks anchor mid-scrollback (the
+      // TUI freezes them as "thought · Xs" but never closes the
+      // logical turn). A synthetic stopReason here surfaces the failure
+      // to history without burying the trail.
+      let response: unknown;
+      try {
+        response = await this.agent.connection.request<unknown>(
+          "session/prompt",
+          {
+            ...(params as object),
+            sessionId: this.upstreamSessionId,
+          },
+        );
+      } catch (err) {
+        this.broadcastTurnComplete(client.clientId, { stopReason: "error" });
+        throw err;
+      }
       this.broadcastTurnComplete(client.clientId, response);
       return response;
     });

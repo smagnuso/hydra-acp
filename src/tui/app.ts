@@ -1336,6 +1336,24 @@ async function runSession(
       if (formatted.length > 0) {
         screen.appendLines(formatted);
       }
+      // Defensive turn-boundary cleanup. The turn-complete handler
+      // normally clears these, but the daemon's broadcastTurnComplete
+      // sits behind `await agent.connection.request("session/prompt")`
+      // and gets skipped if the request throws (agent crash, network
+      // blip, daemon restart) — leaving the prompt recorded without a
+      // matching turn_complete. When that unbalanced seed history is
+      // replayed at attach, the "tools"/"plan" keyed blocks stay
+      // anchored mid-scrollback. The next turn's renderToolsBlock would
+      // then splice into that stale anchor far above the viewport, so
+      // the user never sees their live thinking/tool rows. Clear the
+      // turn-scoped state here so a new turn always anchors at the
+      // current bottom.
+      screen.clearKey("tools");
+      screen.clearKey("plan");
+      toolStates.clear();
+      toolCallOrder.length = 0;
+      toolsExpanded = false;
+      toolsBlockEndedAt = null;
       startToolsBlock();
       // Force an immediate paint past the content-repaint throttle. The
       // user-text event is the user's "I just sent this" signal — they
