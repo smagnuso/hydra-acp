@@ -1,7 +1,13 @@
 import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
-import { HYDRA_SESSION_PREFIX, Session } from "./session.js";
-import { SessionStore, recordFromMemorySession } from "./session-store.js";
+import { HYDRA_SESSION_PREFIX, Session, type CachedNotification } from "./session.js";
+import {
+  SessionStore,
+  recordFromMemorySession,
+  type PersistedAgentCommand,
+} from "./session-store.js";
+import { HistoryStore } from "./history-store.js";
+import type { AdvertisedCommand } from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
 
@@ -20,6 +26,17 @@ export interface ResurrectParams {
   cwd: string;
   title?: string;
   agentArgs?: string[];
+  // Prior broadcast history loaded from disk. Set on the loadFromDisk
+  // path (TUI attaching to a cold session id) so the conversation
+  // replays; left undefined on the resume-hints path (the shim client
+  // already has its own history and will dedupe against ours).
+  seedHistory?: CachedNotification[];
+  // Snapshot state restored from meta.json so the first attach response
+  // can deliver the right model/mode/commands via _meta before the
+  // agent re-emits.
+  currentModel?: string;
+  currentMode?: string;
+  agentCommands?: AdvertisedCommand[];
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -33,7 +50,12 @@ export class SessionManager {
   private resurrectionInflight = new Map<string, Promise<Session>>();
   private spawner: AgentSpawner;
   private store: SessionStore;
+  private histories: HistoryStore;
   private idleTimeoutMs: number;
+  // Serialize meta.json read-modify-write operations per session id so
+  // concurrent snapshot updates (e.g. an agent emitting model + mode
+  // back-to-back) don't lose writes via interleaved reads.
+  private metaWriteQueues = new Map<string, Promise<unknown>>();
 
   constructor(
     private registry: Registry,
@@ -43,6 +65,7 @@ export class SessionManager {
   ) {
     this.spawner = spawner ?? ((opts) => AgentInstance.spawn(opts));
     this.store = store ?? new SessionStore();
+    this.histories = new HistoryStore();
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
   }
 
@@ -64,6 +87,7 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
+      historyStore: this.histories,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -151,6 +175,11 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
+      historyStore: this.histories,
+      seedHistory: params.seedHistory,
+      currentModel: params.currentModel,
+      currentMode: params.currentMode,
+      agentCommands: params.agentCommands,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -218,6 +247,10 @@ export class SessionManager {
       this.sessions.delete(session.sessionId);
       if (deleteRecord) {
         void this.store.delete(session.sessionId).catch(() => undefined);
+        // History follows the same lifecycle as the session record —
+        // an idle-close (deleteRecord: false) keeps both so the next
+        // resurrect can replay; an explicit destroy drops both.
+        void this.histories.delete(session.sessionId).catch(() => undefined);
       }
     });
     session.onTitleChange((title) => {
@@ -227,6 +260,24 @@ export class SessionManager {
       void this.persistAgentChange(session.sessionId, agentId, upstreamSessionId).catch(
         () => undefined,
       );
+    });
+    session.onModelChange((model) => {
+      void this.persistSnapshot(session.sessionId, { currentModel: model }).catch(
+        () => undefined,
+      );
+    });
+    session.onModeChange((mode) => {
+      void this.persistSnapshot(session.sessionId, { currentMode: mode }).catch(
+        () => undefined,
+      );
+    });
+    session.onAgentCommandsChange((commands) => {
+      void this.persistSnapshot(session.sessionId, {
+        agentCommands: commands.map((c) => ({
+          name: c.name,
+          ...(c.description !== undefined ? { description: c.description } : {}),
+        })),
+      }).catch(() => undefined);
     });
     this.sessions.set(session.sessionId, session);
     await this.store
@@ -238,9 +289,30 @@ export class SessionManager {
           cwd: session.cwd,
           title: session.title,
           agentArgs: session.agentArgs,
+          currentModel: session.currentModel,
+          currentMode: session.currentMode,
         }),
       )
       .catch(() => undefined);
+  }
+
+  // Resolve a session's recorded history without forcing a resurrect.
+  // Returns the in-memory snapshot if the session is hot, falls back
+  // to the on-disk history file otherwise. Returns undefined if the
+  // session id is unknown to both the live map and disk store, so the
+  // caller can distinguish "no history yet" (empty array) from "404".
+  async getHistory(
+    sessionId: string,
+  ): Promise<CachedNotification[] | undefined> {
+    const live = this.sessions.get(sessionId);
+    if (live) {
+      return live.getHistorySnapshot();
+    }
+    const record = await this.store.read(sessionId);
+    if (!record) {
+      return undefined;
+    }
+    return this.histories.load(sessionId).catch(() => [] as CachedNotification[]);
   }
 
   async loadFromDisk(sessionId: string): Promise<ResurrectParams | undefined> {
@@ -248,6 +320,14 @@ export class SessionManager {
     if (!record) {
       return undefined;
     }
+    // Load any persisted broadcast history for this session so the
+    // attaching client sees the prior conversation. Only the
+    // loadFromDisk branch sets seedHistory — the resume-hints path
+    // (shim reconnect) deliberately leaves it undefined since the
+    // client already has its own copy.
+    const seedHistory = await this.histories
+      .load(sessionId)
+      .catch(() => [] as CachedNotification[]);
     return {
       hydraSessionId: record.sessionId,
       upstreamSessionId: record.upstreamSessionId,
@@ -255,6 +335,10 @@ export class SessionManager {
       cwd: record.cwd,
       title: record.title,
       agentArgs: record.agentArgs,
+      seedHistory: seedHistory.length > 0 ? seedHistory : undefined,
+      currentModel: record.currentModel,
+      currentMode: record.currentMode,
+      agentCommands: record.agentCommands,
     };
   }
 
@@ -350,14 +434,16 @@ export class SessionManager {
   // record's title in sync with what was broadcast to clients so a
   // daemon restart (and later resurrect) restores the same title.
   private async persistTitle(sessionId: string, title: string): Promise<void> {
-    const record = await this.store.read(sessionId);
-    if (!record) {
-      return;
-    }
-    await this.store.write({
-      ...record,
-      title,
-      updatedAt: new Date().toISOString(),
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      await this.store.write({
+        ...record,
+        title,
+        updatedAt: new Date().toISOString(),
+      });
     });
   }
 
@@ -370,16 +456,69 @@ export class SessionManager {
     agentId: string,
     upstreamSessionId: string,
   ): Promise<void> {
-    const record = await this.store.read(sessionId);
-    if (!record) {
-      return;
-    }
-    await this.store.write({
-      ...record,
-      agentId,
-      upstreamSessionId,
-      updatedAt: new Date().toISOString(),
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      await this.store.write({
+        ...record,
+        agentId,
+        upstreamSessionId,
+        updatedAt: new Date().toISOString(),
+      });
     });
+  }
+
+  // Update one or more snapshot fields (model, mode, commands) in
+  // meta.json. Used so cold-resurrect can deliver the latest snapshot
+  // to attaching clients via the attach response _meta. No-op if the
+  // session record has gone away (race with deleteRecord).
+  private async persistSnapshot(
+    sessionId: string,
+    update: {
+      currentModel?: string;
+      currentMode?: string;
+      agentCommands?: PersistedAgentCommand[];
+    },
+  ): Promise<void> {
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      await this.store.write({
+        ...record,
+        ...(update.currentModel !== undefined
+          ? { currentModel: update.currentModel }
+          : {}),
+        ...(update.currentMode !== undefined
+          ? { currentMode: update.currentMode }
+          : {}),
+        ...(update.agentCommands !== undefined
+          ? { agentCommands: update.agentCommands }
+          : {}),
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  }
+
+  // Serialize meta.json writes per session id so concurrent
+  // read-modify-write operations don't interleave reads.
+  private enqueueMetaWrite(
+    sessionId: string,
+    task: () => Promise<void>,
+  ): Promise<void> {
+    const prev = this.metaWriteQueues.get(sessionId) ?? Promise.resolve();
+    const next = prev.then(task, task);
+    const settled = next.catch(() => undefined);
+    this.metaWriteQueues.set(sessionId, settled);
+    void settled.finally(() => {
+      if (this.metaWriteQueues.get(sessionId) === settled) {
+        this.metaWriteQueues.delete(sessionId);
+      }
+    });
+    return next;
   }
 
   async closeAll(): Promise<void> {

@@ -3,6 +3,17 @@ import * as path from "node:path";
 import { z } from "zod";
 import { paths } from "./paths.js";
 
+// One agent-advertised command. Shape mirrors the
+// available_commands_update notification's entries (name + description),
+// stored persistently here so attach responses can deliver the merged
+// (hydra ∪ agent) command list to clients without depending on history
+// replay of a notification that may have aged out.
+export const PersistedAgentCommand = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+});
+export type PersistedAgentCommand = z.infer<typeof PersistedAgentCommand>;
+
 export const SessionRecord = z.object({
   version: z.literal(1),
   sessionId: z.string(),
@@ -11,6 +22,13 @@ export const SessionRecord = z.object({
   cwd: z.string(),
   title: z.string().optional(),
   agentArgs: z.array(z.string()).optional(),
+  // Snapshot of "what is currently true about this session" carried in
+  // meta.json so a late-attaching or cold-resurrected client can be
+  // told via the attach response _meta without depending on history
+  // replay of a snapshot-shaped notification.
+  currentModel: z.string().optional(),
+  currentMode: z.string().optional(),
+  agentCommands: z.array(PersistedAgentCommand).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -27,7 +45,7 @@ function assertSafeId(id: string): void {
 export class SessionStore {
   async write(record: Omit<SessionRecord, "version">): Promise<void> {
     assertSafeId(record.sessionId);
-    await fs.mkdir(paths.sessionsDir(), { recursive: true });
+    await fs.mkdir(paths.sessionDir(record.sessionId), { recursive: true });
     const full: SessionRecord = { version: 1, ...record };
     await fs.writeFile(
       paths.sessionFile(record.sessionId),
@@ -69,6 +87,18 @@ export class SessionStore {
         throw err;
       }
     }
+    // Best-effort cleanup: if no other tenant (transcript, etc.) is
+    // left in the session dir, drop it. Both this and
+    // TranscriptStore.delete attempt this; whichever runs last (after
+    // both files are gone) is the one that succeeds.
+    try {
+      await fs.rmdir(paths.sessionDir(sessionId));
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== "ENOENT" && e.code !== "ENOTEMPTY") {
+        throw err;
+      }
+    }
   }
 
   async list(): Promise<SessionRecord[]> {
@@ -84,11 +114,9 @@ export class SessionStore {
     }
     const records: SessionRecord[] = [];
     for (const entry of entries) {
-      if (!entry.endsWith(".json")) {
-        continue;
-      }
-      const id = entry.slice(0, -".json".length);
-      const record = await this.read(id);
+      // Each session is a directory under sessions/; non-conforming
+      // names get filtered by assertSafeId via read().
+      const record = await this.read(entry);
       if (record) {
         records.push(record);
       }
@@ -104,6 +132,9 @@ export function recordFromMemorySession(args: {
   cwd: string;
   title?: string;
   agentArgs?: string[];
+  currentModel?: string;
+  currentMode?: string;
+  agentCommands?: PersistedAgentCommand[];
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -115,6 +146,9 @@ export function recordFromMemorySession(args: {
     cwd: args.cwd,
     title: args.title,
     agentArgs: args.agentArgs,
+    currentModel: args.currentModel,
+    currentMode: args.currentMode,
+    agentCommands: args.agentCommands,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

@@ -50,9 +50,11 @@ describe("SessionStore", () => {
 
   it("returns undefined for malformed JSON instead of throwing", async () => {
     const store = new SessionStore();
-    await fs.mkdir(path.join(tmpHome, "sessions"), { recursive: true });
+    await fs.mkdir(path.join(tmpHome, "sessions", "hydra_session_bad"), {
+      recursive: true,
+    });
     await fs.writeFile(
-      path.join(tmpHome, "sessions", "hydra_session_bad.json"),
+      path.join(tmpHome, "sessions", "hydra_session_bad", "meta.json"),
       "not json",
     );
     expect(await store.read("hydra_session_bad")).toBeUndefined();

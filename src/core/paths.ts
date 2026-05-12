@@ -21,7 +21,14 @@ export const paths = {
   agentsDir: () => path.join(hydraHome(), "agents"),
   agentDir: (id: string) => path.join(hydraHome(), "agents", id),
   sessionsDir: () => path.join(hydraHome(), "sessions"),
-  sessionFile: (id: string) => path.join(hydraHome(), "sessions", `${id}.json`),
+  // One directory per session id under sessions/. Co-locates the
+  // session record, its transcript, and any future per-session state
+  // (uploads, scratch, etc.) so the lifecycle is just "rm -rf the dir".
+  sessionDir: (id: string) => path.join(hydraHome(), "sessions", id),
+  sessionFile: (id: string) =>
+    path.join(hydraHome(), "sessions", id, "meta.json"),
+  historyFile: (id: string) =>
+    path.join(hydraHome(), "sessions", id, "history.jsonl"),
   extensionsDir: () => path.join(hydraHome(), "extensions"),
   extensionLogFile: (name: string) =>
     path.join(hydraHome(), "extensions", `${name}.log`),

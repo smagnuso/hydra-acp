@@ -327,6 +327,20 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
   if (session.agentArgs && session.agentArgs.length > 0) {
     ours.agentArgs = session.agentArgs;
   }
+  // Snapshot state for the attaching client. Carries what would
+  // otherwise come from history-replayed snapshot events
+  // (current_model_update / current_mode_update / available_commands_update)
+  // so a fresh attach has the right view from the get-go.
+  if (session.currentModel !== undefined) {
+    ours.currentModel = session.currentModel;
+  }
+  if (session.currentMode !== undefined) {
+    ours.currentMode = session.currentMode;
+  }
+  const commands = session.mergedAvailableCommands();
+  if (commands.length > 0) {
+    ours.availableCommands = commands;
+  }
   return mergeMeta(session.agentMeta, ours);
 }
 

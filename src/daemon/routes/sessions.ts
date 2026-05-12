@@ -59,4 +59,67 @@ export function registerSessionRoutes(
     }
     reply.code(204).send();
   });
+
+  // Tail a session's recorded conversation as NDJSON (one entry per
+  // line). One-shot by default; ?follow=1 keeps the connection open
+  // and streams new entries as they're broadcast — useful for
+  // external archivers (slack uploader, web export) that want the
+  // canonical conversation stream without participating as an ACP
+  // client. Snapshot state (model/mode/title/commands) lives on the
+  // session record, not here; fetch it from GET /v1/sessions if
+  // needed alongside.
+  app.get("/v1/sessions/:id/history", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const query = request.query as { follow?: string } | undefined;
+    const follow = query?.follow === "1" || query?.follow === "true";
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+
+    const live = manager.get(id);
+    // Snapshot atomically with subscription if we'll be following a
+    // live session — Node is single-threaded so the two synchronous
+    // statements have no broadcast interleave between them.
+    let snapshot: ReadonlyArray<unknown> | undefined;
+    let unsubscribe: (() => void) | undefined;
+    if (live) {
+      snapshot = live.getHistorySnapshot();
+      if (follow) {
+        unsubscribe = live.onBroadcast((entry) => {
+          if (reply.raw.writableEnded) {
+            return;
+          }
+          reply.raw.write(JSON.stringify(entry) + "\n");
+        });
+      }
+    } else {
+      const cold = await manager.getHistory(id);
+      if (cold === undefined) {
+        reply.code(404).send({ error: "session not found" });
+        return reply;
+      }
+      snapshot = cold;
+    }
+
+    reply.raw.setHeader("Content-Type", "application/x-ndjson");
+    reply.raw.setHeader("Cache-Control", "no-cache");
+    reply.raw.statusCode = 200;
+    for (const entry of snapshot ?? []) {
+      reply.raw.write(JSON.stringify(entry) + "\n");
+    }
+
+    if (!unsubscribe) {
+      reply.raw.end();
+      return reply;
+    }
+
+    // Follow mode against a live session — keep the connection open
+    // until the client disconnects, then unsubscribe so the handler
+    // doesn't keep firing for nobody.
+    request.raw.on("close", () => {
+      unsubscribe?.();
+      if (!reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+    });
+    return reply;
+  });
 }

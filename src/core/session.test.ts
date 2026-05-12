@@ -333,12 +333,12 @@ describe("Session", () => {
 
       const { client: coldClient } = makeClient();
       const replay = session.attach(coldClient, "full");
-      // History starts with the initial available_commands_update the
-      // Session emits at construction (carrying just /hydra verbs) plus
-      // the two notifications triggered above.
-      expect(replay).toHaveLength(3);
-      expect(replay[1]?.params).toMatchObject({ sessionId: "sess_h", n: 1 });
-      expect(replay[2]?.params).toMatchObject({ sessionId: "sess_h", n: 2 });
+      // Snapshot-shaped events (commands/model/mode/session_info) live
+      // in meta.json and are delivered via the attach response _meta,
+      // not history. Only the two non-snapshot updates should be here.
+      expect(replay).toHaveLength(2);
+      expect(replay[0]?.params).toMatchObject({ sessionId: "sess_h", n: 1 });
+      expect(replay[1]?.params).toMatchObject({ sessionId: "sess_h", n: 2 });
     });
 
     it("returns no history for historyPolicy=none", () => {
@@ -354,31 +354,16 @@ describe("Session", () => {
   });
 
   describe("available_commands_update merging", () => {
-    it("emits an initial available_commands_update with hydra verbs", () => {
+    it("exposes the hydra verbs via mergedAvailableCommands at construction", () => {
       const { session } = makeSession();
-      const { client: cold } = makeClient();
-      // The broadcast at construction goes into history before any
-      // client attaches; pick it up from the replay return.
-      const replay = session.attach(cold, "full");
-      const cmds = replay.find((n) => {
-        if (n.method !== "session/update") {
-          return false;
-        }
-        const u = (n.params as { update?: { sessionUpdate?: string } })?.update;
-        return u?.sessionUpdate === "available_commands_update";
-      });
-      expect(cmds).toBeDefined();
-      const list = (cmds as {
-        params: { update: { availableCommands: Array<{ name: string }> } };
-      }).params.update.availableCommands;
-      const names = list.map((c) => c.name);
+      const names = session.mergedAvailableCommands().map((c) => c.name);
       expect(names).toContain("/hydra title");
       expect(names).toContain("/hydra switch <agent>");
     });
 
-    it("merges agent-emitted commands with hydra verbs", () => {
+    it("merges agent-emitted commands with hydra verbs and broadcasts the merge live", () => {
       const { session, mock } = makeSession("sess_h", "u");
-      const { client } = makeClient();
+      const { client, stream } = makeClient();
       session.attach(client, "full");
       mock.triggerNotification("session/update", {
         sessionId: "u",
@@ -389,23 +374,36 @@ describe("Session", () => {
           ],
         },
       });
-      // Latecomer attach replays history; the most recent
-      // available_commands_update should be the merged set.
+
+      // mergedAvailableCommands is the snapshot accessor used by
+      // acp-ws.ts's buildResponseMeta to deliver commands via _meta.
+      const names = session.mergedAvailableCommands().map((c) => c.name);
+      expect(names).toContain("/hydra title");
+      expect(names).toContain("create_plan");
+
+      // Live broadcast to attached clients still happens — only the
+      // history persistence is skipped.
+      const broadcast = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } })?.update
+            ?.sessionUpdate === "available_commands_update",
+      );
+      expect(broadcast).toBeDefined();
+
+      // A latecomer's replay should NOT include the commands_update —
+      // they pick it up from the attach response _meta instead.
       const { client: late } = makeClient();
       const replay = session.attach(late, "full");
-      const updates = replay.filter((n) => {
+      const replayedCmds = replay.find((n) => {
         if (n.method !== "session/update") {
           return false;
         }
         const u = (n.params as { update?: { sessionUpdate?: string } })?.update;
         return u?.sessionUpdate === "available_commands_update";
       });
-      const last = updates[updates.length - 1] as {
-        params: { update: { availableCommands: Array<{ name: string }> } };
-      };
-      const names = last.params.update.availableCommands.map((c) => c.name);
-      expect(names).toContain("/hydra title");
-      expect(names).toContain("create_plan");
+      expect(replayedCmds).toBeUndefined();
     });
   });
 
@@ -714,6 +712,123 @@ describe("Session", () => {
       await new Promise((r) => setImmediate(r));
 
       expect(session.title).toBe("first prompt title");
+    });
+
+    it("onBroadcast fires for recordable entries and skips snapshot-shaped ones", () => {
+      const { session, mock } = makeSession("hydra_session_OB", "u_OB");
+      const seen: string[] = [];
+      const unsubscribe = session.onBroadcast((entry) => {
+        const kind = (
+          entry.params as { update?: { sessionUpdate?: string } }
+        ).update?.sessionUpdate;
+        if (typeof kind === "string") {
+          seen.push(kind);
+        }
+      });
+
+      // Recordable: should fire.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_OB",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "hi" },
+        },
+      });
+      // Snapshot kind: filtered from history, so should NOT fire.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_OB",
+        update: { sessionUpdate: "current_model_update", currentModel: "x" },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_OB",
+        update: { sessionUpdate: "current_mode_update", currentMode: "y" },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_OB",
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [{ name: "x" }],
+        },
+      });
+
+      expect(seen).toEqual(["agent_message_chunk"]);
+
+      // After unsubscribe, no further firings.
+      unsubscribe();
+      mock.triggerNotification("session/update", {
+        sessionId: "u_OB",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "after" },
+        },
+      });
+      expect(seen).toEqual(["agent_message_chunk"]);
+    });
+
+    it("getHistorySnapshot returns a snapshot decoupled from later writes", () => {
+      const { session, mock } = makeSession("hydra_session_SN", "u_SN");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_SN",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "first" },
+        },
+      });
+      const snap = session.getHistorySnapshot();
+      const before = snap.length;
+      // Subsequent broadcasts shouldn't appear in the snapshot we took.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_SN",
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "second" },
+        },
+      });
+      expect(snap.length).toBe(before);
+      // The live history did grow.
+      expect(session.getHistorySnapshot().length).toBe(before + 1);
+    });
+
+    it("session_info_update is broadcast live but not put in replay history", async () => {
+      const { session, mock } = makeSession("hydra_session_TH", "u_TH");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      // Attach Alice — initial history is just the constructor's
+      // available_commands_update (no title broadcasts yet).
+      const a = makeClient();
+      session.attach(a.client, "full");
+
+      // Drive a title change via /hydra title <text>.
+      await session.prompt(a.client.clientId, {
+        prompt: [{ type: "text", text: "/hydra title testing-the-cache" }],
+      });
+      expect(session.title).toBe("testing-the-cache");
+
+      // Alice received the live broadcast.
+      const aSessionInfo = a.stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "session_info_update",
+      );
+      expect(aSessionInfo).toBeDefined();
+
+      // A late-joining client gets replay history — but no
+      // session_info_update should appear in it, since the canonical
+      // title is delivered via the attach response _meta instead.
+      const b = makeClient();
+      const replay = session.attach(b.client, "full");
+      const replayedTitleUpdate = replay.find(
+        (e) =>
+          e.method === "session/update" &&
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "session_info_update",
+      );
+      expect(replayedTitleUpdate).toBeUndefined();
     });
 
     it("/hydra title <text> sets the title without forwarding to the agent", async () => {

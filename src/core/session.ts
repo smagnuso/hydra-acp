@@ -25,6 +25,7 @@ import {
   hydraCommandsAsAdvertised,
   type AdvertisedCommand,
 } from "./hydra-commands.js";
+import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import type { HistoryPolicy, JsonRpcId } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
@@ -35,11 +36,7 @@ export interface AttachedClient {
   clientInfo?: { name: string; version?: string };
 }
 
-interface CachedNotification {
-  method: string;
-  params: unknown;
-  recordedAt: number;
-}
+export type CachedNotification = HistoryEntry;
 
 export interface SpawnReplacementAgentParams {
   agentId: string;
@@ -71,6 +68,20 @@ export interface SessionInit {
   // process and run initialize + session/new on it. Provided by
   // SessionManager so Session doesn't have to depend on the registry.
   spawnReplacementAgent?: SpawnReplacementAgent;
+  // History loaded from a prior cold incarnation of this session. When
+  // set, the in-memory broadcast cache starts pre-populated so the
+  // attaching client's replay matches what they'd have seen if the
+  // session had stayed hot.
+  seedHistory?: CachedNotification[];
+  // When provided, every recordAndBroadcast entry is persisted to disk
+  // so the session's history survives going cold.
+  historyStore?: HistoryStore;
+  // Snapshot state restored from meta.json on cold resurrect, so the
+  // first attach response can deliver the right model/mode/commands
+  // via _meta before the agent re-emits.
+  currentModel?: string;
+  currentMode?: string;
+  agentCommands?: AdvertisedCommand[];
 }
 
 export interface CloseOptions {
@@ -90,15 +101,27 @@ export class Session {
   agentMeta: Record<string, unknown> | undefined;
   readonly agentArgs: string[] | undefined;
   title: string | undefined;
+  // Snapshot state delivered to attaching clients via the attach
+  // response _meta rather than via history replay (which would be
+  // stale-prone for snapshot-shaped events).
+  currentModel: string | undefined;
+  currentMode: string | undefined;
   updatedAt: number;
 
   private clients = new Map<string, AttachedClient>();
   private history: CachedNotification[] = [];
+  private historyStore: HistoryStore | undefined;
   private promptQueue: Array<() => Promise<void>> = [];
   private promptInFlight = false;
   private closed = false;
   private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
   private titleHandlers: Array<(title: string) => void> = [];
+  // Subscribers notified after every entry that's actually persisted to
+  // history (skipping snapshot-shaped events filtered by
+  // recordAndBroadcast). The HTTP /v1/sessions/:id/history?follow=1
+  // endpoint uses this to tail a live session's conversation stream
+  // without participating in turns or prompts.
+  private broadcastHandlers: Array<(entry: CachedNotification) => void> = [];
   // True once we've observed our first session/prompt; gates the
   // first-prompt-seeded title so subsequent prompts don't churn it.
   private firstPromptSeeded = false;
@@ -122,12 +145,20 @@ export class Session {
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
   > = [];
-  // Last available_commands_update we observed from the agent. Stored so
-  // we can re-broadcast a merged (hydra ∪ agent) list whenever either
-  // half changes — most importantly when a fresh client attaches and
-  // replays history, since the in-cache update is the daemon's merged
-  // form (the agent's raw form is never broadcast).
+  // Last available_commands_update we observed from the agent. Stored
+  // so we can re-broadcast a merged (hydra ∪ agent) list whenever
+  // either half changes, and persisted to meta.json so a fresh attach
+  // can deliver the merged list via _meta without depending on history
+  // replay.
   private agentAdvertisedCommands: AdvertisedCommand[] = [];
+  // Persist hooks for snapshot-shaped state. SessionManager hooks these
+  // to mirror changes into meta.json so cold-resurrect attaches can
+  // surface the latest snapshot via the attach response _meta.
+  private agentCommandsHandlers: Array<
+    (commands: AdvertisedCommand[]) => void
+  > = [];
+  private modelHandlers: Array<(model: string) => void> = [];
+  private modeHandlers: Array<(mode: string) => void> = [];
 
   constructor(init: SessionInit) {
     this.sessionId =
@@ -139,15 +170,20 @@ export class Session {
     this.agentMeta = init.agentMeta;
     this.agentArgs = init.agentArgs;
     this.title = init.title;
+    this.currentModel = init.currentModel;
+    this.currentMode = init.currentMode;
+    if (init.agentCommands && init.agentCommands.length > 0) {
+      this.agentAdvertisedCommands = [...init.agentCommands];
+    }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.historyStore = init.historyStore;
+    if (init.seedHistory && init.seedHistory.length > 0) {
+      this.history = [...init.seedHistory];
+    }
     this.updatedAt = Date.now();
 
     this.wireAgent(this.agent);
-    // Seed the broadcast cache with our /hydra verbs so clients see them
-    // immediately (and on history replay) even if the agent never emits
-    // an available_commands_update of its own.
-    this.broadcastMergedCommands();
   }
 
   private broadcastMergedCommands(): void {
@@ -179,13 +215,27 @@ export class Session {
         captureInternalChunk(this.internalPromptCapture, params);
         return;
       }
-      // available_commands_update is intercepted: we cache the agent's
-      // list and re-emit a merged (hydra ∪ agent) version so clients
-      // always see both halves through one update.
+      // available_commands_update is intercepted: cache the agent's
+      // list, persist to meta.json (so resurrect can deliver via _meta),
+      // and re-emit a merged (hydra ∪ agent) version live. The merged
+      // broadcast itself is filtered from history persistence by
+      // recordAndBroadcast — clients learn the current commands either
+      // live or via attach response _meta.
       const agentCmds = extractAdvertisedCommands(params);
       if (agentCmds !== null) {
-        this.agentAdvertisedCommands = agentCmds;
-        this.broadcastMergedCommands();
+        this.setAgentAdvertisedCommands(agentCmds);
+        return;
+      }
+      // current_model_update / current_mode_update are similarly
+      // snapshot-shaped: cache, persist, broadcast (but filtered from
+      // history). The broadcast still fires so live clients see the
+      // change immediately; new attaches get it via _meta.
+      if (this.maybeApplyAgentModel(params)) {
+        this.recordAndBroadcast("session/update", params);
+        return;
+      }
+      if (this.maybeApplyAgentMode(params)) {
+        this.recordAndBroadcast("session/update", params);
         return;
       }
       // Pick up agent-emitted session_info_update so the canonical
@@ -213,6 +263,29 @@ export class Session {
 
   get attachedCount(): number {
     return this.clients.size;
+  }
+
+  // Snapshot of the current in-memory replay history. Used by the
+  // HTTP history endpoint to deliver the "what's accumulated so far"
+  // prefix before optionally tailing with onBroadcast. Returns a copy
+  // so callers can't mutate our cache.
+  getHistorySnapshot(): CachedNotification[] {
+    return [...this.history];
+  }
+
+  // Subscribe to recordable broadcast entries — fires once per entry
+  // that lands in history (so snapshot-shaped session_info/model/mode/
+  // available_commands updates do NOT trigger this; they're broadcast
+  // live but not recorded). Returns an unsubscribe function the caller
+  // must invoke when done.
+  onBroadcast(handler: (entry: CachedNotification) => void): () => void {
+    this.broadcastHandlers.push(handler);
+    return () => {
+      const i = this.broadcastHandlers.indexOf(handler);
+      if (i >= 0) {
+        this.broadcastHandlers.splice(i, 1);
+      }
+    };
   }
 
   attach(client: AttachedClient, historyPolicy: HistoryPolicy): CachedNotification[] {
@@ -458,6 +531,123 @@ export class Session {
     }
     this.firstPromptSeeded = true;
     this.setTitle(seed);
+  }
+
+  // Apply an agent-emitted current_model_update. Returns true if the
+  // notification was a model update (caller still needs to broadcast
+  // it). Returns false otherwise so the caller can try the next kind.
+  private maybeApplyAgentModel(params: unknown): boolean {
+    const obj = (params ?? {}) as { update?: unknown };
+    const update = (obj.update ?? {}) as {
+      sessionUpdate?: unknown;
+      currentModel?: unknown;
+      model?: unknown;
+    };
+    if (update.sessionUpdate !== "current_model_update") {
+      return false;
+    }
+    const raw =
+      typeof update.currentModel === "string"
+        ? update.currentModel
+        : typeof update.model === "string"
+        ? update.model
+        : undefined;
+    if (raw === undefined) {
+      return true;
+    }
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === this.currentModel) {
+      return true;
+    }
+    this.currentModel = trimmed;
+    for (const handler of this.modelHandlers) {
+      try {
+        handler(trimmed);
+      } catch {
+        void 0;
+      }
+    }
+    return true;
+  }
+
+  private maybeApplyAgentMode(params: unknown): boolean {
+    const obj = (params ?? {}) as { update?: unknown };
+    const update = (obj.update ?? {}) as {
+      sessionUpdate?: unknown;
+      currentMode?: unknown;
+      mode?: unknown;
+    };
+    if (update.sessionUpdate !== "current_mode_update") {
+      return false;
+    }
+    const raw =
+      typeof update.currentMode === "string"
+        ? update.currentMode
+        : typeof update.mode === "string"
+        ? update.mode
+        : undefined;
+    if (raw === undefined) {
+      return true;
+    }
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === this.currentMode) {
+      return true;
+    }
+    this.currentMode = trimmed;
+    for (const handler of this.modeHandlers) {
+      try {
+        handler(trimmed);
+      } catch {
+        void 0;
+      }
+    }
+    return true;
+  }
+
+  // Update the cached agent command list, fire persist handlers, and
+  // broadcast the merged list to attached clients. Idempotent on a
+  // structurally identical list so we don't churn meta.json on noisy
+  // re-emissions.
+  private setAgentAdvertisedCommands(commands: AdvertisedCommand[]): void {
+    if (sameAdvertisedCommands(this.agentAdvertisedCommands, commands)) {
+      // Still broadcast — a fresh attach might be racing — but skip
+      // persistence to avoid pointless meta.json writes.
+      this.broadcastMergedCommands();
+      return;
+    }
+    this.agentAdvertisedCommands = commands;
+    for (const handler of this.agentCommandsHandlers) {
+      try {
+        handler(commands);
+      } catch {
+        void 0;
+      }
+    }
+    this.broadcastMergedCommands();
+  }
+
+  // Subscribe to snapshot-state updates. SessionManager wires these to
+  // persist the new value into meta.json so cold resurrect can restore
+  // them via the attach response _meta.
+  onAgentCommandsChange(
+    handler: (commands: AdvertisedCommand[]) => void,
+  ): void {
+    this.agentCommandsHandlers.push(handler);
+  }
+
+  onModelChange(handler: (model: string) => void): void {
+    this.modelHandlers.push(handler);
+  }
+
+  onModeChange(handler: (mode: string) => void): void {
+    this.modeHandlers.push(handler);
+  }
+
+  // Returns a freshly merged command list (hydra ∪ agent) for callers
+  // that need a snapshot — notably acp-ws.ts's buildResponseMeta when
+  // assembling the attach response.
+  mergedAvailableCommands(): AdvertisedCommand[] {
+    return [...hydraCommandsAsAdvertised(), ...this.agentAdvertisedCommands];
   }
 
   // Pick up an agent-emitted session_info_update and store its title
@@ -805,9 +995,53 @@ export class Session {
     excludeClientId?: string,
   ): void {
     const rewritten = this.rewriteForClient(params);
-    this.history.push({ method, params: rewritten, recordedAt: Date.now() });
-    if (this.history.length > 1000) {
-      this.history = this.history.slice(-500);
+    // Snapshot-shaped updates (title, model, mode, available commands)
+    // are broadcast live but deliberately not recorded. Their canonical
+    // state lives in meta.json and is delivered to fresh clients via
+    // the attach response _meta. Replaying historical transitions would
+    // just churn client state through stale values en route to the
+    // current one.
+    const recordable = !isStateUpdate(method, rewritten);
+    if (recordable) {
+      const entry: CachedNotification = {
+        method,
+        params: rewritten,
+        recordedAt: Date.now(),
+      };
+      this.history.push(entry);
+      let trimmed = false;
+      if (this.history.length > 1000) {
+        this.history = this.history.slice(-500);
+        trimmed = true;
+      }
+      // Mirror the in-memory cache to disk so a session that goes cold
+      // still has its replay buffer available on resurrect. The append
+      // path is fire-and-forget; failures (full disk, permission
+      // problems) shouldn't block the live broadcast. On trim we
+      // rewrite the full window so the file stays bounded by the same
+      // cap.
+      if (this.historyStore) {
+        if (trimmed) {
+          void this.historyStore
+            .rewrite(this.sessionId, [...this.history])
+            .catch(() => undefined);
+        } else {
+          void this.historyStore.append(this.sessionId, entry).catch(
+            () => undefined,
+          );
+        }
+      }
+      // Fan the recorded entry out to any tail-style subscribers
+      // (currently the HTTP /history?follow=1 stream). Synchronous
+      // dispatch so a subscriber sees the entry in order; handlers
+      // own their own error handling.
+      for (const handler of this.broadcastHandlers) {
+        try {
+          handler(entry);
+        } catch {
+          void 0;
+        }
+      }
     }
     this.updatedAt = Date.now();
     for (const client of this.clients.values()) {
@@ -922,6 +1156,41 @@ export class Session {
 function withCode(err: Error, code: number): Error & { code: number } {
   (err as Error & { code: number }).code = code;
   return err as Error & { code: number };
+}
+
+// session/update kinds that carry "what's currently true" snapshots
+// rather than conversation events. Broadcast live but not recorded to
+// history — the canonical state lives in meta.json and is delivered to
+// fresh attaches via the attach response _meta.
+const STATE_UPDATE_KINDS = new Set([
+  "session_info_update",
+  "current_model_update",
+  "current_mode_update",
+  "available_commands_update",
+]);
+
+function isStateUpdate(method: string, params: unknown): boolean {
+  if (method !== "session/update") {
+    return false;
+  }
+  const obj = (params ?? {}) as { update?: { sessionUpdate?: unknown } };
+  const kind = obj.update?.sessionUpdate;
+  return typeof kind === "string" && STATE_UPDATE_KINDS.has(kind);
+}
+
+function sameAdvertisedCommands(
+  a: AdvertisedCommand[],
+  b: AdvertisedCommand[],
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]?.name !== b[i]?.name || a[i]?.description !== b[i]?.description) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Pull text out of an agent_message_chunk session/update notification

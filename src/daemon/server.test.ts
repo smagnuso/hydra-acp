@@ -98,6 +98,21 @@ describe("startDaemon", () => {
       expect(r.status).toBe(404);
     });
 
+    it("returns 404 fetching history for an unknown session", async () => {
+      const r = await fetch(
+        `${baseUrl}/v1/sessions/hydra_session_unknown/history`,
+        {
+          headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+        },
+      );
+      expect(r.status).toBe(404);
+    });
+
+    it("rejects /v1/sessions/:id/history without bearer token", async () => {
+      const r = await fetch(`${baseUrl}/v1/sessions/x/history`);
+      expect(r.status).toBe(401);
+    });
+
     it("rejects /v1/extensions without bearer token", async () => {
       const r = await fetch(`${baseUrl}/v1/extensions`);
       expect(r.status).toBe(401);

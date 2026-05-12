@@ -88,6 +88,11 @@ export type SessionAttachParams = z.infer<typeof SessionAttachParams>;
 
 export const HYDRA_META_KEY = "hydra-acp";
 
+export interface HydraAdvertisedCommand {
+  name: string;
+  description?: string;
+}
+
 export interface HydraMeta {
   upstreamSessionId?: string;
   agentId?: string;
@@ -95,6 +100,12 @@ export interface HydraMeta {
   name?: string;
   agentArgs?: string[];
   resume?: SessionResumeHints;
+  // Snapshot state delivered on the attach/new response so clients
+  // don't need to wait for history replay to know the current model,
+  // mode, or command palette.
+  currentModel?: string;
+  currentMode?: string;
+  availableCommands?: HydraAdvertisedCommand[];
 }
 
 export function extractHydraMeta(
@@ -128,6 +139,32 @@ export function extractHydraMeta(
     const parsed = SessionResumeHints.safeParse(obj.resume);
     if (parsed.success) {
       out.resume = parsed.data;
+    }
+  }
+  if (typeof obj.currentModel === "string") {
+    out.currentModel = obj.currentModel;
+  }
+  if (typeof obj.currentMode === "string") {
+    out.currentMode = obj.currentMode;
+  }
+  if (Array.isArray(obj.availableCommands)) {
+    const cmds: HydraAdvertisedCommand[] = [];
+    for (const raw of obj.availableCommands) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const c = raw as Record<string, unknown>;
+      if (typeof c.name !== "string") {
+        continue;
+      }
+      const cmd: HydraAdvertisedCommand = { name: c.name };
+      if (typeof c.description === "string") {
+        cmd.description = c.description;
+      }
+      cmds.push(cmd);
+    }
+    if (cmds.length > 0) {
+      out.availableCommands = cmds;
     }
   }
   return out;

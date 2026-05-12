@@ -372,6 +372,9 @@ async function runSession(
   let resolvedAgentId = ctx.agentId;
   let resolvedCwd = ctx.cwd;
   let resolvedTitle: string | undefined;
+  let initialModel: string | undefined;
+  let initialMode: string | undefined;
+  let initialCommands: AvailableCommand[] | undefined;
   if (ctx.sessionId === "__new__") {
     const created = (await conn.request("session/new", {
       cwd: ctx.cwd,
@@ -392,6 +395,15 @@ async function runSession(
     if (hydraMeta.name) {
       resolvedTitle = hydraMeta.name;
     }
+    initialModel = hydraMeta.currentModel;
+    initialMode = hydraMeta.currentMode;
+    if (hydraMeta.availableCommands) {
+      initialCommands = hydraMeta.availableCommands.map((c) =>
+        c.description !== undefined
+          ? { name: c.name, description: c.description }
+          : { name: c.name },
+      );
+    }
   } else {
     const attached = (await conn.request("session/attach", {
       sessionId: ctx.sessionId,
@@ -409,6 +421,15 @@ async function runSession(
     }
     if (hydraMeta.name) {
       resolvedTitle = hydraMeta.name;
+    }
+    initialModel = hydraMeta.currentModel;
+    initialMode = hydraMeta.currentMode;
+    if (hydraMeta.availableCommands) {
+      initialCommands = hydraMeta.availableCommands.map((c) =>
+        c.description !== undefined
+          ? { name: c.name, description: c.description }
+          : { name: c.name },
+      );
     }
   }
 
@@ -459,7 +480,9 @@ async function runSession(
     { name: "/demo-plan", description: "Inject synthetic plan events (UI test)" },
     { name: "/demo-tool", description: "Inject a synthetic tool-call sequence (UI test)" },
   ];
-  let agentCommands: AvailableCommand[] = [];
+  // Seeded from the attach/new response _meta so the slash-completion
+  // palette is populated before any history replay or live update.
+  let agentCommands: AvailableCommand[] = initialCommands ?? [];
 
   const allCommands = (): AvailableCommand[] => {
     const seen = new Set<string>();
@@ -609,6 +632,16 @@ async function runSession(
     sessionId: resolvedSessionId,
     title: resolvedTitle,
   });
+  // Surface initial snapshot state (delivered via _meta on attach) so a
+  // late-joining or cold-resurrected client sees the current mode/model
+  // immediately — equivalent to what history replay used to do before
+  // these moved into meta.json.
+  if (initialMode) {
+    screen.appendLines(formatEvent({ kind: "mode-changed", mode: initialMode }));
+  }
+  if (initialModel) {
+    screen.appendLines(formatEvent({ kind: "model-changed", model: initialModel }));
+  }
 
   let finishSession: ((next: TuiOptions | null) => void) | null = null;
   const sessionDone = new Promise<TuiOptions | null>((resolve) => {
