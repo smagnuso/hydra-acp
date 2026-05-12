@@ -1679,6 +1679,8 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-u";
     case "CTRL_W":
       return "ctrl-w";
+    case "CTRL_Y":
+      return "ctrl-y";
     case "ESCAPE":
       return "escape";
     default:

@@ -30,6 +30,7 @@ export type KeyName =
   | "ctrl-p"
   | "ctrl-u"
   | "ctrl-w"
+  | "ctrl-y"
   | "escape";
 
 export type KeyEvent =
@@ -70,6 +71,10 @@ export class InputDispatcher {
     null;
   private history: string[] = [];
   private turnRunning = false;
+  // Single-slot kill ring. The most recent killed text (^U, ^K, ^W) lands
+  // here so ^Y can yank it back. Standard readline keeps a stack; we
+  // only keep one slot because that's what 99% of yank uses look like.
+  private killBuffer = "";
 
   constructor(opts: InputOptions = {}) {
     this.history = [...(opts.history ?? [])];
@@ -185,6 +190,9 @@ export class InputDispatcher {
       case "ctrl-w":
         this.killWord();
         return [];
+      case "ctrl-y":
+        this.yank();
+        return [];
       case "escape":
         // Reserved for modal flows (permission prompt). No-op here.
         return [];
@@ -290,12 +298,20 @@ export class InputDispatcher {
 
   private killLine(): void {
     const line = this.currentLine();
+    const killed = line.slice(0, this.col);
+    if (killed.length > 0) {
+      this.killBuffer = killed;
+    }
     this.setCurrentLine(line.slice(this.col));
     this.col = 0;
   }
 
   private killToEnd(): void {
     const line = this.currentLine();
+    const killed = line.slice(this.col);
+    if (killed.length > 0) {
+      this.killBuffer = killed;
+    }
     this.setCurrentLine(line.slice(0, this.col));
   }
 
@@ -312,8 +328,19 @@ export class InputDispatcher {
     while (i > 0 && !/\s/.test(line[i - 1] ?? "")) {
       i -= 1;
     }
+    const killed = line.slice(i, this.col);
+    if (killed.length > 0) {
+      this.killBuffer = killed;
+    }
     this.setCurrentLine(line.slice(0, i) + line.slice(this.col));
     this.col = i;
+  }
+
+  private yank(): void {
+    if (this.killBuffer.length === 0) {
+      return;
+    }
+    this.insertText(this.killBuffer);
   }
 
   private moveLeft(): void {

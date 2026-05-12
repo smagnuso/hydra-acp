@@ -180,4 +180,55 @@ describe("InputDispatcher", () => {
     feed(d, [k("up")]);
     expect(d.state().buffer).toEqual(["b"]);
   });
+
+  it("ctrl-w deletes the previous word", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("h"), ch("e"), ch("l"), ch("l"), ch("o"), ch(" "), ch("w"), ch("o"), ch("r"), ch("l"), ch("d")]);
+    feed(d, [k("ctrl-w")]);
+    expect(d.state().buffer).toEqual(["hello "]);
+    expect(d.state().col).toBe(6);
+  });
+
+  it("ctrl-w skips trailing whitespace before deleting the word", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "hello world  " }]);
+    feed(d, [k("ctrl-w")]);
+    expect(d.state().buffer).toEqual(["hello "]);
+  });
+
+  it("ctrl-y yanks back what ctrl-w just killed", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "hello world" }]);
+    feed(d, [k("ctrl-w")]);
+    expect(d.state().buffer).toEqual(["hello "]);
+    feed(d, [k("ctrl-y")]);
+    expect(d.state().buffer).toEqual(["hello world"]);
+    expect(d.state().col).toBe(11);
+  });
+
+  it("ctrl-y yanks back what ctrl-u just killed", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "the quick brown fox" }]);
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual([""]);
+    feed(d, [k("ctrl-y")]);
+    expect(d.state().buffer).toEqual(["the quick brown fox"]);
+  });
+
+  it("ctrl-y on an empty kill buffer is a no-op", () => {
+    const d = new InputDispatcher();
+    feed(d, [k("ctrl-y")]);
+    expect(d.state().buffer).toEqual([""]);
+  });
+
+  it("ctrl-y can paste at the cursor mid-buffer", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "abcdef" }]);
+    feed(d, [k("ctrl-u")]);
+    feed(d, [{ type: "paste", text: "xy" }]);
+    feed(d, [k("left")]);
+    feed(d, [k("ctrl-y")]);
+    expect(d.state().buffer).toEqual(["xabcdefy"]);
+    expect(d.state().col).toBe(7);
+  });
 });
