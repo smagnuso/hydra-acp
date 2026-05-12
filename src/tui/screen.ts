@@ -950,6 +950,8 @@ export class Screen {
       ) {
         this.term(" ").dim(formatElapsed(this.banner.elapsedMs));
       }
+    } else if (this.banner.status === "disconnected") {
+      this.term.brightRed(`${dot} ${this.banner.status}`);
     } else {
       this.term.brightGreen(`${dot} ${this.banner.status}`);
     }

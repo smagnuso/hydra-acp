@@ -1,15 +1,15 @@
 // Orchestrator: ties config, daemon discovery, WS connection, the screen, and
 // the input dispatcher together.
 
-import WebSocket from "ws";
-import { once } from "node:events";
+import { nanoid } from "nanoid";
 import termkit from "terminal-kit";
 import { JsonRpcConnection } from "../acp/connection.js";
-import { wsToMessageStream } from "../acp/ws-stream.js";
 import {
   HYDRA_META_KEY,
   extractHydraMeta,
+  type JsonRpcRequest,
 } from "../acp/types.js";
+import { ResilientWsStream } from "../shim/resilient-ws.js";
 import { ensureConfig, type HydraConfig } from "../core/config.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import { paths } from "../core/paths.js";
@@ -80,9 +80,37 @@ async function runSession(
     process.exit(0);
   }
 
-  const ws = await openWs(config);
-  const stream = wsToMessageStream(ws);
+  const protocol = config.daemon.tls ? "wss" : "ws";
+  const wsUrl = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
+  const subprotocols = ["acp.v1", `hydra-acp-token.${config.daemon.authToken}`];
+  // Forward-declared so the resilient stream's onConnect/onDisconnect
+  // hooks (which fire before the Screen is built on first connect) can
+  // call into them safely. Real implementations are assigned later.
+  let onReconnect: (() => Promise<void>) | null = null;
+  let onDisconnectHook: ((err?: Error) => void) | null = null;
+  const stream = new ResilientWsStream({
+    url: wsUrl,
+    subprotocols,
+    onConnect: async (firstConnect) => {
+      if (firstConnect) {
+        // Initial handshake runs in the outer flow so its result can
+        // populate resolvedSessionId/agentId/cwd before the Screen is
+        // built. Nothing to do inside onConnect on first connect.
+        return;
+      }
+      if (onReconnect) {
+        await onReconnect();
+      }
+    },
+    onDisconnect: (err) => {
+      if (onDisconnectHook) {
+        onDisconnectHook(err);
+      }
+    },
+    log: () => undefined,
+  });
   const conn = new JsonRpcConnection(stream);
+  await stream.start();
 
   // Buffer rendered events that arrive before the screen is wired up — most
   // importantly, the history replay during session/attach. Once
@@ -376,7 +404,6 @@ async function runSession(
       resolvedCwd = hydraMeta.cwd;
     }
   }
-  void upstreamSessionId;
 
   const historyFile = paths.tuiHistoryFile();
   let history = await loadHistory(historyFile).catch(() => []);
@@ -682,11 +709,7 @@ async function runSession(
     process.off("SIGINT", sigintHandler);
     screen.stop();
     saveHistory(historyFile, history).catch(() => undefined);
-    try {
-      ws.close();
-    } catch {
-      void 0;
-    }
+    void stream.close().catch(() => undefined);
   };
   const stop = (code = 0): void => {
     teardown();
@@ -1319,6 +1342,123 @@ async function runSession(
     screen.resumeRepaint();
   }
 
+  // Tear down any visible in-flight UI state so the next live signal
+  // (turn-complete on reconnect, our own next prompt, etc.) starts from
+  // a clean slate. Scrollback lines stay intact — we just sever the
+  // keyed-block splice points so new content appends below.
+  const resetInFlightUiState = (): void => {
+    if (pendingPermission) {
+      const resolve = pendingPermission.resolve;
+      pendingPermission = null;
+      screen.setPermissionPrompt(null);
+      resolve({ outcome: { outcome: "cancelled" } });
+    }
+    closeAgentText();
+    if (toolsBlockStartedAt !== null) {
+      if (toolCallOrder.length > 0) {
+        toolsBlockEndedAt = Date.now();
+        renderToolsBlock();
+        screen.clearKey("tools");
+      } else {
+        screen.removeBlock("tools");
+      }
+      toolStates.clear();
+      toolCallOrder.length = 0;
+      toolsBlockStartedAt = null;
+      toolsBlockEndedAt = null;
+      toolsExpanded = false;
+    }
+    screen.clearKey("plan");
+    if (pendingTurns > 0) {
+      adjustPendingTurns(-pendingTurns);
+    }
+  };
+
+  // Disconnect signal arrives the moment the underlying WS drops and a
+  // reconnect is queued. Flag the banner so the user has feedback while
+  // we retry; the prompt queue keeps accepting input and ResilientWsStream
+  // buffers outbound sends until the new connection is live.
+  onDisconnectHook = (): void => {
+    screen.setBanner({ status: "disconnected", elapsedMs: undefined });
+  };
+
+  // Re-attach after a reconnect. Uses stream.request directly (bypassing
+  // conn / the connectGate) because we need this handshake to complete
+  // BEFORE the resilient stream flushes its outbound queue — otherwise a
+  // prompt the user typed while the daemon was down could race the
+  // attach. historyPolicy=none avoids re-replaying scrollback we already
+  // have locally; the daemon will still re-dispatch any in-flight
+  // permission via replayPendingPermissions.
+  onReconnect = async (): Promise<void> => {
+    resetInFlightUiState();
+    const initReq: JsonRpcRequest = {
+      jsonrpc: "2.0",
+      id: `tui-reinit-${nanoid()}`,
+      method: "initialize",
+      params: {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+        clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
+      },
+    };
+    try {
+      await stream.request(initReq);
+    } catch {
+      // initialize failing on reconnect is non-fatal; the daemon may
+      // still accept the attach below.
+    }
+    const attachReq: JsonRpcRequest = {
+      jsonrpc: "2.0",
+      id: `tui-reattach-${nanoid()}`,
+      method: "session/attach",
+      params: {
+        sessionId: resolvedSessionId,
+        historyPolicy: "none",
+        clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
+        ...(upstreamSessionId !== undefined
+          ? {
+              _meta: {
+                [HYDRA_META_KEY]: {
+                  resume: {
+                    upstreamSessionId,
+                    agentId: resolvedAgentId,
+                    cwd: resolvedCwd,
+                  },
+                },
+              },
+            }
+          : {}),
+      },
+    };
+    try {
+      const resp = await stream.request(attachReq);
+      if (resp.error) {
+        throw new Error(resp.error.message);
+      }
+    } catch (err) {
+      // Surface in scrollback so the user understands why state may
+      // diverge. The next live event (or their next prompt) will keep
+      // things moving.
+      screen.appendLines([
+        {
+          prefix: "  ",
+          body: `reattach failed: ${(err as Error).message}`,
+          bodyStyle: "tool-status-fail",
+        },
+      ]);
+    }
+    screen.setBanner({
+      status: pendingTurns > 0 ? "running" : "ready",
+      elapsedMs: pendingTurns > 0 ? 0 : undefined,
+    });
+  };
+
+  // With ResilientWsStream this only fires once we've exhausted reconnect
+  // attempts. The banner reflects intermediate disconnect/reconnect cycles
+  // via onDisconnect/onConnect; only here is the connection truly dead.
   conn.onClose((err) => {
     if (err) {
       term.red(`\nconnection lost: ${err.message}\n`);
@@ -1398,13 +1538,3 @@ function newCtx(
   };
 }
 
-async function openWs(config: HydraConfig): Promise<WebSocket> {
-  const protocol = config.daemon.tls ? "wss" : "ws";
-  const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const ws = new WebSocket(url, [
-    "acp.v1",
-    `hydra-acp-token.${config.daemon.authToken}`,
-  ]);
-  await once(ws, "open");
-  return ws;
-}

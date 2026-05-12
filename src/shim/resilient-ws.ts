@@ -19,6 +19,11 @@ export interface ResilientWsOptions {
   // session/attach can complete BEFORE any queued prompts get flushed.
   onConnect?: (firstConnect: boolean) => Promise<void> | void;
   onConnectFailure?: (err: Error) => void;
+  // Fires the moment the underlying ws closes and a reconnect is queued —
+  // before the new connection is established. Lets the caller react to
+  // the "now offline" transition (e.g. a TUI banner) separately from the
+  // eventual "back online" signal in onConnect.
+  onDisconnect?: (err?: Error) => void;
   log?: (line: string) => void;
 }
 
@@ -220,6 +225,15 @@ export class ResilientWsStream implements MessageStream {
     this.log(
       `hydra-acp: connection lost (${err?.message ?? "no error"}); reconnecting...`,
     );
+    if (this.opts.onDisconnect) {
+      try {
+        this.opts.onDisconnect(err);
+      } catch (hookErr) {
+        this.log(
+          `hydra-acp: onDisconnect handler threw: ${(hookErr as Error).message}`,
+        );
+      }
+    }
     this.reconnectInFlight = (async () => {
       try {
         await this.connectWithRetry();
