@@ -132,6 +132,7 @@ export class Screen {
     queued: 0,
   };
   private header: HeaderState = { agent: "?", cwd: "?", sessionId: "?" };
+  private lastWindowTitle: string | null = null;
   private resizeHandler: () => void;
   private keyHandler: (name: string, _matches: string[], data: { isCharacter?: boolean }) => void;
   private mouseHandler: (name: string, data: unknown) => void;
@@ -480,7 +481,30 @@ export class Screen {
 
   setHeader(header: Partial<HeaderState>): void {
     this.header = { ...this.header, ...header };
+    this.syncWindowTitle();
     this.repaint();
+  }
+
+  // Push the current session title (or short session id, as fallback) to
+  // the host terminal via OSC 2. Supported by xterm/foot/iTerm2/Alacritty/
+  // most modern emulators; ignored harmlessly elsewhere.
+  private syncWindowTitle(): void {
+    const title = this.header.title?.trim();
+    const fallback = shortId(this.header.sessionId) || "hydra";
+    const raw = title && title.length > 0 ? title : fallback;
+    // Strip control chars (including ESC) so a hostile title can't
+    // close the escape sequence early and inject further sequences.
+    const clean = raw.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
+    if (clean === this.lastWindowTitle) {
+      return;
+    }
+    this.lastWindowTitle = clean;
+    process.stdout.write(`\x1b]2;${clean}\x1b\\`);
+  }
+
+  clearWindowTitle(): void {
+    this.lastWindowTitle = null;
+    process.stdout.write("\x1b]2;\x1b\\");
   }
 
   setBanner(banner: Partial<BannerState>): void {

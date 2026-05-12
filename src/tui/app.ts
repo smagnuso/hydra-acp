@@ -768,6 +768,7 @@ async function runSession(
   };
   const teardown = (): void => {
     process.off("SIGINT", sigintHandler);
+    screen.clearWindowTitle();
     screen.stop();
     saveHistory(historyFile, history).catch(() => undefined);
     void stream.close().catch(() => undefined);
