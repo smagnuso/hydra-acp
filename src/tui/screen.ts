@@ -815,13 +815,15 @@ export class Screen {
       titleRoom = 0;
       cwdRoom = variableRoom;
     }
+    // noFormat on the user-controlled cells (agent name, cwd, title) so a
+    // literal `^X` in any of them isn't eaten as terminal-kit markup.
     this.term
       .bold("hydra")(" · ")
-      .cyan(this.header.agent)(" · ")
-      .dim(truncate(this.header.cwd, cwdRoom))(" · ")
+      .cyan.noFormat(this.header.agent)(" · ")
+      .dim.noFormat(truncate(this.header.cwd, cwdRoom))(" · ")
       .yellow(sid);
     if (title) {
-      this.term(" · ").bold(truncate(title, titleRoom));
+      this.term(" · ").bold.noFormat(truncate(title, titleRoom));
     }
     if (usage) {
       const col = Math.max(1, w - usage.length + 1);
