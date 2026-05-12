@@ -56,7 +56,8 @@ export async function pickSession(
     return b.updatedAt.localeCompare(a.updatedAt);
   });
   const visible = sorted;
-  const rows: Row[] = visible.map(toRow);
+  const now = Date.now();
+  const rows: Row[] = visible.map((s) => toRow(s, now));
   const widths: Widths = computeWidths(rows);
 
   // selectedIdx 0 = "+ New session"; 1..N = visible sessions in order.

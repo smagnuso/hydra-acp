@@ -23,6 +23,7 @@ export interface Row {
   status: string;
   clients: string;
   agent: string;
+  age: string;
   title: string;
   cwd: string;
 }
@@ -33,6 +34,7 @@ export interface Widths {
   status: number;
   clients: number;
   agent: number;
+  age: number;
   title: number;
 }
 
@@ -42,6 +44,7 @@ export const HEADER: Row = {
   status: "STATUS",
   clients: "CLIENTS",
   agent: "AGENT",
+  age: "AGE",
   title: "TITLE",
   cwd: "CWD",
 };
@@ -53,13 +56,14 @@ const MIN_CWD = 8;
 // right-truncated by formatRow when a maxWidth is in effect.
 const TITLE_MAX_WIDTH = 40;
 
-export function toRow(s: SessionSummary): Row {
+export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: s.upstreamSessionId ?? "-",
     status: (s.status ?? "live").toUpperCase(),
     clients: s.status === "cold" ? "-" : String(s.attachedClients),
     agent: s.agentId ?? "?",
+    age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
     cwd: s.cwd,
   };
@@ -72,8 +76,50 @@ export function computeWidths(rows: Row[]): Widths {
     status: maxLen(HEADER.status, rows.map((r) => r.status)),
     clients: maxLen(HEADER.clients, rows.map((r) => r.clients)),
     agent: maxLen(HEADER.agent, rows.map((r) => r.agent)),
+    age: maxLen(HEADER.age, rows.map((r) => r.age)),
     title: maxLen(HEADER.title, rows.map((r) => r.title)),
   };
+}
+
+// Short, roughly-accurate "time since" hint. Tuned for table display
+// where the cell is ~3-5 chars wide: "<1m", "12m", "3h", "2d", "5w",
+// "11mo", "2y". Falls back to "?" when the timestamp is missing or
+// unparseable.
+export function formatRelativeAge(iso: string | undefined, now: number): string {
+  if (!iso) {
+    return "?";
+  }
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) {
+    return "?";
+  }
+  const diff = Math.max(0, now - t);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) {
+    return "<1m";
+  }
+  const min = Math.floor(sec / 60);
+  if (min < 60) {
+    return `${min}m`;
+  }
+  const hr = Math.floor(min / 60);
+  if (hr < 24) {
+    return `${hr}h`;
+  }
+  const day = Math.floor(hr / 24);
+  if (day < 14) {
+    return `${day}d`;
+  }
+  const week = Math.floor(day / 7);
+  if (week < 9) {
+    return `${week}w`;
+  }
+  const month = Math.floor(day / 30);
+  if (month < 12) {
+    return `${month}mo`;
+  }
+  const year = Math.floor(day / 365);
+  return `${year}y`;
 }
 
 function maxLen(headerCell: string, values: string[]): number {
@@ -100,6 +146,7 @@ export function formatRow(r: Row, w: Widths, maxWidth?: number): string {
     r.status.padEnd(w.status),
     r.clients.padStart(w.clients),
     r.agent.padEnd(w.agent),
+    r.age.padStart(w.age),
   ].join(SEP);
 
   if (maxWidth === undefined) {

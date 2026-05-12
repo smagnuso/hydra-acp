@@ -53,7 +53,8 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
     visible = [...sorted.slice(0, liveCount), ...coldSlice];
     truncated = hiddenCold;
   }
-  const rows = visible.map(toRow);
+  const now = Date.now();
+  const rows = visible.map((s) => toRow(s, now));
   const widths = computeWidths(rows);
   // Truncate to terminal width only when stdout is a TTY — piping to a
   // file or grep should preserve the full row.

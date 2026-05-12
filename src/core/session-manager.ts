@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
 import { HYDRA_SESSION_PREFIX, Session, type CachedNotification } from "./session.js";
@@ -7,6 +8,7 @@ import {
   type PersistedAgentCommand,
 } from "./session-store.js";
 import { HistoryStore } from "./history-store.js";
+import { paths } from "./paths.js";
 import type { AdvertisedCommand } from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
@@ -386,13 +388,16 @@ export class SessionManager {
         continue;
       }
       liveIds.add(session.sessionId);
+      const used =
+        (await historyMtimeIso(session.sessionId)) ??
+        new Date(session.updatedAt).toISOString();
       entries.push({
         sessionId: session.sessionId,
         upstreamSessionId: session.upstreamSessionId,
         cwd: session.cwd,
         title: session.title,
         agentId: session.agentId,
-        updatedAt: new Date(session.updatedAt).toISOString(),
+        updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
       });
@@ -405,13 +410,14 @@ export class SessionManager {
       if (filter.cwd && r.cwd !== filter.cwd) {
         continue;
       }
+      const used = (await historyMtimeIso(r.sessionId)) ?? r.updatedAt;
       entries.push({
         sessionId: r.sessionId,
         upstreamSessionId: r.upstreamSessionId,
         cwd: r.cwd,
         title: r.title,
         agentId: r.agentId,
-        updatedAt: r.updatedAt,
+        updatedAt: used,
         attachedClients: 0,
         status: "cold",
       });
@@ -530,5 +536,21 @@ export class SessionManager {
     const sessions = [...this.sessions.values()];
     await Promise.allSettled(sessions.map((s) => s.close()));
     this.sessions.clear();
+  }
+}
+
+// "Last meaningful activity" for the picker/listing's USED hint. Uses
+// the history.jsonl mtime — it only gets touched on recordable
+// broadcasts (user prompts, agent chunks, tool calls) and skips noisy
+// state pings (model/mode/title/commands), so an idle session reads
+// honestly idle. Returns undefined when the file doesn't exist (e.g.
+// freshly created session that hasn't been prompted yet) so callers
+// can fall back to the on-disk record's updatedAt.
+async function historyMtimeIso(sessionId: string): Promise<string | undefined> {
+  try {
+    const st = await fs.stat(paths.historyFile(sessionId));
+    return new Date(st.mtimeMs).toISOString();
+  } catch {
+    return undefined;
   }
 }
