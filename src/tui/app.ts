@@ -80,6 +80,18 @@ async function runSession(
     process.exit(0);
   }
 
+  // Visible status while the daemon brings up (or attaches to) the
+  // session. Resurrection of cold sessions and fresh-agent spawns can
+  // take a couple of seconds; without this line the terminal looks
+  // hung between the picker closing and screen.start() entering
+  // fullscreen. The alternate-screen switch in screen.start() naturally
+  // wipes whatever we printed here.
+  const launchLabel =
+    ctx.sessionId === "__new__"
+      ? "Starting new session…"
+      : "Resuming session…";
+  term.cyan(launchLabel)("\n");
+
   const protocol = config.daemon.tls ? "wss" : "ws";
   const wsUrl = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
   const subprotocols = ["acp.v1", `hydra-acp-token.${config.daemon.authToken}`];
