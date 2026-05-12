@@ -86,6 +86,14 @@ export interface SessionInit {
 
 export interface CloseOptions {
   deleteRecord?: boolean;
+  // Before tearing the agent down, ask it for a fresh title that
+  // summarises the conversation so far. Used by the idle-timeout path so
+  // a session going cold persists a meaningful title for the picker.
+  // Best-effort: failures are swallowed and the close proceeds.
+  regenTitle?: boolean;
+  // Maximum time to wait for the title regen before giving up and
+  // killing the agent anyway. Defaults to 5 seconds.
+  regenTitleTimeoutMs?: number;
 }
 
 export class Session {
@@ -472,6 +480,13 @@ export class Session {
       return;
     }
     this.cancelIdleTimer();
+    if (opts.regenTitle && this.firstPromptSeeded) {
+      const timeoutMs = opts.regenTitleTimeoutMs ?? 5000;
+      await Promise.race([
+        this.runTitleRegen().catch(() => undefined),
+        new Promise<void>((r) => setTimeout(r, timeoutMs).unref?.()),
+      ]);
+    }
     await this.agent.kill().catch(() => undefined);
     this.markClosed({ deleteRecord: opts.deleteRecord ?? false });
   }
@@ -965,7 +980,14 @@ export class Session {
     }
     this.idleTimer = setTimeout(() => {
       this.idleTimer = undefined;
-      void this.close({ deleteRecord: false }).catch(() => undefined);
+      // A session that never received a prompt has no conversation to
+      // preserve; drop the record entirely instead of leaving an empty
+      // cold session cluttering the picker. Otherwise persist as cold,
+      // asking the agent for one last title summary on the way out.
+      const opts: CloseOptions = this.firstPromptSeeded
+        ? { deleteRecord: false, regenTitle: true }
+        : { deleteRecord: true };
+      void this.close(opts).catch(() => undefined);
     }, this.idleTimeoutMs);
     if (typeof this.idleTimer.unref === "function") {
       this.idleTimer.unref();
