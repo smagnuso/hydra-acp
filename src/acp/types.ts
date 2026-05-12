@@ -106,6 +106,11 @@ export interface HydraMeta {
   currentModel?: string;
   currentMode?: string;
   availableCommands?: HydraAdvertisedCommand[];
+  // Epoch-ms when the in-flight agent turn began. Present only when
+  // mid-turn at attach response time; lets a fresh client boot with
+  // the busy banner already showing the right elapsed time rather
+  // than waiting for the next live update.
+  turnStartedAt?: number;
 }
 
 export function extractHydraMeta(
@@ -146,6 +151,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.currentMode === "string") {
     out.currentMode = obj.currentMode;
+  }
+  if (typeof obj.turnStartedAt === "number" && obj.turnStartedAt > 0) {
+    out.turnStartedAt = obj.turnStartedAt;
   }
   if (Array.isArray(obj.availableCommands)) {
     const cmds: HydraAdvertisedCommand[] = [];

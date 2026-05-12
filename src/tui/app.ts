@@ -394,6 +394,10 @@ async function runSession(
   let initialModel: string | undefined;
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
+  // Epoch-ms of an in-flight turn at attach time, surfaced by the daemon
+  // when we reattach mid-turn. Lets the post-drain reconcile flip the
+  // banner to busy and start the elapsed timer at the right offset.
+  let initialTurnStartedAt: number | undefined;
   if (ctx.sessionId === "__new__") {
     const created = (await conn.request("session/new", {
       cwd: ctx.cwd,
@@ -416,6 +420,7 @@ async function runSession(
     }
     initialModel = hydraMeta.currentModel;
     initialMode = hydraMeta.currentMode;
+    initialTurnStartedAt = hydraMeta.turnStartedAt;
     if (hydraMeta.availableCommands) {
       initialCommands = hydraMeta.availableCommands.map((c) =>
         c.description !== undefined
@@ -443,6 +448,7 @@ async function runSession(
     }
     initialModel = hydraMeta.currentModel;
     initialMode = hydraMeta.currentMode;
+    initialTurnStartedAt = hydraMeta.turnStartedAt;
     if (hydraMeta.availableCommands) {
       initialCommands = hydraMeta.availableCommands.map((c) =>
         c.description !== undefined
@@ -667,9 +673,23 @@ async function runSession(
   const sessionDone = new Promise<TuiOptions | null>((resolve) => {
     finishSession = resolve;
   });
+  // Send session/cancel to the daemon when the turn isn't ours to settle
+  // locally. `turnInFlight` is only set for turns this TUI initiated; on
+  // reattach mid-turn, or for a peer-initiated turn, it stays null while
+  // pendingTurns > 0. Sending cancel directly still works — the daemon
+  // forwards it to the agent regardless of which client started the turn.
+  const cancelRemoteTurn = (): void => {
+    conn
+      .notify("session/cancel", { sessionId: resolvedSessionId })
+      .catch(() => undefined);
+  };
   const sigintHandler = (): void => {
     if (turnInFlight) {
       turnInFlight.cancel();
+      return;
+    }
+    if (pendingTurns > 0) {
+      cancelRemoteTurn();
       return;
     }
     void requestExit();
@@ -846,6 +866,8 @@ async function runSession(
       case "cancel":
         if (turnInFlight) {
           turnInFlight.cancel();
+        } else if (pendingTurns > 0) {
+          cancelRemoteTurn();
         }
         // Drop any queued prompts beyond the one currently processing —
         // Ctrl+C means stop, not "stop just this". The head (if any) keeps
@@ -1448,6 +1470,32 @@ async function runSession(
     }
   } finally {
     screen.resumeRepaint();
+  }
+
+  // Mid-turn reattach reconcile. History replay incremented pendingTurns
+  // for the unmatched prompt_received, but adjustPendingTurns ran before
+  // screenRef was set so the busy banner / elapsed timer transition was
+  // skipped. Now that the screen is up, force the busy state using the
+  // daemon's authoritative recordedAt as sessionBusySince so the elapsed
+  // counter shows real turn duration, not time-since-reattach. The live
+  // turn_complete will arrive normally and decrement pendingTurns 1 → 0,
+  // which clears the banner via the existing transition.
+  if (initialTurnStartedAt !== undefined && pendingTurns > 0) {
+    sessionBusySince = initialTurnStartedAt;
+    screen.setBanner({
+      status: "busy",
+      elapsedMs: Date.now() - initialTurnStartedAt,
+    });
+    if (sessionElapsedTimer === null) {
+      sessionElapsedTimer = setInterval(() => {
+        if (sessionBusySince === null || screenRef === null) {
+          return;
+        }
+        screenRef.setBanner({ elapsedMs: Date.now() - sessionBusySince });
+        renderToolsBlock();
+      }, 1_000);
+    }
+    startToolsBlock();
   }
 
   // Tear down any visible in-flight UI state so the next live signal

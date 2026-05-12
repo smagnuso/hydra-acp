@@ -273,6 +273,30 @@ export class Session {
     return this.clients.size;
   }
 
+  // Wall-clock when the in-flight agent turn began, or undefined when
+  // idle. Derived from history: the most recent prompt_received without
+  // a later turn_complete is the outstanding turn, and its recordedAt
+  // is when the prompt was first broadcast. Used by buildResponseMeta
+  // so a fresh client reattaching mid-turn boots up with the busy
+  // banner showing real elapsed time.
+  get turnStartedAt(): number | undefined {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i];
+      if (!entry) {
+        continue;
+      }
+      const params = entry.params as { update?: { sessionUpdate?: string } };
+      const kind = params?.update?.sessionUpdate;
+      if (kind === "turn_complete") {
+        return undefined;
+      }
+      if (kind === "prompt_received") {
+        return entry.recordedAt;
+      }
+    }
+    return undefined;
+  }
+
   // Snapshot of the current in-memory replay history. Used by the
   // HTTP history endpoint to deliver the "what's accumulated so far"
   // prefix before optionally tailing with onBroadcast. Returns a copy

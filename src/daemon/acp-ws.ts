@@ -341,6 +341,12 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
   if (commands.length > 0) {
     ours.availableCommands = commands;
   }
+  // Mid-turn at attach time: hand the client the original prompt's
+  // recordedAt so it can boot directly into "busy · Ns" instead of
+  // sitting on "ready" until the next live notification.
+  if (session.turnStartedAt !== undefined) {
+    ours.turnStartedAt = session.turnStartedAt;
+  }
   return mergeMeta(session.agentMeta, ours);
 }
 
