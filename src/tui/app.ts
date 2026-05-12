@@ -1,6 +1,7 @@
 // Orchestrator: ties config, daemon discovery, WS connection, the screen, and
 // the input dispatcher together.
 
+import { appendFileSync, statSync, renameSync } from "node:fs";
 import { nanoid } from "nanoid";
 import termkit from "terminal-kit";
 import { JsonRpcConnection } from "../acp/connection.js";
@@ -177,13 +178,18 @@ async function runSession(
         screenRef!.setBanner({ status: "busy", elapsedMs: 0 });
       }
       if (sessionElapsedTimer === null && screenReady) {
+        // Tick once per second so the "thinking · Xs" indicator visibly
+        // counts up — the browser's spinner gives the user constant
+        // feedback that something is happening; a 5s tick made the TUI
+        // feel frozen by comparison. The 1Hz screen-repaint throttle
+        // coalesces paints, so this isn't expensive.
         sessionElapsedTimer = setInterval(() => {
           if (sessionBusySince === null || screenRef === null) {
             return;
           }
           screenRef.setBanner({ elapsedMs: Date.now() - sessionBusySince });
           renderToolsBlock();
-        }, 5_000);
+        }, 1_000);
       }
     } else if (before > 0 && pendingTurns === 0) {
       sessionBusySince = null;
@@ -206,6 +212,7 @@ async function runSession(
   conn.onNotification("session/update", (params) => {
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
+    debugLogUpdate(update, event);
     if (event?.kind === "user-text") {
       adjustPendingTurns(1);
     } else if (event?.kind === "turn-complete") {
@@ -1191,10 +1198,11 @@ async function runSession(
     let summary: string;
     if (total === 0) {
       // Pre-tool state — the block exists purely as a "still working"
-      // indicator while the agent is thinking.
+      // indicator while the agent is thinking, then freezes as "thought · Xs"
+      // at turn end so the user has a visible trace of the reasoning time.
       summary = inProgress
         ? `thinking · ${formatElapsed(elapsed)}`
-        : `no tools · took ${formatElapsed(elapsed)}`;
+        : `thought · ${formatElapsed(elapsed)}`;
     } else {
       const noun = total === 1 ? "tool" : "tools";
       const timing = inProgress
@@ -1389,12 +1397,15 @@ async function runSession(
       // append a fresh block below. If no tool ever fired this turn the
       // block is just a thinking-indicator with no info worth keeping;
       // splice it out of scrollback entirely.
-      if (toolCallOrder.length > 0) {
+      if (toolsBlockStartedAt !== null) {
+        // Always freeze the block at turn end — even when no tool ever
+        // fired — so the user has a visible "agent thought for Xs"
+        // trace. Removing the placeholder for tool-less turns made the
+        // turn look indistinguishable from one where the TUI silently
+        // dropped events.
         toolsBlockEndedAt = Date.now();
         renderToolsBlock();
         screen.clearKey("tools");
-      } else if (toolsBlockStartedAt !== null) {
-        screen.removeBlock("tools");
       }
       toolStates.clear();
       toolCallOrder.length = 0;
@@ -1433,13 +1444,13 @@ async function runSession(
     }
     closeAgentText();
     if (toolsBlockStartedAt !== null) {
-      if (toolCallOrder.length > 0) {
-        toolsBlockEndedAt = Date.now();
-        renderToolsBlock();
-        screen.clearKey("tools");
-      } else {
-        screen.removeBlock("tools");
-      }
+      // Freeze the block in place (with "thought · Xs" when no tool ever
+      // fired) instead of removing it. Matches the turn-complete handler
+      // and ensures a silent reconnect mid-turn doesn't strip the only
+      // visible signal that the agent was reasoning.
+      toolsBlockEndedAt = Date.now();
+      renderToolsBlock();
+      screen.clearKey("tools");
       toolStates.clear();
       toolCallOrder.length = 0;
       toolsBlockStartedAt = null;
@@ -1613,5 +1624,53 @@ function newCtx(
     agentId: opts.agentId ?? config.defaultAgent ?? "",
     cwd,
   };
+}
+
+// Always-on append-only log of every session/update the TUI receives,
+// paired with the RenderEvent kind we mapped it to (or null when the
+// mapper rejected the shape). Default path is ~/.hydra-acp/tui.log so a
+// user reporting "thoughts/tools aren't rendering" has a ready artifact
+// to share. HYDRA_TUI_DEBUG_LOG overrides the path; setting it to an
+// empty string disables logging.
+const TUI_LOG_MAX_BYTES = 5 * 1024 * 1024;
+function debugLogUpdate(update: unknown, event: RenderEvent | null): void {
+  writeDebugLine({
+    src: "session/update",
+    update,
+    event: event === null ? null : { kind: event.kind },
+  });
+}
+
+function writeDebugLine(payload: Record<string, unknown>): void {
+  const override = process.env.HYDRA_TUI_DEBUG_LOG;
+  const target = override === undefined ? paths.tuiLogFile() : override;
+  if (target.length === 0) {
+    return;
+  }
+  try {
+    rotateIfBig(target);
+    const line = JSON.stringify({
+      t: new Date().toISOString(),
+      ...payload,
+    });
+    appendFileSync(target, `${line}\n`);
+  } catch {
+    void 0;
+  }
+}
+
+// Single-step rotation: when the log crosses the size cap, rename it to
+// `<path>.0` (overwriting any prior rotation) and start fresh. Bounds
+// disk use at ~2x cap without depending on logrotate.
+function rotateIfBig(target: string): void {
+  try {
+    const stat = statSync(target);
+    if (stat.size < TUI_LOG_MAX_BYTES) {
+      return;
+    }
+    renameSync(target, `${target}.0`);
+  } catch {
+    void 0;
+  }
 }
 
