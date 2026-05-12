@@ -1,20 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { SessionStore, recordFromMemorySession } from "./session-store.js";
 
 describe("SessionStore", () => {
   let tmpHome: string;
 
-  beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-store-"));
-    process.env.HYDRA_ACP_HOME = tmpHome;
-  });
-
-  afterEach(async () => {
-    delete process.env.HYDRA_ACP_HOME;
-    await fs.rm(tmpHome, { recursive: true, force: true });
+  beforeEach(() => {
+    tmpHome = process.env.HYDRA_ACP_HOME!;
   });
 
   it("writes a session record and reads it back", async () => {

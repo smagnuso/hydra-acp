@@ -1,7 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
+import { describe, it, expect, vi } from "vitest";
 import { homedir } from "node:os";
 import {
   generateAuthToken,
@@ -40,18 +37,6 @@ describe("defaultConfig", () => {
 });
 
 describe("ensureConfig", () => {
-  let tmpHome: string;
-
-  beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-cfg-"));
-    process.env.HYDRA_ACP_HOME = tmpHome;
-  });
-
-  afterEach(async () => {
-    delete process.env.HYDRA_ACP_HOME;
-    await fs.rm(tmpHome, { recursive: true, force: true });
-  });
-
   it("writes a fresh default config when none exists", async () => {
     const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const cfg = await ensureConfig();

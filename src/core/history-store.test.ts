@@ -1,23 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { HistoryStore } from "./history-store.js";
 import { paths } from "./paths.js";
 
 describe("HistoryStore", () => {
-  let tmpHome: string;
-
-  beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-tr-"));
-    process.env.HYDRA_ACP_HOME = tmpHome;
-  });
-
-  afterEach(async () => {
-    delete process.env.HYDRA_ACP_HOME;
-    await fs.rm(tmpHome, { recursive: true, force: true });
-  });
-
   it("appends entries and reads them back in order", async () => {
     const store = new HistoryStore();
     await store.append("hydra_session_abc", {

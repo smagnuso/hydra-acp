@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { ExtensionManager, type ExtensionContext } from "./extensions.js";
 import type { ExtensionConfig } from "./config.js";
@@ -38,9 +37,8 @@ describe("ExtensionManager", () => {
   let probeOut: string;
   let manager: ExtensionManager | undefined;
 
-  beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-ext-"));
-    process.env.HYDRA_ACP_HOME = tmpHome;
+  beforeEach(() => {
+    tmpHome = process.env.HYDRA_ACP_HOME!;
     probeOut = path.join(tmpHome, "probe-out.json");
   });
 
@@ -49,8 +47,6 @@ describe("ExtensionManager", () => {
       await manager.stop();
       manager = undefined;
     }
-    delete process.env.HYDRA_ACP_HOME;
-    await fs.rm(tmpHome, { recursive: true, force: true });
   });
 
   async function waitForProbe(timeoutMs = 3_000): Promise<unknown> {

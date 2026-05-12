@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
@@ -36,17 +35,6 @@ describe("SessionManager.resurrect", () => {
   let mocks: MockAgentControls[];
   let mockIndex: number;
   let manager: SessionManager;
-  let tmpHome: string;
-
-  beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-mgr-"));
-    process.env.HYDRA_ACP_HOME = tmpHome;
-  });
-
-  afterEach(async () => {
-    delete process.env.HYDRA_ACP_HOME;
-    await fs.rm(tmpHome, { recursive: true, force: true });
-  });
 
   beforeEach(() => {
     mocks = [];
@@ -228,9 +216,8 @@ describe("SessionManager: history persistence", () => {
   let mocks: MockAgentControls[];
   let manager: SessionManager;
 
-  beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-tr-"));
-    process.env.HYDRA_ACP_HOME = tmpHome;
+  beforeEach(() => {
+    tmpHome = process.env.HYDRA_ACP_HOME!;
     mocks = [];
     manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
@@ -247,11 +234,6 @@ describe("SessionManager: history persistence", () => {
         return m.agent;
       },
     );
-  });
-
-  afterEach(async () => {
-    delete process.env.HYDRA_ACP_HOME;
-    await fs.rm(tmpHome, { recursive: true, force: true });
   });
 
   it("persists broadcast notifications and seeds them on loadFromDisk", async () => {
@@ -619,13 +601,8 @@ describe("SessionManager: history persistence", () => {
 
 describe("SessionManager: /hydra switch persistence", () => {
   let tmpHome: string;
-  beforeEach(async () => {
-    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "hydra-acp-switch-"));
-    process.env.HYDRA_ACP_HOME = tmpHome;
-  });
-  afterEach(async () => {
-    delete process.env.HYDRA_ACP_HOME;
-    await fs.rm(tmpHome, { recursive: true, force: true });
+  beforeEach(() => {
+    tmpHome = process.env.HYDRA_ACP_HOME!;
   });
 
   it("rewrites the on-disk record's agentId + upstreamSessionId after a switch", async () => {

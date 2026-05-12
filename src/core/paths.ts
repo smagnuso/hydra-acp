@@ -8,6 +8,16 @@ export function hydraHome(): string {
   if (override && override.length > 0) {
     return path.resolve(override);
   }
+  // Safety net: under VITEST, never silently fall back to the developer's
+  // real ~/.hydra-acp. vitest.setup.ts clamps HYDRA_ACP_HOME to a
+  // per-worker tmpdir; if it goes missing we'd rather a fire-and-forget
+  // write throw (and get swallowed by the surrounding .catch) than land
+  // a stray meta.json in the user's session directory.
+  if (process.env.VITEST) {
+    throw new Error(
+      "HYDRA_ACP_HOME is unset under VITEST; vitest.setup.ts must run first",
+    );
+  }
   return path.join(os.homedir(), ".hydra-acp");
 }
 
