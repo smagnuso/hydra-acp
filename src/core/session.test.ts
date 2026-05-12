@@ -1211,7 +1211,9 @@ describe("Session", () => {
         expect(closeSpy).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(1_001);
 
-        expect(closeSpy).toHaveBeenCalledWith({ deleteRecord: false });
+        // No prompt was ever sent, so the idle close drops the record
+        // entirely rather than persisting an empty cold session.
+        expect(closeSpy).toHaveBeenCalledWith({ deleteRecord: true });
       } finally {
         vi.useRealTimers();
       }

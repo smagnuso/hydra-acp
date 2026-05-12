@@ -6,7 +6,15 @@
 // screen so it can run before fullscreen mode is engaged.
 
 import type { Terminal } from "terminal-kit";
-import { stripHydraSessionPrefix } from "../core/session.js";
+import {
+  HEADER,
+  computeWidths,
+  formatRow,
+  toRow,
+  truncateMiddle,
+  type Row,
+  type Widths,
+} from "../cli/session-row.js";
 import type { DiscoveredSession } from "./discovery.js";
 
 export type PickerResult =
@@ -19,34 +27,10 @@ export interface PickOptions {
   sessions: DiscoveredSession[];
 }
 
-interface Row {
-  session: string;
-  upstream: string;
-  status: string;
-  clients: string;
-  agent: string;
-  title: string;
-  cwd: string;
-}
-
-interface Widths {
-  session: number;
-  upstream: number;
-  status: number;
-  clients: number;
-  agent: number;
-  title: number;
-}
-
-const HEADER: Row = {
-  session: "SESSION",
-  upstream: "UPSTREAM",
-  status: "STATUS",
-  clients: "CLIENTS",
-  agent: "AGENT",
-  title: "TITLE",
-  cwd: "CWD",
-};
+// Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
+// content budget is termWidth - 2. Apply the same prefix to the
+// "+ New session" label so its truncation matches.
+const ROW_PREFIX_WIDTH = 2;
 
 export async function pickSession(
   term: Terminal,
@@ -72,28 +56,35 @@ export async function pickSession(
     return b.updatedAt.localeCompare(a.updatedAt);
   });
   const visible = sorted;
-  const rows = visible.map(toRow);
-  const widths = computeWidths(rows);
-  const newSessionLabel = `+ New session in ${opts.cwd}`;
-  const headerLine = formatRow(HEADER, widths);
-  const sessionLines = rows.map((r) => formatRow(r, widths));
-
-  // Viewport sizing: "+ New" + blank + header + session viewport + scroll
-  // indicator + 1 row breathing room at top = (terminal height - 6) session
-  // rows. Floor at 3 so very small terminals still show something.
-  const termHeight =
-    (term as unknown as { height?: number }).height ?? 24;
-  const maxViewportRows = Math.max(3, termHeight - 6);
-  const viewportSize = Math.min(visible.length, maxViewportRows);
-
-  term("\n");
+  const rows: Row[] = visible.map(toRow);
+  const widths: Widths = computeWidths(rows);
 
   // selectedIdx 0 = "+ New session"; 1..N = visible sessions in order.
   // scrollOffset is the 0-indexed session that occupies the first viewport
-  // row. Adjusted on selection change to keep the cursor in view.
+  // row. Both persist across resizes so the cursor doesn't snap.
   const total = 1 + visible.length;
   let selectedIdx = 0;
   let scrollOffset = 0;
+
+  // All layout state — recomputed on initial paint AND on every resize.
+  let termHeight = readTermHeight(term);
+  let termWidth = readTermWidth(term);
+  let viewportSize = 0;
+  let newSessionLabel = "";
+  let headerLine = "";
+  let sessionLines: string[] = [];
+  let startRow = 1;
+
+  const computeLayout = (): void => {
+    termHeight = readTermHeight(term);
+    termWidth = readTermWidth(term);
+    const maxViewportRows = Math.max(3, termHeight - 6);
+    viewportSize = Math.min(visible.length, maxViewportRows);
+    const rowMaxWidth = Math.max(10, termWidth - ROW_PREFIX_WIDTH);
+    newSessionLabel = formatNewSessionLabel(opts.cwd, rowMaxWidth);
+    headerLine = formatRow(HEADER, widths, rowMaxWidth);
+    sessionLines = rows.map((r) => formatRow(r, widths, rowMaxWidth));
+  };
 
   const adjustScroll = (): void => {
     if (selectedIdx === 0) {
@@ -104,6 +95,10 @@ export async function pickSession(
       scrollOffset = sessionIdx;
     } else if (sessionIdx >= scrollOffset + viewportSize) {
       scrollOffset = sessionIdx - viewportSize + 1;
+    } else if (scrollOffset + viewportSize > visible.length) {
+      // Resize shrank the viewport past the tail — pull scrollOffset back
+      // so we still fill the visible rows.
+      scrollOffset = Math.max(0, visible.length - viewportSize);
     }
   };
 
@@ -140,30 +135,31 @@ export async function pickSession(
     return `  ${parts.join(" · ")}`;
   };
 
-  // Initial paint: "+ New", blank spacer, header, viewport of session
-  // rows, scroll indicator. Each followed by \n so the terminal scrolls
-  // naturally if the picker's total height exceeds the viewport.
-  paintNewItem();
-  term("\n\n");
-  term.dim.noFormat(`  ${headerLine}`)("\n");
-  for (let v = 0; v < viewportSize; v++) {
-    paintSessionRow(scrollOffset + v);
-    term("\n");
-  }
-  term.dim.noFormat(formatIndicator())("\n");
-
-  // Compute startRow by reading the cursor (one row past the indicator)
-  // and walking back: "+ New" (1) + spacer (1) + header (1) +
-  // viewport (viewportSize) + indicator (1) = viewportSize + 4.
-  const cursorY = await getCursorY(term);
-  const startRow = Math.max(1, cursorY - (viewportSize + 4));
-  const newRow = startRow;
-  const indicatorRow = startRow + 3 + viewportSize;
+  const indicatorRow = (): number => startRow + 3 + viewportSize;
   const sessionRow = (sessionIdx: number): number =>
     startRow + 3 + (sessionIdx - scrollOffset);
 
+  // Full paint from a clean slate: clear the screen, anchor the picker at
+  // row 1, and lay out every row. Used on initial entry (so we don't have
+  // to rely on a cursor-position query) and on resize (where the cleanest
+  // way to recover is to start over).
+  const renderFromScratch = (): void => {
+    computeLayout();
+    adjustScroll();
+    startRow = 1;
+    term.moveTo(1, 1).eraseDisplayBelow();
+    paintNewItem();
+    term("\n\n");
+    term.dim.noFormat(`  ${headerLine}`)("\n");
+    for (let v = 0; v < viewportSize; v++) {
+      paintSessionRow(scrollOffset + v);
+      term("\n");
+    }
+    term.dim.noFormat(formatIndicator())("\n");
+  };
+
   const repaintNewItem = (): void => {
-    term.moveTo(1, newRow).eraseLineAfter();
+    term.moveTo(1, startRow).eraseLineAfter();
     paintNewItem();
   };
   const repaintSessionRow = (sessionIdx: number): void => {
@@ -185,22 +181,31 @@ export async function pickSession(
         paintSessionRow(sessionIdx);
       }
     }
-    term.moveTo(1, indicatorRow).eraseLineAfter();
+    term.moveTo(1, indicatorRow()).eraseLineAfter();
     term.dim.noFormat(formatIndicator());
   };
 
+  renderFromScratch();
   term.hideCursor();
+
   return await new Promise<PickerResult>((resolve) => {
     let resolved = false;
+    const onResize = (): void => {
+      if (resolved) {
+        return;
+      }
+      renderFromScratch();
+    };
     const cleanup = (): void => {
       if (resolved) {
         return;
       }
       resolved = true;
       term.off("key", onKey);
+      term.off("resize", onResize);
       term.grabInput(false);
       term.hideCursor(false);
-      term.moveTo(1, indicatorRow + 1);
+      term.moveTo(1, indicatorRow() + 1);
       term("\n");
     };
     const move = (delta: number): void => {
@@ -286,62 +291,22 @@ export async function pickSession(
     };
     term.grabInput({});
     term.on("key", onKey);
+    term.on("resize", onResize);
   });
 }
 
-function getCursorY(term: Terminal): Promise<number> {
-  return new Promise((resolve) => {
-    term.getCursorLocation((err, _x, y) => {
-      if (err || y === undefined) {
-        resolve((term as unknown as { height: number }).height ?? 24);
-        return;
-      }
-      resolve(y);
-    });
-  });
+function readTermHeight(term: Terminal): number {
+  return (term as unknown as { height?: number }).height ?? 24;
 }
 
-function toRow(s: DiscoveredSession): Row {
-  return {
-    session: stripHydraSessionPrefix(s.sessionId),
-    upstream: s.upstreamSessionId ?? "-",
-    status: s.status.toUpperCase(),
-    clients: s.status === "cold" ? "-" : String(s.attachedClients),
-    agent: s.agentId ?? "?",
-    title: s.title ?? "-",
-    cwd: s.cwd,
-  };
+function readTermWidth(term: Terminal): number {
+  return (term as unknown as { width?: number }).width ?? 80;
 }
 
-function computeWidths(rows: Row[]): Widths {
-  return {
-    session: maxLen(HEADER.session, rows.map((r) => r.session)),
-    upstream: maxLen(HEADER.upstream, rows.map((r) => r.upstream)),
-    status: maxLen(HEADER.status, rows.map((r) => r.status)),
-    clients: maxLen(HEADER.clients, rows.map((r) => r.clients)),
-    agent: maxLen(HEADER.agent, rows.map((r) => r.agent)),
-    title: maxLen(HEADER.title, rows.map((r) => r.title)),
-  };
-}
-
-function maxLen(headerCell: string, values: string[]): number {
-  let max = headerCell.length;
-  for (const v of values) {
-    if (v.length > max) {
-      max = v.length;
-    }
-  }
-  return max;
-}
-
-function formatRow(r: Row, w: Widths): string {
-  return [
-    r.session.padEnd(w.session),
-    r.upstream.padEnd(w.upstream),
-    r.status.padEnd(w.status),
-    r.clients.padStart(w.clients),
-    r.agent.padEnd(w.agent),
-    r.title.padEnd(w.title),
-    r.cwd,
-  ].join("  ");
+// Middle-truncate the cwd so the user still sees enough of it (home,
+// project root, leaf) to identify the session.
+function formatNewSessionLabel(cwd: string, maxWidth: number): string {
+  const prefix = "+ New session in ";
+  const budget = Math.max(1, maxWidth - prefix.length);
+  return prefix + truncateMiddle(cwd, budget);
 }

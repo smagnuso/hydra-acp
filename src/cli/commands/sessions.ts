@@ -1,5 +1,10 @@
 import { loadConfig } from "../../core/config.js";
-import { stripHydraSessionPrefix } from "../../core/session.js";
+import {
+  HEADER,
+  computeWidths,
+  formatRow,
+  toRow,
+} from "../session-row.js";
 
 export async function runSessionsList(opts: { all?: boolean } = {}): Promise<void> {
   const config = await loadConfig();
@@ -48,61 +53,20 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
     visible = [...sorted.slice(0, liveCount), ...coldSlice];
     truncated = hiddenCold;
   }
-  const rows = visible.map((s) => ({
-    session: stripHydraSessionPrefix(s.sessionId),
-    upstream: s.upstreamSessionId ?? "-",
-    status: (s.status ?? "live").toUpperCase(),
-    clients: s.status === "cold" ? "-" : String(s.attachedClients),
-    agent: s.agentId ?? "?",
-    title: s.title ?? "-",
-    cwd: s.cwd,
-  }));
-  const header = {
-    session: "SESSION",
-    upstream: "UPSTREAM",
-    status: "STATUS",
-    clients: "CLIENTS",
-    agent: "AGENT",
-    title: "TITLE",
-    cwd: "CWD",
-  };
-  const widths = {
-    session: maxLen(header.session, rows.map((r) => r.session)),
-    upstream: maxLen(header.upstream, rows.map((r) => r.upstream)),
-    status: maxLen(header.status, rows.map((r) => r.status)),
-    clients: maxLen(header.clients, rows.map((r) => r.clients)),
-    agent: maxLen(header.agent, rows.map((r) => r.agent)),
-    title: maxLen(header.title, rows.map((r) => r.title)),
-  };
-  const formatRow = (r: typeof header): string =>
-    [
-      r.session.padEnd(widths.session),
-      r.upstream.padEnd(widths.upstream),
-      r.status.padEnd(widths.status),
-      r.clients.padStart(widths.clients),
-      r.agent.padEnd(widths.agent),
-      r.title.padEnd(widths.title),
-      r.cwd,
-    ].join("  ");
-  process.stdout.write(formatRow(header) + "\n");
+  const rows = visible.map(toRow);
+  const widths = computeWidths(rows);
+  // Truncate to terminal width only when stdout is a TTY — piping to a
+  // file or grep should preserve the full row.
+  const maxWidth = process.stdout.isTTY ? process.stdout.columns : undefined;
+  process.stdout.write(formatRow(HEADER, widths, maxWidth) + "\n");
   for (const r of rows) {
-    process.stdout.write(formatRow(r) + "\n");
+    process.stdout.write(formatRow(r, widths, maxWidth) + "\n");
   }
   if (truncated > 0) {
     process.stdout.write(
       `\n... ${truncated} more cold session${truncated === 1 ? "" : "s"} hidden. Use --all to show.\n`,
     );
   }
-}
-
-function maxLen(headerCell: string, values: string[]): number {
-  let max = headerCell.length;
-  for (const v of values) {
-    if (v.length > max) {
-      max = v.length;
-    }
-  }
-  return max;
 }
 
 export async function runSessionsKill(id: string | undefined): Promise<void> {
