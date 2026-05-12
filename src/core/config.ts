@@ -33,6 +33,10 @@ const TuiConfig = z.object({
   // CPU low during heavy streaming; bump to 250 for 4 Hz, 100 for ~10 Hz,
   // or 0 to disable throttling entirely.
   repaintThrottleMs: z.number().int().nonnegative().default(1000),
+  // Cap on logical lines retained in the in-memory scrollback render
+  // buffer. Oldest lines are dropped on overflow. The on-disk session
+  // history is unaffected; this only bounds the TUI's local view buffer.
+  maxScrollbackLines: z.number().int().positive().default(10_000),
 });
 
 const ExtensionName = z
@@ -66,7 +70,7 @@ export const HydraConfig = z.object({
   // recency and truncated to this count. `--all` overrides in the CLI.
   sessionListColdLimit: z.number().int().nonnegative().default(20),
   extensions: z.record(ExtensionName, ExtensionBody).default({}),
-  tui: TuiConfig.default({ repaintThrottleMs: 1000 }),
+  tui: TuiConfig.default({ repaintThrottleMs: 1000, maxScrollbackLines: 10_000 }),
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;

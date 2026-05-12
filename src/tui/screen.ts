@@ -18,6 +18,9 @@ export interface ScreenOptions {
   // 0 disables throttling. User-action repaints (scroll, modal, resize,
   // /clear, ^L) bypass this regardless. Default 1000 (1 Hz).
   repaintThrottleMs?: number;
+  // Cap on logical lines retained in scrollback. Oldest are dropped on
+  // overflow. Default 10_000.
+  maxScrollbackLines?: number;
 }
 
 interface BannerState {
@@ -80,6 +83,9 @@ const CONFIRM_PROMPT_ROWS = 2;
 // more visible. User-action repaints (scrolling, modal open/close, /clear)
 // bypass the throttle. Override via `tui.repaintThrottleMs` in config.
 const DEFAULT_CONTENT_REPAINT_THROTTLE_MS = 1000;
+// Default cap on logical lines retained in scrollback. Override via
+// `tui.maxScrollbackLines` in config.
+const DEFAULT_MAX_SCROLLBACK_LINES = 10_000;
 
 export class Screen {
   private term: Terminal;
@@ -101,6 +107,17 @@ export class Screen {
   private lastRepaintAt = 0;
   private throttledRepaintTimer: NodeJS.Timeout | null = null;
   private contentRepaintThrottleMs: number;
+  private maxScrollbackLines: number;
+  // Wrap memoization: each FormattedLine that lands in this.lines gets a
+  // monotonic id assigned via trackLine(); wrapCache holds the pre-wrapped
+  // FormattedLine[] for that id at wrapCacheWidth. Width changes flush the
+  // whole cache; in-place body mutation (streaming) and splices invalidate
+  // affected ids. Result: steady-state repaints only wrap newly-appended
+  // lines, not the entire history.
+  private nextLineId = 1;
+  private lineIds = new WeakMap<FormattedLine, number>();
+  private wrapCache = new Map<number, FormattedLine[]>();
+  private wrapCacheWidth = 0;
   private permissionPrompt: PermissionPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
   private completions: CompletionItem[] = [];
@@ -137,6 +154,8 @@ export class Screen {
     this.onKey = opts.onKey;
     this.contentRepaintThrottleMs =
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
+    this.maxScrollbackLines =
+      opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name) => this.handleMouse(name);
@@ -264,14 +283,18 @@ export class Screen {
     }
     this.streamingActive = false;
     this.lines.push(...lines);
+    this.trackLines(lines);
     this.adjustScrollForLineChange(lines.length);
+    this.trimScrollback();
     this.scheduleRepaint();
   }
 
   appendLine(line: FormattedLine): void {
     this.streamingActive = false;
     this.lines.push(line);
+    this.trackLine(line);
     this.adjustScrollForLineChange(1);
+    this.trimScrollback();
     this.scheduleRepaint();
   }
 
@@ -282,6 +305,44 @@ export class Screen {
   private adjustScrollForLineChange(delta: number): void {
     if (this.scrollOffset > 0 && delta !== 0) {
       this.scrollOffset = Math.max(0, this.scrollOffset + delta);
+    }
+  }
+
+  private trackLine(line: FormattedLine): void {
+    this.lineIds.set(line, this.nextLineId++);
+  }
+
+  private trackLines(lines: FormattedLine[]): void {
+    for (const line of lines) {
+      this.trackLine(line);
+    }
+  }
+
+  private forgetLine(line: FormattedLine): void {
+    const id = this.lineIds.get(line);
+    if (id !== undefined) {
+      this.wrapCache.delete(id);
+    }
+  }
+
+  // Drop oldest lines once scrollback exceeds the configured cap. Removes
+  // their wrap-cache entries and shifts keyedBlocks indices in sync;
+  // blocks whose lines fully fell off the head are dropped (a later
+  // upsert for that key will start a fresh block at the bottom).
+  private trimScrollback(): void {
+    const overflow = this.lines.length - this.maxScrollbackLines;
+    if (overflow <= 0) {
+      return;
+    }
+    const removed = this.lines.splice(0, overflow);
+    for (const line of removed) {
+      this.forgetLine(line);
+    }
+    for (const [key, range] of [...this.keyedBlocks.entries()]) {
+      range.start -= overflow;
+      if (range.start < 0) {
+        this.keyedBlocks.delete(key);
+      }
     }
   }
 
@@ -313,7 +374,15 @@ export class Screen {
       touchesEnd = oldEnd >= this.lines.length;
       const delta = newLines.length - existing.count;
       scrollDelta = delta;
-      this.lines.splice(existing.start, existing.count, ...newLines);
+      const removed = this.lines.splice(
+        existing.start,
+        existing.count,
+        ...newLines,
+      );
+      for (const line of removed) {
+        this.forgetLine(line);
+      }
+      this.trackLines(newLines);
       existing.count = newLines.length;
       if (delta !== 0) {
         for (const [k, range] of this.keyedBlocks) {
@@ -332,11 +401,13 @@ export class Screen {
         count: newLines.length,
       });
       this.lines.push(...newLines);
+      this.trackLines(newLines);
     }
     if (touchesEnd) {
       this.streamingActive = false;
     }
     this.adjustScrollForLineChange(scrollDelta);
+    this.trimScrollback();
     this.scheduleRepaint();
   }
 
@@ -359,6 +430,7 @@ export class Screen {
     if (this.streamingActive && this.lines.length > 0) {
       const last = this.lines[this.lines.length - 1];
       if (last) {
+        this.forgetLine(last);
         last.body += first ?? "";
       }
     } else {
@@ -371,7 +443,9 @@ export class Screen {
         const isBlank =
           last && last.body === "" && (!last.prefix || last.prefix === "");
         if (!isBlank) {
-          this.lines.push({ body: "" });
+          const sep: FormattedLine = { body: "" };
+          this.lines.push(sep);
+          this.trackLine(sep);
           added += 1;
         }
       }
@@ -384,19 +458,23 @@ export class Screen {
         initial.prefixStyle = prefixStyle;
       }
       this.lines.push(initial);
+      this.trackLine(initial);
       added += 1;
     }
     const continuationPrefix = " ".repeat(prefix.length);
     for (const piece of rest) {
-      this.lines.push({
+      const cont: FormattedLine = {
         prefix: continuationPrefix,
         body: piece,
         bodyStyle,
-      });
+      };
+      this.lines.push(cont);
+      this.trackLine(cont);
       added += 1;
     }
     this.streamingActive = true;
     this.adjustScrollForLineChange(added);
+    this.trimScrollback();
     this.scheduleRepaint();
   }
 
@@ -414,6 +492,8 @@ export class Screen {
   clearScrollback(): void {
     this.lines = [];
     this.keyedBlocks.clear();
+    this.wrapCache.clear();
+    this.wrapCacheWidth = 0;
     this.streamingActive = false;
     this.scrollOffset = 0;
     this.repaint();
@@ -439,7 +519,10 @@ export class Screen {
     }
     const touchesEnd =
       existing.start + existing.count >= this.lines.length;
-    this.lines.splice(existing.start, existing.count);
+    const removed = this.lines.splice(existing.start, existing.count);
+    for (const line of removed) {
+      this.forgetLine(line);
+    }
     this.keyedBlocks.delete(key);
     for (const [, range] of this.keyedBlocks) {
       if (range.start > existing.start) {
@@ -527,9 +610,12 @@ export class Screen {
     if (last && last.body === "" && (last.prefix === undefined || last.prefix === "")) {
       return;
     }
-    this.lines.push({ body: "" });
+    const sep: FormattedLine = { body: "" };
+    this.lines.push(sep);
+    this.trackLine(sep);
     this.streamingActive = false;
     this.adjustScrollForLineChange(1);
+    this.trimScrollback();
     this.scheduleRepaint();
   }
 
@@ -620,9 +706,11 @@ export class Screen {
   }
 
   private maxScrollOffset(): number {
-    const wrapped = this.wrapLines(this.lines, this.term.width);
-    const visible = this.scrollbackVisibleRows();
-    return Math.max(0, wrapped.length - visible);
+    const { rows } = this.wrapTail(
+      this.term.width,
+      Number.POSITIVE_INFINITY,
+    );
+    return Math.max(0, rows.length - this.scrollbackVisibleRows());
   }
 
   // Used by content mutators to coalesce rapid updates. Repaints fire
@@ -757,11 +845,18 @@ export class Screen {
     if (visibleRows <= 0) {
       return;
     }
-    const wrapped = this.wrapLines(this.lines, w);
-    // Clamp scrollOffset in case content shrank or window resized.
-    const max = Math.max(0, wrapped.length - visibleRows);
-    if (this.scrollOffset > max) {
-      this.scrollOffset = max;
+    const { rows: wrapped, exhausted } = this.wrapTail(
+      w,
+      visibleRows + this.scrollOffset,
+    );
+    // Clamp scrollOffset when content shrank/resized — only knowable when
+    // wrapTail walked the entire array. If exhausted is false we have at
+    // least `needed` rows, so scrollOffset is necessarily valid.
+    if (exhausted) {
+      const max = Math.max(0, wrapped.length - visibleRows);
+      if (this.scrollOffset > max) {
+        this.scrollOffset = max;
+      }
     }
     const end = wrapped.length - this.scrollOffset;
     const start = Math.max(0, end - visibleRows);
@@ -1056,39 +1151,89 @@ export class Screen {
     );
   }
 
-  private wrapLines(lines: FormattedLine[], width: number): FormattedLine[] {
+  // Walk this.lines from the tail, accumulating wrapped rows via the
+  // wrap cache, until we have at least `needed` rows or run out. Returns
+  // the collected rows in original (top-down) order plus an `exhausted`
+  // flag that's true iff we reached the head of this.lines. The hot path
+  // (drawScrollback) only ever asks for `visibleRows + scrollOffset`
+  // rows, so a 10k-line scrollback costs ~50 cache hits per repaint
+  // instead of 10k. With `needed = Infinity` this walks everything and
+  // doubles as a total-row counter for maxScrollOffset.
+  private wrapTail(
+    width: number,
+    needed: number,
+  ): { rows: FormattedLine[]; exhausted: boolean } {
     if (width <= 4) {
-      return lines;
+      const take = Math.min(needed, this.lines.length);
+      return {
+        rows: this.lines.slice(this.lines.length - take),
+        exhausted: needed >= this.lines.length,
+      };
     }
-    const out: FormattedLine[] = [];
-    for (const line of lines) {
-      const prefix = line.prefix ?? "";
-      const room = Math.max(1, width - prefix.length);
-      const chunks = line.ansi
-        ? wrapAnsiBody(line.body, room)
-        : wrap(line.body, room);
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i] ?? "";
-        const wrappedLine: FormattedLine = {
-          prefix: i === 0 ? line.prefix : " ".repeat(prefix.length),
-          body: chunk,
-        };
-        if (line.prefixStyle !== undefined) {
-          wrappedLine.prefixStyle = line.prefixStyle;
-        }
-        if (line.bodyStyle !== undefined) {
-          wrappedLine.bodyStyle = line.bodyStyle;
-        }
-        if (line.fillRow) {
-          wrappedLine.fillRow = true;
-        }
-        if (line.ansi) {
-          wrappedLine.ansi = true;
-        }
-        out.push(wrappedLine);
+    if (this.wrapCacheWidth !== width) {
+      this.wrapCache.clear();
+      this.wrapCacheWidth = width;
+    }
+    if (needed <= 0 || this.lines.length === 0) {
+      return { rows: [], exhausted: true };
+    }
+    const batches: FormattedLine[][] = [];
+    let total = 0;
+    let stoppedAt = 0;
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      const wrapped = this.wrapOne(this.lines[i]!, width);
+      batches.push(wrapped);
+      total += wrapped.length;
+      stoppedAt = i;
+      if (total >= needed) {
+        break;
       }
     }
-    return out;
+    const rows: FormattedLine[] = [];
+    for (let i = batches.length - 1; i >= 0; i--) {
+      rows.push(...batches[i]!);
+    }
+    return { rows, exhausted: stoppedAt === 0 };
+  }
+
+  private wrapOne(line: FormattedLine, width: number): FormattedLine[] {
+    const id = this.lineIds.get(line);
+    if (id !== undefined) {
+      const cached = this.wrapCache.get(id);
+      if (cached) {
+        return cached;
+      }
+    }
+    const prefix = line.prefix ?? "";
+    const room = Math.max(1, width - prefix.length);
+    const chunks = line.ansi
+      ? wrapAnsiBody(line.body, room)
+      : wrap(line.body, room);
+    const wrapped: FormattedLine[] = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i] ?? "";
+      const wrappedLine: FormattedLine = {
+        prefix: i === 0 ? line.prefix : " ".repeat(prefix.length),
+        body: chunk,
+      };
+      if (line.prefixStyle !== undefined) {
+        wrappedLine.prefixStyle = line.prefixStyle;
+      }
+      if (line.bodyStyle !== undefined) {
+        wrappedLine.bodyStyle = line.bodyStyle;
+      }
+      if (line.fillRow) {
+        wrappedLine.fillRow = true;
+      }
+      if (line.ansi) {
+        wrappedLine.ansi = true;
+      }
+      wrapped.push(wrappedLine);
+    }
+    if (id !== undefined) {
+      this.wrapCache.set(id, wrapped);
+    }
+    return wrapped;
   }
 
   private writeFormattedLine(line: FormattedLine, width: number): void {

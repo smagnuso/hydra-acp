@@ -26,7 +26,7 @@ function testConfig(): HydraConfig {
     defaultCwd: os.homedir(),
     sessionListColdLimit: 20,
     extensions: {},
-    tui: { repaintThrottleMs: 1000 },
+    tui: { repaintThrottleMs: 1000, maxScrollbackLines: 10_000 },
   };
 }
 
@@ -426,7 +426,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
           enabled: true,
         },
       },
-      tui: { repaintThrottleMs: 1000 },
+      tui: { repaintThrottleMs: 1000, maxScrollbackLines: 10_000 },
     };
     handle = await startDaemon(cfg);
     const p = port(handle);

@@ -443,6 +443,7 @@ async function runSession(
     term,
     dispatcher,
     repaintThrottleMs: config.tui.repaintThrottleMs,
+    maxScrollbackLines: config.tui.maxScrollbackLines,
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
         if (pendingPermission && tryHandlePermissionKey(ev)) {
