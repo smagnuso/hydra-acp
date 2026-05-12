@@ -863,12 +863,20 @@ export class Screen {
     const end = wrapped.length - this.scrollOffset;
     const start = Math.max(0, end - visibleRows);
     const slice = wrapped.slice(start, end);
+    // Anchor content to the bottom of the scrollback area so a fresh
+    // session shows its first lines just above the prompt and new
+    // content grows upward — the user can always look at the row above
+    // the prompt for the latest text.
+    const padTop = Math.max(0, visibleRows - slice.length);
     for (let i = 0; i < visibleRows; i++) {
       const row = top + i;
       this.term.moveTo(1, row).eraseLineAfter();
-      const line = slice[i];
-      if (line) {
-        this.writeFormattedLine(line, w);
+      const sliceIdx = i - padTop;
+      if (sliceIdx >= 0) {
+        const line = slice[sliceIdx];
+        if (line) {
+          this.writeFormattedLine(line, w);
+        }
       }
     }
   }
