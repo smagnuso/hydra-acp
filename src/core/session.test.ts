@@ -721,6 +721,32 @@ describe("Session", () => {
       expect(session.title).toBe("first prompt title");
     });
 
+    it("does not clobber a resurrected title with the first prompt", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "hydra_session_TR",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_TR",
+        title: "preserved title from prior life",
+        firstPromptSeeded: true,
+      });
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "next turn after resurrect" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).toBe("preserved title from prior life");
+    });
+
     it("onBroadcast fires for recordable entries and skips snapshot-shaped ones", () => {
       const { session, mock } = makeSession("hydra_session_OB", "u_OB");
       const seen: string[] = [];

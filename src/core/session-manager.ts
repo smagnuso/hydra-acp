@@ -182,6 +182,7 @@ export class SessionManager {
       currentModel: params.currentModel,
       currentMode: params.currentMode,
       agentCommands: params.agentCommands,
+      firstPromptSeeded: true,
     });
     await this.attachManagerHooks(session);
     return session;

@@ -174,6 +174,41 @@ describe("SessionManager.resurrect", () => {
     expect(session.agentMeta).toEqual({ "agent-vendor": { sequence: 7 } });
   });
 
+  it("does not let the first prompt after resurrect clobber the persisted title", async () => {
+    const titledMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ stopReason: "end_turn" });
+        return m.agent;
+      },
+    );
+    const session = await titledMgr.resurrect({
+      hydraSessionId: "sess_resurrect_title",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: "/w",
+      title: "feature-X",
+    });
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import(
+      "../__tests__/test-utils.js"
+    );
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    session.attach({ clientId: "c1", connection: conn }, "full");
+
+    await session.prompt("c1", {
+      prompt: [{ type: "text", text: "first prompt of the new life" }],
+    });
+    expect(session.title).toBe("feature-X");
+  });
+
   it("propagates title onto the resurrected session and into list()", async () => {
     const titledMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),

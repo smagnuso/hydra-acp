@@ -82,6 +82,11 @@ export interface SessionInit {
   currentModel?: string;
   currentMode?: string;
   agentCommands?: AdvertisedCommand[];
+  // Suppress the first-prompt title heuristic. Set by SessionManager
+  // when resurrecting a session whose title is already meaningful (from
+  // a prior life's prompt seed, /hydra title, or regenTitle) — without
+  // this, the next prompt would clobber the persisted title.
+  firstPromptSeeded?: boolean;
 }
 
 export interface CloseOptions {
@@ -185,6 +190,9 @@ export class Session {
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    if (init.firstPromptSeeded) {
+      this.firstPromptSeeded = true;
+    }
     this.historyStore = init.historyStore;
     if (init.seedHistory && init.seedHistory.length > 0) {
       this.history = [...init.seedHistory];
