@@ -716,12 +716,13 @@ export class Screen {
     let cwdRoom: number;
     let titleRoom: number;
     if (title) {
-      // Let cwd take its natural width, but cap at half of variableRoom so a
-      // long path can't squeeze the title out entirely. Title gets whatever
-      // remains — up to and including the gap before the usage block.
-      const cwdCap = Math.max(8, Math.floor(variableRoom / 2));
-      cwdRoom = Math.min(this.header.cwd.length, cwdCap);
-      titleRoom = Math.max(8, variableRoom - cwdRoom);
+      // Title is the most useful identifier — give it its natural width
+      // first, capped so cwd retains at least a minimum slice. cwd takes
+      // whatever remains.
+      const cwdMin = Math.min(this.header.cwd.length, 12);
+      const titleCap = Math.max(8, variableRoom - cwdMin);
+      titleRoom = Math.min(title.length, titleCap);
+      cwdRoom = Math.max(8, variableRoom - titleRoom);
     } else {
       titleRoom = 0;
       cwdRoom = variableRoom;

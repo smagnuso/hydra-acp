@@ -525,7 +525,7 @@ export class Session {
     }
     const promptParams = (params ?? {}) as { prompt?: unknown };
     const text = extractPromptText(promptParams.prompt);
-    const seed = firstLine(text, 80);
+    const seed = firstLine(text, 200);
     if (!seed) {
       return;
     }
