@@ -829,6 +829,7 @@ async function runSession(
     const choice: PickerResult = await pickSession(term, {
       cwd: resolvedCwd,
       sessions,
+      config,
     });
     if (choice.kind === "abort") {
       screen.start();
@@ -1667,6 +1668,7 @@ async function resolveSession(
   const choice: PickerResult = await pickSession(term, {
     cwd,
     sessions,
+    config,
   });
   if (choice.kind === "abort") {
     return null;

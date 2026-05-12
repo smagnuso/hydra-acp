@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { listSessions, pickMostRecent } from "./discovery.js";
+import {
+  deleteSession,
+  killSession,
+  listSessions,
+  pickMostRecent,
+} from "./discovery.js";
 import type { HydraConfig } from "../core/config.js";
 
 const cfg = {
@@ -68,6 +73,55 @@ describe("listSessions", () => {
 
   it("returns [] when sessions field missing", async () => {
     expect(await listSessions(cfg, {}, fakeOk({}))).toEqual([]);
+  });
+});
+
+describe("killSession", () => {
+  it("issues POST .../kill with bearer auth", async () => {
+    const captured: { url: string; method?: string; auth?: string } = { url: "" };
+    const fetchImpl = (async (input: string, init?: RequestInit) => {
+      captured.url = input as string;
+      captured.method = init?.method;
+      const headers = init?.headers as Record<string, string> | undefined;
+      captured.auth = headers?.["Authorization"];
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    await killSession(cfg, "sess-1", fetchImpl);
+    expect(captured.url).toBe("http://127.0.0.1:8765/v1/sessions/sess-1/kill");
+    expect(captured.method).toBe("POST");
+    expect(captured.auth).toBe("Bearer tok");
+  });
+
+  it("tolerates 404", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 404 })) as typeof fetch;
+    await expect(killSession(cfg, "sess-1", fetchImpl)).resolves.toBeUndefined();
+  });
+
+  it("throws on other non-2xx", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 500 })) as typeof fetch;
+    await expect(killSession(cfg, "sess-1", fetchImpl)).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("deleteSession", () => {
+  it("issues DELETE with bearer auth", async () => {
+    const captured: { url: string; method?: string; auth?: string } = { url: "" };
+    const fetchImpl = (async (input: string, init?: RequestInit) => {
+      captured.url = input as string;
+      captured.method = init?.method;
+      const headers = init?.headers as Record<string, string> | undefined;
+      captured.auth = headers?.["Authorization"];
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    await deleteSession(cfg, "sess-1", fetchImpl);
+    expect(captured.url).toBe("http://127.0.0.1:8765/v1/sessions/sess-1");
+    expect(captured.method).toBe("DELETE");
+    expect(captured.auth).toBe("Bearer tok");
+  });
+
+  it("tolerates 404", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 404 })) as typeof fetch;
+    await expect(deleteSession(cfg, "sess-1", fetchImpl)).resolves.toBeUndefined();
   });
 });
 

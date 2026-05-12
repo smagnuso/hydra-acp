@@ -15,7 +15,14 @@ import {
   type Row,
   type Widths,
 } from "../cli/session-row.js";
-import type { DiscoveredSession } from "./discovery.js";
+import { stripHydraSessionPrefix } from "../core/session.js";
+import type { HydraConfig } from "../core/config.js";
+import {
+  deleteSession,
+  killSession,
+  listSessions,
+  type DiscoveredSession,
+} from "./discovery.js";
 
 export type PickerResult =
   | { kind: "attach"; sessionId: string; agentId?: string }
@@ -25,6 +32,7 @@ export type PickerResult =
 export interface PickOptions {
   cwd: string;
   sessions: DiscoveredSession[];
+  config: HydraConfig;
 }
 
 // Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
@@ -39,33 +47,47 @@ export async function pickSession(
   if (opts.sessions.length === 0) {
     return { kind: "new" };
   }
-  // Tier sessions so live ones come first, and within the live group prefer
-  // sessions whose cwd matches the caller's. This puts the most relevant
-  // session at the top of the list, just below the "+ New session" entry.
-  const score = (s: DiscoveredSession): number => {
-    if (s.status !== "live") {
-      return 0;
-    }
-    return s.cwd === opts.cwd ? 2 : 1;
+  const sortSessions = (sessions: DiscoveredSession[]): DiscoveredSession[] => {
+    const score = (s: DiscoveredSession): number => {
+      if (s.status !== "live") {
+        return 0;
+      }
+      return s.cwd === opts.cwd ? 2 : 1;
+    };
+    return [...sessions].sort((a, b) => {
+      const tier = score(b) - score(a);
+      if (tier !== 0) {
+        return tier;
+      }
+      return b.updatedAt.localeCompare(a.updatedAt);
+    });
   };
-  const sorted = [...opts.sessions].sort((a, b) => {
-    const tier = score(b) - score(a);
-    if (tier !== 0) {
-      return tier;
-    }
-    return b.updatedAt.localeCompare(a.updatedAt);
-  });
-  const visible = sorted;
-  const now = Date.now();
-  const rows: Row[] = visible.map((s) => toRow(s, now));
-  const widths: Widths = computeWidths(rows);
+
+  // sorted/rows/widths are rebuilt whenever the underlying session list
+  // changes (kill / delete refetches from the daemon).
+  let visible: DiscoveredSession[] = sortSessions(opts.sessions);
+  let rows: Row[] = visible.map((s) => toRow(s, Date.now()));
+  let widths: Widths = computeWidths(rows);
 
   // selectedIdx 0 = "+ New session"; 1..N = visible sessions in order.
   // scrollOffset is the 0-indexed session that occupies the first viewport
   // row. Both persist across resizes so the cursor doesn't snap.
-  const total = 1 + visible.length;
+  let total = 1 + visible.length;
   let selectedIdx = 0;
   let scrollOffset = 0;
+
+  // Confirmation state. While in 'confirm-kill' or 'confirm-delete' we
+  // hijack key handling, replace the indicator with a yes/no prompt, and
+  // ignore navigation until the user resolves (y/n/ESC). `pendingAction`
+  // pins the row that was targeted when the prompt opened so concurrent
+  // refreshes don't drift the action onto a different session.
+  type Mode = "normal" | "confirm-kill" | "confirm-delete" | "busy";
+  let mode: Mode = "normal";
+  let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
+  // Transient one-line hint shown in the indicator slot (e.g. "live —
+  // press k first" when 'd' was used on a live row). Cleared on the next
+  // key press so it never lingers.
+  let transientStatus: string | null = null;
 
   // All layout state — recomputed on initial paint AND on every resize.
   let termHeight = readTermHeight(term);
@@ -85,6 +107,16 @@ export async function pickSession(
     newSessionLabel = formatNewSessionLabel(opts.cwd, rowMaxWidth);
     headerLine = formatRow(HEADER, widths, rowMaxWidth);
     sessionLines = rows.map((r) => formatRow(r, widths, rowMaxWidth));
+  };
+
+  // After the underlying session list changed (kill / delete), rebuild
+  // the derived row/widths/layout arrays in lockstep. Callers handle
+  // cursor placement and trigger the actual repaint themselves.
+  const rebuildRows = (): void => {
+    rows = visible.map((s) => toRow(s, Date.now()));
+    widths = computeWidths(rows);
+    total = 1 + visible.length;
+    computeLayout();
   };
 
   const adjustScroll = (): void => {
@@ -136,6 +168,33 @@ export async function pickSession(
     return `  ${parts.join(" · ")}`;
   };
 
+  // Short id used in confirm prompts; matches what users see in the table.
+  const shortId = (sessionId: string): string => stripHydraSessionPrefix(sessionId);
+
+  // Paint just the indicator row in whatever style matches the current
+  // mode. Used by every state transition that doesn't redraw the whole
+  // picker (most navigation, confirm/cancel, transient hints).
+  const paintIndicator = (): void => {
+    term.moveTo(1, indicatorRow()).eraseLineAfter();
+    if (mode === "confirm-kill" && pendingAction) {
+      term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
+      return;
+    }
+    if (mode === "confirm-delete" && pendingAction) {
+      term.brightRed.noFormat(`  delete ${shortId(pendingAction.sessionId)}? [y/N]`);
+      return;
+    }
+    if (mode === "busy" && pendingAction) {
+      term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
+      return;
+    }
+    if (transientStatus !== null) {
+      term.dim.noFormat(`  ${transientStatus}`);
+      return;
+    }
+    term.dim.noFormat(formatIndicator());
+  };
+
   const indicatorRow = (): number => startRow + 3 + viewportSize;
   const sessionRow = (sessionIdx: number): number =>
     startRow + 3 + (sessionIdx - scrollOffset);
@@ -156,7 +215,8 @@ export async function pickSession(
       paintSessionRow(scrollOffset + v);
       term("\n");
     }
-    term.dim.noFormat(formatIndicator())("\n");
+    paintIndicator();
+    term("\n");
   };
 
   const repaintNewItem = (): void => {
@@ -182,8 +242,7 @@ export async function pickSession(
         paintSessionRow(sessionIdx);
       }
     }
-    term.moveTo(1, indicatorRow()).eraseLineAfter();
-    term.dim.noFormat(formatIndicator());
+    paintIndicator();
   };
 
   renderFromScratch();
@@ -208,6 +267,58 @@ export async function pickSession(
       term.hideCursor(false);
       term.moveTo(1, indicatorRow() + 1);
       term("\n");
+    };
+    // Refetch sessions from the daemon and re-render. When `preferredId`
+    // is provided we try to land the cursor on that session id (used
+    // after kill so the cursor follows the row as it sorts to the cold
+    // tier); otherwise selectedIdx stays put (clamped to the new size),
+    // which after delete lands on whatever now occupies the old slot.
+    const refresh = async (preferredId?: string): Promise<void> => {
+      try {
+        const next = await listSessions(opts.config);
+        visible = sortSessions(next);
+        rebuildRows();
+        if (preferredId !== undefined) {
+          const idx = visible.findIndex((s) => s.sessionId === preferredId);
+          if (idx >= 0) {
+            selectedIdx = idx + 1;
+          }
+        }
+        if (selectedIdx > total - 1) {
+          selectedIdx = Math.max(0, total - 1);
+        }
+        if (scrollOffset + viewportSize > visible.length) {
+          scrollOffset = Math.max(0, visible.length - viewportSize);
+        }
+        adjustScroll();
+        renderFromScratch();
+      } catch (err) {
+        transientStatus = `refresh failed: ${(err as Error).message}`;
+        renderFromScratch();
+      }
+    };
+    const performAction = async (kind: "kill" | "delete"): Promise<void> => {
+      if (!pendingAction) {
+        return;
+      }
+      const target = pendingAction;
+      mode = "busy";
+      paintIndicator();
+      try {
+        if (kind === "kill") {
+          await killSession(opts.config, target.sessionId);
+        } else {
+          await deleteSession(opts.config, target.sessionId);
+        }
+        mode = "normal";
+        pendingAction = null;
+        await refresh(kind === "kill" ? target.sessionId : undefined);
+      } catch (err) {
+        mode = "normal";
+        pendingAction = null;
+        transientStatus = `${kind} failed: ${(err as Error).message}`;
+        paintIndicator();
+      }
     };
     const move = (delta: number): void => {
       const next = Math.min(total - 1, Math.max(0, selectedIdx + delta));
@@ -239,7 +350,84 @@ export async function pickSession(
         repaintSessionRow(selectedIdx - 1);
       }
     };
-    const onKey = (name: string): void => {
+    const clearTransient = (): boolean => {
+      if (transientStatus === null) {
+        return false;
+      }
+      transientStatus = null;
+      paintIndicator();
+      return true;
+    };
+    const onKey = (
+      name: string,
+      _matches: unknown,
+      data?: { isCharacter?: boolean },
+    ): void => {
+      // Drop input while an HTTP action is mid-flight so we don't
+      // double-fire a kill/delete or repaint over the in-progress prompt.
+      if (mode === "busy") {
+        return;
+      }
+      if (mode === "confirm-kill" || mode === "confirm-delete") {
+        if (data?.isCharacter && (name === "y" || name === "Y")) {
+          const kind = mode === "confirm-kill" ? "kill" : "delete";
+          void performAction(kind);
+          return;
+        }
+        if (
+          name === "ESCAPE" ||
+          name === "CTRL_C" ||
+          name === "ENTER" ||
+          name === "KP_ENTER" ||
+          (data?.isCharacter && (name === "n" || name === "N"))
+        ) {
+          mode = "normal";
+          pendingAction = null;
+          paintIndicator();
+          return;
+        }
+        return;
+      }
+      // Any keypress dismisses a transient hint so it doesn't bleed
+      // into the next action's context. We still fall through and run
+      // the key's normal behavior.
+      clearTransient();
+      if (data?.isCharacter) {
+        if ((name === "k" || name === "K") && selectedIdx > 0) {
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          pendingAction = {
+            sessionId: session.sessionId,
+            cwd: session.cwd,
+            status: session.status,
+          };
+          mode = "confirm-kill";
+          paintIndicator();
+          return;
+        }
+        if ((name === "d" || name === "D") && selectedIdx > 0) {
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          if (session.status === "live") {
+            transientStatus = "session is live — press k to kill it first";
+            paintIndicator();
+            return;
+          }
+          pendingAction = {
+            sessionId: session.sessionId,
+            cwd: session.cwd,
+            status: session.status,
+          };
+          mode = "confirm-delete";
+          paintIndicator();
+          return;
+        }
+        return;
+      }
       switch (name) {
         case "UP":
         case "SHIFT_TAB":

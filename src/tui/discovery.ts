@@ -59,6 +59,39 @@ export async function listSessions(
   }));
 }
 
+// Demote a live session to cold (POST .../kill). A 404 is tolerated so
+// callers don't have to special-case races where the session was already
+// removed by another client.
+export async function killSession(
+  config: HydraConfig,
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const response = await fetchImpl(`${base}/v1/sessions/${id}/kill`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+  });
+  if (!response.ok && response.status !== 204 && response.status !== 404) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+}
+
+export async function deleteSession(
+  config: HydraConfig,
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const response = await fetchImpl(`${base}/v1/sessions/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+  });
+  if (!response.ok && response.status !== 204 && response.status !== 404) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+}
+
 // Picks the most recent session for a cwd. Live preferred over cold; ties
 // broken by `updatedAt` descending. Returns null when nothing matches.
 export function pickMostRecent(
