@@ -174,6 +174,7 @@ async function runSession(
     const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
     if (before === 0 && pendingTurns > 0) {
       sessionBusySince = Date.now();
+      dispatcherRef?.setTurnRunning(true);
       if (screenReady) {
         screenRef!.setBanner({ status: "busy", elapsedMs: 0 });
       }
@@ -193,6 +194,7 @@ async function runSession(
       }
     } else if (before > 0 && pendingTurns === 0) {
       sessionBusySince = null;
+      dispatcherRef?.setTurnRunning(false);
       if (sessionElapsedTimer !== null) {
         clearInterval(sessionElapsedTimer);
         sessionElapsedTimer = null;
@@ -205,10 +207,13 @@ async function runSession(
       tickWorker();
     }
   };
-  // Late-bound reference to the Screen instance so adjustPendingTurns
-  // (which can run via onNotification before `screen` is assigned) can
-  // tell whether it's safe to touch the screen.
+  // Late-bound references so adjustPendingTurns (which can run via
+  // onNotification before `screen` and `dispatcher` are assigned) can
+  // tell whether it's safe to touch them. dispatcherRef in particular
+  // gates the turnRunning flag that drives ^C → cancel; without it,
+  // a mid-turn reattach leaves ^C falling through to the exit path.
   let screenRef: Screen | null = null;
+  let dispatcherRef: InputDispatcher | null = null;
   conn.onNotification("session/update", (params) => {
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
@@ -461,6 +466,15 @@ async function runSession(
   const historyFile = paths.tuiHistoryFile();
   let history = await loadHistory(historyFile).catch(() => []);
   const dispatcher = new InputDispatcher({ history });
+  dispatcherRef = dispatcher;
+  // Replay catch-up: history replay may have already incremented
+  // pendingTurns before the dispatcher existed (notification handler
+  // skips the dispatcher call when dispatcherRef is null). If we're
+  // attaching mid-turn, propagate that state now so ^C correctly maps
+  // to cancel instead of falling through to exit.
+  if (pendingTurns > 0) {
+    dispatcher.setTurnRunning(true);
+  }
 
   let turnInFlight: { cancel: () => void } | null = null;
 
@@ -1097,7 +1111,6 @@ async function runSession(
     // turns get the same "running · 30s" treatment as ours.
     adjustPendingTurns(1);
     appendRender({ kind: "user-text", text });
-    dispatcher.setTurnRunning(true);
 
     let cancelled = false;
     turnInFlight = {
@@ -1128,7 +1141,6 @@ async function runSession(
       });
     } finally {
       turnInFlight = null;
-      dispatcher.setTurnRunning(false);
       adjustPendingTurns(-1);
       // Daemon broadcasts turn_complete to other clients but excludes the
       // originator (core/session.ts:138). Synthesize it locally so the
