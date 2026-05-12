@@ -789,7 +789,6 @@ async function runSession(
     const choice: PickerResult = await pickSession(term, {
       cwd: resolvedCwd,
       sessions,
-      coldLimit: config.sessionListColdLimit,
     });
     if (choice.kind === "abort") {
       screen.start();
@@ -1578,7 +1577,6 @@ async function resolveSession(
   const choice: PickerResult = await pickSession(term, {
     cwd,
     sessions,
-    coldLimit: config.sessionListColdLimit,
   });
   if (choice.kind === "abort") {
     return null;

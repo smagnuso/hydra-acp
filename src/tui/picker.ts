@@ -1,9 +1,9 @@
-// Pre-screen interactive picker. Lists every live session plus the most
-// recently-touched cold ones (capped at coldLimit) to keep the table
-// scannable when the on-disk history is deep, plus a "+ New session"
-// entry at the top (the default cursor position) so the user can press
-// Enter for a new session or arrow down into the session list. Lives
-// outside the main screen so it can run before fullscreen mode is engaged.
+// Pre-screen interactive picker. Lists every session (live first, then
+// cold sorted by recency) with a "+ New session" entry at the top — the
+// default cursor position — so Enter creates a new session or the user
+// can arrow down into the list. Long lists scroll within a fixed
+// viewport so every session remains reachable. Lives outside the main
+// screen so it can run before fullscreen mode is engaged.
 
 import type { Terminal } from "terminal-kit";
 import { stripHydraSessionPrefix } from "../core/session.js";
@@ -17,8 +17,6 @@ export type PickerResult =
 export interface PickOptions {
   cwd: string;
   sessions: DiscoveredSession[];
-  // Maximum cold sessions to render. Live sessions are always included.
-  coldLimit: number;
 }
 
 interface Row {
@@ -73,87 +71,234 @@ export async function pickSession(
     }
     return b.updatedAt.localeCompare(a.updatedAt);
   });
-  const liveCount = sorted.filter((s) => s.status !== "cold").length;
-  const coldSlice = sorted.slice(liveCount, liveCount + opts.coldLimit);
-  const hiddenCold = sorted.length - liveCount - coldSlice.length;
-  const visible = [...sorted.slice(0, liveCount), ...coldSlice];
+  const visible = sorted;
   const rows = visible.map(toRow);
   const widths = computeWidths(rows);
   const newSessionLabel = `+ New session in ${opts.cwd}`;
+  const headerLine = formatRow(HEADER, widths);
+  const sessionLines = rows.map((r) => formatRow(r, widths));
 
-  const items: string[] = [newSessionLabel, ...rows.map((r) => formatRow(r, widths))];
+  // Viewport sizing: "+ New" + blank + header + session viewport + scroll
+  // indicator + 1 row breathing room at top = (terminal height - 6) session
+  // rows. Floor at 3 so very small terminals still show something.
+  const termHeight =
+    (term as unknown as { height?: number }).height ?? 24;
+  const maxViewportRows = Math.max(3, termHeight - 6);
+  const viewportSize = Math.min(visible.length, maxViewportRows);
 
   term("\n");
-  term.bold("Select a session")("\n");
-  if (hiddenCold > 0) {
-    term.dim(`(${hiddenCold} older cold session${hiddenCold === 1 ? "" : "s"} hidden; use \`hydra-acp sessions --all\` to view)\n`);
-  }
-  term.dim(formatRow(HEADER, widths))("\n");
 
-  // grabInput puts stdin in raw mode, so the kernel won't deliver SIGINT for
-  // Ctrl+C. Some terminal-kit versions also drop CTRL_C from menu key
-  // bindings entirely. Listen at the term level and force-exit on Ctrl+C so
-  // the picker is always escapable.
-  const onCtrlC = (name: string): void => {
-    if (name === "CTRL_C") {
-      term.grabInput(false);
-      term("\n");
-      process.exit(130);
+  // selectedIdx 0 = "+ New session"; 1..N = visible sessions in order.
+  // scrollOffset is the 0-indexed session that occupies the first viewport
+  // row. Adjusted on selection change to keep the cursor in view.
+  const total = 1 + visible.length;
+  let selectedIdx = 0;
+  let scrollOffset = 0;
+
+  const adjustScroll = (): void => {
+    if (selectedIdx === 0) {
+      return;
+    }
+    const sessionIdx = selectedIdx - 1;
+    if (sessionIdx < scrollOffset) {
+      scrollOffset = sessionIdx;
+    } else if (sessionIdx >= scrollOffset + viewportSize) {
+      scrollOffset = sessionIdx - viewportSize + 1;
     }
   };
-  term.on("key", onCtrlC);
 
-  let response;
-  try {
-    response = await term
-      .singleColumnMenu(items, {
-        cancelable: true,
-        exitOnUnexpectedKey: false,
-        selectedIndex: 0,
-        style: term.brightWhite,
-        selectedStyle: term.brightWhite.bgBlue,
-        keyBindings: {
-          ENTER: "submit",
-          KP_ENTER: "submit",
-          UP: "previous",
-          DOWN: "next",
-          TAB: "next",
-          SHIFT_TAB: "previous",
-          HOME: "first",
-          END: "last",
-          // terminal-kit distinguishes "cancel" (emits a cancel event but
-          // does NOT exit the menu) from "escape" (with cancelable: true,
-          // ends the menu and reports canceled). Use "escape" for both
-          // bindings so the picker actually closes.
-          ESCAPE: "escape",
-          CTRL_C: "escape",
-        },
-      })
-      .promise;
-  } finally {
-    term.off("key", onCtrlC);
-  }
-
-  term("\n");
-
-  if (response.canceled || response.selectedIndex === undefined) {
-    return { kind: "abort" };
-  }
-  if (response.selectedIndex === 0) {
-    return { kind: "new" };
-  }
-  const session = visible[response.selectedIndex - 1];
-  if (!session) {
-    return { kind: "abort" };
-  }
-  const result: PickerResult = {
-    kind: "attach",
-    sessionId: session.sessionId,
+  const paintNewItem = (): void => {
+    if (selectedIdx === 0) {
+      term.brightWhite.bgBlue.noFormat(`❯ ${newSessionLabel}`);
+    } else {
+      term.noFormat(`  ${newSessionLabel}`);
+    }
   };
-  if (session.agentId !== undefined) {
-    result.agentId = session.agentId;
+
+  const paintSessionRow = (sessionIdx: number): void => {
+    const label = sessionLines[sessionIdx] ?? "";
+    if (selectedIdx === sessionIdx + 1) {
+      term.brightWhite.bgBlue.noFormat(`❯ ${label}`);
+    } else {
+      term.noFormat(`  ${label}`);
+    }
+  };
+
+  const formatIndicator = (): string => {
+    const above = scrollOffset;
+    const below = Math.max(0, visible.length - scrollOffset - viewportSize);
+    if (above === 0 && below === 0) {
+      return "";
+    }
+    const parts: string[] = [];
+    if (above > 0) {
+      parts.push(`↑ ${above} above`);
+    }
+    if (below > 0) {
+      parts.push(`↓ ${below} below`);
+    }
+    return `  ${parts.join(" · ")}`;
+  };
+
+  // Initial paint: "+ New", blank spacer, header, viewport of session
+  // rows, scroll indicator. Each followed by \n so the terminal scrolls
+  // naturally if the picker's total height exceeds the viewport.
+  paintNewItem();
+  term("\n\n");
+  term.dim.noFormat(`  ${headerLine}`)("\n");
+  for (let v = 0; v < viewportSize; v++) {
+    paintSessionRow(scrollOffset + v);
+    term("\n");
   }
-  return result;
+  term.dim.noFormat(formatIndicator())("\n");
+
+  // Compute startRow by reading the cursor (one row past the indicator)
+  // and walking back: "+ New" (1) + spacer (1) + header (1) +
+  // viewport (viewportSize) + indicator (1) = viewportSize + 4.
+  const cursorY = await getCursorY(term);
+  const startRow = Math.max(1, cursorY - (viewportSize + 4));
+  const newRow = startRow;
+  const indicatorRow = startRow + 3 + viewportSize;
+  const sessionRow = (sessionIdx: number): number =>
+    startRow + 3 + (sessionIdx - scrollOffset);
+
+  const repaintNewItem = (): void => {
+    term.moveTo(1, newRow).eraseLineAfter();
+    paintNewItem();
+  };
+  const repaintSessionRow = (sessionIdx: number): void => {
+    if (
+      sessionIdx < scrollOffset ||
+      sessionIdx >= scrollOffset + viewportSize
+    ) {
+      return;
+    }
+    term.moveTo(1, sessionRow(sessionIdx)).eraseLineAfter();
+    paintSessionRow(sessionIdx);
+  };
+  const repaintViewport = (): void => {
+    for (let v = 0; v < viewportSize; v++) {
+      const row = startRow + 3 + v;
+      term.moveTo(1, row).eraseLineAfter();
+      const sessionIdx = scrollOffset + v;
+      if (sessionIdx < visible.length) {
+        paintSessionRow(sessionIdx);
+      }
+    }
+    term.moveTo(1, indicatorRow).eraseLineAfter();
+    term.dim.noFormat(formatIndicator());
+  };
+
+  term.hideCursor();
+  return await new Promise<PickerResult>((resolve) => {
+    let resolved = false;
+    const cleanup = (): void => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      term.off("key", onKey);
+      term.grabInput(false);
+      term.hideCursor(false);
+      term.moveTo(1, indicatorRow + 1);
+      term("\n");
+    };
+    const move = (delta: number): void => {
+      const next = Math.min(total - 1, Math.max(0, selectedIdx + delta));
+      if (next === selectedIdx) {
+        return;
+      }
+      const old = selectedIdx;
+      const oldScroll = scrollOffset;
+      selectedIdx = next;
+      adjustScroll();
+      if (scrollOffset !== oldScroll) {
+        // Viewport scrolled — every session row may have changed. Also
+        // refresh "+ New" if its selection state flipped on this move.
+        repaintViewport();
+        if (old === 0 || selectedIdx === 0) {
+          repaintNewItem();
+        }
+        return;
+      }
+      // No scroll: just redraw the two rows whose selection state changed.
+      if (old === 0) {
+        repaintNewItem();
+      } else {
+        repaintSessionRow(old - 1);
+      }
+      if (selectedIdx === 0) {
+        repaintNewItem();
+      } else {
+        repaintSessionRow(selectedIdx - 1);
+      }
+    };
+    const onKey = (name: string): void => {
+      switch (name) {
+        case "UP":
+        case "SHIFT_TAB":
+          move(-1);
+          return;
+        case "DOWN":
+        case "TAB":
+          move(1);
+          return;
+        case "PAGE_UP":
+          move(-viewportSize);
+          return;
+        case "PAGE_DOWN":
+          move(viewportSize);
+          return;
+        case "HOME":
+          move(-total);
+          return;
+        case "END":
+          move(total);
+          return;
+        case "ENTER":
+        case "KP_ENTER": {
+          cleanup();
+          if (selectedIdx === 0) {
+            resolve({ kind: "new" });
+            return;
+          }
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            resolve({ kind: "abort" });
+            return;
+          }
+          const result: PickerResult = {
+            kind: "attach",
+            sessionId: session.sessionId,
+          };
+          if (session.agentId !== undefined) {
+            result.agentId = session.agentId;
+          }
+          resolve(result);
+          return;
+        }
+        case "ESCAPE":
+        case "CTRL_C":
+          cleanup();
+          resolve({ kind: "abort" });
+          return;
+      }
+    };
+    term.grabInput({});
+    term.on("key", onKey);
+  });
+}
+
+function getCursorY(term: Terminal): Promise<number> {
+  return new Promise((resolve) => {
+    term.getCursorLocation((err, _x, y) => {
+      if (err || y === undefined) {
+        resolve((term as unknown as { height: number }).height ?? 24);
+        return;
+      }
+      resolve(y);
+    });
+  });
 }
 
 function toRow(s: DiscoveredSession): Row {
