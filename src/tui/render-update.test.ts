@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { mapUpdate, sanitizeWireText } from "./render-update.js";
+import {
+  mapUpdate,
+  sanitizeSingleLine,
+  sanitizeWireText,
+} from "./render-update.js";
 
 describe("mapUpdate", () => {
   it("handles agent_message_chunk with text content", () => {
@@ -373,5 +377,55 @@ describe("mapUpdate sanitizes wire text", () => {
       kind: "plan",
       entries: [{ content: "step1", status: "pending" }],
     });
+  });
+});
+
+describe("sanitizeSingleLine", () => {
+  it("collapses newlines to spaces", () => {
+    expect(sanitizeSingleLine("a\nb\nc")).toBe("a b c");
+  });
+
+  it("collapses tabs to spaces and squeezes runs of whitespace", () => {
+    expect(sanitizeSingleLine("a\t\tb   c")).toBe("a b c");
+  });
+
+  it("strips ANSI and control chars (inherits from sanitizeWireText)", () => {
+    expect(sanitizeSingleLine("\x1b[31mhello\x1b[0m\nworld")).toBe(
+      "hello world",
+    );
+  });
+
+  it("trims leading and trailing whitespace", () => {
+    expect(sanitizeSingleLine("\n\n  hi  \n")).toBe("hi");
+  });
+
+  it("collapses a multi-line shell command into a single line", () => {
+    const cmd = `python3 << 'EOF'\nimport json\nprint('hi')\nEOF`;
+    const collapsed = sanitizeSingleLine(cmd);
+    expect(collapsed.includes("\n")).toBe(false);
+    expect(collapsed).toContain("python3");
+    expect(collapsed).toContain("import json");
+  });
+});
+
+describe("mapUpdate collapses multi-line tool titles", () => {
+  it("collapses a heredoc shell command in the title", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "cat file | python3 -c \"\nimport sys, json\nprint(sys.stdin.read())\n\"",
+    });
+    expect(ev).toMatchObject({ kind: "tool-call" });
+    const title = (ev as { title?: string }).title ?? "";
+    expect(title.includes("\n")).toBe(false);
+  });
+
+  it("collapses multi-line plan content into a single body-safe row", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "plan",
+      entries: [{ content: "step one\nwith details\nand more", status: "pending" }],
+    });
+    const entries = (ev as { entries: { content: string }[] }).entries;
+    expect(entries[0]?.content.includes("\n")).toBe(false);
   });
 });

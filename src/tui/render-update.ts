@@ -8,12 +8,28 @@ import stripAnsi from "strip-ansi";
 // layer writes bodies through terminal-kit's `.noFormat` and `term(text)`,
 // neither of which filters `\x1b` bytes — so a tool whose title carries
 // CUP / ED / CR / SGR codes would otherwise drive the cursor outside our
-// paint regions and corrupt the screen. Keeps `\n` (we split lines on it)
-// and `\t` (renders as whitespace); strips everything else in C0 + DEL.
+// paint regions and corrupt the screen. Keeps `\n` (the format layer
+// splits multi-line text on it) and `\t`; strips everything else in C0
+// + DEL.
 const STRIP_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f]/g;
 
 export function sanitizeWireText(text: string): string {
   return stripAnsi(text).replace(STRIP_CONTROLS, "");
+}
+
+// Tighter variant for fields that must land in a single FormattedLine
+// body. A `\n` inside a body would be written verbatim to the terminal,
+// which interprets it as a line feed — the cursor leaves our row and
+// subsequent chars paint outside the planned paint region (this is how
+// multi-line Bash tool titles ended up splattering across the screen).
+// Collapses `\n` and `\t` to single spaces and squeezes runs of
+// whitespace so a 600-char heredoc command still renders as one tidy
+// line that gets truncated cleanly to the row width.
+export function sanitizeSingleLine(text: string): string {
+  return sanitizeWireText(text)
+    .replace(/[\n\t]+/g, " ")
+    .replace(/  +/g, " ")
+    .trim();
 }
 
 export type RenderEvent =
@@ -111,7 +127,8 @@ export function mapUpdate(update: unknown): RenderEvent | null {
 
 function mapSessionInfo(u: UpdateLike): RenderEvent | null {
   const rawTitle = readString(u, "title");
-  const title = rawTitle !== undefined ? sanitizeWireText(rawTitle) : undefined;
+  const title =
+    rawTitle !== undefined ? sanitizeSingleLine(rawTitle) : undefined;
   // agentId is a hydra-specific extension carried in _meta["hydra-acp"]
   // (the standard ACP schema for session_info_update has only title +
   // updatedAt + _meta — agent identity is not a protocol-level concept).
@@ -157,9 +174,9 @@ function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
     // (e.g. "create_plan"). The TUI's completion model expects all
     // entries to be slash-prefixed so they match what the user types.
     const rawName = c.name.startsWith("/") ? c.name : `/${c.name}`;
-    const cmd: AvailableCommand = { name: sanitizeWireText(rawName) };
+    const cmd: AvailableCommand = { name: sanitizeSingleLine(rawName) };
     if (typeof c.description === "string") {
-      cmd.description = sanitizeWireText(c.description);
+      cmd.description = sanitizeSingleLine(c.description);
     }
     out.push(cmd);
   }
@@ -250,7 +267,7 @@ function mapToolCall(u: UpdateLike): RenderEvent | null {
     readString(u, "name") ??
     readString(u, "label") ??
     "tool call";
-  const title = sanitizeWireText(rawTitle);
+  const title = sanitizeSingleLine(rawTitle);
   const status = readString(u, "status");
   const rawKind = readString(u, "kind");
   const event: RenderEvent = { kind: "tool-call", toolCallId, title };
@@ -269,7 +286,8 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
     return null;
   }
   const rawTitle = readString(u, "title");
-  const title = rawTitle !== undefined ? sanitizeWireText(rawTitle) : undefined;
+  const title =
+    rawTitle !== undefined ? sanitizeSingleLine(rawTitle) : undefined;
   const status = readString(u, "status");
   // Suppress intermediate "updated" pings that carry nothing new —
   // they're a fan-out artifact, not user-visible signal. Render only
@@ -306,7 +324,9 @@ function mapPlan(u: UpdateLike): RenderEvent | null {
     }
     const e = raw as Record<string, unknown>;
     const content =
-      typeof e.content === "string" ? sanitizeWireText(e.content) : undefined;
+      typeof e.content === "string"
+        ? sanitizeSingleLine(e.content)
+        : undefined;
     if (!content) {
       continue;
     }
@@ -327,7 +347,7 @@ function mapMode(u: UpdateLike): RenderEvent | null {
   if (!mode) {
     return null;
   }
-  return { kind: "mode-changed", mode: sanitizeWireText(mode) };
+  return { kind: "mode-changed", mode: sanitizeSingleLine(mode) };
 }
 
 function mapModel(u: UpdateLike): RenderEvent | null {
@@ -335,7 +355,7 @@ function mapModel(u: UpdateLike): RenderEvent | null {
   if (!model) {
     return null;
   }
-  return { kind: "model-changed", model: sanitizeWireText(model) };
+  return { kind: "model-changed", model: sanitizeSingleLine(model) };
 }
 
 function mapTurnComplete(u: UpdateLike): RenderEvent {

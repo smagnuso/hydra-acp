@@ -26,7 +26,7 @@ import { formatElapsed, Screen } from "./screen.js";
 import { InputDispatcher, type InputEffect, type KeyEvent } from "./input.js";
 import {
   mapUpdate,
-  sanitizeWireText,
+  sanitizeSingleLine,
   type AvailableCommand,
   type RenderEvent,
 } from "./render-update.js";
@@ -364,15 +364,17 @@ async function runSession(
       options?: PermissionOption[];
     };
     const rawOptions = Array.isArray(p.options) ? p.options : [];
-    // Sanitize agent-controlled strings before they reach the renderer —
-    // see sanitizeWireText for why this is necessary.
+    // Sanitize agent-controlled strings before they reach the renderer.
+    // Modal title + option labels each render in a single FormattedLine
+    // body, so a `\n` in either would line-feed the cursor out of the
+    // paint region — use sanitizeSingleLine to collapse newlines.
     const options: PermissionOption[] = rawOptions.map((o) => ({
       optionId: o.optionId,
-      name: sanitizeWireText(o.name ?? ""),
+      name: sanitizeSingleLine(o.name ?? ""),
       ...(o.kind !== undefined ? { kind: o.kind } : {}),
     }));
     const rawTitle = p.toolCall?.title ?? p.toolCall?.name ?? "tool";
-    const title = sanitizeWireText(rawTitle);
+    const title = sanitizeSingleLine(rawTitle);
     const toolCallId = p.toolCall?.toolCallId;
     if (options.length === 0) {
       screen.appendLines([
