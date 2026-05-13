@@ -43,10 +43,10 @@ async function main(): Promise<void> {
 
     const { flags } = parseArgs(beforeLaunch);
     const agentId =
-      positionalAgentId ?? resolveOption(flags, "agent-id");
+      positionalAgentId ?? resolveOption(flags, "agent");
     if (!agentId) {
       process.stderr.write(
-        "Usage: hydra-acp launch <agent-id> [agent-args...]\n",
+        "Usage: hydra-acp launch <agent> [agent-args...]\n",
       );
       process.exit(2);
       return;
@@ -57,7 +57,8 @@ async function main(): Promise<void> {
         ? launchResume
         : resolveOption(flags, "session-id");
     const name = resolveOption(flags, "name");
-    await runShim({ sessionId, agentId, agentArgs, name });
+    const model = resolveOption(flags, "model");
+    await runShim({ sessionId, agentId, agentArgs, name, model });
     return;
   }
 
@@ -82,7 +83,8 @@ async function main(): Promise<void> {
       ? resumeFlag
       : resolveOption(flags, "session-id");
   const name = resolveOption(flags, "name");
-  const agentIdFromFlag = resolveOption(flags, "agent-id");
+  const agentIdFromFlag = resolveOption(flags, "agent");
+  const model = resolveOption(flags, "model");
 
   if (!subcommand) {
     // Auto-dispatch when invoked with no subcommand: TUI when attached to
@@ -94,16 +96,17 @@ async function main(): Promise<void> {
         sessionId,
         agentId: agentIdFromFlag,
         name,
+        model,
       });
       return;
     }
-    await runShim({ sessionId, name, agentId: agentIdFromFlag });
+    await runShim({ sessionId, name, agentId: agentIdFromFlag, model });
     return;
   }
 
   switch (subcommand) {
     case "shim":
-      await runShim({ sessionId, name, agentId: agentIdFromFlag });
+      await runShim({ sessionId, name, agentId: agentIdFromFlag, model });
       return;
     case "init":
       await runInit(flags);
@@ -222,6 +225,7 @@ async function main(): Promise<void> {
         sessionId,
         agentId: agentIdFromFlag,
         name,
+        model,
       });
       return;
     default:
@@ -235,6 +239,7 @@ interface TuiBaseOpts {
   sessionId?: string | undefined;
   agentId?: string | undefined;
   name?: string | undefined;
+  model?: string | undefined;
 }
 
 async function dispatchTui(
@@ -260,6 +265,9 @@ async function dispatchTui(
   if (base.name !== undefined) {
     tuiOpts.name = base.name;
   }
+  if (base.model !== undefined) {
+    tuiOpts.model = base.model;
+  }
   await runTui(tuiOpts);
 }
 
@@ -284,9 +292,9 @@ function printHelp(): void {
       "  hydra-acp                          Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case)",
       "  hydra-acp shim                     Run as ACP shim explicitly (forces shim mode regardless of TTY)",
       "  hydra-acp tui [opts]               Run the terminal UI explicitly (see below for opts)",
-      "  hydra-acp launch <agent-id> [agent-args...]",
-      "                                     Shim mode, force daemon to spawn <agent-id>",
-      "                                     from the registry. Args after <agent-id>",
+      "  hydra-acp launch <agent> [agent-args...]",
+      "                                     Shim mode, force daemon to spawn <agent>",
+      "                                     from the registry. Args after <agent>",
       "                                     are forwarded to the agent's command.",
       "  hydra-acp --resume <id>            Attach to an existing session (TUI when in a terminal, shim otherwise)",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
@@ -307,14 +315,15 @@ function printHelp(): void {
       "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  hydra-acp agents [list]                     List agents in the cached registry",
       "  hydra-acp agents refresh                    Force a registry re-fetch",
-      "  hydra-acp tui flags: [--resume [<id>]] [--new] [--agent-id <id>] [--cwd <path>] [--name <label>]",
+      "  hydra-acp tui flags: [--resume [<id>]] [--new] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
       "                                     --resume <id> attaches to a specific session; bare --resume picks the most-recent",
       "                                     in cwd. Smart default (no flags): picks if any live sessions exist, else new.",
       "  hydra-acp --version                Print version",
       "  hydra-acp --help                   Show this help",
       "",
       "Config knob flags accept env-var equivalents (flag wins):",
-      "  --agent-id              HYDRA_ACP_AGENT_ID",
+      "  --agent                 HYDRA_ACP_AGENT",
+      "  --model                 HYDRA_ACP_MODEL    (one-shot at session/new; ignored on --resume)",
       "  --resume / --session-id HYDRA_ACP_SESSION_ID",
       "  --name                  HYDRA_ACP_NAME",
       "",

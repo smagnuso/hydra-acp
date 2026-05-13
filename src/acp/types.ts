@@ -101,6 +101,11 @@ export interface HydraMeta {
   name?: string;
   agentArgs?: string[];
   resume?: SessionResumeHints;
+  // Caller-requested model id for a fresh session/new. One-shot: the daemon
+  // issues session/set_model with this value during bootstrapAgent and then
+  // forgets it — meta.json carries `currentModel` (response-shaped) instead.
+  // Resurrect ignores this field by design.
+  model?: string;
   // Snapshot state delivered on the attach/new response so clients
   // don't need to wait for history replay to know the current model,
   // mode, or command palette.
@@ -146,6 +151,9 @@ export function extractHydraMeta(
     if (parsed.success) {
       out.resume = parsed.data;
     }
+  }
+  if (typeof obj.model === "string") {
+    out.model = obj.model;
   }
   if (typeof obj.currentModel === "string") {
     out.currentModel = obj.currentModel;

@@ -43,6 +43,11 @@ export interface TuiOptions {
   agentId?: string;
   cwd?: string;
   name?: string;
+  // One-shot model override applied to fresh session/new only. Not
+  // forwarded into nextOpts on resume/restart paths — once a session
+  // exists, model is managed through session/set_model and persisted
+  // as currentModel in meta.json.
+  model?: string;
   resume?: boolean;
   forceNew?: boolean;
 }
@@ -423,11 +428,18 @@ async function runSession(
   // banner to busy and start the elapsed timer at the right offset.
   let initialTurnStartedAt: number | undefined;
   if (ctx.sessionId === "__new__") {
+    const hydraNewMeta: Record<string, unknown> = {};
+    if (opts.name) {
+      hydraNewMeta.name = opts.name;
+    }
+    if (opts.model) {
+      hydraNewMeta.model = opts.model;
+    }
     const created = (await conn.request("session/new", {
       cwd: ctx.cwd,
       ...(opts.agentId ? { agentId: opts.agentId } : {}),
-      ...(opts.name
-        ? { _meta: { [HYDRA_META_KEY]: { name: opts.name } } }
+      ...(Object.keys(hydraNewMeta).length > 0
+        ? { _meta: { [HYDRA_META_KEY]: hydraNewMeta } }
         : {}),
     })) as { sessionId: string; _meta?: Record<string, unknown> };
     resolvedSessionId = created.sessionId;

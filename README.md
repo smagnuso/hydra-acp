@@ -178,7 +178,7 @@ hydra-acp daemon start
 #    spawned-by-editor cases where stdio is already piped. The first
 #    session/new asks the daemon which agent to spawn (defaults to
 #    config.defaultAgent). If you'd rather the editor pin a specific agent,
-#    spawn `hydra-acp launch <agent-id>` (see "Launcher mode" below).
+#    spawn `hydra-acp launch <agent>` (see "Launcher mode" below).
 
 # 4. From a terminal, drive a session interactively (TUI).
 hydra-acp                                   # bare invocation in a TTY launches the TUI
@@ -198,8 +198,8 @@ hydra-acp --session-id hydra_session_abc123
 hydra-acp                                   # auto-dispatch: TUI in a TTY, shim when stdio is piped
 hydra-acp shim                              # explicit shim mode (forces shim regardless of TTY)
 hydra-acp tui                               # explicit terminal-UI mode
-hydra-acp launch <agent-id>                 # launcher mode: shim that forces the
-                                            # daemon to spawn <agent-id> on session/new
+hydra-acp launch <agent>                    # launcher mode: shim that forces the
+                                            # daemon to spawn <agent> on session/new
 hydra-acp --session-id <id>                 # attach to existing session
                                             # (TUI in a TTY, shim otherwise)
 
@@ -234,7 +234,7 @@ A bare invocation (`hydra-acp` with no subcommand) auto-dispatches based on whet
 
 ### Launcher mode
 
-`hydra-acp launch <agent-id>` is a convenience for "shim me, and use *this* registry agent." It's the easiest way to wrap an existing ACP-speaking editor configuration whose agent-spawn surface is just a command and arguments:
+`hydra-acp launch <agent>` is a convenience for "shim me, and use *this* registry agent." It's the easiest way to wrap an existing ACP-speaking editor configuration whose agent-spawn surface is just a command and arguments:
 
 ```text
 # Configure your editor's ACP-launch command to:
@@ -243,9 +243,9 @@ hydra-acp launch claude-code
 
 When the editor sends `session/new`, the shim rewrites the params to `{ ..., agentId: "claude-code" }` before forwarding to the daemon. The daemon resolves `claude-code` against the cached ACP Registry, downloads/installs the agent on first use under `~/.hydra-acp/agents/`, and spawns the subprocess. The editor sees a normal ACP agent. From then on, `hydra-acp sessions` lists the live session and any other client can `session/attach` to it.
 
-`<agent-id>` is the registry ID — e.g. `claude-code`, `gemini-cli`, `codex`. Run `hydra-acp agents` to browse what's available, or fetch the registry CDN URL directly.
+`<agent>` is the registry ID — e.g. `claude-code`, `gemini-cli`, `codex`. Run `hydra-acp agents` to browse what's available, or fetch the registry CDN URL directly.
 
-If both `launch <agent-id>` and `--session-id` are given, `--session-id` wins (attach mode); the agent ID is ignored because the agent process is already running.
+If both `launch <agent>` and `--session-id` are given, `--session-id` wins (attach mode); the agent is ignored because the agent process is already running.
 
 ### Naming sessions from the editor
 
@@ -286,9 +286,9 @@ Each session carries a stable **`lineageId`** that survives every export/import 
 
 The first attach to an imported session is slow: hydra spawns a fresh agent, runs `session/new`, and feeds the imported history back in as a synthesized takeover transcript (same machinery as `/hydra agent`). Subsequent attaches use the normal `session/load` path. This is a text-level handover — the originating agent's internal state (tool-call chains, compacted earlier turns) isn't preserved, so the resumed conversation may be cognitively shallower than the original.
 
-### Forwarding agent args (`hydra-acp launch <agent-id> ...`)
+### Forwarding agent args (`hydra-acp launch <agent> ...`)
 
-Anything you put after `<agent-id>` in launcher mode is forwarded to the underlying agent's command. Hydra appends the extra args to the registry-provided spawn plan. Example:
+Anything you put after `<agent>` in launcher mode is forwarded to the underlying agent's command. Hydra appends the extra args to the registry-provided spawn plan. Example:
 
 ```text
 hydra-acp launch codex-acp -c sandbox_mode=danger-full-access
@@ -303,14 +303,17 @@ Every config-knob flag has an `HYDRA_ACP_FOO_BAR` env-var equivalent. Flag wins 
 | Flag | Env var |
 |---|---|
 | `--name` | `HYDRA_ACP_NAME` |
-| `--agent-id` | `HYDRA_ACP_AGENT_ID` |
+| `--agent` | `HYDRA_ACP_AGENT` |
+| `--model` | `HYDRA_ACP_MODEL` |
 | `--session-id` | `HYDRA_ACP_SESSION_ID` |
+
+`--model` is a one-shot override for the per-agent `defaultModels` entry in `~/.hydra-acp/config.json`. It only applies at fresh session creation — resurrect and `/hydra agent` switch ignore it (resurrected sessions stay on whatever model they were last using).
 
 Action commands (`init`, `daemon`, `sessions`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
 
 ### Registry id resolution
 
-When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `HYDRA_ACP_AGENT_ID`), the daemon first tries an exact match against the ACP Registry's `id` field. If nothing matches, it falls back to matching against the **npx package basename** (the segment after the last `/` and before the version `@`). That means common binary names work transparently:
+When you ask hydra to spawn an agent (via `launch <agent>`, `--agent`, or `HYDRA_ACP_AGENT`), the daemon first tries an exact match against the ACP Registry's `id` field. If nothing matches, it falls back to matching against the **npx package basename** (the segment after the last `/` and before the version `@`). That means common binary names work transparently:
 
 | You spawn… | Registry `id` | Resolves via |
 |---|---|---|

@@ -16,6 +16,7 @@ export interface ShimOptions {
   agentId?: string;
   agentArgs?: string[];
   name?: string;
+  model?: string;
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
@@ -109,6 +110,9 @@ export function wireShim({
       if (namingState.name && !namingState.used) {
         outgoing = injectHydraMeta(outgoing, { name: namingState.name });
         namingState.used = true;
+      }
+      if (opts.model) {
+        outgoing = injectHydraMeta(outgoing, { model: opts.model });
       }
       void upstream.send(outgoing);
       return;

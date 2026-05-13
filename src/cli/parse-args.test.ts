@@ -97,7 +97,8 @@ describe("envKeyForFlag", () => {
   it("maps kebab-case to HYDRA_ACP_UPPER_SNAKE", () => {
     expect(envKeyForFlag("name")).toBe("HYDRA_ACP_NAME");
     expect(envKeyForFlag("session-id")).toBe("HYDRA_ACP_SESSION_ID");
-    expect(envKeyForFlag("agent-id")).toBe("HYDRA_ACP_AGENT_ID");
+    expect(envKeyForFlag("agent")).toBe("HYDRA_ACP_AGENT");
+    expect(envKeyForFlag("model")).toBe("HYDRA_ACP_MODEL");
   });
 });
 
@@ -107,7 +108,8 @@ describe("resolveOption", () => {
   beforeEach(() => {
     delete process.env.HYDRA_ACP_NAME;
     delete process.env.HYDRA_ACP_SESSION_ID;
-    delete process.env.HYDRA_ACP_AGENT_ID;
+    delete process.env.HYDRA_ACP_AGENT;
+    delete process.env.HYDRA_ACP_MODEL;
   });
 
   afterEach(() => {
@@ -125,7 +127,7 @@ describe("resolveOption", () => {
   });
 
   it("returns undefined when neither is set", () => {
-    expect(resolveOption({}, "agent-id")).toBeUndefined();
+    expect(resolveOption({}, "agent")).toBeUndefined();
   });
 
   it("treats boolean-true flags as unset (only string flags carry values)", () => {

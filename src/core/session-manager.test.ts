@@ -1205,6 +1205,61 @@ describe("SessionManager: defaultModels", () => {
     expect(requestMock.mock.calls.length).toBe(2);
   });
 
+  it("prefers params.model over defaultModels[agentId] on create", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_fresh" })
+      .mockResolvedValueOnce({ ok: true });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+    );
+
+    const session = await manager.create({
+      cwd: "/work",
+      agentId: "opencode",
+      model: "openai/gpt-5",
+    });
+
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_model",
+      { sessionId: "u_fresh", modelId: "openai/gpt-5" },
+    ]);
+    expect(session.currentModel).toBe("openai/gpt-5");
+  });
+
+  it("uses params.model when no defaultModel is configured", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_fresh" })
+      .mockResolvedValueOnce({ ok: true });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: {} },
+    );
+
+    await manager.create({
+      cwd: "/work",
+      agentId: "claude-code",
+      model: "claude-opus-4-7",
+    });
+
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_model",
+      { sessionId: "u_fresh", modelId: "claude-opus-4-7" },
+    ]);
+  });
+
   it("falls back to the agent's chosen model when set_model rejects", async () => {
     const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;

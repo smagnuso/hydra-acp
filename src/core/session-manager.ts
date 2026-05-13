@@ -35,6 +35,10 @@ export interface CreateSessionParams {
   mcpServers?: unknown[];
   title?: string;
   agentArgs?: string[];
+  // One-shot model override. When set, wins over defaultModels[agentId]
+  // during bootstrapAgent. Not persisted — resurrect and agent-switch
+  // paths don't see it.
+  model?: string;
 }
 
 export interface ResurrectParams {
@@ -102,6 +106,7 @@ export class SessionManager {
       cwd: params.cwd,
       agentArgs: params.agentArgs,
       mcpServers: params.mcpServers,
+      model: params.model,
     });
     const session = new Session({
       cwd: params.cwd,
@@ -290,6 +295,10 @@ export class SessionManager {
     cwd: string;
     agentArgs?: string[];
     mcpServers?: unknown[];
+    // Per-invocation model override; takes priority over defaultModels.
+    // Only create() forwards this — the agent-switch and import-reseed
+    // callsites omit it so the session stays on its existing model.
+    model?: string;
   }): Promise<{
     agent: AgentInstance;
     upstreamSessionId: string;
@@ -335,7 +344,7 @@ export class SessionManager {
       // something to render from the very first paint, before any turn
       // runs that might cause the agent to emit a current_model_update.
       let initialModel = extractInitialModel(newResult);
-      const desired = this.defaultModels[params.agentId];
+      const desired = params.model ?? this.defaultModels[params.agentId];
       if (desired && desired !== initialModel) {
         try {
           await agent.connection.request("session/set_model", {

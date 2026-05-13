@@ -56,6 +56,13 @@ describe("extractHydraMeta", () => {
     });
     expect(out.resume).toBeUndefined();
   });
+
+  it("extracts a caller-requested model field", () => {
+    const out = extractHydraMeta({
+      [HYDRA_META_KEY]: { model: "openai/gpt-5" },
+    });
+    expect(out.model).toBe("openai/gpt-5");
+  });
 });
 
 describe("mergeMeta", () => {

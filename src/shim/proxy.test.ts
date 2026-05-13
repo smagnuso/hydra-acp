@@ -115,6 +115,97 @@ describe("wireShim forwarding", () => {
     });
   });
 
+  it("injects model under _meta[\"hydra-acp\"] when opts.model is set", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({
+      opts: { agentId: "opencode", model: "openai/gpt-5" },
+      upstream,
+      downstream,
+      tracker,
+    });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session/new",
+      params: { cwd: "/work" },
+    });
+
+    await new Promise((r) => setImmediate(r));
+
+    const sent = upstream.sent[0] as {
+      params: {
+        agentId: string;
+        _meta: { "hydra-acp": { model: string } };
+      };
+    };
+    expect(sent.params.agentId).toBe("opencode");
+    expect(sent.params._meta["hydra-acp"].model).toBe("openai/gpt-5");
+  });
+
+  it("re-applies model on every session/new (unlike name, which is first-only)", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({
+      opts: { model: "openai/gpt-5" },
+      upstream,
+      downstream,
+      tracker,
+    });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session/new",
+      params: { cwd: "/a" },
+    });
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/new",
+      params: { cwd: "/b" },
+    });
+
+    await new Promise((r) => setImmediate(r));
+
+    const first = upstream.sent[0] as { params: { _meta?: { "hydra-acp"?: { model?: string } } } };
+    const second = upstream.sent[1] as { params: { _meta?: { "hydra-acp"?: { model?: string } } } };
+    expect(first.params._meta?.["hydra-acp"]?.model).toBe("openai/gpt-5");
+    expect(second.params._meta?.["hydra-acp"]?.model).toBe("openai/gpt-5");
+  });
+
+  it("omits model from _meta when opts.model is unset", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({
+      opts: { agentId: "opencode" },
+      upstream,
+      downstream,
+      tracker,
+    });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session/new",
+      params: { cwd: "/work" },
+    });
+
+    await new Promise((r) => setImmediate(r));
+
+    const sent = upstream.sent[0] as {
+      params: { _meta?: { "hydra-acp"?: { model?: string } } };
+    };
+    expect(sent.params._meta?.["hydra-acp"]?.model).toBeUndefined();
+  });
+
   it("only labels the first session/new (first one wins)", async () => {
     const upstream = makeControlledStream();
     const downstream = makeControlledStream();

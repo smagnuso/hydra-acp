@@ -89,6 +89,7 @@ export function registerAcpWsEndpoint(
         mcpServers: params.mcpServers,
         title: hydraMeta.name,
         agentArgs: hydraMeta.agentArgs,
+        model: hydraMeta.model,
       });
       const client = bindClientToSession(connection, session, state);
       // Fresh session — nothing to replay, but await for symmetry with
