@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mapUpdate } from "./render-update.js";
+import { mapUpdate, sanitizeWireText } from "./render-update.js";
 
 describe("mapUpdate", () => {
   it("handles agent_message_chunk with text content", () => {
@@ -313,5 +313,65 @@ describe("mapUpdate", () => {
     expect(mapUpdate("hello")).toBeNull();
     expect(mapUpdate({})).toBeNull();
     expect(mapUpdate({ foo: "bar" })).toBeNull();
+  });
+});
+
+describe("sanitizeWireText", () => {
+  it("strips SGR color codes", () => {
+    expect(sanitizeWireText("\x1b[31mhello\x1b[0m")).toBe("hello");
+  });
+
+  it("strips cursor positioning sequences", () => {
+    expect(sanitizeWireText("before\x1b[10;5Hafter")).toBe("beforeafter");
+  });
+
+  it("strips erase-line / erase-display sequences", () => {
+    expect(sanitizeWireText("clean\x1b[Kthis\x1b[2Jall")).toBe("cleanthisall");
+  });
+
+  it("strips OSC sequences", () => {
+    expect(sanitizeWireText("\x1b]2;title\x07after")).toBe("after");
+  });
+
+  it("strips carriage returns and other C0 controls but keeps \\n and \\t", () => {
+    expect(sanitizeWireText("a\rb\nc\td\x08e\x07f")).toBe("ab\nc\tdef");
+  });
+
+  it("strips DEL (0x7f)", () => {
+    expect(sanitizeWireText("a\x7fb")).toBe("ab");
+  });
+
+  it("leaves ordinary text untouched", () => {
+    expect(sanitizeWireText("hello world 中文 🇺🇸")).toBe("hello world 中文 🇺🇸");
+  });
+});
+
+describe("mapUpdate sanitizes wire text", () => {
+  it("sanitizes agent text", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "\x1b[31mred\x1b[0m" },
+    });
+    expect(ev).toEqual({ kind: "agent-text", text: "red" });
+  });
+
+  it("sanitizes tool-call title", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "ls\x1b[2J/home",
+    });
+    expect(ev).toMatchObject({ kind: "tool-call", title: "ls/home" });
+  });
+
+  it("sanitizes plan entry content", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "plan",
+      entries: [{ content: "step\x1b[1;1H1", status: "pending" }],
+    });
+    expect(ev).toEqual({
+      kind: "plan",
+      entries: [{ content: "step1", status: "pending" }],
+    });
   });
 });

@@ -26,6 +26,7 @@ import { formatElapsed, Screen } from "./screen.js";
 import { InputDispatcher, type InputEffect, type KeyEvent } from "./input.js";
 import {
   mapUpdate,
+  sanitizeWireText,
   type AvailableCommand,
   type RenderEvent,
 } from "./render-update.js";
@@ -357,8 +358,16 @@ async function runSession(
       toolCall?: { name?: string; title?: string; toolCallId?: string };
       options?: PermissionOption[];
     };
-    const options = Array.isArray(p.options) ? p.options : [];
-    const title = p.toolCall?.title ?? p.toolCall?.name ?? "tool";
+    const rawOptions = Array.isArray(p.options) ? p.options : [];
+    // Sanitize agent-controlled strings before they reach the renderer —
+    // see sanitizeWireText for why this is necessary.
+    const options: PermissionOption[] = rawOptions.map((o) => ({
+      optionId: o.optionId,
+      name: sanitizeWireText(o.name ?? ""),
+      ...(o.kind !== undefined ? { kind: o.kind } : {}),
+    }));
+    const rawTitle = p.toolCall?.title ?? p.toolCall?.name ?? "tool";
+    const title = sanitizeWireText(rawTitle);
     const toolCallId = p.toolCall?.toolCallId;
     if (options.length === 0) {
       screen.appendLines([

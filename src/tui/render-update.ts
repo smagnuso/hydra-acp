@@ -1,6 +1,21 @@
 // Pure (no I/O, no terminal-kit) mapper from ACP `session/update` notifications
 // into `RenderEvent`s the screen layer knows how to render.
 
+import stripAnsi from "strip-ansi";
+
+// Strip ANSI escape sequences and dangerous C0 control characters from any
+// string we get from the wire before it lands in a RenderEvent. The render
+// layer writes bodies through terminal-kit's `.noFormat` and `term(text)`,
+// neither of which filters `\x1b` bytes — so a tool whose title carries
+// CUP / ED / CR / SGR codes would otherwise drive the cursor outside our
+// paint regions and corrupt the screen. Keeps `\n` (we split lines on it)
+// and `\t` (renders as whitespace); strips everything else in C0 + DEL.
+const STRIP_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f]/g;
+
+export function sanitizeWireText(text: string): string {
+  return stripAnsi(text).replace(STRIP_CONTROLS, "");
+}
+
 export type RenderEvent =
   | { kind: "agent-text"; text: string }
   | { kind: "agent-thought"; text: string }
@@ -95,7 +110,8 @@ export function mapUpdate(update: unknown): RenderEvent | null {
 }
 
 function mapSessionInfo(u: UpdateLike): RenderEvent | null {
-  const title = readString(u, "title");
+  const rawTitle = readString(u, "title");
+  const title = rawTitle !== undefined ? sanitizeWireText(rawTitle) : undefined;
   // agentId is a hydra-specific extension carried in _meta["hydra-acp"]
   // (the standard ACP schema for session_info_update has only title +
   // updatedAt + _meta — agent identity is not a protocol-level concept).
@@ -140,10 +156,10 @@ function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
     // Per the ACP schema, agent commands are advertised by bare name
     // (e.g. "create_plan"). The TUI's completion model expects all
     // entries to be slash-prefixed so they match what the user types.
-    const name = c.name.startsWith("/") ? c.name : `/${c.name}`;
-    const cmd: AvailableCommand = { name };
+    const rawName = c.name.startsWith("/") ? c.name : `/${c.name}`;
+    const cmd: AvailableCommand = { name: sanitizeWireText(rawName) };
     if (typeof c.description === "string") {
-      cmd.description = c.description;
+      cmd.description = sanitizeWireText(c.description);
     }
     out.push(cmd);
   }
@@ -180,7 +196,9 @@ function mapAgentText(u: UpdateLike): RenderEvent | null {
 
 function mapAgentThought(u: UpdateLike): RenderEvent | null {
   const text =
-    typeof u.text === "string" ? u.text : extractContentText(u.content);
+    typeof u.text === "string"
+      ? sanitizeWireText(u.text)
+      : extractContentText(u.content);
   if (text === null) {
     return null;
   }
@@ -227,11 +245,12 @@ function mapToolCall(u: UpdateLike): RenderEvent | null {
   if (!toolCallId) {
     return null;
   }
-  const title =
+  const rawTitle =
     readString(u, "title") ??
     readString(u, "name") ??
     readString(u, "label") ??
     "tool call";
+  const title = sanitizeWireText(rawTitle);
   const status = readString(u, "status");
   const rawKind = readString(u, "kind");
   const event: RenderEvent = { kind: "tool-call", toolCallId, title };
@@ -249,7 +268,8 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
   if (!toolCallId) {
     return null;
   }
-  const title = readString(u, "title");
+  const rawTitle = readString(u, "title");
+  const title = rawTitle !== undefined ? sanitizeWireText(rawTitle) : undefined;
   const status = readString(u, "status");
   // Suppress intermediate "updated" pings that carry nothing new —
   // they're a fan-out artifact, not user-visible signal. Render only
@@ -285,7 +305,8 @@ function mapPlan(u: UpdateLike): RenderEvent | null {
       continue;
     }
     const e = raw as Record<string, unknown>;
-    const content = typeof e.content === "string" ? e.content : undefined;
+    const content =
+      typeof e.content === "string" ? sanitizeWireText(e.content) : undefined;
     if (!content) {
       continue;
     }
@@ -306,7 +327,7 @@ function mapMode(u: UpdateLike): RenderEvent | null {
   if (!mode) {
     return null;
   }
-  return { kind: "mode-changed", mode };
+  return { kind: "mode-changed", mode: sanitizeWireText(mode) };
 }
 
 function mapModel(u: UpdateLike): RenderEvent | null {
@@ -314,7 +335,7 @@ function mapModel(u: UpdateLike): RenderEvent | null {
   if (!model) {
     return null;
   }
-  return { kind: "model-changed", model };
+  return { kind: "model-changed", model: sanitizeWireText(model) };
 }
 
 function mapTurnComplete(u: UpdateLike): RenderEvent {
@@ -326,17 +347,17 @@ function mapTurnComplete(u: UpdateLike): RenderEvent {
 
 function extractContentText(content: unknown): string | null {
   if (typeof content === "string") {
-    return content;
+    return sanitizeWireText(content);
   }
   if (!content || typeof content !== "object") {
     return null;
   }
   const c = content as { type?: unknown; text?: unknown };
   if (c.type === "text" && typeof c.text === "string") {
-    return c.text;
+    return sanitizeWireText(c.text);
   }
   if (typeof c.text === "string") {
-    return c.text;
+    return sanitizeWireText(c.text);
   }
   return null;
 }
