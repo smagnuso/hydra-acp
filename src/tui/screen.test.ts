@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import type { InputDispatcher } from "./input.js";
-import { Screen } from "./screen.js";
+import { Screen, truncate, wrap } from "./screen.js";
 
 // Minimal mock term: width 10/height 10 makes repaint() short-circuit
 // (it bails when width < 20), so we never exercise the draw path. We
@@ -249,5 +250,72 @@ describe("Screen wrapTail bounded walk", () => {
     const { rows, exhausted } = wrapTail(screen, 80, 10);
     expect(rows).toEqual([]);
     expect(exhausted).toBe(true);
+  });
+});
+
+describe("wrap (visible-width aware)", () => {
+  it("wraps pure ASCII at the char boundary, preferring space breaks", () => {
+    expect(wrap("hello world foo bar", 10)).toEqual(["hello", "world foo", "bar"]);
+  });
+
+  it("hard-breaks long unspaced tokens", () => {
+    expect(wrap("abcdefghijklmnop", 5)).toEqual(["abcde", "fghij", "klmno", "p"]);
+  });
+
+  it("budgets CJK by visible width, not char count", () => {
+    // Each CJK char is 2 visible columns; width 4 fits exactly 2 chars.
+    const wrapped = wrap("中文中文中文", 4);
+    for (const chunk of wrapped) {
+      expect(stringWidth(chunk)).toBeLessThanOrEqual(4);
+    }
+    expect(wrapped.join("")).toBe("中文中文中文");
+  });
+
+  it("handles mixed ASCII + CJK", () => {
+    const wrapped = wrap("hi 中文 bye", 5);
+    for (const chunk of wrapped) {
+      expect(stringWidth(chunk)).toBeLessThanOrEqual(5);
+    }
+  });
+
+  it("emits a single wide grapheme that exceeds width rather than looping", () => {
+    // Width 1 with a 2-col char: must still make forward progress.
+    const wrapped = wrap("中", 1);
+    expect(wrapped).toEqual(["中"]);
+  });
+
+  it("keeps regional-indicator flag pairs intact", () => {
+    const wrapped = wrap("🇺🇸🇯🇵", 2);
+    // Each flag is one grapheme, ~2 cols. Each chunk should be one flag.
+    for (const chunk of wrapped) {
+      expect(stringWidth(chunk)).toBeLessThanOrEqual(2);
+    }
+    expect(wrapped.join("")).toBe("🇺🇸🇯🇵");
+  });
+});
+
+describe("truncate (visible-width aware)", () => {
+  it("returns short ASCII unchanged", () => {
+    expect(truncate("hello", 10)).toBe("hello");
+  });
+
+  it("truncates long ASCII with an ellipsis", () => {
+    expect(truncate("hello world", 8)).toBe("hello w…");
+  });
+
+  it("truncates CJK by visible width", () => {
+    // "中文中文" is 8 visible cols; max 5 should fit "中文" (4) + "…" (1) = 5.
+    const out = truncate("中文中文", 5);
+    expect(stringWidth(out)).toBeLessThanOrEqual(5);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("returns CJK unchanged when it already fits visibly", () => {
+    expect(truncate("中文", 4)).toBe("中文");
+  });
+
+  it("never produces output wider than max for mixed content", () => {
+    const out = truncate("hi 中文 world 🇺🇸", 8);
+    expect(stringWidth(out)).toBeLessThanOrEqual(8);
   });
 });

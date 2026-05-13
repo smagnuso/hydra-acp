@@ -179,6 +179,13 @@ export class Screen {
     }
     this.started = true;
     this.term.fullscreen(true);
+    // Disable auto-wrap (DECAWM). Our row painter assumes each row starts
+    // with a moveTo + eraseLineAfter, so any character that overflows the
+    // right margin should be clipped, not wrapped onto the next physical
+    // row. Without this, a wide-unicode body whose visible width exceeds
+    // our wrap budget would bleed onto the row below, and paintRow's
+    // sig-based skip can leave that bleed uncleared indefinitely.
+    process.stdout.write("\x1b[?7l");
     // mouse: "button" enables wheel + click reporting so we can intercept
     // mouse-wheel events for scrollback. terminal-kit emits these through
     // the same "key" channel as MOUSE_WHEEL_UP / MOUSE_WHEEL_DOWN names.
@@ -202,6 +209,8 @@ export class Screen {
     this.term.off("resize", this.resizeHandler);
     this.term.grabInput(false);
     this.term.hideCursor(false);
+    // Restore auto-wrap so the host shell behaves normally after exit.
+    process.stdout.write("\x1b[?7h");
     this.term.fullscreen(false);
     this.term("\n");
   }
@@ -586,6 +595,8 @@ export class Screen {
     this.lastWindowTitle = null;
     this.wrapCache.clear();
     this.wrapCacheWidth = 0;
+    // Re-assert DECAWM-off in case something turned it back on.
+    process.stdout.write("\x1b[?7l");
     this.term.clear();
     this.repaint();
   }
@@ -1627,13 +1638,27 @@ function wrapAnsiBody(text: string, width: number): string[] {
   return wrapAnsi(text, width, { hard: true, trim: false }).split("\n");
 }
 
-function wrap(text: string, width: number): string[] {
+// Wide-character detection. ASCII printable + space; anything else may have
+// visible width != string length (CJK 2-col, emoji ZWJ sequences, fullwidth
+// punctuation, combining marks). When false, char-count math is exact and
+// the fast path is safe; when true we fall back to grapheme + string-width.
+const NON_ASCII = /[^\x20-\x7e]/;
+const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+export function wrap(text: string, width: number): string[] {
   if (width <= 0) {
     return [text];
   }
   if (text.length === 0) {
     return [""];
   }
+  if (!NON_ASCII.test(text)) {
+    return wrapAscii(text, width);
+  }
+  return wrapVisible(text, width);
+}
+
+function wrapAscii(text: string, width: number): string[] {
   const out: string[] = [];
   let remaining = text;
   while (remaining.length > width) {
@@ -1662,14 +1687,89 @@ function wrap(text: string, width: number): string[] {
   return out;
 }
 
-function truncate(text: string, max: number): string {
-  if (text.length <= max) {
+// Visible-width-aware wrap. Walks graphemes, budgeting by string-width
+// so a CJK char counts as 2 cols, a regional-indicator flag as 2, etc.
+// Without this, a body of 80 CJK chars (160 visible cols) would render
+// well past the right margin, the terminal would auto-wrap onto the
+// next physical row, and paintRow's sig-based skip would never erase
+// that bleed.
+function wrapVisible(text: string, width: number): string[] {
+  const out: string[] = [];
+  const graphemes: { seg: string; w: number }[] = [];
+  for (const { segment } of SEGMENTER.segment(text)) {
+    graphemes.push({ seg: segment, w: stringWidth(segment) });
+  }
+  let i = 0;
+  while (i < graphemes.length) {
+    let chunk = "";
+    let chunkW = 0;
+    let lastSpaceI = -1;
+    let chunkAtLastSpace = "";
+    while (i < graphemes.length) {
+      const g = graphemes[i]!;
+      if (chunkW + g.w > width) {
+        break;
+      }
+      if (g.seg === " ") {
+        lastSpaceI = i;
+        chunkAtLastSpace = chunk;
+      }
+      chunk += g.seg;
+      chunkW += g.w;
+      i += 1;
+    }
+    if (i >= graphemes.length) {
+      out.push(chunk);
+      break;
+    }
+    if (lastSpaceI >= 0) {
+      out.push(chunkAtLastSpace);
+      i = lastSpaceI + 1;
+    } else if (chunk.length === 0) {
+      // Single grapheme wider than width — emit it anyway so we make
+      // forward progress. The terminal will clip it (with DECAWM off)
+      // or wrap it (without), but either way the next iteration moves on.
+      out.push(graphemes[i]!.seg);
+      i += 1;
+    } else {
+      out.push(chunk);
+    }
+  }
+  return out;
+}
+
+export function truncate(text: string, max: number): string {
+  if (max <= 0) {
+    return "";
+  }
+  if (text.length <= max && !NON_ASCII.test(text)) {
+    return text;
+  }
+  const visible = stringWidth(text);
+  if (visible <= max) {
     return text;
   }
   if (max <= 1) {
-    return text.slice(0, max);
+    return takeByWidth(text, max);
   }
-  return text.slice(0, max - 1) + "…";
+  return takeByWidth(text, max - 1) + "…";
+}
+
+function takeByWidth(text: string, budget: number): string {
+  if (budget <= 0) {
+    return "";
+  }
+  let out = "";
+  let used = 0;
+  for (const { segment } of SEGMENTER.segment(text)) {
+    const w = stringWidth(segment);
+    if (used + w > budget) {
+      break;
+    }
+    out += segment;
+    used += w;
+  }
+  return out;
 }
 
 function firstLine(text: string): string {
