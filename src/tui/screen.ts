@@ -1193,7 +1193,7 @@ export class Screen {
       }
       this.term(" · ");
       if (this.banner.planMode) {
-        this.term.brightMagenta(planLabel);
+        this.term.brightYellow(planLabel);
       } else {
         this.term.dim(planLabel);
       }
@@ -1545,18 +1545,18 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
     case "tool-status-pending":
       // "queued" — work hasn't started yet; subdued so running calls
       // stand out next to it.
-      term.dim.yellow.noFormat(text);
+      term.dim.noFormat(text);
       return;
     case "tool-status-running":
-      // Bold so an in-flight tool call jumps out of a column of queued
-      // and completed siblings.
-      term.bold.yellow.noFormat(text);
+      // Bright yellow so an in-flight tool call jumps out of a column of
+      // queued and completed siblings, and matches the banner's busy hue.
+      term.brightYellow.noFormat(text);
       return;
     case "tool-status-cancelled":
       term.dim.noFormat(text);
       return;
     case "plan":
-      term.magenta.noFormat(text);
+      term.brightYellow.noFormat(text);
       return;
     case "plan-done":
       term.green.noFormat(text);
