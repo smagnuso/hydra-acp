@@ -3,6 +3,7 @@
 // and delegates them to an `InputDispatcher` (held by the app), then
 // redraws.
 
+import os from "node:os";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import wrapAnsi from "wrap-ansi";
@@ -888,7 +889,8 @@ export class Screen {
     const sid = shortId(this.header.sessionId);
     const title = this.header.title?.trim();
     const agentCell = formatAgentWithModel(this.header.agent, this.header.model);
-    const sig = `hdr|${w}|${agentCell}|${this.header.cwd}|${sid}|${title ?? ""}|${usage ?? ""}`;
+    const cwdDisplay = shortenHomePath(this.header.cwd);
+    const sig = `hdr|${w}|${agentCell}|${cwdDisplay}|${sid}|${title ?? ""}|${usage ?? ""}`;
     this.paintRow(1, sig, () => {
       // Fixed pieces: "hydra · " + agent[(model)] + " · " + cwd + " · " +
       // sessionId [+ " · " + title] and the right-aligned usage block.
@@ -904,13 +906,12 @@ export class Screen {
       let cwdRoom: number;
       let titleRoom: number;
       if (title) {
-        // Title is the most useful identifier — give it its natural width
-        // first, capped so cwd retains at least a minimum slice. cwd takes
-        // whatever remains.
-        const cwdMin = Math.min(this.header.cwd.length, 12);
-        const titleCap = Math.max(8, variableRoom - cwdMin);
-        titleRoom = Math.min(title.length, titleCap);
-        cwdRoom = Math.max(8, variableRoom - titleRoom);
+        // cwd gets its natural width first (a small footprint that holds
+        // the path), and title takes whatever's left. When cwd is so long
+        // it would crowd out title, cap it so title still keeps a sliver.
+        const titleMin = Math.min(title.length, 8);
+        cwdRoom = Math.min(cwdDisplay.length, Math.max(8, variableRoom - titleMin));
+        titleRoom = Math.max(0, variableRoom - cwdRoom);
       } else {
         titleRoom = 0;
         cwdRoom = variableRoom;
@@ -920,7 +921,7 @@ export class Screen {
       this.term
         .bold("hydra")(" · ")
         .cyan.noFormat(agentCell)(" · ")
-        .dim.noFormat(truncate(this.header.cwd, cwdRoom))(" · ")
+        .dim.noFormat(truncate(cwdDisplay, cwdRoom))(" · ")
         .yellow(sid);
       if (title) {
         this.term(" · ").bold.noFormat(truncate(title, titleRoom));
@@ -1752,6 +1753,20 @@ function wrapVisible(text: string, width: number): string[] {
     }
   }
   return out;
+}
+
+export function shortenHomePath(p: string): string {
+  const home = os.homedir();
+  if (!home) {
+    return p;
+  }
+  if (p === home) {
+    return "~";
+  }
+  if (p.startsWith(home + "/")) {
+    return "~" + p.slice(home.length);
+  }
+  return p;
 }
 
 export function truncate(text: string, max: number): string {
