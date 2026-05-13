@@ -418,8 +418,21 @@ function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLin
       },
     ];
   }
+  // Header tracks the plan's overall state: yellow ("plan") while any
+  // entry is still pending/in-progress (matches the busy banner + running
+  // tool accent), green ("plan-done") once every entry is completed so a
+  // finished plan stops drawing the eye like an active one.
+  const allComplete = event.entries.every(
+    (e) => (e.status ?? "pending") === "completed",
+  );
+  const headerStyle: Style = allComplete ? "plan-done" : "plan";
   const lines: FormattedLine[] = [
-    { prefix: "▣ ", prefixStyle: "plan", body: "Plan", bodyStyle: "plan" },
+    {
+      prefix: "▣ ",
+      prefixStyle: headerStyle,
+      body: "Plan",
+      bodyStyle: headerStyle,
+    },
   ];
   for (const entry of event.entries) {
     const status = entry.status ?? "pending";
