@@ -914,7 +914,7 @@ async function runSession(
         screen.setBanner({});
         return;
       case "redraw":
-        screen.redraw();
+        screen.fullRedraw();
         return;
       case "switch-session":
         void switchSession();

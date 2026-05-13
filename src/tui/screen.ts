@@ -574,6 +574,22 @@ export class Screen {
     this.repaint();
   }
 
+  // Forced clean-slate repaint. Drops the per-row signature cache, the
+  // window-title cache, the wrap cache, and clears the terminal before
+  // painting. Wired to ^L so the user can recover when something has
+  // corrupted the visible state and the per-row sig check otherwise
+  // short-circuits the re-emit.
+  fullRedraw(): void {
+    this.lastFrameRows.clear();
+    this.lastFrameW = 0;
+    this.lastFrameH = 0;
+    this.lastWindowTitle = null;
+    this.wrapCache.clear();
+    this.wrapCacheWidth = 0;
+    this.term.clear();
+    this.repaint();
+  }
+
   // While paused, append* methods buffer state but don't repaint. Calls are
   // counter-based so they nest safely. Resume triggers exactly one repaint
   // if any was requested while paused.
