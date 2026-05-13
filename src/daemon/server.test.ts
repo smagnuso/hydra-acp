@@ -141,6 +141,160 @@ describe("startDaemon", () => {
       });
       expect(r.status).toBe(404);
     });
+
+    it("returns 404 exporting an unknown session", async () => {
+      const r = await fetch(
+        `${baseUrl}/v1/sessions/hydra_session_unknown/export`,
+        { headers: { Authorization: `Bearer ${TEST_TOKEN}` } },
+      );
+      expect(r.status).toBe(404);
+    });
+
+    it("rejects import with a missing body", async () => {
+      const r = await fetch(`${baseUrl}/v1/sessions/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({}),
+      });
+      expect(r.status).toBe(400);
+    });
+
+    it("rejects import with a malformed bundle", async () => {
+      const r = await fetch(`${baseUrl}/v1/sessions/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({ bundle: { version: 1, no: "fields" } }),
+      });
+      expect(r.status).toBe(400);
+    });
+
+    it("imports a valid bundle, listing it as cold, and returns 409 on re-import", async () => {
+      const bundle = {
+        version: 1,
+        exportedAt: "2026-05-13T00:00:00.000Z",
+        exportedFrom: { hydraVersion: "0.1.0", machine: "test-host" },
+        session: {
+          sessionId: "hydra_session_origin",
+          lineageId: "hydra_lineage_route_test",
+          agentId: "claude-acp",
+          cwd: "/work",
+          createdAt: "2026-05-13T00:00:00.000Z",
+          updatedAt: "2026-05-13T00:00:00.000Z",
+        },
+        history: [],
+      };
+      const r1 = await fetch(`${baseUrl}/v1/sessions/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({ bundle }),
+      });
+      expect(r1.status).toBe(201);
+      const body = (await r1.json()) as {
+        sessionId: string;
+        importedFromSessionId: string;
+        replaced: boolean;
+      };
+      expect(body.sessionId).toMatch(/^hydra_session_/);
+      expect(body.importedFromSessionId).toBe("hydra_session_origin");
+      expect(body.replaced).toBe(false);
+
+      const list = await fetch(`${baseUrl}/v1/sessions`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      const listBody = (await list.json()) as {
+        sessions: Array<{ sessionId: string; status?: string }>;
+      };
+      expect(
+        listBody.sessions.some(
+          (s) => s.sessionId === body.sessionId && s.status === "cold",
+        ),
+      ).toBe(true);
+
+      const r2 = await fetch(`${baseUrl}/v1/sessions/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({ bundle }),
+      });
+      expect(r2.status).toBe(409);
+      const dup = (await r2.json()) as { existingSessionId?: string };
+      expect(dup.existingSessionId).toBe(body.sessionId);
+
+      const r3 = await fetch(`${baseUrl}/v1/sessions/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({ bundle, replace: true }),
+      });
+      expect(r3.status).toBe(201);
+      const replaced = (await r3.json()) as {
+        sessionId: string;
+        replaced: boolean;
+      };
+      expect(replaced.replaced).toBe(true);
+      expect(replaced.sessionId).toBe(body.sessionId);
+    });
+
+    it("exports an imported session into a bundle that round-trips", async () => {
+      const bundle = {
+        version: 1,
+        exportedAt: "2026-05-13T00:00:00.000Z",
+        exportedFrom: { hydraVersion: "0.1.0", machine: "test-host" },
+        session: {
+          sessionId: "hydra_session_origin_2",
+          lineageId: "hydra_lineage_roundtrip",
+          agentId: "claude-acp",
+          cwd: "/work",
+          title: "round-tripped",
+          createdAt: "2026-05-13T00:00:00.000Z",
+          updatedAt: "2026-05-13T00:00:00.000Z",
+        },
+        history: [
+          {
+            method: "session/update",
+            params: { update: { sessionUpdate: "agent_message_chunk" } },
+            recordedAt: 1,
+          },
+        ],
+      };
+      const r1 = await fetch(`${baseUrl}/v1/sessions/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({ bundle }),
+      });
+      expect(r1.status).toBe(201);
+      const imported = (await r1.json()) as { sessionId: string };
+
+      const r2 = await fetch(
+        `${baseUrl}/v1/sessions/${imported.sessionId}/export`,
+        { headers: { Authorization: `Bearer ${TEST_TOKEN}` } },
+      );
+      expect(r2.status).toBe(200);
+      const exported = (await r2.json()) as {
+        version: number;
+        session: { lineageId: string };
+        history: unknown[];
+      };
+      expect(exported.version).toBe(1);
+      expect(exported.session.lineageId).toBe("hydra_lineage_roundtrip");
+      expect(exported.history).toHaveLength(1);
+    });
   });
 
   describe("WSS handshake + initialize", () => {

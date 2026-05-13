@@ -12,6 +12,8 @@ import {
   runDaemonStop,
 } from "./cli/commands/daemon.js";
 import {
+  runSessionsExport,
+  runSessionsImport,
   runSessionsKill,
   runSessionsList,
   runSessionsRm,
@@ -148,6 +150,17 @@ async function main(): Promise<void> {
         await runSessionsRm(positional[2]);
         return;
       }
+      if (sub === "export") {
+        const out = resolveOption(flags, "out");
+        await runSessionsExport(positional[2], out);
+        return;
+      }
+      if (sub === "import") {
+        await runSessionsImport(positional[2], {
+          replace: flags.replace === true,
+        });
+        return;
+      }
       process.stderr.write(`Unknown sessions subcommand: ${sub}\n`);
       process.exit(2);
       return;
@@ -282,6 +295,10 @@ function printHelp(): void {
       "  hydra-acp sessions [list] [--all]  List sessions (live + 20 most-recent cold; --all for everything)",
       "  hydra-acp sessions kill <id>       Demote a live session to cold (keeps the on-disk record)",
       "  hydra-acp sessions rm <id>         Remove a session entirely (live or cold)",
+      "  hydra-acp sessions export <id> [--out <file>|.]",
+      "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout",
+      "  hydra-acp sessions import <file>|- [--replace]",
+      "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live)",
       "  hydra-acp extensions list                   List configured extensions and live state",
       "  hydra-acp extensions add <name> [opts]      Add an extension to config",
       "  hydra-acp extensions remove <name>          Remove an extension from config",

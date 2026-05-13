@@ -1,7 +1,26 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { customAlphabet } from "nanoid";
 import { z } from "zod";
 import { paths } from "./paths.js";
+
+// Mirror the alphabet/length used for session ids (see session.ts). Plain
+// alphanumeric, length 16 → ~95 bits — collisions across a personal
+// fleet are vanishingly unlikely.
+const HYDRA_ID_ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const generateRawId = customAlphabet(HYDRA_ID_ALPHABET, 16);
+
+export const HYDRA_LINEAGE_PREFIX = "hydra_lineage_";
+
+// Stable identifier set once when a session is first created. Preserved
+// through every export/import so re-importing the same session (even
+// after multi-hop transfers A→B→C→A) can be detected and either
+// rejected or replaced. Distinct from sessionId, which is regenerated
+// fresh on every import to avoid collisions in the local namespace.
+export function generateLineageId(): string {
+  return `${HYDRA_LINEAGE_PREFIX}${generateRawId()}`;
+}
 
 // One agent-advertised command. Shape mirrors the
 // available_commands_update notification's entries (name + description),
@@ -17,7 +36,20 @@ export type PersistedAgentCommand = z.infer<typeof PersistedAgentCommand>;
 export const SessionRecord = z.object({
   version: z.literal(1),
   sessionId: z.string(),
+  // Optional for back-compat with records written before this field
+  // existed; mergeForPersistence generates one on next write so any
+  // touched session converges to having a lineageId. A record that
+  // never gets written again (truly cold and untouched) just won't
+  // participate in lineage-based dedup, which is correct — it was
+  // never exported, so no incoming bundle can claim its lineage.
+  lineageId: z.string().optional(),
   upstreamSessionId: z.string(),
+  // When non-empty, marks a session that was created by import and is
+  // waiting for its first attach to bootstrap a fresh upstream agent
+  // and replay the imported history as a takeover transcript. The
+  // origin's local id at export time, kept for debuggability and as a
+  // breadcrumb in `sessions list` (informational, not used for routing).
+  importedFromSessionId: z.string().optional(),
   agentId: z.string(),
   cwd: z.string(),
   title: z.string().optional(),
@@ -101,6 +133,26 @@ export class SessionStore {
     }
   }
 
+  // Find a persisted session by lineageId. Used by SessionManager.import
+  // to detect bundles that have already been imported (lineageId match)
+  // so we can either error out or, with replace:true, overwrite.
+  // Returns undefined if no record has that lineageId. Records that
+  // pre-date the lineageId field simply don't match — which is
+  // correct: they were never exported, so no incoming bundle can
+  // legitimately claim their lineage.
+  async findByLineageId(lineageId: string): Promise<SessionRecord | undefined> {
+    if (lineageId.length === 0) {
+      return undefined;
+    }
+    const all = await this.list().catch(() => []);
+    for (const record of all) {
+      if (record.lineageId === lineageId) {
+        return record;
+      }
+    }
+    return undefined;
+  }
+
   async list(): Promise<SessionRecord[]> {
     let entries: string[];
     try {
@@ -127,7 +179,9 @@ export class SessionStore {
 
 export function recordFromMemorySession(args: {
   sessionId: string;
+  lineageId?: string;
   upstreamSessionId: string;
+  importedFromSessionId?: string;
   agentId: string;
   cwd: string;
   title?: string;
@@ -141,7 +195,9 @@ export function recordFromMemorySession(args: {
   const now = new Date().toISOString();
   return {
     sessionId: args.sessionId,
+    lineageId: args.lineageId,
     upstreamSessionId: args.upstreamSessionId,
+    importedFromSessionId: args.importedFromSessionId,
     agentId: args.agentId,
     cwd: args.cwd,
     title: args.title,

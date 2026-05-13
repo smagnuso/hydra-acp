@@ -211,6 +211,12 @@ hydra-acp daemon status
 hydra-acp sessions                          # list sessions
 hydra-acp sessions kill <id>                # close a live session (keeps the on-disk record so it can be resurrected)
 hydra-acp sessions rm <id>                  # remove a session entirely (live or cold)
+hydra-acp sessions export <id> [--out <file>|.]
+                                            # write a session bundle (meta + history) to <file>,
+                                            # to a default-named file when --out=., or to stdout
+hydra-acp sessions import <file>|- [--replace]
+                                            # import a bundle from <file> or stdin (-);
+                                            # --replace overwrites an existing lineage match
 
 hydra-acp extensions                        # list configured extensions and live state
 hydra-acp extensions add <name>             # add to config (--command, --args, --env, --disabled)
@@ -264,6 +270,21 @@ Slash commands of the form `/hydra <verb> [args]` are intercepted by hydra befor
 | `/hydra switch <agent>` | Swaps the agent process backing this session. Spawns the new agent (must be in the registry — see `hydra-acp agents list`), kills the old one, and feeds the conversation transcript so far back in as the first prompt to the new agent. `session_info_update` carries the new `agentId`; a synthetic `agent_message_chunk` banner marks the switch in the transcript. The on-disk session record is updated so resurrection brings the session back on the new agent. |
 
 These work from anywhere a session prompt can be typed — the TUI's input box, agent-shell, the slack thread composer, the browser chat composer. Hydra detects them server-side; clients send them as ordinary `session/prompt` requests.
+
+### Exporting and importing sessions
+
+`hydra-acp sessions export` writes a session to a `*.hydra` JSON bundle (meta + history + optional prompt history). `hydra-acp sessions import` brings it back into the local daemon as a new cold session. Use this to archive a session before clearing it, share one with a teammate, restore from backup, or move work between machines without running both daemons live.
+
+```text
+hydra-acp sessions export hydra_session_abc --out backup.hydra
+hydra-acp sessions import backup.hydra            # → new local id
+hydra-acp sessions import backup.hydra            # error: already imported
+hydra-acp sessions import backup.hydra --replace  # overwrites in place
+```
+
+Each session carries a stable **`lineageId`** that survives every export/import hop, so the same bundle imported twice is detected as a duplicate — the second import errors with the existing local id. `--replace` overrides that and overwrites the existing local copy, killing any live session first and preserving the local `sessionId` so bookmarks (Slack threads, editor session links) keep resolving.
+
+The first attach to an imported session is slow: hydra spawns a fresh agent, runs `session/new`, and feeds the imported history back in as a synthesized takeover transcript (same machinery as `/hydra switch`). Subsequent attaches use the normal `session/load` path. Honest caveat: this is a text-level handover — the originating agent's internal state (tool-call chains, compacted earlier turns) isn't preserved, so the resumed conversation may be cognitively shallower than the original.
 
 ### Forwarding agent args (`hydra-acp launch <agent-id> ...`)
 
@@ -514,6 +535,9 @@ GET    /v1/sessions               # list sessions
 POST   /v1/sessions               # create session (alternative to ACP session/new)
 POST   /v1/sessions/:id/kill      # demote a live session to cold (keeps the on-disk record); idempotent
 DELETE /v1/sessions/:id           # remove a session entirely (live or cold)
+GET    /v1/sessions/:id/export    # download a session bundle (*.hydra JSON; meta + history)
+POST   /v1/sessions/import        # body { bundle, replace? } → { sessionId, importedFromSessionId, replaced }
+                                  # 409 with existingSessionId on a lineageId clash unless replace:true
 GET    /v1/agents                 # list known agents (registry + installed)
 POST   /v1/agents/:id/install     # pre-install an agent
 GET    /v1/registry               # current cached registry contents

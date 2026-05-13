@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { customAlphabet } from "nanoid";
 import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
 import {
@@ -9,15 +10,22 @@ import {
 } from "./session.js";
 import {
   SessionStore,
+  generateLineageId,
   recordFromMemorySession,
   type PersistedAgentCommand,
   type SessionRecord,
 } from "./session-store.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { paths } from "./paths.js";
+import { saveHistory as savePromptHistory } from "../tui/history.js";
+import type { Bundle } from "./bundle.js";
 import type { AdvertisedCommand } from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
+
+const HYDRA_ID_ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const generateRawSessionId = customAlphabet(HYDRA_ID_ALPHABET, 16);
 
 export interface CreateSessionParams {
   cwd: string;
@@ -141,6 +149,16 @@ export class SessionManager {
       err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
+
+    // Import-reseed path: meta.json was written by import() with an
+    // empty upstreamSessionId, signaling we should bootstrap a fresh
+    // agent and let it absorb the imported history as a takeover
+    // transcript rather than calling session/load against an id this
+    // install has never heard of.
+    if (params.upstreamSessionId === "") {
+      return this.doResurrectFromImport(params);
+    }
+
     const plan = planSpawn(agentDef, params.agentArgs ?? []);
     const agent = this.spawner({
       agentId: params.agentId,
@@ -196,6 +214,48 @@ export class SessionManager {
         : undefined,
     });
     await this.attachManagerHooks(session);
+    return session;
+  }
+
+  // First-attach path for a session that was created via import(). The
+  // on-disk meta.json carries upstreamSessionId="" as the import
+  // marker; bootstrap a fresh agent (gets a real upstream id) and kick
+  // off seedFromImport so the agent absorbs the historical transcript.
+  // attachManagerHooks rewrites meta.json with the new upstreamSessionId,
+  // so subsequent resurrects of this session use the normal session/load
+  // path.
+  private async doResurrectFromImport(params: ResurrectParams): Promise<Session> {
+    const fresh = await this.bootstrapAgent({
+      agentId: params.agentId,
+      cwd: params.cwd,
+      agentArgs: params.agentArgs,
+      mcpServers: [],
+    });
+    const session = new Session({
+      sessionId: params.hydraSessionId,
+      cwd: params.cwd,
+      agentId: params.agentId,
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      agentMeta: fresh.agentMeta,
+      title: params.title,
+      agentArgs: params.agentArgs,
+      idleTimeoutMs: this.idleTimeoutMs,
+      spawnReplacementAgent: (p) =>
+        this.bootstrapAgent({ ...p, mcpServers: [] }),
+      historyStore: this.histories,
+      currentModel: params.currentModel,
+      currentMode: params.currentMode,
+      agentCommands: params.agentCommands,
+      firstPromptSeeded: !!params.title,
+      createdAt: params.createdAt
+        ? new Date(params.createdAt).getTime()
+        : undefined,
+    });
+    await this.attachManagerHooks(session);
+    // Fire and forget — the seed runs through enqueuePrompt inside
+    // Session, so any user prompt arriving mid-seed queues behind it.
+    void session.seedFromImport().catch(() => undefined);
     return session;
   }
 
@@ -457,6 +517,142 @@ export class SessionManager {
     return entries;
   }
 
+  // Build an export bundle for a session, reading meta + history from
+  // disk. Backfills lineageId if the on-disk record pre-dates that
+  // field. Returns undefined if the session doesn't exist. Callers
+  // populate the bundle's exportedFrom metadata themselves.
+  async exportBundle(sessionId: string): Promise<
+    | {
+        record: SessionRecord & { lineageId: string };
+        history: HistoryStoreEntry[];
+        promptHistory: string[];
+      }
+    | undefined
+  > {
+    const record = await this.store.read(sessionId);
+    if (!record) {
+      return undefined;
+    }
+    let withLineage: SessionRecord & { lineageId: string };
+    if (record.lineageId) {
+      withLineage = record as SessionRecord & { lineageId: string };
+    } else {
+      // Lazy backfill at export time: write the lineageId back so a
+      // subsequent re-export produces the same lineage.
+      const lineageId = generateLineageId();
+      const backfilled: SessionRecord = { ...record, lineageId };
+      await this.enqueueMetaWrite(sessionId, async () => {
+        const latest = await this.store.read(sessionId);
+        if (!latest) {
+          return;
+        }
+        if (latest.lineageId) {
+          return;
+        }
+        await this.store.write({ ...latest, lineageId });
+      }).catch(() => undefined);
+      withLineage = backfilled as SessionRecord & { lineageId: string };
+    }
+    const history = await this.histories.load(sessionId).catch(() => []);
+    const promptHistory = await loadPromptHistorySafely(sessionId);
+    return { record: withLineage, history, promptHistory };
+  }
+
+  // Create a local session from an imported bundle. Without `replace`,
+  // a bundle with a lineageId we already have on disk throws
+  // BundleAlreadyImported citing the existing local id. With
+  // `replace: true`, the existing record is overwritten in-place (its
+  // local sessionId is preserved so bookmarks/Slack thread links still
+  // resolve), and any live in-memory session is closed so the next
+  // attach triggers the import-reseed path.
+  async importBundle(
+    bundle: Bundle,
+    opts: { replace?: boolean } = {},
+  ): Promise<{
+    sessionId: string;
+    importedFromSessionId: string;
+    replaced: boolean;
+  }> {
+    const existing = await this.store.findByLineageId(bundle.session.lineageId);
+    if (existing) {
+      if (!opts.replace) {
+        const err = new Error(
+          `bundle already imported as ${existing.sessionId}`,
+        ) as Error & { code: number; existingSessionId: string };
+        err.code = JsonRpcErrorCodes.BundleAlreadyImported;
+        err.existingSessionId = existing.sessionId;
+        throw err;
+      }
+      // Close any live session backed by this record so the import
+      // overwrite isn't racing in-memory state. close() runs the
+      // onClose handlers which delete the in-memory entry from
+      // this.sessions; deleteRecord:false keeps the disk record so
+      // the overwrite below has something to atomically replace.
+      const live = this.sessions.get(existing.sessionId);
+      if (live) {
+        await live.close({ deleteRecord: false }).catch(() => undefined);
+      }
+      await this.writeImportedRecord({
+        sessionId: existing.sessionId,
+        bundle,
+        preservedCreatedAt: existing.createdAt,
+      });
+      return {
+        sessionId: existing.sessionId,
+        importedFromSessionId: bundle.session.sessionId,
+        replaced: true,
+      };
+    }
+    const newId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
+    await this.writeImportedRecord({ sessionId: newId, bundle });
+    return {
+      sessionId: newId,
+      importedFromSessionId: bundle.session.sessionId,
+      replaced: false,
+    };
+  }
+
+  // Write the imported bundle's history.jsonl, prompt-history (if
+  // present), and meta.json. upstreamSessionId is left empty as the
+  // marker that the first attach should bootstrap a fresh agent and
+  // run seedFromImport rather than calling session/load.
+  private async writeImportedRecord(args: {
+    sessionId: string;
+    bundle: Bundle;
+    preservedCreatedAt?: string;
+  }): Promise<void> {
+    // zod's z.unknown() makes params optional in the inferred type, but
+    // HistoryStore writes whatever JSON shape it was handed; the on-disk
+    // round-trip is identical so the cast is safe.
+    await this.histories.rewrite(
+      args.sessionId,
+      args.bundle.history as HistoryStoreEntry[],
+    );
+    if (args.bundle.promptHistory && args.bundle.promptHistory.length > 0) {
+      await savePromptHistory(
+        paths.tuiHistoryFile(args.sessionId),
+        args.bundle.promptHistory,
+      ).catch(() => undefined);
+    }
+    const now = new Date().toISOString();
+    await this.enqueueMetaWrite(args.sessionId, async () => {
+      await this.store.write({
+        sessionId: args.sessionId,
+        lineageId: args.bundle.session.lineageId,
+        upstreamSessionId: "",
+        importedFromSessionId: args.bundle.session.sessionId,
+        agentId: args.bundle.session.agentId,
+        cwd: args.bundle.session.cwd,
+        title: args.bundle.session.title,
+        currentModel: args.bundle.session.currentModel,
+        currentMode: args.bundle.session.currentMode,
+        agentCommands: args.bundle.session.agentCommands,
+        createdAt: args.preservedCreatedAt ?? now,
+        updatedAt: now,
+      });
+    });
+  }
+
   async deleteRecord(sessionId: string): Promise<boolean> {
     const record = await this.store.read(sessionId);
     if (!record) {
@@ -603,7 +799,9 @@ function mergeForPersistence(
   const agentCommands = persistedCommands ?? existing?.agentCommands;
   return recordFromMemorySession({
     sessionId: session.sessionId,
+    lineageId: existing?.lineageId ?? generateLineageId(),
     upstreamSessionId: session.upstreamSessionId,
+    importedFromSessionId: existing?.importedFromSessionId,
     agentId: session.agentId,
     cwd: session.cwd,
     title: session.title,
@@ -613,6 +811,29 @@ function mergeForPersistence(
     agentCommands,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
+}
+
+async function loadPromptHistorySafely(sessionId: string): Promise<string[]> {
+  try {
+    const raw = await fs.readFile(paths.tuiHistoryFile(sessionId), "utf8");
+    const out: string[] = [];
+    for (const line of raw.split("\n")) {
+      if (line.length === 0) {
+        continue;
+      }
+      try {
+        const decoded = JSON.parse(line);
+        if (typeof decoded === "string") {
+          out.push(decoded);
+        }
+      } catch {
+        // Tolerate corrupted lines (older versions or partial writes).
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 // "Last meaningful activity" for the picker/listing's USED hint. Uses

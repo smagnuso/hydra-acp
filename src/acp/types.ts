@@ -40,6 +40,7 @@ export const JsonRpcErrorCodes = {
   PermissionDenied: -32002,
   AlreadyAttached: -32003,
   AgentNotInstalled: -32005,
+  BundleAlreadyImported: -32010,
 } as const;
 
 export const InitializeParams = z.object({

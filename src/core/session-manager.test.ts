@@ -847,3 +847,220 @@ describe("SessionManager: /hydra switch persistence", () => {
     expect(record?.upstreamSessionId).toBe("u_new");
   });
 });
+
+describe("SessionManager: importBundle", () => {
+  let tmpHome: string;
+  beforeEach(() => {
+    tmpHome = process.env.HYDRA_ACP_HOME!;
+    void tmpHome;
+  });
+
+  function bundleFor(opts: {
+    lineageId: string;
+    sessionId?: string;
+    agentId?: string;
+    cwd?: string;
+    title?: string;
+    history?: Array<{ method: string; params: unknown; recordedAt: number }>;
+    promptHistory?: string[];
+  }) {
+    return {
+      version: 1 as const,
+      exportedAt: "2026-05-13T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: opts.sessionId ?? "hydra_session_origin",
+        lineageId: opts.lineageId,
+        agentId: opts.agentId ?? "claude-code",
+        cwd: opts.cwd ?? "/work",
+        title: opts.title,
+        createdAt: "2026-05-13T00:00:00.000Z",
+        updatedAt: "2026-05-13T00:00:00.000Z",
+      },
+      history: opts.history ?? [],
+      ...(opts.promptHistory ? { promptHistory: opts.promptHistory } : {}),
+    };
+  }
+
+  function noSpawnManager(): SessionManager {
+    return new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        throw new Error("spawner should not be called from importBundle alone");
+      },
+    );
+  }
+
+  it("creates a fresh local session for a new bundle (no lineage match)", async () => {
+    const manager = noSpawnManager();
+    const result = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_aaa" }),
+    );
+    expect(result.replaced).toBe(false);
+    expect(result.importedFromSessionId).toBe("hydra_session_origin");
+    expect(result.sessionId).toMatch(/^hydra_session_/);
+    expect(result.sessionId).not.toBe("hydra_session_origin");
+  });
+
+  it("persists upstreamSessionId='' so the next attach triggers reseed", async () => {
+    const manager = noSpawnManager();
+    const result = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_b" }),
+    );
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "meta.json",
+    );
+    const raw = await fs.readFile(metaPath, "utf8");
+    const record = JSON.parse(raw);
+    expect(record.upstreamSessionId).toBe("");
+    expect(record.lineageId).toBe("hydra_lineage_b");
+    expect(record.importedFromSessionId).toBe("hydra_session_origin");
+  });
+
+  it("rejects a duplicate import (lineage match) without --replace", async () => {
+    const manager = noSpawnManager();
+    const first = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_dup" }),
+    );
+    await expect(
+      manager.importBundle(bundleFor({ lineageId: "hydra_lineage_dup" })),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCodes.BundleAlreadyImported,
+      existingSessionId: first.sessionId,
+    });
+  });
+
+  it("overwrites in place with --replace, preserving the local sessionId", async () => {
+    const manager = noSpawnManager();
+    const first = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_rep", title: "first" }),
+    );
+    const second = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_rep", title: "second" }),
+      { replace: true },
+    );
+    expect(second.replaced).toBe(true);
+    expect(second.sessionId).toBe(first.sessionId);
+
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      first.sessionId,
+      "meta.json",
+    );
+    const raw = await fs.readFile(metaPath, "utf8");
+    const record = JSON.parse(raw);
+    expect(record.title).toBe("second");
+    expect(record.lineageId).toBe("hydra_lineage_rep");
+  });
+
+  it("writes history and prompt-history to disk", async () => {
+    const manager = noSpawnManager();
+    const result = await manager.importBundle(
+      bundleFor({
+        lineageId: "hydra_lineage_hist",
+        history: [
+          {
+            method: "session/update",
+            params: { update: { sessionUpdate: "prompt_received" } },
+            recordedAt: 1,
+          },
+          {
+            method: "session/update",
+            params: { update: { sessionUpdate: "agent_message_chunk" } },
+            recordedAt: 2,
+          },
+        ],
+        promptHistory: ["one", "two"],
+      }),
+    );
+    const histPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "history.jsonl",
+    );
+    const histRaw = await fs.readFile(histPath, "utf8");
+    expect(histRaw.split("\n").filter((l) => l.length > 0)).toHaveLength(2);
+
+    const promptPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "prompt-history",
+    );
+    const promptRaw = await fs.readFile(promptPath, "utf8");
+    expect(promptRaw).toContain('"one"');
+    expect(promptRaw).toContain('"two"');
+  });
+});
+
+describe("SessionManager: resurrect from import", () => {
+  it("bootstraps a fresh agent and runs seedFromImport when upstreamSessionId is empty", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    // bootstrap: initialize + session/new, then seedFromImport's
+    // session/prompt (transcript replay).
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_fresh" })
+      .mockResolvedValueOnce({ stopReason: "end_turn" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    // Plant an imported-style record on disk via importBundle.
+    const imported = await manager.importBundle({
+      version: 1,
+      exportedAt: "2026-05-13T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_origin",
+        lineageId: "hydra_lineage_reseed",
+        agentId: "claude-code",
+        cwd: "/work",
+        createdAt: "2026-05-13T00:00:00.000Z",
+        updatedAt: "2026-05-13T00:00:00.000Z",
+      },
+      // At least one prompt_received entry so buildSwitchTranscript
+      // produces non-empty output and triggers runInternalPrompt.
+      history: [
+        {
+          method: "session/update",
+          params: {
+            update: {
+              sessionUpdate: "prompt_received",
+              prompt: [{ type: "text", text: "hello" }],
+            },
+          },
+          recordedAt: 1,
+        },
+      ],
+    });
+
+    const session = await manager.resurrect({
+      hydraSessionId: imported.sessionId,
+      upstreamSessionId: "",
+      agentId: "claude-code",
+      cwd: "/work",
+    });
+
+    expect(session.upstreamSessionId).toBe("u_fresh");
+
+    // Allow the fire-and-forget seedFromImport to land.
+    for (let i = 0; i < 30; i += 1) {
+      if (requestMock.mock.calls.length >= 3) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(requestMock.mock.calls[0]?.[0]).toBe("initialize");
+    expect(requestMock.mock.calls[1]?.[0]).toBe("session/new");
+    expect(requestMock.mock.calls[2]?.[0]).toBe("session/prompt");
+  });
+});

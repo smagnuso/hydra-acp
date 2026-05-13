@@ -915,7 +915,14 @@ export class Session {
   // switches don't accumulate banners) and other update kinds we don't
   // think the next agent benefits from re-seeing (plans, thoughts,
   // mode/model/usage).
-  private async buildSwitchTranscript(prevAgentId: string): Promise<string> {
+  //
+  // The header text defaults to the agent-swap framing; callers like
+  // seedFromImport pass a custom header when the new agent is taking
+  // over an imported session rather than swapping mid-conversation.
+  private async buildSwitchTranscript(
+    prevAgentId: string,
+    headerOverride?: { intro: string; followup: string },
+  ): Promise<string> {
     const lines: Array<{ speaker: string; text: string }> = [];
     const history = await this.getHistorySnapshot();
     for (const note of history) {
@@ -975,14 +982,45 @@ export class Session {
     if (current) {
       coalesced.push(`<${current.speaker}>: ${current.text.trim()}`);
     }
+    const intro =
+      headerOverride?.intro ??
+      `You are taking over this conversation from ${prevAgentId}. Below is the transcript so far.`;
+    const followup =
+      headerOverride?.followup ??
+      `Each line is prefixed with its speaker. Continue from where ${prevAgentId} left off, responding to the user's most recent message.`;
     return [
-      `You are taking over this conversation from ${prevAgentId}. Below is the transcript so far.`,
-      `Each line is prefixed with its speaker. Continue from where ${prevAgentId} left off, responding to the user's most recent message.`,
+      intro,
+      followup,
       "",
       "--- begin transcript ---",
       ...coalesced,
       "--- end transcript ---",
     ].join("\n");
+  }
+
+  // Replay the persisted history into a freshly-spawned agent so an
+  // imported session has context. Called by SessionManager.doResurrect
+  // on the first wake-up of a session whose meta.json has an empty
+  // upstreamSessionId (the import marker). Wrapped in enqueuePrompt so
+  // any user prompts arriving mid-seed queue behind it (mirrors the
+  // /hydra switch path so the agent isn't asked to respond to a user
+  // turn before it has absorbed the imported transcript). Best-effort:
+  // if the agent fails to absorb the transcript we still leave the
+  // session usable — the user just continues without context.
+  async seedFromImport(): Promise<void> {
+    await this.enqueuePrompt(async () => {
+      const transcript = await this.buildSwitchTranscript(this.agentId, {
+        intro:
+          "You are continuing a conversation that was imported from another hydra. Below is the transcript so far.",
+        followup:
+          "Each line is prefixed with its speaker. Treat this as context for the next user message; do not re-respond to earlier turns.",
+      });
+      if (!transcript) {
+        return undefined;
+      }
+      await this.runInternalPrompt(transcript).catch(() => undefined);
+      return undefined;
+    });
   }
 
   // Tell every attached client (a) the agent identity has changed

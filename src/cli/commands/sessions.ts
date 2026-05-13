@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { loadConfig } from "../../core/config.js";
 import {
   HEADER,
@@ -104,6 +106,122 @@ export async function runSessionsRm(id: string | undefined): Promise<void> {
     process.exit(1);
   }
   process.stdout.write(`Removed ${id}\n`);
+}
+
+export async function runSessionsExport(
+  id: string | undefined,
+  outPath: string | undefined,
+): Promise<void> {
+  if (!id) {
+    process.stderr.write(
+      "Usage: hydra-acp sessions export <session-id> [--out <file>]\n",
+    );
+    process.exit(2);
+  }
+  const config = await loadConfig();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const response = await fetch(
+    `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export`,
+    {
+      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    },
+  );
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    process.stderr.write(`Daemon returned HTTP ${response.status}: ${text}\n`);
+    process.exit(1);
+  }
+  const body = await response.text();
+  if (!outPath) {
+    process.stdout.write(body);
+    if (!body.endsWith("\n")) {
+      process.stdout.write("\n");
+    }
+    return;
+  }
+  const resolved = outPath === "." ? deriveFilenameFrom(response, id) : outPath;
+  await fs.mkdir(path.dirname(path.resolve(resolved)), { recursive: true });
+  await fs.writeFile(resolved, body, { encoding: "utf8", mode: 0o600 });
+  process.stdout.write(`Wrote ${resolved}\n`);
+}
+
+export async function runSessionsImport(
+  file: string | undefined,
+  opts: { replace?: boolean } = {},
+): Promise<void> {
+  if (!file) {
+    process.stderr.write(
+      "Usage: hydra-acp sessions import <file>|- [--replace]\n",
+    );
+    process.exit(2);
+  }
+  let body: string;
+  if (file === "-") {
+    body = await readStdin();
+  } else {
+    body = await fs.readFile(file, "utf8");
+  }
+  let bundle: unknown;
+  try {
+    bundle = JSON.parse(body);
+  } catch (err) {
+    process.stderr.write(`Failed to parse bundle: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+  const config = await loadConfig();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const response = await fetch(`${baseUrl}/v1/sessions/import`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.daemon.authToken}`,
+    },
+    body: JSON.stringify({ bundle, replace: opts.replace === true }),
+  });
+  if (response.status === 409) {
+    const detail = (await response.json().catch(() => ({}))) as {
+      existingSessionId?: string;
+    };
+    process.stderr.write(
+      `Bundle already imported as ${detail.existingSessionId ?? "unknown"}. Use --replace to overwrite.\n`,
+    );
+    process.exit(1);
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    process.stderr.write(`Daemon returned HTTP ${response.status}: ${text}\n`);
+    process.exit(1);
+  }
+  const result = (await response.json()) as {
+    sessionId: string;
+    importedFromSessionId: string;
+    replaced: boolean;
+  };
+  process.stdout.write(
+    result.replaced
+      ? `Replaced ${result.sessionId} (from ${result.importedFromSessionId})\n`
+      : `Imported as ${result.sessionId} (from ${result.importedFromSessionId})\n`,
+  );
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function deriveFilenameFrom(response: Response, id: string): string {
+  const cd = response.headers.get("content-disposition");
+  if (cd) {
+    const match = cd.match(/filename="([^"]+)"/);
+    if (match) {
+      return match[1]!;
+    }
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `hydra-${id}-${stamp}.hydra`;
 }
 
 export function httpBase(host: string, port: number, tls: boolean): string {

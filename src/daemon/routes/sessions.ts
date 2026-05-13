@@ -1,6 +1,14 @@
+import * as os from "node:os";
 import type { FastifyInstance } from "fastify";
 import { expandHome } from "../../core/config.js";
 import type { SessionManager } from "../../core/session-manager.js";
+import { decodeBundle, encodeBundle } from "../../core/bundle.js";
+import { JsonRpcErrorCodes } from "../../acp/types.js";
+
+// Matches the constant used elsewhere in the daemon (server.ts,
+// acp-ws.ts). Stamped onto export bundles for traceability; not used
+// for routing or validation.
+const HYDRA_VERSION = "0.1.0";
 
 export interface SessionRouteDefaults {
   agentId: string;
@@ -78,6 +86,79 @@ export function registerSessionRoutes(
       return;
     }
     reply.code(204).send();
+  });
+
+  // Export a session as a JSON bundle: meta + history + (optional)
+  // prompt history. Recipients can import via POST /v1/sessions/import.
+  // Resolves the bundle's lineageId lazily — pre-lineage records get
+  // a fresh one persisted on export so subsequent re-exports stay
+  // consistent. Filename in Content-Disposition uses the local id and
+  // a UTC timestamp; consumers can rename freely.
+  app.get("/v1/sessions/:id/export", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const exported = await manager.exportBundle(id);
+    if (!exported) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    const bundle = encodeBundle({
+      record: exported.record,
+      history: exported.history,
+      promptHistory:
+        exported.promptHistory.length > 0 ? exported.promptHistory : undefined,
+      hydraVersion: HYDRA_VERSION,
+      machine: os.hostname(),
+    });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    reply.header(
+      "Content-Disposition",
+      `attachment; filename="hydra-${id}-${stamp}.hydra"`,
+    );
+    reply.code(200).send(bundle);
+  });
+
+  // Import a session bundle. Body shape: { bundle, replace? }. Without
+  // replace, a lineageId clash with an existing local session returns
+  // 409 BundleAlreadyImported citing the existing local id. With
+  // replace:true, the existing local session is overwritten in-place
+  // (its local id is preserved); any live in-memory copy is closed so
+  // the next attach triggers the import-reseed path.
+  app.post("/v1/sessions/import", async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      bundle?: unknown;
+      replace?: boolean;
+    };
+    if (body.bundle === undefined) {
+      reply.code(400).send({ error: "missing bundle" });
+      return;
+    }
+    let bundle;
+    try {
+      bundle = decodeBundle(body.bundle);
+    } catch (err) {
+      reply.code(400).send({
+        error: "invalid bundle",
+        details: (err as Error).message,
+      });
+      return;
+    }
+    try {
+      const result = await manager.importBundle(bundle, {
+        replace: body.replace === true,
+      });
+      reply.code(201).send(result);
+    } catch (err) {
+      const e = err as Error & { code?: number; existingSessionId?: string };
+      if (e.code === JsonRpcErrorCodes.BundleAlreadyImported) {
+        reply.code(409).send({
+          error: "bundle already imported",
+          existingSessionId: e.existingSessionId,
+        });
+        return;
+      }
+      reply.code(500).send({ error: e.message });
+    }
   });
 
   // Tail a session's recorded conversation as NDJSON (one entry per
