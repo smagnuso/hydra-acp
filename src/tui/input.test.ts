@@ -129,9 +129,19 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual([""]);
   });
 
-  it("Ctrl+C while turn running emits cancel", () => {
+  it("Ctrl+C while turn running with empty buffer emits cancel", () => {
     const d = new InputDispatcher();
     d.setTurnRunning(true);
+    expect(feed(d, [k("ctrl-c")])).toEqual([{ type: "cancel" }]);
+  });
+
+  it("Ctrl+C with text clears buffer even while turn running (no cancel)", () => {
+    const d = new InputDispatcher();
+    d.setTurnRunning(true);
+    feed(d, [ch("h"), ch("i")]);
+    expect(feed(d, [k("ctrl-c")])).toEqual([]);
+    expect(d.state().buffer).toEqual([""]);
+    // Now that the buffer is empty, the next ^C reaches the cancel path.
     expect(feed(d, [k("ctrl-c")])).toEqual([{ type: "cancel" }]);
   });
 

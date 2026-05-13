@@ -442,12 +442,15 @@ export class InputDispatcher {
   }
 
   private handleCtrlC(): InputEffect[] {
-    if (this.turnRunning) {
-      return [{ type: "cancel" }];
-    }
+    // Unsubmitted text wins: a first ^C clears the prompt and stops there,
+    // even mid-turn. The next ^C (now on an empty buffer) cancels the turn
+    // if one is running, or exits the TUI when idle.
     if (!this.bufferIsEmpty()) {
       this.clearBuffer();
       return [];
+    }
+    if (this.turnRunning) {
+      return [{ type: "cancel" }];
     }
     return [{ type: "exit" }];
   }
