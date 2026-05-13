@@ -1289,12 +1289,18 @@ async function runSession(
       }
       summary = parts.join(" · ");
     }
+    // Pure-thinking placeholder (no tool has fired yet and the turn is
+    // still live) renders yellow to match the busy banner / active plan /
+    // running tool accent. Once a tool fires the per-tool status colors
+    // carry the activity signal, and once frozen ("thought · Xs") the
+    // header dims so completed turns stop pulling the eye.
+    const pureThinking = total === 0 && inProgress;
     const lines: FormattedLine[] = [
       {
         prefix: "⚒ ",
-        prefixStyle: "tool",
+        prefixStyle: pureThinking ? "tool-status-running" : "tool",
         body: summary,
-        bodyStyle: "dim",
+        bodyStyle: pureThinking ? "tool-status-running" : "dim",
       },
     ];
     for (const id of visibleIds) {
