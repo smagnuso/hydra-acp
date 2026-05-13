@@ -163,10 +163,8 @@ export async function runExtensionsAdd(
     process.stderr.write(
       `Daemon refused to register ${name} (HTTP ${r.status}${detail}). Restart the daemon to apply.\n`,
     );
-  } catch (err) {
-    process.stderr.write(
-      `Daemon not reachable (${(err as Error).message}). Config saved; the new extension will start on next daemon launch.\n`,
-    );
+  } catch {
+    // Daemon not running; the new extension will be picked up on next launch.
   }
 }
 
