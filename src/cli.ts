@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { parseArgs, resolveOption } from "./cli/parse-args.js";
 import { runInit } from "./cli/commands/init.js";
 import {
@@ -55,7 +58,7 @@ async function main(): Promise<void> {
   const { positional, flags } = parseArgs(argv);
 
   if (flags.version === true || positional[0] === "--version") {
-    process.stdout.write("hydra-acp 0.1.0\n");
+    process.stdout.write(`hydra-acp ${readVersion()}\n`);
     return;
   }
   if (flags.help === true) {
@@ -232,6 +235,18 @@ async function dispatchTui(
     tuiOpts.name = base.name;
   }
   await runTui(tuiOpts);
+}
+
+function readVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(
+      readFileSync(resolve(here, "../package.json"), "utf8"),
+    ) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function printHelp(): void {
