@@ -284,7 +284,7 @@ hydra-acp sessions import backup.hydra --replace  # overwrites in place
 
 Each session carries a stable **`lineageId`** that survives every export/import hop, so the same bundle imported twice is detected as a duplicate — the second import errors with the existing local id. `--replace` overrides that and overwrites the existing local copy, killing any live session first and preserving the local `sessionId` so bookmarks (Slack threads, editor session links) keep resolving.
 
-The first attach to an imported session is slow: hydra spawns a fresh agent, runs `session/new`, and feeds the imported history back in as a synthesized takeover transcript (same machinery as `/hydra switch`). Subsequent attaches use the normal `session/load` path. Honest caveat: this is a text-level handover — the originating agent's internal state (tool-call chains, compacted earlier turns) isn't preserved, so the resumed conversation may be cognitively shallower than the original.
+The first attach to an imported session is slow: hydra spawns a fresh agent, runs `session/new`, and feeds the imported history back in as a synthesized takeover transcript (same machinery as `/hydra switch`). Subsequent attaches use the normal `session/load` path. This is a text-level handover — the originating agent's internal state (tool-call chains, compacted earlier turns) isn't preserved, so the resumed conversation may be cognitively shallower than the original.
 
 ### Forwarding agent args (`hydra-acp launch <agent-id> ...`)
 
