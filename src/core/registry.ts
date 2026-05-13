@@ -2,6 +2,11 @@ import * as fs from "node:fs/promises";
 import { z } from "zod";
 import { paths } from "./paths.js";
 import type { HydraConfig } from "./config.js";
+import {
+  currentPlatformKey,
+  ensureBinary,
+  pickBinaryTarget,
+} from "./binary-install.js";
 
 const NpxDistribution = z.object({
   package: z.string(),
@@ -12,6 +17,8 @@ const NpxDistribution = z.object({
 const BinaryTarget = z.object({
   archive: z.string().url().optional(),
   cmd: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string()).optional(),
 });
 
 const BinaryDistribution = z.object({
@@ -56,8 +63,14 @@ export const RegistryDocument = z.object({
 });
 export type RegistryDocument = z.infer<typeof RegistryDocument>;
 
+// In-memory cache. `raw` is what gets persisted to disk verbatim — never
+// run through zod. `data` is the zod-validated view used by callers.
+// Keeping both means a future schema bump picks up fields the on-disk
+// cache "didn't know about" simply by re-parsing the same raw bytes
+// with the new schema; we never strip-then-rewrite.
 interface CachedRegistry {
   fetchedAt: number;
+  raw: unknown;
   data: RegistryDocument;
 }
 
@@ -116,39 +129,68 @@ export class Registry {
     if (!response.ok) {
       throw new Error(`Registry fetch failed: HTTP ${response.status}`);
     }
-    const json = await response.json();
-    const data = RegistryDocument.parse(json);
-    return { fetchedAt: Date.now(), data };
+    const raw = await response.json();
+    const data = RegistryDocument.parse(raw);
+    return { fetchedAt: Date.now(), raw, data };
   }
 
   private async readDiskCache(): Promise<CachedRegistry | undefined> {
+    let text: string;
     try {
-      const raw = await fs.readFile(paths.registryCache(), "utf8");
-      const parsed = JSON.parse(raw) as CachedRegistry;
-      if (
-        typeof parsed.fetchedAt === "number" &&
-        parsed.data &&
-        Array.isArray(parsed.data.agents)
-      ) {
-        return parsed;
-      }
+      text = await fs.readFile(paths.registryCache(), "utf8");
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
-      if (e.code !== "ENOENT") {
-        throw err;
+      if (e.code === "ENOENT") {
+        return undefined;
       }
+      // Permission/IO problems are operator-level — surface them instead
+      // of pretending the cache is just missing, which would mask a
+      // misconfigured HYDRA_ACP_HOME.
+      throw err;
     }
-    return undefined;
+    // Anything past this point — truncation mid-write, hand-edited file,
+    // schema drift from a future version — should NOT wedge the daemon.
+    // Treat the cache as missing and let load() re-fetch instead.
+    try {
+      const parsed = JSON.parse(text) as { fetchedAt?: unknown; data?: unknown };
+      if (typeof parsed.fetchedAt !== "number" || parsed.data === undefined) {
+        return undefined;
+      }
+      const data = RegistryDocument.parse(parsed.data);
+      return { fetchedAt: parsed.fetchedAt, raw: parsed.data, data };
+    } catch {
+      return undefined;
+    }
   }
 
+  // Atomic write: dump to a sibling temp path, then rename onto the
+  // target. POSIX rename is atomic within a filesystem, so readers
+  // either see the old file or the fully-written new file — never a
+  // truncated middle. This also makes simultaneous writers safe
+  // without a lock file: the loser of the rename race just gets its
+  // version replaced by the winner's.
   private async writeDiskCache(cache: CachedRegistry): Promise<void> {
     await fs.mkdir(paths.home(), { recursive: true });
-    await fs.writeFile(
-      paths.registryCache(),
-      JSON.stringify(cache, null, 2) + "\n",
-      "utf8",
-    );
+    const final = paths.registryCache();
+    const tmp = `${final}.tmp-${process.pid}-${randSuffix()}`;
+    const body =
+      JSON.stringify(
+        { fetchedAt: cache.fetchedAt, data: cache.raw },
+        null,
+        2,
+      ) + "\n";
+    try {
+      await fs.writeFile(tmp, body, "utf8");
+      await fs.rename(tmp, final);
+    } catch (err) {
+      await fs.unlink(tmp).catch(() => undefined);
+      throw err;
+    }
   }
+}
+
+function randSuffix(): string {
+  return Math.random().toString(36).slice(2, 10);
 }
 
 export interface SpawnPlan {
@@ -168,7 +210,10 @@ function npxPackageBasename(agent: RegistryAgent): string | undefined {
   return atIdx <= 0 ? afterSlash : afterSlash.slice(0, atIdx);
 }
 
-export function planSpawn(agent: RegistryAgent, extraArgs: string[] = []): SpawnPlan {
+export async function planSpawn(
+  agent: RegistryAgent,
+  extraArgs: string[] = [],
+): Promise<SpawnPlan> {
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
     const args = ["-y", npx.package, ...(npx.args ?? []), ...extraArgs];
@@ -179,9 +224,22 @@ export function planSpawn(agent: RegistryAgent, extraArgs: string[] = []): Spawn
     };
   }
   if (agent.distribution.binary) {
-    throw new Error(
-      `Agent ${agent.id} uses binary distribution; not yet supported in hydra-acp. PRs welcome.`,
-    );
+    const target = pickBinaryTarget(agent.distribution.binary);
+    if (!target) {
+      throw new Error(
+        `Agent ${agent.id} has no binary distribution for ${currentPlatformKey() ?? "this platform"}.`,
+      );
+    }
+    const cmdPath = await ensureBinary({
+      agentId: agent.id,
+      version: agent.version ?? "current",
+      target,
+    });
+    return {
+      command: cmdPath,
+      args: [...(target.args ?? []), ...extraArgs],
+      env: target.env ?? {},
+    };
   }
   if (agent.distribution.uvx) {
     const uvx = agent.distribution.uvx;

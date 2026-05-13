@@ -9,6 +9,7 @@ import { Registry } from "../core/registry.js";
 import { SessionManager } from "../core/session-manager.js";
 import { ExtensionManager } from "../core/extensions.js";
 import { paths } from "../core/paths.js";
+import { setBinaryInstallLogger } from "../core/binary-install.js";
 import { bearerAuth } from "./auth.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
@@ -57,6 +58,14 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   });
 
   await app.register(websocketPlugin);
+
+  // Route binary-install progress through the daemon's pino logger so
+  // `hydra logs` (and daemon.log) surface tarball downloads — otherwise
+  // they'd write to a stderr that spawnDaemonDetached redirects to
+  // /dev/null and the user sees an opaque "Starting new session…" hang.
+  setBinaryInstallLogger((msg) => {
+    app.log.info(msg);
+  });
 
   const auth = bearerAuth({ config });
   app.addHook("onRequest", async (request, reply) => {
@@ -130,6 +139,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     // final regenTitle/persistTitle from idle-close has a chance to
     // hit disk before the daemon exits.
     await manager.flushMetaWrites();
+    setBinaryInstallLogger(null);
     await app.close();
     try {
       fs.unlinkSync(paths.pidFile());

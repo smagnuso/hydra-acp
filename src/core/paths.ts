@@ -29,7 +29,12 @@ export const paths = {
   currentLogFile: () => path.join(hydraHome(), "current.log"),
   registryCache: () => path.join(hydraHome(), "registry.json"),
   agentsDir: () => path.join(hydraHome(), "agents"),
-  agentDir: (id: string) => path.join(hydraHome(), "agents", id),
+  // <platformKey>/<agentId>/<version>/ — platform at the top so a Hydra
+  // home shared between machines (NFS, rsync'd dotfiles) keeps each
+  // machine's binaries cleanly separated. `ls agents/` immediately
+  // shows which platforms have ever installed anything.
+  agentInstallDir: (id: string, platformKey: string, version: string) =>
+    path.join(hydraHome(), "agents", platformKey, id, version),
   sessionsDir: () => path.join(hydraHome(), "sessions"),
   // One directory per session id under sessions/. Co-locates the
   // session record, its transcript, and any future per-session state

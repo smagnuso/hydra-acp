@@ -159,7 +159,7 @@ export class SessionManager {
       return this.doResurrectFromImport(params);
     }
 
-    const plan = planSpawn(agentDef, params.agentArgs ?? []);
+    const plan = await planSpawn(agentDef, params.agentArgs ?? []);
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
@@ -280,7 +280,7 @@ export class SessionManager {
       err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
-    const plan = planSpawn(agentDef, params.agentArgs ?? []);
+    const plan = await planSpawn(agentDef, params.agentArgs ?? []);
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
