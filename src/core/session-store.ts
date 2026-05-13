@@ -33,6 +33,20 @@ export const PersistedAgentCommand = z.object({
 });
 export type PersistedAgentCommand = z.infer<typeof PersistedAgentCommand>;
 
+// Last-known snapshot of a session's usage_update notification. Fields
+// mirror the wire shape but flattened (costAmount/costCurrency rather
+// than a nested cost object) so partial updates can merge cleanly.
+// Every field is optional — agents emit varying subsets, and we want a
+// fresh event to update only what it carries while preserving prior
+// values for everything else.
+export const PersistedUsage = z.object({
+  used: z.number().optional(),
+  size: z.number().optional(),
+  costAmount: z.number().optional(),
+  costCurrency: z.string().optional(),
+});
+export type PersistedUsage = z.infer<typeof PersistedUsage>;
+
 export const SessionRecord = z.object({
   version: z.literal(1),
   sessionId: z.string(),
@@ -60,6 +74,7 @@ export const SessionRecord = z.object({
   // replay of a snapshot-shaped notification.
   currentModel: z.string().optional(),
   currentMode: z.string().optional(),
+  currentUsage: PersistedUsage.optional(),
   agentCommands: z.array(PersistedAgentCommand).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -188,6 +203,7 @@ export function recordFromMemorySession(args: {
   agentArgs?: string[];
   currentModel?: string;
   currentMode?: string;
+  currentUsage?: PersistedUsage;
   agentCommands?: PersistedAgentCommand[];
   createdAt?: string;
   updatedAt?: string;
@@ -204,6 +220,7 @@ export function recordFromMemorySession(args: {
     agentArgs: args.agentArgs,
     currentModel: args.currentModel,
     currentMode: args.currentMode,
+    currentUsage: args.currentUsage,
     agentCommands: args.agentCommands,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,

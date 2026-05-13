@@ -11,10 +11,18 @@ export interface DiscoveredSession {
   cwd: string;
   agentId?: string;
   currentModel?: string;
+  currentUsage?: DiscoveredUsage;
   title?: string;
   attachedClients: number;
   updatedAt: string;
   status: "live" | "cold";
+}
+
+export interface DiscoveredUsage {
+  used?: number;
+  size?: number;
+  costAmount?: number;
+  costCurrency?: string;
 }
 
 export interface ListOptions {
@@ -57,6 +65,7 @@ export async function listSessions(
     upstreamSessionId: s.upstreamSessionId,
     agentId: s.agentId,
     currentModel: s.currentModel,
+    currentUsage: s.currentUsage,
     title: s.title,
   }));
 }

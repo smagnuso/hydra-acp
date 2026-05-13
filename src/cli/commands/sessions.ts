@@ -26,6 +26,12 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
       cwd: string;
       agentId?: string;
       currentModel?: string;
+      currentUsage?: {
+        used?: number;
+        size?: number;
+        costAmount?: number;
+        costCurrency?: string;
+      };
       title?: string;
       attachedClients: number;
       updatedAt: string;

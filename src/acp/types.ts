@@ -198,6 +198,18 @@ export const SessionListParams = z.object({
 });
 export type SessionListParams = z.infer<typeof SessionListParams>;
 
+// Last-known usage snapshot (tokens + cost) for a session. Fields are
+// individually optional — agents emit varying subsets and the persisted
+// record merges them across events. Listed sessions surface whatever
+// was last seen on disk; live sessions surface the in-memory state.
+export const SessionListUsage = z.object({
+  used: z.number().optional(),
+  size: z.number().optional(),
+  costAmount: z.number().optional(),
+  costCurrency: z.string().optional(),
+});
+export type SessionListUsage = z.infer<typeof SessionListUsage>;
+
 export const SessionListEntry = z.object({
   sessionId: z.string(),
   upstreamSessionId: z.string().optional(),
@@ -207,6 +219,9 @@ export const SessionListEntry = z.object({
   // Last-known model id, so list views can render `<agent>(<model>)`
   // without resurrecting cold sessions to look it up.
   currentModel: z.string().optional(),
+  // Last-known usage snapshot so list views can show per-session cost
+  // (and tokens, in callers that care) without resurrecting cold sessions.
+  currentUsage: SessionListUsage.optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),

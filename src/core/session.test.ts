@@ -429,6 +429,61 @@ describe("Session", () => {
     });
   });
 
+  describe("usage_update tracking", () => {
+    it("merges fields onto currentUsage and fires onUsageChange", () => {
+      const { session, mock } = makeSession("sess_u", "u_u");
+      const seen: Array<typeof session.currentUsage> = [];
+      session.onUsageChange((usage) => {
+        seen.push({ ...usage });
+      });
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_u",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 100,
+          size: 200000,
+          cost: { amount: 0.05, currency: "USD" },
+        },
+      });
+      expect(session.currentUsage).toEqual({
+        used: 100,
+        size: 200000,
+        costAmount: 0.05,
+        costCurrency: "USD",
+      });
+      expect(seen).toHaveLength(1);
+
+      // Partial update: only `used` and amount change; size+currency preserved.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_u",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 150,
+          cost: { amount: 0.08 },
+        },
+      });
+      expect(session.currentUsage).toEqual({
+        used: 150,
+        size: 200000,
+        costAmount: 0.08,
+        costCurrency: "USD",
+      });
+      expect(seen).toHaveLength(2);
+
+      // No-op when nothing actually changed: handler must not fire.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_u",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 150,
+          cost: { amount: 0.08 },
+        },
+      });
+      expect(seen).toHaveLength(2);
+    });
+  });
+
   describe("attach / detach", () => {
     it("rejects double-attach for the same clientId", () => {
       const { session } = makeSession();
@@ -796,6 +851,14 @@ describe("Session", () => {
         update: {
           sessionUpdate: "available_commands_update",
           availableCommands: [{ name: "x" }],
+        },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_OB",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 1,
+          cost: { amount: 0.01, currency: "USD" },
         },
       });
 

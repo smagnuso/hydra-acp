@@ -4,7 +4,7 @@
 // place ensures the two views stay byte-identical, and centralizes the
 // width-aware truncation so neither caller wraps onto a second line.
 
-import { formatAgentWithModel } from "../core/agent-display.js";
+import { formatAgentCell, type DisplayUsage } from "../core/agent-display.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 
 export interface SessionSummary {
@@ -13,6 +13,7 @@ export interface SessionSummary {
   cwd: string;
   agentId?: string;
   currentModel?: string;
+  currentUsage?: DisplayUsage;
   title?: string;
   attachedClients: number;
   updatedAt: string;
@@ -22,8 +23,10 @@ export interface SessionSummary {
 export interface Row {
   session: string;
   upstream: string;
-  status: string;
-  clients: string;
+  // Combined live/cold + attached-client count. Cold sessions never
+  // have clients, so a dedicated CLIENTS column wasted width on most
+  // rows; we render `LIVE(N)` / `COLD` in one cell instead.
+  state: string;
   agent: string;
   age: string;
   title: string;
@@ -33,8 +36,7 @@ export interface Row {
 export interface Widths {
   session: number;
   upstream: number;
-  status: number;
-  clients: number;
+  state: number;
   agent: number;
   age: number;
   title: number;
@@ -43,8 +45,7 @@ export interface Widths {
 export const HEADER: Row = {
   session: "SESSION",
   upstream: "UPSTREAM",
-  status: "STATUS",
-  clients: "CLIENTS",
+  state: "STATE",
   agent: "AGENT",
   age: "AGE",
   title: "TITLE",
@@ -62,21 +63,33 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: s.upstreamSessionId ?? "-",
-    status: (s.status ?? "live").toUpperCase(),
-    clients: s.status === "cold" ? "-" : String(s.attachedClients),
-    agent: formatAgentWithModel(s.agentId, s.currentModel),
+    state: formatState(s.status, s.attachedClients),
+    agent: formatAgentCell(s.agentId, s.currentModel, s.currentUsage),
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
     cwd: s.cwd,
   };
 }
 
+// Combined live/cold + client-count cell. Live sessions always get
+// parenthesized counts (including `LIVE(0)`) so the column reads
+// consistently; cold sessions render as a bare `COLD`. The HEADER row
+// reuses formatRow's plumbing but its `state` cell is literal "STATE".
+function formatState(
+  status: "live" | "cold" | undefined,
+  clients: number,
+): string {
+  if (status === "cold") {
+    return "COLD";
+  }
+  return `LIVE(${clients})`;
+}
+
 export function computeWidths(rows: Row[]): Widths {
   return {
     session: maxLen(HEADER.session, rows.map((r) => r.session)),
     upstream: maxLen(HEADER.upstream, rows.map((r) => r.upstream)),
-    status: maxLen(HEADER.status, rows.map((r) => r.status)),
-    clients: maxLen(HEADER.clients, rows.map((r) => r.clients)),
+    state: maxLen(HEADER.state, rows.map((r) => r.state)),
     agent: maxLen(HEADER.agent, rows.map((r) => r.agent)),
     age: maxLen(HEADER.age, rows.map((r) => r.age)),
     title: maxLen(HEADER.title, rows.map((r) => r.title)),
@@ -138,15 +151,14 @@ function maxLen(headerCell: string, values: string[]): number {
 // guaranteed to occupy at most `maxWidth` columns: title is right-truncated
 // and cwd is middle-truncated (paths read better with the leading and
 // trailing segments preserved than with either end lopped off). The fixed
-// columns (session/upstream/status/clients/agent) are never truncated —
-// they're keyed by short ids and short labels, so their natural width is
+// columns (session/upstream/state/agent) are never truncated — they're
+// keyed by short ids and short labels, so their natural width is
 // expected to fit.
 export function formatRow(r: Row, w: Widths, maxWidth?: number): string {
   const fixed = [
     r.session.padEnd(w.session),
     r.upstream.padEnd(w.upstream),
-    r.status.padEnd(w.status),
-    r.clients.padStart(w.clients),
+    r.state.padEnd(w.state),
     r.agent.padEnd(w.agent),
     r.age.padStart(w.age),
   ].join(SEP);

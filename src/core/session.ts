@@ -54,6 +54,17 @@ export type SpawnReplacementAgent = (
   params: SpawnReplacementAgentParams,
 ) => Promise<SpawnReplacementAgentResult>;
 
+// Snapshot of the most recent usage_update notification: tokens used,
+// context size, and cost. Fields are individually optional so a fresh
+// event can update only what it carries while preserving prior values
+// for everything else.
+export interface UsageSnapshot {
+  used?: number;
+  size?: number;
+  costAmount?: number;
+  costCurrency?: string;
+}
+
 export interface SessionInit {
   cwd: string;
   agentId: string;
@@ -76,6 +87,7 @@ export interface SessionInit {
   // via _meta before the agent re-emits.
   currentModel?: string;
   currentMode?: string;
+  currentUsage?: UsageSnapshot;
   agentCommands?: AdvertisedCommand[];
   // Suppress the first-prompt title heuristic. Set by SessionManager
   // when resurrecting a session whose title is already meaningful (from
@@ -118,6 +130,7 @@ export class Session {
   // stale-prone for snapshot-shaped events).
   currentModel: string | undefined;
   currentMode: string | undefined;
+  currentUsage: UsageSnapshot | undefined;
   updatedAt: number;
   readonly createdAt: number;
 
@@ -186,6 +199,7 @@ export class Session {
   > = [];
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
+  private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
 
   constructor(init: SessionInit) {
     this.sessionId =
@@ -199,6 +213,7 @@ export class Session {
     this.title = init.title;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
+    this.currentUsage = init.currentUsage;
     if (init.agentCommands && init.agentCommands.length > 0) {
       this.agentAdvertisedCommands = [...init.agentCommands];
     }
@@ -268,6 +283,14 @@ export class Session {
         return;
       }
       if (this.maybeApplyAgentMode(params)) {
+        this.recordAndBroadcast("session/update", params);
+        return;
+      }
+      // usage_update: snapshot-shaped like model/mode. Merge into
+      // currentUsage, fire usage handlers (SessionManager persists to
+      // meta.json so cold resurrect can rehydrate), then broadcast.
+      // recordAndBroadcast filters usage_update out of history.
+      if (this.maybeApplyAgentUsage(params)) {
         this.recordAndBroadcast("session/update", params);
         return;
       }
@@ -671,6 +694,59 @@ export class Session {
     return true;
   }
 
+  // usage_update carries any subset of {used, size, cost.amount,
+  // cost.currency}. Merge non-undefined fields onto currentUsage so a
+  // sparse update preserves prior values, and fire usage handlers only
+  // if something actually changed.
+  private maybeApplyAgentUsage(params: unknown): boolean {
+    const obj = (params ?? {}) as { update?: unknown };
+    const update = (obj.update ?? {}) as {
+      sessionUpdate?: unknown;
+      used?: unknown;
+      size?: unknown;
+      cost?: unknown;
+    };
+    if (update.sessionUpdate !== "usage_update") {
+      return false;
+    }
+    const next: UsageSnapshot = { ...(this.currentUsage ?? {}) };
+    let changed = false;
+    if (typeof update.used === "number" && next.used !== update.used) {
+      next.used = update.used;
+      changed = true;
+    }
+    if (typeof update.size === "number" && next.size !== update.size) {
+      next.size = update.size;
+      changed = true;
+    }
+    if (update.cost && typeof update.cost === "object") {
+      const cost = update.cost as { amount?: unknown; currency?: unknown };
+      if (typeof cost.amount === "number" && next.costAmount !== cost.amount) {
+        next.costAmount = cost.amount;
+        changed = true;
+      }
+      if (
+        typeof cost.currency === "string" &&
+        next.costCurrency !== cost.currency
+      ) {
+        next.costCurrency = cost.currency;
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return true;
+    }
+    this.currentUsage = next;
+    for (const handler of this.usageHandlers) {
+      try {
+        handler(next);
+      } catch {
+        void 0;
+      }
+    }
+    return true;
+  }
+
   // Update the cached agent command list, fire persist handlers, and
   // broadcast the merged list to attached clients. Idempotent on a
   // structurally identical list so we don't churn meta.json on noisy
@@ -708,6 +784,10 @@ export class Session {
 
   onModeChange(handler: (mode: string) => void): void {
     this.modeHandlers.push(handler);
+  }
+
+  onUsageChange(handler: (usage: UsageSnapshot) => void): void {
+    this.usageHandlers.push(handler);
   }
 
   // Returns a freshly merged command list (hydra ∪ agent) for callers
@@ -1325,6 +1405,7 @@ const STATE_UPDATE_KINDS = new Set([
   "current_model_update",
   "current_mode_update",
   "available_commands_update",
+  "usage_update",
 ]);
 
 function isStateUpdate(method: string, params: unknown): boolean {

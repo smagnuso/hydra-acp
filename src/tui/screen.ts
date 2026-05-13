@@ -7,7 +7,7 @@ import os from "node:os";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import wrapAnsi from "wrap-ansi";
-import { formatAgentWithModel } from "../core/agent-display.js";
+import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import type { FormattedLine, Style } from "./format.js";
 import type { InputDispatcher, KeyEvent, KeyName } from "./input.js";
@@ -1855,14 +1855,6 @@ function formatTokens(n: number): string {
     return `${(n / 1_000).toFixed(1)}k`;
   }
   return `${n}`;
-}
-
-function formatCost(amount: number, currency: string | undefined): string {
-  const sign = currency === "USD" || currency === undefined ? "$" : "";
-  const decimals = amount >= 1 ? 2 : 4;
-  return `${sign}${amount.toFixed(decimals)}${
-    currency && currency !== "USD" ? ` ${currency}` : ""
-  }`;
 }
 
 function mapKeyName(name: string): KeyName | null {

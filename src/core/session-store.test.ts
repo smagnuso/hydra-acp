@@ -72,6 +72,31 @@ describe("SessionStore", () => {
     ).rejects.toThrow(/unsafe/);
   });
 
+  it("round-trips a currentUsage block", async () => {
+    const store = new SessionStore();
+    await store.write(
+      recordFromMemorySession({
+        sessionId: "hydra_session_usage",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        cwd: "/w",
+        currentUsage: {
+          used: 1234,
+          size: 200000,
+          costAmount: 0.42,
+          costCurrency: "USD",
+        },
+      }),
+    );
+    const r = await store.read("hydra_session_usage");
+    expect(r?.currentUsage).toEqual({
+      used: 1234,
+      size: 200000,
+      costAmount: 0.42,
+      costCurrency: "USD",
+    });
+  });
+
   it("list returns all valid records", async () => {
     const store = new SessionStore();
     for (const id of ["hydra_session_a", "hydra_session_b"]) {

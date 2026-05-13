@@ -7,12 +7,14 @@ import {
   Session,
   extractPromptText,
   firstLine,
+  type UsageSnapshot,
 } from "./session.js";
 import {
   SessionStore,
   generateLineageId,
   recordFromMemorySession,
   type PersistedAgentCommand,
+  type PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
@@ -47,6 +49,7 @@ export interface ResurrectParams {
   // agent re-emits.
   currentModel?: string;
   currentMode?: string;
+  currentUsage?: UsageSnapshot;
   agentCommands?: AdvertisedCommand[];
   // Original create time, preserved across resurrect so `sessions list`
   // shows when the conversation actually began rather than the latest
@@ -219,6 +222,7 @@ export class SessionManager {
       currentModel:
         params.currentModel ?? extractInitialModel(loadResult ?? {}),
       currentMode: params.currentMode,
+      currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
@@ -264,6 +268,7 @@ export class SessionManager {
       // fall back to whatever the agent ships in its session/new response.
       currentModel: params.currentModel ?? fresh.initialModel,
       currentMode: params.currentMode,
+      currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
@@ -392,6 +397,11 @@ export class SessionManager {
         () => undefined,
       );
     });
+    session.onUsageChange((usage) => {
+      void this.persistSnapshot(session.sessionId, {
+        currentUsage: usageSnapshotToPersisted(usage),
+      }).catch(() => undefined);
+    });
     session.onAgentCommandsChange((commands) => {
       void this.persistSnapshot(session.sessionId, {
         agentCommands: commands.map((c) => ({
@@ -454,6 +464,7 @@ export class SessionManager {
       agentArgs: record.agentArgs,
       currentModel: record.currentModel,
       currentMode: record.currentMode,
+      currentUsage: persistedUsageToSnapshot(record.currentUsage),
       agentCommands: record.agentCommands,
       createdAt: record.createdAt,
     };
@@ -536,6 +547,7 @@ export class SessionManager {
         title: session.title,
         agentId: session.agentId,
         currentModel: session.currentModel,
+        currentUsage: session.currentUsage,
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
@@ -557,6 +569,7 @@ export class SessionManager {
         title: r.title,
         agentId: r.agentId,
         currentModel: r.currentModel,
+        currentUsage: r.currentUsage,
         updatedAt: used,
         attachedClients: 0,
         status: "cold",
@@ -695,6 +708,7 @@ export class SessionManager {
         title: args.bundle.session.title,
         currentModel: args.bundle.session.currentModel,
         currentMode: args.bundle.session.currentMode,
+        currentUsage: args.bundle.session.currentUsage,
         agentCommands: args.bundle.session.agentCommands,
         createdAt: args.preservedCreatedAt ?? now,
         updatedAt: now,
@@ -766,6 +780,7 @@ export class SessionManager {
     update: {
       currentModel?: string;
       currentMode?: string;
+      currentUsage?: PersistedUsage;
       agentCommands?: PersistedAgentCommand[];
     },
   ): Promise<void> {
@@ -781,6 +796,9 @@ export class SessionManager {
           : {}),
         ...(update.currentMode !== undefined
           ? { currentMode: update.currentMode }
+          : {}),
+        ...(update.currentUsage !== undefined
+          ? { currentUsage: update.currentUsage }
           : {}),
         ...(update.agentCommands !== undefined
           ? { agentCommands: update.agentCommands }
@@ -857,9 +875,43 @@ function mergeForPersistence(
     agentArgs: session.agentArgs,
     currentModel: session.currentModel ?? existing?.currentModel,
     currentMode: session.currentMode ?? existing?.currentMode,
+    currentUsage:
+      usageSnapshotToPersisted(session.currentUsage) ?? existing?.currentUsage,
     agentCommands,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
+}
+
+// Convert the in-memory snapshot to the persisted shape. They're
+// structurally identical, but kept as distinct types so the persistence
+// layer can evolve (e.g. add a `recordedAt`) without changing the
+// in-memory contract. Returns undefined when the snapshot is empty.
+function usageSnapshotToPersisted(
+  usage: UsageSnapshot | undefined,
+): PersistedUsage | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const out: PersistedUsage = {};
+  if (usage.used !== undefined) {
+    out.used = usage.used;
+  }
+  if (usage.size !== undefined) {
+    out.size = usage.size;
+  }
+  if (usage.costAmount !== undefined) {
+    out.costAmount = usage.costAmount;
+  }
+  if (usage.costCurrency !== undefined) {
+    out.costCurrency = usage.costCurrency;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function persistedUsageToSnapshot(
+  usage: PersistedUsage | undefined,
+): UsageSnapshot | undefined {
+  return usage ? { ...usage } : undefined;
 }
 
 // Pull a "current model id" from a session/new or session/load response.

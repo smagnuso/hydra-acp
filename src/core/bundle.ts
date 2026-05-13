@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { PersistedAgentCommand, type SessionRecord } from "./session-store.js";
+import {
+  PersistedAgentCommand,
+  PersistedUsage,
+  type SessionRecord,
+} from "./session-store.js";
 import type { HistoryEntry } from "./history-store.js";
 
 // On-disk shape of a history entry as it appears in history.jsonl. The
@@ -24,6 +28,7 @@ const BundleSession = z.object({
   title: z.string().optional(),
   currentModel: z.string().optional(),
   currentMode: z.string().optional(),
+  currentUsage: PersistedUsage.optional(),
   agentCommands: z.array(PersistedAgentCommand).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -69,6 +74,9 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
         : {}),
       ...(params.record.currentMode !== undefined
         ? { currentMode: params.record.currentMode }
+        : {}),
+      ...(params.record.currentUsage !== undefined
+        ? { currentUsage: params.record.currentUsage }
         : {}),
       ...(params.record.agentCommands !== undefined
         ? { agentCommands: params.record.agentCommands }
