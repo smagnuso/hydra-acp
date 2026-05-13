@@ -269,7 +269,7 @@ export class SessionManager {
   }
 
   // Bootstrap a fresh agent process: registry resolve → spawn → initialize
-  // → session/new. Shared by create() and the /hydra switch path so both
+  // → session/new. Shared by create() and the /hydra agent path so both
   // go through the same env / capabilities / error-handling.
   private async bootstrapAgent(params: {
     agentId: string;
@@ -336,7 +336,7 @@ export class SessionManager {
   // bookkeeping. Called from both create() and resurrect() so the same
   // session record + lifecycle handlers are wired regardless of origin.
   // Returns once the initial disk record is written — callers should
-  // await so a subsequent /hydra switch's persistAgentChange (which
+  // await so a subsequent /hydra agent's persistAgentChange (which
   // does read-then-write) finds the file in place.
   private async attachManagerHooks(session: Session): Promise<void> {
     session.onClose(({ deleteRecord }) => {
@@ -709,7 +709,7 @@ export class SessionManager {
     });
   }
 
-  // Persist an agent swap from /hydra switch. The on-disk record's
+  // Persist an agent swap from /hydra agent. The on-disk record's
   // agentId + upstreamSessionId both rotate so a daemon restart (and
   // later resurrect) brings the session back up on the agent the user
   // most recently switched to, not the one it was originally created on.

@@ -772,7 +772,7 @@ describe("SessionManager: history persistence", () => {
   });
 });
 
-describe("SessionManager: /hydra switch persistence", () => {
+describe("SessionManager: /hydra agent persistence", () => {
   let tmpHome: string;
   beforeEach(() => {
     tmpHome = process.env.HYDRA_ACP_HOME!;
@@ -791,7 +791,7 @@ describe("SessionManager: /hydra switch persistence", () => {
         if (!m) throw new Error("unexpected extra spawner call");
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         // initialize + session/new (bootstrapAgent), then session/prompt
-        // (transcript injection during /hydra switch — only the new agent).
+        // (transcript injection during /hydra agent — only the new agent).
         if (agentId === "old") {
           requestMock
             .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -821,7 +821,7 @@ describe("SessionManager: /hydra switch persistence", () => {
     await session.attach({ clientId: "c1", connection: conn }, "full");
 
     await session.prompt("c1", {
-      prompt: [{ type: "text", text: "/hydra switch new" }],
+      prompt: [{ type: "text", text: "/hydra agent new" }],
     });
 
     expect(session.agentId).toBe("new");

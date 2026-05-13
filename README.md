@@ -267,7 +267,7 @@ Slash commands of the form `/hydra <verb> [args]` are intercepted by hydra befor
 |---|---|
 | `/hydra title` | Asks the agent for a one-line summary, applies it as the new title via `session_info_update`. The sub-prompt and reply are suppressed from clients. |
 | `/hydra title <text>` | Sets the title to `<text>` directly. No agent call. |
-| `/hydra switch <agent>` | Swaps the agent process backing this session. Spawns the new agent (must be in the registry — see `hydra-acp agents list`), kills the old one, and feeds the conversation transcript so far back in as the first prompt to the new agent. `session_info_update` carries the new `agentId`; a synthetic `agent_message_chunk` banner marks the switch in the transcript. The on-disk session record is updated so resurrection brings the session back on the new agent. |
+| `/hydra agent <agent>` | Swaps the agent process backing this session. Spawns the new agent (must be in the registry — see `hydra-acp agents list`), kills the old one, and feeds the conversation transcript so far back in as the first prompt to the new agent. `session_info_update` carries the new `agentId`; a synthetic `agent_message_chunk` banner marks the switch in the transcript. The on-disk session record is updated so resurrection brings the session back on the new agent. |
 
 These work from anywhere a session prompt can be typed — the TUI's input box, agent-shell, the slack thread composer, the browser chat composer. Hydra detects them server-side; clients send them as ordinary `session/prompt` requests.
 
@@ -284,7 +284,7 @@ hydra-acp sessions import backup.hydra --replace  # overwrites in place
 
 Each session carries a stable **`lineageId`** that survives every export/import hop, so the same bundle imported twice is detected as a duplicate — the second import errors with the existing local id. `--replace` overrides that and overwrites the existing local copy, killing any live session first and preserving the local `sessionId` so bookmarks (Slack threads, editor session links) keep resolving.
 
-The first attach to an imported session is slow: hydra spawns a fresh agent, runs `session/new`, and feeds the imported history back in as a synthesized takeover transcript (same machinery as `/hydra switch`). Subsequent attaches use the normal `session/load` path. This is a text-level handover — the originating agent's internal state (tool-call chains, compacted earlier turns) isn't preserved, so the resumed conversation may be cognitively shallower than the original.
+The first attach to an imported session is slow: hydra spawns a fresh agent, runs `session/new`, and feeds the imported history back in as a synthesized takeover transcript (same machinery as `/hydra agent`). Subsequent attaches use the normal `session/load` path. This is a text-level handover — the originating agent's internal state (tool-call chains, compacted earlier turns) isn't preserved, so the resumed conversation may be cognitively shallower than the original.
 
 ### Forwarding agent args (`hydra-acp launch <agent-id> ...`)
 

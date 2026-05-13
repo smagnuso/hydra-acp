@@ -379,7 +379,7 @@ describe("Session", () => {
       const { session } = makeSession();
       const names = session.mergedAvailableCommands().map((c) => c.name);
       expect(names).toContain("/hydra title");
-      expect(names).toContain("/hydra switch <agent>");
+      expect(names).toContain("/hydra agent <agent>");
     });
 
     it("merges agent-emitted commands with hydra verbs and broadcasts the merge live", async () => {
@@ -978,7 +978,7 @@ describe("Session", () => {
       expect(sessionInfo).toBeDefined();
     });
 
-    it("/hydra switch swaps the agent, broadcasts info+banner, and feeds transcript to new agent", async () => {
+    it("/hydra agent swaps the agent, broadcasts info+banner, and feeds transcript to new agent", async () => {
       const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
       const newMock = makeMockAgent({ agentId: "new", cwd: "/w" });
       let spawnCalls = 0;
@@ -1036,7 +1036,7 @@ describe("Session", () => {
       const oldKill = oldMock.agent.kill as ReturnType<typeof vi.fn>;
 
       const result = await session.prompt(alice.clientId, {
-        prompt: [{ type: "text", text: "/hydra switch new" }],
+        prompt: [{ type: "text", text: "/hydra agent new" }],
       });
       expect(result).toMatchObject({ stopReason: "end_turn" });
       expect(spawnCalls).toBe(1);
@@ -1096,31 +1096,31 @@ describe("Session", () => {
       });
     });
 
-    it("/hydra switch with no agent id rejects", async () => {
+    it("/hydra agent with no agent id rejects", async () => {
       const { session } = makeSession("hydra_session_S0", "u_S0");
       const { client: alice } = makeClient();
       session.attach(alice, "full");
 
       await expect(
         session.prompt(alice.clientId, {
-          prompt: [{ type: "text", text: "/hydra switch" }],
+          prompt: [{ type: "text", text: "/hydra agent" }],
         }),
       ).rejects.toThrow(/requires an agent id/);
     });
 
-    it("/hydra switch to the current agentId rejects", async () => {
+    it("/hydra agent to the current agentId rejects", async () => {
       const { session } = makeSession("hydra_session_SS", "u_SS");
       const { client: alice } = makeClient();
       session.attach(alice, "full");
 
       await expect(
         session.prompt(alice.clientId, {
-          prompt: [{ type: "text", text: "/hydra switch mock" }],
+          prompt: [{ type: "text", text: "/hydra agent mock" }],
         }),
       ).rejects.toThrow(/already on agent mock/);
     });
 
-    it("/hydra switch leaves the old agent in place when the new spawn fails", async () => {
+    it("/hydra agent leaves the old agent in place when the new spawn fails", async () => {
       const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
       const session = new Session({
         sessionId: "hydra_session_SF",
@@ -1138,7 +1138,7 @@ describe("Session", () => {
 
       await expect(
         session.prompt(alice.clientId, {
-          prompt: [{ type: "text", text: "/hydra switch nope" }],
+          prompt: [{ type: "text", text: "/hydra agent nope" }],
         }),
       ).rejects.toThrow(/registry: agent missing/);
       expect(session.agentId).toBe("old");

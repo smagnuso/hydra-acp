@@ -64,7 +64,7 @@ export interface SessionInit {
   agentMeta?: Record<string, unknown>;
   agentArgs?: string[];
   idleTimeoutMs?: number;
-  // Optional callback used by /hydra switch to spawn a fresh agent
+  // Optional callback used by /hydra agent to spawn a fresh agent
   // process and run initialize + session/new on it. Provided by
   // SessionManager so Session doesn't have to depend on the registry.
   spawnReplacementAgent?: SpawnReplacementAgent;
@@ -103,7 +103,7 @@ const COMPACT_EVERY = 200;
 export class Session {
   readonly sessionId: string;
   readonly cwd: string;
-  // agent / agentId / upstreamSessionId are mutable so /hydra switch can
+  // agent / agentId / upstreamSessionId are mutable so /hydra agent can
   // replace the underlying agent process while keeping the same Session
   // record. agentMeta is the metadata returned by the agent at session/new
   // time; it gets refreshed on switch too.
@@ -234,7 +234,7 @@ export class Session {
   }
 
   // Register session/update, session/request_permission, and onExit
-  // handlers on an agent connection. Re-run on every /hydra switch so
+  // handlers on an agent connection. Re-run on every /hydra agent so
   // the new agent is plumbed identically. The exit handler's identity
   // check is what makes switching safe: when the *old* agent exits as
   // part of a swap, this.agent has already been replaced, so we no-op
@@ -781,8 +781,8 @@ export class Session {
     switch (verb) {
       case "title":
         return this.runTitleCommand(arg);
-      case "switch":
-        return this.runSwitchCommand(arg);
+      case "agent":
+        return this.runAgentCommand(arg);
       default: {
         // Listed in HYDRA_COMMANDS but no dispatch case — wired up wrong.
         const err = new Error(
@@ -822,7 +822,7 @@ export class Session {
 
   // Send a prompt to the underlying agent and capture its reply chunks
   // privately (no fan-out to clients, no recording into history). Used
-  // by /hydra title's regen path and /hydra switch's transcript-injection
+  // by /hydra title's regen path and /hydra agent's transcript-injection
   // path. Returns the joined agent_message_chunk text.
   private async runInternalPrompt(text: string): Promise<string> {
     if (this.internalPromptCapture) {
@@ -845,10 +845,10 @@ export class Session {
   // record. Spawns the new agent first so a failure leaves the old one
   // intact; then injects a synthesized transcript so the new agent has
   // context for the next turn.
-  private runSwitchCommand(newAgentId: string): Promise<unknown> {
+  private runAgentCommand(newAgentId: string): Promise<unknown> {
     if (!newAgentId) {
       throw withCode(
-        new Error("/hydra switch requires an agent id"),
+        new Error("/hydra agent requires an agent id"),
         JsonRpcErrorCodes.InvalidParams,
       );
     }
@@ -1003,7 +1003,7 @@ export class Session {
   // on the first wake-up of a session whose meta.json has an empty
   // upstreamSessionId (the import marker). Wrapped in enqueuePrompt so
   // any user prompts arriving mid-seed queue behind it (mirrors the
-  // /hydra switch path so the agent isn't asked to respond to a user
+  // /hydra agent path so the agent isn't asked to respond to a user
   // turn before it has absorbed the imported transcript). Best-effort:
   // if the agent fails to absorb the transcript we still leave the
   // session usable — the user just continues without context.
@@ -1030,7 +1030,7 @@ export class Session {
   // ones read it and relabel) and (b) drop a visible banner into the
   // transcript so users see the switch rather than just suddenly getting
   // answers from a different agent. Both updates carry synthetic=true
-  // so a future /hydra switch's transcript builder filters them out.
+  // so a future /hydra agent's transcript builder filters them out.
   private broadcastAgentSwitch(oldAgentId: string, newAgentId: string): void {
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,

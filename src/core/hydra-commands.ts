@@ -21,8 +21,8 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
       "Regenerate the session title via the agent (or set manually with an arg)",
   },
   {
-    verb: "switch",
-    name: "/hydra switch",
+    verb: "agent",
+    name: "/hydra agent",
     argsHint: "<agent>",
     description: "Swap the agent backing this session, preserving context",
   },
