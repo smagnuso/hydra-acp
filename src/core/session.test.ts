@@ -1216,7 +1216,7 @@ describe("Session", () => {
   });
 
   describe("idle timeout", () => {
-    it("starts a timer when last client detaches and closes after timeout", async () => {
+    it("closes after the idle window when nothing happens", async () => {
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
@@ -1230,9 +1230,6 @@ describe("Session", () => {
         });
         const closeSpy = vi.fn();
         session.onClose(closeSpy);
-        const { client } = makeClient();
-        session.attach(client, "full");
-        session.detach(client.clientId);
 
         expect(closeSpy).not.toHaveBeenCalled();
         await vi.advanceTimersByTimeAsync(1_001);
@@ -1245,12 +1242,15 @@ describe("Session", () => {
       }
     });
 
-    it("cancels the idle timer when a client reattaches in time", async () => {
+    it("does NOT stay alive just because clients are attached", async () => {
+      // Regression: persistent observers (slack/notifier/approver/browser)
+      // used to pin a quiet session open forever. The new gate is
+      // inactivity, not client count.
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
         const session = new Session({
-          sessionId: "hydra_session_renewed",
+          sessionId: "hydra_session_pinned",
           cwd: "/w",
           agentId: "mock",
           agent: mock.agent,
@@ -1259,16 +1259,74 @@ describe("Session", () => {
         });
         const closeSpy = vi.fn();
         session.onClose(closeSpy);
-        const { client: a } = makeClient();
-        session.attach(a, "full");
-        session.detach(a.clientId);
+        const { client } = makeClient();
+        session.attach(client, "full");
+
+        await vi.advanceTimersByTimeAsync(1_001);
+        expect(closeSpy).toHaveBeenCalledWith({ deleteRecord: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a recorded broadcast resets the idle window", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_active",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client } = makeClient();
+        session.attach(client, "full");
+
+        await vi.advanceTimersByTimeAsync(800);
+        // Activity from the agent — recordable, so it should re-arm.
+        mock.triggerNotification("session/update", {
+          sessionId: "u",
+          update: { sessionUpdate: "agent_message_chunk", content: "hi" },
+        });
+        await vi.advanceTimersByTimeAsync(800);
+        expect(closeSpy).not.toHaveBeenCalled();
+
+        // Now go quiet — the next window should fire.
+        await vi.advanceTimersByTimeAsync(400);
+        expect(closeSpy).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("state-update broadcasts (model/mode/title) do NOT count as activity", async () => {
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_state_only",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
 
         await vi.advanceTimersByTimeAsync(500);
-        const { client: b } = makeClient();
-        session.attach(b, "full");
-        await vi.advanceTimersByTimeAsync(2_000);
-
-        expect(closeSpy).not.toHaveBeenCalled();
+        // Snapshot-shaped updates are broadcast but not recorded, so
+        // they must not extend the inactivity window.
+        mock.triggerNotification("session/update", {
+          sessionId: "u",
+          update: { sessionUpdate: "current_model_update", model: "opus" },
+        });
+        await vi.advanceTimersByTimeAsync(501);
+        expect(closeSpy).toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }
@@ -1288,11 +1346,45 @@ describe("Session", () => {
         });
         const closeSpy = vi.fn();
         session.onClose(closeSpy);
-        const { client } = makeClient();
-        session.attach(client, "full");
-        session.detach(client.clientId);
 
         await vi.advanceTimersByTimeAsync(60_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a resurrected session gets a fresh idle window, not the seed history's", async () => {
+      // Regression: anchoring lastRecordedAt to seed history's
+      // recordedAt would tear down a session immediately on resurrect
+      // since the seed timestamps are exactly what made it go cold.
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const veryOld = Date.now() - 10 * 60 * 60 * 1_000;
+        const session = new Session({
+          sessionId: "hydra_session_resurrected",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+          seedHistory: [
+            {
+              method: "session/update",
+              params: {
+                sessionId: "u",
+                update: { sessionUpdate: "agent_message_chunk", content: "old" },
+              },
+              recordedAt: veryOld,
+            },
+          ],
+          firstPromptSeeded: true,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+
+        await vi.advanceTimersByTimeAsync(500);
         expect(closeSpy).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();

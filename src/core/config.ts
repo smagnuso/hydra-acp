@@ -17,7 +17,7 @@ const DaemonConfig = z.object({
   authToken: z.string().min(16),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
-  sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(30),
+  sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(3600),
 });
 
 const RegistryConfig = z.object({
@@ -113,8 +113,7 @@ export async function ensureConfig(): Promise<HydraConfig> {
     if (e.code !== "ENOENT") {
       throw err;
     }
-    const config = defaultConfig();
-    await writeConfig(config);
+    const config = await writeMinimalInitConfig();
     process.stderr.write(
       `hydra-acp: initialized ${paths.config()} with a fresh auth token.\n`,
     );
@@ -126,6 +125,42 @@ export async function ensureConfig(): Promise<HydraConfig> {
 export async function writeConfig(config: HydraConfig): Promise<void> {
   await fs.mkdir(paths.home(), { recursive: true });
   await fs.writeFile(paths.config(), JSON.stringify(config, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+// Write a brand-new config containing only the fields that don't have
+// defaults (currently just daemon.authToken). The rest is filled in by
+// Zod at load time, which means raising a default later actually reaches
+// users who haven't customized that field instead of being locked in by
+// whatever the default was the day they ran `init`.
+export async function writeMinimalInitConfig(
+  authToken?: string,
+): Promise<HydraConfig> {
+  const token = authToken ?? generateAuthToken();
+  const minimal = { daemon: { authToken: token } };
+  await fs.mkdir(paths.home(), { recursive: true });
+  await fs.writeFile(paths.config(), JSON.stringify(minimal, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return HydraConfig.parse(minimal);
+}
+
+// Rewrite the on-disk config with the user's existing field set preserved
+// — only the named field is changed. Used by `init --rotate-token` so we
+// don't accidentally bake all current Zod defaults into the file.
+export async function updateConfigField(
+  mutate: (raw: Record<string, unknown>) => void,
+): Promise<void> {
+  const path = paths.config();
+  const text = await fs.readFile(path, "utf8");
+  const raw = JSON.parse(text) as Record<string, unknown>;
+  mutate(raw);
+  // Validate before writing so we don't strand the user with a broken file.
+  HydraConfig.parse(raw);
+  await fs.writeFile(path, JSON.stringify(raw, null, 2) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });

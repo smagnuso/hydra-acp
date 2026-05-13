@@ -2,10 +2,10 @@ import * as fs from "node:fs/promises";
 import { paths } from "../../core/paths.js";
 import {
   HydraConfig,
-  defaultConfig,
   generateAuthToken,
   loadConfig,
-  writeConfig,
+  updateConfigField,
+  writeMinimalInitConfig,
 } from "../../core/config.js";
 import { flagBool } from "../parse-args.js";
 
@@ -19,8 +19,7 @@ export async function runInit(flags: Record<string, string | boolean>): Promise<
   }
 
   if (!existing) {
-    const config = defaultConfig();
-    await writeConfig(config);
+    const config = await writeMinimalInitConfig();
     process.stdout.write(
       `Initialized ${paths.config()}\nAuth token: ${config.daemon.authToken}\n`,
     );
@@ -28,10 +27,13 @@ export async function runInit(flags: Record<string, string | boolean>): Promise<
   }
 
   if (flagBool(flags, "rotate-token")) {
-    existing.daemon.authToken = generateAuthToken();
-    await writeConfig(existing);
+    const newToken = generateAuthToken();
+    await updateConfigField((raw) => {
+      const daemon = (raw.daemon ??= {}) as Record<string, unknown>;
+      daemon.authToken = newToken;
+    });
     process.stdout.write(
-      `Rotated token in ${paths.config()}\nNew token: ${existing.daemon.authToken}\n`,
+      `Rotated token in ${paths.config()}\nNew token: ${newToken}\n`,
     );
     return;
   }

@@ -154,6 +154,12 @@ export class Session {
   private internalPromptCapture: { chunks: string[] } | undefined;
   private idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
+  // Time of the last recordable broadcast (or session creation, if
+  // none yet). Drives the inactivity-based idle close; deliberately
+  // does NOT include snapshot state pings (model/mode/title/commands)
+  // or attach/detach, which would otherwise let passive observers
+  // and noisy state churn keep a quiet session alive forever.
+  private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
@@ -198,8 +204,16 @@ export class Session {
       this.history = [...init.seedHistory];
     }
     this.updatedAt = Date.now();
+    // Treat construction as a fresh activity floor. For a resurrected
+    // session the seed history's recordedAt timestamps may be hours
+    // old — anchoring lastRecordedAt to them would cause the idle
+    // timer to fire immediately and tear down the session the user
+    // just woke up. Resurrection itself is the activity that gets a
+    // fresh idle window.
+    this.lastRecordedAt = this.updatedAt;
 
     this.wireAgent(this.agent);
+    this.scheduleIdleCheck();
   }
 
   private broadcastMergedCommands(): void {
@@ -343,7 +357,6 @@ export class Session {
     }
     this.clients.set(client.clientId, client);
     this.updatedAt = Date.now();
-    this.cancelIdleTimer();
     if (historyPolicy === "none") {
       return [];
     }
@@ -366,7 +379,6 @@ export class Session {
   detach(clientId: string): void {
     if (this.clients.delete(clientId)) {
       this.updatedAt = Date.now();
-      this.maybeStartIdleTimer();
     }
   }
 
@@ -1016,27 +1028,71 @@ export class Session {
     }
   }
 
-  private maybeStartIdleTimer(): void {
-    if (this.closed || this.clients.size > 0 || this.idleTimeoutMs <= 0) {
+  // Last meaningful activity timestamp. Bumped only by recordable
+  // broadcasts in recordAndBroadcast — the same signal historyMtimeIso
+  // uses for the picker. Initialized at construction (and seeded from
+  // the newest entry on resurrect) so the inactivity window starts
+  // ticking from a sensible floor when there's no history yet.
+  private get lastActivityAt(): number {
+    return this.lastRecordedAt;
+  }
+
+  // (Re-)arm the idle timer to fire when the inactivity window
+  // elapses past lastActivityAt. Called once at construction and after
+  // every recorded broadcast. The previous design gated on
+  // clients.size === 0; we drop that gate because extensions
+  // (slack/notifier/approver/browser) hold persistent attaches that
+  // would otherwise keep a quiet session alive forever.
+  private scheduleIdleCheck(): void {
+    if (this.closed || this.idleTimeoutMs <= 0) {
       return;
     }
+    const dueAt = this.lastActivityAt + this.idleTimeoutMs;
+    this.armIdleTimer(Math.max(0, dueAt - Date.now()));
+  }
+
+  private armIdleTimer(delay: number): void {
     if (this.idleTimer) {
-      return;
+      clearTimeout(this.idleTimer);
     }
     this.idleTimer = setTimeout(() => {
       this.idleTimer = undefined;
-      // A session that never received a prompt has no conversation to
-      // preserve; drop the record entirely instead of leaving an empty
-      // cold session cluttering the picker. Otherwise persist as cold,
-      // asking the agent for one last title summary on the way out.
-      const opts: CloseOptions = this.firstPromptSeeded
-        ? { deleteRecord: false, regenTitle: true }
-        : { deleteRecord: true };
-      void this.close(opts).catch(() => undefined);
-    }, this.idleTimeoutMs);
+      this.checkIdle();
+    }, delay);
     if (typeof this.idleTimer.unref === "function") {
       this.idleTimer.unref();
     }
+  }
+
+  private checkIdle(): void {
+    if (this.closed || this.idleTimeoutMs <= 0) {
+      return;
+    }
+    // Never abandon active work. An in-flight turn or unresolved
+    // permission request defers the close by a full idle window —
+    // the next broadcast will re-arm us sooner anyway, and this
+    // avoids a tight reschedule loop when activity is stale but
+    // work is genuinely in flight.
+    if (
+      this.turnStartedAt !== undefined ||
+      this.inFlightPermissions.size > 0
+    ) {
+      this.armIdleTimer(this.idleTimeoutMs);
+      return;
+    }
+    const idle = Date.now() - this.lastActivityAt;
+    if (idle < this.idleTimeoutMs) {
+      this.armIdleTimer(this.idleTimeoutMs - idle);
+      return;
+    }
+    // A session that never received a prompt has no conversation to
+    // preserve; drop the record entirely instead of leaving an empty
+    // cold session cluttering the picker. Otherwise persist as cold,
+    // asking the agent for one last title summary on the way out.
+    const opts: CloseOptions = this.firstPromptSeeded
+      ? { deleteRecord: false, regenTitle: true }
+      : { deleteRecord: true };
+    void this.close(opts).catch(() => undefined);
   }
 
   private cancelIdleTimer(): void {
@@ -1076,6 +1132,7 @@ export class Session {
         recordedAt: Date.now(),
       };
       this.history.push(entry);
+      this.lastRecordedAt = entry.recordedAt;
       let trimmed = false;
       if (this.history.length > 1000) {
         this.history = this.history.slice(-500);
@@ -1109,6 +1166,7 @@ export class Session {
           void 0;
         }
       }
+      this.scheduleIdleCheck();
     }
     this.updatedAt = Date.now();
     for (const client of this.clients.values()) {

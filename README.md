@@ -319,7 +319,7 @@ When you ask hydra to spawn an agent (via `launch <id>`, `--agent-id`, or `HYDRA
 }
 ```
 
-`daemon.sessionIdleTimeoutSeconds` (default 30) controls how long a session with zero attached clients stays alive before the daemon closes it. The disk record stays so the session can be resurrected later via `session/load`. Set to `0` to disable.
+`daemon.sessionIdleTimeoutSeconds` (default 3600 — one hour) controls how long a session with no recorded agent or user activity stays alive before the daemon closes it. Snapshot-shaped state pings (model/mode/title/commands) and bare attach/detach don't count as activity — only recordable broadcasts (prompts, agent chunks, tool calls, permission prompts) do, so persistent observer clients like the slack/notifier/approver/browser extensions can't pin a quiet session open. In-flight turns and unresolved permission requests defer the close until they settle. The disk record stays so the session can be resurrected later via `session/load`, at which point extensions re-attach automatically through their poll loops. Set to `0` to disable.
 
 `daemon.sessionRecentMinutes` (default 30) controls how far back `hydra-acp sessions` (and the `/v1/sessions` REST endpoint without `?all=true`) looks for cold (disk-only) sessions. Set to `0` to never list cold sessions.
 
