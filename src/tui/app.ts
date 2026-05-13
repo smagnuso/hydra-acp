@@ -463,7 +463,7 @@ async function runSession(
     }
   }
 
-  const historyFile = paths.tuiHistoryFile();
+  const historyFile = paths.tuiHistoryFile(resolvedSessionId);
   let history = await loadHistory(historyFile).catch(() => []);
   const dispatcher = new InputDispatcher({ history });
   dispatcherRef = dispatcher;

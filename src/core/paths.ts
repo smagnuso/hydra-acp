@@ -44,6 +44,7 @@ export const paths = {
     path.join(hydraHome(), "extensions", `${name}.log`),
   extensionPidFile: (name: string) =>
     path.join(hydraHome(), "extensions", `${name}.pid`),
-  tuiHistoryFile: () => path.join(hydraHome(), "tui-history"),
+  tuiHistoryFile: (id: string) =>
+    path.join(hydraHome(), "sessions", id, "prompt-history"),
   tuiLogFile: () => path.join(hydraHome(), "tui.log"),
 };
