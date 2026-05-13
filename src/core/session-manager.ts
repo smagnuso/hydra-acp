@@ -103,6 +103,7 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
+      currentModel: fresh.initialModel,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -172,15 +173,16 @@ export class SessionManager {
       clientInfo: { name: "hydra", version: "0.1.0" },
     });
 
-    let loadResult: { _meta?: Record<string, unknown> } | undefined;
+    let loadResult: Record<string, unknown> | undefined;
     try {
-      loadResult = await agent.connection.request<{
-        _meta?: Record<string, unknown>;
-      }>("session/load", {
-        sessionId: params.upstreamSessionId,
-        cwd: params.cwd,
-        mcpServers: [],
-      });
+      loadResult = await agent.connection.request<Record<string, unknown>>(
+        "session/load",
+        {
+          sessionId: params.upstreamSessionId,
+          cwd: params.cwd,
+          mcpServers: [],
+        },
+      );
     } catch (err) {
       await agent.kill().catch(() => undefined);
       throw new Error(
@@ -194,14 +196,19 @@ export class SessionManager {
       agentId: params.agentId,
       agent,
       upstreamSessionId: params.upstreamSessionId,
-      agentMeta: loadResult?._meta,
+      agentMeta: loadResult?._meta as Record<string, unknown> | undefined,
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
-      currentModel: params.currentModel,
+      // Prefer what we previously stored from a current_model_update; if
+      // we never captured one (e.g. old opencode sessions on disk before
+      // this fix), fall back to the model the agent ships in its
+      // session/load response body.
+      currentModel:
+        params.currentModel ?? extractInitialModel(loadResult ?? {}),
       currentMode: params.currentMode,
       agentCommands: params.agentCommands,
       // Only gate the first-prompt title heuristic when we actually have
@@ -244,7 +251,9 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
-      currentModel: params.currentModel,
+      // Prefer the stored value (set by a previous current_model_update);
+      // fall back to whatever the agent ships in its session/new response.
+      currentModel: params.currentModel ?? fresh.initialModel,
       currentMode: params.currentMode,
       agentCommands: params.agentCommands,
       firstPromptSeeded: !!params.title,
@@ -271,6 +280,7 @@ export class SessionManager {
     agent: AgentInstance;
     upstreamSessionId: string;
     agentMeta?: Record<string, unknown>;
+    initialModel?: string;
   }> {
     const agentDef = await this.registry.getAgent(params.agentId);
     if (!agentDef) {
@@ -292,17 +302,29 @@ export class SessionManager {
         clientCapabilities: {},
         clientInfo: { name: "hydra", version: "0.1.0" },
       });
-      const newResult = await agent.connection.request<{
-        sessionId: string;
-        _meta?: Record<string, unknown>;
-      }>("session/new", {
-        cwd: params.cwd,
-        mcpServers: params.mcpServers ?? [],
-      });
+      const newResult = await agent.connection.request<Record<string, unknown>>(
+        "session/new",
+        {
+          cwd: params.cwd,
+          mcpServers: params.mcpServers ?? [],
+        },
+      );
+      const sessionIdRaw = newResult.sessionId;
+      if (typeof sessionIdRaw !== "string") {
+        throw new Error(
+          `agent ${params.agentId} returned a non-string sessionId from session/new`,
+        );
+      }
       return {
         agent,
-        upstreamSessionId: newResult.sessionId,
-        agentMeta: newResult._meta,
+        upstreamSessionId: sessionIdRaw,
+        agentMeta: newResult._meta as Record<string, unknown> | undefined,
+        // Some agents (notably opencode) ship their current model in the
+        // session/new response body rather than as a current_model_update
+        // notification. Harvest it here so the picker and TUI header have
+        // something to render from the very first paint, before any turn
+        // runs that might cause the agent to emit a current_model_update.
+        initialModel: extractInitialModel(newResult),
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);
@@ -488,6 +510,7 @@ export class SessionManager {
         cwd: session.cwd,
         title: session.title,
         agentId: session.agentId,
+        currentModel: session.currentModel,
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
@@ -508,6 +531,7 @@ export class SessionManager {
         cwd: r.cwd,
         title: r.title,
         agentId: r.agentId,
+        currentModel: r.currentModel,
         updatedAt: used,
         attachedClients: 0,
         status: "cold",
@@ -811,6 +835,66 @@ function mergeForPersistence(
     agentCommands,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
+}
+
+// Pull a "current model id" from a session/new or session/load response.
+// Agents are inconsistent about how they expose this:
+//   - opencode: `result.models.currentModelId` (or `result._meta.opencode.modelId`)
+//   - hypothetical ACP-spec-strict agent: `result.currentModel` or `result.model`
+//   - some agents emit nothing here and only announce via the
+//     `current_model_update` notification — those skip this path entirely
+// We try the common shapes in order and stop on the first non-empty
+// string. Anything we don't recognize returns undefined; the session
+// will pick the model up later if/when a current_model_update arrives.
+export function extractInitialModel(
+  result: Record<string, unknown>,
+): string | undefined {
+  const direct =
+    asString(result.currentModelId) ??
+    asString(result.currentModel) ??
+    asString(result.modelId) ??
+    asString(result.model);
+  if (direct) {
+    return direct;
+  }
+  const models = result.models;
+  if (models && typeof models === "object" && !Array.isArray(models)) {
+    const m =
+      asString((models as Record<string, unknown>).currentModelId) ??
+      asString((models as Record<string, unknown>).currentModel);
+    if (m) {
+      return m;
+    }
+  }
+  const meta = result._meta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    for (const [key, value] of Object.entries(
+      meta as Record<string, unknown>,
+    )) {
+      // Hydra's own _meta namespace is informational; skip it.
+      if (key === "hydra-acp") {
+        continue;
+      }
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const m =
+          asString((value as Record<string, unknown>).modelId) ??
+          asString((value as Record<string, unknown>).model) ??
+          asString((value as Record<string, unknown>).currentModelId);
+        if (m) {
+          return m;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 async function loadPromptHistorySafely(sessionId: string): Promise<string[]> {

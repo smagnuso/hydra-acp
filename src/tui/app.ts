@@ -683,6 +683,7 @@ async function runSession(
     cwd: resolvedCwd,
     sessionId: resolvedSessionId,
     title: resolvedTitle,
+    model: initialModel,
   });
   // Surface initial snapshot state (delivered via _meta on attach) so a
   // late-joining or cold-resurrected client sees the current mode/model
@@ -1449,6 +1450,11 @@ async function runSession(
       recordToolCall(event.toolCallId, event.title, event.status);
       renderToolsBlock();
       return;
+    }
+    if (event.kind === "model-changed") {
+      // Header reflects live state; scrollback still gets the line below
+      // for a visible audit trail.
+      screen.setHeader({ model: event.model });
     }
     const formatted = formatEvent(event);
     if (formatted.length > 0) {

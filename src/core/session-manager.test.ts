@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, extractInitialModel } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
 import {
   makeMockAgent,
@@ -1064,3 +1064,52 @@ describe("SessionManager: resurrect from import", () => {
     expect(requestMock.mock.calls[2]?.[0]).toBe("session/prompt");
   });
 });
+
+describe("extractInitialModel", () => {
+  it("pulls models.currentModelId (opencode-style)", () => {
+    expect(
+      extractInitialModel({
+        sessionId: "ses_xxx",
+        models: {
+          currentModelId: "ollama/qwen3:8b",
+          availableModels: [{ modelId: "ollama/qwen3:8b" }],
+        },
+        modes: { availableModes: [], currentModeId: "build" },
+      }),
+    ).toBe("ollama/qwen3:8b");
+  });
+
+  it("pulls _meta.<ns>.modelId when nothing else carries it", () => {
+    expect(
+      extractInitialModel({
+        sessionId: "ses_xxx",
+        _meta: {
+          opencode: { modelId: "openai/gpt-5-codex", variant: null },
+          "hydra-acp": { whatever: 1 },
+        },
+      }),
+    ).toBe("openai/gpt-5-codex");
+  });
+
+  it("pulls a top-level currentModelId / currentModel / modelId / model", () => {
+    expect(extractInitialModel({ sessionId: "x", currentModelId: "a" })).toBe("a");
+    expect(extractInitialModel({ sessionId: "x", currentModel: "b" })).toBe("b");
+    expect(extractInitialModel({ sessionId: "x", modelId: "c" })).toBe("c");
+    expect(extractInitialModel({ sessionId: "x", model: "d" })).toBe("d");
+  });
+
+  it("returns undefined when the response carries no model anywhere", () => {
+    expect(
+      extractInitialModel({
+        sessionId: "ses_xxx",
+        agentCapabilities: {},
+        _meta: { "hydra-acp": { upstreamSessionId: "u" } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("ignores blank-string model fields", () => {
+    expect(extractInitialModel({ sessionId: "x", currentModel: "   " })).toBeUndefined();
+  });
+});
+

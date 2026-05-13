@@ -10,6 +10,7 @@ export interface DiscoveredSession {
   upstreamSessionId?: string;
   cwd: string;
   agentId?: string;
+  currentModel?: string;
   title?: string;
   attachedClients: number;
   updatedAt: string;
@@ -55,6 +56,7 @@ export async function listSessions(
     status: s.status ?? "live",
     upstreamSessionId: s.upstreamSessionId,
     agentId: s.agentId,
+    currentModel: s.currentModel,
     title: s.title,
   }));
 }

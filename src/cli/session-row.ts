@@ -4,6 +4,7 @@
 // place ensures the two views stay byte-identical, and centralizes the
 // width-aware truncation so neither caller wraps onto a second line.
 
+import { formatAgentWithModel } from "../core/agent-display.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 
 export interface SessionSummary {
@@ -11,6 +12,7 @@ export interface SessionSummary {
   upstreamSessionId?: string;
   cwd: string;
   agentId?: string;
+  currentModel?: string;
   title?: string;
   attachedClients: number;
   updatedAt: string;
@@ -62,7 +64,7 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
     upstream: s.upstreamSessionId ?? "-",
     status: (s.status ?? "live").toUpperCase(),
     clients: s.status === "cold" ? "-" : String(s.attachedClients),
-    agent: s.agentId ?? "?",
+    agent: formatAgentWithModel(s.agentId, s.currentModel),
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
     cwd: s.cwd,

@@ -204,6 +204,9 @@ export const SessionListEntry = z.object({
   cwd: z.string(),
   title: z.string().optional(),
   agentId: z.string().optional(),
+  // Last-known model id, so list views can render `<agent>(<model>)`
+  // without resurrecting cold sessions to look it up.
+  currentModel: z.string().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),

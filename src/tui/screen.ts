@@ -6,6 +6,7 @@
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import wrapAnsi from "wrap-ansi";
+import { formatAgentWithModel } from "../core/agent-display.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import type { FormattedLine, Style } from "./format.js";
 import type { InputDispatcher, KeyEvent, KeyName } from "./input.js";
@@ -41,6 +42,10 @@ interface HeaderState {
   sessionId: string;
   title?: string;
   usage?: UsageState;
+  // Last known model id, rendered as "<agent>(<model>)" in the bar. Kept
+  // separate from `agent` so the TUI can update it independently when
+  // current_model_update arrives mid-session.
+  model?: string;
 }
 
 export interface UsageState {
@@ -882,13 +887,14 @@ export class Screen {
     const usage = formatUsage(this.header.usage);
     const sid = shortId(this.header.sessionId);
     const title = this.header.title?.trim();
-    const sig = `hdr|${w}|${this.header.agent}|${this.header.cwd}|${sid}|${title ?? ""}|${usage ?? ""}`;
+    const agentCell = formatAgentWithModel(this.header.agent, this.header.model);
+    const sig = `hdr|${w}|${agentCell}|${this.header.cwd}|${sid}|${title ?? ""}|${usage ?? ""}`;
     this.paintRow(1, sig, () => {
-      // Fixed pieces: "hydra · " + agent + " · " + cwd + " · " + sessionId
-      // [+ " · " + title] and the right-aligned usage block.
+      // Fixed pieces: "hydra · " + agent[(model)] + " · " + cwd + " · " +
+      // sessionId [+ " · " + title] and the right-aligned usage block.
       const fixed =
         "hydra · ".length +
-        this.header.agent.length +
+        agentCell.length +
         " · ".length +
         " · ".length +
         sid.length +
@@ -913,7 +919,7 @@ export class Screen {
       // literal `^X` in any of them isn't eaten as terminal-kit markup.
       this.term
         .bold("hydra")(" · ")
-        .cyan.noFormat(this.header.agent)(" · ")
+        .cyan.noFormat(agentCell)(" · ")
         .dim.noFormat(truncate(this.header.cwd, cwdRoom))(" · ")
         .yellow(sid);
       if (title) {
