@@ -88,7 +88,7 @@ describe("Registry.getAgent fallback", () => {
 });
 
 describe("planSpawn", () => {
-  it("appends extra args to the registry's npx args", async () => {
+  it("uses caller args after the npx package when registry has no args", async () => {
     const plan = await planSpawn(FIXTURE.agents[2]!, [
       "-c",
       "sandbox_mode=danger-full-access",
@@ -108,6 +108,30 @@ describe("planSpawn", () => {
       "-y",
       "@agentclientprotocol/claude-agent-acp@0.33.1",
     ]);
+  });
+
+  it("caller args replace the registry's npx args when both are present", async () => {
+    const agent: RegistryAgent = {
+      id: "with-default-args",
+      name: "With Default Args",
+      distribution: {
+        npx: { package: "some-pkg@1", args: ["--acp"] },
+      },
+    };
+    const plan = await planSpawn(agent, ["--something-else"]);
+    expect(plan.args).toEqual(["-y", "some-pkg@1", "--something-else"]);
+  });
+
+  it("falls back to the registry's npx args when caller passes none", async () => {
+    const agent: RegistryAgent = {
+      id: "with-default-args",
+      name: "With Default Args",
+      distribution: {
+        npx: { package: "some-pkg@1", args: ["--acp"] },
+      },
+    };
+    const plan = await planSpawn(agent);
+    expect(plan.args).toEqual(["-y", "some-pkg@1", "--acp"]);
   });
 
   it("rejects a binary agent that has no target for the current platform", async () => {

@@ -210,16 +210,21 @@ function npxPackageBasename(agent: RegistryAgent): string | undefined {
   return atIdx <= 0 ? afterSlash : afterSlash.slice(0, atIdx);
 }
 
+// Caller-supplied args replace the registry's args entirely. When the caller
+// passes nothing, the registry defaults are used. The previous "always append"
+// behavior caused doubled args when an editor prefix (e.g. `hydra-acp launch`)
+// forwarded the same ACP subcommand the registry already supplies — opencode's
+// `acp acp` invocation died with -32603 once session/new ran.
 export async function planSpawn(
   agent: RegistryAgent,
-  extraArgs: string[] = [],
+  callerArgs: string[] = [],
 ): Promise<SpawnPlan> {
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
-    const args = ["-y", npx.package, ...(npx.args ?? []), ...extraArgs];
+    const tail = callerArgs.length > 0 ? callerArgs : (npx.args ?? []);
     return {
       command: "npx",
-      args,
+      args: ["-y", npx.package, ...tail],
       env: npx.env ?? {},
     };
   }
@@ -235,18 +240,19 @@ export async function planSpawn(
       version: agent.version ?? "current",
       target,
     });
+    const tail = callerArgs.length > 0 ? callerArgs : (target.args ?? []);
     return {
       command: cmdPath,
-      args: [...(target.args ?? []), ...extraArgs],
+      args: tail,
       env: target.env ?? {},
     };
   }
   if (agent.distribution.uvx) {
     const uvx = agent.distribution.uvx;
-    const args = [uvx.package, ...(uvx.args ?? []), ...extraArgs];
+    const tail = callerArgs.length > 0 ? callerArgs : (uvx.args ?? []);
     return {
       command: "uvx",
-      args,
+      args: [uvx.package, ...tail],
       env: uvx.env ?? {},
     };
   }
