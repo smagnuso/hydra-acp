@@ -986,19 +986,19 @@ export class Session {
   }
 
   // Tell every attached client (a) the agent identity has changed
-  // (session_info_update with an agentId field — clients that already
-  // listen for title updates pick this up; older clients ignore unknown
-  // fields harmlessly) and (b) drop a visible banner into the transcript
-  // so users see the switch rather than just suddenly getting answers
-  // from a different agent. Both updates carry _meta["hydra-acp"].synthetic
+  // (session_info_update carrying agentId inside _meta["hydra-acp"] —
+  // the ACP schema for session_info_update is just title/updatedAt/_meta,
+  // so non-hydra clients harmlessly ignore the extension; hydra-aware
+  // ones read it and relabel) and (b) drop a visible banner into the
+  // transcript so users see the switch rather than just suddenly getting
+  // answers from a different agent. Both updates carry synthetic=true
   // so a future /hydra switch's transcript builder filters them out.
   private broadcastAgentSwitch(oldAgentId: string, newAgentId: string): void {
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "session_info_update",
-        agentId: newAgentId,
-        _meta: { "hydra-acp": { synthetic: true } },
+        _meta: { "hydra-acp": { synthetic: true, agentId: newAgentId } },
       },
     });
     this.recordAndBroadcast("session/update", {

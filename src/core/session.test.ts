@@ -1056,15 +1056,28 @@ describe("Session", () => {
       expect(sentText).toContain("<user>: say hi");
       expect(sentText).toContain("<agent: old>: Hello.");
 
-      // Broadcast: session_info_update with new agentId + banner.
-      const infoUpdate = aliceStream.sent.find(
-        (m) =>
-          "method" in m &&
-          m.method === "session/update" &&
-          (m.params as { update?: { sessionUpdate?: string; agentId?: string } } | undefined)
-            ?.update?.sessionUpdate === "session_info_update" &&
-          (m.params as { update?: { agentId?: string } } | undefined)?.update?.agentId === "new",
-      );
+      // Broadcast: session_info_update carrying the new agentId inside
+      // _meta["hydra-acp"] (the standard ACP schema has no agentId field
+      // at the top level — agent identity is a hydra extension).
+      const infoUpdate = aliceStream.sent.find((m) => {
+        if (!("method" in m) || m.method !== "session/update") {
+          return false;
+        }
+        const update = (
+          m.params as
+            | {
+                update?: {
+                  sessionUpdate?: string;
+                  _meta?: { "hydra-acp"?: { agentId?: string } };
+                };
+              }
+            | undefined
+        )?.update;
+        return (
+          update?.sessionUpdate === "session_info_update" &&
+          update._meta?.["hydra-acp"]?.agentId === "new"
+        );
+      });
       expect(infoUpdate).toBeDefined();
       const banner = aliceStream.sent.find(
         (m) =>

@@ -179,6 +179,16 @@ export class Screen {
     }
     this.started = true;
     this.term.fullscreen(true);
+    // Entering the alternate screen buffer gives us a blank slate. Drop
+    // the per-row sig cache (and frame-size / window-title shadows) so the
+    // upcoming repaint actually emits every row — without this, a
+    // stop/start round-trip (e.g. the session picker) leaves paintRow
+    // short-circuiting against signatures from the previous run and the
+    // screen stays blank until something forces a fullRedraw.
+    this.lastFrameRows.clear();
+    this.lastFrameW = 0;
+    this.lastFrameH = 0;
+    this.lastWindowTitle = null;
     // Disable auto-wrap (DECAWM). Our row painter assumes each row starts
     // with a moveTo + eraseLineAfter, so any character that overflows the
     // right margin should be clipped, not wrapped onto the next physical

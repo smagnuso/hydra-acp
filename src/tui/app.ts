@@ -1340,6 +1340,10 @@ async function runSession(
       if (event.title !== undefined) {
         screen.setHeader({ title: event.title });
       }
+      if (event.agentId !== undefined && event.agentId !== resolvedAgentId) {
+        resolvedAgentId = event.agentId;
+        screen.setHeader({ agent: event.agentId });
+      }
       return;
     }
     if (event.kind === "usage-update") {

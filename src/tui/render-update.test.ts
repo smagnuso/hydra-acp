@@ -272,10 +272,29 @@ describe("mapUpdate", () => {
     ).toEqual({ kind: "session-info", title: "fix the bug in foo.ts" });
   });
 
-  it("ignores session_info_update without a title", () => {
+  it("ignores session_info_update without a title or agentId", () => {
     expect(
       mapUpdate({ sessionUpdate: "session_info_update", updatedAt: "x" }),
     ).toBeNull();
+  });
+
+  it("maps session_info_update with a hydra agentId in _meta", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "session_info_update",
+        _meta: { "hydra-acp": { synthetic: true, agentId: "codex-acp" } },
+      }),
+    ).toEqual({ kind: "session-info", agentId: "codex-acp" });
+  });
+
+  it("maps session_info_update with both title and agentId", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "session_info_update",
+        title: "fix the bug",
+        _meta: { "hydra-acp": { agentId: "codex-acp" } },
+      }),
+    ).toEqual({ kind: "session-info", title: "fix the bug", agentId: "codex-acp" });
   });
 
   it("returns unknown for unrecognized sessionUpdate", () => {

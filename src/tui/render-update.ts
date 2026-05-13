@@ -30,7 +30,7 @@ export type RenderEvent =
       costCurrency?: string;
     }
   | { kind: "available-commands"; commands: AvailableCommand[] }
-  | { kind: "session-info"; title?: string }
+  | { kind: "session-info"; title?: string; agentId?: string }
   | { kind: "unknown"; sessionUpdate: string; raw: unknown };
 
 export interface AvailableCommand {
@@ -96,10 +96,31 @@ export function mapUpdate(update: unknown): RenderEvent | null {
 
 function mapSessionInfo(u: UpdateLike): RenderEvent | null {
   const title = readString(u, "title");
-  if (title === undefined) {
+  // agentId is a hydra-specific extension carried in _meta["hydra-acp"]
+  // (the standard ACP schema for session_info_update has only title +
+  // updatedAt + _meta — agent identity is not a protocol-level concept).
+  const meta = u._meta;
+  let agentId: string | undefined;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    const ns = (meta as Record<string, unknown>)["hydra-acp"];
+    if (ns && typeof ns === "object" && !Array.isArray(ns)) {
+      const candidate = (ns as Record<string, unknown>).agentId;
+      if (typeof candidate === "string") {
+        agentId = candidate;
+      }
+    }
+  }
+  if (title === undefined && agentId === undefined) {
     return null;
   }
-  return { kind: "session-info", title };
+  const event: RenderEvent = { kind: "session-info" };
+  if (title !== undefined) {
+    event.title = title;
+  }
+  if (agentId !== undefined) {
+    event.agentId = agentId;
+  }
+  return event;
 }
 
 function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
