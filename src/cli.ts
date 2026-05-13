@@ -49,7 +49,11 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
-    const sessionId = resolveOption(flags, "session-id");
+    const launchResume = flags.resume;
+    const sessionId =
+      typeof launchResume === "string"
+        ? launchResume
+        : resolveOption(flags, "session-id");
     const name = resolveOption(flags, "name");
     await runShim({ sessionId, agentId, agentArgs, name });
     return;
@@ -67,7 +71,14 @@ async function main(): Promise<void> {
   }
 
   const subcommand = positional[0];
-  const sessionId = resolveOption(flags, "session-id");
+  // --resume <id> is the preferred way to attach to a specific session.
+  // --session-id <id> is kept for backwards compatibility / env-var use.
+  // Bare --resume (no value) still means "pick the most recent in cwd".
+  const resumeFlag = flags.resume;
+  const sessionId =
+    typeof resumeFlag === "string"
+      ? resumeFlag
+      : resolveOption(flags, "session-id");
   const name = resolveOption(flags, "name");
   const agentIdFromFlag = resolveOption(flags, "agent-id");
 
@@ -218,6 +229,8 @@ async function dispatchTui(
   base: TuiBaseOpts,
 ): Promise<void> {
   const cwd = resolveOption(flags, "cwd");
+  // Only the bare-boolean form of --resume triggers "pick most recent";
+  // --resume <id> was already promoted to base.sessionId in main().
   const resume = flags.resume === true;
   const forceNew = flags.new === true;
   const { runTui } = await import("./tui/index.js");
@@ -262,7 +275,7 @@ function printHelp(): void {
       "                                     Shim mode, force daemon to spawn <agent-id>",
       "                                     from the registry. Args after <agent-id>",
       "                                     are forwarded to the agent's command.",
-      "  hydra-acp --session-id <id>        Attach to an existing session (TUI when in a terminal, shim otherwise)",
+      "  hydra-acp --resume <id>            Attach to an existing session (TUI when in a terminal, shim otherwise)",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
       "  hydra-acp daemon start|stop|restart|status",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
@@ -276,15 +289,16 @@ function printHelp(): void {
       "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  hydra-acp agents [list]                     List agents in the cached registry",
       "  hydra-acp agents refresh                    Force a registry re-fetch",
-      "  hydra-acp tui flags: [--session-id <id>] [--resume] [--new] [--agent-id <id>] [--cwd <path>] [--name <label>]",
-      "                                     Smart default: picks an existing live session if any exist in cwd, else creates a new one",
+      "  hydra-acp tui flags: [--resume [<id>]] [--new] [--agent-id <id>] [--cwd <path>] [--name <label>]",
+      "                                     --resume <id> attaches to a specific session; bare --resume picks the most-recent",
+      "                                     in cwd. Smart default (no flags): picks if any live sessions exist, else new.",
       "  hydra-acp --version                Print version",
       "  hydra-acp --help                   Show this help",
       "",
       "Config knob flags accept env-var equivalents (flag wins):",
-      "  --agent-id    HYDRA_ACP_AGENT_ID",
-      "  --session-id  HYDRA_ACP_SESSION_ID",
-      "  --name        HYDRA_ACP_NAME",
+      "  --agent-id              HYDRA_ACP_AGENT_ID",
+      "  --resume / --session-id HYDRA_ACP_SESSION_ID",
+      "  --name                  HYDRA_ACP_NAME",
       "",
     ].join("\n"),
   );

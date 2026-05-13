@@ -13,6 +13,7 @@ import {
 import { ResilientWsStream } from "../shim/resilient-ws.js";
 import { ensureConfig, type HydraConfig } from "../core/config.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
+import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
 import {
   appendEntry,
@@ -61,9 +62,17 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   await ensureDaemonReachable(config);
   const term = termkit.terminal;
 
+  // Filled in by runSession as soon as a session is attached/created.
+  // Used to print a "To resume: …" hint on the way out so the user
+  // doesn't have to dig through `hydra-acp sessions list` to come back.
+  const exitHint: { sessionId?: string } = {};
   let nextOpts: TuiOptions | null = opts;
   while (nextOpts !== null) {
-    nextOpts = await runSession(term, config, nextOpts);
+    nextOpts = await runSession(term, config, nextOpts, exitHint);
+  }
+  if (exitHint.sessionId) {
+    const short = stripHydraSessionPrefix(exitHint.sessionId);
+    process.stdout.write(`To resume: hydra-acp tui --resume ${short}\n`);
   }
 }
 
@@ -71,6 +80,7 @@ async function runSession(
   term: termkit.Terminal,
   config: HydraConfig,
   opts: TuiOptions,
+  exitHint: { sessionId?: string },
 ): Promise<TuiOptions | null> {
   const ctx = await resolveSession(term, config, opts);
   if (!ctx) {
@@ -412,6 +422,7 @@ async function runSession(
         : {}),
     })) as { sessionId: string; _meta?: Record<string, unknown> };
     resolvedSessionId = created.sessionId;
+    exitHint.sessionId = resolvedSessionId;
     const hydraMeta = extractHydraMeta(created._meta ?? undefined);
     upstreamSessionId = hydraMeta.upstreamSessionId;
     if (hydraMeta.agentId) {
@@ -440,6 +451,7 @@ async function runSession(
       clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
     })) as { sessionId: string; _meta?: Record<string, unknown> };
     resolvedSessionId = attached.sessionId;
+    exitHint.sessionId = resolvedSessionId;
     const hydraMeta = extractHydraMeta(attached._meta ?? undefined);
     upstreamSessionId = hydraMeta.upstreamSessionId;
     if (hydraMeta.agentId) {
