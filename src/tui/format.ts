@@ -340,10 +340,8 @@ export interface ToolLineState {
 // Render the single line that represents a tool call. Combines the initial
 // (generic) title with the refined update title when they add information,
 // and folds them into one when the refinement subsumes the initial label.
-// The leading status icon sits in a 2-space-indented gutter so individual
-// rows nest visibly under the tools block's ⚒ header without repeating
-// the tool glyph on every row. Color + weight encode state: dim while
-// queued, bold while running, normal-weight when done.
+// The icon is styled independently from the title so the active glyph (◐)
+// stays yellow even while the title is dimmed to mark a queued call.
 export function formatToolLine(state: ToolLineState): FormattedLine {
   const initial = state.initialTitle;
   const latest = state.latestTitle;
@@ -358,8 +356,9 @@ export function formatToolLine(state: ToolLineState): FormattedLine {
     title = `${initial} · ${latest}`;
   }
   return {
-    prefix: "  ",
-    body: `${toolStatusIcon(state.status)} ${title}`,
+    prefix: `  ${toolStatusIcon(state.status)} `,
+    prefixStyle: toolIconStyle(state.status),
+    body: title,
     bodyStyle: toolStatusStyle(state.status),
   };
 }
@@ -385,6 +384,26 @@ function toolStatusIcon(status: string): string {
       // Same spinner glyph for queued vs. running — bodyStyle distinguishes
       // them visually (dim vs. bold).
       return "◐";
+  }
+}
+
+// Icon color tracks the icon's meaning, not the line's emphasis: the ◐
+// stays yellow (matching the busy banner / plan accent) for both queued
+// and running, so any tool with work pending reads as "active" at a glance.
+function toolIconStyle(status: string): Style {
+  switch (status) {
+    case "completed":
+    case "succeeded":
+    case "ok":
+      return "tool-status-ok";
+    case "failed":
+    case "error":
+    case "rejected":
+      return "tool-status-fail";
+    case "cancelled":
+      return "tool-status-cancelled";
+    default:
+      return "tool-status-running";
   }
 }
 
