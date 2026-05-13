@@ -58,6 +58,13 @@ export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
 
 export interface SessionManagerOptions {
   idleTimeoutMs?: number;
+  // Per-agent default model id. When a brand-new agent process is spawned
+  // (the bootstrapAgent path: create(), /hydra agent switch, import
+  // re-seed), hydra issues session/set_model with the entry that matches
+  // the agent id so the user lands on their preferred model from the
+  // first prompt. Resurrect paths (session/load) skip this — those
+  // sessions already carry a user-chosen model from the prior incarnation.
+  defaultModels?: Record<string, string>;
 }
 
 export class SessionManager {
@@ -67,6 +74,7 @@ export class SessionManager {
   private store: SessionStore;
   private histories: HistoryStore;
   private idleTimeoutMs: number;
+  private defaultModels: Record<string, string>;
   // Serialize meta.json read-modify-write operations per session id so
   // concurrent snapshot updates (e.g. an agent emitting model + mode
   // back-to-back) don't lose writes via interleaved reads.
@@ -82,6 +90,7 @@ export class SessionManager {
     this.store = store ?? new SessionStore();
     this.histories = new HistoryStore();
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
+    this.defaultModels = options.defaultModels ?? {};
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -315,16 +324,32 @@ export class SessionManager {
           `agent ${params.agentId} returned a non-string sessionId from session/new`,
         );
       }
+      // Some agents (notably opencode) ship their current model in the
+      // session/new response body rather than as a current_model_update
+      // notification. Harvest it here so the picker and TUI header have
+      // something to render from the very first paint, before any turn
+      // runs that might cause the agent to emit a current_model_update.
+      let initialModel = extractInitialModel(newResult);
+      const desired = this.defaultModels[params.agentId];
+      if (desired && desired !== initialModel) {
+        try {
+          await agent.connection.request("session/set_model", {
+            sessionId: sessionIdRaw,
+            modelId: desired,
+          });
+          initialModel = desired;
+        } catch {
+          // Bad / unsupported model id in config shouldn't break session
+          // creation — fall back to whatever the agent picked itself.
+          // The user-visible signal is just that the header keeps the
+          // old model; misconfigurations surface in daemon logs upstream.
+        }
+      }
       return {
         agent,
         upstreamSessionId: sessionIdRaw,
         agentMeta: newResult._meta as Record<string, unknown> | undefined,
-        // Some agents (notably opencode) ship their current model in the
-        // session/new response body rather than as a current_model_update
-        // notification. Harvest it here so the picker and TUI header have
-        // something to render from the very first paint, before any turn
-        // runs that might cause the agent to emit a current_model_update.
-        initialModel: extractInitialModel(newResult),
+        initialModel,
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);

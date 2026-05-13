@@ -61,6 +61,14 @@ export const HydraConfig = z.object({
   daemon: DaemonConfig,
   registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
   defaultAgent: z.string().default("claude-acp"),
+  // Optional per-agent default model id. When a brand-new agent process
+  // is spawned (session/new path), hydra issues session/set_model with
+  // the matching entry so the user lands on their preferred model from
+  // the first prompt. Not applied on resurrect — those sessions keep
+  // whatever the user last selected. Keys are agent ids; values are the
+  // raw model id strings the agent expects (claude-acp: "claude-opus-4-7",
+  // opencode: "openai/gpt-5-codex" or "ncp-anthropic/claude-opus-4-7", …).
+  defaultModels: z.record(z.string(), z.string()).default({}),
   // Where new sessions land when POST /v1/sessions omits cwd. Stored as
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.

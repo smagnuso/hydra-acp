@@ -695,14 +695,13 @@ async function runSession(
     model: initialModel,
   });
   // Surface initial snapshot state (delivered via _meta on attach) so a
-  // late-joining or cold-resurrected client sees the current mode/model
+  // late-joining or cold-resurrected client sees the current mode
   // immediately — equivalent to what history replay used to do before
-  // these moved into meta.json.
+  // these moved into meta.json. The model isn't replayed: it's already
+  // visible in the header (`agent(model)`), so a scrollback line would
+  // just be noise on every session start.
   if (initialMode) {
     screen.appendLines(formatEvent({ kind: "mode-changed", mode: initialMode }));
-  }
-  if (initialModel) {
-    screen.appendLines(formatEvent({ kind: "model-changed", model: initialModel }));
   }
 
   let finishSession: ((next: TuiOptions | null) => void) | null = null;

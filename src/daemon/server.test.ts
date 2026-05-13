@@ -23,6 +23,7 @@ function testConfig(): HydraConfig {
       ttlHours: 24,
     },
     defaultAgent: "claude-acp",
+    defaultModels: {},
     defaultCwd: os.homedir(),
     sessionListColdLimit: 20,
     extensions: {},
@@ -572,6 +573,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         ttlHours: 24,
       },
       defaultAgent: "claude-acp",
+      defaultModels: {},
       defaultCwd: os.homedir(),
       sessionListColdLimit: 20,
       extensions: {

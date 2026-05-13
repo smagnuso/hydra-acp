@@ -1113,3 +1113,118 @@ describe("extractInitialModel", () => {
   });
 });
 
+describe("SessionManager: defaultModels", () => {
+  it("issues session/set_model after session/new and seeds currentModel", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_fresh" })
+      .mockResolvedValueOnce({ ok: true });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+    );
+
+    const session = await manager.create({ cwd: "/work", agentId: "opencode" });
+
+    expect(requestMock.mock.calls[0]?.[0]).toBe("initialize");
+    expect(requestMock.mock.calls[1]?.[0]).toBe("session/new");
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_model",
+      { sessionId: "u_fresh", modelId: "openai/gpt-5-codex" },
+    ]);
+    expect(session.currentModel).toBe("openai/gpt-5-codex");
+  });
+
+  it("skips session/set_model when the agent already reports that model", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        models: { currentModelId: "openai/gpt-5-codex" },
+      });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+    );
+
+    await manager.create({ cwd: "/work", agentId: "opencode" });
+    expect(requestMock.mock.calls.length).toBe(2);
+  });
+
+  it("skips session/set_model when no defaultModel is configured for the agent", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_fresh" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+    );
+
+    await manager.create({ cwd: "/work", agentId: "claude-code" });
+    expect(requestMock.mock.calls.length).toBe(2);
+  });
+
+  it("does not apply defaultModel on the resurrect/session-load path", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_loaded" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+    );
+
+    await manager.resurrect({
+      hydraSessionId: "sess_hyd",
+      upstreamSessionId: "u_loaded",
+      agentId: "opencode",
+      cwd: "/work",
+      currentModel: "ncp-anthropic/claude-opus-4-7",
+    });
+
+    expect(requestMock.mock.calls[1]?.[0]).toBe("session/load");
+    expect(requestMock.mock.calls.length).toBe(2);
+  });
+
+  it("falls back to the agent's chosen model when set_model rejects", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        models: { currentModelId: "openai/gpt-4o" },
+      })
+      .mockRejectedValueOnce(new Error("unknown model id"));
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "bogus/no-such-model" } },
+    );
+
+    const session = await manager.create({ cwd: "/work", agentId: "opencode" });
+    expect(session.currentModel).toBe("openai/gpt-4o");
+  });
+});
+

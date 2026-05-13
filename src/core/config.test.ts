@@ -38,6 +38,10 @@ describe("defaultConfig", () => {
   it("defaults defaultCwd to the literal '~' (expanded at use time)", () => {
     expect(defaultConfig().defaultCwd).toBe("~");
   });
+
+  it("defaults defaultModels to an empty object (no per-agent overrides)", () => {
+    expect(defaultConfig().defaultModels).toEqual({});
+  });
 });
 
 describe("ensureConfig", () => {
