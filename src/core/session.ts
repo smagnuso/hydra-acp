@@ -68,13 +68,8 @@ export interface SessionInit {
   // process and run initialize + session/new on it. Provided by
   // SessionManager so Session doesn't have to depend on the registry.
   spawnReplacementAgent?: SpawnReplacementAgent;
-  // History loaded from a prior cold incarnation of this session. When
-  // set, the in-memory broadcast cache starts pre-populated so the
-  // attaching client's replay matches what they'd have seen if the
-  // session had stayed hot.
-  seedHistory?: CachedNotification[];
-  // When provided, every recordAndBroadcast entry is persisted to disk
-  // so the session's history survives going cold.
+  // Every recordAndBroadcast entry is persisted here. attach()/getHistorySnapshot()
+  // load from this store on demand — Session keeps no in-memory copy.
   historyStore?: HistoryStore;
   // Snapshot state restored from meta.json on cold resurrect, so the
   // first attach response can deliver the right model/mode/commands
@@ -87,6 +82,7 @@ export interface SessionInit {
   // a prior life's prompt seed, /hydra title, or regenTitle) — without
   // this, the next prompt would clobber the persisted title.
   firstPromptSeeded?: boolean;
+  createdAt?: number;
 }
 
 export interface CloseOptions {
@@ -100,6 +96,9 @@ export interface CloseOptions {
   // killing the agent anyway. Defaults to 5 seconds.
   regenTitleTimeoutMs?: number;
 }
+
+const MAX_HISTORY_ENTRIES = 1000;
+const COMPACT_EVERY = 200;
 
 export class Session {
   readonly sessionId: string;
@@ -120,9 +119,9 @@ export class Session {
   currentModel: string | undefined;
   currentMode: string | undefined;
   updatedAt: number;
+  readonly createdAt: number;
 
   private clients = new Map<string, AttachedClient>();
-  private history: CachedNotification[] = [];
   private historyStore: HistoryStore | undefined;
   private promptQueue: Array<() => Promise<void>> = [];
   private promptInFlight = false;
@@ -138,6 +137,15 @@ export class Session {
   // True once we've observed our first session/prompt; gates the
   // first-prompt-seeded title so subsequent prompts don't churn it.
   private firstPromptSeeded = false;
+  // Wall-clock when the active prompt started, undefined when idle.
+  // Bumped by broadcastPromptReceived, cleared by broadcastTurnComplete.
+  // Drives the mid-turn elapsed counter delivered to fresh attachers.
+  private promptStartedAt: number | undefined;
+  // Counts appends since the last compaction. When it hits COMPACT_EVERY
+  // we ask the history store to trim the file to the most recent
+  // MAX_HISTORY_ENTRIES. Keeps file growth bounded without per-append
+  // file-size checks.
+  private appendCount = 0;
   // Permission requests that have been broadcast to one or more
   // clients but have not yet resolved. Replayed to clients that
   // attach mid-flight so a late joiner sees the prompt instead of an
@@ -200,16 +208,11 @@ export class Session {
       this.firstPromptSeeded = true;
     }
     this.historyStore = init.historyStore;
-    if (init.seedHistory && init.seedHistory.length > 0) {
-      this.history = [...init.seedHistory];
-    }
     this.updatedAt = Date.now();
-    // Treat construction as a fresh activity floor. For a resurrected
-    // session the seed history's recordedAt timestamps may be hours
-    // old — anchoring lastRecordedAt to them would cause the idle
-    // timer to fire immediately and tear down the session the user
-    // just woke up. Resurrection itself is the activity that gets a
-    // fresh idle window.
+    this.createdAt = init.createdAt ?? this.updatedAt;
+    // Resurrection itself is the activity that gets a fresh idle
+    // window — even if the disk history is hours old, the user
+    // attaching now is current activity.
     this.lastRecordedAt = this.updatedAt;
 
     this.wireAgent(this.agent);
@@ -296,35 +299,21 @@ export class Session {
   }
 
   // Wall-clock when the in-flight agent turn began, or undefined when
-  // idle. Derived from history: the most recent prompt_received without
-  // a later turn_complete is the outstanding turn, and its recordedAt
-  // is when the prompt was first broadcast. Used by buildResponseMeta
-  // so a fresh client reattaching mid-turn boots up with the busy
-  // banner showing real elapsed time.
+  // idle. Tracked in-memory by broadcastPromptReceived/broadcastTurnComplete
+  // so the daemon can hand a fresh attacher mid-turn the right elapsed
+  // time without scanning history.
   get turnStartedAt(): number | undefined {
-    for (let i = this.history.length - 1; i >= 0; i--) {
-      const entry = this.history[i];
-      if (!entry) {
-        continue;
-      }
-      const params = entry.params as { update?: { sessionUpdate?: string } };
-      const kind = params?.update?.sessionUpdate;
-      if (kind === "turn_complete") {
-        return undefined;
-      }
-      if (kind === "prompt_received") {
-        return entry.recordedAt;
-      }
-    }
-    return undefined;
+    return this.promptStartedAt;
   }
 
-  // Snapshot of the current in-memory replay history. Used by the
-  // HTTP history endpoint to deliver the "what's accumulated so far"
-  // prefix before optionally tailing with onBroadcast. Returns a copy
-  // so callers can't mutate our cache.
-  getHistorySnapshot(): CachedNotification[] {
-    return [...this.history];
+  // Read the persisted history from disk. Returns [] if no history
+  // file exists (fresh session, never prompted). Used by attach() and
+  // the HTTP /history endpoint.
+  async getHistorySnapshot(): Promise<CachedNotification[]> {
+    if (!this.historyStore) {
+      return [];
+    }
+    return this.historyStore.load(this.sessionId).catch(() => []);
   }
 
   // Subscribe to recordable broadcast entries — fires once per entry
@@ -342,7 +331,14 @@ export class Session {
     };
   }
 
-  attach(client: AttachedClient, historyPolicy: HistoryPolicy): CachedNotification[] {
+  // Register a client and (asynchronously) load the replay slice it
+  // should receive. Validation errors throw synchronously so callers
+  // can rely on either the registration being in effect or having
+  // thrown; the disk-load is the only async work.
+  attach(
+    client: AttachedClient,
+    historyPolicy: HistoryPolicy,
+  ): Promise<CachedNotification[]> {
     if (this.closed) {
       throw withCode(
         new Error("session is closed"),
@@ -357,13 +353,10 @@ export class Session {
     }
     this.clients.set(client.clientId, client);
     this.updatedAt = Date.now();
-    if (historyPolicy === "none") {
-      return [];
+    if (historyPolicy === "none" || historyPolicy === "pending_only") {
+      return Promise.resolve([]);
     }
-    if (historyPolicy === "pending_only") {
-      return [];
-    }
-    return [...this.history];
+    return this.getHistorySnapshot();
   }
 
   // Dispatch in-flight permission requests to a freshly-attached
@@ -442,6 +435,7 @@ export class Session {
     if (client.clientInfo?.version) {
       sentBy.version = client.clientInfo.version;
     }
+    this.promptStartedAt = Date.now();
     this.recordAndBroadcast(
       "session/update",
       {
@@ -492,6 +486,7 @@ export class Session {
     if (stopReason !== undefined) {
       update.stopReason = stopReason;
     }
+    this.promptStartedAt = undefined;
     this.recordAndBroadcast(
       "session/update",
       {
@@ -722,6 +717,13 @@ export class Session {
     return [...hydraCommandsAsAdvertised(), ...this.agentAdvertisedCommands];
   }
 
+  // The agent's own advertised commands (not merged with hydra verbs).
+  // Used by SessionManager to persist into meta.json so cold resurrect
+  // can re-deliver via the attach response _meta.
+  agentOnlyAdvertisedCommands(): AdvertisedCommand[] {
+    return [...this.agentAdvertisedCommands];
+  }
+
   // Pick up an agent-emitted session_info_update and store its title
   // as our canonical record. The notification is also forwarded to
   // clients via the surrounding recordAndBroadcast call. Authoritative
@@ -865,7 +867,7 @@ export class Session {
     const spawnAgent = this.spawnReplacementAgent;
     return this.enqueuePrompt(async () => {
       const oldAgentId = this.agentId;
-      const transcript = this.buildSwitchTranscript(oldAgentId);
+      const transcript = await this.buildSwitchTranscript(oldAgentId);
 
       const fresh = await spawnAgent({
         agentId: newAgentId,
@@ -907,15 +909,16 @@ export class Session {
     });
   }
 
-  // Walk this.history (rewritten-for-clients notification cache) and
-  // produce a labeled transcript suitable for handing to a fresh agent.
-  // Includes user prompts, agent replies, and tool-call outcomes; skips
-  // hydra-synthesized markers (so multi-hop switches don't accumulate
-  // banners) and other update kinds we don't think the next agent
-  // benefits from re-seeing (plans, thoughts, mode/model/usage).
-  private buildSwitchTranscript(prevAgentId: string): string {
+  // Walk the persisted history and produce a labeled transcript suitable
+  // for handing to a fresh agent. Includes user prompts, agent replies,
+  // and tool-call outcomes; skips hydra-synthesized markers (so multi-hop
+  // switches don't accumulate banners) and other update kinds we don't
+  // think the next agent benefits from re-seeing (plans, thoughts,
+  // mode/model/usage).
+  private async buildSwitchTranscript(prevAgentId: string): Promise<string> {
     const lines: Array<{ speaker: string; text: string }> = [];
-    for (const note of this.history) {
+    const history = await this.getHistorySnapshot();
+    for (const note of history) {
       if (note.method !== "session/update") {
         continue;
       }
@@ -1131,26 +1134,18 @@ export class Session {
         params: rewritten,
         recordedAt: Date.now(),
       };
-      this.history.push(entry);
       this.lastRecordedAt = entry.recordedAt;
-      let trimmed = false;
-      if (this.history.length > 1000) {
-        this.history = this.history.slice(-500);
-        trimmed = true;
-      }
-      // Mirror the in-memory cache to disk so a session that goes cold
-      // still has its replay buffer available on resurrect. The append
-      // path is fire-and-forget; failures (full disk, permission
-      // problems) shouldn't block the live broadcast. On trim we
-      // rewrite the full window so the file stays bounded by the same
-      // cap.
+      this.appendCount += 1;
+      // Disk is the source of truth for replay. Append is fire-and-forget;
+      // failures (full disk, permission problems) shouldn't block the
+      // live broadcast. Periodic compaction trims the file in place when
+      // it grows past the cap.
       if (this.historyStore) {
-        if (trimmed) {
-          void this.historyStore
-            .rewrite(this.sessionId, [...this.history])
-            .catch(() => undefined);
-        } else {
-          void this.historyStore.append(this.sessionId, entry).catch(
+        const store = this.historyStore;
+        void store.append(this.sessionId, entry).catch(() => undefined);
+        if (this.appendCount >= COMPACT_EVERY) {
+          this.appendCount = 0;
+          void store.compact(this.sessionId, MAX_HISTORY_ENTRIES).catch(
             () => undefined,
           );
         }
@@ -1378,7 +1373,7 @@ function extractAdvertisedCommands(
   return out;
 }
 
-function extractPromptText(prompt: unknown): string {
+export function extractPromptText(prompt: unknown): string {
   if (typeof prompt === "string") {
     return prompt;
   }
@@ -1398,7 +1393,7 @@ function extractPromptText(prompt: unknown): string {
 // First non-empty line of `text`, truncated to `max` chars with a
 // trailing ellipsis if needed. Used to seed a session title from the
 // first user prompt's leading line.
-function firstLine(text: string, max: number): string | undefined {
+export function firstLine(text: string, max: number): string | undefined {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) {

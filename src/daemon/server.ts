@@ -126,6 +126,10 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   const shutdown = async (): Promise<void> => {
     await extensions.stop();
     await manager.closeAll();
+    // Drain pending meta.json writes after closing sessions so any
+    // final regenTitle/persistTitle from idle-close has a chance to
+    // hit disk before the daemon exits.
+    await manager.flushMetaWrites();
     await app.close();
     try {
       fs.unlinkSync(paths.pidFile());

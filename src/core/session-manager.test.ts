@@ -201,12 +201,50 @@ describe("SessionManager.resurrect", () => {
     );
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    session.attach({ clientId: "c1", connection: conn }, "full");
+    await session.attach({ clientId: "c1", connection: conn }, "full");
 
     await session.prompt("c1", {
       prompt: [{ type: "text", text: "first prompt of the new life" }],
     });
     expect(session.title).toBe("feature-X");
+  });
+
+  it("re-seeds the title from the next prompt when the resurrected record had none (firstPromptSeeded gates on title)", async () => {
+    const untitledMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce({ stopReason: "end_turn" });
+        return m.agent;
+      },
+    );
+    const session = await untitledMgr.resurrect({
+      hydraSessionId: "sess_no_title",
+      upstreamSessionId: "u",
+      agentId: "claude-code",
+      cwd: "/w",
+      // No title — should NOT lock firstPromptSeeded on.
+    });
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import(
+      "../__tests__/test-utils.js"
+    );
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    await session.attach({ clientId: "c1", connection: conn }, "full");
+
+    await session.prompt("c1", {
+      prompt: [{ type: "text", text: "recovered title line" }],
+    });
+    expect(session.title).toBe("recovered title line");
+    // Drain pending persistTitle writes before tmpHome cleanup so a
+    // straggler doesn't race the next test's beforeEach.
+    await untitledMgr.flushMetaWrites();
   });
 
   it("propagates title onto the resurrected session and into list()", async () => {
@@ -271,7 +309,14 @@ describe("SessionManager: history persistence", () => {
     );
   });
 
-  it("persists broadcast notifications and seeds them on loadFromDisk", async () => {
+  // Helper: history-store appends are fire-and-forget, so tests need
+  // to give them time to settle before reading back.
+  async function flushHistoryWrites(): Promise<void> {
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+  }
+
+  it("persists broadcast notifications to disk and serves them on getHistory", async () => {
     const session = await manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -284,10 +329,11 @@ describe("SessionManager: history persistence", () => {
         content: { type: "text", text: "hello world" },
       },
     });
+    await flushHistoryWrites();
 
-    const params = await manager.loadFromDisk(session.sessionId);
-    expect(params?.seedHistory).toBeDefined();
-    const chunk = params!.seedHistory!.find(
+    const history = await manager.getHistory(session.sessionId);
+    expect(history).toBeDefined();
+    const chunk = history!.find(
       (e) =>
         (e.params as { update?: { sessionUpdate?: string } }).update
           ?.sessionUpdate === "agent_message_chunk",
@@ -310,12 +356,12 @@ describe("SessionManager: history persistence", () => {
         content: { type: "text", text: "first turn output" },
       },
     });
+    await flushHistoryWrites();
     await live.close({ deleteRecord: false });
 
     // Resurrect via the loadFromDisk path (no resume hints).
     const resumeParams = await manager.loadFromDisk(sessionId);
     expect(resumeParams).toBeDefined();
-    expect(resumeParams!.seedHistory?.length).toBeGreaterThan(0);
 
     const revived = await manager.resurrect(resumeParams!);
     expect(revived.sessionId).toBe(sessionId);
@@ -327,7 +373,10 @@ describe("SessionManager: history persistence", () => {
     );
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    const replay = revived.attach({ clientId: "c1", connection: conn }, "full");
+    const replay = await revived.attach(
+      { clientId: "c1", connection: conn },
+      "full",
+    );
 
     const replayedChunk = replay.find(
       (e) =>
@@ -341,7 +390,7 @@ describe("SessionManager: history persistence", () => {
     ).toBe("first turn output");
   });
 
-  it("does NOT seed history when resurrecting via resume hints (shim path)", async () => {
+  it("loads history from disk on resume-hints resurrect (regression: hints used to skip the disk load)", async () => {
     // Pre-create + emit a chunk so a history file exists on disk.
     const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
     const sessionId = live.sessionId;
@@ -349,14 +398,14 @@ describe("SessionManager: history persistence", () => {
       sessionId: live.upstreamSessionId,
       update: {
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "should not replay" },
+        content: { type: "text", text: "should replay even on hints path" },
       },
     });
+    await flushHistoryWrites();
     await live.close({ deleteRecord: false });
 
-    // Resume-hints path: caller (acp-ws) builds ResurrectParams without
-    // seedHistory. The history on disk is left untouched but never
-    // loaded into the new session.
+    // Hints-style resurrect (no seedHistory passed). History still
+    // comes from the on-disk store via the Session's historyStore.
     const revived = await manager.resurrect({
       hydraSessionId: sessionId,
       upstreamSessionId: "u_freshly_loaded",
@@ -370,16 +419,78 @@ describe("SessionManager: history persistence", () => {
     );
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    const replay = revived.attach({ clientId: "c1", connection: conn }, "full");
+    const replay = await revived.attach(
+      { clientId: "c1", connection: conn },
+      "full",
+    );
 
-    // Replay should contain only the new session's constructor broadcast
-    // (available_commands_update), not the prior chunk.
     const hasChunk = replay.some(
       (e) =>
         (e.params as { update?: { sessionUpdate?: string } }).update
           ?.sessionUpdate === "agent_message_chunk",
     );
-    expect(hasChunk).toBe(false);
+    expect(hasChunk).toBe(true);
+  });
+
+  it("self-heals a missing title from the first prompt in history on loadFromDisk", async () => {
+    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const sessionId = live.sessionId;
+    // Drive a prompt_received into history without the in-memory title
+    // path firing setTitle's persist hook — simulate the race that
+    // leaves the title in memory but not on disk by clearing it before
+    // close.
+    mocks[0]!.triggerNotification("session/update", {
+      sessionId: live.upstreamSessionId,
+      update: {
+        sessionUpdate: "prompt_received",
+        prompt: [{ type: "text", text: "implement the cache layer" }],
+      },
+    });
+    await flushHistoryWrites();
+    // Mimic the persisted-without-title state by stripping title from
+    // meta.json directly (would require the SessionStore but we'll
+    // approximate via a fresh resurrect path).
+    await live.close({ deleteRecord: false });
+
+    // Wipe the title field on disk to simulate the lost-title state.
+    const metaPath = path.join(
+      tmpHome,
+      "sessions",
+      sessionId,
+      "meta.json",
+    );
+    const raw = await fs.readFile(metaPath, "utf8");
+    const parsed = JSON.parse(raw);
+    delete parsed.title;
+    await fs.writeFile(metaPath, JSON.stringify(parsed, null, 2) + "\n");
+
+    const resumeParams = await manager.loadFromDisk(sessionId);
+    expect(resumeParams?.title).toBe("implement the cache layer");
+  });
+
+  it("preserves createdAt across resurrect (regression: attachManagerHooks used to reset it)", async () => {
+    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const sessionId = live.sessionId;
+    const original = await manager.loadFromDisk(sessionId);
+    const originalCreatedAt = original?.createdAt;
+    expect(originalCreatedAt).toBeDefined();
+
+    // Force the second clock tick before resurrect so a regression
+    // (createdAt = new Date().toISOString()) would change the value.
+    await new Promise((r) => setTimeout(r, 20));
+    await live.close({ deleteRecord: false });
+    const revived = await manager.resurrect({
+      hydraSessionId: sessionId,
+      upstreamSessionId: "u_resurrected",
+      agentId: "claude-code",
+      cwd: "/w",
+      title: original?.title,
+      createdAt: original?.createdAt,
+    });
+    void revived;
+
+    const after = await manager.loadFromDisk(sessionId);
+    expect(after?.createdAt).toBe(originalCreatedAt);
   });
 
   it("deletes the history file when the session record is destroyed", async () => {
@@ -394,6 +505,7 @@ describe("SessionManager: history persistence", () => {
         content: { type: "text", text: "x" },
       },
     });
+    await flushHistoryWrites();
     const historyPath = path.join(
       tmpHome,
       "sessions",
@@ -401,8 +513,8 @@ describe("SessionManager: history persistence", () => {
       "history.jsonl",
     );
     // Ensure the history file exists before close.
-    const before = await manager.loadFromDisk(session.sessionId);
-    expect(before?.seedHistory?.length).toBeGreaterThan(0);
+    const before = await manager.getHistory(session.sessionId);
+    expect((before ?? []).length).toBeGreaterThan(0);
 
     await session.close({ deleteRecord: true });
 
@@ -432,11 +544,12 @@ describe("SessionManager: history persistence", () => {
         content: { type: "text", text: "preserved" },
       },
     });
+    await flushHistoryWrites();
     await session.close({ deleteRecord: false });
 
-    const params = await manager.loadFromDisk(session.sessionId);
-    expect(params?.seedHistory).toBeDefined();
-    const chunk = params!.seedHistory!.find(
+    const history = await manager.getHistory(session.sessionId);
+    expect(history).toBeDefined();
+    const chunk = history!.find(
       (e) =>
         (e.params as { update?: { sessionUpdate?: string } }).update
           ?.sessionUpdate === "agent_message_chunk",
@@ -535,10 +648,10 @@ describe("SessionManager: history persistence", () => {
           content: { type: "text", text: "this stays in history" },
         },
       });
-      await new Promise((r) => setImmediate(r));
+      await flushHistoryWrites();
 
-      const params = await manager.loadFromDisk(session.sessionId);
-      const kinds = (params?.seedHistory ?? []).map(
+      const history = await manager.getHistory(session.sessionId);
+      const kinds = (history ?? []).map(
         (e) =>
           (e.params as { update?: { sessionUpdate?: string } }).update
             ?.sessionUpdate,
@@ -584,7 +697,7 @@ describe("SessionManager: history persistence", () => {
   });
 
   describe("getHistory (used by the REST history endpoint)", () => {
-    it("returns the live in-memory history snapshot for a hot session", async () => {
+    it("returns the persisted history for a hot session (disk is the source of truth)", async () => {
       const session = await manager.create({
         cwd: "/w",
         agentId: "claude-code",
@@ -596,6 +709,7 @@ describe("SessionManager: history persistence", () => {
           content: { type: "text", text: "live" },
         },
       });
+      await flushHistoryWrites();
 
       const history = await manager.getHistory(session.sessionId);
       expect(history).toBeDefined();
@@ -620,6 +734,7 @@ describe("SessionManager: history persistence", () => {
           content: { type: "text", text: "persisted" },
         },
       });
+      await flushHistoryWrites();
       await live.close({ deleteRecord: false });
 
       const history = await manager.getHistory(sessionId);
@@ -630,6 +745,29 @@ describe("SessionManager: history persistence", () => {
     it("returns undefined for a completely unknown session id", async () => {
       const history = await manager.getHistory("hydra_session_does_not_exist");
       expect(history).toBeUndefined();
+    });
+  });
+
+  describe("flushMetaWrites", () => {
+    it("awaits pending title persistence so a shutdown right after setTitle doesn't lose it", async () => {
+      const session = await manager.create({
+        cwd: "/w",
+        agentId: "claude-code",
+      });
+      // Drive a title set; persistTitle is fire-and-forget.
+      mocks[0]!.triggerNotification("session/update", {
+        sessionId: session.upstreamSessionId,
+        update: {
+          sessionUpdate: "session_info_update",
+          title: "near-shutdown title",
+        },
+      });
+      // flushMetaWrites is what daemon shutdown calls; after it, disk
+      // must reflect the just-set title even though we never awaited
+      // anything else.
+      await manager.flushMetaWrites();
+      const after = await manager.loadFromDisk(session.sessionId);
+      expect(after?.title).toBe("near-shutdown title");
     });
   });
 });
@@ -680,7 +818,7 @@ describe("SessionManager: /hydra switch persistence", () => {
     );
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    session.attach({ clientId: "c1", connection: conn }, "full");
+    await session.attach({ clientId: "c1", connection: conn }, "full");
 
     await session.prompt("c1", {
       prompt: [{ type: "text", text: "/hydra switch new" }],

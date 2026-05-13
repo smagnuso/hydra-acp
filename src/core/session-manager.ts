@@ -1,13 +1,19 @@
 import * as fs from "node:fs/promises";
 import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
-import { HYDRA_SESSION_PREFIX, Session, type CachedNotification } from "./session.js";
+import {
+  HYDRA_SESSION_PREFIX,
+  Session,
+  extractPromptText,
+  firstLine,
+} from "./session.js";
 import {
   SessionStore,
   recordFromMemorySession,
   type PersistedAgentCommand,
+  type SessionRecord,
 } from "./session-store.js";
-import { HistoryStore } from "./history-store.js";
+import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { paths } from "./paths.js";
 import type { AdvertisedCommand } from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
@@ -28,17 +34,16 @@ export interface ResurrectParams {
   cwd: string;
   title?: string;
   agentArgs?: string[];
-  // Prior broadcast history loaded from disk. Set on the loadFromDisk
-  // path (TUI attaching to a cold session id) so the conversation
-  // replays; left undefined on the resume-hints path (the shim client
-  // already has its own history and will dedupe against ours).
-  seedHistory?: CachedNotification[];
   // Snapshot state restored from meta.json so the first attach response
   // can deliver the right model/mode/commands via _meta before the
   // agent re-emits.
   currentModel?: string;
   currentMode?: string;
   agentCommands?: AdvertisedCommand[];
+  // Original create time, preserved across resurrect so `sessions list`
+  // shows when the conversation actually began rather than the latest
+  // wakeup.
+  createdAt?: string;
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -178,11 +183,17 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
-      seedHistory: params.seedHistory,
       currentModel: params.currentModel,
       currentMode: params.currentMode,
       agentCommands: params.agentCommands,
-      firstPromptSeeded: true,
+      // Only gate the first-prompt title heuristic when we actually have
+      // a title to preserve. A title-less session (lost to a write race
+      // or never seeded) should re-derive from the next prompt rather
+      // than stay stuck.
+      firstPromptSeeded: !!params.title,
+      createdAt: params.createdAt
+        ? new Date(params.createdAt).getTime()
+        : undefined,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -283,39 +294,34 @@ export class SessionManager {
       }).catch(() => undefined);
     });
     this.sessions.set(session.sessionId, session);
-    await this.store
-      .write(
-        recordFromMemorySession({
-          sessionId: session.sessionId,
-          upstreamSessionId: session.upstreamSessionId,
-          agentId: session.agentId,
-          cwd: session.cwd,
-          title: session.title,
-          agentArgs: session.agentArgs,
-          currentModel: session.currentModel,
-          currentMode: session.currentMode,
-        }),
-      )
-      .catch(() => undefined);
+    // Read-modify-write so a resurrect preserves fields the in-memory
+    // Session doesn't know about (originally agentCommands, and
+    // createdAt for sessions that pre-date this code path). For a
+    // brand-new session there's no record yet, so we write the
+    // session's current view.
+    await this.enqueueMetaWrite(session.sessionId, async () => {
+      const existing = await this.store.read(session.sessionId);
+      const merged = mergeForPersistence(session, existing);
+      await this.store.write(merged);
+    }).catch(() => undefined);
   }
 
   // Resolve a session's recorded history without forcing a resurrect.
-  // Returns the in-memory snapshot if the session is hot, falls back
-  // to the on-disk history file otherwise. Returns undefined if the
-  // session id is unknown to both the live map and disk store, so the
-  // caller can distinguish "no history yet" (empty array) from "404".
+  // Always loads from disk — that's the source of truth whether the
+  // session is hot or cold. Returns undefined if the session id is
+  // unknown to both the live map and disk store, so the caller can
+  // distinguish "no history yet" (empty array) from "404".
   async getHistory(
     sessionId: string,
-  ): Promise<CachedNotification[] | undefined> {
-    const live = this.sessions.get(sessionId);
-    if (live) {
-      return live.getHistorySnapshot();
+  ): Promise<HistoryStoreEntry[] | undefined> {
+    if (this.sessions.has(sessionId)) {
+      return this.histories.load(sessionId).catch(() => []);
     }
     const record = await this.store.read(sessionId);
     if (!record) {
       return undefined;
     }
-    return this.histories.load(sessionId).catch(() => [] as CachedNotification[]);
+    return this.histories.load(sessionId).catch(() => []);
   }
 
   async loadFromDisk(sessionId: string): Promise<ResurrectParams | undefined> {
@@ -323,26 +329,50 @@ export class SessionManager {
     if (!record) {
       return undefined;
     }
-    // Load any persisted broadcast history for this session so the
-    // attaching client sees the prior conversation. Only the
-    // loadFromDisk branch sets seedHistory — the resume-hints path
-    // (shim reconnect) deliberately leaves it undefined since the
-    // client already has its own copy.
-    const seedHistory = await this.histories
-      .load(sessionId)
-      .catch(() => [] as CachedNotification[]);
+    // Self-heal a missing title from the first prompt_received in the
+    // session's history. A title can be lost if the daemon was killed
+    // between setTitle's in-memory set and persistTitle's disk write;
+    // re-deriving here means any subsequent load recovers the title
+    // (and the next attach persists it back).
+    let title = record.title;
+    if (!title) {
+      title = await this.deriveTitleFromHistory(sessionId);
+    }
     return {
       hydraSessionId: record.sessionId,
       upstreamSessionId: record.upstreamSessionId,
       agentId: record.agentId,
       cwd: record.cwd,
-      title: record.title,
+      title,
       agentArgs: record.agentArgs,
-      seedHistory: seedHistory.length > 0 ? seedHistory : undefined,
       currentModel: record.currentModel,
       currentMode: record.currentMode,
       agentCommands: record.agentCommands,
+      createdAt: record.createdAt,
     };
+  }
+
+  // Best-effort: peek at the persisted history's first prompt and use
+  // its first line (capped to 200 chars) as a session title. Returns
+  // undefined if no usable prompt is found or any I/O fails.
+  private async deriveTitleFromHistory(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const history = await this.histories.load(sessionId).catch(() => []);
+    for (const entry of history) {
+      const params = entry.params as
+        | { update?: { sessionUpdate?: string; prompt?: unknown } }
+        | undefined;
+      if (params?.update?.sessionUpdate !== "prompt_received") {
+        continue;
+      }
+      const text = extractPromptText(params.update.prompt);
+      const line = firstLine(text, 200);
+      if (line) {
+        return line;
+      }
+    }
+    return undefined;
   }
 
   get(sessionId: string): Session | undefined {
@@ -538,6 +568,51 @@ export class SessionManager {
     await Promise.allSettled(sessions.map((s) => s.close()));
     this.sessions.clear();
   }
+
+  // Wait for every pending meta.json write to settle. Daemon shutdown
+  // hooks call this so a SIGTERM doesn't kill the process mid-write
+  // and lose a freshly-set title (or model/mode/commands).
+  async flushMetaWrites(): Promise<void> {
+    const pending = [...this.metaWriteQueues.values()];
+    if (pending.length === 0) {
+      return;
+    }
+    await Promise.allSettled(pending);
+  }
+}
+
+// Build the record we'll persist to meta.json. Read-modify-write style:
+// fields from the live Session win for the things it tracks, and we
+// reach back to the on-disk record for fields the Session deliberately
+// doesn't carry across a resurrect (createdAt, agentCommands).
+function mergeForPersistence(
+  session: Session,
+  existing: SessionRecord | undefined,
+): Omit<SessionRecord, "version"> {
+  const persistedCommands =
+    session.mergedAvailableCommands().length > 0
+      ? session
+          .agentOnlyAdvertisedCommands()
+          .map((c): PersistedAgentCommand => {
+            if (c.description !== undefined) {
+              return { name: c.name, description: c.description };
+            }
+            return { name: c.name };
+          })
+      : undefined;
+  const agentCommands = persistedCommands ?? existing?.agentCommands;
+  return recordFromMemorySession({
+    sessionId: session.sessionId,
+    upstreamSessionId: session.upstreamSessionId,
+    agentId: session.agentId,
+    cwd: session.cwd,
+    title: session.title,
+    agentArgs: session.agentArgs,
+    currentModel: session.currentModel ?? existing?.currentModel,
+    currentMode: session.currentMode ?? existing?.currentMode,
+    agentCommands,
+    createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
+  });
 }
 
 // "Last meaningful activity" for the picker/listing's USED hint. Uses

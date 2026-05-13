@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Session, type AttachedClient } from "./session.js";
+import { HistoryStore } from "./history-store.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import {
   makeControlledStream,
@@ -10,6 +11,16 @@ import {
   type JsonRpcNotification,
   type JsonRpcRequest,
 } from "../acp/types.js";
+
+// Tests want replay-from-disk to settle before they assert, since
+// recordAndBroadcast appends fire-and-forget. Use this after triggering
+// notifications and before reading session.attach()'s replay.
+async function flushHistoryWrites(): Promise<void> {
+  // Two ticks: one for the broadcast's pending appendFile to land,
+  // one for the writeQueue.then() chain to settle.
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+}
 
 function makeClient(): {
   client: AttachedClient;
@@ -46,6 +57,7 @@ function makeSession(sessionId = "sess_test", upstream = "agent-sess-1") {
     agentId: "mock",
     agent: mock.agent,
     upstreamSessionId: upstream,
+    historyStore: new HistoryStore(),
   });
   return { session, mock };
 }
@@ -213,7 +225,7 @@ describe("Session", () => {
       // Late attach. Drain history first (mirrors what acp-ws.ts does), then
       // dispatch in-flight permissions.
       const b = makeClient();
-      const replay = session.attach(b.client, "full");
+      const replay = await session.attach(b.client, "full");
       for (const note of replay) {
         await b.client.connection.notify(note.method, note.params);
       }
@@ -331,15 +343,16 @@ describe("Session", () => {
   });
 
   describe("history replay", () => {
-    it("replays full history for historyPolicy=full", () => {
+    it("replays full history for historyPolicy=full", async () => {
       const { session, mock } = makeSession("sess_h", "u");
       const { client: warmClient } = makeClient();
-      session.attach(warmClient, "full");
+      await session.attach(warmClient, "full");
       mock.triggerNotification("session/update", { sessionId: "u", n: 1 });
       mock.triggerNotification("session/update", { sessionId: "u", n: 2 });
+      await flushHistoryWrites();
 
       const { client: coldClient } = makeClient();
-      const replay = session.attach(coldClient, "full");
+      const replay = await session.attach(coldClient, "full");
       // Snapshot-shaped events (commands/model/mode/session_info) live
       // in meta.json and are delivered via the attach response _meta,
       // not history. Only the two non-snapshot updates should be here.
@@ -348,14 +361,15 @@ describe("Session", () => {
       expect(replay[1]?.params).toMatchObject({ sessionId: "sess_h", n: 2 });
     });
 
-    it("returns no history for historyPolicy=none", () => {
+    it("returns no history for historyPolicy=none", async () => {
       const { session, mock } = makeSession();
       const { client: warm } = makeClient();
-      session.attach(warm, "full");
+      await session.attach(warm, "full");
       mock.triggerNotification("session/update", { foo: 1 });
+      await flushHistoryWrites();
 
       const { client: cold } = makeClient();
-      const replay = session.attach(cold, "none");
+      const replay = await session.attach(cold, "none");
       expect(replay).toEqual([]);
     });
   });
@@ -368,10 +382,10 @@ describe("Session", () => {
       expect(names).toContain("/hydra switch <agent>");
     });
 
-    it("merges agent-emitted commands with hydra verbs and broadcasts the merge live", () => {
+    it("merges agent-emitted commands with hydra verbs and broadcasts the merge live", async () => {
       const { session, mock } = makeSession("sess_h", "u");
       const { client, stream } = makeClient();
-      session.attach(client, "full");
+      await session.attach(client, "full");
       mock.triggerNotification("session/update", {
         sessionId: "u",
         update: {
@@ -401,8 +415,9 @@ describe("Session", () => {
 
       // A latecomer's replay should NOT include the commands_update —
       // they pick it up from the attach response _meta instead.
+      await flushHistoryWrites();
       const { client: late } = makeClient();
-      const replay = session.attach(late, "full");
+      const replay = await session.attach(late, "full");
       const replayedCmds = replay.find((n) => {
         if (n.method !== "session/update") {
           return false;
@@ -798,7 +813,7 @@ describe("Session", () => {
       expect(seen).toEqual(["agent_message_chunk"]);
     });
 
-    it("getHistorySnapshot returns a snapshot decoupled from later writes", () => {
+    it("getHistorySnapshot returns a snapshot decoupled from later writes", async () => {
       const { session, mock } = makeSession("hydra_session_SN", "u_SN");
       mock.triggerNotification("session/update", {
         sessionId: "u_SN",
@@ -807,7 +822,8 @@ describe("Session", () => {
           content: { type: "text", text: "first" },
         },
       });
-      const snap = session.getHistorySnapshot();
+      await flushHistoryWrites();
+      const snap = await session.getHistorySnapshot();
       const before = snap.length;
       // Subsequent broadcasts shouldn't appear in the snapshot we took.
       mock.triggerNotification("session/update", {
@@ -818,8 +834,9 @@ describe("Session", () => {
         },
       });
       expect(snap.length).toBe(before);
+      await flushHistoryWrites();
       // The live history did grow.
-      expect(session.getHistorySnapshot().length).toBe(before + 1);
+      expect((await session.getHistorySnapshot()).length).toBe(before + 1);
     });
 
     it("session_info_update is broadcast live but not put in replay history", async () => {
@@ -853,8 +870,9 @@ describe("Session", () => {
       // A late-joining client gets replay history — but no
       // session_info_update should appear in it, since the canonical
       // title is delivered via the attach response _meta instead.
+      await flushHistoryWrites();
       const b = makeClient();
-      const replay = session.attach(b.client, "full");
+      const replay = await session.attach(b.client, "full");
       const replayedTitleUpdate = replay.find(
         (e) =>
           e.method === "session/update" &&
@@ -970,6 +988,7 @@ describe("Session", () => {
         agentId: "old",
         agent: oldMock.agent,
         upstreamSessionId: "u_old",
+        historyStore: new HistoryStore(),
         spawnReplacementAgent: async (p) => {
           spawnCalls++;
           expect(p.agentId).toBe("new");
@@ -981,7 +1000,7 @@ describe("Session", () => {
         },
       });
       const { client: alice, stream: aliceStream } = makeClient();
-      session.attach(alice, "full");
+      await session.attach(alice, "full");
 
       // Build a tiny history first: one user prompt + one agent reply.
       const oldRequest = oldMock.agent.connection.request as ReturnType<
@@ -1000,6 +1019,7 @@ describe("Session", () => {
       await session.prompt(alice.clientId, {
         prompt: [{ type: "text", text: "say hi" }],
       });
+      await flushHistoryWrites();
 
       // The new agent's session/prompt resolves immediately; we just want to
       // assert it was *invoked* with the synthesized transcript.
@@ -1153,7 +1173,7 @@ describe("Session", () => {
     it("late attachers replay synthesized events from history", async () => {
       const { session, mock } = makeSession("hydra_session_R", "u_R");
       const { client: alice } = makeClient();
-      session.attach(alice, "full");
+      await session.attach(alice, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
         typeof vi.fn
       >;
@@ -1161,9 +1181,10 @@ describe("Session", () => {
       await session.prompt(alice.clientId, {
         prompt: [{ type: "text", text: "earlier turn" }],
       });
+      await flushHistoryWrites();
 
       const { client: late } = makeClient();
-      const replay = session.attach(late, "full");
+      const replay = await session.attach(late, "full");
       const types = replay.map((n) => {
         const params = n.params as
           | { update?: { sessionUpdate?: string } }
@@ -1354,14 +1375,13 @@ describe("Session", () => {
       }
     });
 
-    it("a resurrected session gets a fresh idle window, not the seed history's", async () => {
-      // Regression: anchoring lastRecordedAt to seed history's
+    it("a resurrected session gets a fresh idle window, not the persisted history's", async () => {
+      // Regression: anchoring lastRecordedAt to persisted history's
       // recordedAt would tear down a session immediately on resurrect
-      // since the seed timestamps are exactly what made it go cold.
+      // since those timestamps are exactly what made it go cold.
       vi.useFakeTimers();
       try {
         const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
-        const veryOld = Date.now() - 10 * 60 * 60 * 1_000;
         const session = new Session({
           sessionId: "hydra_session_resurrected",
           cwd: "/w",
@@ -1369,16 +1389,6 @@ describe("Session", () => {
           agent: mock.agent,
           upstreamSessionId: "u",
           idleTimeoutMs: 1_000,
-          seedHistory: [
-            {
-              method: "session/update",
-              params: {
-                sessionId: "u",
-                update: { sessionUpdate: "agent_message_chunk", content: "old" },
-              },
-              recordedAt: veryOld,
-            },
-          ],
           firstPromptSeeded: true,
         });
         const closeSpy = vi.fn();

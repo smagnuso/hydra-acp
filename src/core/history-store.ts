@@ -59,6 +59,37 @@ export class HistoryStore {
     });
   }
 
+  // Trim the on-disk history file to the most recent maxEntries lines.
+  // Runs through the same per-session write queue as append/rewrite so
+  // it's safe to invoke alongside ongoing writes; a no-op if the file is
+  // already at or below the cap.
+  async compact(sessionId: string, maxEntries: number): Promise<void> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      return;
+    }
+    return this.enqueue(sessionId, async () => {
+      let raw: string;
+      try {
+        raw = await fs.readFile(paths.historyFile(sessionId), "utf8");
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code === "ENOENT") {
+          return;
+        }
+        throw err;
+      }
+      const lines = raw.split("\n").filter((l) => l.length > 0);
+      if (lines.length <= maxEntries) {
+        return;
+      }
+      const trimmed = lines.slice(-maxEntries);
+      await fs.writeFile(paths.historyFile(sessionId), trimmed.join("\n") + "\n", {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+    });
+  }
+
   async load(sessionId: string): Promise<HistoryEntry[]> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return [];

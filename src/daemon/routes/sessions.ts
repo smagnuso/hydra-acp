@@ -95,21 +95,29 @@ export function registerSessionRoutes(
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
 
     const live = manager.get(id);
-    // Snapshot atomically with subscription if we'll be following a
-    // live session — Node is single-threaded so the two synchronous
-    // statements have no broadcast interleave between them.
+    // For follow mode against a live session, subscribe BEFORE reading
+    // the snapshot so we don't lose entries that land during the
+    // disk-read window. Buffer those into `pending` and flush after
+    // the snapshot to preserve order; switch to direct emission once
+    // we've drained.
     let snapshot: ReadonlyArray<unknown> | undefined;
     let unsubscribe: (() => void) | undefined;
+    let snapshotDone = false;
+    const pending: unknown[] = [];
     if (live) {
-      snapshot = live.getHistorySnapshot();
       if (follow) {
         unsubscribe = live.onBroadcast((entry) => {
           if (reply.raw.writableEnded) {
             return;
           }
-          reply.raw.write(JSON.stringify(entry) + "\n");
+          if (snapshotDone) {
+            reply.raw.write(JSON.stringify(entry) + "\n");
+          } else {
+            pending.push(entry);
+          }
         });
       }
+      snapshot = await live.getHistorySnapshot();
     } else {
       const cold = await manager.getHistory(id);
       if (cold === undefined) {
@@ -122,9 +130,25 @@ export function registerSessionRoutes(
     reply.raw.setHeader("Content-Type", "application/x-ndjson");
     reply.raw.setHeader("Cache-Control", "no-cache");
     reply.raw.statusCode = 200;
+    const snapshotKeys = new Set<string>();
     for (const entry of snapshot ?? []) {
       reply.raw.write(JSON.stringify(entry) + "\n");
+      const e = entry as { recordedAt?: number };
+      if (typeof e.recordedAt === "number") {
+        snapshotKeys.add(String(e.recordedAt));
+      }
     }
+    // Drain any entries that landed during the snapshot read window,
+    // skipping ones already in the snapshot.
+    for (const entry of pending) {
+      const e = entry as { recordedAt?: number };
+      const key = typeof e.recordedAt === "number" ? String(e.recordedAt) : "";
+      if (key && snapshotKeys.has(key)) {
+        continue;
+      }
+      reply.raw.write(JSON.stringify(entry) + "\n");
+    }
+    snapshotDone = true;
 
     if (!unsubscribe) {
       reply.raw.end();

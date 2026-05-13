@@ -91,7 +91,10 @@ export function registerAcpWsEndpoint(
         agentArgs: hydraMeta.agentArgs,
       });
       const client = bindClientToSession(connection, session, state);
-      session.attach(client, "full");
+      // Fresh session — nothing to replay, but await for symmetry with
+      // attach() which is now Promise-returning. Validation errors
+      // throw synchronously regardless.
+      await session.attach(client, "full");
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
@@ -118,16 +121,27 @@ export function registerAcpWsEndpoint(
           params.sessionId;
       let session = deps.manager.get(lookupId);
       if (!session) {
-        let resurrectParams = hydraHints
-          ? {
-              hydraSessionId: params.sessionId,
-              upstreamSessionId: hydraHints.upstreamSessionId,
-              agentId: hydraHints.agentId,
-              cwd: hydraHints.cwd,
-              title: hydraHints.title,
-              agentArgs: hydraHints.agentArgs,
-            }
-          : await deps.manager.loadFromDisk(lookupId);
+        // Always consult disk so the resurrected session has its full
+        // persisted state (title, snapshot fields, createdAt). When
+        // resume hints are present they override the freshest known
+        // identity fields (upstream id / cwd / agent) — the originating
+        // client's view is fresher than what was on disk last write.
+        const fromDisk = await deps.manager.loadFromDisk(lookupId);
+        let resurrectParams = fromDisk;
+        if (hydraHints) {
+          resurrectParams = {
+            hydraSessionId: params.sessionId,
+            upstreamSessionId: hydraHints.upstreamSessionId,
+            agentId: hydraHints.agentId,
+            cwd: hydraHints.cwd,
+            title: hydraHints.title ?? fromDisk?.title,
+            agentArgs: hydraHints.agentArgs ?? fromDisk?.agentArgs,
+            currentModel: fromDisk?.currentModel,
+            currentMode: fromDisk?.currentMode,
+            agentCommands: fromDisk?.agentCommands,
+            createdAt: fromDisk?.createdAt,
+          };
+        }
         if (!resurrectParams) {
           const err = new Error(
             `session ${params.sessionId} not found and no resume hints provided`,
@@ -143,13 +157,13 @@ export function registerAcpWsEndpoint(
         state,
         params.clientInfo,
       );
-      const replay = session.attach(client, params.historyPolicy);
+      const replay = await session.attach(client, params.historyPolicy);
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
       });
       app.log.info(
-        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size}`,
+        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} replayed=${replay.length}`,
       );
       for (const note of replay) {
         await connection.notify(note.method, note.params);
@@ -267,7 +281,7 @@ export function registerAcpWsEndpoint(
         session = await deps.manager.resurrect(fromDisk);
       }
       const client = bindClientToSession(connection, session, state);
-      const replay = session.attach(client, "pending_only");
+      const replay = await session.attach(client, "pending_only");
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
