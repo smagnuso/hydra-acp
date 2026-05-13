@@ -393,6 +393,12 @@ export async function pickSession(
       // the key's normal behavior.
       clearTransient();
       if (data?.isCharacter) {
+        if (name === "r" || name === "R") {
+          const currentId =
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+          void refresh(currentId);
+          return;
+        }
         if ((name === "k" || name === "K") && selectedIdx > 0) {
           const session = visible[selectedIdx - 1];
           if (!session) {
