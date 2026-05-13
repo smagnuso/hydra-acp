@@ -8,22 +8,45 @@ import {
   spawnDaemonDetached,
   waitForDaemonReady,
 } from "../../core/daemon-bootstrap.js";
+import { flagBool } from "../parse-args.js";
 import { runLogTail } from "./log-tail.js";
 
-export async function runDaemonStart(): Promise<void> {
+export async function runDaemonStart(
+  flags: Record<string, string | boolean> = {},
+): Promise<void> {
   const config = await ensureConfig();
-  const handle = await startDaemon(config);
-  process.stdout.write(
-    `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
-  );
+  if (await pingHealth(config)) {
+    const info = await readPidFile();
+    process.stdout.write(
+      `Daemon already running${info ? ` (pid ${info.pid})` : ""}. Run \`hydra-acp daemon restart\` to restart it.\n`,
+    );
+    return;
+  }
 
-  const shutdown = async (): Promise<void> => {
-    process.stdout.write("Shutting down...\n");
-    await handle.shutdown();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  if (flagBool(flags, "foreground")) {
+    const handle = await startDaemon(config);
+    process.stdout.write(
+      `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
+    );
+
+    const shutdown = async (): Promise<void> => {
+      process.stdout.write("Shutting down...\n");
+      await handle.shutdown();
+      process.exit(0);
+    };
+    process.on("SIGINT", () => void shutdown());
+    process.on("SIGTERM", () => void shutdown());
+    return;
+  }
+
+  spawnDaemonDetached();
+  await waitForDaemonReady(config);
+  const info = await readPidFile();
+  process.stdout.write(
+    `Daemon started on ${config.daemon.host}:${config.daemon.port}` +
+      (info ? ` pid=${info.pid}` : "") +
+      "\n",
+  );
 }
 
 export async function runDaemonStop(): Promise<void> {

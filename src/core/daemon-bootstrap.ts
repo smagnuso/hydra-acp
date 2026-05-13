@@ -29,11 +29,15 @@ export function spawnDaemonDetached(): void {
   if (!cliPath) {
     throw new Error("Cannot determine hydra-acp binary path to spawn daemon");
   }
-  const child = spawn(process.execPath, [cliPath, "daemon", "start"], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-  });
+  const child = spawn(
+    process.execPath,
+    [cliPath, "daemon", "start", "--foreground"],
+    {
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    },
+  );
   child.unref();
 }
 

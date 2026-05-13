@@ -204,7 +204,7 @@ hydra-acp --session-id <id>                 # attach to existing session
                                             # (TUI in a TTY, shim otherwise)
 
 hydra-acp init                              # generate config + auth token
-hydra-acp daemon start [--port N] [--host H]
+hydra-acp daemon start [--foreground]       # detached by default; --foreground to attach
 hydra-acp daemon stop
 hydra-acp daemon status
 

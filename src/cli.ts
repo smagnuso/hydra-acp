@@ -113,7 +113,7 @@ async function main(): Promise<void> {
       const tail = argv.slice(daemonIdx + 1);
       const sub = tail[0];
       if (sub === "start" || sub === undefined) {
-        await runDaemonStart();
+        await runDaemonStart(flags);
         return;
       }
       if (sub === "stop") {
@@ -290,7 +290,8 @@ function printHelp(): void {
       "                                     are forwarded to the agent's command.",
       "  hydra-acp --resume <id>            Attach to an existing session (TUI when in a terminal, shim otherwise)",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
-      "  hydra-acp daemon start|stop|restart|status",
+      "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
+      "  hydra-acp daemon stop|restart|status",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
       "  hydra-acp sessions [list] [--all]  List sessions (live + 20 most-recent cold; --all for everything)",
       "  hydra-acp sessions kill <id>       Demote a live session to cold (keeps the on-disk record)",
