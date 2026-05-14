@@ -189,7 +189,7 @@ export function registerAcpWsEndpoint(
       const session = deps.manager.get(params.sessionId);
       session?.detach(att.clientId);
       state.attached.delete(params.sessionId);
-      return { detached: true };
+      return { sessionId: params.sessionId, status: "detached" as const };
     });
 
     connection.onRequest("session/list", async (raw) => {
