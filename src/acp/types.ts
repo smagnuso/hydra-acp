@@ -43,11 +43,22 @@ export const JsonRpcErrorCodes = {
   MethodNotFound: -32601,
   InvalidParams: -32602,
   InternalError: -32603,
+  // -32001…-32003 reserved for RFD #533 attach semantics:
+  //   -32001 Session not found
+  //   -32002 Not authorised to attach
+  //   -32003 Session does not support multi-client attach
+  // We emit -32001 (matching); the other two are reserved for spec
+  // alignment even though we don't currently emit them (we bearer-auth
+  // at WS upgrade time and always support multi-client attach).
   SessionNotFound: -32001,
-  PermissionDenied: -32002,
-  AlreadyAttached: -32003,
+  NotAuthorisedToAttach: -32002,
+  MultiClientNotSupported: -32003,
   AgentNotInstalled: -32005,
+  // Hydra-internal codes — outside the RFD's reserved range so they
+  // can't collide with future spec assignments.
   BundleAlreadyImported: -32010,
+  PermissionDenied: -32011,
+  AlreadyAttached: -32012,
 } as const;
 
 export const InitializeParams = z.object({
