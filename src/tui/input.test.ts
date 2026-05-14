@@ -155,11 +155,27 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual([""]);
   });
 
-  it("Ctrl+D exits when buffer empty, no-op otherwise", () => {
+  it("Ctrl+D exits on empty buffer, deletes forward otherwise", () => {
     const d = new InputDispatcher();
     expect(feed(d, [k("ctrl-d")])).toEqual([{ type: "exit" }]);
-    feed(d, [ch("x")]);
+    feed(d, [{ type: "paste", text: "abc" }, k("home")]);
     expect(feed(d, [k("ctrl-d")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["bc"]);
+    expect(d.state().col).toBe(0);
+    feed(d, [k("ctrl-d"), k("ctrl-d")]);
+    expect(d.state().buffer).toEqual([""]);
+    // Now at end-of-buffer with empty content → exit again.
+    expect(feed(d, [k("ctrl-d")])).toEqual([{ type: "exit" }]);
+  });
+
+  it("Ctrl+D at end of line joins with the next line", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("a"), k("alt-enter"), ch("b"), k("home"), k("up"), k("end")]);
+    expect(d.state().buffer).toEqual(["a", "b"]);
+    expect(d.state().row).toBe(0);
+    expect(d.state().col).toBe(1);
+    feed(d, [k("ctrl-d")]);
+    expect(d.state().buffer).toEqual(["ab"]);
   });
 
   it("backspace at start of line joins with previous line", () => {

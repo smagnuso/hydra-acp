@@ -203,7 +203,13 @@ export class InputDispatcher {
       case "ctrl-c":
         return this.handleCtrlC();
       case "ctrl-d":
-        return this.bufferIsEmpty() ? [{ type: "exit" }] : [];
+        // Standard readline: EOF on empty buffer, delete-forward otherwise
+        // (no-op at end-of-buffer when there's nothing to delete).
+        if (this.bufferIsEmpty()) {
+          return [{ type: "exit" }];
+        }
+        this.deleteForward();
+        return [];
       case "ctrl-l":
         return [{ type: "redraw" }];
       case "ctrl-p":
