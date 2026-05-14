@@ -42,7 +42,10 @@ export type InputEffect =
   | { type: "send"; text: string; planMode: boolean }
   | { type: "queue-edit"; index: number; text: string }
   | { type: "queue-remove"; index: number }
-  | { type: "cancel" }
+  // `prefill: true` (emitted by Escape) asks the app to drop the cancelled
+  // turn's text back into the prompt buffer if no queued items will run
+  // afterwards. Plain ^C cancel uses prefill=false (default).
+  | { type: "cancel"; prefill?: boolean }
   | { type: "exit" }
   | { type: "plan-toggle"; on: boolean }
   | { type: "redraw-banner" }
@@ -135,6 +138,16 @@ export class InputDispatcher {
     }
   }
 
+  // Public seed for the buffer (used for Escape pre-fill). Treated like a
+  // fresh draft: nav state and any saved draft are cleared, cursor lands
+  // at the end so the user can edit immediately.
+  setBuffer(text: string): void {
+    this.loadEntry(text);
+    this.historyIndex = -1;
+    this.queueIndex = -1;
+    this.savedDraft = null;
+  }
+
   feed(event: KeyEvent): InputEffect[] {
     if (event.type === "char") {
       this.insertChar(event.ch);
@@ -224,7 +237,13 @@ export class InputDispatcher {
         this.yank();
         return [];
       case "escape":
-        // Reserved for modal flows (permission prompt). No-op here.
+        // Modal flows (permission prompt, exit confirm) intercept Escape
+        // before it reaches here. Outside those, Escape during a turn
+        // cancels with prefill — the app drops the cancelled turn's
+        // text back into the buffer if nothing else is queued.
+        if (this.turnRunning) {
+          return [{ type: "cancel", prefill: true }];
+        }
         return [];
     }
   }

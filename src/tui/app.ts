@@ -511,7 +511,11 @@ async function runSession(
     dispatcher.setTurnRunning(true);
   }
 
-  let turnInFlight: { cancel: () => void } | null = null;
+  let turnInFlight: { text: string; cancel: () => void } | null = null;
+  // Text staged by an Escape cancel: applied to the prompt buffer when the
+  // worker drains, but only if the buffer is still empty (so we never
+  // clobber something the user typed in the meantime).
+  let pendingPrefill: string | null = null;
 
   const screen: Screen = new Screen({
     term,
@@ -937,7 +941,21 @@ async function runSession(
         }
         return;
       }
-      case "cancel":
+      case "cancel": {
+        // Escape (prefill=true) wants the cancelled prompt put back into
+        // the buffer so the user can edit and resubmit — but only when
+        // nothing else is queued behind it and the buffer is empty (we
+        // never overwrite text the user has typed). Plain ^C skips this.
+        if (effect.prefill && turnInFlight) {
+          const headOffset = workerActive ? 1 : 0;
+          const waitingEmpty = promptQueue.length <= headOffset;
+          const bufferEmpty = dispatcher
+            .state()
+            .buffer.every((line) => line === "");
+          if (waitingEmpty && bufferEmpty) {
+            pendingPrefill = turnInFlight.text;
+          }
+        }
         if (turnInFlight) {
           turnInFlight.cancel();
         } else if (pendingTurns > 0) {
@@ -948,6 +966,7 @@ async function runSession(
         // settles. Use queue editing (Up + ^C / Enter) to drop individual
         // queued items, or repeat ^C as each one starts.
         return;
+      }
       case "exit":
         void requestExit();
         return;
@@ -1152,6 +1171,20 @@ async function runSession(
     } finally {
       workerActive = false;
       refreshQueueDisplay();
+      // Escape-cancel staged this. Apply only if the buffer is still
+      // empty — the user may have started typing while the cancelled
+      // turn was settling, and we don't want to clobber that draft.
+      if (pendingPrefill !== null) {
+        const text = pendingPrefill;
+        pendingPrefill = null;
+        const bufferEmpty = dispatcher
+          .state()
+          .buffer.every((line) => line === "");
+        if (bufferEmpty) {
+          dispatcher.setBuffer(text);
+          screen.refreshPrompt();
+        }
+      }
     }
   };
 
@@ -1171,6 +1204,7 @@ async function runSession(
 
     let cancelled = false;
     turnInFlight = {
+      text,
       cancel: () => {
         if (cancelled) {
           return;

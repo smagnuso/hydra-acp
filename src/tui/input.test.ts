@@ -362,6 +362,34 @@ describe("InputDispatcher", () => {
     expect(d.state().queueIndex).toBe(-1);
   });
 
+  it("Escape during a turn emits cancel with prefill=true", () => {
+    const d = new InputDispatcher();
+    d.setTurnRunning(true);
+    expect(feed(d, [k("escape")])).toEqual([
+      { type: "cancel", prefill: true },
+    ]);
+  });
+
+  it("Escape outside a turn is a no-op", () => {
+    const d = new InputDispatcher();
+    expect(feed(d, [k("escape")])).toEqual([]);
+    feed(d, [ch("h"), ch("i")]);
+    expect(feed(d, [k("escape")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["hi"]);
+  });
+
+  it("setBuffer seeds the prompt and clears navigation state", () => {
+    const d = new InputDispatcher({ history: ["old"] });
+    d.setQueue(["q"]);
+    feed(d, [k("up")]);
+    expect(d.state().queueIndex).toBe(0);
+    d.setBuffer("fresh draft");
+    expect(d.state().buffer).toEqual(["fresh draft"]);
+    expect(d.state().queueIndex).toBe(-1);
+    expect(d.state().historyIndex).toBe(-1);
+    expect(d.state().col).toBe(11);
+  });
+
   it("Ctrl+C twice while editing a queue slot drops the slot and restores draft", () => {
     const d = new InputDispatcher();
     d.setQueue(["queued"]);
