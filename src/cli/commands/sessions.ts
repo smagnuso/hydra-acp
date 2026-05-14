@@ -97,9 +97,9 @@ export async function runSessionsKill(id: string | undefined): Promise<void> {
   process.stdout.write(`Killed ${id}\n`);
 }
 
-export async function runSessionsRm(id: string | undefined): Promise<void> {
+export async function runSessionsRemove(id: string | undefined): Promise<void> {
   if (!id) {
-    process.stderr.write("Usage: hydra-acp sessions rm <session-id>\n");
+    process.stderr.write("Usage: hydra-acp sessions remove <session-id>\n");
     process.exit(2);
   }
   const config = await loadConfig();

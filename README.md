@@ -210,7 +210,7 @@ hydra-acp daemon status
 
 hydra-acp sessions                          # list sessions
 hydra-acp sessions kill <id>                # close a live session (keeps the on-disk record so it can be resurrected)
-hydra-acp sessions rm <id>                  # remove a session entirely (live or cold)
+hydra-acp sessions remove <id>              # remove a session entirely (live or cold)
 hydra-acp sessions export <id> [--out <file>|.]
                                             # write a session bundle (meta + history) to <file>,
                                             # to a default-named file when --out=., or to stdout

@@ -16,7 +16,7 @@ import {
   runSessionsImport,
   runSessionsKill,
   runSessionsList,
-  runSessionsRm,
+  runSessionsRemove,
 } from "./cli/commands/sessions.js";
 import {
   runExtensionsAdd,
@@ -149,8 +149,8 @@ async function main(): Promise<void> {
         await runSessionsKill(positional[2]);
         return;
       }
-      if (sub === "rm") {
-        await runSessionsRm(positional[2]);
+      if (sub === "remove") {
+        await runSessionsRemove(positional[2]);
         return;
       }
       if (sub === "export") {
@@ -303,7 +303,7 @@ function printHelp(): void {
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
       "  hydra-acp sessions [list] [--all]  List sessions (live + 20 most-recent cold; --all for everything)",
       "  hydra-acp sessions kill <id>       Demote a live session to cold (keeps the on-disk record)",
-      "  hydra-acp sessions rm <id>         Remove a session entirely (live or cold)",
+      "  hydra-acp sessions remove <id>     Remove a session entirely (live or cold)",
       "  hydra-acp sessions export <id> [--out <file>|.]",
       "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout",
       "  hydra-acp sessions import <file>|- [--replace]",
