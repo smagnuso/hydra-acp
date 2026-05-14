@@ -55,12 +55,13 @@ describe("AgentInstance: spawn-level failures", () => {
       ),
     });
     const err = await settled(agent.connection.request("initialize", {}));
-    // Either we win the race and surface the stderr-tagged exit error,
-    // or stdout 'end' wins and we get a plain "connection closed". The
+    // Four-way race: stderr-tagged exit error, stdout 'end' closing the
+    // connection, the exit event landing first, or the connection's
+    // write() to a stdin the child already closed (EPIPE). The
     // important invariant is that the daemon doesn't crash — the request
     // rejects either way.
     expect(err.message).toMatch(
-      /metatron-auth-failure-tag|exited before responding|closed/i,
+      /metatron-auth-failure-tag|exited before responding|closed|EPIPE/i,
     );
   });
 
@@ -76,7 +77,7 @@ describe("AgentInstance: spawn-level failures", () => {
       ),
     });
     const err = await settled(agent.connection.request("initialize", {}));
-    expect(err.message).toMatch(/EACCES|exited before responding|closed/i);
+    expect(err.message).toMatch(/EACCES|exited before responding|closed|EPIPE/i);
   });
 
   it("respects stderrTailBytes when buffering for the failure diagnostic", async () => {
@@ -92,15 +93,16 @@ describe("AgentInstance: spawn-level failures", () => {
       stderrTailBytes: 64,
     });
     const err = await settled(agent.connection.request("initialize", {}));
-    // Two possible shapes depending on which event won the race:
+    // Three possible shapes depending on which event won the race:
     //   "agent ... exited before responding ...\nstderr: <tail>"
     //   "connection closed" (if stdout end fired first; no tail surfaced)
+    //   "write EPIPE" (if the request's stdin write raced with the child closing)
     const tail = err.message.match(/stderr: ([\s\S]+)$/)?.[1];
     if (tail !== undefined) {
       expect(tail.length).toBeLessThanOrEqual(64);
       expect(tail).toContain("TAILMARK!");
     } else {
-      expect(err.message).toMatch(/closed|exited/i);
+      expect(err.message).toMatch(/closed|exited|EPIPE/i);
     }
   });
 
