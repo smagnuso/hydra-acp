@@ -24,8 +24,10 @@ import { listSessions, pickMostRecent } from "./discovery.js";
 import { pickSession, type PickerResult } from "./picker.js";
 import { formatElapsed, Screen } from "./screen.js";
 import { InputDispatcher, type InputEffect, type KeyEvent } from "./input.js";
+import { computeTabCompletion } from "./completion.js";
 import {
   mapUpdate,
+  normalizeAdvertisedCommands,
   sanitizeSingleLine,
   type AvailableCommand,
   type RenderEvent,
@@ -461,11 +463,7 @@ async function runSession(
     initialMode = hydraMeta.currentMode;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
     if (hydraMeta.availableCommands) {
-      initialCommands = hydraMeta.availableCommands.map((c) =>
-        c.description !== undefined
-          ? { name: c.name, description: c.description }
-          : { name: c.name },
-      );
+      initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
     }
   } else {
     const attached = (await conn.request("session/attach", {
@@ -490,11 +488,7 @@ async function runSession(
     initialMode = hydraMeta.currentMode;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
     if (hydraMeta.availableCommands) {
-      initialCommands = hydraMeta.availableCommands.map((c) =>
-        c.description !== undefined
-          ? { name: c.name, description: c.description }
-          : { name: c.name },
-      );
+      initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
     }
   }
 
@@ -601,55 +595,25 @@ async function runSession(
     screen.setCompletions(currentCompletions());
   };
 
-  // Tab when completions are visible commits the first match; ESC dismisses
-  // the list. Other keys fall through.
   const tryHandleCompletionKey = (ev: KeyEvent): boolean => {
-    if (ev.type !== "key") {
+    if (ev.type !== "key" || ev.name !== "tab") {
       return false;
     }
-    if (ev.name === "tab") {
-      const matches = currentCompletions();
-      const first = matches[0];
-      if (!first) {
-        return false;
-      }
-      // If multiple matches share a longer common prefix, prefer that;
-      // otherwise commit the first match outright (with a trailing space
-      // ready for an argument).
-      const commonPrefix = longestCommonPrefix(matches.map((m) => m.name));
-      const buf = dispatcher.state().buffer;
-      const firstLine = buf[0] ?? "";
-      const space = firstLine.indexOf(" ");
-      const typedPrefix = space === -1 ? firstLine : firstLine.slice(0, space);
-      const tail = space === -1 ? "" : firstLine.slice(space);
-      let next = commonPrefix;
-      if (commonPrefix.length <= typedPrefix.length || matches.length === 1) {
-        next = first.name + (tail.startsWith(" ") ? "" : " ");
-      }
-      dispatcher.replaceFirstLine(next + tail);
+    const matches = currentCompletions();
+    if (matches.length === 0) {
+      return false;
+    }
+    const firstLine = dispatcher.state().buffer[0] ?? "";
+    const next = computeTabCompletion({
+      matches: matches.map((m) => m.name),
+      firstLine,
+    });
+    if (next === null) {
       return true;
     }
-    return false;
+    dispatcher.replaceFirstLine(next);
+    return true;
   };
-
-  function longestCommonPrefix(names: string[]): string {
-    if (names.length === 0) {
-      return "";
-    }
-    let prefix = names[0] ?? "";
-    for (let i = 1; i < names.length; i++) {
-      const n = names[i] ?? "";
-      let j = 0;
-      while (j < prefix.length && j < n.length && prefix[j] === n[j]) {
-        j += 1;
-      }
-      prefix = prefix.slice(0, j);
-      if (prefix.length === 0) {
-        break;
-      }
-    }
-    return prefix;
-  }
 
   // While a permission is pending the modal owns input: arrow keys navigate,
   // Enter submits, Esc cancels, 1–9 are quick-pick shortcuts. All other

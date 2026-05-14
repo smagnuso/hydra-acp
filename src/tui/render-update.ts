@@ -156,10 +156,15 @@ function mapSessionInfo(u: UpdateLike): RenderEvent | null {
   return event;
 }
 
-function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
-  const list = u.availableCommands ?? u.commands;
+// Coerce a raw advertised-commands list (from either a live
+// available_commands_update notification or the attach/new response
+// _meta) into the TUI's AvailableCommand shape. Per the ACP schema,
+// agent commands are advertised by bare name (e.g. "create_plan");
+// the TUI's completion model expects all entries to be slash-prefixed
+// so they match what the user types.
+export function normalizeAdvertisedCommands(list: unknown): AvailableCommand[] {
   if (!Array.isArray(list)) {
-    return null;
+    return [];
   }
   const out: AvailableCommand[] = [];
   for (const raw of list) {
@@ -170,9 +175,6 @@ function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
     if (typeof c.name !== "string" || c.name.length === 0) {
       continue;
     }
-    // Per the ACP schema, agent commands are advertised by bare name
-    // (e.g. "create_plan"). The TUI's completion model expects all
-    // entries to be slash-prefixed so they match what the user types.
     const rawName = c.name.startsWith("/") ? c.name : `/${c.name}`;
     const cmd: AvailableCommand = { name: sanitizeSingleLine(rawName) };
     if (typeof c.description === "string") {
@@ -180,7 +182,15 @@ function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
     }
     out.push(cmd);
   }
-  return { kind: "available-commands", commands: out };
+  return out;
+}
+
+function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
+  const list = u.availableCommands ?? u.commands;
+  if (!Array.isArray(list)) {
+    return null;
+  }
+  return { kind: "available-commands", commands: normalizeAdvertisedCommands(list) };
 }
 
 function mapUsage(u: UpdateLike): RenderEvent {
