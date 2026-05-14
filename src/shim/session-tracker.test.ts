@@ -312,6 +312,80 @@ describe("SessionTracker", () => {
     });
   });
 
+  describe("messageId tracking for after_message", () => {
+    it("records the latest messageId observed per session", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "sess_a",
+          update: { sessionUpdate: "prompt_received", messageId: "m_first" },
+        },
+      });
+      expect(tracker.lastMessageId("sess_a")).toBe("m_first");
+
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "sess_a",
+          update: { sessionUpdate: "turn_complete", messageId: "m_second" },
+        },
+      });
+      expect(tracker.lastMessageId("sess_a")).toBe("m_second");
+    });
+
+    it("ignores session/update notifications without a messageId", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "sess_a",
+          update: { sessionUpdate: "agent_message_chunk", content: { text: "x" } },
+        },
+      });
+      expect(tracker.lastMessageId("sess_a")).toBeUndefined();
+    });
+
+    it("scopes messageIds per session", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "sess_a",
+          update: { sessionUpdate: "prompt_received", messageId: "m_a" },
+        },
+      });
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "sess_b",
+          update: { sessionUpdate: "prompt_received", messageId: "m_b" },
+        },
+      });
+      expect(tracker.lastMessageId("sess_a")).toBe("m_a");
+      expect(tracker.lastMessageId("sess_b")).toBe("m_b");
+    });
+
+    it("forget() clears the messageId index alongside the resume context", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "sess_a",
+          update: { sessionUpdate: "prompt_received", messageId: "m_x" },
+        },
+      });
+      tracker.forget("sess_a");
+      expect(tracker.lastMessageId("sess_a")).toBeUndefined();
+    });
+  });
+
   it("ignores responses to ids it did not observe", () => {
     const tracker = new SessionTracker();
     tracker.observeFromServer({

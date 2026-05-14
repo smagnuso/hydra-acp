@@ -45,7 +45,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
         `hydra-acp: reconnected; resuming ${contexts.length} session(s)\n`,
       );
       for (const ctx of contexts) {
-        await replayAttach(upstream, ctx);
+        await replayAttach(upstream, ctx, tracker.lastMessageId(ctx.sessionId));
       }
     },
   });
@@ -244,6 +244,7 @@ async function cancelPendingPermissions(
 async function replayAttach(
   stream: ResilientWsStream,
   ctx: ResumeContext,
+  afterMessageId: string | undefined,
 ): Promise<void> {
   const resumeHints: Record<string, unknown> = {
     upstreamSessionId: ctx.upstreamSessionId,
@@ -256,19 +257,27 @@ async function replayAttach(
   if (ctx.agentArgs && ctx.agentArgs.length > 0) {
     resumeHints.agentArgs = ctx.agentArgs;
   }
+  // Prefer after_message replay so we only resync what was missed
+  // during the disconnect. Falls back to pending_only when we have no
+  // anchor (no prompt_received/turn_complete observed yet this
+  // session). The daemon will silently downgrade after_message to
+  // "full" if the id is unknown — surfaced in response.historyPolicy
+  // but harmless either way.
+  const params: Record<string, unknown> = {
+    sessionId: ctx.sessionId,
+    _meta: { "hydra-acp": { resume: resumeHints } },
+  };
+  if (afterMessageId) {
+    params.historyPolicy = "after_message";
+    params.afterMessageId = afterMessageId;
+  } else {
+    params.historyPolicy = "pending_only";
+  }
   const request: JsonRpcRequest = {
     jsonrpc: "2.0",
     id: `resume-${ctx.sessionId}-${Date.now()}`,
     method: "session/attach",
-    params: {
-      sessionId: ctx.sessionId,
-      historyPolicy: "pending_only",
-      _meta: {
-        "hydra-acp": {
-          resume: resumeHints,
-        },
-      },
-    },
+    params,
   };
   try {
     const resp = await stream.request(request);

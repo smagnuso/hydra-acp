@@ -50,6 +50,11 @@ export class SessionTracker {
   // pending downstream request, since per-recipient JSON-RPC ids are no
   // longer carried on the wire.
   private pendingPermissionsByToolCall = new Map<string, PendingPermission>();
+  // Most recent messageId observed on a session/update from the daemon
+  // (prompt_received / turn_complete), keyed by sessionId. Used by the
+  // reconnect-replay path to send historyPolicy:"after_message" with
+  // afterMessageId so the daemon only replays the delta we missed.
+  private lastMessageIds = new Map<string, string>();
 
   observeFromClient(msg: JsonRpcMessage): void {
     if (isResponse(msg)) {
@@ -88,6 +93,27 @@ export class SessionTracker {
   }
 
   observeFromServer(msg: JsonRpcMessage): void {
+    // Notifications: only session/update interests us, and only to harvest
+    // messageId from prompt_received/turn_complete for after_message
+    // reconnect replay.
+    if (!isRequest(msg) && !isResponse(msg) && "method" in msg) {
+      if (msg.method === "session/update") {
+        const params = (msg.params ?? {}) as {
+          sessionId?: unknown;
+          update?: { messageId?: unknown };
+        };
+        const sessionId =
+          typeof params.sessionId === "string" ? params.sessionId : undefined;
+        const messageId =
+          typeof params.update?.messageId === "string"
+            ? params.update.messageId
+            : undefined;
+        if (sessionId && messageId) {
+          this.lastMessageIds.set(sessionId, messageId);
+        }
+      }
+      return;
+    }
     if (isRequest(msg)) {
       if (msg.method === "session/request_permission") {
         const params = (msg.params ?? {}) as Record<string, unknown>;
@@ -161,6 +187,15 @@ export class SessionTracker {
 
   forget(sessionId: string): void {
     this.contexts.delete(sessionId);
+    this.lastMessageIds.delete(sessionId);
+  }
+
+  // Latest messageId observed for `sessionId`, or undefined if we
+  // haven't seen one (no prompt_received/turn_complete has flowed
+  // through yet). Used by reconnect-replay to issue
+  // historyPolicy:"after_message" with afterMessageId.
+  lastMessageId(sessionId: string): string | undefined {
+    return this.lastMessageIds.get(sessionId);
   }
 
   clearPending(): void {
