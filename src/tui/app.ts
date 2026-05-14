@@ -112,7 +112,7 @@ async function runSession(
     ctx.sessionId === "__new__"
       ? "Starting new session…"
       : "Resuming session…";
-  term.cyan(launchLabel)("\n");
+  term.brightYellow(launchLabel)("\n");
 
   const protocol = config.daemon.tls ? "wss" : "ws";
   const wsUrl = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
