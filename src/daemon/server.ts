@@ -10,6 +10,7 @@ import { SessionManager } from "../core/session-manager.js";
 import { ExtensionManager } from "../core/extensions.js";
 import { paths } from "../core/paths.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
+import { setNpmInstallLogger } from "../core/npm-install.js";
 import { bearerAuth } from "./auth.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
@@ -67,6 +68,9 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   // they'd write to a stderr that spawnDaemonDetached redirects to
   // /dev/null and the user sees an opaque "Starting new session…" hang.
   setBinaryInstallLogger((msg) => {
+    app.log.info(msg);
+  });
+  setNpmInstallLogger((msg) => {
     app.log.info(msg);
   });
 
@@ -144,6 +148,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     // hit disk before the daemon exits.
     await manager.flushMetaWrites();
     setBinaryInstallLogger(null);
+    setNpmInstallLogger(null);
     await app.close();
     try {
       fs.unlinkSync(paths.pidFile());

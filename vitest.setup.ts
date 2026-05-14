@@ -23,6 +23,11 @@ let currentHome: string | undefined;
 beforeEach(() => {
   currentHome = fs.mkdtempSync(path.join(workerRoot, "home-"));
   process.env.HYDRA_ACP_HOME = currentHome;
+  // Tests rely on the legacy `npx -y` plan from planSpawn rather than
+  // pre-installing into a temp HYDRA_ACP_HOME — the npm install would
+  // hit the network and slow every test to a crawl. The npm-install
+  // tests opt back in by `delete process.env.HYDRA_ACP_SKIP_NPM_PREFETCH`.
+  process.env.HYDRA_ACP_SKIP_NPM_PREFETCH = "1";
 });
 
 afterEach(() => {

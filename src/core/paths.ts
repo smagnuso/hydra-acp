@@ -52,6 +52,19 @@ export const paths = {
   // shows which platforms have ever installed anything.
   agentInstallDir: (id: string, platformKey: string, version: string) =>
     path.join(hydraHome(), "agents", platformKey, id, version),
+  // npm install cache for npx-distributed agents. The trailing
+  // node<ABI> segment keys on process.versions.modules so a Node
+  // major bump (different ABI → native modules incompatible) yields
+  // a fresh install rather than failing at require() time.
+  agentNpmInstallDir: (id: string, platformKey: string, version: string) =>
+    path.join(
+      hydraHome(),
+      "agents",
+      platformKey,
+      id,
+      version,
+      `node${process.versions.modules}`,
+    ),
   sessionsDir: () => path.join(hydraHome(), "sessions"),
   // One directory per session id under sessions/. Co-locates the
   // session record, its transcript, and any future per-session state

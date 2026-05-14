@@ -7,9 +7,14 @@ import {
   ensureBinary,
   pickBinaryTarget,
 } from "./binary-install.js";
+import { ensureNpmPackage } from "./npm-install.js";
 
 const NpxDistribution = z.object({
   package: z.string(),
+  // The bin to invoke after install. Defaults to the package basename
+  // (e.g. "claude-code" for "@anthropic-ai/claude-code"). Required when
+  // the package exposes a bin name that differs from its basename.
+  bin: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
 });
@@ -222,9 +227,27 @@ export async function planSpawn(
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
     const tail = callerArgs.length > 0 ? callerArgs : (npx.args ?? []);
+    // HYDRA_ACP_SKIP_NPM_PREFETCH lets the test suite (and any debugging
+    // scenario that wants the legacy `npx -y` behavior) skip the local
+    // install — useful in environments where invoking `npm install` is
+    // either undesirable or impossible.
+    if (process.env.HYDRA_ACP_SKIP_NPM_PREFETCH) {
+      return {
+        command: "npx",
+        args: ["-y", npx.package, ...tail],
+        env: npx.env ?? {},
+      };
+    }
+    const bin = npx.bin ?? npxPackageBasename(agent) ?? npx.package;
+    const binPath = await ensureNpmPackage({
+      agentId: agent.id,
+      version: agent.version ?? "current",
+      packageSpec: npx.package,
+      bin,
+    });
     return {
-      command: "npx",
-      args: ["-y", npx.package, ...tail],
+      command: binPath,
+      args: tail,
       env: npx.env ?? {},
     };
   }
