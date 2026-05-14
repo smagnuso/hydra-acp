@@ -3,6 +3,22 @@ export interface ParsedArgs {
   flags: Record<string, string | boolean>;
 }
 
+// Flags known to never carry a value. Listing them lets the parser
+// treat `--info file.hydra` and `file.hydra --info` the same way; without
+// this set, the next non-`--` token would be eaten as the flag's value.
+// --resume is intentionally omitted: it is dual-mode (bare = pick recent,
+// with id = attach to that session).
+const KNOWN_BOOLEAN_FLAGS = new Set([
+  "all",
+  "foreground",
+  "help",
+  "info",
+  "new",
+  "replace",
+  "rotate-token",
+  "version",
+]);
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -21,6 +37,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
         continue;
       }
       const key = token.slice(2);
+      if (KNOWN_BOOLEAN_FLAGS.has(key)) {
+        flags[key] = true;
+        i += 1;
+        continue;
+      }
       const next = argv[i + 1];
       if (next !== undefined && !next.startsWith("--")) {
         flags[key] = next;

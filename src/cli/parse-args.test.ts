@@ -64,17 +64,28 @@ describe("parseArgs", () => {
     });
   });
 
-  it("recognizes the documented --rotate-token init quirk", () => {
-    // Known limitation: a boolean-only flag followed by a positional
-    // is parsed as flag=value because the parser cannot distinguish the
-    // intent. Users should pass the positional first.
-    expect(parseArgs(["--rotate-token", "init"])).toEqual({
-      positional: [],
-      flags: { "rotate-token": "init" },
-    });
+  it("does not consume a positional after a known-boolean flag", () => {
+    // Both orderings of a boolean flag and a positional must parse the
+    // same way — the boolean shouldn't slurp the next token.
     expect(parseArgs(["init", "--rotate-token"])).toEqual({
       positional: ["init"],
       flags: { "rotate-token": true },
+    });
+    expect(parseArgs(["--rotate-token", "init"])).toEqual({
+      positional: ["init"],
+      flags: { "rotate-token": true },
+    });
+    expect(
+      parseArgs(["sessions", "import", "--info", "file.hydra"]),
+    ).toEqual({
+      positional: ["sessions", "import", "file.hydra"],
+      flags: { info: true },
+    });
+    expect(
+      parseArgs(["sessions", "import", "file.hydra", "--info"]),
+    ).toEqual({
+      positional: ["sessions", "import", "file.hydra"],
+      flags: { info: true },
     });
   });
 });
