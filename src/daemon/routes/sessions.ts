@@ -4,11 +4,7 @@ import { expandHome } from "../../core/config.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
-
-// Matches the constant used elsewhere in the daemon (server.ts,
-// acp-ws.ts). Stamped onto export bundles for traceability; not used
-// for routing or validation.
-const HYDRA_VERSION = "0.1.0";
+import { HYDRA_VERSION } from "../../core/hydra-version.js";
 
 export interface SessionRouteDefaults {
   agentId: string;

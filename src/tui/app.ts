@@ -9,12 +9,14 @@ import {
   HYDRA_META_KEY,
   extractHydraMeta,
   type JsonRpcRequest,
+  ACP_PROTOCOL_VERSION,
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
 import { ensureConfig, type HydraConfig } from "../core/config.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
+import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
   appendEntry,
   loadHistory,
@@ -415,12 +417,12 @@ async function runSession(
   let agentInfoName: string | undefined;
   try {
     const initResult = (await conn.request("initialize", {
-      protocolVersion: 1,
+      protocolVersion: ACP_PROTOCOL_VERSION,
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
       },
-      clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
+      clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
     })) as { agentInfo?: { name?: string } };
     agentInfoName = initResult?.agentInfo?.name;
   } catch {
@@ -476,7 +478,7 @@ async function runSession(
     const attached = (await conn.request("session/attach", {
       sessionId: ctx.sessionId,
       historyPolicy: "full",
-      clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
+      clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
     })) as { sessionId: string; _meta?: Record<string, unknown> };
     resolvedSessionId = attached.sessionId;
     exitHint.sessionId = resolvedSessionId;
@@ -1693,12 +1695,12 @@ async function runSession(
       id: `tui-reinit-${nanoid()}`,
       method: "initialize",
       params: {
-        protocolVersion: 1,
+        protocolVersion: ACP_PROTOCOL_VERSION,
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
           terminal: false,
         },
-        clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
+        clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
       },
     };
     try {
@@ -1714,7 +1716,7 @@ async function runSession(
       params: {
         sessionId: resolvedSessionId,
         historyPolicy: "none",
-        clientInfo: { name: "hydra-acp-tui", version: "0.1.0" },
+        clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
         ...(upstreamSessionId !== undefined
           ? {
               _meta: {

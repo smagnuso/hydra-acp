@@ -22,11 +22,10 @@ import {
   type InitializeResult,
   type SessionListResult,
   JsonRpcErrorCodes,
+  ACP_PROTOCOL_VERSION,
 } from "../acp/types.js";
 import { tokenFromUpgradeRequest, constantTimeEqual } from "./auth.js";
-
-const HYDRA_VERSION = "0.1.0";
-const HYDRA_PROTOCOL_VERSION = 1;
+import { HYDRA_VERSION } from "../core/hydra-version.js";
 
 interface ClientState {
   clientId: string;
@@ -367,7 +366,7 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
 
 function buildInitializeResult(): InitializeResult {
   return {
-    protocolVersion: HYDRA_PROTOCOL_VERSION,
+    protocolVersion: ACP_PROTOCOL_VERSION,
     agentInfo: { name: "hydra", version: HYDRA_VERSION },
     agentCapabilities: {
       // hydra is a transparent proxy: prompt blocks and MCP server configs are

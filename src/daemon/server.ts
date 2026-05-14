@@ -11,6 +11,7 @@ import { ExtensionManager } from "../core/extensions.js";
 import { paths } from "../core/paths.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
 import { setNpmInstallLogger } from "../core/npm-install.js";
+import { HYDRA_VERSION } from "../core/hydra-version.js";
 import { bearerAuth } from "./auth.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
@@ -18,8 +19,6 @@ import { registerHealthRoutes } from "./routes/health.js";
 import { registerExtensionRoutes } from "./routes/extensions.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
-
-const HYDRA_VERSION = "0.1.0";
 
 declare module "fastify" {
   interface FastifyContextConfig {

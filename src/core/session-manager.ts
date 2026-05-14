@@ -24,7 +24,8 @@ import { saveHistory as savePromptHistory } from "../tui/history.js";
 import type { Bundle } from "./bundle.js";
 import type { AdvertisedCommand } from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
-import { JsonRpcErrorCodes } from "../acp/types.js";
+import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
+import { HYDRA_VERSION } from "./hydra-version.js";
 
 const HYDRA_ID_ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -187,9 +188,9 @@ export class SessionManager {
 
     try {
       await agent.connection.request("initialize", {
-        protocolVersion: 1,
+        protocolVersion: ACP_PROTOCOL_VERSION,
         clientCapabilities: {},
-        clientInfo: { name: "hydra", version: "0.1.0" },
+        clientInfo: { name: "hydra", version: HYDRA_VERSION },
       });
     } catch (err) {
       await agent.kill().catch(() => undefined);
@@ -351,9 +352,9 @@ export class SessionManager {
     });
     try {
       await agent.connection.request("initialize", {
-        protocolVersion: 1,
+        protocolVersion: ACP_PROTOCOL_VERSION,
         clientCapabilities: {},
-        clientInfo: { name: "hydra", version: "0.1.0" },
+        clientInfo: { name: "hydra", version: HYDRA_VERSION },
       });
       const newResult = await agent.connection.request<Record<string, unknown>>(
         "session/new",

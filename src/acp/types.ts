@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+// The ACP wire protocol version that hydra speaks. Single source of
+// truth for every `initialize` handshake (daemon → agent, TUI → daemon,
+// shim proxy) so the value isn't repeated as a literal across the
+// codebase. A protocol bump touches this constant and the matching
+// agreed version negotiation logic — not every callsite.
+export const ACP_PROTOCOL_VERSION = 1;
+
 export type JsonRpcId = string | number;
 
 export interface JsonRpcRequest {
