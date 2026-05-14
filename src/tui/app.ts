@@ -550,6 +550,7 @@ async function runSession(
     { name: "/quit", description: "Exit the TUI" },
     { name: "/clear", description: "Clear scrollback" },
     { name: "/sessions", description: "List sessions" },
+    { name: "/model", description: "Switch model: /model <model-id>" },
     { name: "/demo-plan", description: "Inject synthetic plan events (UI test)" },
     { name: "/demo-tool", description: "Inject a synthetic tool-call sequence (UI test)" },
   ];
@@ -1116,6 +1117,43 @@ async function runSession(
           },
         ]);
         return true;
+      case "/model": {
+        const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        if (arg === "") {
+          screen.appendLines([
+            {
+              prefix: "  ",
+              body: "Usage: /model <model-id>",
+              bodyStyle: "info",
+            },
+          ]);
+          return true;
+        }
+        conn
+          .request("session/set_model", {
+            sessionId: resolvedSessionId,
+            modelId: arg,
+          })
+          .then(() => {
+            screen.appendLines([
+              {
+                prefix: "  ",
+                body: `model set to ${arg}`,
+                bodyStyle: "system",
+              },
+            ]);
+          })
+          .catch((err: Error) => {
+            screen.appendLines([
+              {
+                prefix: "  ",
+                body: `set_model failed: ${err.message}`,
+                bodyStyle: "tool-status-fail",
+              },
+            ]);
+          });
+        return true;
+      }
       default:
         // Not a built-in — fall through so the agent can handle it.
         return false;

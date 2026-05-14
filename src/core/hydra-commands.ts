@@ -6,7 +6,9 @@
 export interface HydraCommandSpec {
   // The verb following "/hydra ", e.g. "title".
   verb: string;
-  // The display/dispatch name as users type it, e.g. "/hydra title".
+  // Wire-advertised name, bare (no leading "/") per ACP convention so
+  // clients prepend their own slash for display. Users type "/hydra
+  // <verb>" — the leading "/" is a UI artifact, not part of the name.
   name: string;
   description: string;
   // Optional argument hint shown in completions, e.g. "<agent>".
@@ -16,13 +18,13 @@ export interface HydraCommandSpec {
 export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
   {
     verb: "title",
-    name: "/hydra title",
+    name: "hydra title",
     description:
       "Regenerate the session title via the agent (or set manually with an arg)",
   },
   {
     verb: "agent",
-    name: "/hydra agent",
+    name: "hydra agent",
     argsHint: "<agent>",
     description: "Swap the agent backing this session, preserving context",
   },

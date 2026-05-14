@@ -692,7 +692,7 @@ describe("SessionManager: history persistence", () => {
       expect(revived.currentModel).toBe("opus-4.7");
       const merged = revived.mergedAvailableCommands().map((c) => c.name);
       expect(merged).toContain("create_plan");
-      expect(merged).toContain("/hydra title");
+      expect(merged).toContain("hydra title");
     });
   });
 
