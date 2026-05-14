@@ -5,6 +5,7 @@
 // width-aware truncation so neither caller wraps onto a second line.
 
 import { formatAgentCell, type DisplayUsage } from "../core/agent-display.js";
+import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 
 export interface SessionSummary {
@@ -12,7 +13,6 @@ export interface SessionSummary {
   upstreamSessionId?: string;
   cwd: string;
   agentId?: string;
-  currentModel?: string;
   currentUsage?: DisplayUsage;
   title?: string;
   attachedClients: number;
@@ -39,6 +39,7 @@ export interface Widths {
   state: number;
   agent: number;
   age: number;
+  cwd: number;
   title: number;
 }
 
@@ -53,21 +54,20 @@ export const HEADER: Row = {
 };
 
 const SEP = "  ";
-const MIN_CWD = 8;
-// Cap the title column so a single long title doesn't blow the column
-// out wide enough to starve the cwd column. Anything past this gets
-// right-truncated by formatRow when a maxWidth is in effect.
-const TITLE_MAX_WIDTH = 40;
+// Cap the cwd column so one or two deeply-nested paths don't widen the
+// whole column and starve title. Anything past this gets middle-truncated
+// by formatRow when a maxWidth is in effect.
+const CWD_MAX_WIDTH = 24;
 
 export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: s.upstreamSessionId ?? "-",
     state: formatState(s.status, s.attachedClients),
-    agent: formatAgentCell(s.agentId, s.currentModel, s.currentUsage),
+    agent: formatAgentCell(s.agentId, s.currentUsage),
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
-    cwd: s.cwd,
+    cwd: shortenHomePath(s.cwd),
   };
 }
 
@@ -92,6 +92,7 @@ export function computeWidths(rows: Row[]): Widths {
     state: maxLen(HEADER.state, rows.map((r) => r.state)),
     agent: maxLen(HEADER.agent, rows.map((r) => r.agent)),
     age: maxLen(HEADER.age, rows.map((r) => r.age)),
+    cwd: maxLen(HEADER.cwd, rows.map((r) => r.cwd)),
     title: maxLen(HEADER.title, rows.map((r) => r.title)),
   };
 }
@@ -148,11 +149,11 @@ function maxLen(headerCell: string, values: string[]): number {
 }
 
 // Build a single formatted row. When `maxWidth` is provided, the row is
-// guaranteed to occupy at most `maxWidth` columns: title is right-truncated
-// and cwd is middle-truncated (paths read better with the leading and
-// trailing segments preserved than with either end lopped off). The fixed
-// columns (session/upstream/state/agent) are never truncated — they're
-// keyed by short ids and short labels, so their natural width is
+// guaranteed to occupy at most `maxWidth` columns: cwd is middle-truncated
+// (paths read better with the leading and trailing segments preserved)
+// and title is right-truncated to absorb whatever budget remains. The
+// fixed columns (session/upstream/state/agent/age) are never truncated —
+// they're keyed by short ids and short labels, so their natural width is
 // expected to fit.
 export function formatRow(r: Row, w: Widths, maxWidth?: number): string {
   const fixed = [
@@ -164,31 +165,24 @@ export function formatRow(r: Row, w: Widths, maxWidth?: number): string {
   ].join(SEP);
 
   if (maxWidth === undefined) {
-    return [fixed, r.title.padEnd(w.title), r.cwd].join(SEP);
+    return [fixed, r.cwd.padEnd(w.cwd), r.title].join(SEP);
   }
 
-  // Cap title column when fitting to width so one outlier title doesn't
-  // starve cwd of room. Long titles get right-truncated to this cap.
-  const titleCap = Math.min(w.title, TITLE_MAX_WIDTH);
   const budget = maxWidth - fixed.length - SEP.length;
   if (budget <= 0) {
     return fixed.slice(0, maxWidth);
   }
 
-  // Prefer title at its capped width; let cwd absorb the rest. If even
-  // MIN_CWD won't fit alongside a full title, shrink title further.
-  const titleNatural = Math.min(r.title.length, titleCap);
-  let titleAlloc =
-    titleNatural + SEP.length + MIN_CWD <= budget
-      ? titleCap
-      : Math.max(0, budget - SEP.length - MIN_CWD);
-  titleAlloc = Math.min(titleAlloc, Math.max(0, budget - SEP.length - 1));
+  // Give cwd its natural (header-aware, capped) width first; title takes
+  // whatever's left as the trailing elastic cell. Always reserve at least
+  // one column for title so an oversized cwd can't push it off the row.
+  const cwdCap = Math.min(w.cwd, CWD_MAX_WIDTH);
+  const cwdAlloc = Math.min(cwdCap, Math.max(0, budget - SEP.length - 1));
+  const cwdCell = truncateMiddle(r.cwd, cwdAlloc).padEnd(cwdAlloc);
+  const titleBudget = Math.max(0, budget - cwdAlloc - SEP.length);
+  const titleCell = truncateRight(r.title, titleBudget);
 
-  const titleCell = truncateRight(r.title, titleAlloc).padEnd(titleAlloc);
-  const cwdBudget = Math.max(0, budget - titleAlloc - SEP.length);
-  const cwdCell = truncateMiddle(r.cwd, cwdBudget);
-
-  return [fixed, titleCell, cwdCell].join(SEP);
+  return [fixed, cwdCell, titleCell].join(SEP);
 }
 
 export function truncateRight(s: string, max: number): string {

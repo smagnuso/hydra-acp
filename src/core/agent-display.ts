@@ -44,19 +44,16 @@ export interface DisplayUsage {
   costCurrency?: string;
 }
 
-// Same agent•model framing as formatAgentWithModel, but appends a
-// whole-dollar cost suffix when the last-known usage carries one. Used
-// by `sessions list` rows and the TUI picker, where there's no separate
-// usage column — cost piggybacks on the AGENT cell so cold sessions
-// surface it without claiming additional width. Sub-dollar costs are
-// dropped entirely (the row stays uncluttered for cheap sessions); the
-// header bar keeps full precision via formatCost.
+// Just the agent id, optionally suffixed with a whole-dollar cost when
+// the last-known usage carries one. Used by `sessions list` rows and
+// the TUI picker — the model is intentionally omitted to keep the row
+// narrow (the TUI header still shows agent•model for the live session).
+// Sub-dollar costs are dropped so the row stays uncluttered.
 export function formatAgentCell(
   agentId: string | undefined,
-  model: string | undefined,
   usage: DisplayUsage | undefined,
 ): string {
-  const base = formatAgentWithModel(agentId, model);
+  const base = agentId ?? "?";
   if (!usage || typeof usage.costAmount !== "number") {
     return base;
   }

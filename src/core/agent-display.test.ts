@@ -60,54 +60,40 @@ describe("formatCost", () => {
 describe("formatAgentCell", () => {
   it("appends whole-dollar cost when present and >= $0.50", () => {
     expect(
-      formatAgentCell("opencode", "openai/gpt-5-codex", {
+      formatAgentCell("opencode", {
         costAmount: 1.42,
         costCurrency: "USD",
       }),
-    ).toBe("opencode•gpt-5-codex $1");
+    ).toBe("opencode $1");
     expect(
-      formatAgentCell("opencode", "openai/gpt-5-codex", {
-        costAmount: 53.12,
-      }),
-    ).toBe("opencode•gpt-5-codex $53");
+      formatAgentCell("opencode", { costAmount: 53.12 }),
+    ).toBe("opencode $53");
   });
 
   it("rounds to nearest dollar", () => {
-    expect(
-      formatAgentCell("opencode", "openai/gpt-5-codex", { costAmount: 5.6 }),
-    ).toBe("opencode•gpt-5-codex $6");
+    expect(formatAgentCell("opencode", { costAmount: 5.6 })).toBe("opencode $6");
   });
 
   it("omits the cost suffix entirely when it rounds to zero", () => {
-    expect(
-      formatAgentCell("opencode", "openai/gpt-5-codex", { costAmount: 0.42 }),
-    ).toBe("opencode•gpt-5-codex");
-    expect(
-      formatAgentCell("opencode", "openai/gpt-5-codex", { costAmount: 0.0042 }),
-    ).toBe("opencode•gpt-5-codex");
+    expect(formatAgentCell("opencode", { costAmount: 0.42 })).toBe("opencode");
+    expect(formatAgentCell("opencode", { costAmount: 0.0042 })).toBe("opencode");
   });
 
-  it("falls back to bare agent•model when no cost is present", () => {
-    expect(
-      formatAgentCell("opencode", "openai/gpt-5-codex", undefined),
-    ).toBe("opencode•gpt-5-codex");
-    expect(formatAgentCell("opencode", "openai/gpt-5-codex", {})).toBe(
-      "opencode•gpt-5-codex",
-    );
+  it("falls back to bare agent id when no cost is present", () => {
+    expect(formatAgentCell("opencode", undefined)).toBe("opencode");
+    expect(formatAgentCell("opencode", {})).toBe("opencode");
   });
 
-  it("works when only the agent is known", () => {
-    expect(
-      formatAgentCell("opencode", undefined, { costAmount: 2.1 }),
-    ).toBe("opencode $2");
+  it("renders '?' when the agent id is missing", () => {
+    expect(formatAgentCell(undefined, { costAmount: 2.1 })).toBe("? $2");
   });
 
   it("renders non-USD currencies without a $ sign", () => {
     expect(
-      formatAgentCell("opencode", "openai/gpt-5-codex", {
+      formatAgentCell("opencode", {
         costAmount: 5.6,
         costCurrency: "EUR",
       }),
-    ).toBe("opencode•gpt-5-codex 6 EUR");
+    ).toBe("opencode 6 EUR");
   });
 });

@@ -3,11 +3,11 @@
 // and delegates them to an `InputDispatcher` (held by the app), then
 // redraws.
 
-import os from "node:os";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
+import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import type { FormattedLine, Style } from "./format.js";
 import type { InputDispatcher, KeyEvent, KeyName } from "./input.js";
@@ -1797,20 +1797,6 @@ function wrapVisible(text: string, width: number): string[] {
     }
   }
   return out;
-}
-
-export function shortenHomePath(p: string): string {
-  const home = os.homedir();
-  if (!home) {
-    return p;
-  }
-  if (p === home) {
-    return "~";
-  }
-  if (p.startsWith(home + "/")) {
-    return "~" + p.slice(home.length);
-  }
-  return p;
 }
 
 export function truncate(text: string, max: number): string {

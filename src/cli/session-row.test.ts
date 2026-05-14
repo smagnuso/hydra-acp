@@ -2,20 +2,19 @@ import { describe, it, expect } from "vitest";
 import { toRow } from "./session-row.js";
 
 describe("toRow agent column", () => {
-  it("renders agent(model) when currentModel is present", () => {
+  it("renders just the agent id (model is intentionally omitted)", () => {
     const r = toRow({
       sessionId: "hydra_session_xyz",
       cwd: "/work",
       agentId: "opencode",
-      currentModel: "openai/gpt-5-codex",
       attachedClients: 1,
       updatedAt: new Date().toISOString(),
       status: "live",
     });
-    expect(r.agent).toBe("opencode•gpt-5-codex");
+    expect(r.agent).toBe("opencode");
   });
 
-  it("renders just the agent id when currentModel is missing", () => {
+  it("renders the agent id for cold sessions too", () => {
     const r = toRow({
       sessionId: "hydra_session_xyz",
       cwd: "/work",
@@ -32,13 +31,12 @@ describe("toRow agent column", () => {
       sessionId: "hydra_session_xyz",
       cwd: "/work",
       agentId: "opencode",
-      currentModel: "openai/gpt-5-codex",
       currentUsage: { costAmount: 1.42, costCurrency: "USD" },
       attachedClients: 1,
       updatedAt: new Date().toISOString(),
       status: "live",
     });
-    expect(r.agent).toBe("opencode•gpt-5-codex $1");
+    expect(r.agent).toBe("opencode $1");
   });
 
   it("omits cost when it rounds to zero", () => {
@@ -46,14 +44,12 @@ describe("toRow agent column", () => {
       sessionId: "hydra_session_xyz",
       cwd: "/work",
       agentId: "opencode",
-      currentModel: "openai/gpt-5-codex",
       currentUsage: { costAmount: 0.9905, costCurrency: "USD" },
       attachedClients: 1,
       updatedAt: new Date().toISOString(),
       status: "live",
     });
-    // Math.round(0.9905) === 1, so it shows $1; sub-50¢ would drop it.
-    expect(r.agent).toBe("opencode•gpt-5-codex $1");
+    expect(r.agent).toBe("opencode $1");
   });
 
   it("omits cost when only tokens are present", () => {
@@ -61,13 +57,12 @@ describe("toRow agent column", () => {
       sessionId: "hydra_session_xyz",
       cwd: "/work",
       agentId: "opencode",
-      currentModel: "openai/gpt-5-codex",
       currentUsage: { used: 1234, size: 200000 },
       attachedClients: 1,
       updatedAt: new Date().toISOString(),
       status: "live",
     });
-    expect(r.agent).toBe("opencode•gpt-5-codex");
+    expect(r.agent).toBe("opencode");
   });
 });
 

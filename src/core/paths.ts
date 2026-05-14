@@ -3,6 +3,20 @@ import * as os from "node:os";
 
 const ROOT_ENV = "HYDRA_ACP_HOME";
 
+export function shortenHomePath(p: string): string {
+  const home = os.homedir();
+  if (!home) {
+    return p;
+  }
+  if (p === home) {
+    return "~";
+  }
+  if (p.startsWith(home + "/")) {
+    return "~" + p.slice(home.length);
+  }
+  return p;
+}
+
 export function hydraHome(): string {
   const override = process.env[ROOT_ENV];
   if (override && override.length > 0) {

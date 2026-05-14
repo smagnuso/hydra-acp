@@ -15,6 +15,7 @@ import {
   type Row,
   type Widths,
 } from "../cli/session-row.js";
+import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import type { HydraConfig } from "../core/config.js";
 import {
@@ -499,9 +500,10 @@ function readTermWidth(term: Terminal): number {
 }
 
 // Middle-truncate the cwd so the user still sees enough of it (home,
-// project root, leaf) to identify the session.
+// project root, leaf) to identify the session. ~/-shortened to match
+// the session rows below.
 function formatNewSessionLabel(cwd: string, maxWidth: number): string {
   const prefix = "+ New session in ";
   const budget = Math.max(1, maxWidth - prefix.length);
-  return prefix + truncateMiddle(cwd, budget);
+  return prefix + truncateMiddle(shortenHomePath(cwd), budget);
 }
