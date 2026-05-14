@@ -2,7 +2,6 @@ import { ndjsonStreamFromStdio } from "../acp/framing.js";
 import { ensureConfig } from "../core/config.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import {
-  type JsonRpcId,
   type JsonRpcMessage,
   type JsonRpcNotification,
   type JsonRpcRequest,
@@ -83,10 +82,11 @@ export function wireShim({
 }: WireShimArgs): void {
   upstream.onMessage((msg) => {
     tracker.observeFromServer(msg);
-    // Daemon-side `session/permission_resolved` (sibling answered first).
-    // Forward the notification AND synthesize a JSON-RPC response so local
-    // clients (agent-shell, hydra-tui) that only register an `onRequest`
-    // handler still see their pending request resolve and their UI clear.
+    // Daemon-side `session/update`/`permission_resolved` (sibling answered
+    // first). Forward the notification AND synthesize a JSON-RPC response
+    // so local clients (agent-shell, hydra-tui) that only register an
+    // `onRequest` handler still see their pending request resolve and
+    // their UI clear.
     maybeReplyToResolvedPermission(msg, tracker, downstream);
     void downstream.send(msg);
   });
@@ -126,34 +126,81 @@ function maybeReplyToResolvedPermission(
   tracker: SessionTracker,
   downstream: MessageStream,
 ): void {
-  if (!isPermissionResolvedNotification(msg)) {
+  const update = extractPermissionResolvedUpdate(msg);
+  if (!update) {
     return;
   }
-  const params = (msg.params ?? {}) as { requestId?: JsonRpcId; result?: unknown };
-  if (params.requestId === undefined) {
+  const toolCallId =
+    typeof update.toolCallId === "string" ? update.toolCallId : undefined;
+  if (!toolCallId) {
     return;
   }
-  const pending = tracker.takePendingPermission(params.requestId);
+  const pending = tracker.takePendingPermissionByToolCall(toolCallId);
   if (!pending) {
     return;
   }
+  const outcome = reconstructOutcome(update);
   void downstream
     .send({
       jsonrpc: "2.0",
       id: pending.requestId,
-      result: params.result ?? null,
+      result: outcome ? { outcome } : null,
     })
     .catch(() => undefined);
 }
 
-function isPermissionResolvedNotification(
+interface PermissionResolvedUpdate {
+  sessionUpdate: "permission_resolved";
+  toolCallId?: unknown;
+  chosenOptionId?: unknown;
+  outcome?: unknown;
+  resolvedBy?: unknown;
+}
+
+function extractPermissionResolvedUpdate(
   msg: JsonRpcMessage,
-): msg is JsonRpcNotification & { method: "session/permission_resolved" } {
+): PermissionResolvedUpdate | undefined {
+  if (!isSessionUpdateNotification(msg)) {
+    return undefined;
+  }
+  const params = (msg.params ?? {}) as { update?: unknown };
+  const update = params.update;
+  if (
+    !update ||
+    typeof update !== "object" ||
+    (update as { sessionUpdate?: unknown }).sessionUpdate !==
+      "permission_resolved"
+  ) {
+    return undefined;
+  }
+  return update as PermissionResolvedUpdate;
+}
+
+function isSessionUpdateNotification(
+  msg: JsonRpcMessage,
+): msg is JsonRpcNotification & { method: "session/update" } {
   return (
     "method" in msg &&
-    msg.method === "session/permission_resolved" &&
+    msg.method === "session/update" &&
     !("id" in msg && msg.id !== undefined)
   );
+}
+
+// Rebuild the `{ outcome }` body that downstream clients expect as the
+// JSON-RPC response to their original `session/request_permission`.
+// Prefer the daemon's explicit `outcome` (our proposed extension) and
+// fall back to reconstructing one from `chosenOptionId` so a future
+// spec-strict emitter still works.
+function reconstructOutcome(
+  update: PermissionResolvedUpdate,
+): Record<string, unknown> | undefined {
+  if (update.outcome && typeof update.outcome === "object") {
+    return update.outcome as Record<string, unknown>;
+  }
+  if (typeof update.chosenOptionId === "string") {
+    return { kind: "selected", optionId: update.chosenOptionId };
+  }
+  return undefined;
 }
 
 async function cancelPendingPermissions(
@@ -168,18 +215,26 @@ async function cancelPendingPermissions(
     `hydra-acp: cancelling ${pendings.length} pending permission request(s)\n`,
   );
   for (const pending of pendings) {
-    const params = {
-      ...pending.params,
-      resolvedBy: "hydra-acp",
-      result: {
-        outcome: { kind: "cancelled", reason: "daemon-disconnected" },
-      },
+    const sessionId =
+      typeof pending.params.sessionId === "string"
+        ? pending.params.sessionId
+        : undefined;
+    if (!sessionId) {
+      continue;
+    }
+    const update: Record<string, unknown> = {
+      sessionUpdate: "permission_resolved",
+      outcome: { kind: "cancelled", reason: "daemon-disconnected" },
+      resolvedBy: { clientId: "hydra-acp" },
     };
+    if (pending.toolCallId) {
+      update.toolCallId = pending.toolCallId;
+    }
     await downstream
       .send({
         jsonrpc: "2.0",
-        method: "session/permission_resolved",
-        params,
+        method: "session/update",
+        params: { sessionId, update },
       })
       .catch(() => undefined);
   }

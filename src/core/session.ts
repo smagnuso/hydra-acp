@@ -27,7 +27,7 @@ import {
 } from "./hydra-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
-import type { HistoryPolicy, JsonRpcId } from "../acp/types.js";
+import type { HistoryPolicy } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
 
 export interface AttachedClient {
@@ -1306,16 +1306,13 @@ export class Session {
       );
     }
     const clientParams = this.rewriteForClient(params);
+    const toolCallId = extractToolCallId(clientParams);
     return new Promise<unknown>((resolve, reject) => {
       let settled = false;
-      // Track each outbound request id so the resolved-sibling notification
-      // can carry the recipient's *own* id — that's the key the slack/browser
-      // clients (and the shim's pendingPermissions tracker) match against.
-      const outbound: Array<{ client: AttachedClient; id: JsonRpcId }> = [];
-      // The Set entry is what attach() consults; storing it ahead of time
-      // lets the settle path delete by identity.
+      const outbound: Array<{ client: AttachedClient }> = [];
       const entry = { addClient: sendTo };
       this.inFlightPermissions.add(entry);
+      const sessionId = this.sessionId;
 
       const settle = (fn: () => void): void => {
         if (settled) {
@@ -1330,24 +1327,27 @@ export class Session {
         if (settled) {
           return;
         }
-        const { id, response } = client.connection.requestWithId(
+        const response = client.connection.request<unknown>(
           "session/request_permission",
           clientParams,
         );
-        outbound.push({ client, id });
+        outbound.push({ client });
         void response
           .then((result) => {
             settle(() => {
+              const update = buildPermissionResolvedUpdate({
+                toolCallId,
+                result,
+                resolver: client,
+              });
               for (const o of outbound) {
                 if (o.client.clientId === client.clientId) {
                   continue;
                 }
                 void o.client.connection
-                  .notify("session/permission_resolved", {
-                    ...(clientParams as object),
-                    requestId: o.id,
-                    resolvedBy: client.clientId,
-                    result,
+                  .notify("session/update", {
+                    sessionId,
+                    update,
                   })
                   .catch(() => undefined);
               }
@@ -1495,6 +1495,92 @@ function extractAdvertisedCommands(
       cmd.description = c.description;
     }
     out.push(cmd);
+  }
+  return out;
+}
+
+// Pull `toolCallId` out of the `session/request_permission` params we
+// forward to clients. The wire shape is `{ sessionId, toolCall: { toolCallId, ... }, options }`.
+// Returns undefined if the params don't match (defensive — agents that
+// emit a malformed request_permission would already be off-spec).
+function extractToolCallId(params: unknown): string | undefined {
+  if (!params || typeof params !== "object") {
+    return undefined;
+  }
+  const toolCall = (params as { toolCall?: unknown }).toolCall;
+  if (!toolCall || typeof toolCall !== "object") {
+    return undefined;
+  }
+  const id = (toolCall as { toolCallId?: unknown }).toolCallId;
+  return typeof id === "string" ? id : undefined;
+}
+
+interface PermissionResolvedBuildArgs {
+  toolCallId: string | undefined;
+  result: unknown;
+  resolver: AttachedClient;
+}
+
+// Build the `update` body for a `session/update`/`permission_resolved`
+// notification per RFD #533 (with our proposed `outcome` extension carried
+// alongside the spec-literal `chosenOptionId`).
+function buildPermissionResolvedUpdate(
+  args: PermissionResolvedBuildArgs,
+): Record<string, unknown> {
+  const outcome = extractOutcome(args.result);
+  const update: Record<string, unknown> = {
+    sessionUpdate: "permission_resolved",
+  };
+  if (args.toolCallId !== undefined) {
+    update.toolCallId = args.toolCallId;
+  }
+  if (outcome) {
+    update.outcome = outcome;
+    if (outcome.kind === "selected" && typeof outcome.optionId === "string") {
+      update.chosenOptionId = outcome.optionId;
+    }
+  }
+  update.resolvedBy = buildResolvedBy(args.resolver);
+  return update;
+}
+
+interface OutcomeShape {
+  kind: string;
+  optionId?: string;
+  reason?: string;
+}
+
+function extractOutcome(result: unknown): OutcomeShape | undefined {
+  if (!result || typeof result !== "object") {
+    return undefined;
+  }
+  const raw = (result as { outcome?: unknown }).outcome;
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const kind = (raw as { kind?: unknown }).kind;
+  if (typeof kind !== "string") {
+    return undefined;
+  }
+  const out: OutcomeShape = { kind };
+  const optionId = (raw as { optionId?: unknown }).optionId;
+  if (typeof optionId === "string") {
+    out.optionId = optionId;
+  }
+  const reason = (raw as { reason?: unknown }).reason;
+  if (typeof reason === "string") {
+    out.reason = reason;
+  }
+  return out;
+}
+
+function buildResolvedBy(client: AttachedClient): Record<string, unknown> {
+  const out: Record<string, unknown> = { clientId: client.clientId };
+  if (client.clientInfo?.name) {
+    out.name = client.clientInfo.name;
+  }
+  if (client.clientInfo?.version) {
+    out.version = client.clientInfo.version;
   }
   return out;
 }

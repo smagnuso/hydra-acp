@@ -264,6 +264,52 @@ describe("SessionTracker", () => {
       });
       expect(tracker.takePendingPermissions()).toEqual([]);
     });
+
+    it("indexes pending permissions by toolCallId for correlation", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        id: 50,
+        method: "session/request_permission",
+        params: {
+          sessionId: "sess_a",
+          toolCall: { name: "edit_file", toolCallId: "tc_50" },
+        },
+      });
+      const found = tracker.takePendingPermissionByToolCall("tc_50");
+      expect(found).toMatchObject({
+        requestId: 50,
+        sessionId: "sess_a",
+        toolCallId: "tc_50",
+      });
+      // Both indexes should be cleared after a take.
+      expect(tracker.takePendingPermissions()).toEqual([]);
+      expect(tracker.takePendingPermissionByToolCall("tc_50")).toBeUndefined();
+    });
+
+    it("clears the toolCallId index when the downstream client responds", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        id: 51,
+        method: "session/request_permission",
+        params: {
+          sessionId: "sess_a",
+          toolCall: { toolCallId: "tc_51" },
+        },
+      });
+      tracker.observeFromClient({
+        jsonrpc: "2.0",
+        id: 51,
+        result: { outcome: { kind: "selected", optionId: "allow" } },
+      });
+      expect(tracker.takePendingPermissionByToolCall("tc_51")).toBeUndefined();
+    });
+
+    it("returns undefined for an unknown toolCallId", () => {
+      const tracker = new SessionTracker();
+      expect(tracker.takePendingPermissionByToolCall("nope")).toBeUndefined();
+    });
   });
 
   it("ignores responses to ids it did not observe", () => {

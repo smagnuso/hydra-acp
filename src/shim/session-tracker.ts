@@ -36,6 +36,7 @@ type Pending =
 export interface PendingPermission {
   requestId: JsonRpcId;
   sessionId: string;
+  toolCallId: string | undefined;
   params: Record<string, unknown>;
 }
 
@@ -43,11 +44,18 @@ export class SessionTracker {
   private contexts = new Map<string, ResumeContext>();
   private pending = new Map<JsonRpcId, Pending>();
   private pendingPermissions = new Map<JsonRpcId, PendingPermission>();
+  // Secondary index — same entries as `pendingPermissions`, keyed by the
+  // tool call id from the request_permission params. Used to correlate
+  // the daemon's `session/update`/`permission_resolved` events back to the
+  // pending downstream request, since per-recipient JSON-RPC ids are no
+  // longer carried on the wire.
+  private pendingPermissionsByToolCall = new Map<string, PendingPermission>();
 
   observeFromClient(msg: JsonRpcMessage): void {
     if (isResponse(msg)) {
-      if (this.pendingPermissions.has(msg.id)) {
-        this.pendingPermissions.delete(msg.id);
+      const existing = this.pendingPermissions.get(msg.id);
+      if (existing) {
+        this.deletePendingPermission(existing);
       }
       return;
     }
@@ -86,11 +94,23 @@ export class SessionTracker {
         const sessionId =
           typeof params.sessionId === "string" ? params.sessionId : undefined;
         if (sessionId) {
-          this.pendingPermissions.set(msg.id, {
+          const toolCall = params.toolCall as
+            | { toolCallId?: unknown }
+            | undefined;
+          const toolCallId =
+            toolCall && typeof toolCall.toolCallId === "string"
+              ? toolCall.toolCallId
+              : undefined;
+          const entry: PendingPermission = {
             requestId: msg.id,
             sessionId,
+            toolCallId,
             params,
-          });
+          };
+          this.pendingPermissions.set(msg.id, entry);
+          if (toolCallId) {
+            this.pendingPermissionsByToolCall.set(toolCallId, entry);
+          }
         }
       }
       return;
@@ -150,15 +170,33 @@ export class SessionTracker {
   takePendingPermissions(): PendingPermission[] {
     const out = [...this.pendingPermissions.values()];
     this.pendingPermissions.clear();
+    this.pendingPermissionsByToolCall.clear();
     return out;
   }
 
   takePendingPermission(requestId: JsonRpcId): PendingPermission | undefined {
     const found = this.pendingPermissions.get(requestId);
     if (found) {
-      this.pendingPermissions.delete(requestId);
+      this.deletePendingPermission(found);
     }
     return found;
+  }
+
+  takePendingPermissionByToolCall(
+    toolCallId: string,
+  ): PendingPermission | undefined {
+    const found = this.pendingPermissionsByToolCall.get(toolCallId);
+    if (found) {
+      this.deletePendingPermission(found);
+    }
+    return found;
+  }
+
+  private deletePendingPermission(entry: PendingPermission): void {
+    this.pendingPermissions.delete(entry.requestId);
+    if (entry.toolCallId) {
+      this.pendingPermissionsByToolCall.delete(entry.toolCallId);
+    }
   }
 }
 

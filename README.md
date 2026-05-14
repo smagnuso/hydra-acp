@@ -40,7 +40,7 @@ Adds two new methods that turn ACP from 1:1 into 1:N:
 - **`session/attach { sessionId, historyPolicy, clientInfo? }`** — a second (or third, or N-th) client connects to a session that's already live. `historyPolicy` controls replay on attach: `"full"`, `"pending_only"`, or `"none"`.
 - **`session/detach { sessionId }`** — graceful disconnect; the session continues as long as one client remains attached.
 
-Every event the agent emits is broadcast to every attached client; clients self-filter what they act on. Permission requests broadcast the same way: the first response wins, and the rest receive a `session/permission_resolved` notification. Capability is advertised in `initialize` under `agentCapabilities.sessionCapabilities.attach`.
+Every event the agent emits is broadcast to every attached client; clients self-filter what they act on. Permission requests broadcast the same way: the first response wins, and the rest receive a `session/update` notification with `sessionUpdate: "permission_resolved"`. Capability is advertised in `initialize` under `agentCapabilities.sessionCapabilities.attach`.
 
 #### 2. Agent Extensions via ACP Proxies — [RFD: proxy-chains](https://agentclientprotocol.com/rfds/proxy-chains)
 
@@ -85,7 +85,7 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 2. **Shim opens a WSS connection** to the daemon at `/acp`, authenticating via the bearer token.
 3. **`session/new` from the editor** → daemon resolves the requested agent against the cached ACP Registry, downloads it on first use under `~/.hydra-acp/agents/`, spawns it as a child process, and creates an ACP session inside it (per RFD: proxy-chains).
 4. **`session/attach` from a second client** → daemon adds the new client to the session's broadcast list and replays history per `historyPolicy` (per RFD #533).
-5. **Notifications** fan out to every attached client. **Prompts** are serialized through the daemon's per-session queue. **Permission requests** broadcast to every attached client; first response wins and the rest receive `session/permission_resolved`.
+5. **Notifications** fan out to every attached client. **Prompts** are serialized through the daemon's per-session queue. **Permission requests** broadcast to every attached client; first response wins and the rest receive a `session/update` with `sessionUpdate: "permission_resolved"` carrying the resolving client's outcome.
 6. **`session/list`** returns the daemon's active sessions, filterable by `cwd` (per RFD: session-list).
 7. **`session/detach`** lets a client leave voluntarily; the session continues until the last client detaches (per RFD #533).
 
@@ -112,7 +112,7 @@ The resurrection is serialized per hydra sessionId, so two shims racing to reatt
 
 **What gets lost across restart:** the daemon's in-memory streaming history and in-flight tool calls. The agent's persisted state — past completed turns, conversation context — is recovered via `session/load`. The agent will need to re-issue any tool call that was mid-stream when the daemon died.
 
-**In-flight permission prompts:** the shim tracks open `session/request_permission` requests it has forwarded to the editor. On any reconnect (which always implies the previous daemon-side promise is gone), the shim emits a `session/permission_resolved` notification toward the editor for each pending request, with `resolvedBy: "hydra-acp"` and `outcome: { kind: "cancelled", reason: "daemon-disconnected" }`. Editors that handle `session/permission_resolved` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533) will dismiss their in-flight permission UI. Any response the editor still sends afterward is silently dropped by the new daemon (unknown request id).
+**In-flight permission prompts:** the shim tracks open `session/request_permission` requests it has forwarded to the editor. On any reconnect (which always implies the previous daemon-side promise is gone), the shim emits a `session/update` notification with `sessionUpdate: "permission_resolved"` toward the editor for each pending request, carrying the original `toolCallId` plus `outcome: { kind: "cancelled", reason: "daemon-disconnected" }` and `resolvedBy: { clientId: "hydra-acp" }`. Editors that handle `permission_resolved` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533) will dismiss their in-flight permission UI. Any response the editor still sends afterward is silently dropped by the new daemon (unknown request id).
 
 ### Wire shape of `_meta`
 

@@ -251,20 +251,35 @@ async function runSession(
     } else if (event?.kind === "turn-complete") {
       adjustPendingTurns(-1);
     }
+    if (rawTag === "permission_resolved") {
+      handlePermissionResolved(update);
+      return;
+    }
     appendRender(event);
     maybeDismissPermissionByToolUpdate(update);
   });
 
-  // Sibling client answered the permission first. The daemon stamps the
-  // notification with our request id (post-fix) and the toolCall echo, so
-  // matching by toolCallId works regardless of how we keyed the modal.
-  conn.onNotification("session/permission_resolved", (params) => {
-    const p = (params ?? {}) as {
-      toolCall?: { toolCallId?: string };
-      result?: unknown;
+  // Sibling client answered the permission first (or the daemon synthesized
+  // a cancellation on disconnect). Reconstruct the JSON-RPC response shape
+  // the modal expects from the update's `outcome` (preferred) or
+  // `chosenOptionId` so the awaiting Promise resolves cleanly.
+  const handlePermissionResolved = (update: unknown): void => {
+    const u = (update ?? {}) as {
+      toolCallId?: unknown;
+      chosenOptionId?: unknown;
+      outcome?: unknown;
     };
-    dismissPermissionExternally(p.toolCall?.toolCallId, p.result);
-  });
+    const toolCallId =
+      typeof u.toolCallId === "string" ? u.toolCallId : undefined;
+    let outcome: unknown;
+    if (u.outcome && typeof u.outcome === "object") {
+      outcome = u.outcome;
+    } else if (typeof u.chosenOptionId === "string") {
+      outcome = { kind: "selected", optionId: u.chosenOptionId };
+    }
+    const result = outcome ? { outcome } : undefined;
+    dismissPermissionExternally(toolCallId, result);
+  };
 
   // Permission requests are handled with a modal in the prompt area. While
   // one is pending: ↑/↓ navigate options, Enter submits, Esc cancels, and
@@ -312,7 +327,7 @@ async function runSession(
     // need a sticky scrollback line announcing the resolution.
   };
 
-  // Fallback for the case where session/permission_resolved didn't arrive:
+  // Fallback for the case where permission_resolved didn't arrive:
   // if the agent emits a tool_call/tool_call_update for our pending
   // permission's toolCallId in any non-pending state, the decision was
   // clearly made elsewhere — clear the modal.

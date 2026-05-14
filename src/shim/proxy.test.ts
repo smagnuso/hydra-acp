@@ -247,27 +247,34 @@ describe("wireShim forwarding", () => {
 
     wireShim({ opts: {}, upstream, downstream, tracker });
 
-    // Daemon sends request_permission to this shim — the tracker records it.
+    // Daemon sends request_permission to this shim — the tracker records it,
+    // indexing by toolCallId so the resolve event can be correlated later.
     upstream.emitMessage({
       jsonrpc: "2.0",
       id: "daemon-req-7",
       method: "session/request_permission",
-      params: { sessionId: "sess_h", toolCall: { name: "edit" } },
+      params: {
+        sessionId: "sess_h",
+        toolCall: { name: "edit", toolCallId: "tc_7" },
+      },
     });
     await new Promise((r) => setImmediate(r));
     expect(downstream.sent).toHaveLength(1);
 
-    // Sibling answers first; daemon now sends permission_resolved
-    // carrying *this* shim's requestId.
+    // Sibling answers first; daemon now sends session/update with
+    // sessionUpdate: "permission_resolved" keyed by toolCallId.
     upstream.emitMessage({
       jsonrpc: "2.0",
-      method: "session/permission_resolved",
+      method: "session/update",
       params: {
         sessionId: "sess_h",
-        toolCall: { name: "edit" },
-        requestId: "daemon-req-7",
-        resolvedBy: "cli_other",
-        result: { outcome: { kind: "allow", optionId: "allow" } },
+        update: {
+          sessionUpdate: "permission_resolved",
+          toolCallId: "tc_7",
+          chosenOptionId: "allow",
+          outcome: { kind: "selected", optionId: "allow" },
+          resolvedBy: { clientId: "cli_other" },
+        },
       },
     });
     await new Promise((r) => setImmediate(r));
@@ -282,13 +289,59 @@ describe("wireShim forwarding", () => {
     expect(synthesized).toBeDefined();
     expect(synthesized?.id).toBe("daemon-req-7");
     expect(synthesized?.result).toMatchObject({
-      outcome: { kind: "allow", optionId: "allow" },
+      outcome: { kind: "selected", optionId: "allow" },
     });
 
     const forwardedNotification = downstream.sent.find(
-      (m) => "method" in m && m.method === "session/permission_resolved",
+      (m): m is { method: string; params: { update: { sessionUpdate: string } } } =>
+        "method" in m &&
+        m.method === "session/update" &&
+        (m as { params?: { update?: { sessionUpdate?: string } } }).params
+          ?.update?.sessionUpdate === "permission_resolved",
     );
     expect(forwardedNotification).toBeDefined();
+  });
+
+  it("falls back to chosenOptionId when the daemon omits outcome", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: "daemon-req-9",
+      method: "session/request_permission",
+      params: {
+        sessionId: "sess_h",
+        toolCall: { name: "edit", toolCallId: "tc_9" },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "sess_h",
+        update: {
+          sessionUpdate: "permission_resolved",
+          toolCallId: "tc_9",
+          chosenOptionId: "deny",
+          resolvedBy: { clientId: "cli_other" },
+        },
+      },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const synthesized = downstream.sent.find(
+      (m): m is { jsonrpc: "2.0"; id: string | number; result: unknown } =>
+        "id" in m && !("method" in m) && (m as { id?: unknown }).id === "daemon-req-9",
+    );
+    expect(synthesized?.result).toMatchObject({
+      outcome: { kind: "selected", optionId: "deny" },
+    });
   });
 
   it("does not double-respond when downstream already answered the permission", async () => {
@@ -302,15 +355,19 @@ describe("wireShim forwarding", () => {
       jsonrpc: "2.0",
       id: "daemon-req-8",
       method: "session/request_permission",
-      params: { sessionId: "sess_h", toolCall: { name: "edit" } },
+      params: {
+        sessionId: "sess_h",
+        toolCall: { name: "edit", toolCallId: "tc_8" },
+      },
     });
     await new Promise((r) => setImmediate(r));
 
-    // Downstream answers — tracker should drop its pending entry.
+    // Downstream answers — tracker should drop its pending entry from
+    // both the requestId map AND the toolCallId map.
     downstream.emitMessage({
       jsonrpc: "2.0",
       id: "daemon-req-8",
-      result: { outcome: { kind: "allow", optionId: "allow" } },
+      result: { outcome: { kind: "selected", optionId: "allow" } },
     });
     await new Promise((r) => setImmediate(r));
 
@@ -320,12 +377,16 @@ describe("wireShim forwarding", () => {
     // (just forwarded as a notification, no second synthesized response).
     upstream.emitMessage({
       jsonrpc: "2.0",
-      method: "session/permission_resolved",
+      method: "session/update",
       params: {
         sessionId: "sess_h",
-        requestId: "daemon-req-8",
-        resolvedBy: "cli_other",
-        result: { outcome: { kind: "allow", optionId: "allow" } },
+        update: {
+          sessionUpdate: "permission_resolved",
+          toolCallId: "tc_8",
+          chosenOptionId: "allow",
+          outcome: { kind: "selected", optionId: "allow" },
+          resolvedBy: { clientId: "cli_other" },
+        },
       },
     });
     await new Promise((r) => setImmediate(r));
@@ -336,7 +397,11 @@ describe("wireShim forwarding", () => {
     );
     expect(synthesized).toBeUndefined();
     const forwardedNotification = newMessages.find(
-      (m) => "method" in m && m.method === "session/permission_resolved",
+      (m): m is { method: string } =>
+        "method" in m &&
+        m.method === "session/update" &&
+        (m as { params?: { update?: { sessionUpdate?: string } } }).params
+          ?.update?.sessionUpdate === "permission_resolved",
     );
     expect(forwardedNotification).toBeDefined();
   });

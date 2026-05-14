@@ -22,7 +22,7 @@ async function flushHistoryWrites(): Promise<void> {
   await new Promise((r) => setImmediate(r));
 }
 
-function makeClient(): {
+function makeClient(clientInfo?: { name: string; version?: string }): {
   client: AttachedClient;
   conn: JsonRpcConnection;
   stream: ReturnType<typeof makeControlledStream>;
@@ -32,6 +32,7 @@ function makeClient(): {
   const client: AttachedClient = {
     clientId: `c_${Math.random().toString(36).slice(2, 8)}`,
     connection: conn,
+    ...(clientInfo ? { clientInfo } : {}),
   };
   return { client, conn, stream };
 }
@@ -167,8 +168,11 @@ describe("Session", () => {
       });
 
       const aResolved = a.stream.sent.find(
-        (m) =>
-          "method" in m && m.method === "session/permission_resolved",
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "permission_resolved",
       );
       expect(aResolved).toBeDefined();
     });
@@ -252,58 +256,72 @@ describe("Session", () => {
       await reqPromise;
     });
 
-    it("includes each sibling's own requestId in permission_resolved fan-out", async () => {
+    it("emits RFD-shaped permission_resolved on the session/update channel to siblings", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
-      const a = makeClient();
+      const a = makeClient({ name: "client-A", version: "1.2.3" });
       const b = makeClient();
       session.attach(a.client, "full");
       session.attach(b.client, "full");
 
       const requestPromise = mock.triggerRequest("session/request_permission", {
         sessionId: "u_agent",
-        toolCall: { name: "edit_file" },
+        toolCall: { name: "edit_file", toolCallId: "tc_55" },
         options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
       });
 
       await new Promise((r) => setImmediate(r));
       const aReq = a.stream.sent[0] as { id: string | number };
       const bReq = b.stream.sent[0] as { id: string | number };
-      expect(aReq.id).toBeDefined();
-      expect(bReq.id).toBeDefined();
       expect(aReq.id).not.toEqual(bReq.id);
 
-      // A answers first.
       a.stream.emitMessage({
         jsonrpc: "2.0",
         id: aReq.id,
-        result: { outcome: { kind: "allow", optionId: "allow" } },
+        result: { outcome: { kind: "selected", optionId: "allow" } },
       });
 
       await expect(requestPromise).resolves.toMatchObject({
-        outcome: { kind: "allow" },
+        outcome: { kind: "selected" },
       });
 
-      // B should now have received a permission_resolved notification
-      // carrying B's *own* request id — that's how slack/browser correlate
-      // their pending UI with the resolution event.
       const bResolved = b.stream.sent.find(
         (m): m is JsonRpcNotification =>
-          "method" in m && m.method === "session/permission_resolved",
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "permission_resolved",
       );
       expect(bResolved).toBeDefined();
-      const bResolvedParams = bResolved?.params as
-        | { requestId: string | number; sessionId: string; result: unknown }
-        | undefined;
-      expect(bResolvedParams?.requestId).toEqual(bReq.id);
-      expect(bResolvedParams).toMatchObject({
-        sessionId: "sess_hyd",
-        result: { outcome: { kind: "allow", optionId: "allow" } },
+      const bParams = bResolved?.params as {
+        sessionId: string;
+        update: {
+          sessionUpdate: string;
+          toolCallId: string;
+          chosenOptionId: string;
+          outcome: { kind: string; optionId: string };
+          resolvedBy: { clientId: string; name?: string; version?: string };
+          requestId?: unknown;
+        };
+      };
+      expect(bParams.sessionId).toBe("sess_hyd");
+      expect(bParams.update.toolCallId).toBe("tc_55");
+      expect(bParams.update.chosenOptionId).toBe("allow");
+      expect(bParams.update.outcome).toEqual({ kind: "selected", optionId: "allow" });
+      expect(bParams.update.resolvedBy).toMatchObject({
+        clientId: expect.any(String),
+        name: "client-A",
+        version: "1.2.3",
       });
+      // requestId is no longer carried on the wire.
+      expect(bParams.update.requestId).toBeUndefined();
 
       // A must not get a permission_resolved — its own request already resolved.
       const aResolved = a.stream.sent.find(
-        (m) =>
-          "method" in m && m.method === "session/permission_resolved",
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "permission_resolved",
       );
       expect(aResolved).toBeUndefined();
     });
