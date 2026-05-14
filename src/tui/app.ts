@@ -943,13 +943,10 @@ async function runSession(
         } else if (pendingTurns > 0) {
           cancelRemoteTurn();
         }
-        // Drop any queued prompts beyond the one currently processing —
-        // Ctrl+C means stop, not "stop just this". The head (if any) keeps
-        // its current state until the in-flight turn settles.
-        if (promptQueue.length > (workerActive ? 1 : 0)) {
-          promptQueue.length = workerActive ? 1 : 0;
-          refreshQueueDisplay();
-        }
+        // ^C stops only the in-flight turn. Queued prompts stay put — the
+        // worker loop will pick the next one up once the cancelled turn
+        // settles. Use queue editing (Up + ^C / Enter) to drop individual
+        // queued items, or repeat ^C as each one starts.
         return;
       case "exit":
         void requestExit();
