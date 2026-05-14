@@ -65,6 +65,16 @@ export class JsonRpcConnection {
     }
   }
 
+  // Discard any notifications buffered for the given method without firing
+  // handlers. Used by the resurrect path to drop the agent's session/load
+  // replay: that replay is the agent re-emitting our own history back at
+  // us, and if we flushed it through wireAgent's session/update handler
+  // every entry would be re-appended to history.jsonl, doubling the log
+  // each time the session was woken up.
+  drainBuffered(method: string): void {
+    this.bufferedNotifications.delete(method);
+  }
+
   onClose(handler: (err?: Error) => void): void {
     this.closeHandlers.push(handler);
   }

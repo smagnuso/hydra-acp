@@ -228,6 +228,17 @@ export class SessionManager {
       return this.doResurrectFromImport(params);
     }
 
+    // session/load asks the agent to replay the conversation via
+    // session/update notifications. We already have that history in
+    // history.jsonl, and we're about to wire up wireAgent's session/update
+    // handler — which would flush the buffered replay through
+    // recordAndBroadcast and re-append every entry. That doubles the log
+    // every resurrect, drags in /hydra-internal prompts the agent
+    // remembers but we deliberately didn't record, and breaks the TUI's
+    // turn bracketing on reload (each replayed slice looks like a turn
+    // that started but never reached turn_complete).
+    agent.connection.drainBuffered("session/update");
+
     const session = new Session({
       sessionId: params.hydraSessionId,
       cwd: params.cwd,

@@ -78,6 +78,14 @@ export function makeMockAgent(opts: {
 } = {}): MockAgentControls {
   const requestHandlers = new Map<string, RequestHandler>();
   const notificationHandlers = new Map<string, NotificationHandler>();
+  // Mirror JsonRpcConnection's buffering: a notification that arrives
+  // before a handler is registered must queue rather than vanish, so
+  // tests can faithfully reproduce the "agent emits chunks during
+  // session/load" pattern and verify the drainBuffered escape hatch.
+  const bufferedNotifications = new Map<
+    string,
+    Array<{ method: string; params: unknown }>
+  >();
   const exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
 
   const requestMock = vi.fn().mockResolvedValue(undefined);
@@ -90,6 +98,17 @@ export function makeMockAgent(opts: {
     },
     onNotification(method: string, handler: NotificationHandler): void {
       notificationHandlers.set(method, handler);
+      const queued = bufferedNotifications.get(method);
+      if (!queued) {
+        return;
+      }
+      bufferedNotifications.delete(method);
+      for (const note of queued) {
+        handler(note.params, note.method);
+      }
+    },
+    drainBuffered(method: string): void {
+      bufferedNotifications.delete(method);
     },
     onClose(_handler: (err?: Error) => void): void {
       void _handler;
@@ -119,7 +138,14 @@ export function makeMockAgent(opts: {
       const handler = notificationHandlers.get(method);
       if (handler) {
         handler(params, method);
+        return;
       }
+      let queued = bufferedNotifications.get(method);
+      if (!queued) {
+        queued = [];
+        bufferedNotifications.set(method, queued);
+      }
+      queued.push({ method, params });
     },
     async triggerRequest(method, params) {
       const handler = requestHandlers.get(method);

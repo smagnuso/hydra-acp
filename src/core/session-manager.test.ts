@@ -407,6 +407,79 @@ describe("SessionManager: history persistence", () => {
     ).toBe("first turn output");
   });
 
+  it("drops the agent's session/load replay instead of re-recording it (regression: doubled history every resurrect)", async () => {
+    // First incarnation: emit one real chunk that legitimately lands in
+    // history, then idle-close so the disk record sticks around.
+    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const sessionId = live.sessionId;
+    const upstream = live.upstreamSessionId;
+    mocks[0]!.triggerNotification("session/update", {
+      sessionId: upstream,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "original turn output" },
+      },
+    });
+    await flushHistoryWrites();
+    await live.close({ deleteRecord: false });
+
+    // Fresh SessionManager whose session/load mock simulates the
+    // ACP-spec behavior: agent re-emits the conversation via
+    // session/update notifications before its session/load reply
+    // returns. Those land in the connection's pre-handler buffer.
+    // Without drainBuffered, wireAgent's subscription would flush
+    // them through recordAndBroadcast and double the on-disk log.
+    const replayMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<
+          typeof vi.fn
+        >;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockImplementationOnce(async (method: string) => {
+            if (method === "session/load") {
+              m.triggerNotification("session/update", {
+                sessionId: upstream,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: "REPLAYED — should not be recorded",
+                  },
+                },
+              });
+            }
+            return {};
+          });
+        return m.agent;
+      },
+    );
+
+    await replayMgr.resurrect({
+      hydraSessionId: sessionId,
+      upstreamSessionId: upstream,
+      agentId: "claude-code",
+      cwd: "/w",
+    });
+    await flushHistoryWrites();
+
+    const history = await replayMgr.getHistory(sessionId);
+    expect(history).toBeDefined();
+    const chunks = history!.filter(
+      (e) =>
+        (e.params as { update?: { sessionUpdate?: string } }).update
+          ?.sessionUpdate === "agent_message_chunk",
+    );
+    expect(chunks).toHaveLength(1);
+    expect(
+      (chunks[0]!.params as { update: { content: { text: string } } }).update
+        .content.text,
+    ).toBe("original turn output");
+  });
+
   it("loads history from disk on resume-hints resurrect (regression: hints used to skip the disk load)", async () => {
     // Pre-create + emit a chunk so a history file exists on disk.
     const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
