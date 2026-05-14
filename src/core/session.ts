@@ -1343,10 +1343,19 @@ export class Session {
     // just churn client state through stale values en route to the
     // current one.
     const recordable = !isStateUpdate(method, rewritten);
+    // Stamp every recordable session/update with a messageId so
+    // after_message replay has resync anchors at every event boundary
+    // — not just prompt_received / turn_complete. Non-recordable
+    // events (state updates) skip this since they're not in history,
+    // and explicit messageIds (set by broadcastPromptReceived /
+    // broadcastTurnComplete) are preserved.
+    const broadcast = recordable
+      ? ensureMessageIdOnUpdate(method, rewritten)
+      : rewritten;
     if (recordable) {
       const entry: CachedNotification = {
         method,
-        params: rewritten,
+        params: broadcast,
         recordedAt: Date.now(),
       };
       this.lastRecordedAt = entry.recordedAt;
@@ -1383,7 +1392,7 @@ export class Session {
       if (excludeClientId && client.clientId === excludeClientId) {
         continue;
       }
-      void client.connection.notify(method, rewritten).catch(() => undefined);
+      void client.connection.notify(method, broadcast).catch(() => undefined);
     }
   }
 
@@ -1587,6 +1596,28 @@ function extractAdvertisedCommands(
     out.push(cmd);
   }
   return out;
+}
+
+// If `params` is a session/update with an `update` object that lacks
+// a messageId, return a shallow clone with one stamped. Otherwise
+// return `params` unchanged. Keeps the original caller-supplied
+// object untouched so we don't surprise anyone holding a reference.
+function ensureMessageIdOnUpdate(method: string, params: unknown): unknown {
+  if (method !== "session/update" || !params || typeof params !== "object") {
+    return params;
+  }
+  const p = params as { update?: unknown };
+  if (!p.update || typeof p.update !== "object" || Array.isArray(p.update)) {
+    return params;
+  }
+  const u = p.update as { messageId?: unknown };
+  if (typeof u.messageId === "string") {
+    return params;
+  }
+  return {
+    ...(params as Record<string, unknown>),
+    update: { ...(p.update as Record<string, unknown>), messageId: generateMessageId() },
+  };
 }
 
 // Walk a history snapshot and find the index of the entry whose

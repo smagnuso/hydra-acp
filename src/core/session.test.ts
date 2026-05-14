@@ -566,6 +566,62 @@ describe("Session", () => {
     });
   });
 
+  describe("messageId on recorded session/update events", () => {
+    it("stamps messageId on tool_call and plan broadcasts so after_message can anchor mid-turn", async () => {
+      const { session, mock } = makeSession("sess_mid", "u_mid");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_mid",
+        update: { sessionUpdate: "tool_call", toolCallId: "tc_1", title: "x" },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_mid",
+        update: { sessionUpdate: "plan", entries: [] },
+      });
+
+      const updates = a.stream.sent.flatMap((m) =>
+        "method" in m && m.method === "session/update"
+          ? [
+              (m.params as { update: { sessionUpdate: string; messageId?: string } })
+                .update,
+            ]
+          : [],
+      );
+      const tool = updates.find((u) => u.sessionUpdate === "tool_call");
+      const plan = updates.find((u) => u.sessionUpdate === "plan");
+      expect(tool?.messageId).toMatch(/^m_[A-Za-z0-9]{16}$/);
+      expect(plan?.messageId).toMatch(/^m_[A-Za-z0-9]{16}$/);
+      expect(tool?.messageId).not.toBe(plan?.messageId);
+    });
+
+    it("does not stamp messageId on filtered state updates", async () => {
+      const { session, mock } = makeSession("sess_state", "u_state");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_state",
+        update: { sessionUpdate: "current_model_update", currentModel: "opus" },
+      });
+
+      // State updates ARE broadcast (so live clients can react) but
+      // not recorded — and since they're not anchorable for replay,
+      // no messageId is stamped.
+      const broadcast = a.stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "current_model_update",
+      );
+      const update = (broadcast?.params as { update: { messageId?: unknown } })
+        .update;
+      expect(update.messageId).toBeUndefined();
+    });
+  });
+
   describe("messageId on prompt_received and turn_complete", () => {
     it("stamps a fresh messageId on prompt_received and turn_complete", async () => {
       const { session, mock } = makeSession("sess_m", "u_m");
