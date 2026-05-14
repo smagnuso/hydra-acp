@@ -109,7 +109,7 @@ export function registerSessionRoutes(
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     reply.header(
       "Content-Disposition",
-      `attachment; filename="hydra-${id}-${stamp}.hydra"`,
+      `attachment; filename="${id}-${stamp}.hydra"`,
     );
     reply.code(200).send(bundle);
   });
