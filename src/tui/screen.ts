@@ -1509,8 +1509,12 @@ interface PromptVisualRow {
 
 // Split each logical buffer line into visual rows of at most `room` chars
 // each, so very long pasted/typed input soft-wraps in the prompt area
-// instead of running off-screen. An empty buffer line still yields one
-// visual row so the cursor has somewhere to land.
+// instead of running off-screen. Breaks prefer the last whitespace in
+// the window so wraps land on word boundaries; an unbroken run wider
+// than `room` falls back to a hard wrap. The trailing whitespace stays
+// on the upstream row, keeping [startCol, endCol) a contiguous partition
+// of the line — the cursor-positioning logic in computePromptLayout
+// depends on that invariant.
 function computePromptVisualRows(buffer: string[], room: number): PromptVisualRow[] {
   const rows: PromptVisualRow[] = [];
   for (let i = 0; i < buffer.length; i++) {
@@ -1521,9 +1525,24 @@ function computePromptVisualRows(buffer: string[], room: number): PromptVisualRo
     }
     let pos = 0;
     while (pos < line.length) {
-      const end = Math.min(line.length, pos + room);
-      rows.push({ bufferIdx: i, startCol: pos, endCol: end });
-      pos = end;
+      if (line.length - pos <= room) {
+        rows.push({ bufferIdx: i, startCol: pos, endCol: line.length });
+        pos = line.length;
+        break;
+      }
+      let breakAt = -1;
+      for (let j = pos + room - 1; j >= pos; j--) {
+        const c = line[j];
+        if (c === " " || c === "\t") {
+          breakAt = j + 1;
+          break;
+        }
+      }
+      if (breakAt === -1) {
+        breakAt = pos + room;
+      }
+      rows.push({ bufferIdx: i, startCol: pos, endCol: breakAt });
+      pos = breakAt;
     }
   }
   if (rows.length === 0) {
