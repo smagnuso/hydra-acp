@@ -65,8 +65,12 @@ export async function pickSession(
   };
 
   // sorted/rows/widths are rebuilt whenever the underlying session list
-  // changes (kill / delete refetches from the daemon).
-  let visible: DiscoveredSession[] = sortSessions(opts.sessions);
+  // changes (kill / delete refetches from the daemon). `allSessions` is the
+  // full sorted source; `visible` is the currently displayed slice — equal
+  // to `allSessions` when the picker isn't filtering, otherwise the subset
+  // matching `searchTerm`.
+  let allSessions: DiscoveredSession[] = sortSessions(opts.sessions);
+  let visible: DiscoveredSession[] = allSessions;
   let rows: Row[] = visible.map((s) => toRow(s, Date.now()));
   let widths: Widths = computeWidths(rows);
 
@@ -76,6 +80,13 @@ export async function pickSession(
   let total = 1 + visible.length;
   let selectedIdx = 0;
   let scrollOffset = 0;
+
+  // Picker-search state. `/` enters search; printable chars build up
+  // `searchTerm` and incrementally narrow `visible`; ^c / ESC drops the
+  // filter and returns to the full list. The filter never persists across
+  // pickSession calls — state is local to this invocation.
+  let searchActive = false;
+  let searchTerm = "";
 
   // Confirmation state. While in 'confirm-kill' or 'confirm-delete' we
   // hijack key handling, replace the indicator with a yes/no prompt, and
@@ -119,6 +130,32 @@ export async function pickSession(
     widths = computeWidths(rows);
     total = 1 + visible.length;
     computeLayout();
+  };
+
+  // Apply (or remove, when searchTerm is empty / searchActive is false)
+  // the picker-search filter to `allSessions`, replacing `visible` with
+  // the filtered slice and rebuilding all derived state. When invoked
+  // while in search mode, snaps the cursor to the first match (or to
+  // "+ New session" when nothing matches) so the user always sees a
+  // selectable row; out of search mode the cursor/scroll are clamped
+  // but not reset (so refresh after a kill doesn't drop context).
+  const applyFilter = (): void => {
+    if (searchActive && searchTerm.length > 0) {
+      visible = allSessions.filter((s) => matchesSearch(s, searchTerm));
+    } else {
+      visible = allSessions;
+    }
+    rebuildRows();
+    if (searchActive) {
+      scrollOffset = 0;
+      selectedIdx = visible.length > 0 ? 1 : 0;
+    } else if (selectedIdx > total - 1) {
+      selectedIdx = Math.max(0, total - 1);
+    }
+    if (scrollOffset + viewportSize > visible.length) {
+      scrollOffset = Math.max(0, visible.length - viewportSize);
+    }
+    adjustScroll();
   };
 
   const adjustScroll = (): void => {
@@ -192,6 +229,20 @@ export async function pickSession(
     }
     if (transientStatus !== null) {
       term.dim.noFormat(`  ${transientStatus}`);
+      return;
+    }
+    if (searchActive) {
+      // Search line is anchored to the bottom of the picker so it stays
+      // visible regardless of how the session list scrolls above. ^c
+      // exits and clears the filter. A trailing block cursor reinforces
+      // that the line accepts input.
+      term.brightYellow.noFormat(`  /${searchTerm}`);
+      term.bgBrightYellow(" ");
+      const hint =
+        visible.length === 0
+          ? " no matches"
+          : ` ${visible.length} match${visible.length === 1 ? "" : "es"}`;
+      term.dim.noFormat(`${hint} · ^c clears`);
       return;
     }
     term.dim.noFormat(formatIndicator());
@@ -278,8 +329,8 @@ export async function pickSession(
     const refresh = async (preferredId?: string): Promise<void> => {
       try {
         const next = await listSessions(opts.config);
-        visible = sortSessions(next);
-        rebuildRows();
+        allSessions = sortSessions(next);
+        applyFilter();
         if (preferredId !== undefined) {
           const idx = visible.findIndex((s) => s.sessionId === preferredId);
           if (idx >= 0) {
@@ -394,7 +445,44 @@ export async function pickSession(
       // into the next action's context. We still fall through and run
       // the key's normal behavior.
       clearTransient();
+      // Search mode: chars build the filter, navigation keys still move
+      // through the filtered list, ^c / ESC clears the filter. r/k/d/etc.
+      // are intentionally NOT interpreted as actions here — the user is
+      // typing a substring that may contain those letters.
+      if (searchActive) {
+        if (data?.isCharacter) {
+          searchTerm += name;
+          applyFilter();
+          renderFromScratch();
+          return;
+        }
+        if (name === "BACKSPACE") {
+          if (searchTerm.length > 0) {
+            searchTerm = searchTerm.slice(0, -1);
+            applyFilter();
+            renderFromScratch();
+          }
+          return;
+        }
+        if (name === "ESCAPE" || name === "CTRL_C") {
+          searchActive = false;
+          searchTerm = "";
+          applyFilter();
+          renderFromScratch();
+          return;
+        }
+        // Fall through for UP/DOWN/PAGE_UP/PAGE_DOWN/HOME/END/ENTER so the
+        // user can navigate the filtered list and pick a match without
+        // leaving search mode.
+      }
       if (data?.isCharacter) {
+        if (name === "/") {
+          searchActive = true;
+          searchTerm = "";
+          applyFilter();
+          renderFromScratch();
+          return;
+        }
         if (name === "r" || name === "R") {
           const currentId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
@@ -507,4 +595,28 @@ function formatNewSessionLabel(cwd: string, maxWidth: number): string {
   const prefix = "+ New session in ";
   const budget = Math.max(1, maxWidth - prefix.length);
   return prefix + truncateMiddle(shortenHomePath(cwd), budget);
+}
+
+// Case-insensitive substring match across the session's user-visible
+// metadata. Exported so the picker.test.ts can exercise it directly
+// without driving a fake terminal.
+export function matchesSearch(s: DiscoveredSession, term: string): boolean {
+  if (term.length === 0) {
+    return true;
+  }
+  const t = term.toLowerCase();
+  const haystacks = [
+    stripHydraSessionPrefix(s.sessionId),
+    s.upstreamSessionId ?? "",
+    s.agentId ?? "",
+    s.title ?? "",
+    s.cwd,
+    shortenHomePath(s.cwd),
+  ];
+  for (const h of haystacks) {
+    if (h.toLowerCase().includes(t)) {
+      return true;
+    }
+  }
+  return false;
 }

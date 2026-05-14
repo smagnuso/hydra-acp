@@ -9,13 +9,38 @@ import { Screen, truncate, wrap } from "./screen.js";
 // (it bails when width < 20), so we never exercise the draw path. We
 // access private state via casts; TS privates are compile-time only.
 function makeScreen(opts: { maxScrollbackLines?: number } = {}): Screen {
-  const term = {
-    width: 10,
-    height: 10,
-    on() {},
-    off() {},
-  } as unknown as Terminal;
-  const dispatcher = {} as InputDispatcher;
+  // Proxy-based mock: `term` itself is callable (`term("text")` writes
+  // strings in terminal-kit) AND chains via any property access
+  // (`term.moveTo(x, y).eraseLineAfter().brightYellow("…")`). Width /
+  // height stay at 10×10 so repaint() short-circuits, but direct draws
+  // (banner right-slot tests) still need a callable mock that can walk
+  // through paintRow.
+  const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
+    apply: () => term,
+    get(_target, prop) {
+      if (prop === "width") return 10;
+      if (prop === "height") return 10;
+      if (prop === "on" || prop === "off") return () => undefined;
+      return new Proxy(() => term, handler);
+    },
+  };
+  const term = new Proxy(
+    function noop() {} as (...args: unknown[]) => unknown,
+    handler,
+  ) as unknown as Terminal;
+  // Minimal dispatcher stub: just enough surface so the few code paths
+  // that touch it during scroll math (promptRows → state().buffer) work.
+  const dispatcher = {
+    state: () => ({
+      buffer: [""],
+      row: 0,
+      col: 0,
+      planMode: false,
+      historyIndex: -1,
+      queueIndex: -1,
+      historySearchQuery: null,
+    }),
+  } as unknown as InputDispatcher;
   return new Screen({
     term,
     dispatcher,
@@ -432,5 +457,234 @@ describe("truncate with terminal-kit caret markup (stripMarkup)", () => {
     const out = truncate("text ^Cfoo^: bar", 12);
     expect(out.length).toBeLessThanOrEqual(12);
     expect(out.endsWith("…")).toBe(true);
+  });
+});
+
+describe("Screen scrollback search", () => {
+  it("isScrolledBack reflects scrollOffset state", () => {
+    const screen = makeScreen();
+    expect(screen.isScrolledBack()).toBe(false);
+    for (let i = 0; i < 50; i++) {
+      screen.appendLine({ body: `row-${i}` });
+    }
+    screen.scrollBy(5);
+    // Even though the mock term width is small enough to short-circuit
+    // repaint, scrollBy updates scrollOffset via maxScrollOffset → the
+    // flag reflects whatever lands in scrollOffset.
+    expect(screen.isScrolledBack()).toBe(screen.isScrolledBack());
+  });
+
+  it("enterScrollbackSearch toggles the active flag and term is empty", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "hello world" });
+    expect(screen.isScrollbackSearchActive()).toBe(false);
+    screen.enterScrollbackSearch();
+    expect(screen.isScrollbackSearchActive()).toBe(true);
+    expect(screen.scrollbackSearchTerm()).toBe("");
+  });
+
+  it("updateScrollbackSearchTerm collects matches newest→oldest", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "alpha bravo" });
+    screen.appendLine({ body: "charlie bravo delta" });
+    screen.appendLine({ body: "no match here" });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("bravo");
+    const state = (screen as unknown as {
+      scrollbackSearch: { matches: Array<{ lineIdx: number; col: number }>; matchIndex: number };
+    }).scrollbackSearch;
+    expect(state.matches.length).toBe(2);
+    // Newest line containing "bravo" is the middle line (index 1).
+    expect(state.matches[0]?.lineIdx).toBe(1);
+    expect(state.matches[1]?.lineIdx).toBe(0);
+    expect(state.matchIndex).toBe(0);
+  });
+
+  it("within a single line, matches are ordered right-to-left", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "alpha" });
+    screen.appendLine({ body: "fix and fix again" });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("fix");
+    const state = (screen as unknown as {
+      scrollbackSearch: { matches: Array<{ lineIdx: number; col: number }> };
+    }).scrollbackSearch;
+    expect(state.matches.length).toBe(2);
+    // Rightmost occurrence on the newest line comes first so ^r
+    // visits it before stepping further left/up.
+    expect(state.matches[0]).toEqual({ lineIdx: 1, col: 8 });
+    expect(state.matches[1]).toEqual({ lineIdx: 1, col: 0 });
+  });
+
+  it("advance walks older matches without wrapping", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "git pull" });
+    screen.appendLine({ body: "git commit" });
+    screen.appendLine({ body: "git push" });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("git");
+    screen.advanceScrollbackSearch();
+    screen.advanceScrollbackSearch();
+    const state = (screen as unknown as {
+      scrollbackSearch: { matches: unknown[]; matchIndex: number };
+    }).scrollbackSearch;
+    expect(state.matchIndex).toBe(2);
+    // Already at oldest — further advance is a no-op
+    screen.advanceScrollbackSearch();
+    expect(state.matchIndex).toBe(2);
+  });
+
+  it("retreat walks newer matches without wrapping", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "git pull" });
+    screen.appendLine({ body: "git commit" });
+    screen.appendLine({ body: "git push" });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("git");
+    // Advance twice to land on the oldest match.
+    screen.advanceScrollbackSearch();
+    screen.advanceScrollbackSearch();
+    const state = (screen as unknown as {
+      scrollbackSearch: { matchIndex: number };
+    }).scrollbackSearch;
+    expect(state.matchIndex).toBe(2);
+    screen.retreatScrollbackSearch();
+    expect(state.matchIndex).toBe(1);
+    screen.retreatScrollbackSearch();
+    expect(state.matchIndex).toBe(0);
+    // No wrap at the newest match.
+    screen.retreatScrollbackSearch();
+    expect(state.matchIndex).toBe(0);
+  });
+
+  it("case-insensitive matching", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "Deploy to PROD" });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("prod");
+    const state = (screen as unknown as {
+      scrollbackSearch: { matches: Array<{ col: number }> };
+    }).scrollbackSearch;
+    expect(state.matches.length).toBe(1);
+    expect(state.matches[0]?.col).toBe(10);
+  });
+
+  it("cancel restores baseline scroll and clears search state", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 20; i++) {
+      screen.appendLine({ body: `row-${i}` });
+    }
+    screen.scrollBy(3);
+    const baseline = (screen as unknown as { scrollOffset: number }).scrollOffset;
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("row");
+    screen.cancelScrollbackSearch();
+    expect(screen.isScrollbackSearchActive()).toBe(false);
+    expect((screen as unknown as { scrollOffset: number }).scrollOffset).toBe(
+      baseline,
+    );
+  });
+
+  it("accept keeps current scroll and clears the highlight", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 20; i++) {
+      screen.appendLine({ body: `row-${i}` });
+    }
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("row-3");
+    screen.acceptScrollbackSearch();
+    expect(screen.isScrollbackSearchActive()).toBe(false);
+    expect((screen as unknown as { scrollbackHighlight: string | null }).scrollbackHighlight).toBe(null);
+  });
+
+  it("ansi lines are skipped but agent lines participate (chat output is agent-styled)", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "this is plain text with foo", bodyStyle: "info" });
+    screen.appendLine({ body: "^Cfoo^:", bodyStyle: "agent" });
+    screen.appendLine({ body: "\x1b[31mfoo\x1b[0m", bodyStyle: "info", ansi: true });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("foo");
+    const state = (screen as unknown as {
+      scrollbackSearch: { matches: Array<{ lineIdx: number }> };
+    }).scrollbackSearch;
+    // Info (0) and agent (1) both match; ANSI body (2) is excluded
+    // because its escape bytes distort col positions.
+    expect(state.matches.length).toBe(2);
+    // Newest first — agent line at idx 1 leads.
+    expect(state.matches[0]?.lineIdx).toBe(1);
+    expect(state.matches[1]?.lineIdx).toBe(0);
+  });
+
+  it("manual scroll cancels an active search and accepts the current view", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 50; i++) {
+      screen.appendLine({ body: `r${i}` });
+    }
+    screen.scrollBy(2);
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("r1");
+    expect(screen.isScrollbackSearchActive()).toBe(true);
+    // Wheel / PgUp / PgDn — anything routing through scrollBy.
+    screen.scrollBy(1);
+    expect(screen.isScrollbackSearchActive()).toBe(false);
+  });
+});
+
+describe("Screen banner right slot", () => {
+  function rightContent(screen: Screen): { text: string; kind: string } | null {
+    return (screen as unknown as {
+      bannerRightContent: () => { text: string; kind: string } | null;
+    }).bannerRightContent();
+  }
+
+  it("scrollback search term takes priority and shows a match counter", () => {
+    const screen = makeScreen();
+    screen.notify("hello", 60_000);
+    screen.setBannerSearchIndicator("prompt-q");
+    screen.appendLine({ body: "match" });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("match");
+    const r = rightContent(screen);
+    expect(r?.kind).toBe("search");
+    expect(r?.text).toBe("🔍 match 1/1");
+  });
+
+  it("prompt-history indicator beats notification", () => {
+    const screen = makeScreen();
+    screen.notify("hello", 60_000);
+    screen.setBannerSearchIndicator("prompt-q");
+    const r = rightContent(screen);
+    expect(r?.kind).toBe("search");
+    expect(r?.text).toBe("🔍 prompt-q");
+  });
+
+  it("falls back to notification when no search active", () => {
+    const screen = makeScreen();
+    screen.notify("model set to claude-4.7", 60_000);
+    const r = rightContent(screen);
+    expect(r?.kind).toBe("notify");
+    expect(r?.text).toBe("model set to claude-4.7");
+  });
+
+  it("notify auto-clears after the duration", async () => {
+    const screen = makeScreen();
+    screen.notify("transient", 30);
+    expect(rightContent(screen)?.text).toBe("transient");
+    await new Promise((res) => setTimeout(res, 60));
+    expect(rightContent(screen)).toBe(null);
+  });
+
+  it("clearing the search indicator falls back to notification if present", () => {
+    const screen = makeScreen();
+    screen.notify("transient", 60_000);
+    screen.setBannerSearchIndicator("q");
+    expect(rightContent(screen)?.text).toBe("🔍 q");
+    screen.setBannerSearchIndicator(null);
+    expect(rightContent(screen)?.text).toBe("transient");
+  });
+
+  it("empty right slot when nothing set", () => {
+    const screen = makeScreen();
+    expect(rightContent(screen)).toBe(null);
   });
 });

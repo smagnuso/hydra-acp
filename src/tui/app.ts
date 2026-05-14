@@ -535,6 +535,9 @@ async function runSession(
         if (exitConfirmation && tryHandleExitConfirmKey(ev)) {
           continue;
         }
+        if (tryHandleScrollbackSearchKey(ev)) {
+          continue;
+        }
         if (tryHandleCompletionKey(ev)) {
           continue;
         }
@@ -544,6 +547,12 @@ async function runSession(
         }
       }
       refreshCompletions();
+      // Surface the prompt-history reverse-search query (when one is
+      // engaged) in the banner's right slot — it's otherwise invisible
+      // since the prompt area shows only the matched history entry.
+      screen.setBannerSearchIndicator(
+        dispatcher.state().historySearchQuery,
+      );
       screen.refreshPrompt();
     },
   });
@@ -624,6 +633,67 @@ async function runSession(
       return true;
     }
     dispatcher.replaceFirstLine(next);
+    return true;
+  };
+
+  // Scrollback reverse-search: ^r while scrolled back engages a search
+  // overlay in the prompt area; subsequent ^r advances to the older match;
+  // chars build the term; backspace edits it; ESC/^c cancels (restoring
+  // baseline scroll); Enter accepts (keeping viewport on current match).
+  // While search is active this predicate owns every keystroke so the
+  // dispatcher / completion paths can't see them. Returns false when the
+  // event isn't ours to handle (so normal routing continues).
+  const tryHandleScrollbackSearchKey = (ev: KeyEvent): boolean => {
+    if (!screen.isScrollbackSearchActive()) {
+      // Not in search mode — only ^r when scrolled back kicks us in.
+      if (ev.type === "key" && ev.name === "ctrl-r" && screen.isScrolledBack()) {
+        screen.enterScrollbackSearch();
+        screen.updateScrollbackSearchTerm("");
+        return true;
+      }
+      return false;
+    }
+    // In search mode: own every key.
+    if (ev.type === "char") {
+      const term = screen.scrollbackSearchTerm() + ev.ch;
+      screen.updateScrollbackSearchTerm(term);
+      return true;
+    }
+    if (ev.type === "paste") {
+      const term = screen.scrollbackSearchTerm() + ev.text.replace(/\n/g, " ");
+      screen.updateScrollbackSearchTerm(term);
+      return true;
+    }
+    if (ev.type === "key") {
+      switch (ev.name) {
+        case "ctrl-r":
+          screen.advanceScrollbackSearch();
+          return true;
+        case "ctrl-s":
+          screen.retreatScrollbackSearch();
+          return true;
+        case "backspace": {
+          const term = screen.scrollbackSearchTerm();
+          if (term.length === 0) {
+            screen.cancelScrollbackSearch();
+          } else {
+            screen.updateScrollbackSearchTerm(term.slice(0, -1));
+          }
+          return true;
+        }
+        case "enter":
+          screen.acceptScrollbackSearch();
+          return true;
+        case "escape":
+        case "ctrl-c":
+          screen.cancelScrollbackSearch();
+          return true;
+        default:
+          // Swallow everything else so a stray arrow doesn't fall through
+          // to the prompt dispatcher behind the overlay.
+          return true;
+      }
+    }
     return true;
   };
 
@@ -967,6 +1037,16 @@ async function runSession(
       case "toggle-tools":
         toolsExpanded = !toolsExpanded;
         renderToolsBlock();
+        return;
+      case "escalate-search":
+        // Prompt-history reverse-search ran out (no match, or the user
+        // walked past the oldest match). Hand the query off to the
+        // screen's scrollback search so they can keep walking through
+        // session scrollback for the same term — the prompt area
+        // turns into the search overlay with their typed text as the
+        // search input.
+        screen.enterScrollbackSearch();
+        screen.updateScrollbackSearchTerm(effect.query);
         return;
     }
   };

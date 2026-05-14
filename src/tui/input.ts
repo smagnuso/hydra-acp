@@ -28,6 +28,8 @@ export type KeyName =
   | "ctrl-n"
   | "ctrl-o"
   | "ctrl-p"
+  | "ctrl-r"
+  | "ctrl-s"
   | "ctrl-u"
   | "ctrl-w"
   | "ctrl-y"
@@ -53,7 +55,13 @@ export type InputEffect =
   | { type: "scroll-to-top" }
   | { type: "scroll-to-bottom" }
   | { type: "switch-session" }
-  | { type: "toggle-tools" };
+  | { type: "toggle-tools" }
+  // Emitted when prompt-history reverse-search runs out — either no
+  // history entry matched the query, or the user advanced ^R past the
+  // oldest match. The app hands the query off to the screen's
+  // scrollback search so the user keeps walking through scrollback
+  // without having to press anything extra.
+  | { type: "escalate-search"; query: string };
 
 export interface InputState {
   buffer: string[];
@@ -62,6 +70,11 @@ export interface InputState {
   planMode: boolean;
   historyIndex: number;
   queueIndex: number;
+  // Non-null while reverse-i-search is engaged on prompt history.
+  // Exposed so the screen can surface the query in the banner —
+  // otherwise the prompt area shows only the matched entry, with no
+  // hint of what's being searched for.
+  historySearchQuery: string | null;
 }
 
 export interface InputOptions {
@@ -84,6 +97,19 @@ export class InputDispatcher {
   private savedDraft: { buffer: string[]; row: number; col: number } | null =
     null;
   private history: string[] = [];
+  // Active reverse-incremental search over `history`. Set when ^r is
+  // pressed; cleared when the user accepts (Enter / typing / arrows)
+  // or cancels (ESC). `query` is the lowercased substring matched
+  // against history entries; `matchIndices` are history indices in
+  // newest→oldest order; `cursor` is the current index into that list.
+  // `savedDraft` snapshots the buffer/cursor at the moment search
+  // began so ESC can restore it.
+  private historySearch: {
+    query: string;
+    matchIndices: number[];
+    cursor: number;
+    savedDraft: { buffer: string[]; row: number; col: number };
+  } | null = null;
   // Waiting queue snapshot (excludes the in-flight head). Newest item lives
   // at the end so Up walks the array right-to-left.
   private queue: string[] = [];
@@ -106,6 +132,7 @@ export class InputDispatcher {
       planMode: this.planMode,
       historyIndex: this.historyIndex,
       queueIndex: this.queueIndex,
+      historySearchQuery: this.historySearch?.query ?? null,
     };
   }
 
@@ -117,6 +144,7 @@ export class InputDispatcher {
     this.history = [...history];
     this.historyIndex = -1;
     this.savedDraft = null;
+    this.historySearch = null;
   }
 
   // Snapshot of the waiting queue (head excluded). Called by the app after
@@ -148,9 +176,57 @@ export class InputDispatcher {
     this.historyIndex = -1;
     this.queueIndex = -1;
     this.savedDraft = null;
+    this.historySearch = null;
   }
 
   feed(event: KeyEvent): InputEffect[] {
+    // Reverse-i-search owns ^r (advance), Escape (cancel restoring
+    // draft), Backspace (shrink the query), and printable chars / paste
+    // (extend the query). Enter exits search keeping the matched entry
+    // and submits it; arrows / other keys exit keeping the match and
+    // process normally.
+    if (this.historySearch !== null) {
+      if (event.type === "char") {
+        return this.mutateHistorySearchQuery(
+          this.historySearch.query + event.ch.toLowerCase(),
+        );
+      }
+      if (event.type === "paste") {
+        return this.mutateHistorySearchQuery(
+          this.historySearch.query +
+            event.text.replace(/\n/g, " ").toLowerCase(),
+        );
+      }
+      if (event.type === "key") {
+        if (event.name === "ctrl-r") {
+          return this.advanceHistorySearch();
+        }
+        if (event.name === "ctrl-s") {
+          this.retreatHistorySearch();
+          return [];
+        }
+        if (event.name === "escape") {
+          this.cancelHistorySearch();
+          return [];
+        }
+        if (event.name === "backspace") {
+          if (this.historySearch.query.length === 0) {
+            // Nothing left to shrink — cancel and restore the draft so
+            // backspace at this point reads as "undo my ^r".
+            this.cancelHistorySearch();
+            return [];
+          }
+          return this.mutateHistorySearchQuery(
+            this.historySearch.query.slice(0, -1),
+          );
+        }
+        // Enter / arrows / other keys: exit search keeping the loaded
+        // entry in the buffer, then process the key normally so the
+        // user can submit, move the cursor, or invoke another command
+        // on the matched text.
+        this.historySearch = null;
+      }
+    }
     if (event.type === "char") {
       this.insertChar(event.ch);
       return [];
@@ -231,6 +307,13 @@ export class InputDispatcher {
         return [{ type: "redraw" }];
       case "ctrl-p":
         return [{ type: "switch-session" }];
+      case "ctrl-r":
+        return this.startHistorySearch();
+      case "ctrl-s":
+        // ^s outside search is a no-op — terminal flow-control may also
+        // intercept it (XOFF) on some setups; inside search it walks
+        // forward toward newer matches.
+        return [];
       case "ctrl-u":
         this.killLine();
         return [];
@@ -275,6 +358,7 @@ export class InputDispatcher {
     this.historyIndex = -1;
     this.queueIndex = -1;
     this.savedDraft = null;
+    this.historySearch = null;
   }
 
   private insertChar(ch: string): void {
@@ -520,6 +604,154 @@ export class InputDispatcher {
     } else {
       this.clearBuffer();
     }
+  }
+
+  // Engage reverse-incremental search over prompt history. Uses the
+  // current buffer text as the search query. With an empty buffer we
+  // enter search mode in an "empty query, no match shown" state — the
+  // banner indicator lights up, and as the user types we extend the
+  // query and load top matches. We deliberately do NOT auto-load the
+  // most recent entry on an empty ^R (that's a surprise — Up-arrow
+  // already walks history if that's what they wanted). With a
+  // non-empty query that has no history match, escalate straight to
+  // scrollback search so the typed term searches session output.
+  private startHistorySearch(): InputEffect[] {
+    const query = this.bufferText().toLowerCase();
+    if (query.length === 0) {
+      this.historySearch = {
+        query: "",
+        matchIndices: [],
+        cursor: 0,
+        savedDraft: {
+          buffer: [...this.buffer],
+          row: this.row,
+          col: this.col,
+        },
+      };
+      return [];
+    }
+    const matchIndices = this.findHistoryMatches(query);
+    if (matchIndices.length === 0) {
+      // Buffer text stays put so cancelling the resulting scrollback
+      // search returns the user to what they typed.
+      return [{ type: "escalate-search", query }];
+    }
+    this.historySearch = {
+      query,
+      matchIndices,
+      cursor: 0,
+      savedDraft: {
+        buffer: [...this.buffer],
+        row: this.row,
+        col: this.col,
+      },
+    };
+    this.loadEntry(this.history[matchIndices[0]!] ?? "");
+    return [];
+  }
+
+  // ^R advance. At the oldest match with a non-empty query, falls
+  // through to scrollback search (same escalate path as a never-
+  // matched startHistorySearch). With an empty query at the oldest
+  // match (i.e. the user walked all history with no filter), advance
+  // is a no-op so the buffer stays on the oldest entry.
+  private advanceHistorySearch(): InputEffect[] {
+    if (this.historySearch === null) {
+      return [];
+    }
+    const search = this.historySearch;
+    const atOldest = search.cursor >= search.matchIndices.length - 1;
+    if (atOldest) {
+      if (search.query.length === 0) {
+        return [];
+      }
+      // Restore the original draft so cancelling the upcoming
+      // scrollback search lands the user back on the text they typed,
+      // not the oldest history entry.
+      const query = search.query;
+      const draft = search.savedDraft;
+      this.historySearch = null;
+      this.buffer = [...draft.buffer];
+      this.row = draft.row;
+      this.col = draft.col;
+      return [{ type: "escalate-search", query }];
+    }
+    search.cursor += 1;
+    const idx = search.matchIndices[search.cursor]!;
+    this.loadEntry(this.history[idx] ?? "");
+    return [];
+  }
+
+  // ^S retreat — walk toward newer matches. No-op at the newest match
+  // (no wrap, mirroring ^R no-wrap at the oldest).
+  private retreatHistorySearch(): void {
+    if (this.historySearch === null) {
+      return;
+    }
+    if (this.historySearch.cursor === 0) {
+      return;
+    }
+    this.historySearch.cursor -= 1;
+    const idx = this.historySearch.matchIndices[this.historySearch.cursor]!;
+    this.loadEntry(this.history[idx] ?? "");
+  }
+
+  // Backspace / typing within search mode mutates the query and
+  // re-searches. When the new query is empty, restore the saved
+  // draft buffer (typically empty) and stay in search mode — the
+  // user can keep typing. When the new query has matches, load the
+  // top one. When the new query has no matches, escalate to scrollback
+  // search so the typed term applies there instead.
+  private mutateHistorySearchQuery(newQuery: string): InputEffect[] {
+    if (this.historySearch === null) {
+      return [];
+    }
+    if (newQuery.length === 0) {
+      this.historySearch.query = "";
+      this.historySearch.matchIndices = [];
+      this.historySearch.cursor = 0;
+      const draft = this.historySearch.savedDraft;
+      this.buffer = [...draft.buffer];
+      this.row = draft.row;
+      this.col = draft.col;
+      return [];
+    }
+    const matchIndices = this.findHistoryMatches(newQuery);
+    if (matchIndices.length === 0) {
+      const draft = this.historySearch.savedDraft;
+      this.historySearch = null;
+      this.buffer = [...draft.buffer];
+      this.row = draft.row;
+      this.col = draft.col;
+      return [{ type: "escalate-search", query: newQuery }];
+    }
+    this.historySearch.query = newQuery;
+    this.historySearch.matchIndices = matchIndices;
+    this.historySearch.cursor = 0;
+    this.loadEntry(this.history[matchIndices[0]!] ?? "");
+    return [];
+  }
+
+  private findHistoryMatches(query: string): number[] {
+    const out: number[] = [];
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i] ?? "";
+      if (query.length === 0 || entry.toLowerCase().includes(query)) {
+        out.push(i);
+      }
+    }
+    return out;
+  }
+
+  private cancelHistorySearch(): void {
+    if (this.historySearch === null) {
+      return;
+    }
+    const draft = this.historySearch.savedDraft;
+    this.historySearch = null;
+    this.buffer = [...draft.buffer];
+    this.row = draft.row;
+    this.col = draft.col;
   }
 
   private loadEntry(text: string): void {

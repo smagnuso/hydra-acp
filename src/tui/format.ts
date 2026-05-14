@@ -25,7 +25,9 @@ export type Style =
   | "code"
   | "heading-1"
   | "heading-2"
-  | "heading-3";
+  | "heading-3"
+  | "search-highlight"
+  | "search-highlight-active";
 
 export interface FormattedLine {
   prefix?: string;

@@ -441,4 +441,210 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["draft"]);
     expect(d.state().queueIndex).toBe(-1);
   });
+
+  it("Ctrl+R with empty buffer engages history search with empty query (no auto-load)", () => {
+    const d = new InputDispatcher({ history: ["old", "mid", "new"] });
+    expect(feed(d, [k("ctrl-r")])).toEqual([]);
+    // Buffer stays empty — search is engaged but no entry is loaded
+    // yet; the next typed char will start filtering.
+    expect(d.state().buffer).toEqual([""]);
+    expect(d.state().historySearchQuery).toBe("");
+    // Typing 'n' now finds the entry containing 'n' and loads it.
+    feed(d, [ch("n")]);
+    expect(d.state().buffer).toEqual(["new"]);
+    expect(d.state().historySearchQuery).toBe("n");
+  });
+
+  it("Ctrl+R with buffer text filters history by substring", () => {
+    const d = new InputDispatcher({
+      history: ["git pull", "git commit", "git push", "npm test"],
+    });
+    feed(d, [ch("p"), ch("u"), ch("s"), ch("h")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+  });
+
+  it("Ctrl+R case-insensitive match", () => {
+    const d = new InputDispatcher({ history: ["Deploy Prod", "rebuild"] });
+    feed(d, [ch("d"), ch("e"), ch("p"), ch("l")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["Deploy Prod"]);
+  });
+
+  it("Ctrl+R then Escape restores the original draft", () => {
+    const d = new InputDispatcher({ history: ["git pull", "git push"] });
+    feed(d, [ch("g"), ch("i"), ch("t")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    expect(feed(d, [k("escape")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["git"]);
+  });
+
+  it("Ctrl+R then Enter submits the matched history entry", () => {
+    const d = new InputDispatcher({ history: ["git push"] });
+    feed(d, [ch("g"), ch("i"), ch("t")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    expect(feed(d, [k("enter")])).toEqual([
+      { type: "send", text: "git push", planMode: false },
+    ]);
+  });
+
+  it("Ctrl+R with no history match escalates to scrollback search", () => {
+    const d = new InputDispatcher({ history: ["git pull"] });
+    feed(d, [ch("z"), ch("z"), ch("z")]);
+    const effects = feed(d, [k("ctrl-r")]);
+    expect(effects).toEqual([{ type: "escalate-search", query: "zzz" }]);
+    // Buffer untouched — escalating means the user keeps their typed
+    // text so cancelling scrollback search lands them back here.
+    expect(d.state().buffer).toEqual(["zzz"]);
+  });
+
+  it("Ctrl+R with empty buffer + empty history engages search; typing escalates on first miss", () => {
+    const d = new InputDispatcher();
+    expect(feed(d, [k("ctrl-r")])).toEqual([]);
+    expect(d.state().historySearchQuery).toBe("");
+    // Typing with no history finds nothing → escalates to scrollback.
+    expect(feed(d, [ch("x")])).toEqual([
+      { type: "escalate-search", query: "x" },
+    ]);
+  });
+
+  it("Ctrl+R past the oldest match escalates with the original query", () => {
+    const d = new InputDispatcher({ history: ["git pull"] });
+    feed(d, [ch("g"), ch("i"), ch("t")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git pull"]);
+    // Already at oldest — next ^R falls through to scrollback search.
+    const effects = feed(d, [k("ctrl-r")]);
+    expect(effects).toEqual([{ type: "escalate-search", query: "git" }]);
+    // Restored to original draft so cancel returns to "git", not "git pull".
+    expect(d.state().buffer).toEqual(["git"]);
+  });
+
+  it("backspacing query to empty restores the saved draft and stays in search", () => {
+    const d = new InputDispatcher({ history: ["one"] });
+    feed(d, [ch("o")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["one"]);
+    feed(d, [k("backspace")]);
+    // Empty query → draft "o" comes back; still in search mode so
+    // typing keeps filtering.
+    expect(d.state().buffer).toEqual(["o"]);
+    expect(d.state().historySearchQuery).toBe("");
+    // Past-oldest ^R with empty query is a no-op (don't escalate empty).
+    expect(feed(d, [k("ctrl-r")])).toEqual([]);
+  });
+
+  it("typing in search mode extends the query and re-searches", () => {
+    const d = new InputDispatcher({
+      history: ["git pull", "git push origin", "npm test"],
+    });
+    feed(d, [ch("n")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["npm test"]);
+    feed(d, [k("backspace"), ch("g")]);
+    expect(d.state().buffer).toEqual(["git push origin"]);
+    feed(d, [ch("i"), ch("t"), ch(" "), ch("p"), ch("u"), ch("l")]);
+    expect(d.state().buffer).toEqual(["git pull"]);
+  });
+
+  it("typing extends the query until no match, then escalates", () => {
+    const d = new InputDispatcher({ history: ["git push"] });
+    feed(d, [ch("g"), ch("i"), ch("t")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    const effects = feed(d, [ch("z")]);
+    expect(effects).toEqual([{ type: "escalate-search", query: "gitz" }]);
+    expect(d.state().buffer).toEqual(["git"]);
+  });
+
+  it("backspace in search mode shrinks the query and re-searches", () => {
+    const d = new InputDispatcher({
+      history: ["git pull", "git push", "git commit"],
+    });
+    // Query "git pu" matches "git push" (newer) and "git pull" (older).
+    feed(d, [ch("g"), ch("i"), ch("t"), ch(" "), ch("p"), ch("u")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    feed(d, [k("backspace"), k("backspace"), k("backspace")]);
+    // Query now "git", newest match is "git commit".
+    expect(d.state().buffer).toEqual(["git commit"]);
+  });
+
+  it("backspace shrinking until no match escalates", () => {
+    const d2 = new InputDispatcher({ history: ["git push"] });
+    feed(d2, [ch("g"), ch("i"), ch("t")]);
+    feed(d2, [k("ctrl-r")]);
+    expect(d2.state().buffer).toEqual(["git push"]);
+    const effects = feed(d2, [ch("z")]);
+    expect(effects[0]).toEqual({ type: "escalate-search", query: "gitz" });
+  });
+
+  it("backspacing through the query restores the draft, then cancels search on next backspace", () => {
+    const d = new InputDispatcher({ history: ["onelongmatch"] });
+    feed(d, [ch("o"), ch("n"), ch("e")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["onelongmatch"]);
+    expect(d.state().historySearchQuery).toBe("one");
+    feed(d, [k("backspace"), k("backspace"), k("backspace")]);
+    // Query empty → buffer reverts to the saved draft; search still
+    // engaged so further typing would build a new query.
+    expect(d.state().buffer).toEqual(["one"]);
+    expect(d.state().historySearchQuery).toBe("");
+    // Another backspace at empty query cancels search (still leaves
+    // the draft in place).
+    expect(feed(d, [k("backspace")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["one"]);
+    expect(d.state().historySearchQuery).toBe(null);
+  });
+
+  it("Enter in search mode submits the matched entry (history clears search state)", () => {
+    const d = new InputDispatcher({ history: ["git push"] });
+    feed(d, [ch("g"), ch("i"), ch("t")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    expect(feed(d, [k("enter")])).toEqual([
+      { type: "send", text: "git push", planMode: false },
+    ]);
+  });
+
+  it("arrow key in search mode exits keeping the match and processes the arrow", () => {
+    const d = new InputDispatcher({ history: ["git push"] });
+    feed(d, [ch("g")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    feed(d, [k("home")]);
+    // home moved cursor to start of the matched line; buffer kept.
+    expect(d.state().buffer).toEqual(["git push"]);
+    expect(d.state().col).toBe(0);
+  });
+
+  it("Ctrl+S in history search walks forward toward newer matches", () => {
+    const d = new InputDispatcher({
+      history: ["git pull", "git push", "git commit"],
+    });
+    feed(d, [ch("g"), ch("i"), ch("t")]);
+    feed(d, [k("ctrl-r")]);
+    // cursor=0, newest match
+    expect(d.state().buffer).toEqual(["git commit"]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git pull"]);
+    // Walk forward
+    feed(d, [k("ctrl-s")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    feed(d, [k("ctrl-s")]);
+    expect(d.state().buffer).toEqual(["git commit"]);
+    // No wrap at the newest match
+    feed(d, [k("ctrl-s")]);
+    expect(d.state().buffer).toEqual(["git commit"]);
+  });
+
+  it("Ctrl+S outside history search is a no-op", () => {
+    const d = new InputDispatcher({ history: ["one"] });
+    expect(feed(d, [k("ctrl-s")])).toEqual([]);
+    expect(d.state().buffer).toEqual([""]);
+  });
 });

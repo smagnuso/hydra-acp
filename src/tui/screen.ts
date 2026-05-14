@@ -129,6 +129,15 @@ export class Screen {
   private lineIds = new WeakMap<FormattedLine, number>();
   private wrapCache = new Map<number, FormattedLine[]>();
   private wrapCacheWidth = 0;
+  // For each wrapped chunk (produced by wrapOne), record the source
+  // line's id and the col offset where this chunk starts in the source
+  // body. Used by the active-match highlight in scrollback search to
+  // map currentMatch (sourceLineId, sourceCol) onto the wrapped chunk
+  // that owns it without scanning the wrap cache.
+  private wrapOrigin = new WeakMap<
+    FormattedLine,
+    { sourceLineId: number; sourceColOffset: number }
+  >();
   // Per-row signature of what was painted to each terminal row on the
   // previous repaint. drawX methods funnel through paintRow(), which
   // skips the moveTo+eraseLineAfter+write sequence when the new
@@ -146,10 +155,35 @@ export class Screen {
   // above the bottom. Mouse wheel and PgUp/PgDn adjust this; new content
   // pushes the view down naturally when at 0.
   private scrollOffset = 0;
+  // Scrollback search state. While active the prompt area is taken over
+  // by a single-row search input (drawSearchPrompt) and matches in the
+  // visible scrollback are rendered with a background-highlight style.
+  // baselineScroll captures the scrollOffset at the moment the user
+  // engaged search so cancel can restore the view.
+  private scrollbackSearch: {
+    term: string;
+    matchIndex: number;
+    matches: Array<{ lineIdx: number; col: number }>;
+    baselineScroll: number;
+  } | null = null;
+  // Lowercased search term used by drawScrollback to drive per-row
+  // highlight rendering. Mirrors scrollbackSearch?.term but cached as a
+  // separate field so the per-row signature can include it cheaply.
+  private scrollbackHighlight: string | null = null;
+  // Right-side banner slot. Three sources, in priority order:
+  //   1. Active scrollback search term (auto, from this.scrollbackSearch)
+  //   2. External search indicator pushed by the app while prompt-
+  //      history reverse-search is active (gives that mode visible
+  //      feedback for its otherwise-hidden query)
+  //   3. Transient notification set via notify(), auto-cleared after
+  //      durationMs
+  private bannerNotification: string | null = null;
+  private bannerNotificationTimer: NodeJS.Timeout | null = null;
+  private bannerSearchIndicator: string | null = null;
   private banner: BannerState = {
     status: "ready",
     planMode: false,
-    hint: "⇧⇥ plan · ⌥⏎ newline · ⌃P pick · ⌃C cancel · ⌃D quit",
+    hint: "⇧⇥ plan · ⌥⏎ newline · ⌃P pick · ⌃C cancel · ⌃D detach",
     queued: 0,
   };
   private header: HeaderState = { agent: "?", cwd: "?", sessionId: "?" };
@@ -234,6 +268,10 @@ export class Screen {
       return;
     }
     this.started = false;
+    if (this.bannerNotificationTimer) {
+      clearTimeout(this.bannerNotificationTimer);
+      this.bannerNotificationTimer = null;
+    }
     this.uninstallBracketedPaste();
     this.term.off("key", this.keyHandler);
     if (this.mouseEnabled) {
@@ -565,6 +603,66 @@ export class Screen {
     this.placeCursor();
   }
 
+  // Transient right-side banner message. Cleared automatically after
+  // durationMs (default 4s). Each call resets the timer, so rapid
+  // successive notifications coalesce on the latest text. Active
+  // scrollback / prompt-history search indicators take priority over
+  // notifications, so a notification queued during search is held
+  // behind it and visible once search exits — unless its timer fires
+  // first, in which case it's dropped.
+  notify(text: string, durationMs = 4000): void {
+    if (this.bannerNotificationTimer) {
+      clearTimeout(this.bannerNotificationTimer);
+    }
+    this.bannerNotification = text;
+    this.bannerNotificationTimer = setTimeout(() => {
+      this.bannerNotification = null;
+      this.bannerNotificationTimer = null;
+      this.drawBanner();
+      this.placeCursor();
+    }, durationMs);
+    this.drawBanner();
+    this.placeCursor();
+  }
+
+  // Pushed by the app each onKey tick to reflect prompt-history
+  // reverse-search state in the banner — the only place that mode's
+  // query is visible. Pass null when not searching.
+  setBannerSearchIndicator(text: string | null): void {
+    if (this.bannerSearchIndicator === text) {
+      return;
+    }
+    this.bannerSearchIndicator = text;
+    this.drawBanner();
+    this.placeCursor();
+  }
+
+  // Computes what (if anything) the right-side banner slot should show
+  // this paint. Priority: scrollback search term > prompt-history
+  // indicator > notification. Scrollback gets a "N/M" counter suffix
+  // since the user can't see which match they're on from the highlight
+  // alone; prompt-history's match is visible in the buffer, so no
+  // counter needed there.
+  private bannerRightContent(): { text: string; kind: "search" | "notify" } | null {
+    if (this.scrollbackSearch !== null) {
+      const sb = this.scrollbackSearch;
+      const counter =
+        sb.matches.length > 0
+          ? ` ${sb.matchIndex + 1}/${sb.matches.length}`
+          : sb.term.length === 0
+            ? ""
+            : " 0/0";
+      return { text: `🔍 ${sb.term}${counter}`, kind: "search" };
+    }
+    if (this.bannerSearchIndicator !== null) {
+      return { text: `🔍 ${this.bannerSearchIndicator}`, kind: "search" };
+    }
+    if (this.bannerNotification !== null) {
+      return { text: this.bannerNotification, kind: "notify" };
+    }
+    return null;
+  }
+
   clearScrollback(): void {
     this.lines = [];
     this.keyedBlocks.clear();
@@ -774,6 +872,13 @@ export class Screen {
     if (delta === 0) {
       return;
     }
+    // Manual scroll (wheel / PgUp / PgDn) while a scrollback search is
+    // engaged is taken as "I'm done searching, let me look around" —
+    // accept the current match position and leave search mode so the
+    // scroll itself takes effect on a clean state.
+    if (this.scrollbackSearch !== null) {
+      this.acceptScrollbackSearch();
+    }
     const max = this.maxScrollOffset();
     const next = Math.min(max, Math.max(0, this.scrollOffset + delta));
     if (next === this.scrollOffset) {
@@ -784,6 +889,9 @@ export class Screen {
   }
 
   scrollToBottom(): void {
+    if (this.scrollbackSearch !== null) {
+      this.acceptScrollbackSearch();
+    }
     if (this.scrollOffset === 0) {
       return;
     }
@@ -792,12 +900,262 @@ export class Screen {
   }
 
   scrollToTop(): void {
+    if (this.scrollbackSearch !== null) {
+      this.acceptScrollbackSearch();
+    }
     const max = this.maxScrollOffset();
     if (this.scrollOffset === max) {
       return;
     }
     this.scrollOffset = max;
     this.repaint();
+  }
+
+  // True iff the user is scrolled above the live tail — gates the
+  // app-level decision of whether ^r engages scrollback search vs.
+  // prompt-history search.
+  isScrolledBack(): boolean {
+    return this.scrollOffset > 0;
+  }
+
+  // True iff a scrollback search is currently active. Used by the app
+  // to decide whether to keep routing keys into search vs. the prompt
+  // dispatcher.
+  isScrollbackSearchActive(): boolean {
+    return this.scrollbackSearch !== null;
+  }
+
+  // Engage scrollback reverse-search. Captures the current scroll
+  // position so cancel can restore it, and seeds an empty search term
+  // (the prompt row renders the search input immediately so the user
+  // sees the entry). Idempotent: no-op when already active.
+  enterScrollbackSearch(): void {
+    if (this.scrollbackSearch !== null) {
+      return;
+    }
+    this.scrollbackSearch = {
+      term: "",
+      matchIndex: 0,
+      matches: [],
+      baselineScroll: this.scrollOffset,
+    };
+    this.scrollbackHighlight = null;
+    this.repaint();
+  }
+
+  // Update the search term and recompute matches. Walks `lines` from
+  // the tail (newest) toward the head (oldest), pushing every case-
+  // insensitive substring hit. Snaps the viewport to the newest match
+  // when found. Called per keystroke; sub-millisecond on typical
+  // scrollback sizes.
+  updateScrollbackSearchTerm(term: string): void {
+    if (this.scrollbackSearch === null) {
+      return;
+    }
+    const lowered = term.toLowerCase();
+    const matches: Array<{ lineIdx: number; col: number }> = [];
+    if (lowered.length > 0) {
+      for (let i = this.lines.length - 1; i >= 0; i--) {
+        const line = this.lines[i];
+        if (!line || line.body.length === 0) {
+          continue;
+        }
+        // ANSI lines stay excluded — their escape bytes inflate col
+        // positions and substring math against the raw body would
+        // point at locations that don't line up with what's rendered.
+        // Agent lines (caret markup) are included: most chat content
+        // is agent-styled, and split-around-match still renders
+        // sensibly because the search-highlight span overrides the
+        // surrounding markup styling for its few chars.
+        if (line.ansi) {
+          continue;
+        }
+        const hay = line.body.toLowerCase();
+        // Collect occurrences left-to-right (non-overlapping step),
+        // then push to the global match list in reverse so within a
+        // single line we walk right-to-left. Rightmost is "newest" by
+        // reading order, so as ^r steps backward through scrollback
+        // we visit it first before going further back on the same line.
+        const lineCols: number[] = [];
+        let pos = 0;
+        while (pos < hay.length) {
+          const found = hay.indexOf(lowered, pos);
+          if (found === -1) {
+            break;
+          }
+          lineCols.push(found);
+          pos = found + lowered.length;
+        }
+        for (let j = lineCols.length - 1; j >= 0; j--) {
+          matches.push({ lineIdx: i, col: lineCols[j]! });
+        }
+      }
+    }
+    this.scrollbackSearch.term = term;
+    this.scrollbackSearch.matches = matches;
+    this.scrollbackSearch.matchIndex = 0;
+    this.scrollbackHighlight = lowered.length > 0 ? lowered : null;
+    if (matches.length > 0) {
+      this.scrollToMatch(matches[0]!);
+    }
+    this.repaint();
+  }
+
+  // Advance to the next-older match (called for repeated ^r). Stops at
+  // the oldest match (does not wrap). No-op when there are no matches
+  // or search is inactive.
+  advanceScrollbackSearch(): void {
+    if (this.scrollbackSearch === null || this.scrollbackSearch.matches.length === 0) {
+      return;
+    }
+    const nextIdx = Math.min(
+      this.scrollbackSearch.matches.length - 1,
+      this.scrollbackSearch.matchIndex + 1,
+    );
+    if (nextIdx === this.scrollbackSearch.matchIndex) {
+      return;
+    }
+    this.scrollbackSearch.matchIndex = nextIdx;
+    this.scrollToMatch(this.scrollbackSearch.matches[nextIdx]!);
+    this.repaint();
+  }
+
+  // Retreat to the previous (newer) match — ^s forward-search. Stops
+  // at the newest match (no wrap).
+  retreatScrollbackSearch(): void {
+    if (this.scrollbackSearch === null || this.scrollbackSearch.matches.length === 0) {
+      return;
+    }
+    if (this.scrollbackSearch.matchIndex === 0) {
+      return;
+    }
+    this.scrollbackSearch.matchIndex -= 1;
+    this.scrollToMatch(this.scrollbackSearch.matches[this.scrollbackSearch.matchIndex]!);
+    this.repaint();
+  }
+
+  // Exit search keeping the viewport at the current match. Highlight is
+  // cleared so subsequent scrollback content reads normally.
+  acceptScrollbackSearch(): void {
+    if (this.scrollbackSearch === null) {
+      return;
+    }
+    this.scrollbackSearch = null;
+    this.scrollbackHighlight = null;
+    this.repaint();
+  }
+
+  // Exit search and restore the viewport to where the user was when
+  // they engaged search.
+  cancelScrollbackSearch(): void {
+    if (this.scrollbackSearch === null) {
+      return;
+    }
+    const baseline = this.scrollbackSearch.baselineScroll;
+    this.scrollbackSearch = null;
+    this.scrollbackHighlight = null;
+    this.scrollOffset = baseline;
+    this.repaint();
+  }
+
+  scrollbackSearchTerm(): string {
+    return this.scrollbackSearch?.term ?? "";
+  }
+
+  // Source-line identity + col + term length for whichever match is
+  // currently selected (advanced via ^r / retreated via ^s). Used by
+  // drawScrollback to give the current match a distinct highlight
+  // style without disturbing the bulk-highlight on the other matches.
+  private currentMatchInfo(): { lineId: number; col: number; length: number } | null {
+    if (this.scrollbackSearch === null || this.scrollbackSearch.matches.length === 0) {
+      return null;
+    }
+    const match = this.scrollbackSearch.matches[this.scrollbackSearch.matchIndex];
+    if (!match) {
+      return null;
+    }
+    const sourceLine = this.lines[match.lineIdx];
+    if (!sourceLine) {
+      return null;
+    }
+    const lineId = this.lineIds.get(sourceLine);
+    if (lineId === undefined) {
+      return null;
+    }
+    return {
+      lineId,
+      col: match.col,
+      length: this.scrollbackSearch.term.length,
+    };
+  }
+
+  // If `line` is the wrapped chunk that contains the active match,
+  // returns the col within the chunk's body where the match starts;
+  // otherwise null. The chunk's source identity comes from
+  // this.wrapOrigin which wrapOne populates for every wrapped chunk.
+  private activeMatchCol(
+    line: FormattedLine | undefined,
+    info: { lineId: number; col: number; length: number } | null,
+  ): number | null {
+    if (!line || info === null) {
+      return null;
+    }
+    const origin = this.wrapOrigin.get(line);
+    if (!origin || origin.sourceLineId !== info.lineId) {
+      return null;
+    }
+    const colInChunk = info.col - origin.sourceColOffset;
+    if (colInChunk < 0 || colInChunk >= line.body.length) {
+      return null;
+    }
+    return colInChunk;
+  }
+
+  // Position scrollOffset so the wrapped row containing the given
+  // (lineIdx, col) lands on a visible row of the scrollback viewport.
+  // Walks wrapTail to count wrapped rows between the target line and
+  // the tail.
+  private scrollToMatch(match: { lineIdx: number; col: number }): void {
+    const w = this.term.width;
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0) {
+      return;
+    }
+    // Sum wrapped rows from the tail down to (and including) the match
+    // line. Then add the wrapped-row offset *within* the match line
+    // that contains the match column.
+    let rowsBelowMatchLine = 0;
+    for (let i = this.lines.length - 1; i > match.lineIdx; i--) {
+      const line = this.lines[i];
+      if (!line) {
+        continue;
+      }
+      rowsBelowMatchLine += this.wrapOne(line, w).length;
+    }
+    const matchLine = this.lines[match.lineIdx];
+    let rowsWithinMatchLine = 0;
+    if (matchLine) {
+      const wrapped = this.wrapOne(matchLine, w);
+      let consumed = 0;
+      for (let r = 0; r < wrapped.length; r++) {
+        const piece = wrapped[r];
+        if (!piece) {
+          continue;
+        }
+        const bodyLen = piece.body.length;
+        if (match.col < consumed + bodyLen) {
+          rowsWithinMatchLine = wrapped.length - 1 - r;
+          break;
+        }
+        consumed += bodyLen;
+      }
+    }
+    // Target scrollOffset: place the match row in the middle of the
+    // visible scrollback area so the user has context on both sides.
+    const target = rowsBelowMatchLine + rowsWithinMatchLine;
+    const desired = Math.max(0, target - Math.floor(visibleRows / 2));
+    const max = this.maxScrollOffset();
+    this.scrollOffset = Math.min(max, desired);
   }
 
   private scrollPageSize(): number {
@@ -1010,14 +1368,23 @@ export class Screen {
     // content grows upward — the user can always look at the row above
     // the prompt for the latest text.
     const padTop = Math.max(0, visibleRows - slice.length);
+    const matchInfo = this.currentMatchInfo();
+    const activeLength = matchInfo?.length ?? 0;
     for (let i = 0; i < visibleRows; i++) {
       const row = top + i;
       const sliceIdx = i - padTop;
       const line = sliceIdx >= 0 ? slice[sliceIdx] : undefined;
-      const sig = formattedLineSig("sb", w, line);
+      const activeCol = this.activeMatchCol(line, matchInfo);
+      const sig = formattedLineSig(
+        "sb",
+        w,
+        line,
+        this.scrollbackHighlight,
+        activeCol,
+      );
       this.paintRow(row, sig, () => {
         if (line) {
-          this.writeFormattedLine(line, w);
+          this.writeFormattedLine(line, w, activeCol, activeLength);
         }
       });
     }
@@ -1263,10 +1630,13 @@ export class Screen {
       this.banner.elapsedMs >= 1000
         ? formatElapsed(this.banner.elapsedMs)
         : "";
+    const right = this.bannerRightContent();
+    const rightSig = right ? `${right.kind}|${right.text}` : "";
     const sig =
       `bnr|${w}|${this.banner.status}|${elapsedStr}|` +
       `${this.banner.queued}|${this.scrollOffset}|` +
-      `${this.banner.planMode ? "1" : "0"}|${this.banner.hint}`;
+      `${this.banner.planMode ? "1" : "0"}|${this.banner.hint}|` +
+      rightSig;
     this.paintRow(row, sig, () => {
       const dot = this.banner.status === "busy" ? "●" : "○";
       const planLabel = this.banner.planMode ? "plan: ON " : "plan: off";
@@ -1293,6 +1663,19 @@ export class Screen {
         this.term.dim(planLabel);
       }
       this.term(" · ").dim(this.banner.hint);
+      if (right) {
+        // Right-aligned. moveTo + eraseLineAfter clears anything the
+        // hint extended into this region, then we write the slot text.
+        // string-width handles wide glyphs (emoji + CJK).
+        const visibleWidth = stringWidth(right.text);
+        const col = Math.max(1, w - visibleWidth + 1);
+        this.term.moveTo(col, row).eraseLineAfter();
+        if (right.kind === "search") {
+          this.term.brightCyan.noFormat(right.text);
+        } else {
+          this.term.brightYellow.noFormat(right.text);
+        }
+      }
     });
   }
 
@@ -1313,6 +1696,19 @@ export class Screen {
       this.term.moveTo(2, top);
       return;
     }
+    if (this.scrollbackSearch) {
+      // Hide the cursor entirely — the prompt area shows the user's
+      // existing buffer unchanged, and their typing actually lands in
+      // the banner search overlay. A visible cursor in either spot
+      // would mislead, plus most terminals draw the cursor as a
+      // colored block which tinted the 🔍 emoji it sat on top of.
+      this.term.hideCursor(true);
+      return;
+    }
+    // Outside of scrollback search, ensure the cursor is visible —
+    // re-asserting on every paint is cheap and recovers from a stale
+    // hide if the previous frame was in search mode.
+    this.term.hideCursor(false);
     const w = this.term.width;
     const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
@@ -1417,6 +1813,11 @@ export class Screen {
       ? wrapAnsiBody(line.body, room)
       : wrap(line.body, room, { stripMarkup });
     const wrapped: FormattedLine[] = [];
+    // Walk the source body to recover each chunk's starting col. wrap()
+    // doesn't return offsets, but chunks are sequential portions and
+    // indexOf from the previous chunk's end finds each one (even when
+    // wrap dropped whitespace at a break — indexOf skips past it).
+    let scanPos = 0;
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i] ?? "";
       const wrappedLine: FormattedLine = {
@@ -1435,6 +1836,15 @@ export class Screen {
       if (line.ansi) {
         wrappedLine.ansi = true;
       }
+      if (id !== undefined && chunk.length > 0) {
+        const found = line.body.indexOf(chunk, scanPos);
+        const colOffset = found === -1 ? scanPos : found;
+        this.wrapOrigin.set(wrappedLine, {
+          sourceLineId: id,
+          sourceColOffset: colOffset,
+        });
+        scanPos = colOffset + chunk.length;
+      }
       wrapped.push(wrappedLine);
     }
     if (id !== undefined) {
@@ -1443,7 +1853,12 @@ export class Screen {
     return wrapped;
   }
 
-  private writeFormattedLine(line: FormattedLine, width: number): void {
+  private writeFormattedLine(
+    line: FormattedLine,
+    width: number,
+    activeMatchCol: number | null = null,
+    activeMatchLength: number = 0,
+  ): void {
     if (line.prefix) {
       writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle);
     }
@@ -1459,7 +1874,29 @@ export class Screen {
     const bodyText = line.ansi
       ? line.body
       : truncate(line.body, remaining, { stripMarkup });
-    writeStyled(this.term, bodyText, line.bodyStyle);
+    // Scrollback search active: split the visible body around case-
+    // insensitive matches of the search term so each match renders
+    // with the search-highlight style while the rest keeps the base
+    // bodyStyle. ANSI bodies skip the split (escape bytes would
+    // confuse substring math). Agent / caret-markup bodies do
+    // participate — the highlight overrides surrounding markup for
+    // the matched chars, which produces sensible output for the
+    // common case (matches landing in plain prose, not inside markup
+    // spans). When activeMatchCol is set, the occurrence at that
+    // exact col renders with the louder "search-highlight-active"
+    // style so the user knows which match ^r/^s is pointing at.
+    if (this.scrollbackHighlight !== null && !line.ansi) {
+      writeBodyWithHighlight(
+        this.term,
+        bodyText,
+        line.bodyStyle,
+        this.scrollbackHighlight,
+        activeMatchCol,
+        activeMatchLength,
+      );
+    } else {
+      writeStyled(this.term, bodyText, line.bodyStyle);
+    }
     if (line.fillRow) {
       const visible = line.ansi ? stringWidth(bodyText) : bodyText.length;
       const pad = remaining - visible;
@@ -1489,15 +1926,19 @@ function formattedLineSig(
   zone: string,
   width: number,
   line: FormattedLine | undefined,
+  highlight: string | null = null,
+  activeCol: number | null = null,
 ): string {
+  const active = activeCol === null ? "" : `a${activeCol}`;
   if (!line) {
-    return `${zone}|${width}|empty`;
+    return `${zone}|${width}|empty|${highlight ?? ""}|${active}`;
   }
   return (
     `${zone}|${width}|` +
     `${line.prefix ?? ""}|${line.prefixStyle ?? ""}|` +
     `${line.body}|${line.bodyStyle ?? ""}|` +
-    `${line.ansi ? "1" : "0"}|${line.fillRow ? "1" : "0"}`
+    `${line.ansi ? "1" : "0"}|${line.fillRow ? "1" : "0"}|` +
+    `${highlight ?? ""}|${active}`
   );
 }
 
@@ -1616,6 +2057,50 @@ function computePromptLayout(
   return { cursorVisualRow, cursorVisualCol, windowStart, rendered };
 }
 
+// Splits `text` around case-insensitive occurrences of `term` and emits
+// each piece via writeStyled — base `style` for surrounding text,
+// "search-highlight" for matches. When activeCol is non-null, the
+// occurrence that starts at that exact col renders with the louder
+// "search-highlight-active" style instead, so the user can spot which
+// match the ^r/^s cursor is currently pointing at. When `term` is empty
+// or absent the function degrades to a single writeStyled call. Matches
+// do not overlap (we advance past each match's full length).
+function writeBodyWithHighlight(
+  termObj: Terminal,
+  text: string,
+  style: Style | undefined,
+  term: string,
+  activeCol: number | null = null,
+  _activeLength: number = 0,
+): void {
+  if (text.length === 0) {
+    return;
+  }
+  if (term.length === 0) {
+    writeStyled(termObj, text, style);
+    return;
+  }
+  const haystack = text.toLowerCase();
+  let i = 0;
+  while (i < text.length) {
+    const next = haystack.indexOf(term, i);
+    if (next === -1) {
+      writeStyled(termObj, text.slice(i), style);
+      return;
+    }
+    if (next > i) {
+      writeStyled(termObj, text.slice(i, next), style);
+    }
+    const isActive = activeCol !== null && next === activeCol;
+    writeStyled(
+      termObj,
+      text.slice(next, next + term.length),
+      isActive ? "search-highlight-active" : "search-highlight",
+    );
+    i = next + term.length;
+  }
+}
+
 function writeStyled(term: Terminal, text: string, style: Style | undefined): void {
   if (text.length === 0) {
     return;
@@ -1715,6 +2200,20 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       return;
     case "heading-3":
       term.bold.noFormat(text);
+      return;
+    case "search-highlight":
+      // Bright yellow background with black foreground. The combination
+      // is loud enough to spot inside any base style (dim, info, agent)
+      // without being unreadable on light terminal themes.
+      term.bgBrightYellow.black.noFormat(text);
+      return;
+    case "search-highlight-active":
+      // The single "current" match — visually distinct from the
+      // generic yellow-bg highlight so the user can spot which match
+      // ^r/^s is pointing at without scanning the whole row. Red bg
+      // with bright white fg jumps out against both light and dark
+      // terminal themes.
+      term.bgRed.brightWhite.noFormat(text);
       return;
     default:
       term.noFormat(text);
@@ -2147,6 +2646,10 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-o";
     case "CTRL_P":
       return "ctrl-p";
+    case "CTRL_R":
+      return "ctrl-r";
+    case "CTRL_S":
+      return "ctrl-s";
     case "CTRL_U":
       return "ctrl-u";
     case "CTRL_W":
