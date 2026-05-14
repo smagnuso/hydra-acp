@@ -126,28 +126,45 @@ describe("SessionManager.resurrect", () => {
     expect(mocks).toHaveLength(1);
   });
 
-  it("kills the agent and surfaces an error if session/load fails", async () => {
+  it("recovers via import-reseed when session/load fails for the upstream id", async () => {
+    let spawnCount = 0;
     const failingMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
-        requestMock
-          .mockResolvedValueOnce({ protocolVersion: 1 })
-          .mockRejectedValueOnce(new Error("loadSession not supported"));
+        if (spawnCount === 0) {
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockRejectedValueOnce(new Error("loadSession not supported"));
+        } else {
+          // Recovery: initialize + session/new return a fresh upstream
+          // id. No session/prompt expected — no history is planted, so
+          // buildSwitchTranscript yields an empty string and the seed
+          // is a no-op.
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockResolvedValueOnce({ sessionId: "u_new" });
+        }
+        spawnCount += 1;
         return m.agent;
       },
     );
-    await expect(
-      failingMgr.resurrect({
-        hydraSessionId: "sess_fail",
-        upstreamSessionId: "u_fail",
-        agentId: "claude-code",
-        cwd: "/w",
-      }),
-    ).rejects.toThrow(/loadSession not supported/);
-    expect(mocks[mocks.length - 1]?.agent.kill).toHaveBeenCalled();
+
+    const session = await failingMgr.resurrect({
+      hydraSessionId: "sess_fail",
+      upstreamSessionId: "u_fail",
+      agentId: "claude-code",
+      cwd: "/w",
+    });
+
+    expect(session.upstreamSessionId).toBe("u_new");
+    expect(mocks[0]?.agent.kill).toHaveBeenCalled();
+    expect(spawnCount).toBe(2);
+
+    const reloaded = await failingMgr.loadFromDisk("sess_fail");
+    expect(reloaded?.upstreamSessionId).toBe("u_new");
   });
 
   it("captures the agent's _meta on session/load for passthrough", async () => {
@@ -1062,6 +1079,139 @@ describe("SessionManager: resurrect from import", () => {
     expect(requestMock.mock.calls[0]?.[0]).toBe("initialize");
     expect(requestMock.mock.calls[1]?.[0]).toBe("session/new");
     expect(requestMock.mock.calls[2]?.[0]).toBe("session/prompt");
+  });
+});
+
+describe("SessionManager: bootstrap failures and unknown ids", () => {
+  it("create() rejects and kills the agent when initialize fails", async () => {
+    const mocks: MockAgentControls[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock.mockRejectedValueOnce(new Error("spawn ENOENT: npx-not-found"));
+        return m.agent;
+      },
+    );
+    await expect(
+      manager.create({ cwd: "/w", agentId: "claude-code" }),
+    ).rejects.toThrow(/npx-not-found/);
+    expect(mocks[0]?.agent.kill).toHaveBeenCalled();
+  });
+
+  it("create() rejects and kills the agent when session/new fails", async () => {
+    const mocks: MockAgentControls[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockRejectedValueOnce(new Error("session/new rejected: bad model"));
+        return m.agent;
+      },
+    );
+    await expect(
+      manager.create({ cwd: "/w", agentId: "claude-code" }),
+    ).rejects.toThrow(/bad model/);
+    expect(mocks[0]?.agent.kill).toHaveBeenCalled();
+  });
+
+  it("create() rejects when the agent id isn't in the registry", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+    );
+    await expect(
+      manager.create({ cwd: "/w", agentId: "ghost-agent" }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.AgentNotInstalled });
+  });
+
+  it("resurrect() rejects and kills the agent when initialize fails", async () => {
+    const mocks: MockAgentControls[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock.mockRejectedValueOnce(new Error("agent died mid-handshake"));
+        return m.agent;
+      },
+    );
+    await expect(
+      manager.resurrect({
+        hydraSessionId: "sess_init_fail",
+        upstreamSessionId: "u_old",
+        agentId: "claude-code",
+        cwd: "/w",
+      }),
+    ).rejects.toThrow(/died mid-handshake/);
+    expect(mocks[0]?.agent.kill).toHaveBeenCalled();
+  });
+
+  it("resurrect() throws cleanly when both session/load and the recovery spawn fail", async () => {
+    let spawnCount = 0;
+    const mocks: MockAgentControls[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        if (spawnCount === 0) {
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockRejectedValueOnce(new Error("session/load: no such id"));
+        } else {
+          requestMock.mockRejectedValueOnce(
+            new Error("recovery spawn: agent binary missing"),
+          );
+        }
+        spawnCount += 1;
+        return m.agent;
+      },
+    );
+    await expect(
+      manager.resurrect({
+        hydraSessionId: "sess_cascade",
+        upstreamSessionId: "u_gone",
+        agentId: "claude-code",
+        cwd: "/w",
+      }),
+    ).rejects.toThrow(/agent binary missing/);
+    expect(spawnCount).toBe(2);
+    expect(mocks[0]?.agent.kill).toHaveBeenCalled();
+    expect(mocks[1]?.agent.kill).toHaveBeenCalled();
+  });
+
+  it("loadFromDisk returns undefined for an unknown session id", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+    );
+    const result = await manager.loadFromDisk("hydra_session_does_not_exist");
+    expect(result).toBeUndefined();
+  });
+
+  it("hasRecord returns false for an unknown session id", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+    );
+    expect(await manager.hasRecord("hydra_session_does_not_exist")).toBe(false);
+  });
+
+  it("getHistory returns undefined for an unknown session id", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+    );
+    expect(await manager.getHistory("hydra_session_does_not_exist")).toBeUndefined();
   });
 });
 

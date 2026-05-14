@@ -116,6 +116,14 @@ export class JsonRpcConnection {
     await this.stream.close();
   }
 
+  // Force-close with an error. Rejects all pending requests and fires
+  // close handlers carrying `err`. Used by transports that detect a
+  // failure (e.g. child process crash, spawn ENOENT) the stream itself
+  // can't surface as a stdout/stdin error.
+  fail(err: Error): void {
+    this.handleClose(err);
+  }
+
   private handleIncoming(message: JsonRpcMessage): void {
     if ("method" in message) {
       if ("id" in message && message.id !== undefined) {

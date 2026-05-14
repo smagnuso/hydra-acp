@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import { customAlphabet } from "nanoid";
 import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
@@ -184,11 +185,16 @@ export class SessionManager {
       plan,
     });
 
-    await agent.connection.request("initialize", {
-      protocolVersion: 1,
-      clientCapabilities: {},
-      clientInfo: { name: "hydra", version: "0.1.0" },
-    });
+    try {
+      await agent.connection.request("initialize", {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: "hydra", version: "0.1.0" },
+      });
+    } catch (err) {
+      await agent.kill().catch(() => undefined);
+      throw err;
+    }
 
     let loadResult: Record<string, unknown> | undefined;
     try {
@@ -201,10 +207,17 @@ export class SessionManager {
         },
       );
     } catch (err) {
-      await agent.kill().catch(() => undefined);
-      throw new Error(
-        `agent ${params.agentId} failed to load upstream session ${params.upstreamSessionId}: ${(err as Error).message}`,
+      // Agent forgot the upstream id (e.g. its store was wiped). Drop
+      // this agent and recover via the import-reseed path: a fresh
+      // session/new gives us a new upstream id, attachManagerHooks
+      // persists it to meta.json, and seedFromImport replays the
+      // history transcript into the new agent so the user keeps the
+      // conversation context.
+      process.stderr.write(
+        `session/load failed for upstream ${params.upstreamSessionId} on ${params.agentId} (${(err as Error).message}); recovering via import-reseed\n`,
       );
+      await agent.kill().catch(() => undefined);
+      return this.doResurrectFromImport(params);
     }
 
     const session = new Session({
@@ -250,15 +263,20 @@ export class SessionManager {
   // so subsequent resurrects of this session use the normal session/load
   // path.
   private async doResurrectFromImport(params: ResurrectParams): Promise<Session> {
+    // Bundles carry the exporter's cwd, which often doesn't exist on
+    // this machine when pulling in a session from another user. Fall
+    // back to $HOME so the spawn doesn't fail with ENOENT; the merge-
+    // write in attachManagerHooks persists the resolved cwd.
+    const cwd = await this.resolveImportCwd(params.cwd);
     const fresh = await this.bootstrapAgent({
       agentId: params.agentId,
-      cwd: params.cwd,
+      cwd,
       agentArgs: params.agentArgs,
       mcpServers: [],
     });
     const session = new Session({
       sessionId: params.hydraSessionId,
-      cwd: params.cwd,
+      cwd,
       agentId: params.agentId,
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
@@ -285,6 +303,18 @@ export class SessionManager {
     // Session, so any user prompt arriving mid-seed queues behind it.
     void session.seedFromImport().catch(() => undefined);
     return session;
+  }
+
+  private async resolveImportCwd(cwd: string): Promise<string> {
+    try {
+      const stat = await fs.stat(cwd);
+      if (stat.isDirectory()) {
+        return cwd;
+      }
+    } catch {
+      void 0;
+    }
+    return os.homedir();
   }
 
   // Bootstrap a fresh agent process: registry resolve → spawn → initialize
