@@ -170,7 +170,7 @@ describe("InputDispatcher", () => {
 
   it("Ctrl+D at end of line joins with the next line", () => {
     const d = new InputDispatcher();
-    feed(d, [ch("a"), k("alt-enter"), ch("b"), k("home"), k("up"), k("end")]);
+    feed(d, [ch("a"), k("alt-enter"), ch("b"), k("up")]);
     expect(d.state().buffer).toEqual(["a", "b"]);
     expect(d.state().row).toBe(0);
     expect(d.state().col).toBe(1);
@@ -182,8 +182,8 @@ describe("InputDispatcher", () => {
     const d = new InputDispatcher();
     feed(d, [ch("a"), k("alt-enter"), ch("b")]);
     expect(d.state().buffer).toEqual(["a", "b"]);
-    // cursor is at end of "b" — move home, then backspace
-    feed(d, [k("home"), k("backspace")]);
+    // cursor is at end of "b" — move to start of current line, then backspace
+    feed(d, [k("ctrl-a"), k("backspace")]);
     expect(d.state().buffer).toEqual(["ab"]);
     expect(d.state().row).toBe(0);
     expect(d.state().col).toBe(1);
@@ -360,6 +360,41 @@ describe("InputDispatcher", () => {
     // Enter on empty buffer + active slot removes the slot.
     expect(feed(d, [k("enter")])).toEqual([{ type: "queue-remove", index: 0 }]);
     expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Home jumps to buffer start; pressing again emits scroll-to-top", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("a"), k("alt-enter"), ch("b"), ch("c")]);
+    expect(d.state().row).toBe(1);
+    expect(d.state().col).toBe(2);
+    expect(feed(d, [k("home")])).toEqual([]);
+    expect(d.state().row).toBe(0);
+    expect(d.state().col).toBe(0);
+    expect(feed(d, [k("home")])).toEqual([{ type: "scroll-to-top" }]);
+  });
+
+  it("End jumps to buffer end; pressing again emits scroll-to-bottom", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("a"), k("alt-enter"), ch("b"), ch("c"), k("home"), k("up")]);
+    expect(d.state().row).toBe(0);
+    expect(d.state().col).toBe(0);
+    expect(feed(d, [k("end")])).toEqual([]);
+    expect(d.state().row).toBe(1);
+    expect(d.state().col).toBe(2);
+    expect(feed(d, [k("end")])).toEqual([{ type: "scroll-to-bottom" }]);
+  });
+
+  it("Ctrl+A and Ctrl+E remain line-level (no scroll fallback)", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("a"), k("alt-enter"), ch("b"), ch("c")]);
+    feed(d, [k("ctrl-a")]);
+    expect(d.state().row).toBe(1);
+    expect(d.state().col).toBe(0);
+    // Ctrl+A again is still a no-op (line-local, no scroll effect).
+    expect(feed(d, [k("ctrl-a")])).toEqual([]);
+    feed(d, [k("ctrl-e")]);
+    expect(d.state().col).toBe(2);
+    expect(feed(d, [k("ctrl-e")])).toEqual([]);
   });
 
   it("Escape during a turn emits cancel with prefill=true", () => {

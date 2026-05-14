@@ -50,6 +50,8 @@ export type InputEffect =
   | { type: "plan-toggle"; on: boolean }
   | { type: "redraw-banner" }
   | { type: "redraw" }
+  | { type: "scroll-to-top" }
+  | { type: "scroll-to-bottom" }
   | { type: "switch-session" }
   | { type: "toggle-tools" };
 
@@ -186,14 +188,16 @@ export class InputDispatcher {
       case "right":
         this.moveRight();
         return [];
-      case "home":
       case "ctrl-a":
         this.col = 0;
         return [];
-      case "end":
       case "ctrl-e":
         this.col = this.currentLine().length;
         return [];
+      case "home":
+        return this.handleHome();
+      case "end":
+        return this.handleEnd();
       case "ctrl-b":
         this.moveLeft();
         return [];
@@ -545,6 +549,30 @@ export class InputDispatcher {
     const planMode = this.planMode;
     this.clearBuffer();
     return [{ type: "send", text, planMode }];
+  }
+
+  // Home: jump to the very start of the prompt buffer. If we're already
+  // there, fall through to scrolling the scrollback to its top.
+  private handleHome(): InputEffect[] {
+    if (this.row !== 0 || this.col !== 0) {
+      this.row = 0;
+      this.col = 0;
+      return [];
+    }
+    return [{ type: "scroll-to-top" }];
+  }
+
+  // End: jump to the end of the last line of the prompt buffer. Already
+  // there → scroll the scrollback to the bottom (newest).
+  private handleEnd(): InputEffect[] {
+    const lastRow = this.buffer.length - 1;
+    const lastCol = (this.buffer[lastRow] ?? "").length;
+    if (this.row !== lastRow || this.col !== lastCol) {
+      this.row = lastRow;
+      this.col = lastCol;
+      return [];
+    }
+    return [{ type: "scroll-to-bottom" }];
   }
 
   private handleCtrlC(): InputEffect[] {

@@ -979,6 +979,12 @@ async function runSession(
       case "redraw":
         screen.fullRedraw();
         return;
+      case "scroll-to-top":
+        screen.scrollToTop();
+        return;
+      case "scroll-to-bottom":
+        screen.scrollToBottom();
+        return;
       case "switch-session":
         void switchSession();
         return;

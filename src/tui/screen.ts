@@ -775,6 +775,15 @@ export class Screen {
     this.repaint();
   }
 
+  scrollToTop(): void {
+    const max = this.maxScrollOffset();
+    if (this.scrollOffset === max) {
+      return;
+    }
+    this.scrollOffset = max;
+    this.repaint();
+  }
+
   private scrollPageSize(): number {
     return Math.max(1, this.scrollbackVisibleRows() - 2);
   }
