@@ -669,7 +669,7 @@ export class SessionManager {
   // attach triggers the import-reseed path.
   async importBundle(
     bundle: Bundle,
-    opts: { replace?: boolean } = {},
+    opts: { replace?: boolean; cwd?: string } = {},
   ): Promise<{
     sessionId: string;
     importedFromSessionId: string;
@@ -698,6 +698,7 @@ export class SessionManager {
         sessionId: existing.sessionId,
         bundle,
         preservedCreatedAt: existing.createdAt,
+        cwd: opts.cwd,
       });
       return {
         sessionId: existing.sessionId,
@@ -706,7 +707,11 @@ export class SessionManager {
       };
     }
     const newId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
-    await this.writeImportedRecord({ sessionId: newId, bundle });
+    await this.writeImportedRecord({
+      sessionId: newId,
+      bundle,
+      cwd: opts.cwd,
+    });
     return {
       sessionId: newId,
       importedFromSessionId: bundle.session.sessionId,
@@ -722,6 +727,11 @@ export class SessionManager {
     sessionId: string;
     bundle: Bundle;
     preservedCreatedAt?: string;
+    // Override the bundle's recorded cwd. Used when importing a
+    // session from another machine where the original cwd doesn't
+    // exist locally — the caller (CLI / HTTP route) validates the
+    // override before passing it in.
+    cwd?: string;
   }): Promise<void> {
     // zod's z.unknown() makes params optional in the inferred type, but
     // HistoryStore writes whatever JSON shape it was handed; the on-disk
@@ -744,7 +754,7 @@ export class SessionManager {
         upstreamSessionId: "",
         importedFromSessionId: args.bundle.session.sessionId,
         agentId: args.bundle.session.agentId,
-        cwd: args.bundle.session.cwd,
+        cwd: args.cwd ?? args.bundle.session.cwd,
         title: args.bundle.session.title,
         currentModel: args.bundle.session.currentModel,
         currentMode: args.bundle.session.currentMode,

@@ -159,8 +159,11 @@ async function main(): Promise<void> {
         return;
       }
       if (sub === "import") {
+        const cwd = resolveOption(flags, "cwd");
         await runSessionsImport(positional[2], {
           replace: flags.replace === true,
+          info: flags.info === true,
+          ...(cwd !== undefined ? { cwd } : {}),
         });
         return;
       }
@@ -306,8 +309,8 @@ function printHelp(): void {
       "  hydra-acp sessions remove <id>     Remove a session entirely (live or cold)",
       "  hydra-acp sessions export <id> [--out <file>|.]",
       "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout",
-      "  hydra-acp sessions import <file>|- [--replace]",
-      "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live)",
+      "  hydra-acp sessions import <file>|- [--replace] [--cwd <path>] [--info]",
+      "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing",
       "  hydra-acp extensions list                   List configured extensions and live state",
       "  hydra-acp extensions add <name> [opts]      Add an extension to config",
       "  hydra-acp extensions remove <name>          Remove an extension from config",

@@ -1013,6 +1013,59 @@ describe("SessionManager: importBundle", () => {
     expect(promptRaw).toContain('"one"');
     expect(promptRaw).toContain('"two"');
   });
+
+  it("persists the caller's cwd override instead of the bundle's recorded cwd", async () => {
+    const manager = noSpawnManager();
+    const result = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_cwd", cwd: "/home/abakken/dev/owm" }),
+      { cwd: "/home/smagnuson/local-target" },
+    );
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "meta.json",
+    );
+    const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    expect(record.cwd).toBe("/home/smagnuson/local-target");
+  });
+
+  it("honors the cwd override on --replace too", async () => {
+    const manager = noSpawnManager();
+    const first = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_cwd_rep", cwd: "/orig" }),
+    );
+    const second = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_cwd_rep", cwd: "/orig" }),
+      { replace: true, cwd: "/picked-on-replace" },
+    );
+    expect(second.replaced).toBe(true);
+    expect(second.sessionId).toBe(first.sessionId);
+
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      first.sessionId,
+      "meta.json",
+    );
+    const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    expect(record.cwd).toBe("/picked-on-replace");
+  });
+
+  it("falls back to the bundle's cwd when no override is given", async () => {
+    const manager = noSpawnManager();
+    const result = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_no_cwd", cwd: "/bundle-orig" }),
+    );
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "meta.json",
+    );
+    const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    expect(record.cwd).toBe("/bundle-orig");
+  });
 });
 
 describe("SessionManager: resurrect from import", () => {

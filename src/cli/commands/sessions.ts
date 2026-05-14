@@ -1,11 +1,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { loadConfig } from "../../core/config.js";
+import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import {
   HEADER,
   computeWidths,
   formatRow,
   toRow,
+  type SessionSummary,
 } from "../session-row.js";
 
 export async function runSessionsList(opts: { all?: boolean } = {}): Promise<void> {
@@ -154,13 +156,28 @@ export async function runSessionsExport(
 
 export async function runSessionsImport(
   file: string | undefined,
-  opts: { replace?: boolean } = {},
+  opts: { replace?: boolean; cwd?: string; info?: boolean } = {},
 ): Promise<void> {
   if (!file) {
     process.stderr.write(
-      "Usage: hydra-acp sessions import <file>|- [--replace]\n",
+      "Usage: hydra-acp sessions import <file>|- [--replace] [--cwd <path>] [--info]\n",
     );
     process.exit(2);
+  }
+  let cwdOverride: string | undefined;
+  if (opts.cwd !== undefined) {
+    const resolved = path.resolve(opts.cwd);
+    try {
+      const stat = await fs.stat(resolved);
+      if (!stat.isDirectory()) {
+        process.stderr.write(`--cwd ${resolved} is not a directory\n`);
+        process.exit(1);
+      }
+    } catch {
+      process.stderr.write(`--cwd ${resolved} does not exist\n`);
+      process.exit(1);
+    }
+    cwdOverride = resolved;
   }
   let body: string;
   if (file === "-") {
@@ -175,6 +192,10 @@ export async function runSessionsImport(
     process.stderr.write(`Failed to parse bundle: ${(err as Error).message}\n`);
     process.exit(1);
   }
+  if (opts.info === true) {
+    printBundleInfo(bundle);
+    return;
+  }
   const config = await loadConfig();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetch(`${baseUrl}/v1/sessions/import`, {
@@ -183,7 +204,11 @@ export async function runSessionsImport(
       "Content-Type": "application/json",
       Authorization: `Bearer ${config.daemon.authToken}`,
     },
-    body: JSON.stringify({ bundle, replace: opts.replace === true }),
+    body: JSON.stringify({
+      bundle,
+      replace: opts.replace === true,
+      ...(cwdOverride !== undefined ? { cwd: cwdOverride } : {}),
+    }),
   });
   if (response.status === 409) {
     const detail = (await response.json().catch(() => ({}))) as {
@@ -208,6 +233,52 @@ export async function runSessionsImport(
     result.replaced
       ? `Replaced ${result.sessionId} (from ${result.importedFromSessionId})\n`
       : `Imported as ${result.sessionId} (from ${result.importedFromSessionId})\n`,
+  );
+}
+
+// Map a Bundle to the SessionSummary shape the list formatter consumes.
+// upstreamSessionId is rendered as "-" because the bundle's upstream
+// id is the exporter's, not anything the local install can attach to;
+// attachedClients/status are "this isn't an active session yet."
+export function bundleToSummary(parsed: Bundle): SessionSummary {
+  return {
+    sessionId: parsed.session.sessionId,
+    upstreamSessionId: "-",
+    cwd: parsed.session.cwd,
+    agentId: parsed.session.agentId,
+    currentUsage: parsed.session.currentUsage,
+    title: parsed.session.title,
+    attachedClients: 0,
+    updatedAt: parsed.session.updatedAt,
+    status: "cold",
+  };
+}
+
+// Render a single-row "session list" view of a bundle file, using the
+// same column layout as `hydra sessions list`. Local-only — never hits
+// the daemon — so it works on a host that isn't running hydra and on
+// bundles the user hasn't imported yet.
+function printBundleInfo(raw: unknown): void {
+  let parsed;
+  try {
+    parsed = decodeBundle(raw);
+  } catch (err) {
+    process.stderr.write(`Not a valid bundle: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+  const summary = bundleToSummary(parsed);
+  const row = toRow(summary);
+  const widths = computeWidths([row]);
+  const maxWidth = process.stdout.isTTY ? process.stdout.columns : undefined;
+  process.stdout.write(formatRow(HEADER, widths, maxWidth) + "\n");
+  process.stdout.write(formatRow(row, widths, maxWidth) + "\n");
+  process.stdout.write(
+    `\nlineage: ${parsed.session.lineageId}\n` +
+      `exported: ${parsed.exportedAt} from ${parsed.exportedFrom.machine} (hydra ${parsed.exportedFrom.hydraVersion})\n` +
+      `history entries: ${parsed.history.length}` +
+      (parsed.promptHistory
+        ? `, prompt history: ${parsed.promptHistory.length}\n`
+        : "\n"),
   );
 }
 

@@ -124,10 +124,19 @@ export function registerSessionRoutes(
     const body = (request.body ?? {}) as {
       bundle?: unknown;
       replace?: boolean;
+      cwd?: unknown;
     };
     if (body.bundle === undefined) {
       reply.code(400).send({ error: "missing bundle" });
       return;
+    }
+    let cwdOverride: string | undefined;
+    if (body.cwd !== undefined) {
+      if (typeof body.cwd !== "string" || body.cwd.length === 0) {
+        reply.code(400).send({ error: "cwd must be a non-empty string" });
+        return;
+      }
+      cwdOverride = body.cwd;
     }
     let bundle;
     try {
@@ -142,6 +151,7 @@ export function registerSessionRoutes(
     try {
       const result = await manager.importBundle(bundle, {
         replace: body.replace === true,
+        ...(cwdOverride !== undefined ? { cwd: cwdOverride } : {}),
       });
       reply.code(201).send(result);
     } catch (err) {
