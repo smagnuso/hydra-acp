@@ -92,9 +92,11 @@ export function registerAcpWsEndpoint(
       });
       const client = bindClientToSession(connection, session, state);
       // Fresh session — nothing to replay, but await for symmetry with
-      // attach() which is now Promise-returning. Validation errors
-      // throw synchronously regardless.
+      // attach() which is Promise-returning. Validation errors throw
+      // synchronously regardless.
       await session.attach(client, "full");
+      // attach() returns { entries, appliedPolicy }; we discard for
+      // fresh sessions since there's no history to replay.
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
@@ -158,13 +160,17 @@ export function registerAcpWsEndpoint(
         params.clientInfo,
         params.clientId,
       );
-      const replay = await session.attach(client, params.historyPolicy);
+      const { entries: replay, appliedPolicy } = await session.attach(
+        client,
+        params.historyPolicy,
+        { afterMessageId: params.afterMessageId },
+      );
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
       });
       app.log.info(
-        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} replayed=${replay.length}`,
+        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} requestedPolicy=${params.historyPolicy} appliedPolicy=${appliedPolicy} replayed=${replay.length}`,
       );
       for (const note of replay) {
         await connection.notify(note.method, note.params);
@@ -174,6 +180,11 @@ export function registerAcpWsEndpoint(
         sessionId: session.sessionId,
         clientId: client.clientId,
         connectedClients: session.connectedClients(client.clientId),
+        // appliedPolicy surfaces whether after_message fell back to full
+        // (because afterMessageId wasn't found in history) — RFD #533
+        // says the response.historyPolicy should reflect what actually
+        // ran, not what was asked for.
+        historyPolicy: appliedPolicy,
         replayed: replay.length,
         _meta: buildResponseMeta(session),
       };
@@ -284,7 +295,7 @@ export function registerAcpWsEndpoint(
         session = await deps.manager.resurrect(fromDisk);
       }
       const client = bindClientToSession(connection, session, state);
-      const replay = await session.attach(client, "pending_only");
+      const { entries: replay } = await session.attach(client, "pending_only");
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,

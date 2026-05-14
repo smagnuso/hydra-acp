@@ -390,7 +390,7 @@ describe("SessionManager: history persistence", () => {
     );
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    const replay = await revived.attach(
+    const { entries: replay } = await revived.attach(
       { clientId: "c1", connection: conn },
       "full",
     );
@@ -436,7 +436,7 @@ describe("SessionManager: history persistence", () => {
     );
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    const replay = await revived.attach(
+    const { entries: replay } = await revived.attach(
       { clientId: "c1", connection: conn },
       "full",
     );

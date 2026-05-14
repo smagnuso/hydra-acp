@@ -229,7 +229,7 @@ describe("Session", () => {
       // Late attach. Drain history first (mirrors what acp-ws.ts does), then
       // dispatch in-flight permissions.
       const b = makeClient();
-      const replay = await session.attach(b.client, "full");
+      const { entries: replay } = await session.attach(b.client, "full");
       for (const note of replay) {
         await b.client.connection.notify(note.method, note.params);
       }
@@ -370,7 +370,7 @@ describe("Session", () => {
       await flushHistoryWrites();
 
       const { client: coldClient } = makeClient();
-      const replay = await session.attach(coldClient, "full");
+      const { entries: replay } = await session.attach(coldClient, "full");
       // Snapshot-shaped events (commands/model/mode/session_info) live
       // in meta.json and are delivered via the attach response _meta,
       // not history. Only the two non-snapshot updates should be here.
@@ -387,8 +387,84 @@ describe("Session", () => {
       await flushHistoryWrites();
 
       const { client: cold } = makeClient();
-      const replay = await session.attach(cold, "none");
+      const { entries: replay } = await session.attach(cold, "none");
       expect(replay).toEqual([]);
+    });
+
+    it("after_message replays entries strictly after the matching messageId", async () => {
+      const { session, mock } = makeSession("sess_am", "u_am");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+
+      // Drive a real prompt → turn so we get persisted messageIds.
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_am",
+        prompt: [{ type: "text", text: "first turn" }],
+      });
+      // Sprinkle an extra event after turn_complete to verify slicing.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_am",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "tail" } },
+      });
+      await flushHistoryWrites();
+
+      // Grab the turn_complete's messageId from history.
+      const fullSnap = await session.getHistorySnapshot();
+      const turnEntry = fullSnap.find(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete",
+      );
+      const turnMessageId = (turnEntry?.params as {
+        update: { messageId: string };
+      }).update.messageId;
+      expect(turnMessageId).toBeDefined();
+
+      const { client: late } = makeClient();
+      const { entries: delta, appliedPolicy } = await session.attach(
+        late,
+        "after_message",
+        { afterMessageId: turnMessageId },
+      );
+      expect(appliedPolicy).toBe("after_message");
+      // Only the trailing tail chunk should remain.
+      expect(delta).toHaveLength(1);
+      expect(
+        (delta[0]?.params as { update: { sessionUpdate: string } }).update
+          .sessionUpdate,
+      ).toBe("agent_message_chunk");
+    });
+
+    it("after_message falls back to full when the id is unknown", async () => {
+      const { session, mock } = makeSession();
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "x" } },
+      });
+      await flushHistoryWrites();
+
+      const { client: late } = makeClient();
+      const { entries, appliedPolicy } = await session.attach(
+        late,
+        "after_message",
+        { afterMessageId: "m_does_not_exist" },
+      );
+      expect(appliedPolicy).toBe("full");
+      expect(entries.length).toBeGreaterThan(0);
+    });
+
+    it("after_message without afterMessageId falls back to full", async () => {
+      const { session } = makeSession();
+      const { client: a } = makeClient();
+      const { appliedPolicy } = await session.attach(a, "after_message");
+      expect(appliedPolicy).toBe("full");
     });
   });
 
@@ -606,7 +682,7 @@ describe("Session", () => {
       // they pick it up from the attach response _meta instead.
       await flushHistoryWrites();
       const { client: late } = makeClient();
-      const replay = await session.attach(late, "full");
+      const { entries: replay } = await session.attach(late, "full");
       const replayedCmds = replay.find((n) => {
         if (n.method !== "session/update") {
           return false;
@@ -1124,7 +1200,7 @@ describe("Session", () => {
       // title is delivered via the attach response _meta instead.
       await flushHistoryWrites();
       const b = makeClient();
-      const replay = await session.attach(b.client, "full");
+      const { entries: replay } = await session.attach(b.client, "full");
       const replayedTitleUpdate = replay.find(
         (e) =>
           e.method === "session/update" &&
@@ -1449,7 +1525,7 @@ describe("Session", () => {
       await flushHistoryWrites();
 
       const { client: late } = makeClient();
-      const replay = await session.attach(late, "full");
+      const { entries: replay } = await session.attach(late, "full");
       const types = replay.map((n) => {
         const params = n.params as
           | { update?: { sessionUpdate?: string } }

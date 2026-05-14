@@ -73,7 +73,12 @@ export const InitializeParams = z.object({
 });
 export type InitializeParams = z.infer<typeof InitializeParams>;
 
-export const HistoryPolicy = z.enum(["full", "pending_only", "none"]);
+export const HistoryPolicy = z.enum([
+  "full",
+  "pending_only",
+  "none",
+  "after_message",
+]);
 export type HistoryPolicy = z.infer<typeof HistoryPolicy>;
 
 export const SessionNewParams = z.object({
@@ -95,6 +100,12 @@ export type SessionResumeHints = z.infer<typeof SessionResumeHints>;
 export const SessionAttachParams = z.object({
   sessionId: z.string(),
   historyPolicy: HistoryPolicy.default("full"),
+  // Required when historyPolicy is "after_message"; ignored otherwise.
+  // The proxy replays history entries strictly after the entry whose
+  // messageId matches this value. If the id isn't found in the buffer,
+  // the response.historyPolicy field surfaces "full" so the caller
+  // knows we fell back. Per RFD #533.
+  afterMessageId: z.string().optional(),
   // Caller-assigned opaque id (e.g. a UUID). When provided, the proxy
   // echoes it in resolvedBy/sentBy and lifecycle events so other
   // clients can disambiguate multiple instances of the same

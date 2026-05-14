@@ -396,13 +396,16 @@ export class Session {
   }
 
   // Register a client and (asynchronously) load the replay slice it
-  // should receive. Validation errors throw synchronously so callers
-  // can rely on either the registration being in effect or having
-  // thrown; the disk-load is the only async work.
+  // should receive. Returns both the slice to replay and the actual
+  // historyPolicy applied (which may differ from the requested one
+  // when after_message falls back to full). Validation errors throw
+  // synchronously so callers can rely on either the registration being
+  // in effect or having thrown; the disk-load is the only async work.
   attach(
     client: AttachedClient,
     historyPolicy: HistoryPolicy,
-  ): Promise<CachedNotification[]> {
+    opts: { afterMessageId?: string } = {},
+  ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     if (this.closed) {
       throw withCode(
         new Error("session is closed"),
@@ -418,9 +421,26 @@ export class Session {
     this.clients.set(client.clientId, client);
     this.updatedAt = Date.now();
     if (historyPolicy === "none" || historyPolicy === "pending_only") {
-      return Promise.resolve([]);
+      return Promise.resolve({ entries: [], appliedPolicy: historyPolicy });
     }
-    return this.getHistorySnapshot();
+    return this.loadReplay(historyPolicy, opts);
+  }
+
+  private async loadReplay(
+    historyPolicy: HistoryPolicy,
+    opts: { afterMessageId?: string },
+  ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
+    const all = await this.getHistorySnapshot();
+    if (historyPolicy === "after_message") {
+      const cutoff = opts.afterMessageId
+        ? findMessageIdIndex(all, opts.afterMessageId)
+        : -1;
+      if (cutoff < 0) {
+        return { entries: all, appliedPolicy: "full" };
+      }
+      return { entries: all.slice(cutoff + 1), appliedPolicy: "after_message" };
+    }
+    return { entries: all, appliedPolicy: "full" };
   }
 
   // Dispatch in-flight permission requests to a freshly-attached
@@ -1567,6 +1587,26 @@ function extractAdvertisedCommands(
     out.push(cmd);
   }
   return out;
+}
+
+// Walk a history snapshot and find the index of the entry whose
+// session/update.messageId matches `target`. Returns -1 if not found.
+// Used by attach() to compute the after_message replay slice.
+function findMessageIdIndex(
+  history: CachedNotification[],
+  target: string,
+): number {
+  for (let i = 0; i < history.length; i++) {
+    const entry = history[i];
+    if (!entry || entry.method !== "session/update") {
+      continue;
+    }
+    const params = entry.params as { update?: { messageId?: unknown } } | undefined;
+    if (params?.update?.messageId === target) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 // Pull `toolCallId` out of the `session/request_permission` params we
