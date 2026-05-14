@@ -99,6 +99,7 @@ export async function pickSession(
   let sessionLines: string[] = [];
   let startRow = 1;
 
+  const cwdMaxWidth = opts.config.tui.cwdColumnMaxWidth;
   const computeLayout = (): void => {
     termHeight = readTermHeight(term);
     termWidth = readTermWidth(term);
@@ -106,8 +107,8 @@ export async function pickSession(
     viewportSize = Math.min(visible.length, maxViewportRows);
     const rowMaxWidth = Math.max(10, termWidth - ROW_PREFIX_WIDTH);
     newSessionLabel = formatNewSessionLabel(opts.cwd, rowMaxWidth);
-    headerLine = formatRow(HEADER, widths, rowMaxWidth);
-    sessionLines = rows.map((r) => formatRow(r, widths, rowMaxWidth));
+    headerLine = formatRow(HEADER, widths, rowMaxWidth, cwdMaxWidth);
+    sessionLines = rows.map((r) => formatRow(r, widths, rowMaxWidth, cwdMaxWidth));
   };
 
   // After the underlying session list changed (kill / delete), rebuild

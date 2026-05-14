@@ -74,6 +74,10 @@ export interface SessionManagerOptions {
   // first prompt. Resurrect paths (session/load) skip this — those
   // sessions already carry a user-chosen model from the prior incarnation.
   defaultModels?: Record<string, string>;
+  // Cap on entries kept in each session's on-disk history.jsonl. Forwarded
+  // to both the shared HistoryStore (read-side trim) and every Session
+  // (write-side compact + derived 20%-of-cap compact trigger).
+  sessionHistoryMaxEntries?: number;
 }
 
 export class SessionManager {
@@ -84,6 +88,7 @@ export class SessionManager {
   private histories: HistoryStore;
   private idleTimeoutMs: number;
   private defaultModels: Record<string, string>;
+  private sessionHistoryMaxEntries: number;
   // Serialize meta.json read-modify-write operations per session id so
   // concurrent snapshot updates (e.g. an agent emitting model + mode
   // back-to-back) don't lose writes via interleaved reads.
@@ -97,7 +102,8 @@ export class SessionManager {
   ) {
     this.spawner = spawner ?? ((opts) => AgentInstance.spawn(opts));
     this.store = store ?? new SessionStore();
-    this.histories = new HistoryStore();
+    this.sessionHistoryMaxEntries = options.sessionHistoryMaxEntries ?? 1000;
+    this.histories = new HistoryStore({ maxEntries: this.sessionHistoryMaxEntries });
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.defaultModels = options.defaultModels ?? {};
   }
@@ -122,6 +128,7 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
+      historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: fresh.initialModel,
     });
     await this.attachManagerHooks(session);
@@ -234,6 +241,7 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
+      historyMaxEntries: this.sessionHistoryMaxEntries,
       // Prefer what we previously stored from a current_model_update; if
       // we never captured one (e.g. old opencode sessions on disk before
       // this fix), fall back to the model the agent ships in its
@@ -288,6 +296,7 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
+      historyMaxEntries: this.sessionHistoryMaxEntries,
       // Prefer the stored value (set by a previous current_model_update);
       // fall back to whatever the agent ships in its session/new response.
       currentModel: params.currentModel ?? fresh.initialModel,

@@ -128,8 +128,24 @@ describe("HistoryStore", () => {
     );
     const loaded = await store.load("hydra_session_abc");
     expect(loaded).toHaveLength(1000);
-    // Should be the tail (entries 500..1499).
     expect(loaded[0]?.recordedAt).toBe(500);
     expect(loaded[loaded.length - 1]?.recordedAt).toBe(1499);
+  });
+
+  it("respects a custom maxEntries cap on load", async () => {
+    const store = new HistoryStore({ maxEntries: 50 });
+    await fs.mkdir(paths.sessionDir("hydra_session_abc"), { recursive: true });
+    const lines: string[] = [];
+    for (let i = 0; i < 200; i++) {
+      lines.push(JSON.stringify({ method: "x", params: { i }, recordedAt: i }));
+    }
+    await fs.writeFile(
+      paths.historyFile("hydra_session_abc"),
+      lines.join("\n") + "\n",
+    );
+    const loaded = await store.load("hydra_session_abc");
+    expect(loaded).toHaveLength(50);
+    expect(loaded[0]?.recordedAt).toBe(150);
+    expect(loaded[loaded.length - 1]?.recordedAt).toBe(199);
   });
 });

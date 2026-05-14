@@ -17,16 +17,25 @@ export interface HistoryEntry {
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-// Mirror the in-memory history cap in Session: trim to this many on
-// read, even if the file grew unbounded (e.g. older daemon that didn't
-// trim on disk).
-const MAX_ENTRIES = 1000;
+const DEFAULT_MAX_ENTRIES = 1000;
+
+export interface HistoryStoreOptions {
+  // Defensive cap applied on read: even if a file grew unbounded (older
+  // daemon, manual edit), load() tails to this many entries. Mirrors the
+  // compaction cap Session uses on write.
+  maxEntries?: number;
+}
 
 export class HistoryStore {
   // Serialize writes per session id so appends and rewrites don't
   // interleave JSONL lines on disk. The chain swallows errors so one
   // failed append doesn't poison every subsequent write.
   private writeQueues = new Map<string, Promise<void>>();
+  private maxEntries: number;
+
+  constructor(options: HistoryStoreOptions = {}) {
+    this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  }
 
   async append(sessionId: string, entry: HistoryEntry): Promise<void> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
@@ -140,8 +149,8 @@ export class HistoryStore {
         recordedAt: obj.recordedAt,
       });
     }
-    if (out.length > MAX_ENTRIES) {
-      return out.slice(-MAX_ENTRIES);
+    if (out.length > this.maxEntries) {
+      return out.slice(-this.maxEntries);
     }
     return out;
   }

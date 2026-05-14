@@ -8,12 +8,13 @@ export interface AgentInstanceOptions {
   cwd: string;
   plan: SpawnPlan;
   extraEnv?: Record<string, string>;
+  // Bytes of trailing stderr buffered for diagnostic dumps on spawn
+  // failure. Defaults to 4096 — just enough to surface a typical
+  // auth complaint or ENOENT without unbounded growth.
+  stderrTailBytes?: number;
 }
 
-// Cap how much trailing stderr we hold so a chatty agent can't grow
-// the buffer without bound; just enough to give the user a hint about
-// why an agent failed to come up (e.g. an auth complaint or npx ENOENT).
-const STDERR_TAIL_BYTES = 4096;
+const DEFAULT_STDERR_TAIL_BYTES = 4096;
 
 export class AgentInstance {
   readonly agentId: string;
@@ -23,12 +24,14 @@ export class AgentInstance {
   private exited = false;
   private killed = false;
   private stderrTail = "";
+  private stderrTailBytes: number;
   private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
 
   private constructor(opts: AgentInstanceOptions, child: ChildProcess) {
     this.agentId = opts.agentId;
     this.cwd = opts.cwd;
     this.child = child;
+    this.stderrTailBytes = opts.stderrTailBytes ?? DEFAULT_STDERR_TAIL_BYTES;
 
     if (!child.stdout || !child.stdin) {
       throw new Error("agent subprocess missing stdio");
@@ -38,7 +41,7 @@ export class AgentInstance {
 
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_BYTES);
+      this.stderrTail = (this.stderrTail + chunk).slice(-this.stderrTailBytes);
       process.stderr.write(`[${opts.agentId}] ${chunk}`);
     });
 

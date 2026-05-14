@@ -374,6 +374,45 @@ describe("Session", () => {
     });
   });
 
+  describe("history compaction trigger", () => {
+    it("triggers compact() once every floor(historyMaxEntries * 0.2) appends", async () => {
+      const store = new HistoryStore();
+      const compactSpy = vi.spyOn(store, "compact").mockResolvedValue();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+      const session = new Session({
+        sessionId: "hydra_session_HC",
+        cwd: "/w",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_hc",
+        historyStore: store,
+        historyMaxEntries: 50,
+      });
+      const { client } = makeClient();
+      await session.attach(client, "full");
+
+      // compactEvery = floor(50 * 0.2) = 10. Fire 9 recordable broadcasts:
+      // not yet at the threshold, no compaction.
+      for (let i = 0; i < 9; i++) {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_hc",
+          update: { sessionUpdate: "agent_thought", text: `t${i}` },
+        });
+      }
+      await flushHistoryWrites();
+      expect(compactSpy).not.toHaveBeenCalled();
+
+      // The 10th broadcast hits the threshold and triggers one compact.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_hc",
+        update: { sessionUpdate: "agent_thought", text: "t9" },
+      });
+      await flushHistoryWrites();
+      expect(compactSpy).toHaveBeenCalledTimes(1);
+      expect(compactSpy).toHaveBeenCalledWith("hydra_session_HC", 50);
+    });
+  });
+
   describe("available_commands_update merging", () => {
     it("exposes the hydra verbs via mergedAvailableCommands at construction", () => {
       const { session } = makeSession();

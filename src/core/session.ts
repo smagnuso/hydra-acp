@@ -82,6 +82,10 @@ export interface SessionInit {
   // Every recordAndBroadcast entry is persisted here. attach()/getHistorySnapshot()
   // load from this store on demand — Session keeps no in-memory copy.
   historyStore?: HistoryStore;
+  // Cap on entries retained in the on-disk history.jsonl. The compaction
+  // trigger is derived as 20% of this value (min 1), so larger caps also
+  // compact less often. Defaults to 1000 if omitted.
+  historyMaxEntries?: number;
   // Snapshot state restored from meta.json on cold resurrect, so the
   // first attach response can deliver the right model/mode/commands
   // via _meta before the agent re-emits.
@@ -109,8 +113,7 @@ export interface CloseOptions {
   regenTitleTimeoutMs?: number;
 }
 
-const MAX_HISTORY_ENTRIES = 1000;
-const COMPACT_EVERY = 200;
+const DEFAULT_HISTORY_MAX_ENTRIES = 1000;
 
 export class Session {
   readonly sessionId: string;
@@ -154,11 +157,13 @@ export class Session {
   // Bumped by broadcastPromptReceived, cleared by broadcastTurnComplete.
   // Drives the mid-turn elapsed counter delivered to fresh attachers.
   private promptStartedAt: number | undefined;
-  // Counts appends since the last compaction. When it hits COMPACT_EVERY
+  // Counts appends since the last compaction. When it hits compactEvery
   // we ask the history store to trim the file to the most recent
-  // MAX_HISTORY_ENTRIES. Keeps file growth bounded without per-append
+  // historyMaxEntries. Keeps file growth bounded without per-append
   // file-size checks.
   private appendCount = 0;
+  private historyMaxEntries: number;
+  private compactEvery: number;
   // Permission requests that have been broadcast to one or more
   // clients but have not yet resolved. Replayed to clients that
   // attach mid-flight so a late joiner sees the prompt instead of an
@@ -223,6 +228,8 @@ export class Session {
       this.firstPromptSeeded = true;
     }
     this.historyStore = init.historyStore;
+    this.historyMaxEntries = init.historyMaxEntries ?? DEFAULT_HISTORY_MAX_ENTRIES;
+    this.compactEvery = Math.max(1, Math.floor(this.historyMaxEntries * 0.2));
     this.updatedAt = Date.now();
     this.createdAt = init.createdAt ?? this.updatedAt;
     // Resurrection itself is the activity that gets a fresh idle
@@ -1261,9 +1268,9 @@ export class Session {
       if (this.historyStore) {
         const store = this.historyStore;
         void store.append(this.sessionId, entry).catch(() => undefined);
-        if (this.appendCount >= COMPACT_EVERY) {
+        if (this.appendCount >= this.compactEvery) {
           this.appendCount = 0;
-          void store.compact(this.sessionId, MAX_HISTORY_ENTRIES).catch(
+          void store.compact(this.sessionId, this.historyMaxEntries).catch(
             () => undefined,
           );
         }

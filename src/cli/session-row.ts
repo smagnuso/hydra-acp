@@ -54,10 +54,12 @@ export const HEADER: Row = {
 };
 
 const SEP = "  ";
-// Cap the cwd column so one or two deeply-nested paths don't widen the
-// whole column and starve title. Anything past this gets middle-truncated
-// by formatRow when a maxWidth is in effect.
-const CWD_MAX_WIDTH = 24;
+// Default cap on the cwd column when one isn't passed. Anything past this
+// gets middle-truncated by formatRow when a maxWidth is in effect. Both
+// the CLI sessions command and the TUI picker pass an explicit value
+// (sourced from config.tui.cwdColumnMaxWidth); the default is the fallback
+// for callers that don't have config in hand.
+const DEFAULT_CWD_MAX_WIDTH = 24;
 
 export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
@@ -155,7 +157,12 @@ function maxLen(headerCell: string, values: string[]): number {
 // fixed columns (session/upstream/state/agent/age) are never truncated —
 // they're keyed by short ids and short labels, so their natural width is
 // expected to fit.
-export function formatRow(r: Row, w: Widths, maxWidth?: number): string {
+export function formatRow(
+  r: Row,
+  w: Widths,
+  maxWidth?: number,
+  cwdMaxWidth: number = DEFAULT_CWD_MAX_WIDTH,
+): string {
   const fixed = [
     r.session.padEnd(w.session),
     r.upstream.padEnd(w.upstream),
@@ -176,7 +183,7 @@ export function formatRow(r: Row, w: Widths, maxWidth?: number): string {
   // Give cwd its natural (header-aware, capped) width first; title takes
   // whatever's left as the trailing elastic cell. Always reserve at least
   // one column for title so an oversized cwd can't push it off the row.
-  const cwdCap = Math.min(w.cwd, CWD_MAX_WIDTH);
+  const cwdCap = Math.min(w.cwd, cwdMaxWidth);
   const cwdAlloc = Math.min(cwdCap, Math.max(0, budget - SEP.length - 1));
   const cwdCell = truncateMiddle(r.cwd, cwdAlloc).padEnd(cwdAlloc);
   const titleBudget = Math.max(0, budget - cwdAlloc - SEP.length);

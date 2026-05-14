@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadConfig } from "../../core/config.js";
+import { loadConfig, loadConfigReadOnly } from "../../core/config.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import {
   HEADER,
@@ -70,9 +70,10 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
   // Truncate to terminal width only when stdout is a TTY — piping to a
   // file or grep should preserve the full row.
   const maxWidth = process.stdout.isTTY ? process.stdout.columns : undefined;
-  process.stdout.write(formatRow(HEADER, widths, maxWidth) + "\n");
+  const cwdMax = config.tui.cwdColumnMaxWidth;
+  process.stdout.write(formatRow(HEADER, widths, maxWidth, cwdMax) + "\n");
   for (const r of rows) {
-    process.stdout.write(formatRow(r, widths, maxWidth) + "\n");
+    process.stdout.write(formatRow(r, widths, maxWidth, cwdMax) + "\n");
   }
   if (truncated > 0) {
     process.stdout.write(
@@ -193,7 +194,8 @@ export async function runSessionsImport(
     process.exit(1);
   }
   if (opts.info === true) {
-    printBundleInfo(bundle);
+    const inspectConfig = await loadConfigReadOnly();
+    printBundleInfo(bundle, inspectConfig.tui.cwdColumnMaxWidth);
     return;
   }
   const config = await loadConfig();
@@ -258,7 +260,7 @@ export function bundleToSummary(parsed: Bundle): SessionSummary {
 // same column layout as `hydra sessions list`. Local-only — never hits
 // the daemon — so it works on a host that isn't running hydra and on
 // bundles the user hasn't imported yet.
-function printBundleInfo(raw: unknown): void {
+function printBundleInfo(raw: unknown, cwdColumnMaxWidth: number): void {
   let parsed;
   try {
     parsed = decodeBundle(raw);
@@ -270,8 +272,8 @@ function printBundleInfo(raw: unknown): void {
   const row = toRow(summary);
   const widths = computeWidths([row]);
   const maxWidth = process.stdout.isTTY ? process.stdout.columns : undefined;
-  process.stdout.write(formatRow(HEADER, widths, maxWidth) + "\n");
-  process.stdout.write(formatRow(row, widths, maxWidth) + "\n");
+  process.stdout.write(formatRow(HEADER, widths, maxWidth, cwdColumnMaxWidth) + "\n");
+  process.stdout.write(formatRow(row, widths, maxWidth, cwdColumnMaxWidth) + "\n");
   process.stdout.write(
     `\nlineage: ${parsed.session.lineageId}\n` +
       `exported: ${parsed.exportedAt} from ${parsed.exportedFrom.machine} (hydra ${parsed.exportedFrom.hydraVersion})\n` +

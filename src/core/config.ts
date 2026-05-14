@@ -18,6 +18,15 @@ const DaemonConfig = z.object({
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
   sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(3600),
+  // Cap on entries kept in a session's on-disk replay log (history.jsonl).
+  // Compaction trims to this many on a periodic basis; reads also slice
+  // to the tail at this length as a defensive measure against older
+  // daemons that may have written unbounded files.
+  sessionHistoryMaxEntries: z.number().int().positive().default(1000),
+  // Bytes of trailing agent stderr buffered per AgentInstance so the
+  // daemon can include it in the diagnostic message when a spawn fails.
+  // Bump if your agents emit large tracebacks you want surfaced.
+  agentStderrTailBytes: z.number().int().positive().default(4096),
 });
 
 const RegistryConfig = z.object({
@@ -43,6 +52,13 @@ const TuiConfig = z.object({
   // false to disable capture — wheel scrollback stops working, but
   // plain click-drag selects text via the terminal emulator.
   mouse: z.boolean().default(true),
+  // Size at which the TUI's session/update debug log (tui.log) rotates
+  // to tui.log.0 and resets. Bounds on-disk use at ~2x this value.
+  logMaxBytes: z.number().int().positive().default(5 * 1024 * 1024),
+  // Width cap on the cwd column in the `sessions list` output and the
+  // TUI picker. Set higher if you keep deeply-nested working directories
+  // and want them visible; the elastic title column shrinks to make room.
+  cwdColumnMaxWidth: z.number().int().positive().default(24),
 });
 
 const ExtensionName = z
@@ -88,10 +104,24 @@ export const HydraConfig = z.object({
     repaintThrottleMs: 1000,
     maxScrollbackLines: 10_000,
     mouse: true,
+    logMaxBytes: 5 * 1024 * 1024,
+    cwdColumnMaxWidth: 24,
   }),
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;
+
+// Schema variant used by passive inspection commands (e.g. `sessions
+// import --info`) that read display preferences but never talk to the
+// daemon. The auth token isn't present in config.json — it lives in a
+// separate file and is injected by loadConfig before parsing — so
+// dropping the requirement here lets such commands load the user's
+// settings without forcing an `init` run.
+const HydraConfigReadOnly = HydraConfig.extend({
+  daemon: DaemonConfig.omit({ authToken: true }),
+});
+
+export type HydraConfigReadOnly = z.infer<typeof HydraConfigReadOnly>;
 
 export function extensionList(config: HydraConfig): ExtensionConfig[] {
   return Object.entries(config.extensions).map(([name, body]) => ({
@@ -200,6 +230,14 @@ export async function loadConfig(): Promise<HydraConfig> {
   const daemon = (raw.daemon ??= {}) as Record<string, unknown>;
   daemon.authToken = token;
   return HydraConfig.parse(raw);
+}
+
+// Read and parse config.json without touching the auth-token file. The
+// daemon section is returned with authToken omitted. Used by passive
+// inspection paths that honor user display preferences but never need
+// to authenticate with the daemon (e.g. `sessions import --info`).
+export async function loadConfigReadOnly(): Promise<HydraConfigReadOnly> {
+  return HydraConfigReadOnly.parse(await readConfigFile());
 }
 
 // Like loadConfig, but writes a fresh token if none exists. Used by

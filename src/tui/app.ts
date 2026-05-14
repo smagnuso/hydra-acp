@@ -69,6 +69,7 @@ const PLAN_PREFIX_TEXT =
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const config = await ensureConfig();
+  logMaxBytes = config.tui.logMaxBytes;
   await ensureDaemonReachable(config);
   const term = termkit.terminal;
 
@@ -1843,7 +1844,7 @@ function newCtx(
 // user reporting "thoughts/tools aren't rendering" has a ready artifact
 // to share. HYDRA_TUI_DEBUG_LOG overrides the path; setting it to an
 // empty string disables logging.
-const TUI_LOG_MAX_BYTES = 5 * 1024 * 1024;
+let logMaxBytes = 5 * 1024 * 1024;
 function debugLogUpdate(update: unknown, event: RenderEvent | null): void {
   writeDebugLine({
     src: "session/update",
@@ -1876,7 +1877,7 @@ function writeDebugLine(payload: Record<string, unknown>): void {
 function rotateIfBig(target: string): void {
   try {
     const stat = statSync(target);
-    if (stat.size < TUI_LOG_MAX_BYTES) {
+    if (stat.size < logMaxBytes) {
       return;
     }
     renameSync(target, `${target}.0`);

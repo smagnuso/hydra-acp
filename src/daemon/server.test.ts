@@ -17,6 +17,8 @@ function testConfig(): HydraConfig {
       authToken: TEST_TOKEN,
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
+      sessionHistoryMaxEntries: 1000,
+      agentStderrTailBytes: 4096,
     },
     registry: {
       url: "http://127.0.0.1:65535/never-reached",
@@ -27,7 +29,13 @@ function testConfig(): HydraConfig {
     defaultCwd: os.homedir(),
     sessionListColdLimit: 20,
     extensions: {},
-    tui: { repaintThrottleMs: 1000, maxScrollbackLines: 10_000, mouse: true },
+    tui: {
+      repaintThrottleMs: 1000,
+      maxScrollbackLines: 10_000,
+      mouse: true,
+      logMaxBytes: 5 * 1024 * 1024,
+      cwdColumnMaxWidth: 24,
+    },
   };
 }
 
@@ -567,6 +575,8 @@ describe("startDaemon — extensions REST lifecycle", () => {
         authToken: TEST_TOKEN,
         logLevel: "warn",
         sessionIdleTimeoutSeconds: 30,
+        sessionHistoryMaxEntries: 1000,
+        agentStderrTailBytes: 4096,
       },
       registry: {
         url: "http://127.0.0.1:65535/never-reached",
@@ -584,7 +594,13 @@ describe("startDaemon — extensions REST lifecycle", () => {
           enabled: true,
         },
       },
-      tui: { repaintThrottleMs: 1000, maxScrollbackLines: 10_000, mouse: true },
+      tui: {
+        repaintThrottleMs: 1000,
+        maxScrollbackLines: 10_000,
+        mouse: true,
+        logMaxBytes: 5 * 1024 * 1024,
+        cwdColumnMaxWidth: 24,
+      },
     };
     handle = await startDaemon(cfg);
     const p = port(handle);

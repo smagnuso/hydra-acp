@@ -41,6 +41,8 @@ function fakeConfig(): HydraConfig {
       authToken: "hydra_token_xxx",
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
+      sessionHistoryMaxEntries: 1000,
+      agentStderrTailBytes: 4096,
     },
     registry: {
       url: "http://example.invalid/never",
@@ -51,7 +53,13 @@ function fakeConfig(): HydraConfig {
     defaultCwd: homedir(),
     sessionListColdLimit: 20,
     extensions: {},
-    tui: { repaintThrottleMs: 1000, maxScrollbackLines: 10_000, mouse: true },
+    tui: {
+      repaintThrottleMs: 1000,
+      maxScrollbackLines: 10_000,
+      mouse: true,
+      logMaxBytes: 5 * 1024 * 1024,
+      cwdColumnMaxWidth: 24,
+    },
   };
 }
 

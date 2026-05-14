@@ -6,7 +6,8 @@ import pino, { type Level } from "pino";
 import createPinoRoll from "pino-roll";
 import { type HydraConfig, extensionList } from "../core/config.js";
 import { Registry } from "../core/registry.js";
-import { SessionManager } from "../core/session-manager.js";
+import { AgentInstance } from "../core/agent-instance.js";
+import { SessionManager, type AgentSpawner } from "../core/session-manager.js";
 import { ExtensionManager } from "../core/extensions.js";
 import { paths } from "../core/paths.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
@@ -85,9 +86,14 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
   });
 
   const registry = new Registry(config);
-  const manager = new SessionManager(registry, undefined, undefined, {
+  // Inject the configured stderr-tail size into every spawned agent so a
+  // crash diagnostic includes the user-tuned trailing bytes.
+  const spawner: AgentSpawner = (opts) =>
+    AgentInstance.spawn({ ...opts, stderrTailBytes: config.daemon.agentStderrTailBytes });
+  const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
     defaultModels: config.defaultModels,
+    sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
   });
 
   const extensions = new ExtensionManager(extensionList(config));

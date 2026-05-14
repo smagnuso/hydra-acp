@@ -79,6 +79,31 @@ describe("AgentInstance: spawn-level failures", () => {
     expect(err.message).toMatch(/EACCES|exited before responding|closed/i);
   });
 
+  it("respects stderrTailBytes when buffering for the failure diagnostic", async () => {
+    // 2 KB of filler followed by a distinct trailing marker. With a 64-byte
+    // tail cap, the last slice retained should fit in 64 bytes and still
+    // include the marker — confirming the override is applied.
+    const agent = AgentInstance.spawn({
+      agentId: "verbose-stderr",
+      cwd: process.cwd(),
+      plan: nodeScript(
+        "process.stderr.write('A'.repeat(2000)); process.stderr.write('TAILMARK!'); process.exit(1);",
+      ),
+      stderrTailBytes: 64,
+    });
+    const err = await settled(agent.connection.request("initialize", {}));
+    // Two possible shapes depending on which event won the race:
+    //   "agent ... exited before responding ...\nstderr: <tail>"
+    //   "connection closed" (if stdout end fired first; no tail surfaced)
+    const tail = err.message.match(/stderr: ([\s\S]+)$/)?.[1];
+    if (tail !== undefined) {
+      expect(tail.length).toBeLessThanOrEqual(64);
+      expect(tail).toContain("TAILMARK!");
+    } else {
+      expect(err.message).toMatch(/closed|exited/i);
+    }
+  });
+
   it("kill() closes the connection without surfacing an exit-before-responding error", async () => {
     const agent = AgentInstance.spawn({
       agentId: "long-lived",
