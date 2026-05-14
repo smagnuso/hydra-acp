@@ -37,6 +37,12 @@ const TuiConfig = z.object({
   // buffer. Oldest lines are dropped on overflow. The on-disk session
   // history is unaffected; this only bounds the TUI's local view buffer.
   maxScrollbackLines: z.number().int().positive().default(10_000),
+  // When true (default), the TUI captures mouse events so the wheel can
+  // drive scrollback. The cost: terminals route clicks to the app, so
+  // text selection requires shift+drag to bypass mouse reporting. Set
+  // false to disable capture — wheel scrollback stops working, but
+  // plain click-drag selects text via the terminal emulator.
+  mouse: z.boolean().default(true),
 });
 
 const ExtensionName = z
@@ -78,7 +84,11 @@ export const HydraConfig = z.object({
   // recency and truncated to this count. `--all` overrides in the CLI.
   sessionListColdLimit: z.number().int().nonnegative().default(20),
   extensions: z.record(ExtensionName, ExtensionBody).default({}),
-  tui: TuiConfig.default({ repaintThrottleMs: 1000, maxScrollbackLines: 10_000 }),
+  tui: TuiConfig.default({
+    repaintThrottleMs: 1000,
+    maxScrollbackLines: 10_000,
+    mouse: true,
+  }),
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;

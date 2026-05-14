@@ -523,6 +523,7 @@ async function runSession(
     dispatcher,
     repaintThrottleMs: config.tui.repaintThrottleMs,
     maxScrollbackLines: config.tui.maxScrollbackLines,
+    mouse: config.tui.mouse,
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
         if (pendingPermission && tryHandlePermissionKey(ev)) {

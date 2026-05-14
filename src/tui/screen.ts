@@ -23,6 +23,10 @@ export interface ScreenOptions {
   // Cap on logical lines retained in scrollback. Oldest are dropped on
   // overflow. Default 10_000.
   maxScrollbackLines?: number;
+  // When true (default), grabInput captures mouse events so the wheel
+  // can drive scrollback. When false, the wheel does nothing but text
+  // selection works with plain click-drag (no shift required).
+  mouse?: boolean;
 }
 
 interface BannerState {
@@ -165,6 +169,7 @@ export class Screen {
   private pasteActive = false;
   private pasteBuffer = "";
   private rawStdinHandler: (chunk: Buffer) => void;
+  private mouseEnabled: boolean;
 
   constructor(opts: ScreenOptions) {
     this.term = opts.term;
@@ -174,6 +179,7 @@ export class Screen {
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
     this.maxScrollbackLines =
       opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
+    this.mouseEnabled = opts.mouse ?? true;
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name) => this.handleMouse(name);
@@ -206,10 +212,18 @@ export class Screen {
     // mouse: "button" enables wheel + click reporting so we can intercept
     // mouse-wheel events for scrollback. terminal-kit emits these through
     // the same "key" channel as MOUSE_WHEEL_UP / MOUSE_WHEEL_DOWN names.
-    this.term.grabInput({ mouse: "button" });
+    // Skip mouse capture when disabled via config so click-drag text
+    // selection works without shift; the trade-off is wheel scrollback.
+    if (this.mouseEnabled) {
+      this.term.grabInput({ mouse: "button" });
+    } else {
+      this.term.grabInput(true);
+    }
     this.term.hideCursor(false);
     this.term.on("key", this.keyHandler);
-    this.term.on("mouse", this.mouseHandler);
+    if (this.mouseEnabled) {
+      this.term.on("mouse", this.mouseHandler);
+    }
     this.term.on("resize", this.resizeHandler);
     this.installBracketedPaste();
     this.repaint();
@@ -222,7 +236,9 @@ export class Screen {
     this.started = false;
     this.uninstallBracketedPaste();
     this.term.off("key", this.keyHandler);
-    this.term.off("mouse", this.mouseHandler);
+    if (this.mouseEnabled) {
+      this.term.off("mouse", this.mouseHandler);
+    }
     this.term.off("resize", this.resizeHandler);
     this.term.grabInput(false);
     this.term.hideCursor(false);

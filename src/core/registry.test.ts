@@ -51,7 +51,7 @@ function fakeConfig(): HydraConfig {
     defaultCwd: homedir(),
     sessionListColdLimit: 20,
     extensions: {},
-    tui: { repaintThrottleMs: 1000, maxScrollbackLines: 10_000 },
+    tui: { repaintThrottleMs: 1000, maxScrollbackLines: 10_000, mouse: true },
   };
 }
 
