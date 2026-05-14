@@ -117,8 +117,12 @@ export type HydraConfig = z.infer<typeof HydraConfig>;
 // separate file and is injected by loadConfig before parsing — so
 // dropping the requirement here lets such commands load the user's
 // settings without forcing an `init` run.
+// The whole daemon block is defaulted to {} so users whose config.json
+// has no daemon section (e.g. after the auth-token migration stripped
+// the only key it held) can still run inspection commands. All remaining
+// fields in DaemonConfig have their own defaults.
 const HydraConfigReadOnly = HydraConfig.extend({
-  daemon: DaemonConfig.omit({ authToken: true }),
+  daemon: DaemonConfig.omit({ authToken: true }).default({}),
 });
 
 export type HydraConfigReadOnly = z.infer<typeof HydraConfigReadOnly>;
