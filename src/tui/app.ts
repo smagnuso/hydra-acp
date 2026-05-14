@@ -236,7 +236,14 @@ async function runSession(
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
     debugLogUpdate(update, event);
-    if (event?.kind === "user-text") {
+    // Only prompt_received signals a new turn. user_message_chunk also
+    // maps to a "user-text" event but agents legitimately emit it
+    // mid-turn (e.g. echoing a user's reply during a permission/elicit
+    // flow); counting those would leave pendingTurns stranded and lock
+    // the prompt queue.
+    const rawTag = (update as { sessionUpdate?: unknown } | undefined)
+      ?.sessionUpdate;
+    if (rawTag === "prompt_received") {
       adjustPendingTurns(1);
     } else if (event?.kind === "turn-complete") {
       adjustPendingTurns(-1);
@@ -1623,6 +1630,12 @@ async function runSession(
       }, 1_000);
     }
     startToolsBlock();
+  } else if (initialTurnStartedAt === undefined && pendingTurns > 0) {
+    // Daemon says idle but local replay counted unmatched user-text
+    // events. The daemon's turnStartedAt is authoritative — any
+    // mismatch is local accounting error (e.g. a malformed historical
+    // entry). Snap pendingTurns to 0 so the prompt queue can drain.
+    adjustPendingTurns(-pendingTurns);
   }
 
   // Tear down any visible in-flight UI state so the next live signal
