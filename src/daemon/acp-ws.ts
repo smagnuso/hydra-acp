@@ -156,6 +156,7 @@ export function registerAcpWsEndpoint(
         session,
         state,
         params.clientInfo,
+        params.clientId,
       );
       const replay = await session.attach(client, params.historyPolicy);
       state.attached.set(session.sessionId, {
@@ -171,6 +172,7 @@ export function registerAcpWsEndpoint(
       session.replayPendingPermissions(client);
       return {
         sessionId: session.sessionId,
+        clientId: client.clientId,
         replayed: replay.length,
         _meta: buildResponseMeta(session),
       };
@@ -401,11 +403,12 @@ function bindClientToSession(
   session: Session,
   state: ClientState,
   clientInfo?: { name: string; version?: string },
+  callerClientId?: string,
 ): AttachedClient {
   void state;
   void session;
   return {
-    clientId: `cli_${nanoid(8)}`,
+    clientId: callerClientId ?? `cli_${nanoid(8)}`,
     connection,
     clientInfo,
   };

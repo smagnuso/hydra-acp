@@ -95,6 +95,12 @@ export type SessionResumeHints = z.infer<typeof SessionResumeHints>;
 export const SessionAttachParams = z.object({
   sessionId: z.string(),
   historyPolicy: HistoryPolicy.default("full"),
+  // Caller-assigned opaque id (e.g. a UUID). When provided, the proxy
+  // echoes it in resolvedBy/sentBy and lifecycle events so other
+  // clients can disambiguate multiple instances of the same
+  // clientInfo.name. When omitted, the proxy assigns one and returns
+  // it in the response. Per RFD #533.
+  clientId: z.string().optional(),
   clientInfo: z
     .object({
       name: z.string(),
