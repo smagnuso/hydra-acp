@@ -490,6 +490,40 @@ describe("Session", () => {
     });
   });
 
+  describe("messageId on prompt_received and turn_complete", () => {
+    it("stamps a fresh messageId on prompt_received and turn_complete", async () => {
+      const { session, mock } = makeSession("sess_m", "u_m");
+      const a = makeClient();
+      const b = makeClient();
+      await session.attach(a.client, "none");
+      await session.attach(b.client, "none");
+
+      // Mock agent's session/prompt response so the turn completes.
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_m",
+        prompt: [{ type: "text", text: "hi" }],
+      });
+
+      const updates = b.stream.sent.flatMap((m) =>
+        "method" in m && m.method === "session/update"
+          ? [
+              (m.params as { update: { sessionUpdate: string; messageId?: string } })
+                .update,
+            ]
+          : [],
+      );
+      const prompt = updates.find((u) => u.sessionUpdate === "prompt_received");
+      const turn = updates.find((u) => u.sessionUpdate === "turn_complete");
+      expect(prompt?.messageId).toMatch(/^m_[A-Za-z0-9]{16}$/);
+      expect(turn?.messageId).toMatch(/^m_[A-Za-z0-9]{16}$/);
+      expect(prompt?.messageId).not.toBe(turn?.messageId);
+    });
+  });
+
   describe("history compaction trigger", () => {
     it("triggers compact() once every floor(historyMaxEntries * 0.2) appends", async () => {
       const store = new HistoryStore();
