@@ -1032,6 +1032,7 @@ async function runSession(
         toolCallOrder.length = 0;
         toolsBlockStartedAt = null;
         toolsBlockEndedAt = null;
+        toolsBlockStopReason = null;
         toolsExpanded = false;
         screen.clearScrollback();
         return true;
@@ -1281,6 +1282,11 @@ async function runSession(
   // "took Xs"). Both null when there's no live block.
   let toolsBlockStartedAt: number | null = null;
   let toolsBlockEndedAt: number | null = null;
+  // Captured at turn-end from turn-complete.stopReason. When set to
+  // anything other than "end_turn" the frozen tools block renders as
+  // `stopped (<reason>) · Xs` in red instead of the usual dim
+  // `thought · Xs`, so a cancel/refusal/max_tokens turn is visibly distinct.
+  let toolsBlockStopReason: string | null = null;
   // How many recent tool rows the collapsed view shows; older ones get
   // rolled into the "N hidden" counter in the header.
   const TOOLS_COLLAPSED_LIMIT = 5;
@@ -1341,19 +1347,35 @@ async function runSession(
     const inProgress = toolsBlockEndedAt === null;
     const end = toolsBlockEndedAt ?? Date.now();
     const elapsed = end - toolsBlockStartedAt;
+    // Any frozen non-success stopReason gets the loud "stopped (<reason>)"
+    // treatment so cancel/refusal/max_tokens etc. aren't visually identical
+    // to a normal end_turn finish.
+    const stoppedReason =
+      !inProgress &&
+      toolsBlockStopReason !== null &&
+      toolsBlockStopReason !== "end_turn"
+        ? toolsBlockStopReason
+        : null;
     let summary: string;
     if (total === 0) {
       // Pre-tool state — the block exists purely as a "still working"
       // indicator while the agent is thinking, then freezes as "thought · Xs"
       // at turn end so the user has a visible trace of the reasoning time.
-      summary = inProgress
-        ? `thinking · ${formatElapsed(elapsed)}`
-        : `thought · ${formatElapsed(elapsed)}`;
+      if (stoppedReason !== null) {
+        summary = `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`;
+      } else {
+        summary = inProgress
+          ? `thinking · ${formatElapsed(elapsed)}`
+          : `thought · ${formatElapsed(elapsed)}`;
+      }
     } else {
       const noun = total === 1 ? "tool" : "tools";
-      const timing = inProgress
-        ? formatElapsed(elapsed)
-        : `took ${formatElapsed(elapsed)}`;
+      const timing =
+        stoppedReason !== null
+          ? `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`
+          : inProgress
+            ? formatElapsed(elapsed)
+            : `took ${formatElapsed(elapsed)}`;
       const parts: string[] = [`${total} ${noun}`, timing];
       // Only advertise the hotkey while the block is live — once frozen,
       // ^O no longer affects it and the hint would be misleading.
@@ -1370,14 +1392,20 @@ async function runSession(
     // still live) renders yellow to match the busy banner / active plan /
     // running tool accent. Once a tool fires the per-tool status colors
     // carry the activity signal, and once frozen ("thought · Xs") the
-    // header dims so completed turns stop pulling the eye.
+    // header dims so completed turns stop pulling the eye. A non-success
+    // stopReason overrides the frozen dim and goes bold-red so the user
+    // can spot a cancelled / refused / truncated turn at a glance.
     const pureThinking = total === 0 && inProgress;
+    const frozenStyle: "tool-status-fail" | "tool" =
+      stoppedReason !== null ? "tool-status-fail" : "tool";
+    const frozenBodyStyle: "tool-status-fail" | "dim" =
+      stoppedReason !== null ? "tool-status-fail" : "dim";
     const lines: FormattedLine[] = [
       {
         prefix: "⚒ ",
-        prefixStyle: pureThinking ? "tool-status-running" : "tool",
+        prefixStyle: pureThinking ? "tool-status-running" : frozenStyle,
         body: summary,
-        bodyStyle: pureThinking ? "tool-status-running" : "dim",
+        bodyStyle: pureThinking ? "tool-status-running" : frozenBodyStyle,
       },
     ];
     for (const id of visibleIds) {
@@ -1397,6 +1425,7 @@ async function runSession(
   const startToolsBlock = (): void => {
     toolsBlockStartedAt = Date.now();
     toolsBlockEndedAt = null;
+    toolsBlockStopReason = null;
     renderToolsBlock();
   };
 
@@ -1429,6 +1458,7 @@ async function runSession(
       if (toolsBlockStartedAt === null) {
         toolsBlockStartedAt = Date.now();
         toolsBlockEndedAt = null;
+        toolsBlockStopReason = null;
       }
       toolCallOrder.push(id);
     }
@@ -1583,6 +1613,7 @@ async function runSession(
         // turn look indistinguishable from one where the TUI silently
         // dropped events.
         toolsBlockEndedAt = Date.now();
+        toolsBlockStopReason = event.stopReason ?? null;
         renderToolsBlock();
         screen.clearKey("tools");
       }
@@ -1590,6 +1621,7 @@ async function runSession(
       toolCallOrder.length = 0;
       toolsBlockStartedAt = null;
       toolsBlockEndedAt = null;
+      toolsBlockStopReason = null;
       toolsExpanded = false;
       screen.ensureSeparator();
     }
@@ -1658,14 +1690,18 @@ async function runSession(
       // Freeze the block in place (with "thought · Xs" when no tool ever
       // fired) instead of removing it. Matches the turn-complete handler
       // and ensures a silent reconnect mid-turn doesn't strip the only
-      // visible signal that the agent was reasoning.
+      // visible signal that the agent was reasoning. No stopReason is
+      // known here, so the block freezes as plain "thought · Xs" — the
+      // turn is genuinely unfinished from our side.
       toolsBlockEndedAt = Date.now();
+      toolsBlockStopReason = null;
       renderToolsBlock();
       screen.clearKey("tools");
       toolStates.clear();
       toolCallOrder.length = 0;
       toolsBlockStartedAt = null;
       toolsBlockEndedAt = null;
+      toolsBlockStopReason = null;
       toolsExpanded = false;
     }
     screen.clearKey("plan");
