@@ -6,14 +6,16 @@ export interface ParsedArgs {
 // Flags known to never carry a value. Listing them lets the parser
 // treat `--info file.hydra` and `file.hydra --info` the same way; without
 // this set, the next non-`--` token would be eaten as the flag's value.
-// --resume is intentionally omitted: it is dual-mode (bare = pick recent,
-// with id = attach to that session).
+// --resume is intentionally omitted so the CLI can detect bare `--resume`
+// (which is no longer supported) and emit a friendly error pointing the
+// user at --reattach.
 const KNOWN_BOOLEAN_FLAGS = new Set([
   "all",
   "foreground",
   "help",
   "info",
   "new",
+  "reattach",
   "replace",
   "rotate-token",
   "version",

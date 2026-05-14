@@ -88,6 +88,30 @@ describe("parseArgs", () => {
       flags: { info: true },
     });
   });
+
+  it("treats --reattach as a pure boolean (no slurp)", () => {
+    expect(parseArgs(["--reattach"])).toEqual({
+      positional: [],
+      flags: { reattach: true },
+    });
+    expect(parseArgs(["tui", "--reattach"])).toEqual({
+      positional: ["tui"],
+      flags: { reattach: true },
+    });
+  });
+
+  it("still allows --resume <id> to carry a session id", () => {
+    // --resume is intentionally NOT in the boolean set so the CLI can
+    // distinguish "bare --resume" (which it rejects) from "--resume <id>".
+    expect(parseArgs(["--resume", "sess_abc"])).toEqual({
+      positional: [],
+      flags: { resume: "sess_abc" },
+    });
+    expect(parseArgs(["--resume"])).toEqual({
+      positional: [],
+      flags: { resume: true },
+    });
+  });
 });
 
 describe("flagString", () => {

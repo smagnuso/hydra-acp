@@ -42,6 +42,17 @@ async function main(): Promise<void> {
     const agentArgs = afterLaunch.slice(1);
 
     const { flags } = parseArgs(beforeLaunch);
+    if (flags.resume === true) {
+      bareResumeError();
+      return;
+    }
+    if (flags.reattach === true) {
+      process.stderr.write(
+        "hydra-acp launch: --reattach is not valid here. Pass --resume <id> to attach to a specific session.\n",
+      );
+      process.exit(2);
+      return;
+    }
     const agentId =
       positionalAgentId ?? resolveOption(flags, "agent");
     if (!agentId) {
@@ -51,10 +62,9 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
-    const launchResume = flags.resume;
     const sessionId =
-      typeof launchResume === "string"
-        ? launchResume
+      typeof flags.resume === "string"
+        ? flags.resume
         : resolveOption(flags, "session-id");
     const name = resolveOption(flags, "name");
     const model = resolveOption(flags, "model");
@@ -74,13 +84,16 @@ async function main(): Promise<void> {
   }
 
   const subcommand = positional[0];
-  // --resume <id> is the preferred way to attach to a specific session.
-  // --session-id <id> is kept for backwards compatibility / env-var use.
-  // Bare --resume (no value) still means "pick the most recent in cwd".
-  const resumeFlag = flags.resume;
+  if (flags.resume === true) {
+    bareResumeError();
+    return;
+  }
+  // --resume <id> attaches to a specific session. --session-id <id> is kept
+  // for env-var / backwards compatibility. --reattach (boolean) picks the
+  // most recent session for cwd; it used to be bare --resume.
   const sessionId =
-    typeof resumeFlag === "string"
-      ? resumeFlag
+    typeof flags.resume === "string"
+      ? flags.resume
       : resolveOption(flags, "session-id");
   const name = resolveOption(flags, "name");
   const agentIdFromFlag = resolveOption(flags, "agent");
@@ -250,9 +263,9 @@ async function dispatchTui(
   base: TuiBaseOpts,
 ): Promise<void> {
   const cwd = resolveOption(flags, "cwd");
-  // Only the bare-boolean form of --resume triggers "pick most recent";
-  // --resume <id> was already promoted to base.sessionId in main().
-  const resume = flags.resume === true;
+  // --resume <id> was already promoted to base.sessionId in main();
+  // --reattach is what now triggers "pick most recent in cwd".
+  const resume = flags.reattach === true;
   const forceNew = flags.new === true;
   const { runTui } = await import("./tui/index.js");
   const tuiOpts: Parameters<typeof runTui>[0] = { resume, forceNew };
@@ -272,6 +285,13 @@ async function dispatchTui(
     tuiOpts.model = base.model;
   }
   await runTui(tuiOpts);
+}
+
+function bareResumeError(): void {
+  process.stderr.write(
+    "hydra-acp: --resume requires a session id. Use --resume <id> to attach to a specific session, or --reattach to pick the most recent one in cwd.\n",
+  );
+  process.exit(2);
 }
 
 function readVersion(): string {
@@ -300,6 +320,7 @@ function printHelp(): void {
       "                                     from the registry. Args after <agent>",
       "                                     are forwarded to the agent's command.",
       "  hydra-acp --resume <id>            Attach to an existing session (TUI when in a terminal, shim otherwise)",
+      "  hydra-acp --reattach               Attach to the most-recent session for the current cwd (TUI/shim auto-pick)",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart|status",
@@ -318,9 +339,9 @@ function printHelp(): void {
       "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  hydra-acp agents [list]                     List agents in the cached registry",
       "  hydra-acp agents refresh                    Force a registry re-fetch",
-      "  hydra-acp tui flags: [--resume [<id>]] [--new] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
-      "                                     --resume <id> attaches to a specific session; bare --resume picks the most-recent",
-      "                                     in cwd. Smart default (no flags): picks if any live sessions exist, else new.",
+      "  hydra-acp tui flags: [--resume <id>] [--reattach] [--new] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
+      "                                     --resume <id> attaches to a specific session; --reattach picks the most-recent in cwd.",
+      "                                     Smart default (no flags): shows a picker when sessions exist, else new.",
       "  hydra-acp --version                Print version",
       "  hydra-acp --help                   Show this help",
       "",
