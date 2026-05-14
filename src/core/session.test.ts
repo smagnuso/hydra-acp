@@ -392,6 +392,43 @@ describe("Session", () => {
     });
   });
 
+  describe("connectedClients roster", () => {
+    it("lists attached clients with clientInfo when present", async () => {
+      const { session } = makeSession();
+      const a = makeClient({ name: "client-A", version: "1.0.0" });
+      const b = makeClient({ name: "client-B" });
+      await session.attach(a.client, "none");
+      await session.attach(b.client, "none");
+      const roster = session.connectedClients();
+      expect(roster).toHaveLength(2);
+      expect(roster).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "client-A", version: "1.0.0" }),
+          expect.objectContaining({ name: "client-B" }),
+        ]),
+      );
+    });
+
+    it("excludes the specified clientId from the roster", async () => {
+      const { session } = makeSession();
+      const a = makeClient({ name: "client-A" });
+      const b = makeClient({ name: "client-B" });
+      await session.attach(a.client, "none");
+      await session.attach(b.client, "none");
+      const roster = session.connectedClients(a.client.clientId);
+      expect(roster).toHaveLength(1);
+      expect(roster[0]?.name).toBe("client-B");
+    });
+
+    it("omits clientInfo fields that weren't supplied", async () => {
+      const { session } = makeSession();
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      const roster = session.connectedClients();
+      expect(roster).toEqual([{ clientId: a.client.clientId }]);
+    });
+  });
+
   describe("history compaction trigger", () => {
     it("triggers compact() once every floor(historyMaxEntries * 0.2) appends", async () => {
       const store = new HistoryStore();

@@ -328,6 +328,33 @@ export class Session {
     return this.clients.size;
   }
 
+  // Roster of currently-attached clients, optionally excluding one
+  // clientId. Used by the daemon to populate connectedClients on the
+  // session/attach response (per RFD #533) — the freshly-attaching
+  // client wants to see who else is on the session but not itself in
+  // the list.
+  connectedClients(
+    excludeClientId?: string,
+  ): Array<{ clientId: string; name?: string; version?: string }> {
+    const out: Array<{ clientId: string; name?: string; version?: string }> = [];
+    for (const client of this.clients.values()) {
+      if (excludeClientId && client.clientId === excludeClientId) {
+        continue;
+      }
+      const entry: { clientId: string; name?: string; version?: string } = {
+        clientId: client.clientId,
+      };
+      if (client.clientInfo?.name) {
+        entry.name = client.clientInfo.name;
+      }
+      if (client.clientInfo?.version) {
+        entry.version = client.clientInfo.version;
+      }
+      out.push(entry);
+    }
+    return out;
+  }
+
   // Wall-clock when the in-flight agent turn began, or undefined when
   // idle. Tracked in-memory by broadcastPromptReceived/broadcastTurnComplete
   // so the daemon can hand a fresh attacher mid-turn the right elapsed

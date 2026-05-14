@@ -173,6 +173,7 @@ export function registerAcpWsEndpoint(
       return {
         sessionId: session.sessionId,
         clientId: client.clientId,
+        connectedClients: session.connectedClients(client.clientId),
         replayed: replay.length,
         _meta: buildResponseMeta(session),
       };
