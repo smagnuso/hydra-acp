@@ -55,6 +55,9 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
       stream: logStream,
     },
     https: httpsOptions ?? null,
+    // Session bundles can be large (full history + tool output);
+    // the 1MB Fastify default rejects ordinary imports.
+    bodyLimit: 256 * 1024 * 1024,
   });
 
   await app.register(websocketPlugin);
