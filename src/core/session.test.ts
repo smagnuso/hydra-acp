@@ -429,6 +429,67 @@ describe("Session", () => {
     });
   });
 
+  describe("client_disconnected broadcast", () => {
+    it("notifies remaining peers when a client detaches", async () => {
+      const { session } = makeSession("sess_d", "u_d");
+      const a = makeClient({ name: "client-A", version: "1.0.0" });
+      const b = makeClient({ name: "client-B" });
+      await session.attach(a.client, "none");
+      await session.attach(b.client, "none");
+
+      session.detach(a.client.clientId);
+
+      const note = b.stream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "client_disconnected",
+      );
+      expect(note).toBeDefined();
+      const params = note?.params as {
+        sessionId: string;
+        update: {
+          sessionUpdate: string;
+          client: { clientId: string; name?: string; version?: string };
+          timestamp: string;
+        };
+      };
+      expect(params.sessionId).toBe("sess_d");
+      expect(params.update.client).toEqual({
+        clientId: a.client.clientId,
+        name: "client-A",
+        version: "1.0.0",
+      });
+      expect(params.update.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("does not send the notification to the leaving client itself", async () => {
+      const { session } = makeSession();
+      const a = makeClient({ name: "client-A" });
+      const b = makeClient({ name: "client-B" });
+      await session.attach(a.client, "none");
+      await session.attach(b.client, "none");
+
+      session.detach(a.client.clientId);
+
+      const selfNote = a.stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "client_disconnected",
+      );
+      expect(selfNote).toBeUndefined();
+    });
+
+    it("is a no-op for an unknown clientId", () => {
+      const { session } = makeSession();
+      // Should not throw; nothing to broadcast since no one's attached.
+      session.detach("does-not-exist");
+    });
+  });
+
   describe("history compaction trigger", () => {
     it("triggers compact() once every floor(historyMaxEntries * 0.2) appends", async () => {
       const store = new HistoryStore();

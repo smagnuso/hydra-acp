@@ -427,8 +427,42 @@ export class Session {
   }
 
   detach(clientId: string): void {
-    if (this.clients.delete(clientId)) {
-      this.updatedAt = Date.now();
+    const leaving = this.clients.get(clientId);
+    if (!leaving) {
+      return;
+    }
+    this.clients.delete(clientId);
+    this.updatedAt = Date.now();
+    this.broadcastClientDisconnected(leaving);
+  }
+
+  // Notify remaining attached clients that a peer just left, per
+  // RFD #533. Fires for both explicit session/detach and ws-close
+  // teardown (acp-ws calls Session.detach() in both paths). The
+  // notification is broadcast (not recorded) — peer presence is
+  // transient, not part of conversation history.
+  private broadcastClientDisconnected(client: AttachedClient): void {
+    const info: { clientId: string; name?: string; version?: string } = {
+      clientId: client.clientId,
+    };
+    if (client.clientInfo?.name) {
+      info.name = client.clientInfo.name;
+    }
+    if (client.clientInfo?.version) {
+      info.version = client.clientInfo.version;
+    }
+    const update = {
+      sessionUpdate: "client_disconnected",
+      client: info,
+      timestamp: new Date().toISOString(),
+    };
+    for (const peer of this.clients.values()) {
+      void peer.connection
+        .notify("session/update", {
+          sessionId: this.sessionId,
+          update,
+        })
+        .catch(() => undefined);
     }
   }
 
