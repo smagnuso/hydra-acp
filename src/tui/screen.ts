@@ -375,7 +375,7 @@ export class Screen {
     this.streamingActive = false;
     this.lines.push(...lines);
     this.trackLines(lines);
-    this.adjustScrollForLineChange(lines.length);
+    this.adjustScrollForRowChange(this.wrappedRowsOfMany(lines));
     this.trimScrollback();
     this.scheduleRepaint();
   }
@@ -384,19 +384,42 @@ export class Screen {
     this.streamingActive = false;
     this.lines.push(line);
     this.trackLine(line);
-    this.adjustScrollForLineChange(1);
+    this.adjustScrollForRowChange(this.wrappedRowsOf(line));
     this.trimScrollback();
     this.scheduleRepaint();
   }
 
   // When scrolled away from the bottom, shift scrollOffset to keep the
   // user's visible window anchored on the same content as the lines
-  // array grows. Without this, every new line silently scrolls the view
-  // up by one row — the original bug the user reported.
-  private adjustScrollForLineChange(delta: number): void {
+  // array grows. `delta` is measured in WRAPPED ROWS — the same unit
+  // scrollOffset uses — so a single logical line that wraps to N rows
+  // contributes N, not 1. Counting logical lines here was the original
+  // bug: any wrapped append would slide the view up by N−1 rows.
+  private adjustScrollForRowChange(delta: number): void {
     if (this.scrollOffset > 0 && delta !== 0) {
       this.scrollOffset = Math.max(0, this.scrollOffset + delta);
     }
+  }
+
+  // Wrapped-row count for a single line at the current terminal width.
+  // Reuses the wrap cache, and synchronises the cache's width with the
+  // current width so a resize that hasn't yet been picked up by
+  // drawScrollback can't return stale counts during an insert.
+  private wrappedRowsOf(line: FormattedLine): number {
+    const w = this.term.width;
+    if (this.wrapCacheWidth !== w) {
+      this.wrapCache.clear();
+      this.wrapCacheWidth = w;
+    }
+    return this.wrapOne(line, w).length;
+  }
+
+  private wrappedRowsOfMany(lines: FormattedLine[]): number {
+    let n = 0;
+    for (const line of lines) {
+      n += this.wrappedRowsOf(line);
+    }
+    return n;
   }
 
   private trackLine(line: FormattedLine): void {
@@ -459,12 +482,14 @@ export class Screen {
     // would be treated as a fresh utterance and get a blank-line
     // separator inserted mid-message.
     let touchesEnd = false;
-    let scrollDelta = 0;
+    let rowDelta = 0;
     if (existing) {
       const oldEnd = existing.start + existing.count;
       touchesEnd = oldEnd >= this.lines.length;
+      const oldRows = this.wrappedRowsOfMany(
+        this.lines.slice(existing.start, oldEnd),
+      );
       const delta = newLines.length - existing.count;
-      scrollDelta = delta;
       const removed = this.lines.splice(
         existing.start,
         existing.count,
@@ -482,22 +507,23 @@ export class Screen {
           }
         }
       }
+      rowDelta = this.wrappedRowsOfMany(newLines) - oldRows;
     } else {
       // Appending a new block at the bottom always displaces whatever
       // was the last line.
       touchesEnd = true;
-      scrollDelta = newLines.length;
       this.keyedBlocks.set(key, {
         start: this.lines.length,
         count: newLines.length,
       });
       this.lines.push(...newLines);
       this.trackLines(newLines);
+      rowDelta = this.wrappedRowsOfMany(newLines);
     }
     if (touchesEnd) {
       this.streamingActive = false;
     }
-    this.adjustScrollForLineChange(scrollDelta);
+    this.adjustScrollForRowChange(rowDelta);
     this.trimScrollback();
     this.scheduleRepaint();
   }
@@ -517,12 +543,17 @@ export class Screen {
     }
     const fragments = text.split("\n");
     const [first, ...rest] = fragments;
-    let added = 0;
+    let rowDelta = 0;
     if (this.streamingActive && this.lines.length > 0) {
       const last = this.lines[this.lines.length - 1];
       if (last) {
+        // The in-place mutation can push the line over a wrap boundary,
+        // so we measure rows before/after and account for the diff —
+        // not just the new continuation lines below.
+        const before = this.wrappedRowsOf(last);
         this.forgetLine(last);
         last.body += first ?? "";
+        rowDelta += this.wrappedRowsOf(last) - before;
       }
     } else {
       // Fresh streaming utterance — insert a blank separator unless the
@@ -537,7 +568,7 @@ export class Screen {
           const sep: FormattedLine = { body: "" };
           this.lines.push(sep);
           this.trackLine(sep);
-          added += 1;
+          rowDelta += this.wrappedRowsOf(sep);
         }
       }
       const initial: FormattedLine = {
@@ -550,7 +581,7 @@ export class Screen {
       }
       this.lines.push(initial);
       this.trackLine(initial);
-      added += 1;
+      rowDelta += this.wrappedRowsOf(initial);
     }
     const continuationPrefix = " ".repeat(prefix.length);
     for (const piece of rest) {
@@ -561,10 +592,10 @@ export class Screen {
       };
       this.lines.push(cont);
       this.trackLine(cont);
-      added += 1;
+      rowDelta += this.wrappedRowsOf(cont);
     }
     this.streamingActive = true;
-    this.adjustScrollForLineChange(added);
+    this.adjustScrollForRowChange(rowDelta);
     this.trimScrollback();
     this.scheduleRepaint();
   }
@@ -693,6 +724,11 @@ export class Screen {
     }
     const touchesEnd =
       existing.start + existing.count >= this.lines.length;
+    // Count wrapped rows before splicing so cached entries still
+    // resolve; forgetLine below would clear them.
+    const removedRows = this.wrappedRowsOfMany(
+      this.lines.slice(existing.start, existing.start + existing.count),
+    );
     const removed = this.lines.splice(existing.start, existing.count);
     for (const line of removed) {
       this.forgetLine(line);
@@ -706,7 +742,7 @@ export class Screen {
     if (touchesEnd) {
       this.streamingActive = false;
     }
-    this.adjustScrollForLineChange(-existing.count);
+    this.adjustScrollForRowChange(-removedRows);
     this.scheduleRepaint();
   }
 
@@ -807,7 +843,7 @@ export class Screen {
     this.lines.push(sep);
     this.trackLine(sep);
     this.streamingActive = false;
-    this.adjustScrollForLineChange(1);
+    this.adjustScrollForRowChange(this.wrappedRowsOf(sep));
     this.trimScrollback();
     this.scheduleRepaint();
   }

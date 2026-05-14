@@ -148,7 +148,9 @@ describe("Screen wrap cache", () => {
     for (let i = 0; i < 20; i++) {
       screen.appendLine({ body: `line-${i}` });
     }
-    expect(getWrapCache(screen).size).toBe(0);
+    // wrapAll at a different width than term.width discards the
+    // on-insert cache populated by scroll-anchor math and rebuilds it
+    // fresh — one entry per logical line.
     wrapAll(screen, 80);
     expect(getWrapCache(screen).size).toBe(20);
   });
@@ -178,18 +180,13 @@ describe("Screen wrap cache", () => {
     const screen = makeScreen();
     screen.appendStreaming("hello", "  ", "agent");
     const lines = getLines(screen);
-    // Two lines: leading separator (the very first stream gets no separator
-    // since lines was empty) — actually, the first streaming call with
-    // empty scrollback creates exactly one line. Sanity-check that.
     expect(lines.length).toBeGreaterThan(0);
     wrapAll(screen, 80);
-    const cacheBefore = getWrapCache(screen).size;
-    expect(cacheBefore).toBeGreaterThan(0);
+    expect(getWrapCache(screen).size).toBeGreaterThan(0);
     // Stream another chunk — should mutate the last line in place and
-    // drop its cache entry.
+    // re-wrap against the extended body (scroll-anchor math re-populates
+    // the cache at term.width during the insert).
     screen.appendStreaming(" world", "  ", "agent");
-    const cacheAfter = getWrapCache(screen).size;
-    expect(cacheAfter).toBe(cacheBefore - 1);
     const wrapped = wrapAll(screen, 80);
     const joined = wrapped.map((l) => l.body).join("");
     expect(joined).toContain("hello world");
@@ -686,5 +683,86 @@ describe("Screen banner right slot", () => {
   it("empty right slot when nothing set", () => {
     const screen = makeScreen();
     expect(rightContent(screen)).toBe(null);
+  });
+});
+
+describe("Screen scroll anchor on new content", () => {
+  function getScrollOffset(screen: Screen): number {
+    return (screen as unknown as { scrollOffset: number }).scrollOffset;
+  }
+
+  // Mock term.width = 10. Strings like "0123456789abcdefghijABCDEFGHIJ"
+  // (30 chars, no whitespace → hard breaks every 10 cols) wrap to 3 rows.
+
+  it("appendLine shifts scrollOffset by the wrapped-row count, not logical lines", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 30; i++) {
+      screen.appendLine({ body: `r${i}` });
+    }
+    screen.scrollBy(5);
+    const before = getScrollOffset(screen);
+    expect(before).toBeGreaterThan(0);
+    screen.appendLine({ body: "0123456789abcdefghijABCDEFGHIJ" });
+    expect(getScrollOffset(screen)).toBe(before + 3);
+  });
+
+  it("appendLines totals the wrapped rows of every added line", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 30; i++) {
+      screen.appendLine({ body: `r${i}` });
+    }
+    screen.scrollBy(5);
+    const before = getScrollOffset(screen);
+    screen.appendLines([
+      { body: "short" },
+      { body: "abcdefghijABCDEFGHIJ" },
+    ]);
+    expect(getScrollOffset(screen)).toBe(before + 1 + 2);
+  });
+
+  it("appendStreaming accounts for in-place mutations that cross a wrap boundary", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 30; i++) {
+      screen.appendLine({ body: `r${i}` });
+    }
+    screen.appendStreaming("123456", "", "agent");
+    screen.scrollBy(5);
+    const before = getScrollOffset(screen);
+    screen.appendStreaming("7890XX", "", "agent");
+    expect(getScrollOffset(screen)).toBe(before + 1);
+  });
+
+  it("upsertLines shifts scrollOffset by the wrapped-row delta when replacing a block", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 30; i++) {
+      screen.appendLine({ body: `r${i}` });
+    }
+    screen.upsertLines("k", [{ body: "short" }]);
+    screen.scrollBy(5);
+    const before = getScrollOffset(screen);
+    screen.upsertLines("k", [{ body: "0123456789abcdefghijABCDEFGHIJ" }]);
+    expect(getScrollOffset(screen)).toBe(before + 2);
+  });
+
+  it("removeBlock pulls scrollOffset back by the wrapped rows of the removed block", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 30; i++) {
+      screen.appendLine({ body: `r${i}` });
+    }
+    screen.upsertLines("k", [{ body: "0123456789abcdefghijABCDEFGHIJ" }]);
+    screen.scrollBy(8);
+    const before = getScrollOffset(screen);
+    screen.removeBlock("k");
+    expect(getScrollOffset(screen)).toBe(before - 3);
+  });
+
+  it("does not move scrollOffset when pinned at the bottom", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 30; i++) {
+      screen.appendLine({ body: `r${i}` });
+    }
+    expect(getScrollOffset(screen)).toBe(0);
+    screen.appendLine({ body: "0123456789abcdefghijABCDEFGHIJ" });
+    expect(getScrollOffset(screen)).toBe(0);
   });
 });
