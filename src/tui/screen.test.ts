@@ -319,3 +319,118 @@ describe("truncate (visible-width aware)", () => {
     expect(stringWidth(out)).toBeLessThanOrEqual(8);
   });
 });
+
+// Visible width counting that mirrors what the terminal actually renders
+// for a body that will be passed to term-kit's markup-interpreting `term()`.
+// Mirrors the production stripMarkup helper used by wrap/truncate.
+function visibleCols(text: string): number {
+  const stripped = text.replace(
+    /\^\^|\^\[[^\]]*\]|\^[a-zA-Z+\-:_!#/]/g,
+    (m) => (m === "^^" ? "^" : ""),
+  );
+  return stringWidth(stripped);
+}
+
+// Bug #2: applyInlineMarkup (format.ts) rewrites `code` -> ^Ccode^: and
+// **bold** -> ^+bold^: so terminal-kit's `term(text)` can render them as
+// styled spans. Those ^X sequences are zero-width SGR commands at render
+// time but currently get counted as 1 col each by wrap/truncate via
+// .length and string-width. Result: bullet bodies wrap or truncate too
+// early and can split mid-markup, producing visible-text corruption
+// ("Gupdated)", trailing stray backticks, dropped chars near code spans).
+//
+// The fix opts the "agent" bodyStyle into a markup-aware width path:
+//   wrap(text, width, { stripMarkup: true })
+//   truncate(text, max, { stripMarkup: true })
+// Without the flag, behavior is unchanged (cwd/title/spec rendering
+// already goes through .noFormat, so markup there should be counted as
+// literal characters).
+describe("wrap with terminal-kit caret markup (stripMarkup)", () => {
+  it("does not count ^C...^: code-span markup toward visible width", () => {
+    // applyInlineMarkup turns `foo` into ^Cfoo^: -- 7 JS chars but
+    // term(text) renders as 3 visible cols ("foo"). So
+    // "text ^Cfoo^: bar" is 16 JS chars / 12 visible cols and must
+    // fit in width=12 with stripMarkup=true.
+    expect(wrap("text ^Cfoo^: bar", 12, { stripMarkup: true })).toEqual([
+      "text ^Cfoo^: bar",
+    ]);
+  });
+
+  it("does not count ^+...^: bold markup toward visible width", () => {
+    // "**foo**" -> "^+foo^:" : 7 JS chars, 3 visible cols.
+    // "a ^+b^: c" -> 9 JS chars, 5 visible cols.
+    expect(wrap("a ^+b^: c", 5, { stripMarkup: true })).toEqual(["a ^+b^: c"]);
+  });
+
+  it("treats ^^ as a single visible caret column", () => {
+    // applyInlineMarkup escapes a literal `^` typed by the agent as `^^`;
+    // term(text) renders that as one visible `^`. So "x ^^ y" is 6 JS
+    // chars / 5 visible cols.
+    expect(wrap("x ^^ y", 5, { stripMarkup: true })).toEqual(["x ^^ y"]);
+  });
+
+  it("budgets each wrapped chunk by visible width when markup is interspersed", () => {
+    const wrapped = wrap("aaaa ^Cbbbb^: cccc dddd", 10, { stripMarkup: true });
+    for (const chunk of wrapped) {
+      expect(visibleCols(chunk)).toBeLessThanOrEqual(10);
+    }
+    // No source characters are dropped (other than the breaking space
+    // between chunks, which is consumed at the wrap point).
+    expect(wrapped.join(" ")).toMatch(/aaaa/);
+    expect(wrapped.join(" ")).toMatch(/bbbb/);
+    expect(wrapped.join(" ")).toMatch(/cccc/);
+    expect(wrapped.join(" ")).toMatch(/dddd/);
+  });
+
+  it("never splits a chunk inside a ^X markup span", () => {
+    // Splitting between '^' and 'C' would leave a dangling '^' (rendered
+    // literally by term()) on one row and an orphan style code on the
+    // next -- the exact corruption pattern seen in long bullet bodies.
+    const wrapped = wrap("aaaa ^Cbbbbcccc^: dddd eeee ffff", 8, {
+      stripMarkup: true,
+    });
+    for (const chunk of wrapped) {
+      // No chunk ends with a bare '^' (would mean we cut inside ^X).
+      expect(chunk).not.toMatch(/\^$/);
+      // No chunk starts with a known single-char SGR code that isn't
+      // preceded by its caret (would mean we cut between ^ and the code).
+      expect(chunk).not.toMatch(/^[+\-:_!#/]/);
+    }
+  });
+
+  it("falls back to char-count behavior when stripMarkup is omitted", () => {
+    // Without the flag, "text ^Cfoo^: bar" (16 chars) gets the old
+    // length-based wrap: wraps because length > 12. This is the
+    // backward-compatible path for cwd/title/spec call sites that go
+    // through .noFormat at render time (no markup interpretation).
+    const wrapped = wrap("text ^Cfoo^: bar", 12);
+    expect(wrapped.length).toBeGreaterThan(1);
+  });
+});
+
+describe("truncate with terminal-kit caret markup (stripMarkup)", () => {
+  it("returns the body unchanged when visible width already fits", () => {
+    // 16 JS chars but only 12 visible cols.
+    expect(truncate("text ^Cfoo^: bar", 12, { stripMarkup: true })).toBe(
+      "text ^Cfoo^: bar",
+    );
+  });
+
+  it("truncates by visible width, not by JS char count", () => {
+    const out = truncate("text ^Cfoo^: bar", 6, { stripMarkup: true });
+    expect(visibleCols(out)).toBeLessThanOrEqual(6);
+  });
+
+  it("treats ^^ as one visible column in the budget", () => {
+    // 6 JS chars, 5 visible cols. max=5 -> unchanged.
+    expect(truncate("x ^^ y", 5, { stripMarkup: true })).toBe("x ^^ y");
+  });
+
+  it("falls back to char-count behavior when stripMarkup is omitted", () => {
+    // Without the flag, "text ^Cfoo^: bar" (16 chars) gets truncated
+    // because length > 12. Preserves existing cwd/title semantics.
+    const out = truncate("text ^Cfoo^: bar", 12);
+    expect(out.length).toBeLessThanOrEqual(12);
+    expect(out.endsWith("…")).toBe(true);
+  });
+});

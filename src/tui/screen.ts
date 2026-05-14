@@ -962,8 +962,15 @@ export class Screen {
       }
       if (usage) {
         const col = Math.max(1, w - usage.length + 1);
-        this.term.moveTo(col, 1);
-        this.term.dim(usage);
+        // paintRow already cleared row 1 before this callback ran, so
+        // the gap between the left-side writes and the right-aligned
+        // usage block is guaranteed blank. The extra eraseLineAfter
+        // here is belt-and-suspenders: it bounds any future regression
+        // in paintRow's signature cache (or a code path that draws to
+        // row 1 outside paintRow) to "usage block redraws cleanly"
+        // instead of "stale right-side bytes survive forever".
+        this.term.moveTo(col, 1).eraseLineAfter();
+        this.term.dim.noFormat(usage);
       }
     });
   }
@@ -1400,9 +1407,15 @@ export class Screen {
     }
     const prefix = line.prefix ?? "";
     const room = Math.max(1, width - prefix.length);
+    // Only the "agent" bodyStyle is routed through term-kit's markup-
+    // interpreting writer (see writeStyled); every other style emits
+    // text via .noFormat, so caret sequences are literal there and the
+    // wrap budget must include them. Keeping stripMarkup off by default
+    // preserves existing cwd/title/spec behavior.
+    const stripMarkup = line.bodyStyle === "agent";
     const chunks = line.ansi
       ? wrapAnsiBody(line.body, room)
-      : wrap(line.body, room);
+      : wrap(line.body, room, { stripMarkup });
     const wrapped: FormattedLine[] = [];
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i] ?? "";
@@ -1439,8 +1452,13 @@ export class Screen {
     // wrap-ansi, so we don't truncate further — that would re-introduce
     // the char-counting bug the ansi path exists to avoid. Width for
     // fillRow padding is measured with string-width so escape bytes
-    // don't shrink the apparent line.
-    const bodyText = line.ansi ? line.body : truncate(line.body, remaining);
+    // don't shrink the apparent line. For "agent" bodyStyle, opt into
+    // markup-aware truncate so a `^Cfoo^:` span isn't counted as 5 cols
+    // and isn't cut between '^' and the style char.
+    const stripMarkup = line.bodyStyle === "agent";
+    const bodyText = line.ansi
+      ? line.body
+      : truncate(line.body, remaining, { stripMarkup });
     writeStyled(this.term, bodyText, line.bodyStyle);
     if (line.fillRow) {
       const visible = line.ansi ? stringWidth(bodyText) : bodyText.length;
@@ -1706,17 +1724,127 @@ function wrapAnsiBody(text: string, width: number): string[] {
 const NON_ASCII = /[^\x20-\x7e]/;
 const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-export function wrap(text: string, width: number): string[] {
+// terminal-kit caret-markup recognizer. applyInlineMarkup() in format.ts
+// rewrites markdown for the "agent" bodyStyle into terminal-kit's `^X`
+// markup so term(text) can render styled spans inline:
+//   ^^         literal "^"            (1 visible col -- one caret renders)
+//   ^X         single-char SGR style  (0 visible cols)
+//   ^[#color]  extended color/style   (0 visible cols)
+// At render time these are zero-width style commands. Width-budgeting
+// routines (wrap/truncate) must skip them when stripMarkup is on, or
+// long bullet bodies wrap/truncate too early and can split mid-markup,
+// producing visible-text corruption near code/bold spans.
+const TK_MARKUP_STYLE_CHAR = /[a-zA-Z+\-:_!#/]/;
+
+interface MarkupMatch {
+  text: string;
+  width: number;
+}
+
+function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
+  if (text.charCodeAt(i) !== 0x5e /* ^ */) {
+    return null;
+  }
+  const c = text[i + 1];
+  if (c === undefined) {
+    return null;
+  }
+  if (c === "^") {
+    return { text: "^^", width: 1 };
+  }
+  if (c === "[") {
+    const end = text.indexOf("]", i + 2);
+    if (end !== -1) {
+      return { text: text.slice(i, end + 1), width: 0 };
+    }
+  }
+  if (TK_MARKUP_STYLE_CHAR.test(c)) {
+    return { text: text.slice(i, i + 2), width: 0 };
+  }
+  return null;
+}
+
+function hasTkMarkup(text: string): boolean {
+  if (!text.includes("^")) {
+    return false;
+  }
+  for (let i = 0; i < text.length; i++) {
+    if (matchTkMarkupAt(text, i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+interface WidthSegment {
+  text: string;
+  width: number;
+}
+
+// Walk `text` yielding either a markup span (emitted as one indivisible
+// segment of width 0 or 1) or a single grapheme cluster (width measured
+// via string-width). Used by the markup-aware wrap/truncate paths so a
+// `^Cfoo^:` span is never split across rows and is excluded from the
+// visible-column budget.
+function* segmentForWidth(text: string): IterableIterator<WidthSegment> {
+  let i = 0;
+  while (i < text.length) {
+    const m = matchTkMarkupAt(text, i);
+    if (m) {
+      yield { text: m.text, width: m.width };
+      i += m.text.length;
+      continue;
+    }
+    // Walk graphemes only up to the next markup boundary so the
+    // segmenter doesn't fuse a stray '^' with adjacent text.
+    let runEnd = text.length;
+    let probe = text.indexOf("^", i);
+    while (probe !== -1 && probe < text.length) {
+      if (matchTkMarkupAt(text, probe)) {
+        runEnd = probe;
+        break;
+      }
+      probe = text.indexOf("^", probe + 1);
+    }
+    if (runEnd === i) {
+      // Bare '^' that isn't valid markup; render as 1 visible col.
+      yield { text: "^", width: 1 };
+      i += 1;
+      continue;
+    }
+    for (const { segment } of SEGMENTER.segment(text.slice(i, runEnd))) {
+      yield { text: segment, width: stringWidth(segment) };
+    }
+    i = runEnd;
+  }
+}
+
+export interface WrapOptions {
+  // When true, treat terminal-kit caret markup (`^X`, `^^`, `^[#...]`)
+  // as zero-width style commands -- only "agent" bodyStyle text needs
+  // this since it's the only style routed through term(text)'s markup-
+  // interpreting writer. Default false preserves the historical
+  // char-count behavior for cwd/title/spec call sites that render
+  // through .noFormat (markup shows literally there).
+  stripMarkup?: boolean;
+}
+
+export function wrap(
+  text: string,
+  width: number,
+  opts: WrapOptions = {},
+): string[] {
   if (width <= 0) {
     return [text];
   }
   if (text.length === 0) {
     return [""];
   }
-  if (!NON_ASCII.test(text)) {
+  const stripMarkup = opts.stripMarkup === true && hasTkMarkup(text);
+  if (!stripMarkup && !NON_ASCII.test(text)) {
     return wrapAscii(text, width);
   }
-  return wrapVisible(text, width);
+  return wrapVisible(text, width, stripMarkup);
 }
 
 function wrapAscii(text: string, width: number): string[] {
@@ -1748,38 +1876,50 @@ function wrapAscii(text: string, width: number): string[] {
   return out;
 }
 
-// Visible-width-aware wrap. Walks graphemes, budgeting by string-width
-// so a CJK char counts as 2 cols, a regional-indicator flag as 2, etc.
-// Without this, a body of 80 CJK chars (160 visible cols) would render
-// well past the right margin, the terminal would auto-wrap onto the
-// next physical row, and paintRow's sig-based skip would never erase
-// that bleed.
-function wrapVisible(text: string, width: number): string[] {
+// Visible-width-aware wrap. Walks graphemes (and optionally caret-markup
+// spans) budgeting by string-width so a CJK char counts as 2 cols, a
+// regional-indicator flag as 2, and a `^Cfoo^:` span as just the visible
+// "foo" (3 cols). Without this, a body of 80 CJK chars (160 visible
+// cols) would render past the right margin and paintRow's sig-based
+// skip would never erase that bleed; with markup, the same effect
+// happens around inline code/bold spans in agent bullets.
+function wrapVisible(
+  text: string,
+  width: number,
+  stripMarkup: boolean,
+): string[] {
   const out: string[] = [];
-  const graphemes: { seg: string; w: number }[] = [];
-  for (const { segment } of SEGMENTER.segment(text)) {
-    graphemes.push({ seg: segment, w: stringWidth(segment) });
-  }
+  const segments: WidthSegment[] = stripMarkup
+    ? [...segmentForWidth(text)]
+    : graphemeSegments(text);
   let i = 0;
-  while (i < graphemes.length) {
+  while (i < segments.length) {
     let chunk = "";
     let chunkW = 0;
     let lastSpaceI = -1;
     let chunkAtLastSpace = "";
-    while (i < graphemes.length) {
-      const g = graphemes[i]!;
-      if (chunkW + g.w > width) {
+    while (i < segments.length) {
+      const s = segments[i]!;
+      if (chunkW + s.width > width) {
+        // Mirror wrapAscii's window+1 behavior: a space that *would*
+        // push us one col over is still a valid break point. Without
+        // this, a chunk that ends exactly on the budget would carry
+        // its trailing space into the next chunk as a leading space.
+        if (s.text === " " && s.width === 1) {
+          lastSpaceI = i;
+          chunkAtLastSpace = chunk;
+        }
         break;
       }
-      if (g.seg === " ") {
+      if (s.text === " " && s.width === 1) {
         lastSpaceI = i;
         chunkAtLastSpace = chunk;
       }
-      chunk += g.seg;
-      chunkW += g.w;
+      chunk += s.text;
+      chunkW += s.width;
       i += 1;
     }
-    if (i >= graphemes.length) {
+    if (i >= segments.length) {
       out.push(chunk);
       break;
     }
@@ -1790,7 +1930,7 @@ function wrapVisible(text: string, width: number): string[] {
       // Single grapheme wider than width — emit it anyway so we make
       // forward progress. The terminal will clip it (with DECAWM off)
       // or wrap it (without), but either way the next iteration moves on.
-      out.push(graphemes[i]!.seg);
+      out.push(segments[i]!.text);
       i += 1;
     } else {
       out.push(chunk);
@@ -1799,21 +1939,56 @@ function wrapVisible(text: string, width: number): string[] {
   return out;
 }
 
-export function truncate(text: string, max: number): string {
+function graphemeSegments(text: string): WidthSegment[] {
+  const out: WidthSegment[] = [];
+  for (const { segment } of SEGMENTER.segment(text)) {
+    out.push({ text: segment, width: stringWidth(segment) });
+  }
+  return out;
+}
+
+export interface TruncateOptions {
+  // See WrapOptions.stripMarkup -- same semantics for truncate.
+  stripMarkup?: boolean;
+}
+
+export function truncate(
+  text: string,
+  max: number,
+  opts: TruncateOptions = {},
+): string {
   if (max <= 0) {
     return "";
   }
-  if (text.length <= max && !NON_ASCII.test(text)) {
+  const stripMarkup = opts.stripMarkup === true && hasTkMarkup(text);
+  if (!stripMarkup && text.length <= max && !NON_ASCII.test(text)) {
     return text;
   }
-  const visible = stringWidth(text);
+  if (!stripMarkup) {
+    const visible = stringWidth(text);
+    if (visible <= max) {
+      return text;
+    }
+    if (max <= 1) {
+      return takeByWidth(text, max);
+    }
+    return takeByWidth(text, max - 1) + "…";
+  }
+  // Markup-aware path: segmentForWidth yields ^X spans with width 0 (or
+  // 1 for ^^) so they don't consume budget, and stays indivisible so a
+  // truncate can't cut between '^' and the style char.
+  const segments = [...segmentForWidth(text)];
+  let visible = 0;
+  for (const s of segments) {
+    visible += s.width;
+  }
   if (visible <= max) {
     return text;
   }
   if (max <= 1) {
-    return takeByWidth(text, max);
+    return takeFromSegments(segments, max);
   }
-  return takeByWidth(text, max - 1) + "…";
+  return takeFromSegments(segments, max - 1) + "…";
 }
 
 function takeByWidth(text: string, budget: number): string {
@@ -1829,6 +2004,22 @@ function takeByWidth(text: string, budget: number): string {
     }
     out += segment;
     used += w;
+  }
+  return out;
+}
+
+function takeFromSegments(segments: WidthSegment[], budget: number): string {
+  if (budget <= 0) {
+    return "";
+  }
+  let out = "";
+  let used = 0;
+  for (const s of segments) {
+    if (used + s.width > budget) {
+      break;
+    }
+    out += s.text;
+    used += s.width;
   }
   return out;
 }
