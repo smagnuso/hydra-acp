@@ -158,4 +158,64 @@ describe("JsonRpcConnection", () => {
 
     expect(closeHandler).toHaveBeenCalled();
   });
+
+  it("buffers notifications that arrive before onNotification subscribes", () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { tag: "early-1" },
+    });
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { tag: "early-2" },
+    });
+
+    const handler = vi.fn();
+    conn.onNotification("session/update", handler);
+
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler).toHaveBeenNthCalledWith(
+      1,
+      { tag: "early-1" },
+      "session/update",
+    );
+    expect(handler).toHaveBeenNthCalledWith(
+      2,
+      { tag: "early-2" },
+      "session/update",
+    );
+
+    // Subsequent notifications go directly to the handler, not the buffer.
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { tag: "live" },
+    });
+    expect(handler).toHaveBeenCalledTimes(3);
+    expect(handler).toHaveBeenLastCalledWith({ tag: "live" }, "session/update");
+  });
+
+  it("caps the per-method buffer so a chatty pre-subscribe sender can't OOM us", () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+
+    for (let i = 0; i < 100; i++) {
+      stream.emitMessage({
+        jsonrpc: "2.0",
+        method: "x/spam",
+        params: { i },
+      });
+    }
+    const handler = vi.fn();
+    conn.onNotification("x/spam", handler);
+
+    expect(handler).toHaveBeenCalledTimes(64);
+    // We keep the most-recent 64; the oldest 36 were evicted.
+    expect(handler).toHaveBeenNthCalledWith(1, { i: 36 }, "x/spam");
+    expect(handler).toHaveBeenLastCalledWith({ i: 99 }, "x/spam");
+  });
 });

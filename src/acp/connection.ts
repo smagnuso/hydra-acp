@@ -22,6 +22,16 @@ export class JsonRpcConnection {
   private requestHandlers = new Map<string, RequestHandler>();
   private defaultRequestHandler: RequestHandler | undefined;
   private notificationHandlers = new Map<string, NotificationHandler>();
+  // Notifications received before a handler was registered. Some agents
+  // (e.g. claude-acp) advertise their command list in the same chunk as
+  // the `session/new` response, which is processed before the consumer
+  // can attach its `session/update` handler. Without this buffer those
+  // notifications would be silently dropped, so e.g. `/model` would
+  // never appear in the TUI's slash-completion palette. Capped per
+  // method to keep the buffer from growing unboundedly when nothing
+  // ever subscribes.
+  private bufferedNotifications = new Map<string, JsonRpcNotification[]>();
+  private static readonly MAX_BUFFERED_PER_METHOD = 64;
   private pending = new Map<JsonRpcId, PendingRequest>();
   private closed = false;
   private closeHandlers: Array<(err?: Error) => void> = [];
@@ -41,6 +51,18 @@ export class JsonRpcConnection {
 
   onNotification(method: string, handler: NotificationHandler): void {
     this.notificationHandlers.set(method, handler);
+    const queued = this.bufferedNotifications.get(method);
+    if (!queued) {
+      return;
+    }
+    this.bufferedNotifications.delete(method);
+    for (const note of queued) {
+      try {
+        handler(note.params, note.method);
+      } catch {
+        void 0;
+      }
+    }
   }
 
   onClose(handler: (err?: Error) => void): void {
@@ -140,6 +162,18 @@ export class JsonRpcConnection {
     const handler = this.notificationHandlers.get(note.method);
     if (handler) {
       handler(note.params, note.method);
+      return;
+    }
+    // No handler yet — buffer until one subscribes. Drop oldest when
+    // capped so a misbehaving sender can't OOM us.
+    let queued = this.bufferedNotifications.get(note.method);
+    if (!queued) {
+      queued = [];
+      this.bufferedNotifications.set(note.method, queued);
+    }
+    queued.push(note);
+    if (queued.length > JsonRpcConnection.MAX_BUFFERED_PER_METHOD) {
+      queued.shift();
     }
   }
 
