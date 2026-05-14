@@ -1497,7 +1497,7 @@ async function runSession(
       stoppedReason !== null ? "tool-status-fail" : "dim";
     const lines: FormattedLine[] = [
       {
-        prefix: "⚒ ",
+        prefix: "⚙ ",
         prefixStyle: pureThinking ? "tool-status-running" : frozenStyle,
         body: summary,
         bodyStyle: pureThinking ? "tool-status-running" : frozenBodyStyle,
