@@ -108,6 +108,7 @@ export class Screen {
   private streamingActive = false;
   private lastPromptRows = 0;
   private queuedTexts: string[] = [];
+  private lastQueueEditingIndex = -1;
   private repaintPaused = 0;
   private repaintPending = false;
   private lastRepaintAt = 0;
@@ -637,6 +638,7 @@ export class Screen {
 
   setQueuedPrompts(texts: string[]): void {
     this.queuedTexts = [...texts];
+    this.lastQueueEditingIndex = this.dispatcher.state().queueIndex;
     this.repaint();
   }
 
@@ -700,11 +702,18 @@ export class Screen {
   // row count changed (alt+enter added a line, backspace joined two), the
   // separator and scrollback bottom shift, so we need a full repaint;
   // otherwise an in-place prompt redraw is enough. (Queued-zone changes
-  // already trigger a full repaint via setQueuedPrompts.)
+  // already trigger a full repaint via setQueuedPrompts.) Queue-edit
+  // navigation may also change which queued row is marked, so check
+  // for that and redraw just that zone in-place.
   refreshPrompt(): void {
     if (this.promptRows() !== this.lastPromptRows) {
       this.repaint();
       return;
+    }
+    const editingIndex = this.dispatcher.state().queueIndex;
+    if (editingIndex !== this.lastQueueEditingIndex) {
+      this.lastQueueEditingIndex = editingIndex;
+      this.drawQueuedZone();
     }
     this.drawPrompt();
     this.placeCursor();
@@ -1056,6 +1065,7 @@ export class Screen {
     const separatorRow = this.term.height - promptRows - BANNER_ROWS;
     const queuedBottom = separatorRow - 1;
     const queuedTop = queuedBottom - rows + 1;
+    const editingIndex = this.dispatcher.state().queueIndex;
     for (let i = 0; i < rows; i++) {
       const row = queuedTop + i;
       const text = this.queuedTexts[i];
@@ -1068,16 +1078,25 @@ export class Screen {
           : isLast
             ? `+ ${overflow + 1} more queued`
             : truncate(firstLine(text), w - 4);
+      // Mark the slot the user is currently editing — the marker takes
+      // the column the leading space normally holds, so total width
+      // (and the truncate budget above) stay the same.
+      const editing = !isLast && i === editingIndex;
       const sig =
         text === undefined
           ? `queued|${w}|empty`
-          : `queued|${w}|${isLast ? "ovf" : "row"}|${summary}`;
+          : `queued|${w}|${editing ? "edit" : isLast ? "ovf" : "row"}|${summary}`;
       this.paintRow(row, sig, () => {
         if (text === undefined) {
           return;
         }
-        const display = ` ⏳ ${summary}`;
-        const padded = display + " ".repeat(Math.max(0, w - display.length));
+        const rest = `⏳ ${summary}`;
+        const padded = rest + " ".repeat(Math.max(0, w - 1 - rest.length));
+        if (editing) {
+          this.term.bgBlue.brightYellow("▸");
+        } else {
+          this.term.bgBlue(" ");
+        }
         // noFormat: the queued summary contains user-typed prompt text, so
         // literal `^X` should not be interpreted as terminal-kit markup.
         this.term.bgBlue.brightWhite.noFormat(padded);

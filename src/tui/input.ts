@@ -40,6 +40,8 @@ export type KeyEvent =
 
 export type InputEffect =
   | { type: "send"; text: string; planMode: boolean }
+  | { type: "queue-edit"; index: number; text: string }
+  | { type: "queue-remove"; index: number }
   | { type: "cancel" }
   | { type: "exit" }
   | { type: "plan-toggle"; on: boolean }
@@ -54,6 +56,7 @@ export interface InputState {
   col: number;
   planMode: boolean;
   historyIndex: number;
+  queueIndex: number;
 }
 
 export interface InputOptions {
@@ -67,9 +70,18 @@ export class InputDispatcher {
   private col = 0;
   private planMode = false;
   private historyIndex = -1;
+  // Queue editing: when the user walks Up past row 0 with queued prompts
+  // present, the most-recently-queued item lands in the buffer and
+  // queueIndex tracks which slot of `queue` is being edited. Enter submits
+  // the edit (queue-edit) or, on an empty buffer, drops the slot
+  // (queue-remove). -1 means not editing a queue slot.
+  private queueIndex = -1;
   private savedDraft: { buffer: string[]; row: number; col: number } | null =
     null;
   private history: string[] = [];
+  // Waiting queue snapshot (excludes the in-flight head). Newest item lives
+  // at the end so Up walks the array right-to-left.
+  private queue: string[] = [];
   private turnRunning = false;
   // Single-slot kill ring. The most recent killed text (^U, ^K, ^W) lands
   // here so ^Y can yank it back. Standard readline keeps a stack; we
@@ -88,6 +100,7 @@ export class InputDispatcher {
       col: this.col,
       planMode: this.planMode,
       historyIndex: this.historyIndex,
+      queueIndex: this.queueIndex,
     };
   }
 
@@ -99,6 +112,17 @@ export class InputDispatcher {
     this.history = [...history];
     this.historyIndex = -1;
     this.savedDraft = null;
+  }
+
+  // Snapshot of the waiting queue (head excluded). Called by the app after
+  // every queue mutation so Up/Down can walk a fresh view. queueIndex is
+  // only invalidated when it falls outside the new bounds — staying in
+  // bounds preserves the user's edit if the queue grew or stayed put.
+  setQueue(queue: string[]): void {
+    this.queue = [...queue];
+    if (this.queueIndex >= this.queue.length) {
+      this.queueIndex = -1;
+    }
   }
 
   // Replace the contents of the first row, leaving subsequent rows alone.
@@ -220,6 +244,7 @@ export class InputDispatcher {
     this.row = 0;
     this.col = 0;
     this.historyIndex = -1;
+    this.queueIndex = -1;
     this.savedDraft = null;
   }
 
@@ -365,51 +390,99 @@ export class InputDispatcher {
     }
   }
 
-  // Up scrolls back through history when the cursor is on the first line of
-  // the buffer; otherwise it just moves the cursor up one line.
+  // Up walks the navigation stack from newest to oldest: pending queue
+  // items first (so the user can edit something they just enqueued),
+  // then prompt history. Cursor movement within a multi-line buffer
+  // takes priority when not already navigating.
   private handleUp(): InputEffect[] {
     if (this.row > 0) {
       this.row -= 1;
       this.col = Math.min(this.col, this.currentLine().length);
       return [];
     }
-    if (this.history.length === 0) {
-      return [];
-    }
-    if (this.historyIndex === -1) {
+    if (this.queueIndex === -1 && this.historyIndex === -1) {
+      if (this.queue.length === 0 && this.history.length === 0) {
+        return [];
+      }
       this.savedDraft = {
         buffer: [...this.buffer],
         row: this.row,
         col: this.col,
       };
-      this.historyIndex = this.history.length - 1;
-    } else if (this.historyIndex > 0) {
-      this.historyIndex -= 1;
-    } else {
+      if (this.queue.length > 0) {
+        this.queueIndex = this.queue.length - 1;
+        this.loadEntry(this.queue[this.queueIndex] ?? "");
+      } else {
+        this.historyIndex = this.history.length - 1;
+        this.loadEntry(this.history[this.historyIndex] ?? "");
+      }
       return [];
     }
-    this.loadHistoryEntry(this.historyIndex);
+    if (this.queueIndex >= 0) {
+      if (this.queueIndex > 0) {
+        this.queueIndex -= 1;
+        this.loadEntry(this.queue[this.queueIndex] ?? "");
+        return [];
+      }
+      // Past the oldest queue slot — cross into history if any.
+      if (this.history.length === 0) {
+        return [];
+      }
+      this.queueIndex = -1;
+      this.historyIndex = this.history.length - 1;
+      this.loadEntry(this.history[this.historyIndex] ?? "");
+      return [];
+    }
+    if (this.historyIndex > 0) {
+      this.historyIndex -= 1;
+      this.loadEntry(this.history[this.historyIndex] ?? "");
+    }
     return [];
   }
 
-  // Down advances within history; when we walk off the end, restore the
-  // saved draft. When already on a multi-line buffer's middle row, just
-  // moves the cursor down.
+  // Down reverses the Up walk: history (older → newer), then queue
+  // (oldest → newest), then restore the original draft. Within a
+  // multi-line buffer, plain cursor movement still wins when no
+  // navigation is in progress.
   private handleDown(): InputEffect[] {
-    if (this.row < this.buffer.length - 1 && this.historyIndex === -1) {
+    if (
+      this.row < this.buffer.length - 1 &&
+      this.historyIndex === -1 &&
+      this.queueIndex === -1
+    ) {
       this.row += 1;
       this.col = Math.min(this.col, this.currentLine().length);
       return [];
     }
-    if (this.historyIndex === -1) {
+    if (this.historyIndex >= 0) {
+      if (this.historyIndex < this.history.length - 1) {
+        this.historyIndex += 1;
+        this.loadEntry(this.history[this.historyIndex] ?? "");
+        return [];
+      }
+      this.historyIndex = -1;
+      if (this.queue.length > 0) {
+        this.queueIndex = 0;
+        this.loadEntry(this.queue[this.queueIndex] ?? "");
+        return [];
+      }
+      this.restoreDraft();
       return [];
     }
-    if (this.historyIndex < this.history.length - 1) {
-      this.historyIndex += 1;
-      this.loadHistoryEntry(this.historyIndex);
+    if (this.queueIndex >= 0) {
+      if (this.queueIndex < this.queue.length - 1) {
+        this.queueIndex += 1;
+        this.loadEntry(this.queue[this.queueIndex] ?? "");
+        return [];
+      }
+      this.queueIndex = -1;
+      this.restoreDraft();
       return [];
     }
-    this.historyIndex = -1;
+    return [];
+  }
+
+  private restoreDraft(): void {
     if (this.savedDraft) {
       this.buffer = [...this.savedDraft.buffer];
       this.row = this.savedDraft.row;
@@ -418,12 +491,10 @@ export class InputDispatcher {
     } else {
       this.clearBuffer();
     }
-    return [];
   }
 
-  private loadHistoryEntry(index: number): void {
-    const entry = this.history[index] ?? "";
-    this.buffer = entry.split("\n");
+  private loadEntry(text: string): void {
+    this.buffer = text.split("\n");
     if (this.buffer.length === 0) {
       this.buffer = [""];
     }
@@ -433,6 +504,16 @@ export class InputDispatcher {
 
   private send(): InputEffect[] {
     const text = this.bufferText();
+    // Submitting while editing a queued slot routes the change back into
+    // the queue (edit or remove) instead of starting a new turn.
+    if (this.queueIndex >= 0 && this.queueIndex < this.queue.length) {
+      const index = this.queueIndex;
+      this.clearBuffer();
+      if (text.trim().length === 0) {
+        return [{ type: "queue-remove", index }];
+      }
+      return [{ type: "queue-edit", index, text }];
+    }
     if (text.trim().length === 0) {
       return [];
     }
@@ -442,11 +523,26 @@ export class InputDispatcher {
   }
 
   private handleCtrlC(): InputEffect[] {
-    // Unsubmitted text wins: a first ^C clears the prompt and stops there,
-    // even mid-turn. The next ^C (now on an empty buffer) cancels the turn
-    // if one is running, or exits the TUI when idle.
+    // ^C peels one layer at a time:
+    //   1. Buffer has text → clear it (preserve queueIndex so Enter on
+    //      the now-empty buffer can still emit queue-remove).
+    //   2. Empty buffer but editing a queue slot → drop the slot
+    //      pointer and restore the saved draft.
+    //   3. Empty buffer, no slot, turn running → cancel.
+    //   4. Empty buffer, no slot, idle → exit.
     if (!this.bufferIsEmpty()) {
-      this.clearBuffer();
+      this.buffer = [""];
+      this.row = 0;
+      this.col = 0;
+      if (this.queueIndex === -1) {
+        this.historyIndex = -1;
+        this.savedDraft = null;
+      }
+      return [];
+    }
+    if (this.queueIndex >= 0) {
+      this.queueIndex = -1;
+      this.restoreDraft();
       return [];
     }
     if (this.turnRunning) {

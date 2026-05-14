@@ -908,11 +908,35 @@ async function runSession(
     resume(nextOpts);
   };
 
+  // The dispatcher's queue indices reference the "waiting" slice (the
+  // head being processed is invisible to queue editing). Translate back
+  // into the real promptQueue offset when applying changes.
+  const queueHeadOffset = (): number => (workerActive ? 1 : 0);
+
   const handleEffect = (effect: InputEffect): void => {
     switch (effect.type) {
       case "send":
         enqueuePrompt(effect.text, effect.planMode);
         return;
+      case "queue-edit": {
+        const realIdx = effect.index + queueHeadOffset();
+        const existing = promptQueue[realIdx];
+        if (existing) {
+          // Preserve the slot's original planMode — the user is editing
+          // text, not re-deciding plan mode for this slot.
+          promptQueue[realIdx] = { text: effect.text, planMode: existing.planMode };
+          refreshQueueDisplay();
+        }
+        return;
+      }
+      case "queue-remove": {
+        const realIdx = effect.index + queueHeadOffset();
+        if (realIdx >= 0 && realIdx < promptQueue.length) {
+          promptQueue.splice(realIdx, 1);
+          refreshQueueDisplay();
+        }
+        return;
+      }
       case "cancel":
         if (turnInFlight) {
           turnInFlight.cancel();
@@ -963,6 +987,7 @@ async function runSession(
     const waiting = promptQueue.slice(workerActive ? 1 : 0);
     screen.setQueuedPrompts(waiting.map((p) => p.text));
     screen.setBanner({ queued: waiting.length });
+    dispatcher.setQueue(waiting.map((p) => p.text));
   };
 
   const enqueuePrompt = (text: string, planMode: boolean): void => {

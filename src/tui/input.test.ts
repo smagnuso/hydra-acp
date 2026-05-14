@@ -241,4 +241,125 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["xabcdefy"]);
     expect(d.state().col).toBe(7);
   });
+
+  it("Up walks the queue newest-first before falling through to history", () => {
+    const d = new InputDispatcher({ history: ["h1", "h2"] });
+    d.setQueue(["q1", "q2", "q3"]);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["q3"]);
+    expect(d.state().queueIndex).toBe(2);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["q2"]);
+    expect(d.state().queueIndex).toBe(1);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["q1"]);
+    expect(d.state().queueIndex).toBe(0);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["h2"]);
+    expect(d.state().queueIndex).toBe(-1);
+    expect(d.state().historyIndex).toBe(1);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["h1"]);
+  });
+
+  it("Down reverses the Up walk through history then queue then draft", () => {
+    const d = new InputDispatcher({ history: ["h1", "h2"] });
+    d.setQueue(["q1", "q2"]);
+    feed(d, [ch("d"), ch("r"), ch("a"), ch("f"), ch("t")]);
+    feed(d, [k("up"), k("up"), k("up"), k("up")]);
+    expect(d.state().buffer).toEqual(["h1"]);
+    feed(d, [k("down")]);
+    expect(d.state().buffer).toEqual(["h2"]);
+    feed(d, [k("down")]);
+    expect(d.state().buffer).toEqual(["q1"]);
+    expect(d.state().queueIndex).toBe(0);
+    feed(d, [k("down")]);
+    expect(d.state().buffer).toEqual(["q2"]);
+    expect(d.state().queueIndex).toBe(1);
+    feed(d, [k("down")]);
+    expect(d.state().buffer).toEqual(["draft"]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Enter on an edited queue slot emits queue-edit, not send", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["first", "second"]);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["second"]);
+    feed(d, [ch("!")]);
+    expect(d.state().buffer).toEqual(["second!"]);
+    expect(feed(d, [k("enter")])).toEqual([
+      { type: "queue-edit", index: 1, text: "second!" },
+    ]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Clearing the buffer while editing a queue slot emits queue-remove on Enter", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["a", "b"]);
+    feed(d, [k("up"), k("up")]);
+    expect(d.state().buffer).toEqual(["a"]);
+    expect(d.state().queueIndex).toBe(0);
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(feed(d, [k("enter")])).toEqual([{ type: "queue-remove", index: 0 }]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Up restores into the saved draft when navigating then coming back", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["only-queue"]);
+    feed(d, [ch("h"), ch("i")]);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["only-queue"]);
+    feed(d, [k("down")]);
+    expect(d.state().buffer).toEqual(["hi"]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("setQueue resets queueIndex only when the slot disappears", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["a", "b", "c"]);
+    feed(d, [k("up")]);
+    expect(d.state().queueIndex).toBe(2);
+    // Queue grows — the slot is still there.
+    d.setQueue(["a", "b", "c", "d"]);
+    expect(d.state().queueIndex).toBe(2);
+    // Queue shrinks below the slot — reset.
+    d.setQueue(["a"]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Ctrl+C while editing a queued slot clears the text but keeps the slot", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["queued"]);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["queued"]);
+    expect(d.state().queueIndex).toBe(0);
+    // First ^C: clear text, stay on the slot so Enter can drop it.
+    expect(feed(d, [k("ctrl-c")])).toEqual([]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(d.state().queueIndex).toBe(0);
+    // Enter on empty buffer + active slot removes the slot.
+    expect(feed(d, [k("enter")])).toEqual([{ type: "queue-remove", index: 0 }]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Ctrl+C twice while editing a queue slot drops the slot and restores draft", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["queued"]);
+    feed(d, [ch("d"), ch("r"), ch("a"), ch("f"), ch("t")]);
+    feed(d, [k("up")]);
+    expect(d.state().buffer).toEqual(["queued"]);
+    expect(d.state().queueIndex).toBe(0);
+    // First ^C clears the text; queueIndex sticks.
+    feed(d, [k("ctrl-c")]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(d.state().queueIndex).toBe(0);
+    // Second ^C exits queue edit mode and brings the draft back.
+    expect(feed(d, [k("ctrl-c")])).toEqual([]);
+    expect(d.state().buffer).toEqual(["draft"]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
 });
