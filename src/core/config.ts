@@ -100,85 +100,132 @@ export function extensionList(config: HydraConfig): ExtensionConfig[] {
   }));
 }
 
-export async function loadConfig(): Promise<HydraConfig> {
-  const configPath = paths.config();
+// Read config.json from disk and return its parsed object, or `{}` if
+// the file is missing. Throws on parse errors or other IO errors.
+async function readConfigFile(): Promise<Record<string, unknown>> {
   let raw: string;
   try {
-    raw = await fs.readFile(configPath, "utf8");
+    raw = await fs.readFile(paths.config(), "utf8");
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code === "ENOENT") {
-      throw new Error(
-        `No config found at ${configPath}. Run \`hydra-acp init\` to create one.`,
-      );
+      return {};
     }
     throw err;
   }
-  const parsed = JSON.parse(raw);
-  return HydraConfig.parse(parsed);
+  return JSON.parse(raw) as Record<string, unknown>;
 }
 
-// Like loadConfig, but writes a default if the file is missing. Used by
-// entry points that imply "actually running hydra" (daemon start, shim,
-// TUI) so a first-run user doesn't need to call `hydra-acp init` first —
-// matters especially for the registry-distribution case, where editors
-// just spawn `hydra-acp shim` and expect it to work.
-export async function ensureConfig(): Promise<HydraConfig> {
+// Read the auth token from its own file. For installs predating the
+// auth-token split, migrates a legacy daemon.authToken in config.json
+// into the new file and strips it from config.json. Throws if both
+// sources hold a token, since we can't pick a winner safely.
+export async function loadAuthToken(): Promise<string | undefined> {
+  let tokenFile: string | undefined;
   try {
-    await fs.access(paths.config());
+    const text = await fs.readFile(paths.authToken(), "utf8");
+    const trimmed = text.trim();
+    if (trimmed.length > 0) {
+      tokenFile = trimmed;
+    }
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code !== "ENOENT") {
       throw err;
     }
-    const config = await writeMinimalInitConfig();
-    process.stderr.write(
-      `hydra-acp: initialized ${paths.config()} with a fresh auth token.\n`,
+  }
+
+  const raw = await readConfigFile();
+  const daemon = raw.daemon as Record<string, unknown> | undefined;
+  const legacy =
+    daemon && typeof daemon.authToken === "string" ? daemon.authToken : undefined;
+
+  if (tokenFile && legacy) {
+    throw new Error(
+      `Auth token present in both ${paths.authToken()} and ${paths.config()} (daemon.authToken). ` +
+        `Remove daemon.authToken from config.json to resolve.`,
     );
-    return config;
+  }
+  if (tokenFile) {
+    return tokenFile;
+  }
+  if (legacy) {
+    await migrateLegacyAuthToken(raw, daemon!, legacy);
+    return legacy;
+  }
+  return undefined;
+}
+
+// One-shot move: write the legacy token to its own file and rewrite
+// config.json without it. Called from loadAuthToken so any path that
+// reads the token (CLI, daemon start, init) heals the on-disk layout.
+async function migrateLegacyAuthToken(
+  raw: Record<string, unknown>,
+  daemon: Record<string, unknown>,
+  token: string,
+): Promise<void> {
+  await writeAuthToken(token);
+  delete daemon.authToken;
+  if (Object.keys(daemon).length === 0) {
+    delete raw.daemon;
+  }
+  await fs.writeFile(paths.config(), JSON.stringify(raw, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  process.stderr.write(
+    `hydra-acp: migrated auth token from ${paths.config()} to ${paths.authToken()}.\n`,
+  );
+}
+
+export async function writeAuthToken(token: string): Promise<void> {
+  await fs.mkdir(paths.home(), { recursive: true });
+  await fs.writeFile(paths.authToken(), token + "\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+export async function loadConfig(): Promise<HydraConfig> {
+  // Resolve the token first so any legacy-migration write happens before
+  // we read config.json into memory — otherwise we'd be parsing a stale
+  // snapshot that still includes daemon.authToken.
+  const token = await loadAuthToken();
+  if (!token) {
+    throw new Error(
+      `No auth token found at ${paths.authToken()}. Run \`hydra-acp init\` to create one.`,
+    );
+  }
+  const raw = await readConfigFile();
+  const daemon = (raw.daemon ??= {}) as Record<string, unknown>;
+  daemon.authToken = token;
+  return HydraConfig.parse(raw);
+}
+
+// Like loadConfig, but writes a fresh token if none exists. Used by
+// entry points that imply "actually running hydra" (daemon start, shim,
+// TUI) so a first-run user doesn't need to call `hydra-acp init` first —
+// matters especially for the registry-distribution case, where editors
+// just spawn `hydra-acp shim` and expect it to work.
+export async function ensureConfig(): Promise<HydraConfig> {
+  if (!(await loadAuthToken())) {
+    const token = generateAuthToken();
+    await writeAuthToken(token);
+    process.stderr.write(
+      `hydra-acp: initialized ${paths.authToken()} with a fresh auth token.\n`,
+    );
   }
   return loadConfig();
 }
 
+// Persist the user-editable portion of the config. Strips daemon.authToken
+// — that lives in its own file so config.json stays safe to version-control.
 export async function writeConfig(config: HydraConfig): Promise<void> {
   await fs.mkdir(paths.home(), { recursive: true });
-  await fs.writeFile(paths.config(), JSON.stringify(config, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-}
-
-// Write a brand-new config containing only the fields that don't have
-// defaults (currently just daemon.authToken). The rest is filled in by
-// Zod at load time, which means raising a default later actually reaches
-// users who haven't customized that field instead of being locked in by
-// whatever the default was the day they ran `init`.
-export async function writeMinimalInitConfig(
-  authToken?: string,
-): Promise<HydraConfig> {
-  const token = authToken ?? generateAuthToken();
-  const minimal = { daemon: { authToken: token } };
-  await fs.mkdir(paths.home(), { recursive: true });
-  await fs.writeFile(paths.config(), JSON.stringify(minimal, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  return HydraConfig.parse(minimal);
-}
-
-// Rewrite the on-disk config with the user's existing field set preserved
-// — only the named field is changed. Used by `init --rotate-token` so we
-// don't accidentally bake all current Zod defaults into the file.
-export async function updateConfigField(
-  mutate: (raw: Record<string, unknown>) => void,
-): Promise<void> {
-  const path = paths.config();
-  const text = await fs.readFile(path, "utf8");
-  const raw = JSON.parse(text) as Record<string, unknown>;
-  mutate(raw);
-  // Validate before writing so we don't strand the user with a broken file.
-  HydraConfig.parse(raw);
-  await fs.writeFile(path, JSON.stringify(raw, null, 2) + "\n", {
+  const { daemon, ...rest } = config;
+  const { authToken: _authToken, ...daemonRest } = daemon;
+  const onDisk = { ...rest, daemon: daemonRest };
+  await fs.writeFile(paths.config(), JSON.stringify(onDisk, null, 2) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });

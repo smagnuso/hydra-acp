@@ -24,6 +24,9 @@ export function hydraHome(): string {
 export const paths = {
   home: hydraHome,
   config: () => path.join(hydraHome(), "config.json"),
+  // Auth token lives in its own file so config.json can be version-
+  // controlled without leaking the secret. Raw string contents, mode 0600.
+  authToken: () => path.join(hydraHome(), "auth-token"),
   pidFile: () => path.join(hydraHome(), "daemon.pid"),
   logFile: () => path.join(hydraHome(), "daemon.log"),
   currentLogFile: () => path.join(hydraHome(), "current.log"),

@@ -6,10 +6,10 @@ import {
   defaultConfig,
   ensureConfig,
   expandHome,
+  loadAuthToken,
   loadConfig,
-  updateConfigField,
+  writeAuthToken,
   writeConfig,
-  writeMinimalInitConfig,
 } from "./config.js";
 import { paths } from "./paths.js";
 
@@ -45,66 +45,127 @@ describe("defaultConfig", () => {
 });
 
 describe("ensureConfig", () => {
-  it("writes a fresh default config when none exists", async () => {
+  it("writes a fresh auth token when none exists", async () => {
     const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const cfg = await ensureConfig();
     expect(cfg.daemon.authToken.startsWith("hydra_token_")).toBe(true);
-    const written = await loadConfig();
-    expect(written.daemon.authToken).toBe(cfg.daemon.authToken);
+    const onDisk = (await fs.readFile(paths.authToken(), "utf8")).trim();
+    expect(onDisk).toBe(cfg.daemon.authToken);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
 
-  it("only writes required fields to disk (no Zod defaults baked in)", async () => {
-    // Regression: writing all defaults on init means raising a default
-    // later (e.g. sessionIdleTimeoutSeconds) silently doesn't reach
-    // existing users.
+  it("does not create config.json (defaults are filled in by Zod at load time)", async () => {
     const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     await ensureConfig();
-    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
-    expect(Object.keys(raw)).toEqual(["daemon"]);
-    expect(Object.keys(raw.daemon)).toEqual(["authToken"]);
+    await expect(fs.access(paths.config())).rejects.toMatchObject({ code: "ENOENT" });
     warn.mockRestore();
   });
 
-  it("returns the existing config without rewriting it", async () => {
-    const initial = defaultConfig();
-    await writeConfig(initial);
+  it("returns the existing config without rewriting the token", async () => {
+    const token = generateAuthToken();
+    await writeAuthToken(token);
     const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const cfg = await ensureConfig();
-    expect(cfg.daemon.authToken).toBe(initial.daemon.authToken);
+    expect(cfg.daemon.authToken).toBe(token);
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 });
 
-describe("updateConfigField", () => {
-  it("preserves the user's existing field set (no Zod defaults baked in)", async () => {
+describe("loadAuthToken", () => {
+  it("reads the token from auth-token when present", async () => {
+    const token = generateAuthToken();
+    await writeAuthToken(token);
+    expect(await loadAuthToken()).toBe(token);
+  });
+
+  it("returns undefined when neither file has a token", async () => {
+    expect(await loadAuthToken()).toBeUndefined();
+  });
+
+  it("migrates a legacy daemon.authToken into the auth-token file and strips it from config.json", async () => {
+    const legacy = "hydra_token_" + "b".repeat(64);
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({ daemon: { authToken: legacy }, defaultAgent: "opencode" }) + "\n",
+      "utf8",
+    );
     const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    await ensureConfig();
-    warn.mockRestore();
-    await updateConfigField((raw) => {
-      const daemon = (raw.daemon ??= {}) as Record<string, unknown>;
-      daemon.authToken = "hydra_token_" + "0".repeat(64);
-    });
+    expect(await loadAuthToken()).toBe(legacy);
+    expect((await fs.readFile(paths.authToken(), "utf8")).trim()).toBe(legacy);
     const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
-    expect(Object.keys(raw)).toEqual(["daemon"]);
-    expect(Object.keys(raw.daemon)).toEqual(["authToken"]);
-    expect(raw.daemon.authToken).toBe("hydra_token_" + "0".repeat(64));
+    expect(raw.daemon).toBeUndefined();
+    expect(raw.defaultAgent).toBe("opencode");
+    warn.mockRestore();
+  });
+
+  it("leaves config.json as {} when the legacy daemon block only held the token", async () => {
+    const legacy = "hydra_token_" + "e".repeat(64);
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({ daemon: { authToken: legacy } }) + "\n",
+      "utf8",
+    );
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    await loadAuthToken();
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw).toEqual({});
+    warn.mockRestore();
+  });
+
+  it("throws when both auth-token and legacy daemon.authToken are set", async () => {
+    const legacy = "hydra_token_" + "c".repeat(64);
+    const current = "hydra_token_" + "d".repeat(64);
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({ daemon: { authToken: legacy } }) + "\n",
+      "utf8",
+    );
+    await writeAuthToken(current);
+    await expect(loadAuthToken()).rejects.toThrow(/present in both/);
   });
 });
 
-describe("writeMinimalInitConfig", () => {
-  it("writes only daemon.authToken to disk", async () => {
-    const cfg = await writeMinimalInitConfig();
-    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
-    expect(raw).toEqual({ daemon: { authToken: cfg.daemon.authToken } });
+describe("loadConfig", () => {
+  it("works when config.json is absent (token only)", async () => {
+    const token = generateAuthToken();
+    await writeAuthToken(token);
+    const cfg = await loadConfig();
+    expect(cfg.daemon.authToken).toBe(token);
+    expect(cfg.daemon.port).toBe(8765);
   });
 
-  it("accepts an explicit token", async () => {
-    const token = "hydra_token_" + "a".repeat(64);
-    const cfg = await writeMinimalInitConfig(token);
+  it("merges fields from config.json with the token from auth-token", async () => {
+    const token = generateAuthToken();
+    await writeAuthToken(token);
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({ daemon: { port: 9999 }, defaultAgent: "opencode" }) + "\n",
+      "utf8",
+    );
+    const cfg = await loadConfig();
     expect(cfg.daemon.authToken).toBe(token);
+    expect(cfg.daemon.port).toBe(9999);
+    expect(cfg.defaultAgent).toBe("opencode");
+  });
+
+  it("throws when no token exists at all", async () => {
+    await expect(loadConfig()).rejects.toThrow(/No auth token found/);
+  });
+});
+
+describe("writeConfig", () => {
+  it("strips daemon.authToken so config.json stays safe to version-control", async () => {
+    const cfg = defaultConfig();
+    await writeConfig(cfg);
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.daemon.authToken).toBeUndefined();
+    expect(raw.daemon.port).toBe(8765);
   });
 });
 
