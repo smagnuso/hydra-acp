@@ -44,6 +44,7 @@ export async function getPendingUpdate(): Promise<PendingUpdate | null> {
     const notifier = (updateNotifier as (opts: unknown) => {
       check: () => void;
       update?: { current?: string; latest?: string; type?: string };
+      config?: { set?: (key: string, value: unknown) => void };
     })({
       pkg: { name: PKG_NAME, version: HYDRA_VERSION },
       updateCheckInterval: 1000 * 60 * 60 * 24,
@@ -64,6 +65,18 @@ export async function getPendingUpdate(): Promise<PendingUpdate | null> {
       typeof u.current === "string" &&
       u.latest !== u.current
     ) {
+      // update-notifier intentionally deletes the cached `update` field
+      // after check() reads it (it's designed for the show-once-per-
+      // process notify() flow). We surface this notification across
+      // multiple processes — CLI end-of-process, in-session TUI banner,
+      // and TUI exit hint — so write the field back so the next hydra
+      // invocation still has it. The detached child overwrites (or
+      // clears, on upgrade) this field at the next stale-cache check.
+      try {
+        notifier.config?.set?.("update", u);
+      } catch {
+        void 0;
+      }
       cached = {
         current: u.current,
         latest: u.latest,
