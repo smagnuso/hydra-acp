@@ -36,6 +36,11 @@ export async function runDaemonStart(
     };
     process.on("SIGINT", () => void shutdown());
     process.on("SIGTERM", () => void shutdown());
+    // Ignore SIGHUP — the daemon must survive terminal closes. Terminal
+    // emulators (e.g. iTerm2) send SIGHUP to all descendant processes when
+    // a window closes, even across session boundaries; Node.js's default
+    // SIGHUP action is to terminate, which would orphan every live agent.
+    process.on("SIGHUP", () => undefined);
     return;
   }
 
