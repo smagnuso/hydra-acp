@@ -4,7 +4,7 @@
 
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
-import type { RenderEvent } from "./render-update.js";
+import type { RenderEvent } from "../core/render-update.js";
 
 export type Style =
   | "user"

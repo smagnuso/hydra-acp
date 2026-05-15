@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { loadConfig, loadConfigReadOnly } from "../../core/config.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
+import { bundleToMarkdown } from "../../core/transcript.js";
 import {
   HEADER,
   computeWidths,
@@ -10,7 +11,9 @@ import {
   type SessionSummary,
 } from "../session-row.js";
 
-export async function runSessionsList(opts: { all?: boolean } = {}): Promise<void> {
+export async function runSessionsList(
+  opts: { all?: boolean; json?: boolean } = {},
+): Promise<void> {
   const config = await loadConfig();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const url = new URL(`${baseUrl}/v1/sessions`);
@@ -40,6 +43,12 @@ export async function runSessionsList(opts: { all?: boolean } = {}): Promise<voi
       status?: "live" | "cold";
     }>;
   };
+  // --json bypasses the table renderer and the cold-cap truncation:
+  // a script wants the full list verbatim, not a TTY-trimmed view.
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(body.sessions, null, 2) + "\n");
+    return;
+  }
   if (body.sessions.length === 0) {
     process.stdout.write("No active sessions.\n");
     return;
@@ -153,6 +162,98 @@ export async function runSessionsExport(
   await fs.mkdir(path.dirname(path.resolve(resolved)), { recursive: true });
   await fs.writeFile(resolved, body, { encoding: "utf8", mode: 0o600 });
   process.stdout.write(`Wrote ${resolved}\n`);
+}
+
+// Render a session as a markdown transcript. Accepts either a session
+// id (fetches the daemon's GET /transcript route) or a local .hydra
+// bundle file (decoded + rendered in-process via bundleToMarkdown).
+// Both paths share the same renderer in core/transcript.ts.
+export async function runSessionsTranscript(
+  idOrFile: string | undefined,
+  outPath: string | undefined,
+): Promise<void> {
+  if (!idOrFile) {
+    process.stderr.write(
+      "Usage: hydra-acp sessions transcript <session-id>|<file> [--out <file>|.]\n",
+    );
+    process.exit(2);
+  }
+  // File-path branch: avoids a daemon round-trip and works on bundles
+  // the user hasn't imported (or on hosts without a daemon running).
+  let body: string;
+  let defaultName: string;
+  const localFile = await readBundleFileIfExists(idOrFile);
+  if (localFile !== null) {
+    const bundle = decodeBundleOrExit(localFile.raw);
+    body = bundleToMarkdown(bundle);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    defaultName = `${path.basename(idOrFile, path.extname(idOrFile))}-${stamp}.md`;
+  } else {
+    const config = await loadConfig();
+    const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+    const response = await fetch(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(idOrFile)}/transcript`,
+      {
+        headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+      },
+    );
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      process.stderr.write(`Daemon returned HTTP ${response.status}: ${text}\n`);
+      process.exit(1);
+    }
+    body = await response.text();
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    defaultName = `hydra-${idOrFile}-${stamp}.md`;
+  }
+  if (!outPath) {
+    process.stdout.write(body);
+    if (!body.endsWith("\n")) {
+      process.stdout.write("\n");
+    }
+    return;
+  }
+  const resolved = outPath === "." ? defaultName : outPath;
+  await fs.mkdir(path.dirname(path.resolve(resolved)), { recursive: true });
+  await fs.writeFile(resolved, body, { encoding: "utf8", mode: 0o600 });
+  process.stdout.write(`Wrote ${resolved}\n`);
+}
+
+// Returns parsed JSON if `arg` refers to an existing readable file,
+// otherwise null. Used to disambiguate the file path from a session id
+// at the top of runSessionsTranscript. Session ids are alnum + `_-`
+// only (see SESSION_ID_PATTERN in core/session-store), so collisions
+// with real filenames are vanishingly rare; we still prefer the file
+// branch when the path resolves so a user with a session id that
+// happens to match a file in their cwd gets a clear "decode this
+// file" error instead of a confusing daemon 404.
+async function readBundleFileIfExists(
+  arg: string,
+): Promise<{ raw: unknown } | null> {
+  try {
+    const stat = await fs.stat(arg);
+    if (!stat.isFile()) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const text = await fs.readFile(arg, "utf8");
+  try {
+    return { raw: JSON.parse(text) };
+  } catch (err) {
+    process.stderr.write(`Failed to parse bundle file: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+}
+
+function decodeBundleOrExit(raw: unknown): Bundle {
+  try {
+    return decodeBundle(raw);
+  } catch (err) {
+    process.stderr.write(`Not a valid bundle: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
 }
 
 export async function runSessionsImport(

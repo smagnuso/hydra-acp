@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { expandHome } from "../../core/config.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
+import { bundleToMarkdown } from "../../core/transcript.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
 
@@ -112,6 +113,30 @@ export function registerSessionRoutes(
       `attachment; filename="${id}-${stamp}.hydra"`,
     );
     reply.code(200).send(bundle);
+  });
+
+  // Render a session as a markdown transcript. Shares the bundle
+  // assembly with /export and pipes the result through
+  // bundleToMarkdown — the same function the CLI's file-path branch
+  // calls locally — so output is byte-identical across surfaces.
+  app.get("/v1/sessions/:id/transcript", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const exported = await manager.exportBundle(id);
+    if (!exported) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    const bundle = encodeBundle({
+      record: exported.record,
+      history: exported.history,
+      promptHistory:
+        exported.promptHistory.length > 0 ? exported.promptHistory : undefined,
+      hydraVersion: HYDRA_VERSION,
+      machine: os.hostname(),
+    });
+    reply.header("Content-Type", "text/markdown; charset=utf-8");
+    reply.code(200).send(bundleToMarkdown(bundle));
   });
 
   // Import a session bundle. Body shape: { bundle, replace? }. Without

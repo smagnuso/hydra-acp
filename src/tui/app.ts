@@ -18,6 +18,10 @@ import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
+  formatUpdateNoticeLine,
+  getPendingUpdate,
+} from "../core/update-check.js";
+import {
   appendEntry,
   loadHistory,
   saveHistory,
@@ -47,7 +51,7 @@ import {
   sanitizeSingleLine,
   type AvailableCommand,
   type RenderEvent,
-} from "./render-update.js";
+} from "../core/render-update.js";
 import {
   formatEvent,
   formatToolLine,
@@ -840,6 +844,11 @@ async function runSession(
   if (initialMode) {
     screen.appendLines(formatEvent({ kind: "mode-changed", mode: initialMode }));
   }
+  void getPendingUpdate().then((info) => {
+    if (info) {
+      screen.notify(`✨ ${formatUpdateNoticeLine(info)}`, 30_000);
+    }
+  });
 
   let finishSession: ((next: TuiOptions | null) => void) | null = null;
   const sessionDone = new Promise<TuiOptions | null>((resolve) => {

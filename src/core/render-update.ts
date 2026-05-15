@@ -3,7 +3,7 @@
 
 import stripAnsi from "strip-ansi";
 
-import type { Attachment } from "./input.js";
+import type { Attachment } from "../tui/input.js";
 
 // Strip ANSI escape sequences and dangerous C0 control characters from any
 // string we get from the wire before it lands in a RenderEvent. The render

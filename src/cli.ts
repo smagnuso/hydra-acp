@@ -17,6 +17,7 @@ import {
   runSessionsKill,
   runSessionsList,
   runSessionsRemove,
+  runSessionsTranscript,
 } from "./cli/commands/sessions.js";
 import {
   runExtensionsAdd,
@@ -170,7 +171,10 @@ async function main(): Promise<void> {
     case "sessions": {
       const sub = positional[1];
       if (sub === undefined || sub === "list") {
-        await runSessionsList({ all: flags.all === true });
+        await runSessionsList({
+          all: flags.all === true,
+          json: flags.json === true,
+        });
         return;
       }
       if (sub === "kill") {
@@ -184,6 +188,11 @@ async function main(): Promise<void> {
       if (sub === "export") {
         const out = resolveOption(flags, "out");
         await runSessionsExport(positional[2], out);
+        return;
+      }
+      if (sub === "transcript") {
+        const out = resolveOption(flags, "out");
+        await runSessionsTranscript(positional[2], out);
         return;
       }
       if (sub === "import") {
@@ -341,11 +350,14 @@ function printHelp(): void {
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart|status",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
-      "  hydra-acp sessions [list] [--all]  List sessions (live + 20 most-recent cold; --all for everything)",
+      "  hydra-acp sessions [list] [--all] [--json]",
+      "                                     List sessions (live + 20 most-recent cold; --all for everything; --json emits the raw daemon response as JSON for scripts)",
       "  hydra-acp sessions kill <id>       Demote a live session to cold (keeps the on-disk record)",
       "  hydra-acp sessions remove <id>     Remove a session entirely (live or cold)",
       "  hydra-acp sessions export <id> [--out <file>|.]",
       "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout",
+      "  hydra-acp sessions transcript <id>|<file> [--out <file>|.]",
+      "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout",
       "  hydra-acp sessions import <file>|- [--replace] [--cwd <path>] [--info]",
       "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing",
       "  hydra-acp extensions list                   List configured extensions and live state",
