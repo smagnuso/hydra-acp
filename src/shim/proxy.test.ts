@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { wireShim } from "./proxy.js";
 import { SessionTracker } from "./session-tracker.js";
 import { makeControlledStream } from "../__tests__/test-utils.js";
+import type { JsonRpcNotification } from "../acp/types.js";
 
 describe("wireShim forwarding", () => {
   it("forwards initialize to upstream and does NOT spuriously respond on downstream", async () => {
@@ -293,7 +294,7 @@ describe("wireShim forwarding", () => {
     });
 
     const forwardedNotification = downstream.sent.find(
-      (m): m is { method: string; params: { update: { sessionUpdate: string } } } =>
+      (m): m is JsonRpcNotification =>
         "method" in m &&
         m.method === "session/update" &&
         (m as { params?: { update?: { sessionUpdate?: string } } }).params
@@ -397,7 +398,7 @@ describe("wireShim forwarding", () => {
     );
     expect(synthesized).toBeUndefined();
     const forwardedNotification = newMessages.find(
-      (m): m is { method: string } =>
+      (m): m is JsonRpcNotification =>
         "method" in m &&
         m.method === "session/update" &&
         (m as { params?: { update?: { sessionUpdate?: string } } }).params

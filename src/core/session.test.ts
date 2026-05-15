@@ -616,8 +616,8 @@ describe("Session", () => {
           (m.params as { update?: { sessionUpdate?: string } } | undefined)
             ?.update?.sessionUpdate === "current_model_update",
       );
-      const update = (broadcast?.params as { update: { messageId?: unknown } })
-        .update;
+      const update = ((broadcast as JsonRpcNotification | undefined)
+        ?.params as { update: { messageId?: unknown } }).update;
       expect(update.messageId).toBeUndefined();
     });
   });
