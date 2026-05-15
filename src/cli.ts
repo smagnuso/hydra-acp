@@ -29,6 +29,17 @@ import {
 } from "./cli/commands/extensions.js";
 import { runAgentsList, runAgentsRefresh } from "./cli/commands/agents.js";
 import { runShim } from "./shim/proxy.js";
+import {
+  formatUpdateNoticeLine,
+  getPendingUpdate,
+} from "./core/update-check.js";
+
+// Set when a code path takes over the process for the long haul (shim
+// over piped stdio, or the TUI's alternate screen) so the post-main
+// notice doesn't corrupt the JSON-RPC stream or print over the TUI's
+// last frame after it exits. The TUI handles its own notice in
+// scrollback.
+let suppressUpdateNotice = false;
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -68,6 +79,7 @@ async function main(): Promise<void> {
         : resolveOption(flags, "session-id");
     const name = resolveOption(flags, "name");
     const model = resolveOption(flags, "model");
+    suppressUpdateNotice = true;
     await runShim({ sessionId, agentId, agentArgs, name, model });
     return;
   }
@@ -105,6 +117,7 @@ async function main(): Promise<void> {
     // Either path is forced explicitly via `hydra-acp tui` or
     // `hydra-acp shim` if the caller wants to bypass detection.
     if (process.stdout.isTTY) {
+      suppressUpdateNotice = true;
       await dispatchTui(flags, {
         sessionId,
         agentId: agentIdFromFlag,
@@ -113,12 +126,14 @@ async function main(): Promise<void> {
       });
       return;
     }
+    suppressUpdateNotice = true;
     await runShim({ sessionId, name, agentId: agentIdFromFlag, model });
     return;
   }
 
   switch (subcommand) {
     case "shim":
+      suppressUpdateNotice = true;
       await runShim({ sessionId, name, agentId: agentIdFromFlag, model });
       return;
     case "init":
@@ -237,6 +252,7 @@ async function main(): Promise<void> {
       return;
     }
     case "tui":
+      suppressUpdateNotice = true;
       await dispatchTui(flags, {
         sessionId,
         agentId: agentIdFromFlag,
@@ -355,7 +371,24 @@ function printHelp(): void {
   );
 }
 
-main().catch((err) => {
-  process.stderr.write(`hydra-acp: ${(err as Error).message}\n`);
-  process.exit(1);
-});
+async function maybePrintUpdateNotice(): Promise<void> {
+  if (suppressUpdateNotice) {
+    return;
+  }
+  try {
+    const info = await getPendingUpdate();
+    if (info) {
+      process.stderr.write(`✨ ${formatUpdateNoticeLine(info)}\n`);
+    }
+  } catch {
+    // Update check is best-effort; never let it disrupt the exit code.
+  }
+}
+
+main()
+  .then(maybePrintUpdateNotice)
+  .catch(async (err) => {
+    process.stderr.write(`hydra-acp: ${(err as Error).message}\n`);
+    await maybePrintUpdateNotice();
+    process.exit(1);
+  });
