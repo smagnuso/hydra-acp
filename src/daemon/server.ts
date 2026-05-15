@@ -87,13 +87,24 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
 
   const registry = new Registry(config);
   // Inject the configured stderr-tail size into every spawned agent so a
-  // crash diagnostic includes the user-tuned trailing bytes.
+  // crash diagnostic includes the user-tuned trailing bytes. The logger
+  // routes agent stderr + unexpected exits to daemon.log — without it,
+  // both go to fd 2 which is /dev/null in detached mode.
+  const agentLogger = {
+    info: (msg: string) => app.log.info(msg),
+    warn: (msg: string) => app.log.warn(msg),
+  };
   const spawner: AgentSpawner = (opts) =>
-    AgentInstance.spawn({ ...opts, stderrTailBytes: config.daemon.agentStderrTailBytes });
+    AgentInstance.spawn({
+      ...opts,
+      stderrTailBytes: config.daemon.agentStderrTailBytes,
+      logger: agentLogger,
+    });
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
     defaultModels: config.defaultModels,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
+    logger: agentLogger,
   });
 
   const extensions = new ExtensionManager(extensionList(config));

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import { customAlphabet } from "nanoid";
-import { AgentInstance, type AgentInstanceOptions } from "./agent-instance.js";
+import { AgentInstance, type AgentInstanceOptions, type AgentLogger } from "./agent-instance.js";
 import { Registry, planSpawn } from "./registry.js";
 import {
   HYDRA_SESSION_PREFIX,
@@ -78,6 +78,11 @@ export interface SessionManagerOptions {
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
   sessionHistoryMaxEntries?: number;
+  // Pino-style logger forwarded to each Session so idle-close + explicit
+  // close paths leave a trail in daemon.log (the close path used to be
+  // completely silent, making it hard to tell agent-killed-by-us apart
+  // from agent-died-on-its-own).
+  logger?: AgentLogger;
 }
 
 export class SessionManager {
@@ -93,6 +98,7 @@ export class SessionManager {
   // concurrent snapshot updates (e.g. an agent emitting model + mode
   // back-to-back) don't lose writes via interleaved reads.
   private metaWriteQueues = new Map<string, Promise<unknown>>();
+  private logger?: AgentLogger;
 
   constructor(
     private registry: Registry,
@@ -106,6 +112,7 @@ export class SessionManager {
     this.histories = new HistoryStore({ maxEntries: this.sessionHistoryMaxEntries });
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.defaultModels = options.defaultModels ?? {};
+    this.logger = options.logger;
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -125,6 +132,7 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
@@ -249,6 +257,7 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,
@@ -304,6 +313,7 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       historyStore: this.histories,

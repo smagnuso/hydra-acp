@@ -82,6 +82,9 @@ export interface SessionInit {
   agentMeta?: Record<string, unknown>;
   agentArgs?: string[];
   idleTimeoutMs?: number;
+  // Pino-style logger for close + idle paths. Optional so tests/consumers
+  // that construct Session directly aren't forced to provide one.
+  logger?: { info: (msg: string) => void; warn: (msg: string) => void };
   // Optional callback used by /hydra agent to spawn a fresh agent
   // process and run initialize + session/new on it. Provided by
   // SessionManager so Session doesn't have to depend on the registry.
@@ -194,6 +197,7 @@ export class Session {
   // and noisy state churn keep a quiet session alive forever.
   private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
+  private logger: SessionInit["logger"];
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
   > = [];
@@ -231,6 +235,7 @@ export class Session {
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.logger = init.logger;
     if (init.firstPromptSeeded) {
       this.firstPromptSeeded = true;
     }
@@ -651,6 +656,9 @@ export class Session {
     if (this.closed) {
       return;
     }
+    this.logger?.info(
+      `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false} regenTitle=${opts.regenTitle ?? false}`,
+    );
     this.cancelIdleTimer();
     if (opts.regenTitle && this.firstPromptSeeded) {
       const timeoutMs = opts.regenTitleTimeoutMs ?? 5000;
@@ -1310,6 +1318,10 @@ export class Session {
     const opts: CloseOptions = this.firstPromptSeeded
       ? { deleteRecord: false, regenTitle: true }
       : { deleteRecord: true };
+    const idleSec = Math.round(idle / 1000);
+    this.logger?.info(
+      `session ${this.sessionId} idle timeout fired after ${idleSec}s (window=${Math.round(this.idleTimeoutMs / 1000)}s) — closing`,
+    );
     void this.close(opts).catch(() => undefined);
   }
 
