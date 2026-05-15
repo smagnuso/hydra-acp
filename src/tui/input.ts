@@ -266,7 +266,11 @@ export class InputDispatcher {
           this.retreatHistorySearch();
           return [];
         }
-        if (event.name === "escape") {
+        if (event.name === "escape" || event.name === "ctrl-c") {
+          // ^c inside history search peels the search layer first (matching
+          // Escape) — restoring the saved draft — instead of falling through
+          // to handleCtrlC and exiting. A second ^c with no search active
+          // then follows the normal peel-or-exit ladder.
           this.cancelHistorySearch();
           return [];
         }

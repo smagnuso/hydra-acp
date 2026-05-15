@@ -617,6 +617,31 @@ describe("InputDispatcher", () => {
     expect(d.state().historySearchQuery).toBe(null);
   });
 
+  it("Ctrl+C in history search cancels the search (no exit) and restores the draft", () => {
+    const d = new InputDispatcher({ history: ["git push"] });
+    feed(d, [ch("g"), ch("i"), ch("t")]);
+    feed(d, [k("ctrl-r")]);
+    expect(d.state().buffer).toEqual(["git push"]);
+    expect(d.state().historySearchQuery).toBe("git");
+    // Empty-query case: ^r with no chars typed yet still engages search.
+    const d2 = new InputDispatcher({ history: ["git push"] });
+    feed(d2, [k("ctrl-r")]);
+    expect(d2.state().historySearchQuery).toBe("");
+    expect(feed(d2, [k("ctrl-c")])).toEqual([]);
+    expect(d2.state().historySearchQuery).toBe(null);
+    expect(d2.state().buffer).toEqual([""]);
+    // With a query: ^c peels the search, draft is restored, no exit.
+    expect(feed(d, [k("ctrl-c")])).toEqual([]);
+    expect(d.state().historySearchQuery).toBe(null);
+    expect(d.state().buffer).toEqual(["git"]);
+    // Next ^c on the (now empty after clearing the draft text) buffer
+    // follows the normal ladder — here the draft has text so it clears it.
+    expect(feed(d, [k("ctrl-c")])).toEqual([]);
+    expect(d.state().buffer).toEqual([""]);
+    // Final ^c on an empty draft with no turn running exits.
+    expect(feed(d, [k("ctrl-c")])).toEqual([{ type: "exit" }]);
+  });
+
   it("Enter in search mode submits the matched entry (history clears search state)", () => {
     const d = new InputDispatcher({ history: ["git push"] });
     feed(d, [ch("g"), ch("i"), ch("t")]);
