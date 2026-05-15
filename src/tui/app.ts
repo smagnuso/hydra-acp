@@ -100,6 +100,16 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   while (nextOpts !== null) {
     nextOpts = await runSession(term, config, nextOpts, exitHint);
   }
+  // Re-surface the update notice on the way out so users who missed
+  // the 30-second banner inside the TUI still see it. cli.ts suppresses
+  // its own end-of-process notice for the TUI path (it owned the
+  // alternate screen until just now), so this is the only post-exit
+  // chance. getPendingUpdate() caches in-process — this just reads
+  // whatever the in-session banner check already populated.
+  const pendingUpdate = await getPendingUpdate();
+  if (pendingUpdate) {
+    process.stderr.write(`✨ ${formatUpdateNoticeLine(pendingUpdate)}\n`);
+  }
   if (exitHint.sessionId) {
     const short = stripHydraSessionPrefix(exitHint.sessionId);
     process.stdout.write(`To resume: hydra-acp tui --resume ${short}\n`);

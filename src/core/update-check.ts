@@ -42,11 +42,21 @@ export async function getPendingUpdate(): Promise<PendingUpdate | null> {
     const updateNotifier =
       (mod as { default?: unknown }).default ?? (mod as unknown);
     const notifier = (updateNotifier as (opts: unknown) => {
+      check: () => void;
       update?: { current?: string; latest?: string; type?: string };
     })({
       pkg: { name: PKG_NAME, version: HYDRA_VERSION },
       updateCheckInterval: 1000 * 60 * 60 * 24,
     });
+    // Constructor only sets up the on-disk configstore; the actual
+    // registry probe is gated behind check(). It (a) pulls the most
+    // recent cached `update` field into notifier.update, and (b) when
+    // the cache is older than updateCheckInterval, spawns a detached
+    // child to re-probe the registry and write a fresh `update` field
+    // for the NEXT process to read. Without this call our prior code
+    // saw notifier.update === undefined forever and the cache only
+    // ever held configstore's seed value.
+    notifier.check();
     const u = notifier.update;
     if (
       u &&
