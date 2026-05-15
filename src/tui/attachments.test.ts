@@ -4,6 +4,7 @@ import {
   formatSize,
   isSupportedImagePath,
   mimeFromExtension,
+  parseDataUriImage,
   parseImageDropPaste,
 } from "./attachments.js";
 
@@ -100,5 +101,61 @@ describe("parseImageDropPaste", () => {
   it("returns null on empty paste", () => {
     expect(parseImageDropPaste("")).toBeNull();
     expect(parseImageDropPaste("   ")).toBeNull();
+  });
+
+  it("accepts data: URIs for supported image mime types", () => {
+    const uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+    expect(parseImageDropPaste(uri)).toEqual([uri]);
+  });
+
+  it("accepts a mix of paths and data: URIs in one paste", () => {
+    const uri = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABg==";
+    expect(parseImageDropPaste(`/tmp/a.png ${uri}`)).toEqual([
+      "/tmp/a.png",
+      uri,
+    ]);
+  });
+
+  it("rejects data: URIs for unsupported mime types", () => {
+    expect(parseImageDropPaste("data:image/svg+xml;base64,PHN2Zw==")).toBeNull();
+    expect(parseImageDropPaste("data:text/plain;base64,aGVsbG8=")).toBeNull();
+  });
+
+  it("rejects non-base64 data: URIs", () => {
+    // Raw-form data URIs (no `;base64,`) aren't supported.
+    expect(parseImageDropPaste("data:image/png,foo")).toBeNull();
+  });
+});
+
+describe("parseDataUriImage", () => {
+  it("extracts mime + payload + estimated size from a base64 data URI", () => {
+    // 8-char base64 with "==" pad encodes 4 bytes (the PNG magic).
+    const uri = "data:image/png;base64,iVBORw==";
+    const out = parseDataUriImage(uri);
+    expect(out).not.toBeNull();
+    if (out) {
+      expect(out.mimeType).toBe("image/png");
+      expect(out.data).toBe("iVBORw==");
+      expect(out.sizeBytes).toBe(4);
+    }
+  });
+
+  it("handles jpeg / gif / webp", () => {
+    expect(parseDataUriImage("data:image/jpeg;base64,/9j=")?.mimeType).toBe(
+      "image/jpeg",
+    );
+    expect(parseDataUriImage("data:image/gif;base64,R0lGOD==")?.mimeType).toBe(
+      "image/gif",
+    );
+    expect(parseDataUriImage("data:image/webp;base64,UklGRg==")?.mimeType).toBe(
+      "image/webp",
+    );
+  });
+
+  it("rejects unsupported mime types and malformed input", () => {
+    expect(parseDataUriImage("data:image/svg+xml;base64,Zm9v")).toBeNull();
+    expect(parseDataUriImage("data:image/png,not-base64")).toBeNull();
+    expect(parseDataUriImage("not a data uri at all")).toBeNull();
+    expect(parseDataUriImage("data:image/png;base64,!!!")).toBeNull();
   });
 });

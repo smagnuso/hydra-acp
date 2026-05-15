@@ -35,6 +35,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   formatSize,
   mimeFromExtension,
+  parseDataUriImage,
 } from "./attachments.js";
 import { readClipboard } from "./clipboard.js";
 import fs from "node:fs/promises";
@@ -1136,24 +1137,45 @@ async function runSession(
     }
   };
 
-  // Reads bytes from disk for each dropped path, sniffs the mime,
-  // gates on size and capability, and pushes the survivors onto the
-  // dispatcher. Banner-notifies for any rejection so the user knows
-  // why a chip didn't appear.
-  const handleAttachmentPaths = async (paths: string[]): Promise<void> => {
+  // Resolves each dropped token — either an absolute path on disk
+  // (reads the file) or a base64 data: URI (decodes in place) — and
+  // pushes the survivors onto the dispatcher. Banner-notifies on any
+  // rejection so the user knows why a chip didn't appear.
+  const handleAttachmentPaths = async (tokens: string[]): Promise<void> => {
     if (!agentAcceptsImages) {
       screen.notify("agent does not accept image attachments");
       return;
     }
     let added = 0;
-    for (const p of paths) {
-      const mimeType = mimeFromExtension(p);
+    for (const token of tokens) {
+      if (token.startsWith("data:")) {
+        const parsed = parseDataUriImage(token);
+        if (!parsed) {
+          screen.notify("unsupported data: URI");
+          continue;
+        }
+        if (parsed.sizeBytes > MAX_ATTACHMENT_BYTES) {
+          screen.notify(
+            `image too large (${formatSize(parsed.sizeBytes)}, max ${formatSize(MAX_ATTACHMENT_BYTES)})`,
+          );
+          continue;
+        }
+        dispatcher.addAttachment({
+          mimeType: parsed.mimeType,
+          data: parsed.data,
+          name: "pasted image",
+          sizeBytes: parsed.sizeBytes,
+        });
+        added++;
+        continue;
+      }
+      const mimeType = mimeFromExtension(token);
       if (!mimeType) {
-        screen.notify(`unsupported image type: ${path.basename(p)}`);
+        screen.notify(`unsupported image type: ${path.basename(token)}`);
         continue;
       }
       try {
-        const buf = await fs.readFile(p);
+        const buf = await fs.readFile(token);
         if (buf.length > MAX_ATTACHMENT_BYTES) {
           screen.notify(
             `image too large (${formatSize(buf.length)}, max ${formatSize(MAX_ATTACHMENT_BYTES)})`,
@@ -1163,12 +1185,14 @@ async function runSession(
         dispatcher.addAttachment({
           mimeType,
           data: buf.toString("base64"),
-          name: path.basename(p),
+          name: path.basename(token),
           sizeBytes: buf.length,
         });
         added++;
       } catch (err) {
-        screen.notify(`cannot read ${path.basename(p)}: ${(err as Error).message}`);
+        screen.notify(
+          `cannot read ${path.basename(token)}: ${(err as Error).message}`,
+        );
       }
     }
     if (added > 0) {
