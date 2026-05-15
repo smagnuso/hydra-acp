@@ -9,6 +9,7 @@ import {
   HYDRA_META_KEY,
   extractHydraMeta,
   type JsonRpcRequest,
+  type SessionListUsage,
   ACP_PROTOCOL_VERSION,
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
@@ -499,6 +500,10 @@ async function runSession(
   let initialModel: string | undefined;
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
+  // Last-known usage at attach time, surfaced by the daemon's meta so the
+  // sessionbar can show tokens/cost immediately on reopen rather than
+  // waiting for the next live usage_update event.
+  let initialUsage: SessionListUsage | undefined;
   // Epoch-ms of an in-flight turn at attach time, surfaced by the daemon
   // when we reattach mid-turn. Lets the post-drain reconcile flip the
   // banner to busy and start the elapsed timer at the right offset.
@@ -533,6 +538,7 @@ async function runSession(
     }
     initialModel = hydraMeta.currentModel;
     initialMode = hydraMeta.currentMode;
+    initialUsage = hydraMeta.currentUsage;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
@@ -558,6 +564,7 @@ async function runSession(
     }
     initialModel = hydraMeta.currentModel;
     initialMode = hydraMeta.currentMode;
+    initialUsage = hydraMeta.currentUsage;
     initialTurnStartedAt = hydraMeta.turnStartedAt;
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
@@ -827,6 +834,10 @@ async function runSession(
   };
 
   const sessionbarAgent = resolvedAgentId || agentInfoName || "?";
+  // Running usage snapshot — seeded from the daemon's attach _meta so the
+  // sessionbar shows tokens/cost immediately on reopen, then merged in
+  // place by the usage-update event handler.
+  const usage: SessionListUsage = { ...(initialUsage ?? {}) };
   screen.start();
   screen.setSessionbar({
     agent: sessionbarAgent,
@@ -834,6 +845,7 @@ async function runSession(
     sessionId: resolvedSessionId,
     title: resolvedTitle,
     model: initialModel,
+    usage: { ...usage },
   });
   // Surface initial snapshot state (delivered via _meta on attach) so a
   // late-joining or cold-resurrected client sees the current mode
@@ -1554,8 +1566,6 @@ async function runSession(
       );
     }
   };
-
-  const usage: { used?: number; size?: number; costAmount?: number; costCurrency?: string } = {};
 
   // toolCallId → merged state for the per-call row inside the current
   // turn's tools block. Cleared at turn boundaries (the block gets

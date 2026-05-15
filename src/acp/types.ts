@@ -146,6 +146,10 @@ export interface HydraMeta {
   // mode, or command palette.
   currentModel?: string;
   currentMode?: string;
+  // Last-known usage (tokens + cost). Delivered on attach so the TUI's
+  // sessionbar can show tokens/cost immediately instead of waiting for
+  // the next live usage_update.
+  currentUsage?: SessionListUsage;
   availableCommands?: HydraAdvertisedCommand[];
   // Epoch-ms when the in-flight agent turn began. Present only when
   // mid-turn at attach response time; lets a fresh client boot with
@@ -195,6 +199,12 @@ export function extractHydraMeta(
   }
   if (typeof obj.currentMode === "string") {
     out.currentMode = obj.currentMode;
+  }
+  if (obj.currentUsage) {
+    const parsed = SessionListUsage.safeParse(obj.currentUsage);
+    if (parsed.success) {
+      out.currentUsage = parsed.data;
+    }
   }
   if (typeof obj.turnStartedAt === "number" && obj.turnStartedAt > 0) {
     out.turnStartedAt = obj.turnStartedAt;

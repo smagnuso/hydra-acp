@@ -91,15 +91,31 @@ export function registerAcpWsEndpoint(
         model: hydraMeta.model,
       });
       const client = bindClientToSession(connection, session, state);
-      // Fresh session — nothing to replay, but await for symmetry with
-      // attach() which is Promise-returning. Validation errors throw
-      // synchronously regardless.
-      await session.attach(client, "full");
-      // attach() returns { entries, appliedPolicy }; we discard for
-      // fresh sessions since there's no history to replay.
+      // No conversation history to replay on a fresh session, but
+      // buildStateSnapshotReplay() still emits synthetic state snapshots
+      // (at minimum the hydra verbs in available_commands_update) so a
+      // protocol-only client sees the current command set right after
+      // session/new — without depending on hydra's `_meta`.
+      const { entries: replay } = await session.attach(client, "full");
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
+      });
+      // Defer until after the response goes out. On session/new the
+      // client only learns the new sessionId from the response, so
+      // session/update notifications fired *before* the response would
+      // refer to a session the client hasn't registered yet — well-behaved
+      // JSON-RPC clients (agent-shell, Zed) drop those as "for unknown
+      // session". setImmediate runs once the current request handler has
+      // returned and the framework has flushed the response.
+      setImmediate(() => {
+        void (async () => {
+          for (const note of replay) {
+            await connection
+              .notify(note.method, note.params)
+              .catch(() => undefined);
+          }
+        })();
       });
       return {
         sessionId: session.sessionId,
@@ -364,6 +380,9 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
   }
   if (session.currentMode !== undefined) {
     ours.currentMode = session.currentMode;
+  }
+  if (session.currentUsage !== undefined) {
+    ours.currentUsage = session.currentUsage;
   }
   const commands = session.mergedAvailableCommands();
   if (commands.length > 0) {

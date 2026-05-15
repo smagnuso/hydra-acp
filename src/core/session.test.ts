@@ -22,6 +22,26 @@ async function flushHistoryWrites(): Promise<void> {
   await new Promise((r) => setImmediate(r));
 }
 
+// Mirror of session.ts STATE_UPDATE_KINDS — the kinds that get prepended
+// to attach replay as synthetic standard-ACP notifications. Tests use
+// this to peel off the snapshot prefix when asserting on historical
+// entries.
+const STATE_SNAPSHOT_KINDS = new Set([
+  "session_info_update",
+  "current_model_update",
+  "current_mode_update",
+  "available_commands_update",
+  "usage_update",
+]);
+function isStateSnapshotEntry(entry: { method: string; params: unknown }): boolean {
+  if (entry.method !== "session/update") {
+    return false;
+  }
+  const u = (entry.params as { update?: { sessionUpdate?: string } } | undefined)
+    ?.update;
+  return typeof u?.sessionUpdate === "string" && STATE_SNAPSHOT_KINDS.has(u.sessionUpdate);
+}
+
 function makeClient(clientInfo?: { name: string; version?: string }): {
   client: AttachedClient;
   conn: JsonRpcConnection;
@@ -371,12 +391,15 @@ describe("Session", () => {
 
       const { client: coldClient } = makeClient();
       const { entries: replay } = await session.attach(coldClient, "full");
-      // Snapshot-shaped events (commands/model/mode/session_info) live
-      // in meta.json and are delivered via the attach response _meta,
-      // not history. Only the two non-snapshot updates should be here.
-      expect(replay).toHaveLength(2);
-      expect(replay[0]?.params).toMatchObject({ sessionId: "sess_h", n: 1 });
-      expect(replay[1]?.params).toMatchObject({ sessionId: "sess_h", n: 2 });
+      // Snapshot-shaped events (commands/model/mode/session_info/usage)
+      // live in meta.json and are prepended to the replay as synthetic
+      // standard-ACP notifications so third-party clients receive them
+      // through the normal event channel. Filter them out here to
+      // assert on just the historical entries.
+      const historical = replay.filter((e) => !isStateSnapshotEntry(e));
+      expect(historical).toHaveLength(2);
+      expect(historical[0]?.params).toMatchObject({ sessionId: "sess_h", n: 1 });
+      expect(historical[1]?.params).toMatchObject({ sessionId: "sess_h", n: 2 });
     });
 
     it("returns no history for historyPolicy=none", async () => {
@@ -432,11 +455,14 @@ describe("Session", () => {
         { afterMessageId: turnMessageId },
       );
       expect(appliedPolicy).toBe("after_message");
-      // Only the trailing tail chunk should remain.
-      expect(delta).toHaveLength(1);
+      // Filter out the synthetic state-snapshot prefix so we can assert
+      // on just the historical delta — only the trailing tail chunk
+      // should remain there.
+      const historicalDelta = delta.filter((e) => !isStateSnapshotEntry(e));
+      expect(historicalDelta).toHaveLength(1);
       expect(
-        (delta[0]?.params as { update: { sessionUpdate: string } }).update
-          .sessionUpdate,
+        (historicalDelta[0]?.params as { update: { sessionUpdate: string } })
+          .update.sessionUpdate,
       ).toBe("agent_message_chunk");
     });
 
@@ -465,6 +491,122 @@ describe("Session", () => {
       const { client: a } = makeClient();
       const { appliedPolicy } = await session.attach(a, "after_message");
       expect(appliedPolicy).toBe("full");
+    });
+
+    it("prepends synthetic state snapshots for cached model/mode/usage on attach", async () => {
+      const { session, mock } = makeSession("sess_state", "u_state");
+      // Drive the agent into emitting state updates that get cached on
+      // the Session but filtered from on-disk history. Resume should
+      // surface them as standard ACP notifications.
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_state",
+        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_state",
+        update: { sessionUpdate: "current_mode_update", currentMode: "code" },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_state",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 1234,
+          size: 200_000,
+          cost: { amount: 0.42, currency: "USD" },
+        },
+      });
+      await flushHistoryWrites();
+
+      const { client: cold } = makeClient();
+      const { entries: replay } = await session.attach(cold, "full");
+      const findKind = (kind: string): unknown =>
+        replay.find(
+          (e) =>
+            e.method === "session/update" &&
+            (e.params as { update?: { sessionUpdate?: string } }).update
+              ?.sessionUpdate === kind,
+        )?.params;
+      const model = findKind("current_model_update") as
+        | { update: { currentModel: string } }
+        | undefined;
+      const mode = findKind("current_mode_update") as
+        | { update: { currentMode: string } }
+        | undefined;
+      const usage = findKind("usage_update") as
+        | {
+            update: {
+              used?: number;
+              size?: number;
+              cost?: { amount?: number; currency?: string };
+            };
+          }
+        | undefined;
+      expect(model?.update.currentModel).toBe("gpt-5");
+      expect(mode?.update.currentMode).toBe("code");
+      expect(usage?.update.used).toBe(1234);
+      expect(usage?.update.size).toBe(200_000);
+      expect(usage?.update.cost?.amount).toBe(0.42);
+      expect(usage?.update.cost?.currency).toBe("USD");
+    });
+
+    it("skips synthetic state snapshots for historyPolicy=none", async () => {
+      const { session, mock } = makeSession("sess_none", "u_none");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_none",
+        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+      });
+      await flushHistoryWrites();
+      const { client: cold } = makeClient();
+      const { entries: replay } = await session.attach(cold, "none");
+      expect(replay).toEqual([]);
+    });
+
+    it("includes synthetic state snapshots (but no history) for historyPolicy=pending_only", async () => {
+      // pending_only is what session/load (agent-shell's resume path)
+      // uses — the client has its own conversation history but still
+      // needs current state pushed so a third-party ACP client sees
+      // model/usage/commands/title without depending on hydra's _meta.
+      const { session, mock } = makeSession("sess_po", "u_po");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_po",
+        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+      });
+      // Record a real conversation-history entry so we can prove it's
+      // excluded from the pending_only replay.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_po",
+        update: { sessionUpdate: "agent_message_chunk", content: { text: "hi" } },
+      });
+      await flushHistoryWrites();
+      const { client: cold } = makeClient();
+      const { entries: replay, appliedPolicy } = await session.attach(
+        cold,
+        "pending_only",
+      );
+      expect(appliedPolicy).toBe("pending_only");
+      // No historical entries.
+      const hasHistory = replay.some(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "agent_message_chunk",
+      );
+      expect(hasHistory).toBe(false);
+      // But state snapshots ARE present.
+      const model = replay.find(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "current_model_update",
+      );
+      expect(model).toBeDefined();
+      expect(
+        (model?.params as { update: { currentModel: string } }).update.currentModel,
+      ).toBe("gpt-5");
     });
   });
 
@@ -735,8 +877,10 @@ describe("Session", () => {
       );
       expect(broadcast).toBeDefined();
 
-      // A latecomer's replay should NOT include the commands_update —
-      // they pick it up from the attach response _meta instead.
+      // A latecomer's replay carries the merged commands as a synthetic
+      // snapshot at the front, so third-party ACP clients see the
+      // current command set through the standard event channel — not
+      // just hydra-aware clients reading attach response _meta.
       await flushHistoryWrites();
       const { client: late } = makeClient();
       const { entries: replay } = await session.attach(late, "full");
@@ -747,7 +891,14 @@ describe("Session", () => {
         const u = (n.params as { update?: { sessionUpdate?: string } })?.update;
         return u?.sessionUpdate === "available_commands_update";
       });
-      expect(replayedCmds).toBeUndefined();
+      expect(replayedCmds).toBeDefined();
+      const replayedNames = (
+        replayedCmds?.params as {
+          update: { availableCommands: Array<{ name: string }> };
+        }
+      ).update.availableCommands.map((c) => c.name);
+      expect(replayedNames).toContain("hydra title");
+      expect(replayedNames).toContain("create_plan");
     });
   });
 
@@ -1224,7 +1375,7 @@ describe("Session", () => {
       expect((await session.getHistorySnapshot()).length).toBe(before + 1);
     });
 
-    it("session_info_update is broadcast live but not put in replay history", async () => {
+    it("session_info_update is broadcast live and prepended to replay as a synthetic snapshot", async () => {
       const { session, mock } = makeSession("hydra_session_TH", "u_TH");
       const requestMock = mock.agent.connection.request as ReturnType<
         typeof vi.fn
@@ -1252,10 +1403,22 @@ describe("Session", () => {
       );
       expect(aSessionInfo).toBeDefined();
 
-      // A late-joining client gets replay history — but no
-      // session_info_update should appear in it, since the canonical
-      // title is delivered via the attach response _meta instead.
+      // session_info_update is filtered from recorded history (it's
+      // snapshot state, not a conversation event), so on-disk history
+      // never carries it.
       await flushHistoryWrites();
+      const onDisk = await session.getHistorySnapshot();
+      expect(
+        onDisk.find(
+          (e) =>
+            (e.params as { update?: { sessionUpdate?: string } }).update
+              ?.sessionUpdate === "session_info_update",
+        ),
+      ).toBeUndefined();
+
+      // But the canonical title IS surfaced to a late-joining client
+      // through a synthetic session_info_update at the front of replay,
+      // so third-party ACP clients see it via the standard event channel.
       const b = makeClient();
       const { entries: replay } = await session.attach(b.client, "full");
       const replayedTitleUpdate = replay.find(
@@ -1264,7 +1427,11 @@ describe("Session", () => {
           (e.params as { update?: { sessionUpdate?: string } }).update
             ?.sessionUpdate === "session_info_update",
       );
-      expect(replayedTitleUpdate).toBeUndefined();
+      expect(replayedTitleUpdate).toBeDefined();
+      expect(
+        (replayedTitleUpdate?.params as { update: { title: string } }).update
+          .title,
+      ).toBe("testing-the-cache");
     });
 
     it("/hydra title <text> sets the title without forwarding to the agent", async () => {

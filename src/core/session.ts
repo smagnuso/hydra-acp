@@ -425,8 +425,20 @@ export class Session {
     }
     this.clients.set(client.clientId, client);
     this.updatedAt = Date.now();
-    if (historyPolicy === "none" || historyPolicy === "pending_only") {
+    // "none" is a true opt-out — caller wants zero notifications.
+    if (historyPolicy === "none") {
       return Promise.resolve({ entries: [], appliedPolicy: historyPolicy });
+    }
+    // "pending_only" gets snapshot state but no conversation history.
+    // Callers using this policy (notably session/load — agent-shell's
+    // resume path) already have their own conversation history but
+    // still need current model/mode/usage/commands/title to render
+    // correctly, since those are filtered from on-disk history.
+    if (historyPolicy === "pending_only") {
+      return Promise.resolve({
+        entries: this.buildStateSnapshotReplay(),
+        appliedPolicy: historyPolicy,
+      });
     }
     return this.loadReplay(historyPolicy, opts);
   }
@@ -436,16 +448,121 @@ export class Session {
     opts: { afterMessageId?: string },
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     const all = await this.getHistorySnapshot();
+    const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
       const cutoff = opts.afterMessageId
         ? findMessageIdIndex(all, opts.afterMessageId)
         : -1;
       if (cutoff < 0) {
-        return { entries: all, appliedPolicy: "full" };
+        return { entries: [...state, ...all], appliedPolicy: "full" };
       }
-      return { entries: all.slice(cutoff + 1), appliedPolicy: "after_message" };
+      return {
+        entries: [...state, ...all.slice(cutoff + 1)],
+        appliedPolicy: "after_message",
+      };
     }
-    return { entries: all, appliedPolicy: "full" };
+    return { entries: [...state, ...all], appliedPolicy: "full" };
+  }
+
+  // Synthesizes one session/update notification per cached STATE_UPDATE_KIND
+  // so an attaching client receives the current snapshot through the
+  // standard ACP event channel. Without this, third-party clients would
+  // never see current_model/mode/usage/info/commands on resume — they're
+  // filtered out of recorded history (canonical state lives in meta.json
+  // and is *also* surfaced via the attach response _meta, but third-party
+  // clients can't read hydra's namespaced meta).
+  private buildStateSnapshotReplay(): CachedNotification[] {
+    const out: CachedNotification[] = [];
+    const sessionId = this.sessionId;
+    const recordedAt = Date.now();
+    if (this.title !== undefined && this.title.length > 0) {
+      out.push({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "session_info_update",
+            title: this.title,
+          },
+        },
+        recordedAt,
+      });
+    }
+    if (this.currentModel !== undefined && this.currentModel.length > 0) {
+      out.push({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "current_model_update",
+            currentModel: this.currentModel,
+          },
+        },
+        recordedAt,
+      });
+    }
+    if (this.currentMode !== undefined && this.currentMode.length > 0) {
+      out.push({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "current_mode_update",
+            currentMode: this.currentMode,
+          },
+        },
+        recordedAt,
+      });
+    }
+    const cmds = this.mergedAvailableCommands();
+    if (cmds.length > 0) {
+      out.push({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: cmds,
+          },
+        },
+        recordedAt,
+      });
+    }
+    if (this.currentUsage !== undefined) {
+      const u = this.currentUsage;
+      const update: Record<string, unknown> = {
+        sessionUpdate: "usage_update",
+      };
+      if (typeof u.used === "number") {
+        update.used = u.used;
+      }
+      if (typeof u.size === "number") {
+        update.size = u.size;
+      }
+      if (
+        typeof u.costAmount === "number" ||
+        typeof u.costCurrency === "string"
+      ) {
+        const cost: Record<string, unknown> = {};
+        if (typeof u.costAmount === "number") {
+          cost.amount = u.costAmount;
+        }
+        if (typeof u.costCurrency === "string") {
+          cost.currency = u.costCurrency;
+        }
+        update.cost = cost;
+      }
+      // Only emit when at least one payload field is present — an empty
+      // snapshot has nothing useful to say.
+      if (Object.keys(update).length > 1) {
+        out.push({
+          method: "session/update",
+          params: { sessionId, update },
+          recordedAt,
+        });
+      }
+    }
+    return out;
   }
 
   // Dispatch in-flight permission requests to a freshly-attached
