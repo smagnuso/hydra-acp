@@ -968,6 +968,8 @@ export class Session {
         return this.runTitleCommand(arg);
       case "agent":
         return this.runAgentCommand(arg);
+      case "kill":
+        return this.runKillCommand();
       default: {
         // Listed in HYDRA_COMMANDS but no dispatch case — wired up wrong.
         const err = new Error(
@@ -1092,6 +1094,18 @@ export class Session {
       }
       return { stopReason: "end_turn" };
     });
+  }
+
+  // Close this session in-place. Bypasses enqueuePrompt deliberately so a
+  // mid-turn /hydra kill takes effect immediately — agent.kill() will tear
+  // down any in-flight request as a side effect. The record is kept
+  // (deleteRecord:false) so the session goes cold and can be resurrected.
+  // Returns end_turn so the prompt() caller's response resolves normally,
+  // but every attached client has already received hydra-acp/session_closed
+  // by the time this returns.
+  private async runKillCommand(): Promise<unknown> {
+    await this.close({ deleteRecord: false });
+    return { stopReason: "end_turn" };
   }
 
   // Walk the persisted history and produce a labeled transcript suitable

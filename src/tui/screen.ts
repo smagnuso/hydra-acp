@@ -1844,6 +1844,8 @@ export class Screen {
         }
       } else if (this.banner.status === "disconnected") {
         this.term.brightRed(`${dot} ${this.banner.status}`);
+      } else if (this.banner.status === "cold") {
+        this.term.brightMagenta(`${dot} ${this.banner.status}`);
       } else {
         this.term.brightGreen(`${dot} ${this.banner.status}`);
       }

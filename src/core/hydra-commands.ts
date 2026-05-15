@@ -28,6 +28,12 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
     argsHint: "<agent>",
     description: "Swap the agent backing this session, preserving context",
   },
+  {
+    verb: "kill",
+    name: "hydra kill",
+    description:
+      "Close this session (kills the agent; record is kept so it can be resumed later)",
+  },
 ];
 
 const VERB_INDEX = new Map(HYDRA_COMMANDS.map((c) => [c.verb, c]));

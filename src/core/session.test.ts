@@ -701,6 +701,7 @@ describe("Session", () => {
       const names = session.mergedAvailableCommands().map((c) => c.name);
       expect(names).toContain("hydra title");
       expect(names).toContain("hydra agent <agent>");
+      expect(names).toContain("hydra kill");
     });
 
     it("merges agent-emitted commands with hydra verbs and broadcasts the merge live", async () => {
@@ -1528,6 +1529,28 @@ describe("Session", () => {
       expect(session.agentId).toBe("old");
       expect(session.agent).toBe(oldMock.agent);
       expect(oldKill).not.toHaveBeenCalled();
+    });
+
+    it("/hydra kill closes the session, notifies clients, and keeps the cold record", async () => {
+      const { session, mock } = makeSession("hydra_session_K", "u_K");
+      const { client: alice, stream } = makeClient();
+      const closeSpy = vi.fn();
+      session.onClose(closeSpy);
+      session.attach(alice, "full");
+      const killMock = mock.agent.kill as ReturnType<typeof vi.fn>;
+
+      const response = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra kill" }],
+      });
+
+      expect(response).toEqual({ stopReason: "end_turn" });
+      expect(killMock).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledWith({ deleteRecord: false });
+      const closeMsg = stream.sent.find(
+        (m) => "method" in m && m.method === "hydra-acp/session_closed",
+      );
+      expect(closeMsg).toMatchObject({ params: { sessionId: "hydra_session_K" } });
+      expect(session.attachedCount).toBe(0);
     });
 
     it("unknown /hydra verbs throw", async () => {

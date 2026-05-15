@@ -272,6 +272,21 @@ async function runSession(
     maybeDismissPermissionByToolUpdate(update);
   });
 
+  // Daemon-side close (user typed /hydra kill, an idle-close fired, the
+  // record was deleted out from under us, etc.). Drain in-flight turn
+  // bookkeeping so the elapsed timer stops, then flip the banner to a
+  // terminal "closed" state. The WS itself stays up; a subsequent prompt
+  // will get rejected by the daemon and surface that error in scrollback.
+  conn.onNotification("hydra-acp/session_closed", () => {
+    if (pendingTurns > 0) {
+      adjustPendingTurns(-pendingTurns);
+    }
+    const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
+    if (screenReady) {
+      screenRef!.setBanner({ status: "cold", elapsedMs: undefined });
+    }
+  });
+
   // Sibling client answered the permission first (or the daemon synthesized
   // a cancellation on disconnect). Reconstruct the JSON-RPC response shape
   // the modal expects from the update's `outcome` (preferred) or
