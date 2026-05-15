@@ -35,6 +35,7 @@ function testConfig(): HydraConfig {
       mouse: true,
       logMaxBytes: 5 * 1024 * 1024,
       cwdColumnMaxWidth: 24,
+      progressIndicator: true,
     },
   };
 }
@@ -600,6 +601,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         mouse: true,
         logMaxBytes: 5 * 1024 * 1024,
         cwdColumnMaxWidth: 24,
+        progressIndicator: true,
       },
     };
     handle = await startDaemon(cfg);

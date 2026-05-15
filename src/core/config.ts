@@ -59,6 +59,12 @@ const TuiConfig = z.object({
   // TUI picker. Set higher if you keep deeply-nested working directories
   // and want them visible; the elastic title column shrinks to make room.
   cwdColumnMaxWidth: z.number().int().positive().default(24),
+  // When true (default), emit OSC 9;4 progress-bar control codes so the
+  // host terminal can show an indeterminate busy indicator (taskbar pulse
+  // on Windows Terminal, dock badge on KDE/Konsole, etc.) while a turn is
+  // running. Set false if your terminal renders this obnoxiously or you
+  // just don't want it.
+  progressIndicator: z.boolean().default(true),
 });
 
 const ExtensionName = z
@@ -106,6 +112,7 @@ export const HydraConfig = z.object({
     mouse: true,
     logMaxBytes: 5 * 1024 * 1024,
     cwdColumnMaxWidth: 24,
+    progressIndicator: true,
   }),
 });
 

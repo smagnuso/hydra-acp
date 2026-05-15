@@ -542,6 +542,7 @@ async function runSession(
     repaintThrottleMs: config.tui.repaintThrottleMs,
     maxScrollbackLines: config.tui.maxScrollbackLines,
     mouse: config.tui.mouse,
+    progressIndicator: config.tui.progressIndicator,
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
         if (pendingPermission && tryHandlePermissionKey(ev)) {

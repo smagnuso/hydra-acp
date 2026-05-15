@@ -27,6 +27,11 @@ export interface ScreenOptions {
   // can drive scrollback. When false, the wheel does nothing but text
   // selection works with plain click-drag (no shift required).
   mouse?: boolean;
+  // When true (default), emit OSC 9;4 progress-bar codes so the host
+  // terminal can render an indeterminate busy indicator while a turn is
+  // running (taskbar pulse on Windows Terminal, dock badge on Konsole,
+  // etc.). When false, no progress sequences are written.
+  progressIndicator?: boolean;
 }
 
 interface BannerState {
@@ -204,6 +209,12 @@ export class Screen {
   private pasteBuffer = "";
   private rawStdinHandler: (chunk: Buffer) => void;
   private mouseEnabled: boolean;
+  private progressIndicatorEnabled: boolean;
+  // Last OSC 9;4 state we wrote (3 = indeterminate, 0 = remove). Used to
+  // suppress redundant writes when setBanner runs but `status` didn't
+  // actually change, and to re-emit on start() if a picker round-trip
+  // cleared the host terminal's indicator.
+  private lastProgressState: 0 | 3 = 0;
 
   constructor(opts: ScreenOptions) {
     this.term = opts.term;
@@ -214,6 +225,7 @@ export class Screen {
     this.maxScrollbackLines =
       opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
     this.mouseEnabled = opts.mouse ?? true;
+    this.progressIndicatorEnabled = opts.progressIndicator ?? true;
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name) => this.handleMouse(name);
@@ -260,6 +272,14 @@ export class Screen {
     }
     this.term.on("resize", this.resizeHandler);
     this.installBracketedPaste();
+    // Re-emit the progress indicator on entry. The OSC 9;4 state is
+    // owned by the host terminal, not the alternate screen buffer, so
+    // strictly we don't need to re-emit on a clean fullscreen swap —
+    // but a picker round-trip cleared lastProgressState via stop(), so
+    // forcing a fresh write when status is still "busy" gets the
+    // taskbar pulsing again.
+    this.lastProgressState = 0;
+    this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
     this.repaint();
   }
 
@@ -282,6 +302,11 @@ export class Screen {
     this.term.hideCursor(false);
     // Restore auto-wrap so the host shell behaves normally after exit.
     process.stdout.write("\x1b[?7h");
+    // Clear any progress indicator so the host terminal's taskbar /
+    // dock badge doesn't keep pulsing after we exit (or while a picker
+    // is up). The host owns this state independently of the alternate
+    // screen, so it survives fullscreen(false) without explicit clear.
+    this.writeProgressIndicator(0);
     this.term.fullscreen(false);
     this.term("\n");
   }
@@ -630,8 +655,26 @@ export class Screen {
 
   setBanner(banner: Partial<BannerState>): void {
     this.banner = { ...this.banner, ...banner };
+    this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
     this.drawBanner();
     this.placeCursor();
+  }
+
+  // OSC 9;4 progress-bar control. State 3 = indeterminate (pulsing
+  // taskbar / dock badge while a turn is running); state 0 = remove.
+  // ConEmu-flavor sequence — supported by Windows Terminal, WezTerm,
+  // Ghostty, Konsole, Black Box, Rio, and others; ignored harmlessly
+  // by terminals that don't implement it. Disabled entirely when
+  // tui.progressIndicator is false.
+  private writeProgressIndicator(state: 0 | 3): void {
+    if (!this.progressIndicatorEnabled) {
+      return;
+    }
+    if (state === this.lastProgressState) {
+      return;
+    }
+    this.lastProgressState = state;
+    process.stdout.write(`\x1b]9;4;${state}\x1b\\`);
   }
 
   // Transient right-side banner message. Cleared automatically after

@@ -59,6 +59,7 @@ function fakeConfig(): HydraConfig {
       mouse: true,
       logMaxBytes: 5 * 1024 * 1024,
       cwdColumnMaxWidth: 24,
+      progressIndicator: true,
     },
   };
 }
