@@ -64,6 +64,16 @@ export const SessionRecord = z.object({
   // origin's local id at export time, kept for debuggability and as a
   // breadcrumb in `sessions list` (informational, not used for routing).
   importedFromSessionId: z.string().optional(),
+  // Origin's agent-side session id at export time. Carried as a
+  // breadcrumb and as the handle a future "connect back to origin"
+  // feature would dial. Absent when the origin record had no upstream
+  // bound (re-export of an imported, not-yet-attached session).
+  importedFromUpstreamSessionId: z.string().optional(),
+  // Hostname of the machine that exported the bundle we imported
+  // (i.e. the most recent hop, not necessarily the true multi-hop
+  // origin). Surfaced in the picker so imported rows don't look like
+  // they materialized from nowhere.
+  importedFromMachine: z.string().optional(),
   agentId: z.string(),
   cwd: z.string(),
   title: z.string().optional(),
@@ -197,6 +207,8 @@ export function recordFromMemorySession(args: {
   lineageId?: string;
   upstreamSessionId: string;
   importedFromSessionId?: string;
+  importedFromUpstreamSessionId?: string;
+  importedFromMachine?: string;
   agentId: string;
   cwd: string;
   title?: string;
@@ -214,6 +226,8 @@ export function recordFromMemorySession(args: {
     lineageId: args.lineageId,
     upstreamSessionId: args.upstreamSessionId,
     importedFromSessionId: args.importedFromSessionId,
+    importedFromUpstreamSessionId: args.importedFromUpstreamSessionId,
+    importedFromMachine: args.importedFromMachine,
     agentId: args.agentId,
     cwd: args.cwd,
     title: args.title,

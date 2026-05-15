@@ -23,6 +23,12 @@ const BundleSession = z.object({
   // Required on bundles — the export path backfills if the source
   // record was written before lineageId existed.
   lineageId: z.string(),
+  // The exporter's agent-side session id at export time. Carried so
+  // importers can persist it as a breadcrumb (and, eventually, as the
+  // handle a "connect back to origin" feature would need). Omitted on
+  // bundles whose source record never bound to an agent (e.g. a
+  // re-export of an imported, not-yet-attached session).
+  upstreamSessionId: z.string().optional(),
   agentId: z.string(),
   cwd: z.string(),
   title: z.string().optional(),
@@ -66,6 +72,9 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
     session: {
       sessionId: params.record.sessionId,
       lineageId: params.record.lineageId,
+      ...(params.record.upstreamSessionId
+        ? { upstreamSessionId: params.record.upstreamSessionId }
+        : {}),
       agentId: params.record.agentId,
       cwd: params.record.cwd,
       ...(params.record.title !== undefined ? { title: params.record.title } : {}),

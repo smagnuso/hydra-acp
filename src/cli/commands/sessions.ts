@@ -239,17 +239,18 @@ export async function runSessionsImport(
 }
 
 // Map a Bundle to the SessionSummary shape the list formatter consumes.
-// upstreamSessionId is rendered as "-" because the bundle's upstream
-// id is the exporter's, not anything the local install can attach to;
-// attachedClients/status are "this isn't an active session yet."
+// upstreamSessionId is left undefined so toRow falls through to the
+// import-machine breadcrumb (`← <host>`) — that's more informative
+// than a bare "-" for a bundle preview, which by definition came
+// from another machine. attachedClients/status mark this as inert.
 export function bundleToSummary(parsed: Bundle): SessionSummary {
   return {
     sessionId: parsed.session.sessionId,
-    upstreamSessionId: "-",
     cwd: parsed.session.cwd,
     agentId: parsed.session.agentId,
     currentUsage: parsed.session.currentUsage,
     title: parsed.session.title,
+    importedFromMachine: parsed.exportedFrom.machine,
     attachedClients: 0,
     updatedAt: parsed.session.updatedAt,
     status: "cold",
@@ -274,9 +275,12 @@ function printBundleInfo(raw: unknown, cwdColumnMaxWidth: number): void {
   const maxWidth = process.stdout.isTTY ? process.stdout.columns : undefined;
   process.stdout.write(formatRow(HEADER, widths, maxWidth, cwdColumnMaxWidth) + "\n");
   process.stdout.write(formatRow(row, widths, maxWidth, cwdColumnMaxWidth) + "\n");
+  const originUpstream = parsed.session.upstreamSessionId ?? "-";
   process.stdout.write(
     `\nlineage: ${parsed.session.lineageId}\n` +
       `exported: ${parsed.exportedAt} from ${parsed.exportedFrom.machine} (hydra ${parsed.exportedFrom.hydraVersion})\n` +
+      `origin session: ${parsed.session.sessionId}\n` +
+      `origin upstream: ${originUpstream}\n` +
       `history entries: ${parsed.history.length}` +
       (parsed.promptHistory
         ? `, prompt history: ${parsed.promptHistory.length}\n`

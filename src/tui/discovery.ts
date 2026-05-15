@@ -13,6 +13,12 @@ export interface DiscoveredSession {
   currentModel?: string;
   currentUsage?: DiscoveredUsage;
   title?: string;
+  // Hostname of the machine that exported this session, when the
+  // current record is the product of an import. Used by the picker to
+  // fill the UPSTREAM cell pre-first-attach so imported rows don't
+  // look like they appeared out of nowhere.
+  importedFromMachine?: string;
+  importedFromUpstreamSessionId?: string;
   attachedClients: number;
   updatedAt: string;
   status: "live" | "cold";
@@ -67,6 +73,8 @@ export async function listSessions(
     currentModel: s.currentModel,
     currentUsage: s.currentUsage,
     title: s.title,
+    importedFromMachine: s.importedFromMachine,
+    importedFromUpstreamSessionId: s.importedFromUpstreamSessionId,
   }));
 }
 

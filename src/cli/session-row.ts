@@ -15,6 +15,11 @@ export interface SessionSummary {
   agentId?: string;
   currentUsage?: DisplayUsage;
   title?: string;
+  // Origin host for imported sessions. Used to populate the UPSTREAM
+  // cell with `← <host>` when the local upstream id hasn't been bound
+  // yet (typical for imported-not-yet-attached rows), so imported rows
+  // visibly carry their provenance instead of rendering as "-".
+  importedFromMachine?: string;
   attachedClients: number;
   updatedAt: string;
   status?: "live" | "cold";
@@ -64,13 +69,32 @@ const DEFAULT_CWD_MAX_WIDTH = 24;
 export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
-    upstream: s.upstreamSessionId ?? "-",
+    upstream: formatUpstreamCell(s.upstreamSessionId, s.importedFromMachine),
     state: formatState(s.status, s.attachedClients),
     agent: formatAgentCell(s.agentId, s.currentUsage),
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
     cwd: shortenHomePath(s.cwd),
   };
+}
+
+// Pre-first-attach imported sessions have no local upstream id yet —
+// the cell would otherwise render as "-" with no hint that the row
+// came from another machine. When the import breadcrumb is present
+// we surface the origin host in its place so the provenance is
+// visible in the picker. Once the local agent is bound, the real
+// upstream id wins.
+export function formatUpstreamCell(
+  upstreamSessionId: string | undefined,
+  importedFromMachine: string | undefined,
+): string {
+  if (upstreamSessionId && upstreamSessionId.length > 0) {
+    return upstreamSessionId;
+  }
+  if (importedFromMachine && importedFromMachine.length > 0) {
+    return `← ${importedFromMachine}`;
+  }
+  return "-";
 }
 
 // Combined live/cold + client-count cell. Live sessions always get

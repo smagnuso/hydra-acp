@@ -948,19 +948,24 @@ describe("SessionManager: importBundle", () => {
   function bundleFor(opts: {
     lineageId: string;
     sessionId?: string;
+    upstreamSessionId?: string;
     agentId?: string;
     cwd?: string;
     title?: string;
+    machine?: string;
     history?: Array<{ method: string; params: unknown; recordedAt: number }>;
     promptHistory?: string[];
   }) {
     return {
       version: 1 as const,
       exportedAt: "2026-05-13T00:00:00.000Z",
-      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      exportedFrom: { hydraVersion: "0.1.0", machine: opts.machine ?? "h" },
       session: {
         sessionId: opts.sessionId ?? "hydra_session_origin",
         lineageId: opts.lineageId,
+        ...(opts.upstreamSessionId !== undefined
+          ? { upstreamSessionId: opts.upstreamSessionId }
+          : {}),
         agentId: opts.agentId ?? "claude-code",
         cwd: opts.cwd ?? "/work",
         title: opts.title,
@@ -1008,6 +1013,54 @@ describe("SessionManager: importBundle", () => {
     expect(record.upstreamSessionId).toBe("");
     expect(record.lineageId).toBe("hydra_lineage_b");
     expect(record.importedFromSessionId).toBe("hydra_session_origin");
+  });
+
+  it("persists origin machine and origin upstream id on import", async () => {
+    const manager = noSpawnManager();
+    const result = await manager.importBundle(
+      bundleFor({
+        lineageId: "hydra_lineage_origin",
+        upstreamSessionId: "agent-side-xyz",
+        machine: "build-host",
+      }),
+    );
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "meta.json",
+    );
+    const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    expect(record.importedFromMachine).toBe("build-host");
+    expect(record.importedFromUpstreamSessionId).toBe("agent-side-xyz");
+  });
+
+  it("preserves origin machine and origin upstream id across --replace", async () => {
+    const manager = noSpawnManager();
+    const first = await manager.importBundle(
+      bundleFor({
+        lineageId: "hydra_lineage_rep_origin",
+        upstreamSessionId: "agent-1",
+        machine: "host-1",
+      }),
+    );
+    await manager.importBundle(
+      bundleFor({
+        lineageId: "hydra_lineage_rep_origin",
+        upstreamSessionId: "agent-2",
+        machine: "host-2",
+      }),
+      { replace: true },
+    );
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      first.sessionId,
+      "meta.json",
+    );
+    const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    expect(record.importedFromMachine).toBe("host-2");
+    expect(record.importedFromUpstreamSessionId).toBe("agent-2");
   });
 
   it("rejects a duplicate import (lineage match) without --replace", async () => {

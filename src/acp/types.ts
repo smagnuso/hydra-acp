@@ -265,6 +265,11 @@ export const SessionListEntry = z.object({
   // Last-known usage snapshot so list views can show per-session cost
   // (and tokens, in callers that care) without resurrecting cold sessions.
   currentUsage: SessionListUsage.optional(),
+  // Origin host (and origin upstream id) for imported sessions. Picker
+  // uses the host to fill in the UPSTREAM cell pre-first-attach;
+  // future "connect back to origin" callers would dial both.
+  importedFromMachine: z.string().optional(),
+  importedFromUpstreamSessionId: z.string().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),

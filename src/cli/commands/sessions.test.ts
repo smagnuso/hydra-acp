@@ -39,13 +39,14 @@ describe("bundleToSummary", () => {
     expect(s.updatedAt).toBe("2026-05-13T01:00:00.000Z");
   });
 
-  it("renders upstream as '-' and state as cold (no live attach yet)", () => {
+  it("surfaces the origin host in the upstream cell and renders state as cold", () => {
     const s = bundleToSummary(bundle());
-    expect(s.upstreamSessionId).toBe("-");
+    expect(s.upstreamSessionId).toBeUndefined();
+    expect(s.importedFromMachine).toBe("h");
     expect(s.status).toBe("cold");
     expect(s.attachedClients).toBe(0);
     const row = toRow(s);
-    expect(row.upstream).toBe("-");
+    expect(row.upstream).toBe("← h");
     expect(row.state).toBe("COLD");
   });
 

@@ -33,6 +33,7 @@ describe("Bundle", () => {
     expect(decoded.version).toBe(1);
     expect(decoded.session.sessionId).toBe("hydra_session_abc");
     expect(decoded.session.lineageId).toBe("hydra_lineage_xyz");
+    expect(decoded.session.upstreamSessionId).toBe("u_anything");
     expect(decoded.session.agentId).toBe("claude-acp");
     expect(decoded.session.title).toBe("test session");
     expect(decoded.session.currentModel).toBe("claude-opus");
@@ -43,9 +44,21 @@ describe("Bundle", () => {
     expect(decoded.exportedFrom.machine).toBe("test-host");
   });
 
-  it("omits upstreamSessionId from the bundle (it's local to the origin install)", () => {
+  it("carries upstreamSessionId when the source record has one", () => {
     const encoded = encodeBundle({
-      record: sampleRecord(),
+      record: { ...sampleRecord(), upstreamSessionId: "agent-side-id-123" },
+      history: [],
+      hydraVersion: "0.1.0",
+      machine: "h",
+    });
+    expect(encoded.session.upstreamSessionId).toBe("agent-side-id-123");
+    const decoded = decodeBundle(encoded);
+    expect(decoded.session.upstreamSessionId).toBe("agent-side-id-123");
+  });
+
+  it("omits upstreamSessionId when the source record's upstream is empty", () => {
+    const encoded = encodeBundle({
+      record: { ...sampleRecord(), upstreamSessionId: "" },
       history: [],
       hydraVersion: "0.1.0",
       machine: "h",

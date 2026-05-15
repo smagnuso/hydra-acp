@@ -66,6 +66,45 @@ describe("toRow agent column", () => {
   });
 });
 
+describe("toRow upstream column", () => {
+  const base = {
+    sessionId: "hydra_session_xyz",
+    cwd: "/work",
+    agentId: "opencode",
+    attachedClients: 0,
+    updatedAt: new Date().toISOString(),
+    status: "cold" as const,
+  };
+
+  it("renders the local upstream id when it's bound", () => {
+    const r = toRow({ ...base, upstreamSessionId: "u_abc" });
+    expect(r.upstream).toBe("u_abc");
+  });
+
+  it("renders ← <host> when upstream is empty but the origin host is known", () => {
+    const r = toRow({
+      ...base,
+      upstreamSessionId: "",
+      importedFromMachine: "build-host",
+    });
+    expect(r.upstream).toBe("← build-host");
+  });
+
+  it("prefers the bound upstream id over the import-host breadcrumb", () => {
+    const r = toRow({
+      ...base,
+      upstreamSessionId: "u_local",
+      importedFromMachine: "build-host",
+    });
+    expect(r.upstream).toBe("u_local");
+  });
+
+  it("falls back to - when neither upstream nor origin host is known", () => {
+    const r = toRow({ ...base });
+    expect(r.upstream).toBe("-");
+  });
+});
+
 describe("toRow state column", () => {
   const base = {
     sessionId: "hydra_session_xyz",
