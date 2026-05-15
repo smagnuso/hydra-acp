@@ -99,14 +99,10 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
         },
       ];
     case "model-changed":
-      return [
-        {
-          prefix: "» ",
-          prefixStyle: "info",
-          body: `model: ${event.model}`,
-          bodyStyle: "info",
-        },
-      ];
+      // Sessionbar reflects the live model — a scrollback line would just
+      // be noise (and on session/new the snapshot replay fires one of
+      // these before the user has done anything).
+      return [];
     case "turn-complete":
       // Boundary is rendered as a blank separator only — see the
       // ensureSeparator() call in app.ts after a turn-complete event.
