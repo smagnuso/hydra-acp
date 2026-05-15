@@ -1192,6 +1192,112 @@ describe("SessionManager: importBundle", () => {
     const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
     expect(record.cwd).toBe("/bundle-orig");
   });
+
+  it("closes a live session backed by the replaced record and notifies attached clients", async () => {
+    // Replace-over-live is the only importBundle path that can yank the
+    // session out from under an attached client; assert it broadcasts
+    // hydra-acp/session_closed so the TUI's cold-banner handler trips.
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    // bootstrap: initialize + session/new for the resurrect-from-import
+    // path. No history in the bundle → seedFromImport is a no-op.
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_live_imported" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    const imported = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_replace_live" }),
+    );
+
+    const live = await manager.resurrect({
+      hydraSessionId: imported.sessionId,
+      upstreamSessionId: "",
+      agentId: "claude-code",
+      cwd: "/work",
+    });
+
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import(
+      "../__tests__/test-utils.js"
+    );
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    await live.attach({ clientId: "c1", connection: conn }, "full");
+
+    const replaced = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_replace_live", title: "second" }),
+      { replace: true },
+    );
+    expect(replaced.replaced).toBe(true);
+
+    const closeMsg = stream.sent.find(
+      (m) => "method" in m && m.method === "hydra-acp/session_closed",
+    );
+    expect(closeMsg).toMatchObject({
+      params: { sessionId: imported.sessionId },
+    });
+    expect(manager.get(imported.sessionId)).toBeUndefined();
+  });
+});
+
+describe("SessionManager: closeAll", () => {
+  it("broadcasts hydra-acp/session_closed to every attached client", async () => {
+    // Daemon graceful shutdown calls closeAll; without this, attached
+    // clients would just see the WS drop and never the explicit "session
+    // is gone" signal that drives the cold banner.
+    const mocks: MockAgentControls[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: `u_${mocks.length}` });
+        return m.agent;
+      },
+    );
+
+    const sessionA = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const sessionB = await manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import(
+      "../__tests__/test-utils.js"
+    );
+    const streamA = makeControlledStream();
+    const streamB = makeControlledStream();
+    await sessionA.attach(
+      { clientId: "cA", connection: new JsonRpcConnection(streamA) },
+      "full",
+    );
+    await sessionB.attach(
+      { clientId: "cB", connection: new JsonRpcConnection(streamB) },
+      "full",
+    );
+
+    await manager.closeAll();
+
+    for (const [stream, session] of [
+      [streamA, sessionA],
+      [streamB, sessionB],
+    ] as const) {
+      const closeMsg = stream.sent.find(
+        (m) => "method" in m && m.method === "hydra-acp/session_closed",
+      );
+      expect(closeMsg).toMatchObject({
+        params: { sessionId: session.sessionId },
+      });
+    }
+    expect(manager.get(sessionA.sessionId)).toBeUndefined();
+    expect(manager.get(sessionB.sessionId)).toBeUndefined();
+  });
 });
 
 describe("SessionManager: resurrect from import", () => {

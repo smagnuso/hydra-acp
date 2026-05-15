@@ -1877,6 +1877,38 @@ describe("Session", () => {
       }
     });
 
+    it("broadcasts hydra-acp/session_closed to attached clients on idle close", async () => {
+      // Pins the chain idle-timer → close() → markClosed → broadcast, the
+      // exact path the TUI's cold-banner handler keys off when a session
+      // is closed behind the user's back.
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_idle_broadcast",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+        });
+        const { client, stream } = makeClient();
+        session.attach(client, "full");
+
+        await vi.advanceTimersByTimeAsync(1_001);
+
+        const closeMsg = stream.sent.find(
+          (m) => "method" in m && m.method === "hydra-acp/session_closed",
+        );
+        expect(closeMsg).toMatchObject({
+          params: { sessionId: "hydra_session_idle_broadcast" },
+        });
+        expect(session.attachedCount).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("a recorded broadcast resets the idle window", async () => {
       vi.useFakeTimers();
       try {
