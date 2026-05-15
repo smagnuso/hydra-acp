@@ -1,5 +1,5 @@
 // Pre-screen interactive picker. Lists every session (live first, then
-// cold sorted by recency) with a "+ New session" entry at the top — the
+// cold sorted by recency) with a "New session" entry at the top — the
 // default cursor position — so Enter creates a new session or the user
 // can arrow down into the list. Long lists scroll within a fixed
 // viewport so every session remains reachable. Lives outside the main
@@ -41,7 +41,7 @@ export interface PickOptions {
 
 // Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
 // content budget is termWidth - 2. Apply the same prefix to the
-// "+ New session" label so its truncation matches.
+// "New session" label so its truncation matches.
 const ROW_PREFIX_WIDTH = 2;
 
 export async function pickSession(
@@ -77,7 +77,7 @@ export async function pickSession(
   let rows: Row[] = visible.map((s) => toRow(s, Date.now()));
   let widths: Widths = computeWidths(rows);
 
-  // selectedIdx 0 = "+ New session"; 1..N = visible sessions in order.
+  // selectedIdx 0 = "New session"; 1..N = visible sessions in order.
   // scrollOffset is the 0-indexed session that occupies the first viewport
   // row. Both persist across resizes so the cursor doesn't snap.
   let total = 1 + visible.length;
@@ -149,7 +149,7 @@ export async function pickSession(
   // the picker-search filter to `allSessions`, replacing `visible` with
   // the filtered slice and rebuilding all derived state. When invoked
   // while in search mode, snaps the cursor to the first match (or to
-  // "+ New session" when nothing matches) so the user always sees a
+  // "New session" when nothing matches) so the user always sees a
   // selectable row; out of search mode the cursor/scroll are clamped
   // but not reset (so refresh after a kill doesn't drop context).
   const applyFilter = (): void => {
@@ -645,7 +645,7 @@ function readTermWidth(term: Terminal): number {
 // project root, leaf) to identify the session. ~/-shortened to match
 // the session rows below.
 function formatNewSessionLabel(cwd: string, maxWidth: number): string {
-  const prefix = "+ New session in ";
+  const prefix = "New session in ";
   const budget = Math.max(1, maxWidth - prefix.length);
   return prefix + truncateMiddle(shortenHomePath(cwd), budget);
 }

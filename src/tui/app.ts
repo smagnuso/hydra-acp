@@ -2121,7 +2121,7 @@ async function resolveSession(
   // Smart default: show every live session plus up to PICKER_COLD_LIMIT
   // most-recently-touched cold ones so the list stays scannable even with
   // a deep on-disk history. The picker defaults its cursor to
-  // "+ New session" so just pressing Enter creates a fresh one.
+  // "New session" so just pressing Enter creates a fresh one.
   const sessions = await listSessions(config);
   if (sessions.length === 0) {
     return newCtx(opts, cwd, config);
