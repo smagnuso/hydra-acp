@@ -1626,6 +1626,11 @@ async function runSession(
   // `stopped (<reason>) · Xs` in red instead of the usual dim
   // `thought · Xs`, so a cancel/refusal/max_tokens turn is visibly distinct.
   let toolsBlockStopReason: string | null = null;
+  // Last plan snapshot seen this turn, retained so turn-complete with a
+  // non-success stopReason can re-render the keyed "plan" block in its
+  // stopped state (header red, in-progress entries dimmed) before the
+  // splice point is cleared.
+  let lastPlanEvent: Extract<RenderEvent, { kind: "plan" }> | null = null;
   // How many recent tool rows the collapsed view shows; older ones get
   // rolled into the "N hidden" counter in the header.
   const TOOLS_COLLAPSED_LIMIT = 5;
@@ -1874,6 +1879,7 @@ async function runSession(
       // current bottom.
       screen.clearKey("tools");
       screen.clearKey("plan");
+      lastPlanEvent = null;
       toolStates.clear();
       toolCallOrder.length = 0;
       toolsExpanded = false;
@@ -1911,6 +1917,7 @@ async function runSession(
       // or checked off; render it as a single mutating block so the
       // scrollback doesn't accumulate one copy per update.
       closeAgentText();
+      lastPlanEvent = event;
       const lines = formatEvent(event);
       if (lines.length > 0) {
         screen.upsertLines("plan", lines);
@@ -1939,6 +1946,22 @@ async function runSession(
       // it would splice into the previous turn's plan, possibly far up in
       // (or off the top of) scrollback.
       closeAgentText();
+      // Repaint the plan one last time with stopped=true when the turn
+      // ended on a non-success reason (cancelled, refused, max_tokens, …).
+      // Header flips to red and any in_progress rows dim — so a cancelled
+      // plan stops looking like it's still busy. Must happen before
+      // clearKey so the upsert lands on the existing scrollback block.
+      if (
+        lastPlanEvent !== null &&
+        event.stopReason !== undefined &&
+        event.stopReason !== "end_turn"
+      ) {
+        const lines = formatEvent({ ...lastPlanEvent, stopped: true });
+        if (lines.length > 0) {
+          screen.upsertLines("plan", lines);
+        }
+      }
+      lastPlanEvent = null;
       screen.clearKey("plan");
       // Freeze the tools block (header switches from live "Xs" to
       // "took Xs") and then drop the key so next turn's tool calls
@@ -2044,6 +2067,7 @@ async function runSession(
       toolsExpanded = false;
     }
     screen.clearKey("plan");
+    lastPlanEvent = null;
     if (pendingTurns > 0) {
       adjustPendingTurns(-pendingTurns);
     }

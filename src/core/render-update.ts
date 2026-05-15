@@ -56,7 +56,7 @@ export type RenderEvent =
       title?: string;
       status?: string;
     }
-  | { kind: "plan"; entries: PlanEntry[] }
+  | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean }
   | { kind: "mode-changed"; mode: string }
   | { kind: "model-changed"; model: string }
   | { kind: "turn-complete"; stopReason?: string }

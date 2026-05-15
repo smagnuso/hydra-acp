@@ -432,11 +432,12 @@ function toolIconStyle(status: string): Style {
 }
 
 function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLine[] {
+  const stopped = event.stopped === true;
   if (event.entries.length === 0) {
     return [
       {
         prefix: "▣ ",
-        prefixStyle: "plan",
+        prefixStyle: stopped ? "tool-status-fail" : "plan",
         body: "(empty plan)",
         bodyStyle: "dim",
       },
@@ -445,11 +446,18 @@ function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLin
   // Header tracks the plan's overall state: yellow ("plan") while any
   // entry is still pending/in-progress (matches the busy banner + running
   // tool accent), green ("plan-done") once every entry is completed so a
-  // finished plan stops drawing the eye like an active one.
+  // finished plan stops drawing the eye like an active one. When the turn
+  // ends with a non-success stopReason and the plan didn't finish, the
+  // header flips to bold red ("tool-status-fail") to match the
+  // "stopped (<reason>)" treatment on the tools block.
   const allComplete = event.entries.every(
     (e) => (e.status ?? "pending") === "completed",
   );
-  const headerStyle: Style = allComplete ? "plan-done" : "plan";
+  const headerStyle: Style = allComplete
+    ? "plan-done"
+    : stopped
+      ? "tool-status-fail"
+      : "plan";
   const lines: FormattedLine[] = [
     {
       prefix: "▣ ",
@@ -466,11 +474,16 @@ function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLin
         : status === "in_progress"
           ? "[~]"
           : "[ ]";
+    // In_progress entries are no longer running once the turn stopped —
+    // dim them so the row reads as "didn't get there" rather than
+    // "actively working".
     const style: Style =
       status === "completed"
         ? "plan-done"
         : status === "in_progress"
-          ? "plan"
+          ? stopped
+            ? "plan-pending"
+            : "plan"
           : "plan-pending";
     lines.push({
       prefix: "  ",
