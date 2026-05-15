@@ -3,7 +3,12 @@ import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import type { InputDispatcher } from "./input.js";
-import { Screen, truncate, wrap } from "./screen.js";
+import {
+  Screen,
+  buildIterm2ImageEscape,
+  truncate,
+  wrap,
+} from "./screen.js";
 
 // Minimal mock term: width 10/height 10 makes repaint() short-circuit
 // (it bails when width < 20), so we never exercise the draw path. We
@@ -38,6 +43,7 @@ function makeScreen(opts: { maxScrollbackLines?: number } = {}): Screen {
       planMode: false,
       historyIndex: -1,
       queueIndex: -1,
+      attachments: [],
       historySearchQuery: null,
     }),
   } as unknown as InputDispatcher;
@@ -764,5 +770,60 @@ describe("Screen scroll anchor on new content", () => {
     expect(getScrollOffset(screen)).toBe(0);
     screen.appendLine({ body: "0123456789abcdefghijABCDEFGHIJ" });
     expect(getScrollOffset(screen)).toBe(0);
+  });
+});
+
+describe("buildIterm2ImageEscape", () => {
+  it("emits OSC 1337 with inline=1, height, preserveAspectRatio, and BEL terminator", () => {
+    const out = buildIterm2ImageEscape("AAAA", 5, false);
+    expect(out).toBe(
+      "\x1b]1337;File=inline=1;height=5;preserveAspectRatio=1:AAAA\x07",
+    );
+  });
+
+  it("wraps in tmux DCS passthrough when insideTmux=true", () => {
+    const out = buildIterm2ImageEscape("AAAA", 1, true);
+    expect(out.startsWith("\x1bPtmux;")).toBe(true);
+    expect(out.endsWith("\x1b\\")).toBe(true);
+    // Every ESC inside the inner payload must be doubled. The inner
+    // payload has two ESCs (OSC start and BEL — actually BEL is not
+    // ESC; the OSC is just one ESC). So inside the wrap we expect
+    // ESC ESC for the doubled OSC-start.
+    const inner = out.slice("\x1bPtmux;".length, -"\x1b\\".length);
+    // Inner should contain \x1b\x1b (the doubled OSC start).
+    expect(inner.startsWith("\x1b\x1b]1337;")).toBe(true);
+  });
+});
+
+describe("Screen.setAttachments", () => {
+  it("updates state without crashing on empty or non-empty list", () => {
+    const screen = makeScreen();
+    screen.setAttachments([]);
+    const att = {
+      mimeType: "image/png",
+      data: "AAAA",
+      sizeBytes: 3,
+      name: "x.png",
+    };
+    screen.setAttachments([att]);
+    const attachments = (screen as unknown as { attachments: typeof att[] })
+      .attachments;
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]?.name).toBe("x.png");
+  });
+
+  it("is a no-op when identical references are passed", () => {
+    const screen = makeScreen();
+    const att = {
+      mimeType: "image/png",
+      data: "AAAA",
+      sizeBytes: 3,
+    };
+    screen.setAttachments([att]);
+    // Verify no exception is thrown for repeated identical-list calls.
+    screen.setAttachments([att]);
+    const attachments = (screen as unknown as { attachments: typeof att[] })
+      .attachments;
+    expect(attachments).toHaveLength(1);
   });
 });

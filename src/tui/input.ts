@@ -31,18 +31,41 @@ export type KeyName =
   | "ctrl-r"
   | "ctrl-s"
   | "ctrl-u"
+  | "ctrl-v"
   | "ctrl-w"
   | "ctrl-y"
   | "escape";
 
+// One attached image, ready to be sent as an ACP image content block. data
+// is base64-encoded raw bytes (PNG/JPEG/etc.); mimeType matches. name and
+// sizeBytes are display-only — chips and banners surface them, but the
+// outgoing wire block only carries data + mimeType.
+export interface Attachment {
+  mimeType: string;
+  data: string;
+  name?: string;
+  sizeBytes: number;
+}
+
 export type KeyEvent =
   | { type: "char"; ch: string }
   | { type: "key"; name: KeyName }
-  | { type: "paste"; text: string };
+  | { type: "paste"; text: string }
+  // Emitted by the screen layer when a bracketed-paste payload is
+  // recognised as image file path(s) — drag-and-drop from a file
+  // manager produces this. The dispatcher ignores it (no text buffer
+  // mutation); the app intercepts the event to read the files and
+  // call addAttachment.
+  | { type: "attachment-paths"; paths: string[] };
 
 export type InputEffect =
-  | { type: "send"; text: string; planMode: boolean }
-  | { type: "queue-edit"; index: number; text: string }
+  | { type: "send"; text: string; planMode: boolean; attachments: Attachment[] }
+  | {
+      type: "queue-edit";
+      index: number;
+      text: string;
+      attachments: Attachment[];
+    }
   | { type: "queue-remove"; index: number }
   // `prefill: true` (emitted by Escape) asks the app to drop the cancelled
   // turn's text back into the prompt buffer if no queued items will run
@@ -56,6 +79,11 @@ export type InputEffect =
   | { type: "scroll-to-bottom" }
   | { type: "switch-session" }
   | { type: "toggle-tools" }
+  // Dispatcher → app: please acquire an image from the named source
+  // (currently only the system clipboard) and call addAttachment().
+  // Emitted by ctrl-v. The dispatcher stays synchronous; the app owns
+  // the shell-out and the file I/O.
+  | { type: "attachment-request"; source: "clipboard" }
   // Emitted when prompt-history reverse-search runs out — either no
   // history entry matched the query, or the user advanced ^R past the
   // oldest match. The app hands the query off to the screen's
@@ -70,6 +98,9 @@ export interface InputState {
   planMode: boolean;
   historyIndex: number;
   queueIndex: number;
+  // Images attached to the current draft. The chip zone renders one
+  // chip per entry; send() snapshots and clears.
+  attachments: Attachment[];
   // Non-null while reverse-i-search is engaged on prompt history.
   // Exposed so the screen can surface the query in the banner —
   // otherwise the prompt area shows only the matched entry, with no
@@ -118,6 +149,17 @@ export class InputDispatcher {
   // here so ^Y can yank it back. Standard readline keeps a stack; we
   // only keep one slot because that's what 99% of yank uses look like.
   private killBuffer = "";
+  // Images attached to the current draft. Cleared in the same paths
+  // that clear the text buffer (clearBuffer, after send). Queue
+  // navigation snapshots/restores them alongside savedDraft so up/down
+  // through queued items doesn't drop chips.
+  private attachments: Attachment[] = [];
+  // Snapshot of `attachments` taken when the user starts walking
+  // history/queue with chips already attached. Restored alongside the
+  // text draft when the walk ends. Distinct from savedDraft because
+  // queue slots (which may carry their own attachments — though we
+  // don't surface that yet) shouldn't blend with the current draft's.
+  private savedAttachments: Attachment[] | null = null;
 
   constructor(opts: InputOptions = {}) {
     this.history = [...(opts.history ?? [])];
@@ -132,8 +174,23 @@ export class InputDispatcher {
       planMode: this.planMode,
       historyIndex: this.historyIndex,
       queueIndex: this.queueIndex,
+      attachments: [...this.attachments],
       historySearchQuery: this.historySearch?.query ?? null,
     };
+  }
+
+  // App calls this after asynchronously acquiring an image (drag-drop
+  // file read, clipboard shellout). The dispatcher just records it;
+  // chip rendering and capability gating live in the app/screen layer.
+  addAttachment(attachment: Attachment): void {
+    this.attachments.push(attachment);
+  }
+
+  removeAttachment(index: number): void {
+    if (index < 0 || index >= this.attachments.length) {
+      return;
+    }
+    this.attachments.splice(index, 1);
   }
 
   setTurnRunning(running: boolean): void {
@@ -170,13 +227,17 @@ export class InputDispatcher {
 
   // Public seed for the buffer (used for Escape pre-fill). Treated like a
   // fresh draft: nav state and any saved draft are cleared, cursor lands
-  // at the end so the user can edit immediately.
-  setBuffer(text: string): void {
+  // at the end so the user can edit immediately. Attachments restore
+  // alongside the text so a cancelled turn's chips land back in the
+  // draft together with the typed prompt.
+  setBuffer(text: string, attachments: Attachment[] = []): void {
     this.loadEntry(text);
     this.historyIndex = -1;
     this.queueIndex = -1;
     this.savedDraft = null;
+    this.savedAttachments = null;
     this.historySearch = null;
+    this.attachments = [...attachments];
   }
 
   feed(event: KeyEvent): InputEffect[] {
@@ -233,6 +294,12 @@ export class InputDispatcher {
     }
     if (event.type === "paste") {
       this.insertText(event.text);
+      return [];
+    }
+    if (event.type === "attachment-paths") {
+      // App-handled out-of-band; the dispatcher has no text mutation to
+      // do here. Returning [] keeps feed()'s contract tidy if the app
+      // ever forwards this event through.
       return [];
     }
     return this.handleKey(event.name);
@@ -317,6 +384,8 @@ export class InputDispatcher {
       case "ctrl-u":
         this.killLine();
         return [];
+      case "ctrl-v":
+        return [{ type: "attachment-request", source: "clipboard" }];
       case "ctrl-w":
         this.killWord();
         return [];
@@ -358,7 +427,9 @@ export class InputDispatcher {
     this.historyIndex = -1;
     this.queueIndex = -1;
     this.savedDraft = null;
+    this.savedAttachments = null;
     this.historySearch = null;
+    this.attachments = [];
   }
 
   private insertChar(ch: string): void {
@@ -522,6 +593,8 @@ export class InputDispatcher {
         row: this.row,
         col: this.col,
       };
+      this.savedAttachments = [...this.attachments];
+      this.attachments = [];
       if (this.queue.length > 0) {
         this.queueIndex = this.queue.length - 1;
         this.loadEntry(this.queue[this.queueIndex] ?? "");
@@ -601,6 +674,8 @@ export class InputDispatcher {
       this.row = this.savedDraft.row;
       this.col = this.savedDraft.col;
       this.savedDraft = null;
+      this.attachments = this.savedAttachments ?? [];
+      this.savedAttachments = null;
     } else {
       this.clearBuffer();
     }
@@ -766,21 +841,25 @@ export class InputDispatcher {
   private send(): InputEffect[] {
     const text = this.bufferText();
     // Submitting while editing a queued slot routes the change back into
-    // the queue (edit or remove) instead of starting a new turn.
+    // the queue (edit or remove) instead of starting a new turn. Empty
+    // text with attachments still counts as a removal — an attachment-
+    // only queue slot is not something we support today.
     if (this.queueIndex >= 0 && this.queueIndex < this.queue.length) {
       const index = this.queueIndex;
+      const attachments = [...this.attachments];
       this.clearBuffer();
       if (text.trim().length === 0) {
         return [{ type: "queue-remove", index }];
       }
-      return [{ type: "queue-edit", index, text }];
+      return [{ type: "queue-edit", index, text, attachments }];
     }
-    if (text.trim().length === 0) {
+    if (text.trim().length === 0 && this.attachments.length === 0) {
       return [];
     }
     const planMode = this.planMode;
+    const attachments = [...this.attachments];
     this.clearBuffer();
-    return [{ type: "send", text, planMode }];
+    return [{ type: "send", text, planMode, attachments }];
   }
 
   // Home: jump to the very start of the prompt buffer. If we're already
@@ -809,19 +888,22 @@ export class InputDispatcher {
 
   private handleCtrlC(): InputEffect[] {
     // ^C peels one layer at a time:
-    //   1. Buffer has text → clear it (preserve queueIndex so Enter on
-    //      the now-empty buffer can still emit queue-remove).
-    //   2. Empty buffer but editing a queue slot → drop the slot
+    //   1. Draft has text OR attachments → clear both (preserve
+    //      queueIndex so Enter on the now-empty buffer can still emit
+    //      queue-remove).
+    //   2. Empty draft but editing a queue slot → drop the slot
     //      pointer and restore the saved draft.
-    //   3. Empty buffer, no slot, turn running → cancel.
-    //   4. Empty buffer, no slot, idle → exit.
-    if (!this.bufferIsEmpty()) {
+    //   3. Empty draft, no slot, turn running → cancel.
+    //   4. Empty draft, no slot, idle → exit.
+    if (!this.bufferIsEmpty() || this.attachments.length > 0) {
       this.buffer = [""];
       this.row = 0;
       this.col = 0;
+      this.attachments = [];
       if (this.queueIndex === -1) {
         this.historyIndex = -1;
         this.savedDraft = null;
+        this.savedAttachments = null;
       }
       return [];
     }

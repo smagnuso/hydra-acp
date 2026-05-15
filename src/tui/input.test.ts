@@ -36,7 +36,9 @@ describe("InputDispatcher", () => {
     const d = new InputDispatcher();
     feed(d, [ch("h"), ch("i")]);
     const effects = feed(d, [k("enter")]);
-    expect(effects).toEqual([{ type: "send", text: "hi", planMode: false }]);
+    expect(effects).toEqual([
+      { type: "send", text: "hi", planMode: false, attachments: [] },
+    ]);
     expect(d.state().buffer).toEqual([""]);
   });
 
@@ -50,7 +52,9 @@ describe("InputDispatcher", () => {
     feed(d, [ch("a"), k("alt-enter"), ch("b")]);
     expect(d.state().buffer).toEqual(["a", "b"]);
     const out = feed(d, [k("enter")]);
-    expect(out).toEqual([{ type: "send", text: "a\nb", planMode: false }]);
+    expect(out).toEqual([
+      { type: "send", text: "a\nb", planMode: false, attachments: [] },
+    ]);
   });
 
   it("Shift-Tab toggles plan mode and emits redraw", () => {
@@ -75,7 +79,7 @@ describe("InputDispatcher", () => {
     const d = new InputDispatcher({ planMode: true });
     feed(d, [ch("x")]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "x", planMode: true },
+      { type: "send", text: "x", planMode: true, attachments: [] },
     ]);
   });
 
@@ -150,7 +154,7 @@ describe("InputDispatcher", () => {
     feed(d, [ch("h"), ch("i")]);
     d.setTurnRunning(true);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "hi", planMode: false },
+      { type: "send", text: "hi", planMode: false, attachments: [] },
     ]);
     expect(d.state().buffer).toEqual([""]);
   });
@@ -305,7 +309,7 @@ describe("InputDispatcher", () => {
     feed(d, [ch("!")]);
     expect(d.state().buffer).toEqual(["second!"]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "queue-edit", index: 1, text: "second!" },
+      { type: "queue-edit", index: 1, text: "second!", attachments: [] },
     ]);
     expect(d.state().buffer).toEqual([""]);
     expect(d.state().queueIndex).toBe(-1);
@@ -486,7 +490,7 @@ describe("InputDispatcher", () => {
     feed(d, [k("ctrl-r")]);
     expect(d.state().buffer).toEqual(["git push"]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "git push", planMode: false },
+      { type: "send", text: "git push", planMode: false, attachments: [] },
     ]);
   });
 
@@ -605,7 +609,7 @@ describe("InputDispatcher", () => {
     feed(d, [k("ctrl-r")]);
     expect(d.state().buffer).toEqual(["git push"]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "git push", planMode: false },
+      { type: "send", text: "git push", planMode: false, attachments: [] },
     ]);
   });
 
@@ -646,5 +650,129 @@ describe("InputDispatcher", () => {
     const d = new InputDispatcher({ history: ["one"] });
     expect(feed(d, [k("ctrl-s")])).toEqual([]);
     expect(d.state().buffer).toEqual([""]);
+  });
+
+  describe("attachments", () => {
+    const att = (name: string) => ({
+      mimeType: "image/png",
+      data: "AAAA",
+      name,
+      sizeBytes: 3,
+    });
+
+    it("Ctrl+V emits attachment-request without mutating the buffer", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h"), ch("i")]);
+      expect(feed(d, [k("ctrl-v")])).toEqual([
+        { type: "attachment-request", source: "clipboard" },
+      ]);
+      expect(d.state().buffer).toEqual(["hi"]);
+    });
+
+    it("addAttachment appends and state exposes the list", () => {
+      const d = new InputDispatcher();
+      d.addAttachment(att("a.png"));
+      d.addAttachment(att("b.png"));
+      expect(d.state().attachments.map((a) => a.name)).toEqual([
+        "a.png",
+        "b.png",
+      ]);
+    });
+
+    it("removeAttachment drops the slot; out-of-range is a no-op", () => {
+      const d = new InputDispatcher();
+      d.addAttachment(att("a.png"));
+      d.addAttachment(att("b.png"));
+      d.removeAttachment(0);
+      expect(d.state().attachments.map((a) => a.name)).toEqual(["b.png"]);
+      d.removeAttachment(99);
+      expect(d.state().attachments.map((a) => a.name)).toEqual(["b.png"]);
+    });
+
+    it("Enter snapshots attachments into send effect and clears them", () => {
+      const d = new InputDispatcher();
+      d.addAttachment(att("a.png"));
+      feed(d, [ch("h"), ch("i")]);
+      const out = feed(d, [k("enter")]);
+      expect(out).toEqual([
+        {
+          type: "send",
+          text: "hi",
+          planMode: false,
+          attachments: [att("a.png")],
+        },
+      ]);
+      expect(d.state().attachments).toEqual([]);
+    });
+
+    it("Enter with attachments-only (no text) still emits send", () => {
+      const d = new InputDispatcher();
+      d.addAttachment(att("a.png"));
+      const out = feed(d, [k("enter")]);
+      expect(out).toEqual([
+        {
+          type: "send",
+          text: "",
+          planMode: false,
+          attachments: [att("a.png")],
+        },
+      ]);
+    });
+
+    it("Queue-edit carries attachments alongside the edited text", () => {
+      const d = new InputDispatcher();
+      d.setQueue(["queued"]);
+      feed(d, [k("up")]);
+      d.addAttachment(att("a.png"));
+      feed(d, [ch("!")]);
+      const out = feed(d, [k("enter")]);
+      expect(out).toEqual([
+        {
+          type: "queue-edit",
+          index: 0,
+          text: "queued!",
+          attachments: [att("a.png")],
+        },
+      ]);
+    });
+
+    it("Ctrl+C with attachments and empty text clears them (peel layer 1)", () => {
+      const d = new InputDispatcher();
+      d.addAttachment(att("a.png"));
+      const out = feed(d, [k("ctrl-c")]);
+      expect(out).toEqual([]);
+      expect(d.state().attachments).toEqual([]);
+    });
+
+    it("Up walks history snapshotting attachments; Down restores them", () => {
+      const d = new InputDispatcher({ history: ["one"] });
+      d.addAttachment(att("a.png"));
+      feed(d, [ch("d"), ch("r"), ch("a"), ch("f"), ch("t")]);
+      feed(d, [k("up")]);
+      expect(d.state().buffer).toEqual(["one"]);
+      expect(d.state().attachments).toEqual([]);
+      feed(d, [k("down")]);
+      expect(d.state().buffer).toEqual(["draft"]);
+      expect(d.state().attachments).toEqual([att("a.png")]);
+    });
+
+    it("setBuffer with attachments seeds both", () => {
+      const d = new InputDispatcher();
+      d.setBuffer("restored", [att("a.png")]);
+      expect(d.state().buffer).toEqual(["restored"]);
+      expect(d.state().attachments).toEqual([att("a.png")]);
+    });
+
+    it("attachment-paths KeyEvent is dispatcher no-op", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h")]);
+      const out = d.feed({
+        type: "attachment-paths",
+        paths: ["/tmp/cat.png"],
+      });
+      expect(out).toEqual([]);
+      expect(d.state().buffer).toEqual(["h"]);
+      expect(d.state().attachments).toEqual([]);
+    });
   });
 });

@@ -44,12 +44,38 @@ export interface FormattedLine {
   // ANSI-aware wrap/width helpers so escape bytes don't inflate column
   // counts. Only used today for highlighted code blocks inside fences.
   ansi?: boolean;
+  // When set on user-text echo lines, the screen layer emits the
+  // iTerm2 OSC 1337 inline-image escape after the body so a thumbnail
+  // of the attached image appears in scrollback. Non-iTerm2 terminals
+  // ignore the field and only the body (filename / size) is shown.
+  iterm2Image?: { data: string; heightCells: number };
 }
 
 export function formatEvent(event: RenderEvent): FormattedLine[] {
   switch (event.kind) {
-    case "user-text":
-      return formatBlock(event.text, "▎ ", "user", undefined, event.sentBy, true);
+    case "user-text": {
+      const lines = formatBlock(
+        event.text,
+        "▎ ",
+        "user",
+        undefined,
+        event.sentBy,
+        true,
+      );
+      if (event.attachments && event.attachments.length > 0) {
+        for (const a of event.attachments) {
+          lines.push({
+            prefix: "▎ ",
+            prefixStyle: "user",
+            body: `📎 ${a.name ?? "image"}`,
+            bodyStyle: "user",
+            fillRow: true,
+            iterm2Image: { data: a.data, heightCells: 5 },
+          });
+        }
+      }
+      return lines;
+    }
     case "agent-text":
       return formatBlock(event.text, "  ", "agent");
     case "agent-thought":

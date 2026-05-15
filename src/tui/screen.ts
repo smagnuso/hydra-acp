@@ -9,8 +9,14 @@ import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
+import { formatSize, parseImageDropPaste } from "./attachments.js";
 import type { FormattedLine, Style } from "./format.js";
-import type { InputDispatcher, KeyEvent, KeyName } from "./input.js";
+import type {
+  Attachment,
+  InputDispatcher,
+  KeyEvent,
+  KeyName,
+} from "./input.js";
 
 export interface ScreenOptions {
   term: Terminal;
@@ -91,6 +97,7 @@ const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
 const MAX_COMPLETION_ROWS = 6;
+const MAX_CHIP_ROWS = 4;
 const CONFIRM_PROMPT_ROWS = 2;
 // Default minimum interval between content-driven repaints (agent text
 // chunks, tool/plan upserts, elapsed ticks). Without this we full-redraw
@@ -118,6 +125,12 @@ export class Screen {
   private lastPromptRows = 0;
   private queuedTexts: string[] = [];
   private lastQueueEditingIndex = -1;
+  // Attachments on the current draft, pushed by the app whenever the
+  // dispatcher mutates. The chip zone (drawAttachmentChipZone) renders
+  // one row per attachment plus, in iTerm2-capable terminals, an inline
+  // thumbnail. Capped at MAX_CHIP_ROWS in the visible zone — additional
+  // chips collapse into an overflow row.
+  private attachments: Attachment[] = [];
   private repaintPaused = 0;
   private repaintPending = false;
   private lastRepaintAt = 0;
@@ -188,7 +201,7 @@ export class Screen {
   private banner: BannerState = {
     status: "ready",
     planMode: false,
-    hint: "⇧⇥ plan · ⌥⏎ newline · ⌃P pick · ⌃C cancel · ⌃D detach",
+    hint: "⇧⇥ plan · ⌥⏎ newline · ⌃V paste · ⌃P pick · ⌃C cancel · ⌃D detach",
     queued: 0,
   };
   private header: HeaderState = { agent: "?", cwd: "?", sessionId: "?" };
@@ -372,7 +385,17 @@ export class Screen {
           .toString("utf-8")
           .replace(/\r\n?/g, "\n");
         this.pasteBuffer = "";
-        this.onKey([{ type: "paste", text: pasted }]);
+        // Drag-drop file paths arrive through the same bracketed-paste
+        // channel as text — but the entire paste is just absolute
+        // path(s) to image files. Strict match means "Here's
+        // /tmp/foo.png" still pastes as text; only a pure-paths paste
+        // becomes an attachment.
+        const paths = parseImageDropPaste(pasted);
+        if (paths !== null) {
+          this.onKey([{ type: "attachment-paths", paths }]);
+        } else {
+          this.onKey([{ type: "paste", text: pasted }]);
+        }
         continue;
       }
       const startIdx = text.indexOf(startMarker);
@@ -1248,6 +1271,7 @@ export class Screen {
       this.promptRows() -
       BANNER_ROWS -
       SEPARATOR_ROWS -
+      this.chipRows() -
       this.queuedRows() -
       this.completionRows();
     return Math.max(0, bottom - top + 1);
@@ -1342,6 +1366,7 @@ export class Screen {
     this.drawScrollback();
     this.drawCompletionZone();
     this.drawQueuedZone();
+    this.drawAttachmentChipZone();
     const promptRows = this.promptRows();
     // Separator goes on the row directly above the first prompt row.
     // drawPrompt computes its top as (h - promptRows - BANNER_ROWS + 1), so
@@ -1473,6 +1498,27 @@ export class Screen {
     return Math.min(MAX_QUEUED_ROWS, this.queuedTexts.length);
   }
 
+  private chipRows(): number {
+    return Math.min(MAX_CHIP_ROWS, this.attachments.length);
+  }
+
+  setAttachments(attachments: Attachment[]): void {
+    // No-op when the list is identical to what we last rendered —
+    // refreshPrompt fires on every dispatcher mutation so we'd
+    // otherwise repaint and reflow the prompt area for unchanged
+    // state. Reference equality of underlying entries is enough
+    // because the dispatcher snapshots into a fresh array but the
+    // entries are stable across reads.
+    if (
+      this.attachments.length === attachments.length &&
+      this.attachments.every((a, i) => a === attachments[i])
+    ) {
+      return;
+    }
+    this.attachments = [...attachments];
+    this.repaint();
+  }
+
   private completionRows(): number {
     if (this.permissionPrompt) {
       // Completions are pointless when the prompt area is taken over by
@@ -1491,8 +1537,12 @@ export class Screen {
     const promptRows = this.promptRows();
     const separatorRow = this.term.height - promptRows - BANNER_ROWS;
     const queuedRows = this.queuedRows();
-    // Completion sits above queued (queued is closer to the separator).
-    const completionBottom = separatorRow - 1 - queuedRows;
+    const chipRows = this.chipRows();
+    // Stacking, bottom-to-top above the separator:
+    //   separator – 1            chips (closest to prompt)
+    //   – chipRows               queued
+    //   – queuedRows             completion (top)
+    const completionBottom = separatorRow - 1 - queuedRows - chipRows;
     const completionTop = completionBottom - rows + 1;
     // Width of the longest command name so descriptions line up.
     let nameWidth = 0;
@@ -1531,6 +1581,72 @@ export class Screen {
     }
   }
 
+  // Chip zone: one row per attached image, sitting between the queued
+  // zone and the separator (closest to the user's draft). Each row
+  // shows "📎 <name> · <size>" plus, in iTerm2-capable terminals, a
+  // tiny inline thumbnail at the end. Overflow collapses into a
+  // single "+ N more attached" row.
+  private drawAttachmentChipZone(): void {
+    const rows = this.chipRows();
+    if (rows === 0) {
+      return;
+    }
+    const w = this.term.width;
+    const promptRows = this.promptRows();
+    const separatorRow = this.term.height - promptRows - BANNER_ROWS;
+    const chipBottom = separatorRow - 1;
+    const chipTop = chipBottom - rows + 1;
+    const iterm = this.isIterm2();
+    for (let i = 0; i < rows; i++) {
+      const row = chipTop + i;
+      const isLast = i === rows - 1 && this.attachments.length > MAX_CHIP_ROWS;
+      const overflow = this.attachments.length - MAX_CHIP_ROWS;
+      const att = this.attachments[i];
+      const label = att
+        ? `${att.name ?? "image"} · ${formatSize(att.sizeBytes)}`
+        : "";
+      // Sig: row content + iterm flag + a data fingerprint (sizeBytes
+      // is enough — base64 strings of the same image are equal).
+      const sig = isLast
+        ? `chip|${w}|overflow|${overflow}`
+        : att
+          ? `chip|${w}|${iterm ? "i" : "t"}|${label}|${att.sizeBytes}`
+          : `chip|${w}|empty`;
+      this.paintRow(row, sig, () => {
+        if (isLast) {
+          this.term.dim(`  📎 + ${overflow + 1} more attached`);
+          return;
+        }
+        if (!att) {
+          return;
+        }
+        this.term("  ").yellow(`📎 ${label}`);
+        if (iterm) {
+          // Trailing space keeps a visible gap between the label and
+          // the thumbnail in terminals where the image renders at the
+          // current cursor with no margin.
+          this.term(" ");
+          this.writeIterm2Image(att.data, 1);
+        }
+      });
+    }
+  }
+
+  private isIterm2(): boolean {
+    const env = process.env;
+    return env.LC_TERMINAL === "iTerm2" || env.TERM_PROGRAM === "iTerm.app";
+  }
+
+  // Emits the iTerm2 OSC 1337 inline image escape at the current
+  // cursor position. Wraps in DCS-passthrough when tmux is detected
+  // (requires `set -g allow-passthrough on` in the user's tmux conf).
+  // Caller is responsible for knowing iTerm2 is the active terminal.
+  private writeIterm2Image(base64: string, heightCells: number): void {
+    process.stdout.write(
+      buildIterm2ImageEscape(base64, heightCells, Boolean(process.env.TMUX)),
+    );
+  }
+
   private drawQueuedZone(): void {
     const rows = this.queuedRows();
     if (rows === 0) {
@@ -1538,10 +1654,12 @@ export class Screen {
     }
     const w = this.term.width;
     const promptRows = this.promptRows();
-    // Queued zone sits directly above the separator, which is directly
-    // above the prompt. So queued bottom = separator - 1.
+    // Queued zone sits above the chip zone (chips are visually closest
+    // to the user's draft and occupy the rows immediately above the
+    // separator).
     const separatorRow = this.term.height - promptRows - BANNER_ROWS;
-    const queuedBottom = separatorRow - 1;
+    const chipRows = this.chipRows();
+    const queuedBottom = separatorRow - 1 - chipRows;
     const queuedTop = queuedBottom - rows + 1;
     const editingIndex = this.dispatcher.state().queueIndex;
     for (let i = 0; i < rows; i++) {
@@ -1915,6 +2033,14 @@ export class Screen {
       if (line.ansi) {
         wrappedLine.ansi = true;
       }
+      // Attach the iTerm2 inline image only to the first wrapped row.
+      // Wrapping a body that carries an image should produce a tiny
+      // body (filename), so wrap rarely splits it — but if it did,
+      // emitting the OSC on each continuation would draw the same
+      // image twice.
+      if (i === 0 && line.iterm2Image) {
+        wrappedLine.iterm2Image = line.iterm2Image;
+      }
       if (id !== undefined && chunk.length > 0) {
         const found = line.body.indexOf(chunk, scanPos);
         const colOffset = found === -1 ? scanPos : found;
@@ -1993,6 +2119,18 @@ export class Screen {
     if (line.ansi || line.body.includes("^")) {
       this.term.styleReset();
     }
+    // iTerm2 inline thumbnail (only emitted on iTerm2 — host terminals
+    // silently ignore the OSC). The image renders at the current
+    // cursor with heightCells rows; iTerm2 may advance the cursor
+    // beyond our row, but the next paintRow's moveTo resets it for
+    // the row below. Net effect: the image visually overlays this row
+    // and a few rows below, with subsequent paint calls untouched.
+    if (line.iterm2Image && this.isIterm2()) {
+      this.writeIterm2Image(
+        line.iterm2Image.data,
+        line.iterm2Image.heightCells,
+      );
+    }
   }
 }
 
@@ -2012,12 +2150,19 @@ function formattedLineSig(
   if (!line) {
     return `${zone}|${width}|empty|${highlight ?? ""}|${active}`;
   }
+  // iTerm2 image fingerprint: heightCells + base64 length is enough —
+  // identical base64s of the same length are de-facto identical images
+  // and the user's attachments don't get mutated in place. Including
+  // the full base64 would explode the sig string for no benefit.
+  const img = line.iterm2Image
+    ? `i${line.iterm2Image.heightCells}:${line.iterm2Image.data.length}`
+    : "";
   return (
     `${zone}|${width}|` +
     `${line.prefix ?? ""}|${line.prefixStyle ?? ""}|` +
     `${line.body}|${line.bodyStyle ?? ""}|` +
     `${line.ansi ? "1" : "0"}|${line.fillRow ? "1" : "0"}|` +
-    `${highlight ?? ""}|${active}`
+    `${highlight ?? ""}|${active}|${img}`
   );
 }
 
@@ -2426,6 +2571,26 @@ export interface WrapOptions {
   stripMarkup?: boolean;
 }
 
+// Build the iTerm2 OSC 1337 inline-image escape, optionally wrapped in
+// tmux DCS-passthrough. Pure function — exported for unit tests so the
+// wrap math (doubling every ESC inside the passthrough payload, ESC \
+// terminator, not BEL) can be verified without a real terminal.
+export function buildIterm2ImageEscape(
+  base64: string,
+  heightCells: number,
+  insideTmux: boolean,
+): string {
+  const inner = `\x1b]1337;File=inline=1;height=${heightCells};preserveAspectRatio=1:${base64}\x07`;
+  if (!insideTmux) {
+    return inner;
+  }
+  // Tmux DCS-passthrough: prefix with ESC P tmux ;, double every ESC
+  // inside the payload, terminate with ESC \ (ST). Without this, tmux
+  // swallows the OSC and the host terminal sees nothing.
+  const doubled = inner.replace(/\x1b/g, "\x1b\x1b");
+  return `\x1bPtmux;${doubled}\x1b\\`;
+}
+
 export function wrap(
   text: string,
   width: number,
@@ -2731,6 +2896,8 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-s";
     case "CTRL_U":
       return "ctrl-u";
+    case "CTRL_V":
+      return "ctrl-v";
     case "CTRL_W":
       return "ctrl-w";
     case "CTRL_Y":

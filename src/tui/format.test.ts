@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAgentMarkdown } from "./format.js";
+import { formatEvent, parseAgentMarkdown } from "./format.js";
 
 const ESC = "";
 
@@ -116,5 +116,31 @@ describe("parseAgentMarkdown", () => {
       bodyStyle: "agent",
     });
     expect(lines[2]?.ansi).toBeUndefined();
+  });
+});
+
+describe("formatEvent — user-text with attachments", () => {
+  it("appends one thumbnail line per attachment after the text body", () => {
+    const lines = formatEvent({
+      kind: "user-text",
+      text: "look at this",
+      attachments: [
+        { mimeType: "image/png", data: "AAAA", name: "a.png", sizeBytes: 3 },
+        { mimeType: "image/jpeg", data: "BBBB", name: "b.jpg", sizeBytes: 5 },
+      ],
+    });
+    expect(lines).toHaveLength(3);
+    expect(lines[0]?.body).toBe("look at this");
+    expect(lines[1]?.body).toBe("📎 a.png");
+    expect(lines[1]?.iterm2Image).toEqual({ data: "AAAA", heightCells: 5 });
+    expect(lines[2]?.body).toBe("📎 b.jpg");
+    expect(lines[2]?.iterm2Image).toEqual({ data: "BBBB", heightCells: 5 });
+  });
+
+  it("emits the text body unchanged when there are no attachments", () => {
+    const lines = formatEvent({ kind: "user-text", text: "plain" });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.body).toBe("plain");
+    expect(lines[0]?.iterm2Image).toBeUndefined();
   });
 });

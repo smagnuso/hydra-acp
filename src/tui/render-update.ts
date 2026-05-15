@@ -3,6 +3,8 @@
 
 import stripAnsi from "strip-ansi";
 
+import type { Attachment } from "./input.js";
+
 // Strip ANSI escape sequences and dangerous C0 control characters from any
 // string we get from the wire before it lands in a RenderEvent. The render
 // layer writes bodies through terminal-kit's `.noFormat` and `term(text)`,
@@ -35,7 +37,12 @@ export function sanitizeSingleLine(text: string): string {
 export type RenderEvent =
   | { kind: "agent-text"; text: string }
   | { kind: "agent-thought"; text: string }
-  | { kind: "user-text"; text: string; sentBy?: string }
+  | {
+      kind: "user-text";
+      text: string;
+      sentBy?: string;
+      attachments?: Attachment[];
+    }
   | {
       kind: "tool-call";
       toolCallId: string;

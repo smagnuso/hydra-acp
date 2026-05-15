@@ -4,3 +4,4 @@
 
 export { runTuiApp as runTui } from "./app.js";
 export type { TuiOptions } from "./app.js";
+export type { Attachment } from "./input.js";

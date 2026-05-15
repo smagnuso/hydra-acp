@@ -25,7 +25,20 @@ import {
 import { listSessions, pickMostRecent } from "./discovery.js";
 import { pickSession, type PickerResult } from "./picker.js";
 import { formatElapsed, Screen } from "./screen.js";
-import { InputDispatcher, type InputEffect, type KeyEvent } from "./input.js";
+import {
+  InputDispatcher,
+  type Attachment,
+  type InputEffect,
+  type KeyEvent,
+} from "./input.js";
+import {
+  MAX_ATTACHMENT_BYTES,
+  formatSize,
+  mimeFromExtension,
+} from "./attachments.js";
+import { readClipboard } from "./clipboard.js";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
 import {
   mapUpdate,
@@ -431,6 +444,10 @@ async function runSession(
 
   let upstreamSessionId: string | undefined;
   let agentInfoName: string | undefined;
+  // Defaults to true: the daemon advertises image support and forwards
+  // blocks unchanged; an old agent that explicitly says image=false
+  // flips this and gates the chip/clipboard UI.
+  let agentAcceptsImages = true;
   try {
     const initResult = (await conn.request("initialize", {
       protocolVersion: ACP_PROTOCOL_VERSION,
@@ -439,8 +456,18 @@ async function runSession(
         terminal: false,
       },
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
-    })) as { agentInfo?: { name?: string } };
+    })) as {
+      agentInfo?: { name?: string };
+      agentCapabilities?: {
+        promptCapabilities?: { image?: boolean };
+      };
+    };
     agentInfoName = initResult?.agentInfo?.name;
+    const imageCap =
+      initResult?.agentCapabilities?.promptCapabilities?.image;
+    if (imageCap === false) {
+      agentAcceptsImages = false;
+    }
   } catch {
     // initialize is optional from the daemon's perspective; proceed regardless.
   }
@@ -530,11 +557,17 @@ async function runSession(
     dispatcher.setTurnRunning(true);
   }
 
-  let turnInFlight: { text: string; cancel: () => void } | null = null;
-  // Text staged by an Escape cancel: applied to the prompt buffer when the
-  // worker drains, but only if the buffer is still empty (so we never
-  // clobber something the user typed in the meantime).
-  let pendingPrefill: string | null = null;
+  let turnInFlight: {
+    text: string;
+    attachments: Attachment[];
+    cancel: () => void;
+  } | null = null;
+  // Text + chips staged by an Escape cancel: applied to the prompt
+  // buffer when the worker drains, but only if the buffer is still
+  // empty (so we never clobber something the user typed in the
+  // meantime).
+  let pendingPrefill: { text: string; attachments: Attachment[] } | null =
+    null;
 
   const screen: Screen = new Screen({
     term,
@@ -557,6 +590,13 @@ async function runSession(
         if (tryHandleCompletionKey(ev)) {
           continue;
         }
+        // Drag-and-drop file paths are intercepted before the
+        // dispatcher sees them — they're not text edits, they're an
+        // async file-read that ends in addAttachment().
+        if (ev.type === "attachment-paths") {
+          void handleAttachmentPaths(ev.paths);
+          continue;
+        }
         const effects = dispatcher.feed(ev);
         for (const effect of effects) {
           handleEffect(effect);
@@ -569,6 +609,7 @@ async function runSession(
       screen.setBannerSearchIndicator(
         dispatcher.state().historySearchQuery,
       );
+      screen.setAttachments(dispatcher.state().attachments);
       screen.refreshPrompt();
     },
   });
@@ -982,15 +1023,21 @@ async function runSession(
   const handleEffect = (effect: InputEffect): void => {
     switch (effect.type) {
       case "send":
-        enqueuePrompt(effect.text, effect.planMode);
+        enqueuePrompt(effect.text, effect.planMode, effect.attachments);
         return;
       case "queue-edit": {
         const realIdx = effect.index + queueHeadOffset();
         const existing = promptQueue[realIdx];
         if (existing) {
           // Preserve the slot's original planMode — the user is editing
-          // text, not re-deciding plan mode for this slot.
-          promptQueue[realIdx] = { text: effect.text, planMode: existing.planMode };
+          // text, not re-deciding plan mode for this slot. Attachments
+          // are overwritten with the new submission's set: editing
+          // produces a new "draft" so the user's most recent chips win.
+          promptQueue[realIdx] = {
+            text: effect.text,
+            planMode: existing.planMode,
+            attachments: effect.attachments,
+          };
           refreshQueueDisplay();
         }
         return;
@@ -1015,7 +1062,10 @@ async function runSession(
             .state()
             .buffer.every((line) => line === "");
           if (waitingEmpty && bufferEmpty) {
-            pendingPrefill = turnInFlight.text;
+            pendingPrefill = {
+              text: turnInFlight.text,
+              attachments: turnInFlight.attachments,
+            };
           }
         }
         if (turnInFlight) {
@@ -1064,7 +1114,77 @@ async function runSession(
         screen.enterScrollbackSearch();
         screen.updateScrollbackSearchTerm(effect.query);
         return;
+      case "attachment-request":
+        void handleClipboardAttachment();
+        return;
     }
+  };
+
+  // Reads bytes from disk for each dropped path, sniffs the mime,
+  // gates on size and capability, and pushes the survivors onto the
+  // dispatcher. Banner-notifies for any rejection so the user knows
+  // why a chip didn't appear.
+  const handleAttachmentPaths = async (paths: string[]): Promise<void> => {
+    if (!agentAcceptsImages) {
+      screen.notify("agent does not accept image attachments");
+      return;
+    }
+    let added = 0;
+    for (const p of paths) {
+      const mimeType = mimeFromExtension(p);
+      if (!mimeType) {
+        screen.notify(`unsupported image type: ${path.basename(p)}`);
+        continue;
+      }
+      try {
+        const buf = await fs.readFile(p);
+        if (buf.length > MAX_ATTACHMENT_BYTES) {
+          screen.notify(
+            `image too large (${formatSize(buf.length)}, max ${formatSize(MAX_ATTACHMENT_BYTES)})`,
+          );
+          continue;
+        }
+        dispatcher.addAttachment({
+          mimeType,
+          data: buf.toString("base64"),
+          name: path.basename(p),
+          sizeBytes: buf.length,
+        });
+        added++;
+      } catch (err) {
+        screen.notify(`cannot read ${path.basename(p)}: ${(err as Error).message}`);
+      }
+    }
+    if (added > 0) {
+      screen.setAttachments(dispatcher.state().attachments);
+      screen.refreshPrompt();
+    }
+  };
+
+  const handleClipboardAttachment = async (): Promise<void> => {
+    const result = await readClipboard();
+    if (!result.ok) {
+      screen.notify(result.reason);
+      return;
+    }
+    if (result.kind === "image") {
+      if (!agentAcceptsImages) {
+        screen.notify("agent does not accept image attachments");
+        return;
+      }
+      dispatcher.addAttachment(result.attachment);
+      screen.setAttachments(dispatcher.state().attachments);
+      screen.refreshPrompt();
+      return;
+    }
+    // Text: route through the same paste path as bracketed paste so
+    // multi-line content splits at \n into the buffer instead of being
+    // treated as a series of Enter presses.
+    const effects = dispatcher.feed({ type: "paste", text: result.text });
+    for (const effect of effects) {
+      handleEffect(effect);
+    }
+    screen.refreshPrompt();
   };
 
   // Serial prompt queue. While a turn is running, Enter pushes here; the
@@ -1072,19 +1192,34 @@ async function runSession(
   // when the prompt is *processed*, not enqueued, so each turn lands as a
   // clean (user → reply) pair in scrollback even if the user typed several
   // prompts back-to-back.
-  const promptQueue: Array<{ text: string; planMode: boolean }> = [];
+  const promptQueue: Array<{
+    text: string;
+    planMode: boolean;
+    attachments: Attachment[];
+  }> = [];
   let workerActive = false;
 
   const refreshQueueDisplay = (): void => {
     // Skip the head — that one is being processed and is already echoed in
-    // scrollback. Show only those still waiting.
+    // scrollback. Show only those still waiting. Attached image count is
+    // surfaced as a "📎×N" suffix on the chip text so a queued slot with
+    // chips is visually distinct from one without.
     const waiting = promptQueue.slice(workerActive ? 1 : 0);
-    screen.setQueuedPrompts(waiting.map((p) => p.text));
+    const displayTexts = waiting.map((p) =>
+      p.attachments.length > 0
+        ? `${p.text} · 📎×${p.attachments.length}`
+        : p.text,
+    );
+    screen.setQueuedPrompts(displayTexts);
     screen.setBanner({ queued: waiting.length });
     dispatcher.setQueue(waiting.map((p) => p.text));
   };
 
-  const enqueuePrompt = (text: string, planMode: boolean): void => {
+  const enqueuePrompt = (
+    text: string,
+    planMode: boolean,
+    attachments: Attachment[],
+  ): void => {
     // Sending a prompt always snaps the view to the bottom — the user
     // wants to see their own input and the agent's reply.
     screen.scrollToBottom();
@@ -1094,7 +1229,7 @@ async function runSession(
     history = appendEntry(history, text);
     dispatcher.setHistory(history);
     saveHistory(historyFile, history).catch(() => undefined);
-    promptQueue.push({ text, planMode });
+    promptQueue.push({ text, planMode, attachments });
     refreshQueueDisplay();
     tickWorker();
   };
@@ -1279,7 +1414,7 @@ async function runSession(
         // Drop the head from the visual queue zone — it's about to be
         // echoed into scrollback as a real user message.
         refreshQueueDisplay();
-        await processPrompt(next.text, next.planMode);
+        await processPrompt(next.text, next.planMode, next.attachments);
         // Now that processing is fully done (including turn-complete),
         // shift the head off so the next iteration's slice(1) is correct.
         promptQueue.shift();
@@ -1291,21 +1426,31 @@ async function runSession(
       // empty — the user may have started typing while the cancelled
       // turn was settling, and we don't want to clobber that draft.
       if (pendingPrefill !== null) {
-        const text = pendingPrefill;
+        const { text, attachments } = pendingPrefill;
         pendingPrefill = null;
         const bufferEmpty = dispatcher
           .state()
           .buffer.every((line) => line === "");
         if (bufferEmpty) {
-          dispatcher.setBuffer(text);
+          dispatcher.setBuffer(text, attachments);
           screen.refreshPrompt();
         }
       }
     }
   };
 
-  const processPrompt = async (text: string, planMode: boolean): Promise<void> => {
-    const userBlocks = [{ type: "text", text }];
+  const processPrompt = async (
+    text: string,
+    planMode: boolean,
+    attachments: Attachment[],
+  ): Promise<void> => {
+    const userBlocks: Array<Record<string, unknown>> = [];
+    if (text.length > 0) {
+      userBlocks.push({ type: "text", text });
+    }
+    for (const a of attachments) {
+      userBlocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
+    }
     const promptArr = planMode
       ? [{ type: "text", text: PLAN_PREFIX_TEXT }, ...userBlocks]
       : userBlocks;
@@ -1316,11 +1461,12 @@ async function runSession(
     // banner status and the elapsed timer in one place so peer-triggered
     // turns get the same "running · 30s" treatment as ours.
     adjustPendingTurns(1);
-    appendRender({ kind: "user-text", text });
+    appendRender({ kind: "user-text", text, attachments });
 
     let cancelled = false;
     turnInFlight = {
       text,
+      attachments,
       cancel: () => {
         if (cancelled) {
           return;
