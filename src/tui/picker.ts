@@ -97,6 +97,10 @@ export async function pickSession(
   let searchActive = false;
   let searchTerm = "";
 
+  // `o` toggles a cwd-only filter that narrows `visible` to sessions whose
+  // cwd matches the current cwd. Composes with search — both are AND'd.
+  let cwdOnly = false;
+
   // Confirmation state. While in 'confirm-kill' or 'confirm-delete' we
   // hijack key handling, replace the indicator with a yes/no prompt, and
   // ignore navigation until the user resolves (y/n/ESC). `pendingAction`
@@ -149,10 +153,14 @@ export async function pickSession(
   // selectable row; out of search mode the cursor/scroll are clamped
   // but not reset (so refresh after a kill doesn't drop context).
   const applyFilter = (): void => {
+    let base = allSessions;
+    if (cwdOnly) {
+      base = base.filter((s) => s.cwd === opts.cwd);
+    }
     if (searchActive && searchTerm.length > 0) {
-      visible = allSessions.filter((s) => matchesSearch(s, searchTerm));
+      visible = base.filter((s) => matchesSearch(s, searchTerm));
     } else {
-      visible = allSessions;
+      visible = base;
     }
     rebuildRows();
     if (searchActive) {
@@ -203,15 +211,18 @@ export async function pickSession(
   const formatIndicator = (): string => {
     const above = scrollOffset;
     const below = Math.max(0, visible.length - scrollOffset - viewportSize);
-    if (above === 0 && below === 0) {
-      return "";
-    }
     const parts: string[] = [];
+    if (cwdOnly) {
+      parts.push("cwd-only");
+    }
     if (above > 0) {
       parts.push(`↑ ${above} above`);
     }
     if (below > 0) {
       parts.push(`↓ ${below} below`);
+    }
+    if (parts.length === 0) {
+      return "";
     }
     return `  ${parts.join(" · ")}`;
   };
@@ -489,6 +500,39 @@ export async function pickSession(
           searchActive = true;
           searchTerm = "";
           applyFilter();
+          renderFromScratch();
+          return;
+        }
+        if (name === "n" || name === "N") {
+          move(1);
+          return;
+        }
+        if (name === "p" || name === "P") {
+          move(-1);
+          return;
+        }
+        if (name === "c" || name === "C") {
+          cleanup();
+          resolve({ kind: "new" });
+          return;
+        }
+        if (name === "q" || name === "Q") {
+          cleanup();
+          resolve({ kind: "abort" });
+          return;
+        }
+        if (name === "o" || name === "O") {
+          const keepId =
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+          cwdOnly = !cwdOnly;
+          applyFilter();
+          if (keepId !== undefined) {
+            const idx = visible.findIndex((s) => s.sessionId === keepId);
+            if (idx >= 0) {
+              selectedIdx = idx + 1;
+              adjustScroll();
+            }
+          }
           renderFromScratch();
           return;
         }
