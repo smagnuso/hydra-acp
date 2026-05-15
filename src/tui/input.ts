@@ -888,28 +888,26 @@ export class InputDispatcher {
 
   private handleCtrlC(): InputEffect[] {
     // ^C peels one layer at a time:
-    //   1. Draft has text OR attachments → clear both (preserve
-    //      queueIndex so Enter on the now-empty buffer can still emit
-    //      queue-remove).
-    //   2. Empty draft but editing a queue slot → drop the slot
-    //      pointer and restore the saved draft.
+    //   1. Editing a queued slot → emit queue-remove for that slot
+    //      and restore the original draft. One-shot cancel rather than
+    //      the old "clear text, then Enter on empty buffer" two-step.
+    //   2. Fresh draft with text/attachments → clear both.
     //   3. Empty draft, no slot, turn running → cancel.
     //   4. Empty draft, no slot, idle → exit.
+    if (this.queueIndex >= 0) {
+      const index = this.queueIndex;
+      this.queueIndex = -1;
+      this.restoreDraft();
+      return [{ type: "queue-remove", index }];
+    }
     if (!this.bufferIsEmpty() || this.attachments.length > 0) {
       this.buffer = [""];
       this.row = 0;
       this.col = 0;
       this.attachments = [];
-      if (this.queueIndex === -1) {
-        this.historyIndex = -1;
-        this.savedDraft = null;
-        this.savedAttachments = null;
-      }
-      return [];
-    }
-    if (this.queueIndex >= 0) {
-      this.queueIndex = -1;
-      this.restoreDraft();
+      this.historyIndex = -1;
+      this.savedDraft = null;
+      this.savedAttachments = null;
       return [];
     }
     if (this.turnRunning) {

@@ -351,19 +351,32 @@ describe("InputDispatcher", () => {
     expect(d.state().queueIndex).toBe(-1);
   });
 
-  it("Ctrl+C while editing a queued slot clears the text but keeps the slot", () => {
+  it("Ctrl+C while editing a queued slot removes the slot and restores the draft in one step", () => {
     const d = new InputDispatcher();
     d.setQueue(["queued"]);
+    feed(d, [ch("d"), ch("r"), ch("a"), ch("f"), ch("t")]);
     feed(d, [k("up")]);
     expect(d.state().buffer).toEqual(["queued"]);
     expect(d.state().queueIndex).toBe(0);
-    // First ^C: clear text, stay on the slot so Enter can drop it.
-    expect(feed(d, [k("ctrl-c")])).toEqual([]);
-    expect(d.state().buffer).toEqual([""]);
-    expect(d.state().queueIndex).toBe(0);
-    // Enter on empty buffer + active slot removes the slot.
-    expect(feed(d, [k("enter")])).toEqual([{ type: "queue-remove", index: 0 }]);
+    // Single ^C: emit queue-remove for the edited slot AND restore
+    // the original draft. No two-step (clear-then-enter) required.
+    expect(feed(d, [k("ctrl-c")])).toEqual([
+      { type: "queue-remove", index: 0 },
+    ]);
     expect(d.state().queueIndex).toBe(-1);
+    expect(d.state().buffer).toEqual(["draft"]);
+  });
+
+  it("Ctrl+C drops the slot even if the user edited its text first", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["queued"]);
+    feed(d, [k("up"), ch("!")]);
+    expect(d.state().buffer).toEqual(["queued!"]);
+    expect(feed(d, [k("ctrl-c")])).toEqual([
+      { type: "queue-remove", index: 0 },
+    ]);
+    expect(d.state().queueIndex).toBe(-1);
+    expect(d.state().buffer).toEqual([""]);
   });
 
   it("Home jumps to buffer start; pressing again emits scroll-to-top", () => {
@@ -429,21 +442,22 @@ describe("InputDispatcher", () => {
     expect(d.state().col).toBe(11);
   });
 
-  it("Ctrl+C twice while editing a queue slot drops the slot and restores draft", () => {
+  it("Ctrl+C after dropping a queued slot exits cleanly (no double-fire)", () => {
     const d = new InputDispatcher();
     d.setQueue(["queued"]);
     feed(d, [ch("d"), ch("r"), ch("a"), ch("f"), ch("t")]);
     feed(d, [k("up")]);
     expect(d.state().buffer).toEqual(["queued"]);
     expect(d.state().queueIndex).toBe(0);
-    // First ^C clears the text; queueIndex sticks.
-    feed(d, [k("ctrl-c")]);
-    expect(d.state().buffer).toEqual([""]);
-    expect(d.state().queueIndex).toBe(0);
-    // Second ^C exits queue edit mode and brings the draft back.
-    expect(feed(d, [k("ctrl-c")])).toEqual([]);
+    // First ^C removes the slot and brings draft back in one shot.
+    expect(feed(d, [k("ctrl-c")])).toEqual([
+      { type: "queue-remove", index: 0 },
+    ]);
     expect(d.state().buffer).toEqual(["draft"]);
     expect(d.state().queueIndex).toBe(-1);
+    // Second ^C clears the restored draft (now a fresh-text layer).
+    expect(feed(d, [k("ctrl-c")])).toEqual([]);
+    expect(d.state().buffer).toEqual([""]);
   });
 
   it("Ctrl+R with empty buffer engages history search with empty query (no auto-load)", () => {
