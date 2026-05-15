@@ -1001,6 +1001,7 @@ async function runSession(
       cwd: resolvedCwd,
       sessions,
       config,
+      currentSessionId: resolvedSessionId,
     });
     if (choice.kind === "abort") {
       screen.start();

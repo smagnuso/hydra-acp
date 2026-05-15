@@ -34,6 +34,9 @@ export interface PickOptions {
   cwd: string;
   sessions: DiscoveredSession[];
   config: HydraConfig;
+  // When the picker is opened from inside a session (^p), pre-select that
+  // session's row so the user can drop straight back in with Enter.
+  currentSessionId?: string;
 }
 
 // Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
@@ -80,6 +83,12 @@ export async function pickSession(
   let total = 1 + visible.length;
   let selectedIdx = 0;
   let scrollOffset = 0;
+  if (opts.currentSessionId !== undefined) {
+    const idx = visible.findIndex((s) => s.sessionId === opts.currentSessionId);
+    if (idx >= 0) {
+      selectedIdx = idx + 1;
+    }
+  }
 
   // Picker-search state. `/` enters search; printable chars build up
   // `searchTerm` and incrementally narrow `visible`; ^c / ESC drops the
