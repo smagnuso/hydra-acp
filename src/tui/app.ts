@@ -826,10 +826,10 @@ async function runSession(
     return true;
   };
 
-  const headerName = resolvedAgentId || agentInfoName || "?";
+  const sessionbarAgent = resolvedAgentId || agentInfoName || "?";
   screen.start();
-  screen.setHeader({
-    agent: headerName,
+  screen.setSessionbar({
+    agent: sessionbarAgent,
     cwd: resolvedCwd,
     sessionId: resolvedSessionId,
     title: resolvedTitle,
@@ -1763,11 +1763,11 @@ async function runSession(
     }
     if (event.kind === "session-info") {
       if (event.title !== undefined) {
-        screen.setHeader({ title: event.title });
+        screen.setSessionbar({ title: event.title });
       }
       if (event.agentId !== undefined && event.agentId !== resolvedAgentId) {
         resolvedAgentId = event.agentId;
-        screen.setHeader({ agent: event.agentId });
+        screen.setSessionbar({ agent: event.agentId });
       }
       return;
     }
@@ -1796,7 +1796,7 @@ async function runSession(
         changed = true;
       }
       if (changed) {
-        screen.setHeader({ usage: { ...usage } });
+        screen.setSessionbar({ usage: { ...usage } });
       }
       return;
     }
@@ -1876,9 +1876,9 @@ async function runSession(
       return;
     }
     if (event.kind === "model-changed") {
-      // Header reflects live state; scrollback still gets the line below
-      // for a visible audit trail.
-      screen.setHeader({ model: event.model });
+      // Sessionbar reflects live state; scrollback still gets the line
+      // below for a visible audit trail.
+      screen.setSessionbar({ model: event.model });
     }
     const formatted = formatEvent(event);
     if (formatted.length > 0) {

@@ -1,6 +1,6 @@
 // Screen layer: owns terminal-kit setup, layout, and the live render of
-// header + scrollback + prompt + banner. Receives `KeyEvent`s from the user
-// and delegates them to an `InputDispatcher` (held by the app), then
+// scrollback + prompt + sessionbar + banner. Receives `KeyEvent`s from the
+// user and delegates them to an `InputDispatcher` (held by the app), then
 // redraws.
 
 import stringWidth from "string-width";
@@ -52,7 +52,7 @@ interface BannerState {
   elapsedMs?: number;
 }
 
-interface HeaderState {
+interface SessionbarState {
   agent: string;
   cwd: string;
   sessionId: string;
@@ -90,7 +90,7 @@ export interface CompletionItem {
   description?: string;
 }
 
-const HEADER_ROWS = 2;
+const SESSIONBAR_ROWS = 1;
 const BANNER_ROWS = 1;
 const SEPARATOR_ROWS = 1;
 const MAX_PROMPT_ROWS = 8;
@@ -204,7 +204,7 @@ export class Screen {
     hint: "⇧⇥ plan · ⌥⏎ newline · ⌃V paste · ⌃P pick · ⌃C cancel · ⌃D detach",
     queued: 0,
   };
-  private header: HeaderState = { agent: "?", cwd: "?", sessionId: "?" };
+  private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
   private lastWindowTitle: string | null = null;
   private resizeHandler: () => void;
   private keyHandler: (name: string, _matches: string[], data: { isCharacter?: boolean }) => void;
@@ -648,8 +648,8 @@ export class Screen {
     this.scheduleRepaint();
   }
 
-  setHeader(header: Partial<HeaderState>): void {
-    this.header = { ...this.header, ...header };
+  setSessionbar(sessionbar: Partial<SessionbarState>): void {
+    this.sessionbar = { ...this.sessionbar, ...sessionbar };
     this.syncWindowTitle();
     this.repaint();
   }
@@ -658,8 +658,8 @@ export class Screen {
   // the host terminal via OSC 2. Supported by xterm/foot/iTerm2/Alacritty/
   // most modern emulators; ignored harmlessly elsewhere.
   private syncWindowTitle(): void {
-    const title = this.header.title?.trim();
-    const fallback = shortId(this.header.sessionId) || "hydra";
+    const title = this.sessionbar.title?.trim();
+    const fallback = shortId(this.sessionbar.sessionId) || "hydra";
     const raw = title && title.length > 0 ? title : fallback;
     // Strip control chars (including ESC) so a hostile title can't
     // close the escape sequence early and inject further sequences.
@@ -1265,12 +1265,14 @@ export class Screen {
   }
 
   private scrollbackVisibleRows(): number {
-    const top = HEADER_ROWS + SEPARATOR_ROWS;
+    const top = 1;
     const bottom =
       this.term.height -
       this.promptRows() -
+      SESSIONBAR_ROWS -
+      SEPARATOR_ROWS - // separator between banner and sessionbar
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      SEPARATOR_ROWS - // separator above prompt
       this.chipRows() -
       this.queuedRows() -
       this.completionRows();
@@ -1361,50 +1363,58 @@ export class Screen {
     // and the first row write. (Fullscreen alternate-screen mode means
     // the buffer starts clean; resize triggers a repaint that covers all
     // rows in the new size.)
-    this.drawHeader();
-    this.drawSeparator(HEADER_ROWS);
     this.drawScrollback();
     this.drawCompletionZone();
     this.drawQueuedZone();
     this.drawAttachmentChipZone();
     const promptRows = this.promptRows();
-    // Separator goes on the row directly above the first prompt row.
-    // drawPrompt computes its top as (h - promptRows - BANNER_ROWS + 1), so
-    // the separator belongs at (h - promptRows - BANNER_ROWS).
-    const separatorRow = h - promptRows - BANNER_ROWS;
-    this.drawSeparator(separatorRow);
+    // Stacking from the bottom:
+    //   row h            sessionbar
+    //   row h-1          separator (between banner and sessionbar)
+    //   row h-2          banner
+    //   rows above       prompt (promptRows tall)
+    //   row above prompt separator
+    // Total bottom reservation = promptRows + 2*SEPARATOR_ROWS +
+    // BANNER_ROWS + SESSIONBAR_ROWS.
+    const separatorAbovePromptRow =
+      h - promptRows - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+    this.drawSeparator(separatorAbovePromptRow);
     this.drawPrompt();
     this.drawBanner();
+    this.drawSeparator(h - SESSIONBAR_ROWS);
+    this.drawSessionbar();
     this.placeCursor();
     this.lastPromptRows = promptRows;
   }
 
-  private drawHeader(): void {
+  private drawSessionbar(): void {
     const w = this.term.width;
-    const usage = formatUsage(this.header.usage);
-    const sid = shortId(this.header.sessionId);
-    const title = this.header.title?.trim();
-    const agentCell = formatAgentWithModel(this.header.agent, this.header.model);
-    const cwdDisplay = shortenHomePath(this.header.cwd);
-    const sig = `hdr|${w}|${agentCell}|${cwdDisplay}|${sid}|${title ?? ""}|${usage ?? ""}`;
-    this.paintRow(1, sig, () => {
-      // Fixed pieces: "hydra · " + agent[(model)] + " · " + cwd + " · " +
-      // sessionId [+ " · " + title] and the right-aligned usage block.
+    const row = this.term.height;
+    const sid = shortId(this.sessionbar.sessionId);
+    const title = this.sessionbar.title?.trim();
+    const agentCell = formatAgentWithModel(this.sessionbar.agent, this.sessionbar.model);
+    const cwdDisplay = shortenHomePath(this.sessionbar.cwd);
+    const usage = formatUsage(this.sessionbar.usage);
+    const sig = `sbar|${w}|${sid}|${agentCell}|${cwdDisplay}|${title ?? ""}|${usage ?? ""}`;
+    this.paintRow(row, sig, () => {
+      // Layout: <sid · agent(model) · cwd · title>           <usage>
+      // Left side is bullet-separated; usage is right-aligned with a
+      // small margin from the right edge. cwd and title share whatever
+      // horizontal room is left after the fixed pieces and the usage
+      // reservation, with title getting priority over a long cwd so it
+      // always keeps a sliver.
+      const usageReserve = usage ? usage.length + 3 : 0;
       const fixed =
-        "hydra · ".length +
+        sid.length +
+        " · ".length +
         agentCell.length +
         " · ".length +
-        " · ".length +
-        sid.length +
         (title ? " · ".length : 0) +
-        (usage ? usage.length + 3 : 0);
+        usageReserve;
       const variableRoom = Math.max(8, w - fixed);
       let cwdRoom: number;
       let titleRoom: number;
       if (title) {
-        // cwd gets its natural width first (a small footprint that holds
-        // the path), and title takes whatever's left. When cwd is so long
-        // it would crowd out title, cap it so title still keeps a sliver.
         const titleMin = Math.min(title.length, 8);
         cwdRoom = Math.min(cwdDisplay.length, Math.max(8, variableRoom - titleMin));
         titleRoom = Math.max(0, variableRoom - cwdRoom);
@@ -1415,23 +1425,20 @@ export class Screen {
       // noFormat on the user-controlled cells (agent name, cwd, title) so a
       // literal `^X` in any of them isn't eaten as terminal-kit markup.
       this.term
-        .bold("hydra")(" · ")
+        .yellow(sid)(" · ")
         .cyan.noFormat(agentCell)(" · ")
-        .dim.noFormat(truncate(cwdDisplay, cwdRoom))(" · ")
-        .yellow(sid);
+        .dim.noFormat(truncate(cwdDisplay, cwdRoom));
       if (title) {
         this.term(" · ").bold.noFormat(truncate(title, titleRoom));
       }
       if (usage) {
-        const col = Math.max(1, w - usage.length + 1);
-        // paintRow already cleared row 1 before this callback ran, so
+        // paintRow already cleared this row before the callback ran, so
         // the gap between the left-side writes and the right-aligned
-        // usage block is guaranteed blank. The extra eraseLineAfter
-        // here is belt-and-suspenders: it bounds any future regression
-        // in paintRow's signature cache (or a code path that draws to
-        // row 1 outside paintRow) to "usage block redraws cleanly"
-        // instead of "stale right-side bytes survive forever".
-        this.term.moveTo(col, 1).eraseLineAfter();
+        // usage block is guaranteed blank. The extra eraseLineAfter is
+        // belt-and-suspenders against a future code path that paints to
+        // this row outside paintRow.
+        const col = Math.max(1, w - usage.length + 1);
+        this.term.moveTo(col, row).eraseLineAfter();
         this.term.dim.noFormat(usage);
       }
     });
@@ -1446,7 +1453,7 @@ export class Screen {
 
   private drawScrollback(): void {
     const w = this.term.width;
-    const top = HEADER_ROWS + SEPARATOR_ROWS;
+    const top = 1;
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
       return;
@@ -1535,7 +1542,12 @@ export class Screen {
     }
     const w = this.term.width;
     const promptRows = this.promptRows();
-    const separatorRow = this.term.height - promptRows - BANNER_ROWS;
+    const separatorRow =
+      this.term.height -
+      promptRows -
+      SESSIONBAR_ROWS -
+      SEPARATOR_ROWS -
+      BANNER_ROWS;
     const queuedRows = this.queuedRows();
     const chipRows = this.chipRows();
     // Stacking, bottom-to-top above the separator:
@@ -1593,7 +1605,12 @@ export class Screen {
     }
     const w = this.term.width;
     const promptRows = this.promptRows();
-    const separatorRow = this.term.height - promptRows - BANNER_ROWS;
+    const separatorRow =
+      this.term.height -
+      promptRows -
+      SESSIONBAR_ROWS -
+      SEPARATOR_ROWS -
+      BANNER_ROWS;
     const chipBottom = separatorRow - 1;
     const chipTop = chipBottom - rows + 1;
     const iterm = this.isIterm2();
@@ -1657,7 +1674,12 @@ export class Screen {
     // Queued zone sits above the chip zone (chips are visually closest
     // to the user's draft and occupy the rows immediately above the
     // separator).
-    const separatorRow = this.term.height - promptRows - BANNER_ROWS;
+    const separatorRow =
+      this.term.height -
+      promptRows -
+      SESSIONBAR_ROWS -
+      SEPARATOR_ROWS -
+      BANNER_ROWS;
     const chipRows = this.chipRows();
     const queuedBottom = separatorRow - 1 - chipRows;
     const queuedTop = queuedBottom - rows + 1;
@@ -1714,7 +1736,13 @@ export class Screen {
     const state = this.dispatcher.state();
     const visualRows = computePromptVisualRows(state.buffer, room);
     const layout = computePromptLayout(visualRows, state, MAX_PROMPT_ROWS);
-    const top = this.term.height - layout.rendered - BANNER_ROWS + 1;
+    const top =
+      this.term.height -
+      layout.rendered -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
     for (let i = 0; i < layout.rendered; i++) {
       const vr = visualRows[layout.windowStart + i];
       const row = top + i;
@@ -1757,7 +1785,13 @@ export class Screen {
       return;
     }
     const w = this.term.width;
-    const top = this.term.height - CONFIRM_PROMPT_ROWS - BANNER_ROWS + 1;
+    const top =
+      this.term.height -
+      CONFIRM_PROMPT_ROWS -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
     this.paintRow(top, `confirm|q|${w}|${spec.question}`, () => {
       this.term.brightYellow(` ? ${truncate(spec.question, w - 4)}`);
     });
@@ -1773,7 +1807,13 @@ export class Screen {
     }
     const w = this.term.width;
     const rows = this.permissionRows();
-    const top = this.term.height - rows - BANNER_ROWS + 1;
+    const top =
+      this.term.height -
+      rows -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
     let row = top;
     const writeRow = (sig: string, paint: () => void): void => {
       if (row >= top + rows) {
@@ -1816,7 +1856,7 @@ export class Screen {
   }
 
   private drawBanner(): void {
-    const row = this.term.height;
+    const row = this.term.height - SESSIONBAR_ROWS - SEPARATOR_ROWS;
     const w = this.term.width;
     // Use the rendered elapsed string in the sig (not raw ms), so a tick
     // landing within the same displayed-second skips the repaint. Tied to
@@ -1883,15 +1923,29 @@ export class Screen {
       // Park cursor on the selected option line — visual feedback while the
       // user navigates with arrows.
       const rows = this.permissionRows();
-      const top = this.term.height - rows - BANNER_ROWS + 1;
+      const top =
+        this.term.height -
+        rows -
+        BANNER_ROWS -
+        SEPARATOR_ROWS -
+        SESSIONBAR_ROWS +
+        1;
       const optionRow = top + 3 + this.permissionPrompt.selectedIndex;
-      this.term.moveTo(2, Math.min(optionRow, this.term.height - BANNER_ROWS));
+      const lastUsableRow =
+        this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+      this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
       return;
     }
     if (this.confirmPrompt) {
       // Park cursor at the end of the question — there's no field to type
       // into, but a visible cursor reads as "waiting for your keypress".
-      const top = this.term.height - CONFIRM_PROMPT_ROWS - BANNER_ROWS + 1;
+      const top =
+        this.term.height -
+        CONFIRM_PROMPT_ROWS -
+        BANNER_ROWS -
+        SEPARATOR_ROWS -
+        SESSIONBAR_ROWS +
+        1;
       this.term.moveTo(2, top);
       return;
     }
@@ -1913,12 +1967,20 @@ export class Screen {
     const state = this.dispatcher.state();
     const visualRows = computePromptVisualRows(state.buffer, room);
     const layout = computePromptLayout(visualRows, state, MAX_PROMPT_ROWS);
-    const top = this.term.height - layout.rendered - BANNER_ROWS + 1;
+    const top =
+      this.term.height -
+      layout.rendered -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
     const row = top + Math.max(0, layout.cursorVisualRow - layout.windowStart);
     const col = layout.cursorVisualCol + 3; // gutter (2) + 1-based column
+    const lastPromptRow =
+      this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
     this.term.moveTo(
       Math.min(col, this.term.width),
-      Math.min(row, this.term.height - BANNER_ROWS),
+      Math.min(row, lastPromptRow),
     );
   }
 
