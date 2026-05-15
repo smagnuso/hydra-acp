@@ -300,10 +300,16 @@ export class Screen {
     if (!this.started) {
       return;
     }
-    this.started = false;
     if (this.bannerNotificationTimer) {
       clearTimeout(this.bannerNotificationTimer);
       this.bannerNotificationTimer = null;
+    }
+    // A throttled repaint queued just before stop would otherwise fire
+    // AFTER we leave the alternate screen and write raw cursor-position
+    // escapes into the host shell, scrambling it.
+    if (this.throttledRepaintTimer) {
+      clearTimeout(this.throttledRepaintTimer);
+      this.throttledRepaintTimer = null;
     }
     this.uninstallBracketedPaste();
     this.term.off("key", this.keyHandler);
@@ -320,6 +326,11 @@ export class Screen {
     // is up). The host owns this state independently of the alternate
     // screen, so it survives fullscreen(false) without explicit clear.
     this.writeProgressIndicator(0);
+    // Flip `started` only after the final guarded writes (progress
+    // indicator clear) so they aren't gated out. Anything that runs
+    // after this point — late timer ticks, stray repaint callbacks —
+    // is correctly rejected by paintRow/placeCursor/repaint.
+    this.started = false;
     this.term.fullscreen(false);
     this.term("\n");
   }
@@ -690,6 +701,9 @@ export class Screen {
   // by terminals that don't implement it. Disabled entirely when
   // tui.progressIndicator is false.
   private writeProgressIndicator(state: 0 | 3): void {
+    if (!this.started) {
+      return;
+    }
     if (!this.progressIndicatorEnabled) {
       return;
     }
@@ -1292,6 +1306,9 @@ export class Screen {
   // recently, schedule one for the remainder of the window. Setting the
   // throttle to 0 disables coalescing entirely.
   private scheduleRepaint(): void {
+    if (!this.started) {
+      return;
+    }
     if (this.repaintPaused > 0) {
       this.repaintPending = true;
       return;
@@ -1325,6 +1342,9 @@ export class Screen {
   // visible output for that row (width, FormattedLine fields, banner
   // state, etc.) so identical sigs guarantee identical bytes.
   private paintRow(row: number, signature: string, paint: () => void): void {
+    if (!this.started) {
+      return;
+    }
     if (row < 1 || row > this.term.height) {
       return;
     }
@@ -1337,6 +1357,9 @@ export class Screen {
   }
 
   private repaint(): void {
+    if (!this.started) {
+      return;
+    }
     if (this.repaintPaused > 0) {
       this.repaintPending = true;
       return;
@@ -1919,6 +1942,9 @@ export class Screen {
   }
 
   private placeCursor(): void {
+    if (!this.started) {
+      return;
+    }
     if (this.permissionPrompt) {
       // Park cursor on the selected option line — visual feedback while the
       // user navigates with arrows.

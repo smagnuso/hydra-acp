@@ -180,6 +180,11 @@ async function runSession(
   // applyRenderEvent is bound we drain the buffer through it.
   let bufferedEvents: RenderEvent[] = [];
   let applyRenderEvent: ((event: RenderEvent) => void) | null = null;
+  // Flips true the moment teardown starts. Notification/request handlers
+  // check this and bail before touching the screen — otherwise updates
+  // streaming in during a long turn keep painting after we've left the
+  // alternate screen, scrambling the host shell on detach.
+  let teardownStarted = false;
   const appendRender = (event: RenderEvent | null): void => {
     if (!event) {
       return;
@@ -265,6 +270,9 @@ async function runSession(
   let screenRef: Screen | null = null;
   let dispatcherRef: InputDispatcher | null = null;
   conn.onNotification("session/update", (params) => {
+    if (teardownStarted) {
+      return;
+    }
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
     debugLogUpdate(update, event);
@@ -294,6 +302,9 @@ async function runSession(
   // terminal "closed" state. The WS itself stays up; a subsequent prompt
   // will get rejected by the daemon and surface that error in scrollback.
   conn.onNotification("hydra-acp/session_closed", () => {
+    if (teardownStarted) {
+      return;
+    }
     if (pendingTurns > 0) {
       adjustPendingTurns(-pendingTurns);
     }
@@ -430,6 +441,11 @@ async function runSession(
   };
 
   conn.onRequest("session/request_permission", async (params) => {
+    if (teardownStarted) {
+      // Detaching — punt the decision back to the daemon so it can route
+      // to a peer or treat us as gone, instead of stranding the agent.
+      return { outcome: { outcome: "cancelled" } };
+    }
     const p = (params ?? {}) as {
       toolCall?: { name?: string; title?: string; toolCallId?: string };
       options?: PermissionOption[];
@@ -990,7 +1006,19 @@ async function runSession(
     return true;
   };
   const teardown = (): void => {
+    // Set first so any inbound notification/request that lands between
+    // here and stream.close() bails before touching the screen.
+    teardownStarted = true;
     process.off("SIGINT", sigintHandler);
+    // The elapsed-time setInterval ticks every second and calls
+    // screen.setBanner(), which writes raw cursor-position escapes to
+    // stdout. Left running, it both keeps the event loop alive (so the
+    // process never exits) and scrambles the host shell after we've
+    // left the alternate screen.
+    if (sessionElapsedTimer !== null) {
+      clearInterval(sessionElapsedTimer);
+      sessionElapsedTimer = null;
+    }
     screen.clearWindowTitle();
     screen.stop();
     saveHistory(historyFile, history).catch(() => undefined);

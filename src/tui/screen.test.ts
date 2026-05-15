@@ -13,7 +13,13 @@ import {
 // Minimal mock term: width 10/height 10 makes repaint() short-circuit
 // (it bails when width < 20), so we never exercise the draw path. We
 // access private state via casts; TS privates are compile-time only.
-function makeScreen(opts: { maxScrollbackLines?: number } = {}): Screen {
+function makeScreen(
+  opts: {
+    maxScrollbackLines?: number;
+    repaintThrottleMs?: number;
+    progressIndicator?: boolean;
+  } = {},
+): Screen {
   // Proxy-based mock: `term` itself is callable (`term("text")` writes
   // strings in terminal-kit) AND chains via any property access
   // (`term.moveTo(x, y).eraseLineAfter().brightYellow("…")`). Width /
@@ -51,8 +57,9 @@ function makeScreen(opts: { maxScrollbackLines?: number } = {}): Screen {
     term,
     dispatcher,
     onKey: () => {},
-    repaintThrottleMs: 0,
+    repaintThrottleMs: opts.repaintThrottleMs ?? 0,
     maxScrollbackLines: opts.maxScrollbackLines,
+    progressIndicator: opts.progressIndicator ?? false,
   });
 }
 
@@ -825,5 +832,82 @@ describe("Screen.setAttachments", () => {
     const attachments = (screen as unknown as { attachments: typeof att[] })
       .attachments;
     expect(attachments).toHaveLength(1);
+  });
+});
+
+// stop() leaves the alternate screen. Any subsequent stdout write from a
+// repaint would land in the host shell as raw ANSI and scramble it — so
+// the screen must drop any pending throttled paint AND refuse to queue a
+// new one. Regression test for the "^d-mid-turn corrupts terminal" bug.
+describe("Screen lifecycle", () => {
+  function getStarted(screen: Screen): boolean {
+    return (screen as unknown as { started: boolean }).started;
+  }
+  function getThrottleTimer(screen: Screen): NodeJS.Timeout | null {
+    return (screen as unknown as { throttledRepaintTimer: NodeJS.Timeout | null })
+      .throttledRepaintTimer;
+  }
+
+  it("clears the pending throttled repaint on stop()", () => {
+    const screen = makeScreen({ repaintThrottleMs: 50 });
+    screen.start();
+    // start() runs a synchronous repaint, so lastRepaintAt is fresh.
+    // The next appendLine arrives within the throttle window and queues
+    // a setTimeout instead of painting directly.
+    screen.appendLine({ body: "mid-turn output" });
+    expect(getThrottleTimer(screen)).not.toBeNull();
+    screen.stop();
+    expect(getStarted(screen)).toBe(false);
+    expect(getThrottleTimer(screen)).toBeNull();
+  });
+
+  it("refuses to queue further repaints after stop()", () => {
+    const screen = makeScreen({ repaintThrottleMs: 50 });
+    screen.start();
+    screen.stop();
+    // A late session/update notification slipping through before the WS
+    // close completes used to schedule a paint into the host shell.
+    screen.appendLine({ body: "post-stop update" });
+    expect(getThrottleTimer(screen)).toBeNull();
+  });
+
+  it("paintRow's callback never runs after stop()", () => {
+    const screen = makeScreen();
+    screen.start();
+    screen.stop();
+    // setBanner from a stray sessionElapsedTimer tick would fall through
+    // setBanner → drawBanner → paintRow → callback before the fix.
+    let painted = false;
+    (
+      screen as unknown as {
+        paintRow: (row: number, sig: string, paint: () => void) => void;
+      }
+    ).paintRow(1, "any-sig", () => {
+      painted = true;
+    });
+    expect(painted).toBe(false);
+  });
+
+  it("setBanner after stop() emits no stdout writes", () => {
+    const screen = makeScreen({ progressIndicator: true });
+    screen.start();
+    screen.stop();
+    // Spy on the real stdout: the proxy mock funnels nothing here, so
+    // any writeProgressIndicator or paintRow leak shows up directly.
+    const original = process.stdout.write.bind(process.stdout);
+    let writeCount = 0;
+    process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+      writeCount += 1;
+      return original(chunk as Parameters<typeof original>[0], ...(rest as []));
+    }) as typeof process.stdout.write;
+    try {
+      // Mirrors the production sequence: sessionElapsedTimer ticks every
+      // second and calls setBanner({ elapsedMs }) — would write banner
+      // ANSI to the host shell post-detach without the started-guards.
+      screen.setBanner({ status: "busy", elapsedMs: 1234 });
+    } finally {
+      process.stdout.write = original;
+    }
+    expect(writeCount).toBe(0);
   });
 });
