@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadConfig, loadConfigReadOnly } from "../../core/config.js";
+import { loadConfig } from "../../core/config.js";
+import { loadServiceToken } from "../../core/service-token.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import {
@@ -15,10 +16,11 @@ export async function runSessionsList(
   opts: { all?: boolean; json?: boolean } = {},
 ): Promise<void> {
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const url = new URL(`${baseUrl}/v1/sessions`);
   const response = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    headers: { Authorization: `Bearer ${serviceToken}` },
   });
   if (!response.ok) {
     process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
@@ -97,10 +99,11 @@ export async function runSessionsKill(id: string | undefined): Promise<void> {
     process.exit(2);
   }
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetch(`${baseUrl}/v1/sessions/${id}/kill`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    headers: { Authorization: `Bearer ${serviceToken}` },
   });
   if (!response.ok && response.status !== 204) {
     process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
@@ -115,10 +118,11 @@ export async function runSessionsRemove(id: string | undefined): Promise<void> {
     process.exit(2);
   }
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetch(`${baseUrl}/v1/sessions/${id}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    headers: { Authorization: `Bearer ${serviceToken}` },
   });
   if (!response.ok && response.status !== 204) {
     process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
@@ -138,11 +142,12 @@ export async function runSessionsExport(
     process.exit(2);
   }
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetch(
     `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export`,
     {
-      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+      headers: { Authorization: `Bearer ${serviceToken}` },
     },
   );
   if (!response.ok) {
@@ -190,11 +195,12 @@ export async function runSessionsTranscript(
     defaultName = `${path.basename(idOrFile, path.extname(idOrFile))}-${stamp}.md`;
   } else {
     const config = await loadConfig();
+    const serviceToken = await loadServiceToken();
     const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
     const response = await fetch(
       `${baseUrl}/v1/sessions/${encodeURIComponent(idOrFile)}/transcript`,
       {
-        headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+        headers: { Authorization: `Bearer ${serviceToken}` },
       },
     );
     if (!response.ok) {
@@ -295,17 +301,18 @@ export async function runSessionsImport(
     process.exit(1);
   }
   if (opts.info === true) {
-    const inspectConfig = await loadConfigReadOnly();
+    const inspectConfig = await loadConfig();
     printBundleInfo(bundle, inspectConfig.tui.cwdColumnMaxWidth);
     return;
   }
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetch(`${baseUrl}/v1/sessions/import`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.daemon.authToken}`,
+      Authorization: `Bearer ${serviceToken}`,
     },
     body: JSON.stringify({
       bundle,

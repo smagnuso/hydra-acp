@@ -1,10 +1,9 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
-import type { HydraConfig } from "../core/config.js";
 
 const BEARER_PREFIX = "Bearer ";
 
 export interface AuthOptions {
-  config: HydraConfig;
+  serviceToken: string;
 }
 
 export function bearerAuth(opts: AuthOptions) {
@@ -18,7 +17,7 @@ export function bearerAuth(opts: AuthOptions) {
       return;
     }
     const token = header.slice(BEARER_PREFIX.length).trim();
-    if (!constantTimeEqual(token, opts.config.daemon.authToken)) {
+    if (!constantTimeEqual(token, opts.serviceToken)) {
       reply.code(403).send({ error: "Invalid token" });
       return;
     }

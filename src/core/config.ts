@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import { homedir } from "node:os";
 import { z } from "zod";
 import { paths } from "./paths.js";
+import { writeServiceToken } from "./service-token.js";
 
 const REGISTRY_URL_DEFAULT =
   "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -14,7 +15,6 @@ const TlsConfig = z.object({
 const DaemonConfig = z.object({
   host: z.string().default("127.0.0.1"),
   port: z.number().int().positive().default(8765),
-  authToken: z.string().min(16),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
   sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(3600),
@@ -86,7 +86,7 @@ export type ExtensionBody = z.infer<typeof ExtensionBody>;
 export type ExtensionConfig = ExtensionBody & { name: string };
 
 export const HydraConfig = z.object({
-  daemon: DaemonConfig,
+  daemon: DaemonConfig.default({}),
   registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
   defaultAgent: z.string().default("claude-acp"),
   // Optional per-agent default model id. When a brand-new agent process
@@ -118,22 +118,6 @@ export const HydraConfig = z.object({
 
 export type HydraConfig = z.infer<typeof HydraConfig>;
 
-// Schema variant used by passive inspection commands (e.g. `sessions
-// import --info`) that read display preferences but never talk to the
-// daemon. The auth token isn't present in config.json — it lives in a
-// separate file and is injected by loadConfig before parsing — so
-// dropping the requirement here lets such commands load the user's
-// settings without forcing an `init` run.
-// The whole daemon block is defaulted to {} so users whose config.json
-// has no daemon section (e.g. after the auth-token migration stripped
-// the only key it held) can still run inspection commands. All remaining
-// fields in DaemonConfig have their own defaults.
-const HydraConfigReadOnly = HydraConfig.extend({
-  daemon: DaemonConfig.omit({ authToken: true }).default({}),
-});
-
-export type HydraConfigReadOnly = z.infer<typeof HydraConfigReadOnly>;
-
 export function extensionList(config: HydraConfig): ExtensionConfig[] {
   return Object.entries(config.extensions).map(([name, body]) => ({
     name,
@@ -157,57 +141,46 @@ async function readConfigFile(): Promise<Record<string, unknown>> {
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
-// Read the auth token from its own file. For installs predating the
-// auth-token split, migrates a legacy daemon.authToken in config.json
-// into the new file and strips it from config.json. Throws if both
+// One-shot heal for installs predating the auth-token split: if
+// config.json carries a legacy daemon.authToken, move it to the
+// service-token file and strip it from config.json. Idempotent: if no
+// legacy field is present, returns without writing. Throws if BOTH
 // sources hold a token, since we can't pick a winner safely.
-export async function loadAuthToken(): Promise<string | undefined> {
-  let tokenFile: string | undefined;
+//
+// Callers that subsequently load a service token (daemon start, CLI
+// commands, init, shim, TUI) should invoke this first so the legacy
+// state heals before service-token lookup runs.
+export async function migrateLegacyAuthToken(): Promise<void> {
+  const raw = await readConfigFile();
+  const daemon = raw.daemon as Record<string, unknown> | undefined;
+  const legacy =
+    daemon && typeof daemon.authToken === "string"
+      ? daemon.authToken
+      : undefined;
+  if (!legacy) {
+    return;
+  }
+
+  let tokenFileExists = false;
   try {
-    const text = await fs.readFile(paths.authToken(), "utf8");
-    const trimmed = text.trim();
-    if (trimmed.length > 0) {
-      tokenFile = trimmed;
-    }
+    await fs.access(paths.authToken());
+    tokenFileExists = true;
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
     if (e.code !== "ENOENT") {
       throw err;
     }
   }
-
-  const raw = await readConfigFile();
-  const daemon = raw.daemon as Record<string, unknown> | undefined;
-  const legacy =
-    daemon && typeof daemon.authToken === "string" ? daemon.authToken : undefined;
-
-  if (tokenFile && legacy) {
+  if (tokenFileExists) {
     throw new Error(
       `Auth token present in both ${paths.authToken()} and ${paths.config()} (daemon.authToken). ` +
         `Remove daemon.authToken from config.json to resolve.`,
     );
   }
-  if (tokenFile) {
-    return tokenFile;
-  }
-  if (legacy) {
-    await migrateLegacyAuthToken(raw, daemon!, legacy);
-    return legacy;
-  }
-  return undefined;
-}
 
-// One-shot move: write the legacy token to its own file and rewrite
-// config.json without it. Called from loadAuthToken so any path that
-// reads the token (CLI, daemon start, init) heals the on-disk layout.
-async function migrateLegacyAuthToken(
-  raw: Record<string, unknown>,
-  daemon: Record<string, unknown>,
-  token: string,
-): Promise<void> {
-  await writeAuthToken(token);
-  delete daemon.authToken;
-  if (Object.keys(daemon).length === 0) {
+  await writeServiceToken(legacy);
+  delete daemon!.authToken;
+  if (Object.keys(daemon!).length === 0) {
     delete raw.daemon;
   }
   await fs.writeFile(paths.config(), JSON.stringify(raw, null, 2) + "\n", {
@@ -219,83 +192,23 @@ async function migrateLegacyAuthToken(
   );
 }
 
-export async function writeAuthToken(token: string): Promise<void> {
-  await fs.mkdir(paths.home(), { recursive: true });
-  await fs.writeFile(paths.authToken(), token + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-}
-
 export async function loadConfig(): Promise<HydraConfig> {
-  // Resolve the token first so any legacy-migration write happens before
-  // we read config.json into memory — otherwise we'd be parsing a stale
-  // snapshot that still includes daemon.authToken.
-  const token = await loadAuthToken();
-  if (!token) {
-    throw new Error(
-      `No auth token found at ${paths.authToken()}. Run \`hydra-acp init\` to create one.`,
-    );
-  }
-  const raw = await readConfigFile();
-  const daemon = (raw.daemon ??= {}) as Record<string, unknown>;
-  daemon.authToken = token;
-  return HydraConfig.parse(raw);
+  // Heal legacy layout before reading config.json so the parse sees the
+  // post-migration shape rather than a stale snapshot.
+  await migrateLegacyAuthToken();
+  return HydraConfig.parse(await readConfigFile());
 }
 
-// Read and parse config.json without touching the auth-token file. The
-// daemon section is returned with authToken omitted. Used by passive
-// inspection paths that honor user display preferences but never need
-// to authenticate with the daemon (e.g. `sessions import --info`).
-export async function loadConfigReadOnly(): Promise<HydraConfigReadOnly> {
-  return HydraConfigReadOnly.parse(await readConfigFile());
-}
-
-// Like loadConfig, but writes a fresh token if none exists. Used by
-// entry points that imply "actually running hydra" (daemon start, shim,
-// TUI) so a first-run user doesn't need to call `hydra-acp init` first —
-// matters especially for the registry-distribution case, where editors
-// just spawn `hydra-acp shim` and expect it to work.
-export async function ensureConfig(): Promise<HydraConfig> {
-  if (!(await loadAuthToken())) {
-    const token = generateAuthToken();
-    await writeAuthToken(token);
-    process.stderr.write(
-      `hydra-acp: initialized ${paths.authToken()} with a fresh auth token.\n`,
-    );
-  }
-  return loadConfig();
-}
-
-// Persist the user-editable portion of the config. Strips daemon.authToken
-// — that lives in its own file so config.json stays safe to version-control.
 export async function writeConfig(config: HydraConfig): Promise<void> {
   await fs.mkdir(paths.home(), { recursive: true });
-  const { daemon, ...rest } = config;
-  const { authToken: _authToken, ...daemonRest } = daemon;
-  const onDisk = { ...rest, daemon: daemonRest };
-  await fs.writeFile(paths.config(), JSON.stringify(onDisk, null, 2) + "\n", {
+  await fs.writeFile(paths.config(), JSON.stringify(config, null, 2) + "\n", {
     encoding: "utf8",
     mode: 0o600,
   });
-}
-
-export function generateAuthToken(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let hex = "";
-  for (const b of bytes) {
-    hex += b.toString(16).padStart(2, "0");
-  }
-  return `hydra_token_${hex}`;
 }
 
 export function defaultConfig(): HydraConfig {
-  return HydraConfig.parse({
-    daemon: {
-      authToken: generateAuthToken(),
-    },
-  });
+  return HydraConfig.parse({});
 }
 
 // Expand a leading "~", "~/...", "$HOME", or "$HOME/..." to the current

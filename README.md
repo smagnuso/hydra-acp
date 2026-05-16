@@ -203,7 +203,7 @@ hydra-acp launch <agent>                    # launcher mode: shim that forces th
 hydra-acp --session-id <id>                 # attach to existing session
                                             # (TUI in a TTY, shim otherwise)
 
-hydra-acp init                              # generate config + auth token
+hydra-acp init                              # generate the service token
 hydra-acp daemon start [--foreground]       # detached by default; --foreground to attach
 hydra-acp daemon stop
 hydra-acp daemon status
@@ -332,7 +332,6 @@ When you ask hydra to spawn an agent (via `launch <agent>`, `--agent`, or `HYDRA
   "daemon": {
     "host": "127.0.0.1",
     "port": 8765,
-    "authToken": "hydra_token_<random>",
     "logLevel": "info"
   },
   "registry": {
@@ -342,6 +341,8 @@ When you ask hydra to spawn an agent (via `launch <agent>`, `--agent`, or `HYDRA
   "defaultAgent": "claude-code"
 }
 ```
+
+The service token lives in its own file (`~/.hydra-acp/auth-token`, mode 0600) and is never written to `config.json` — so the config file stays safe to version-control.
 
 `daemon.sessionIdleTimeoutSeconds` (default 3600 — one hour) controls how long a session with no recorded agent or user activity stays alive before the daemon closes it. Snapshot-shaped state pings (model/mode/title/commands) and bare attach/detach don't count as activity — only recordable broadcasts (prompts, agent chunks, tool calls, permission prompts) do, so persistent observer clients like the slack/notifier/approver/browser extensions can't pin a quiet session open. In-flight turns and unresolved permission requests defer the close until they settle. The disk record stays so the session can be resurrected later via `session/load`, at which point extensions re-attach automatically through their poll loops. Set to `0` to disable.
 
@@ -394,7 +395,7 @@ hydra-acp extensions logs hydra-acp-slack --follow
 
 `stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply.
 
-**Trust model**: extensions run with the same privileges as the daemon and receive its full auth token. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism.
+**Trust model**: extensions run with the same privileges as the daemon and receive its full service token. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism.
 
 #### Optional extensions
 
@@ -440,7 +441,7 @@ Without a config file the approver abstains on everything — installing it has 
 
 Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extensions logs <name> -f` tails an extension's stdout/stderr if you need to debug.
 
-The `authToken` is generated on `hydra-acp init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. Tokens never leave `~/.hydra-acp/`.
+The service token (stored at `~/.hydra-acp/auth-token`, mode 0600) is generated on `hydra-acp init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. The token never leaves `~/.hydra-acp/`.
 
 For remote access (binding to a non-loopback address), enable TLS via:
 
@@ -461,7 +462,8 @@ The daemon refuses to bind to non-loopback hosts without TLS configured.
 
 ```
 ~/.hydra-acp/
-├── config.json              # daemon config + auth token
+├── config.json              # daemon config (safe to version-control)
+├── auth-token               # service token (mode 0600, never in config.json)
 ├── daemon.pid               # PID + port lockfile (when running)
 ├── daemon.<N>.log           # rotated daemon logs (10 MB or daily, whichever first)
 ├── current.log              # symlink to the active daemon.<N>.log
@@ -553,13 +555,13 @@ Sessions are also reachable via `session/list` over ACP itself, for clients that
 
 ## Security
 
-The daemon exposes a process-management surface. Treat the auth token like an SSH key.
+The daemon exposes a process-management surface. Treat the service token like an SSH key.
 
 - **Default bind is `127.0.0.1`.** Cross-host access requires TLS + a strong token.
 - **No anonymous access.** Every request — REST and WSS — must present the bearer token.
 - **Token rotation:** `hydra-acp init --rotate-token` invalidates the old token; running clients are kicked.
 - **Sandboxing is the user's responsibility.** Spawned agents inherit the daemon's filesystem and shell. Run the daemon under a restricted user or inside a container if you don't trust agents fully.
-- **Subprocess scope:** agent processes inherit `cwd` and a sanitized environment. The daemon does not pass its auth token through to spawned agents.
+- **Subprocess scope:** agent processes inherit `cwd` and a sanitized environment. The daemon does not pass its service token through to spawned agents.
 
 ## Registry entry mockup
 

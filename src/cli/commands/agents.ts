@@ -1,4 +1,5 @@
 import { loadConfig } from "../../core/config.js";
+import { loadServiceToken } from "../../core/service-token.js";
 import { httpBase } from "./sessions.js";
 
 interface AgentSummary {
@@ -11,11 +12,12 @@ interface AgentSummary {
 
 export async function runAgentsList(): Promise<void> {
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   let body: { version: string; agents: AgentSummary[] };
   try {
     const r = await fetch(`${baseUrl}/v1/agents`, {
-      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+      headers: { Authorization: `Bearer ${serviceToken}` },
     });
     if (!r.ok) {
       process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
@@ -72,12 +74,13 @@ export async function runAgentsList(): Promise<void> {
 
 export async function runAgentsRefresh(): Promise<void> {
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   let body: { version: string; agentCount: number };
   try {
     const r = await fetch(`${baseUrl}/v1/registry/refresh`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+      headers: { Authorization: `Bearer ${serviceToken}` },
     });
     if (!r.ok) {
       process.stderr.write(`Daemon returned HTTP ${r.status}\n`);

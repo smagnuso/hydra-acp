@@ -1,5 +1,6 @@
 import { ndjsonStreamFromStdio } from "../acp/framing.js";
-import { ensureConfig } from "../core/config.js";
+import { loadConfig } from "../core/config.js";
+import { ensureServiceToken } from "../core/service-token.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import {
   type JsonRpcMessage,
@@ -19,7 +20,8 @@ export interface ShimOptions {
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
-  const config = await ensureConfig();
+  const config = await loadConfig();
+  const serviceToken = await ensureServiceToken();
   await ensureDaemonReachable(config);
 
   const tracker = new SessionTracker();
@@ -27,7 +29,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
 
   const protocol = config.daemon.tls ? "wss" : "ws";
   const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const subprotocols = ["acp.v1", `hydra-acp-token.${config.daemon.authToken}`];
+  const subprotocols = ["acp.v1", `hydra-acp-token.${serviceToken}`];
   const upstream = new ResilientWsStream({
     url,
     subprotocols,

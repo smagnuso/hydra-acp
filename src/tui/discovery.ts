@@ -38,6 +38,7 @@ export interface ListOptions {
 
 export async function listSessions(
   config: HydraConfig,
+  serviceToken: string,
   opts: ListOptions = {},
   // Allow tests to inject a fetch implementation. Defaults to the global one.
   fetchImpl: typeof fetch = fetch,
@@ -51,7 +52,7 @@ export async function listSessions(
     url.searchParams.set("all", "true");
   }
   const response = await fetchImpl(url.toString(), {
-    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    headers: { Authorization: `Bearer ${serviceToken}` },
   });
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);
@@ -83,13 +84,14 @@ export async function listSessions(
 // removed by another client.
 export async function killSession(
   config: HydraConfig,
+  serviceToken: string,
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetchImpl(`${base}/v1/sessions/${id}/kill`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    headers: { Authorization: `Bearer ${serviceToken}` },
   });
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);
@@ -98,13 +100,14 @@ export async function killSession(
 
 export async function deleteSession(
   config: HydraConfig,
+  serviceToken: string,
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const response = await fetchImpl(`${base}/v1/sessions/${id}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+    headers: { Authorization: `Bearer ${serviceToken}` },
   });
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);

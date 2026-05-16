@@ -13,7 +13,8 @@ import {
   ACP_PROTOCOL_VERSION,
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
-import { ensureConfig, type HydraConfig } from "../core/config.js";
+import { loadConfig, type HydraConfig } from "../core/config.js";
+import { ensureServiceToken } from "../core/service-token.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
@@ -87,7 +88,8 @@ const PLAN_PREFIX_TEXT =
   "produce a plan only.";
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
-  const config = await ensureConfig();
+  const config = await loadConfig();
+  const serviceToken = await ensureServiceToken();
   logMaxBytes = config.tui.logMaxBytes;
   await ensureDaemonReachable(config);
   const term = termkit.terminal;
@@ -98,7 +100,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const exitHint: { sessionId?: string } = {};
   let nextOpts: TuiOptions | null = opts;
   while (nextOpts !== null) {
-    nextOpts = await runSession(term, config, nextOpts, exitHint);
+    nextOpts = await runSession(term, config, serviceToken, nextOpts, exitHint);
   }
   // Re-surface the update notice on the way out so users who missed
   // the 30-second banner inside the TUI still see it. cli.ts suppresses
@@ -119,10 +121,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
 async function runSession(
   term: termkit.Terminal,
   config: HydraConfig,
+  serviceToken: string,
   opts: TuiOptions,
   exitHint: { sessionId?: string },
 ): Promise<TuiOptions | null> {
-  const ctx = await resolveSession(term, config, opts);
+  const ctx = await resolveSession(term, config, serviceToken, opts);
   if (!ctx) {
     // Picker was aborted (Ctrl+C / Esc). singleColumnMenu leaves grabInput
     // engaged on cancel, which keeps the event loop alive past the return.
@@ -145,7 +148,7 @@ async function runSession(
 
   const protocol = config.daemon.tls ? "wss" : "ws";
   const wsUrl = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const subprotocols = ["acp.v1", `hydra-acp-token.${config.daemon.authToken}`];
+  const subprotocols = ["acp.v1", `hydra-acp-token.${serviceToken}`];
   // Forward-declared so the resilient stream's onConnect/onDisconnect
   // hooks (which fire before the Screen is built on first connect) can
   // call into them safely. Real implementations are assigned later.
@@ -935,7 +938,7 @@ async function runSession(
     }
     let onlyClient = false;
     try {
-      const sessions = await listSessions(config);
+      const sessions = await listSessions(config, serviceToken);
       const me = sessions.find((s) => s.sessionId === resolvedSessionId);
       onlyClient = !me || me.attachedClients <= 1;
     } catch {
@@ -1056,11 +1059,12 @@ async function runSession(
     screen.pauseRepaint();
     screen.stop();
     saveHistory(historyFile, history).catch(() => undefined);
-    const sessions = await listSessions(config);
+    const sessions = await listSessions(config, serviceToken);
     const choice: PickerResult = await pickSession(term, {
       cwd: resolvedCwd,
       sessions,
       config,
+      serviceToken,
       currentSessionId: resolvedSessionId,
     });
     if (choice.kind === "abort") {
@@ -2173,6 +2177,7 @@ async function runSession(
 async function resolveSession(
   term: termkit.Terminal,
   config: HydraConfig,
+  serviceToken: string,
   opts: TuiOptions,
 ): Promise<SessionContext | null> {
   const cwd = opts.cwd ?? process.cwd();
@@ -2187,7 +2192,7 @@ async function resolveSession(
     return newCtx(opts, cwd, config);
   }
   if (opts.resume) {
-    const sessions = await listSessions(config, { cwd, all: true });
+    const sessions = await listSessions(config, serviceToken, { cwd, all: true });
     const target = pickMostRecent(sessions, cwd);
     if (!target) {
       term.yellow(`No sessions found for ${cwd}.\n`);
@@ -2203,7 +2208,7 @@ async function resolveSession(
   // most-recently-touched cold ones so the list stays scannable even with
   // a deep on-disk history. The picker defaults its cursor to
   // "New session" so just pressing Enter creates a fresh one.
-  const sessions = await listSessions(config);
+  const sessions = await listSessions(config, serviceToken);
   if (sessions.length === 0) {
     return newCtx(opts, cwd, config);
   }
@@ -2211,6 +2216,7 @@ async function resolveSession(
     cwd,
     sessions,
     config,
+    serviceToken,
   });
   if (choice.kind === "abort") {
     return null;

@@ -9,7 +9,7 @@ function makeContext(home: string): ExtensionContext {
     daemonUrl: "http://127.0.0.1:8765",
     daemonHost: "127.0.0.1",
     daemonPort: 8765,
-    daemonToken: "hydra_token_test",
+    serviceToken: "hydra_token_test",
     daemonWsUrl: "ws://127.0.0.1:8765/acp",
     hydraHome: home,
   };

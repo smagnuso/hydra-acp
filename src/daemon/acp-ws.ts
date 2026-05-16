@@ -3,9 +3,6 @@ import type { WebSocket } from "ws";
 import { nanoid } from "nanoid";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
-import {
-  HydraConfig,
-} from "../core/config.js";
 import { SessionManager } from "../core/session-manager.js";
 import { Session, type AttachedClient } from "../core/session.js";
 import {
@@ -33,7 +30,7 @@ interface ClientState {
 }
 
 export interface AcpWsDeps {
-  config: HydraConfig;
+  serviceToken: string;
   manager: SessionManager;
   defaultAgent: string;
 }
@@ -47,7 +44,7 @@ export function registerAcpWsEndpoint(
       headers: request.headers as NodeJS.Dict<string | string[]>,
       url: request.url,
     });
-    if (!token || !constantTimeEqual(token, deps.config.daemon.authToken)) {
+    if (!token || !constantTimeEqual(token, deps.serviceToken)) {
       socket.close(4401, "Unauthorized");
       return;
     }

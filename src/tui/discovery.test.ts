@@ -11,10 +11,11 @@ const cfg = {
   daemon: {
     host: "127.0.0.1",
     port: 8765,
-    authToken: "tok",
     logLevel: "info" as const,
   },
 } as unknown as HydraConfig;
+
+const TOKEN = "tok";
 
 const fakeOk = (body: unknown): typeof fetch =>
   (async (input: string | URL | Request) => {
@@ -47,7 +48,7 @@ describe("listSessions", () => {
         { status: 200 },
       );
     }) as typeof fetch;
-    const out = await listSessions(cfg, { cwd: "/x", all: true }, fetchImpl);
+    const out = await listSessions(cfg, TOKEN, { cwd: "/x", all: true }, fetchImpl);
     expect(captured.url).toBe(
       "http://127.0.0.1:8765/v1/sessions?cwd=%2Fx&all=true",
     );
@@ -68,11 +69,11 @@ describe("listSessions", () => {
 
   it("throws on non-2xx", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 500 })) as typeof fetch;
-    await expect(listSessions(cfg, {}, fetchImpl)).rejects.toThrow(/HTTP 500/);
+    await expect(listSessions(cfg, TOKEN, {}, fetchImpl)).rejects.toThrow(/HTTP 500/);
   });
 
   it("returns [] when sessions field missing", async () => {
-    expect(await listSessions(cfg, {}, fakeOk({}))).toEqual([]);
+    expect(await listSessions(cfg, TOKEN, {}, fakeOk({}))).toEqual([]);
   });
 });
 
@@ -86,7 +87,7 @@ describe("killSession", () => {
       captured.auth = headers?.["Authorization"];
       return new Response(null, { status: 204 });
     }) as typeof fetch;
-    await killSession(cfg, "sess-1", fetchImpl);
+    await killSession(cfg, TOKEN, "sess-1", fetchImpl);
     expect(captured.url).toBe("http://127.0.0.1:8765/v1/sessions/sess-1/kill");
     expect(captured.method).toBe("POST");
     expect(captured.auth).toBe("Bearer tok");
@@ -94,12 +95,12 @@ describe("killSession", () => {
 
   it("tolerates 404", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 404 })) as typeof fetch;
-    await expect(killSession(cfg, "sess-1", fetchImpl)).resolves.toBeUndefined();
+    await expect(killSession(cfg, TOKEN, "sess-1", fetchImpl)).resolves.toBeUndefined();
   });
 
   it("throws on other non-2xx", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 500 })) as typeof fetch;
-    await expect(killSession(cfg, "sess-1", fetchImpl)).rejects.toThrow(/HTTP 500/);
+    await expect(killSession(cfg, TOKEN, "sess-1", fetchImpl)).rejects.toThrow(/HTTP 500/);
   });
 });
 
@@ -113,7 +114,7 @@ describe("deleteSession", () => {
       captured.auth = headers?.["Authorization"];
       return new Response(null, { status: 204 });
     }) as typeof fetch;
-    await deleteSession(cfg, "sess-1", fetchImpl);
+    await deleteSession(cfg, TOKEN, "sess-1", fetchImpl);
     expect(captured.url).toBe("http://127.0.0.1:8765/v1/sessions/sess-1");
     expect(captured.method).toBe("DELETE");
     expect(captured.auth).toBe("Bearer tok");
@@ -121,7 +122,7 @@ describe("deleteSession", () => {
 
   it("tolerates 404", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 404 })) as typeof fetch;
-    await expect(deleteSession(cfg, "sess-1", fetchImpl)).resolves.toBeUndefined();
+    await expect(deleteSession(cfg, TOKEN, "sess-1", fetchImpl)).resolves.toBeUndefined();
   });
 });
 

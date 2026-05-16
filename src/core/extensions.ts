@@ -9,7 +9,7 @@ export interface ExtensionContext {
   daemonUrl: string;
   daemonHost: string;
   daemonPort: number;
-  daemonToken: string;
+  serviceToken: string;
   daemonWsUrl: string;
   hydraHome: string;
 }
@@ -367,7 +367,7 @@ export class ExtensionManager {
       HYDRA_ACP_DAEMON_URL: ctx.daemonUrl,
       HYDRA_ACP_DAEMON_HOST: ctx.daemonHost,
       HYDRA_ACP_DAEMON_PORT: String(ctx.daemonPort),
-      HYDRA_ACP_TOKEN: ctx.daemonToken,
+      HYDRA_ACP_TOKEN: ctx.serviceToken,
       HYDRA_ACP_WS_URL: ctx.daemonWsUrl,
       HYDRA_ACP_HOME: ctx.hydraHome,
       HYDRA_ACP_EXTENSION_NAME: ext.name,

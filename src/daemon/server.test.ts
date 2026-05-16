@@ -14,7 +14,6 @@ function testConfig(): HydraConfig {
     daemon: {
       host: "127.0.0.1",
       port: 0,
-      authToken: TEST_TOKEN,
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
       sessionHistoryMaxEntries: 1000,
@@ -56,7 +55,7 @@ describe("startDaemon", () => {
 
   beforeEach(async () => {
     tmpHome = process.env.HYDRA_ACP_HOME!;
-    handle = await startDaemon(testConfig());
+    handle = await startDaemon(testConfig(), TEST_TOKEN);
     const p = port(handle);
     baseUrl = `http://127.0.0.1:${p}`;
     wsUrl = `ws://127.0.0.1:${p}/acp`;
@@ -557,7 +556,7 @@ describe("startDaemon", () => {
     it("refuses to bind to non-loopback without TLS", async () => {
       const cfg = testConfig();
       cfg.daemon.host = "0.0.0.0";
-      await expect(startDaemon(cfg)).rejects.toThrow(/non-loopback/);
+      await expect(startDaemon(cfg, TEST_TOKEN)).rejects.toThrow(/non-loopback/);
     });
   });
 });
@@ -573,7 +572,6 @@ describe("startDaemon — extensions REST lifecycle", () => {
       daemon: {
         host: "127.0.0.1",
         port: 0,
-        authToken: TEST_TOKEN,
         logLevel: "warn",
         sessionIdleTimeoutSeconds: 30,
         sessionHistoryMaxEntries: 1000,
@@ -604,7 +602,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         progressIndicator: true,
       },
     };
-    handle = await startDaemon(cfg);
+    handle = await startDaemon(cfg, TEST_TOKEN);
     const p = port(handle);
     baseUrl = `http://127.0.0.1:${p}`;
   });

@@ -1,5 +1,6 @@
 import * as fsp from "node:fs/promises";
 import { loadConfig } from "../../core/config.js";
+import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
 import { runLogTail } from "./log-tail.js";
 import { httpBase } from "./sessions.js";
@@ -17,11 +18,12 @@ interface ExtensionInfo {
 
 export async function runExtensionsList(): Promise<void> {
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   let body: { extensions: ExtensionInfo[] };
   try {
     const r = await fetch(`${baseUrl}/v1/extensions`, {
-      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+      headers: { Authorization: `Bearer ${serviceToken}` },
     });
     if (!r.ok) {
       process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
@@ -134,13 +136,14 @@ export async function runExtensionsAdd(
   process.stdout.write(`Added extension '${name}' to ${paths.config()}\n`);
 
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const registerBody = { name, ...body };
   try {
     const r = await fetch(`${baseUrl}/v1/extensions`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.daemon.authToken}`,
+        Authorization: `Bearer ${serviceToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(registerBody),
@@ -188,11 +191,12 @@ export async function runExtensionsRemove(name: string | undefined): Promise<voi
   process.stdout.write(`Removed extension '${name}' from ${paths.config()}\n`);
 
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   try {
     const r = await fetch(`${baseUrl}/v1/extensions/${encodeURIComponent(name)}`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+      headers: { Authorization: `Bearer ${serviceToken}` },
     });
     if (r.status === 204 || r.status === 404) {
       process.stdout.write(`${name}: stopped\n`);
@@ -258,12 +262,13 @@ async function postLifecycle(
     return;
   }
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   let r: Response;
   try {
     r = await fetch(`${baseUrl}/v1/extensions/${encodeURIComponent(name)}/${verb}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${config.daemon.authToken}` },
+      headers: { Authorization: `Bearer ${serviceToken}` },
     });
   } catch (err) {
     process.stderr.write(
@@ -295,8 +300,9 @@ async function postLifecycleAll(
   verb: "start" | "stop" | "restart",
 ): Promise<void> {
   const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const auth = { Authorization: `Bearer ${config.daemon.authToken}` };
+  const auth = { Authorization: `Bearer ${serviceToken}` };
 
   let listBody: { extensions: ExtensionInfo[] };
   try {

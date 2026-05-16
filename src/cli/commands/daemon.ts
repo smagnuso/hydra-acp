@@ -1,7 +1,8 @@
 import * as fsp from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { paths } from "../../core/paths.js";
-import { ensureConfig } from "../../core/config.js";
+import { loadConfig } from "../../core/config.js";
+import { ensureServiceToken } from "../../core/service-token.js";
 import { startDaemon } from "../../daemon/server.js";
 import {
   pingHealth,
@@ -14,7 +15,8 @@ import { runLogTail } from "./log-tail.js";
 export async function runDaemonStart(
   flags: Record<string, string | boolean> = {},
 ): Promise<void> {
-  const config = await ensureConfig();
+  const config = await loadConfig();
+  const serviceToken = await ensureServiceToken();
   if (await pingHealth(config)) {
     const info = await readPidFile();
     process.stdout.write(
@@ -24,7 +26,7 @@ export async function runDaemonStart(
   }
 
   if (flagBool(flags, "foreground")) {
-    const handle = await startDaemon(config);
+    const handle = await startDaemon(config, serviceToken);
     process.stdout.write(
       `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
     );
@@ -69,7 +71,8 @@ export async function runDaemonStop(): Promise<void> {
 }
 
 export async function runDaemonRestart(): Promise<void> {
-  const config = await ensureConfig();
+  const config = await loadConfig();
+  await ensureServiceToken();
   const info = await readPidFile();
   if (info && isProcessAlive(info.pid)) {
     process.stdout.write(`Stopping daemon pid ${info.pid}...\n`);

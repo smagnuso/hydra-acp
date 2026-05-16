@@ -35,7 +35,10 @@ export interface DaemonHandle {
   shutdown: () => Promise<void>;
 }
 
-export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
+export async function startDaemon(
+  config: HydraConfig,
+  serviceToken: string,
+): Promise<DaemonHandle> {
   ensureLoopbackOrTls(config);
 
   const httpsOptions = config.daemon.tls
@@ -74,7 +77,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     app.log.info(msg);
   });
 
-  const auth = bearerAuth({ config });
+  const auth = bearerAuth({ serviceToken });
   app.addHook("onRequest", async (request, reply) => {
     if (request.routeOptions.config?.skipAuth) {
       return;
@@ -121,7 +124,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     defaultCwd: config.defaultCwd,
   });
   registerAcpWsEndpoint(app, {
-    config,
+    serviceToken,
     manager,
     defaultAgent: config.defaultAgent,
   });
@@ -150,7 +153,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     daemonUrl: `${scheme}://${config.daemon.host}:${boundPort}`,
     daemonHost: config.daemon.host,
     daemonPort: boundPort,
-    daemonToken: config.daemon.authToken,
+    serviceToken,
     daemonWsUrl: `${wsScheme}://${config.daemon.host}:${boundPort}/acp`,
     hydraHome: paths.home(),
   });

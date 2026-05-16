@@ -9,12 +9,15 @@ export { ndjsonStreamFromStdio } from "./acp/framing.js";
 export { wsToMessageStream } from "./acp/ws-stream.js";
 export {
   loadConfig,
-  ensureConfig,
   writeConfig,
   defaultConfig,
-  generateAuthToken,
 } from "./core/config.js";
 export type { HydraConfig } from "./core/config.js";
+export {
+  generateServiceToken,
+  loadServiceToken,
+  ensureServiceToken,
+} from "./core/service-token.js";
 export { paths } from "./core/paths.js";
 export type {
   SessionAttachParams,

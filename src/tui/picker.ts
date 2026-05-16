@@ -34,6 +34,7 @@ export interface PickOptions {
   cwd: string;
   sessions: DiscoveredSession[];
   config: HydraConfig;
+  serviceToken: string;
   // When the picker is opened from inside a session (^p), pre-select that
   // session's row so the user can drop straight back in with Enter.
   currentSessionId?: string;
@@ -348,7 +349,7 @@ export async function pickSession(
     // which after delete lands on whatever now occupies the old slot.
     const refresh = async (preferredId?: string): Promise<void> => {
       try {
-        const next = await listSessions(opts.config);
+        const next = await listSessions(opts.config, opts.serviceToken);
         allSessions = sortSessions(next);
         applyFilter();
         if (preferredId !== undefined) {
@@ -379,9 +380,9 @@ export async function pickSession(
       paintIndicator();
       try {
         if (kind === "kill") {
-          await killSession(opts.config, target.sessionId);
+          await killSession(opts.config, opts.serviceToken, target.sessionId);
         } else {
-          await deleteSession(opts.config, target.sessionId);
+          await deleteSession(opts.config, opts.serviceToken, target.sessionId);
         }
         mode = "normal";
         pendingAction = null;
