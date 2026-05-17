@@ -1590,11 +1590,14 @@ async function runSession(
         stopReason = response.stopReason;
       }
     } catch (err) {
-      appendRender({
-        kind: "unknown",
-        sessionUpdate: "error",
-        raw: { error: (err as Error).message },
-      });
+      screen.appendLines([
+        {
+          prefix: "✗ ",
+          prefixStyle: "tool-status-fail",
+          body: (err as Error).message,
+          bodyStyle: "tool-status-fail",
+        },
+      ]);
     } finally {
       turnInFlight = null;
       adjustPendingTurns(-1);
