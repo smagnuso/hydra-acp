@@ -173,6 +173,7 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "session":
     case "sessions": {
       const sub = positional[1];
       if (sub === undefined || sub === "list") {
@@ -209,12 +210,13 @@ async function main(): Promise<void> {
         });
         return;
       }
-      process.stderr.write(`Unknown sessions subcommand: ${sub}\n`);
+      process.stderr.write(`Unknown session subcommand: ${sub}\n`);
       process.exit(2);
       return;
     }
+    case "extension":
     case "extensions": {
-      const extIdx = argv.indexOf("extensions");
+      const extIdx = argv.indexOf(subcommand);
       const tail = argv.slice(extIdx + 1);
       const sub = tail[0];
       const name = tail[1];
@@ -247,10 +249,11 @@ async function main(): Promise<void> {
         await runExtensionsLogs(name, rest);
         return;
       }
-      process.stderr.write(`Unknown extensions subcommand: ${sub}\n`);
+      process.stderr.write(`Unknown extension subcommand: ${sub}\n`);
       process.exit(2);
       return;
     }
+    case "agent":
     case "agents": {
       const sub = positional[1];
       if (sub === undefined || sub === "list") {
@@ -261,7 +264,7 @@ async function main(): Promise<void> {
         await runAgentsRefresh();
         return;
       }
-      process.stderr.write(`Unknown agents subcommand: ${sub}\n`);
+      process.stderr.write(`Unknown agent subcommand: ${sub}\n`);
       process.exit(2);
       return;
     }
@@ -379,23 +382,23 @@ function printHelp(): void {
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart|status",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
-      "  hydra-acp sessions [list] [--all] [--json]",
+      "  hydra-acp session [list] [--all] [--json]",
       "                                     List sessions (live + 20 most-recent cold; --all for everything; --json emits the raw daemon response as JSON for scripts)",
-      "  hydra-acp sessions kill <id>       Demote a live session to cold (keeps the on-disk record)",
-      "  hydra-acp sessions remove <id>     Remove a session entirely (live or cold)",
-      "  hydra-acp sessions export <id> [--out <file>|.]",
+      "  hydra-acp session kill <id>        Demote a live session to cold (keeps the on-disk record)",
+      "  hydra-acp session remove <id>      Remove a session entirely (live or cold)",
+      "  hydra-acp session export <id> [--out <file>|.]",
       "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout",
-      "  hydra-acp sessions transcript <id>|<file> [--out <file>|.]",
+      "  hydra-acp session transcript <id>|<file> [--out <file>|.]",
       "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout",
-      "  hydra-acp sessions import <file>|- [--replace] [--cwd <path>] [--info]",
+      "  hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]",
       "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing",
-      "  hydra-acp extensions list                   List configured extensions and live state",
-      "  hydra-acp extensions add <name> [opts]      Add an extension to config",
-      "  hydra-acp extensions remove <name>          Remove an extension from config",
-      "  hydra-acp extensions start|stop|restart <n>|all  Lifecycle on one or all",
-      "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
-      "  hydra-acp agents [list]                     List agents in the cached registry",
-      "  hydra-acp agents refresh                    Force a registry re-fetch",
+      "  hydra-acp extension list                    List configured extensions and live state",
+      "  hydra-acp extension add <name> [opts]       Add an extension to config",
+      "  hydra-acp extension remove <name>           Remove an extension from config",
+      "  hydra-acp extension start|stop|restart <n>|all   Lifecycle on one or all",
+      "  hydra-acp extension logs <name> [-f] [-n N]      Tail or follow an extension's log",
+      "  hydra-acp agent [list]                      List agents in the cached registry",
+      "  hydra-acp agent refresh                     Force a registry re-fetch",
       "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
       "  hydra-acp auth revoke <id>                  Revoke a session token",
