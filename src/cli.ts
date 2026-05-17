@@ -396,7 +396,7 @@ function printHelp(): void {
       "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  hydra-acp agents [list]                     List agents in the cached registry",
       "  hydra-acp agents refresh                    Force a registry re-fetch",
-      "  hydra-acp auth password set [--force]       Set the daemon's master password",
+      "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
       "  hydra-acp auth revoke <id>                  Revoke a session token",
       "  hydra-acp tui flags: [--resume <id>] [--reattach] [--new] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",

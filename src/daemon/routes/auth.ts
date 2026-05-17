@@ -49,7 +49,7 @@ export function registerAuthRoutes(
       if (!(await hasPassword())) {
         return reply.code(403).send({
           error:
-            "No password configured. Run `hydra-acp auth password set` on the daemon host.",
+            "No password configured. Run `hydra-acp auth password` on the daemon host.",
         });
       }
 
