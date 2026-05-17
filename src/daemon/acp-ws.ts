@@ -21,7 +21,7 @@ import {
   JsonRpcErrorCodes,
   ACP_PROTOCOL_VERSION,
 } from "../acp/types.js";
-import { tokenFromUpgradeRequest, constantTimeEqual } from "./auth.js";
+import { tokenFromUpgradeRequest, type TokenValidator } from "./auth.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 
 interface ClientState {
@@ -30,7 +30,7 @@ interface ClientState {
 }
 
 export interface AcpWsDeps {
-  serviceToken: string;
+  validator: TokenValidator;
   manager: SessionManager;
   defaultAgent: string;
 }
@@ -39,12 +39,12 @@ export function registerAcpWsEndpoint(
   app: FastifyInstance,
   deps: AcpWsDeps,
 ): void {
-  app.get("/acp", { websocket: true }, (socket: WebSocket, request) => {
+  app.get("/acp", { websocket: true }, async (socket: WebSocket, request) => {
     const token = tokenFromUpgradeRequest({
       headers: request.headers as NodeJS.Dict<string | string[]>,
       url: request.url,
     });
-    if (!token || !constantTimeEqual(token, deps.serviceToken)) {
+    if (!token || !(await deps.validator.validate(token))) {
       socket.close(4401, "Unauthorized");
       return;
     }

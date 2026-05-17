@@ -13,12 +13,20 @@ import { paths } from "../core/paths.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
 import { setNpmInstallLogger } from "../core/npm-install.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
-import { bearerAuth } from "./auth.js";
+import { SessionTokenStore } from "../core/session-tokens.js";
+import {
+  bearerAuth,
+  CompositeTokenValidator,
+  SessionTokenValidator,
+  StaticTokenValidator,
+} from "./auth.js";
+import { AuthRateLimiter } from "./rate-limit.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerExtensionRoutes } from "./routes/extensions.js";
 import { registerConfigRoutes } from "./routes/config.js";
+import { registerAuthRoutes } from "./routes/auth.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
 
 declare module "fastify" {
@@ -77,7 +85,14 @@ export async function startDaemon(
     app.log.info(msg);
   });
 
-  const auth = bearerAuth({ serviceToken });
+  const sessionTokenStore = await SessionTokenStore.load();
+  const authRateLimiter = new AuthRateLimiter();
+  const validator = new CompositeTokenValidator([
+    new StaticTokenValidator(serviceToken),
+    new SessionTokenValidator(sessionTokenStore),
+  ]);
+
+  const auth = bearerAuth({ validator });
   app.addHook("onRequest", async (request, reply) => {
     if (request.routeOptions.config?.skipAuth) {
       return;
@@ -87,6 +102,18 @@ export async function startDaemon(
     }
     await auth(request, reply);
   });
+
+  // Periodically remove expired session tokens. Cheap O(n) walk; the
+  // store also sweeps on load and on verify-of-expired, so this is a
+  // safety net for long-running daemons that don't see verify traffic
+  // for a given token.
+  const sweepInterval = setInterval(
+    () => {
+      sessionTokenStore.sweepExpired();
+    },
+    5 * 60 * 1000,
+  );
+  sweepInterval.unref();
 
   const registry = new Registry(config);
   // Inject the configured stderr-tail size into every spawned agent so a
@@ -123,8 +150,12 @@ export async function startDaemon(
     defaultAgent: config.defaultAgent,
     defaultCwd: config.defaultCwd,
   });
+  registerAuthRoutes(app, {
+    store: sessionTokenStore,
+    rateLimiter: authRateLimiter,
+  });
   registerAcpWsEndpoint(app, {
-    serviceToken,
+    validator,
     manager,
     defaultAgent: config.defaultAgent,
   });
@@ -160,6 +191,8 @@ export async function startDaemon(
   await extensions.start();
 
   const shutdown = async (): Promise<void> => {
+    clearInterval(sweepInterval);
+    await sessionTokenStore.flush();
     await extensions.stop();
     await manager.closeAll();
     // Drain pending meta.json writes after closing sessions so any

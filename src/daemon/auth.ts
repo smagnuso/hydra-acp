@@ -1,9 +1,57 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
+import type { SessionTokenStore } from "../core/session-tokens.js";
 
 const BEARER_PREFIX = "Bearer ";
 
+// A TokenValidator decides whether a presented bearer token grants
+// access. The daemon uses a composite validator that accepts either the
+// machine-spawned service token (long-lived, used by extensions) or a
+// human-issued session token (revocable, from /v1/auth/login).
+export interface TokenValidator {
+  // Returns the identifier of the matched token kind/record when valid,
+  // or undefined when the token is rejected. For the service token, the
+  // identifier is the constant string "service". For session tokens, it
+  // is the per-record id so callers (e.g. logout) can revoke it.
+  validate(token: string): Promise<string | undefined>;
+}
+
+export class StaticTokenValidator implements TokenValidator {
+  constructor(private readonly token: string) {}
+  async validate(token: string): Promise<string | undefined> {
+    return constantTimeEqual(token, this.token) ? "service" : undefined;
+  }
+}
+
+export class SessionTokenValidator implements TokenValidator {
+  constructor(private readonly store: SessionTokenStore) {}
+  async validate(token: string): Promise<string | undefined> {
+    return this.store.verify(token);
+  }
+}
+
+export class CompositeTokenValidator implements TokenValidator {
+  constructor(private readonly validators: TokenValidator[]) {}
+  async validate(token: string): Promise<string | undefined> {
+    for (const v of this.validators) {
+      const id = await v.validate(token);
+      if (id !== undefined) {
+        return id;
+      }
+    }
+    return undefined;
+  }
+}
+
+declare module "fastify" {
+  interface FastifyRequest {
+    // Identifier of the matched token: "service" for the service-token
+    // bearer, the session-token record id for human-issued tokens.
+    authIdentity?: string;
+  }
+}
+
 export interface AuthOptions {
-  serviceToken: string;
+  validator: TokenValidator;
 }
 
 export function bearerAuth(opts: AuthOptions) {
@@ -17,10 +65,12 @@ export function bearerAuth(opts: AuthOptions) {
       return;
     }
     const token = header.slice(BEARER_PREFIX.length).trim();
-    if (!constantTimeEqual(token, opts.serviceToken)) {
+    const identity = await opts.validator.validate(token);
+    if (!identity) {
       reply.code(403).send({ error: "Invalid token" });
       return;
     }
+    request.authIdentity = identity;
   };
 }
 

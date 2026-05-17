@@ -29,6 +29,11 @@ import {
   runExtensionsStop,
 } from "./cli/commands/extensions.js";
 import { runAgentsList, runAgentsRefresh } from "./cli/commands/agents.js";
+import {
+  runAuthList,
+  runAuthPasswordSet,
+  runAuthRevoke,
+} from "./cli/commands/auth.js";
 import { runShim } from "./shim/proxy.js";
 import {
   formatUpdateNoticeLine,
@@ -260,6 +265,30 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "auth": {
+      const sub = positional[1];
+      if (sub === "password") {
+        const action = positional[2];
+        if (action === undefined || action === "set") {
+          await runAuthPasswordSet(flags);
+          return;
+        }
+        process.stderr.write(`Unknown auth password action: ${action}\n`);
+        process.exit(2);
+        return;
+      }
+      if (sub === undefined || sub === "list") {
+        await runAuthList();
+        return;
+      }
+      if (sub === "revoke") {
+        await runAuthRevoke(positional[2]);
+        return;
+      }
+      process.stderr.write(`Unknown auth subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
     case "tui":
       suppressUpdateNotice = true;
       await dispatchTui(flags, {
@@ -367,6 +396,9 @@ function printHelp(): void {
       "  hydra-acp extensions logs <name> [-f] [-n N]Tail or follow an extension's log",
       "  hydra-acp agents [list]                     List agents in the cached registry",
       "  hydra-acp agents refresh                    Force a registry re-fetch",
+      "  hydra-acp auth password set [--force]       Set the daemon's master password",
+      "  hydra-acp auth [list]                       List active session tokens",
+      "  hydra-acp auth revoke <id>                  Revoke a session token",
       "  hydra-acp tui flags: [--resume <id>] [--reattach] [--new] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
       "                                     --resume <id> attaches to a specific session; --reattach picks the most-recent in cwd.",
       "                                     Smart default (no flags): shows a picker when sessions exist, else new.",
