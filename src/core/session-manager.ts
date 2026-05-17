@@ -83,6 +83,9 @@ export interface SessionManagerOptions {
   // completely silent, making it hard to tell agent-killed-by-us apart
   // from agent-died-on-its-own).
   logger?: AgentLogger;
+  // npm registry URL forwarded to planSpawn for npm-distributed agents.
+  // Overrides the user's global .npmrc so installs hit the intended registry.
+  npmRegistry?: string;
 }
 
 export class SessionManager {
@@ -99,6 +102,7 @@ export class SessionManager {
   // back-to-back) don't lose writes via interleaved reads.
   private metaWriteQueues = new Map<string, Promise<unknown>>();
   private logger?: AgentLogger;
+  private npmRegistry?: string;
 
   constructor(
     private registry: Registry,
@@ -113,6 +117,7 @@ export class SessionManager {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.defaultModels = options.defaultModels ?? {};
     this.logger = options.logger;
+    this.npmRegistry = options.npmRegistry;
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -194,7 +199,7 @@ export class SessionManager {
       return this.doResurrectFromImport(params);
     }
 
-    const plan = await planSpawn(agentDef, params.agentArgs ?? []);
+    const plan = await planSpawn(agentDef, params.agentArgs ?? [], { npmRegistry: this.npmRegistry });
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
@@ -374,7 +379,7 @@ export class SessionManager {
       err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
-    const plan = await planSpawn(agentDef, params.agentArgs ?? []);
+    const plan = await planSpawn(agentDef, params.agentArgs ?? [], { npmRegistry: this.npmRegistry });
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,

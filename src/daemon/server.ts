@@ -135,6 +135,7 @@ export async function startDaemon(
     defaultModels: config.defaultModels,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,
+    npmRegistry: config.npmRegistry,
   });
 
   const extensions = new ExtensionManager(extensionList(config));

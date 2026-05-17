@@ -22,6 +22,7 @@ export interface EnsureNpmPackageArgs {
   version: string;
   packageSpec: string;
   bin: string;
+  registry?: string;
 }
 
 // Ensure the npm package for an agent is installed at
@@ -51,6 +52,7 @@ export async function ensureNpmPackage(
     agentId: args.agentId,
     packageSpec: args.packageSpec,
     installDir,
+    registry: args.registry,
   });
   if (!(await fileExists(binPath))) {
     throw new Error(
@@ -64,6 +66,7 @@ async function installInto(args: {
   agentId: string;
   packageSpec: string;
   installDir: string;
+  registry?: string;
 }): Promise<void> {
   await fsp.mkdir(path.dirname(args.installDir), { recursive: true });
   const tempDir = await fsp.mkdtemp(`${args.installDir}.partial-`);
@@ -74,6 +77,7 @@ async function installInto(args: {
     await runNpmInstall({
       packageSpec: args.packageSpec,
       cwd: tempDir,
+      registry: args.registry,
     });
     try {
       await fsp.rename(tempDir, args.installDir);
@@ -105,11 +109,13 @@ async function installInto(args: {
 function runNpmInstall(args: {
   packageSpec: string;
   cwd: string;
+  registry?: string;
 }): Promise<void> {
   return new Promise((resolve, reject) => {
+    const registryArgs = args.registry ? ["--registry", args.registry] : [];
     const child = spawn(
       "npm",
-      ["install", "--no-audit", "--no-fund", "--silent", args.packageSpec],
+      ["install", "--no-audit", "--no-fund", "--silent", ...registryArgs, args.packageSpec],
       {
         cwd: args.cwd,
         stdio: ["ignore", "pipe", "pipe"],

@@ -106,6 +106,11 @@ export const HydraConfig = z.object({
   // recency and truncated to this count. `--all` overrides in the CLI.
   sessionListColdLimit: z.number().int().nonnegative().default(20),
   extensions: z.record(ExtensionName, ExtensionBody).default({}),
+  // npm registry URL used when installing npm-distributed agents into
+  // ~/.hydra-acp/agents. Overrides the global ~/.npmrc registry so a
+  // corporate .npmrc pointing at an internal registry doesn't break
+  // public-package installs. Omit to let npm use its own defaults.
+  npmRegistry: z.string().url().optional(),
   tui: TuiConfig.default({
     repaintThrottleMs: 1000,
     maxScrollbackLines: 10_000,
