@@ -109,6 +109,16 @@ const DEFAULT_CONTENT_REPAINT_THROTTLE_MS = 1000;
 // `tui.maxScrollbackLines` in config.
 const DEFAULT_MAX_SCROLLBACK_LINES = 10_000;
 
+// Recognise a chunk that is just a bare URL (optionally with a trailing
+// newline). Some terminals deliver link drag-drops as raw keystrokes
+// rather than bracketed paste; without this, each char would be typed
+// and a trailing \n would submit the prompt before the URL was visible.
+const BARE_URL_RE = /^(https?|ftp):\/\/\S+$/;
+function matchBareUrl(text: string): string | null {
+  const stripped = text.replace(/\r\n?$|\n$/, "");
+  return BARE_URL_RE.test(stripped) ? stripped : null;
+}
+
 export class Screen {
   private term: Terminal;
   private dispatcher: InputDispatcher;
@@ -411,8 +421,15 @@ export class Screen {
       }
       const startIdx = text.indexOf(startMarker);
       if (startIdx === -1) {
-        // No paste markers in this chunk — forward to terminal-kit as-is.
-        if (this.terminalKitStdinHandler) {
+        // No paste markers in this chunk — forward to terminal-kit as-is,
+        // unless the chunk is a bare URL (some terminals deliver link
+        // drag-drops outside of bracketed paste, where each char would
+        // otherwise be processed as a keystroke and a trailing newline
+        // would submit the prompt).
+        const url = matchBareUrl(text);
+        if (url !== null) {
+          this.onKey([{ type: "paste", text: url }]);
+        } else if (this.terminalKitStdinHandler) {
           this.terminalKitStdinHandler(Buffer.from(text, "binary"));
         }
         return;
