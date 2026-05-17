@@ -5,12 +5,13 @@ import {
   listSessions,
   pickMostRecent,
 } from "./discovery.js";
+import { DEFAULT_DAEMON_PORT } from "../core/config.js";
 import type { HydraConfig } from "../core/config.js";
 
 const cfg = {
   daemon: {
     host: "127.0.0.1",
-    port: 8765,
+    port: DEFAULT_DAEMON_PORT,
     logLevel: "info" as const,
   },
 } as unknown as HydraConfig;
@@ -50,7 +51,7 @@ describe("listSessions", () => {
     }) as typeof fetch;
     const out = await listSessions(cfg, TOKEN, { cwd: "/x", all: true }, fetchImpl);
     expect(captured.url).toBe(
-      "http://127.0.0.1:8765/v1/sessions?cwd=%2Fx&all=true",
+      `http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions?cwd=%2Fx&all=true`,
     );
     expect(captured.auth).toBe("Bearer tok");
     expect(out).toEqual([
@@ -88,7 +89,7 @@ describe("killSession", () => {
       return new Response(null, { status: 204 });
     }) as typeof fetch;
     await killSession(cfg, TOKEN, "sess-1", fetchImpl);
-    expect(captured.url).toBe("http://127.0.0.1:8765/v1/sessions/sess-1/kill");
+    expect(captured.url).toBe(`http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/sess-1/kill`);
     expect(captured.method).toBe("POST");
     expect(captured.auth).toBe("Bearer tok");
   });
@@ -115,7 +116,7 @@ describe("deleteSession", () => {
       return new Response(null, { status: 204 });
     }) as typeof fetch;
     await deleteSession(cfg, TOKEN, "sess-1", fetchImpl);
-    expect(captured.url).toBe("http://127.0.0.1:8765/v1/sessions/sess-1");
+    expect(captured.url).toBe(`http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/sess-1`);
     expect(captured.method).toBe("DELETE");
     expect(captured.auth).toBe("Bearer tok");
   });

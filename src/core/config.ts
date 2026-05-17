@@ -12,9 +12,11 @@ const TlsConfig = z.object({
   key: z.string(),
 });
 
+export const DEFAULT_DAEMON_PORT = 55514;
+
 const DaemonConfig = z.object({
   host: z.string().default("127.0.0.1"),
-  port: z.number().int().positive().default(8765),
+  port: z.number().int().positive().default(DEFAULT_DAEMON_PORT),
   logLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   tls: TlsConfig.optional(),
   sessionIdleTimeoutSeconds: z.number().int().nonnegative().default(3600),

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { homedir } from "node:os";
 import * as fs from "node:fs/promises";
 import {
+  DEFAULT_DAEMON_PORT,
   defaultConfig,
   expandHome,
   loadConfig,
@@ -14,7 +15,7 @@ describe("defaultConfig", () => {
   it("emits a config with the expected daemon defaults", () => {
     const cfg = defaultConfig();
     expect(cfg.daemon.host).toBe("127.0.0.1");
-    expect(cfg.daemon.port).toBe(8765);
+    expect(cfg.daemon.port).toBe(DEFAULT_DAEMON_PORT);
     expect(cfg.registry.url).toContain("agentclientprotocol.com");
   });
 
@@ -30,7 +31,7 @@ describe("defaultConfig", () => {
 describe("loadConfig", () => {
   it("works when config.json is absent (returns defaults)", async () => {
     const cfg = await loadConfig();
-    expect(cfg.daemon.port).toBe(8765);
+    expect(cfg.daemon.port).toBe(DEFAULT_DAEMON_PORT);
     expect(cfg.daemon.host).toBe("127.0.0.1");
   });
 
@@ -128,7 +129,7 @@ describe("writeConfig", () => {
     const cfg = defaultConfig();
     await writeConfig(cfg);
     const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
-    expect(raw.daemon.port).toBe(8765);
+    expect(raw.daemon.port).toBe(DEFAULT_DAEMON_PORT);
     expect(raw.defaultAgent).toBe("claude-acp");
   });
 });

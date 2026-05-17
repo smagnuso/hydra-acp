@@ -2,15 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ExtensionManager, type ExtensionContext } from "./extensions.js";
+import { DEFAULT_DAEMON_PORT } from "./config.js";
 import type { ExtensionConfig } from "./config.js";
 
 function makeContext(home: string): ExtensionContext {
   return {
-    daemonUrl: "http://127.0.0.1:8765",
+    daemonUrl: `http://127.0.0.1:${DEFAULT_DAEMON_PORT}`,
     daemonHost: "127.0.0.1",
-    daemonPort: 8765,
+    daemonPort: DEFAULT_DAEMON_PORT,
     serviceToken: "hydra_token_test",
-    daemonWsUrl: "ws://127.0.0.1:8765/acp",
+    daemonWsUrl: `ws://127.0.0.1:${DEFAULT_DAEMON_PORT}/acp`,
     hydraHome: home,
   };
 }
@@ -78,11 +79,11 @@ describe("ExtensionManager", () => {
 
     const probe = (await waitForProbe()) as Record<string, string | undefined>;
 
-    expect(probe.url).toBe("http://127.0.0.1:8765");
+    expect(probe.url).toBe(`http://127.0.0.1:${DEFAULT_DAEMON_PORT}`);
     expect(probe.host).toBe("127.0.0.1");
-    expect(probe.port).toBe("8765");
+    expect(probe.port).toBe(String(DEFAULT_DAEMON_PORT));
     expect(probe.token).toBe("hydra_token_test");
-    expect(probe.ws).toBe("ws://127.0.0.1:8765/acp");
+    expect(probe.ws).toBe(`ws://127.0.0.1:${DEFAULT_DAEMON_PORT}/acp`);
     expect(probe.home).toBe(tmpHome);
     expect(probe.name).toBe("probe");
     expect(probe.custom).toBe("hello");

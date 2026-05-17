@@ -331,7 +331,7 @@ When you ask hydra to spawn an agent (via `launch <agent>`, `--agent`, or `HYDRA
 {
   "daemon": {
     "host": "127.0.0.1",
-    "port": 8765,
+    "port": 55514,
     "logLevel": "info"
   },
   "registry": {
@@ -375,11 +375,11 @@ Each extension is launched with these env vars set:
 
 | Env var | Example |
 |---|---|
-| `HYDRA_ACP_DAEMON_URL` | `http://127.0.0.1:8765` |
+| `HYDRA_ACP_DAEMON_URL` | `http://127.0.0.1:55514` |
 | `HYDRA_ACP_DAEMON_HOST` | `127.0.0.1` |
-| `HYDRA_ACP_DAEMON_PORT` | `8765` |
+| `HYDRA_ACP_DAEMON_PORT` | `55514` |
 | `HYDRA_ACP_TOKEN` | `hydra_token_<hex>` |
-| `HYDRA_ACP_WS_URL` | `ws://127.0.0.1:8765/acp` |
+| `HYDRA_ACP_WS_URL` | `ws://127.0.0.1:55514/acp` |
 | `HYDRA_ACP_HOME` | `~/.hydra-acp` |
 | `HYDRA_ACP_EXTENSION_NAME` | the `name` from config |
 
@@ -482,7 +482,7 @@ The daemon's WSS endpoint follows the [Streamable HTTP & WebSocket Transport RFD
 
 ```
 GET /acp HTTP/1.1
-Host: localhost:8765
+Host: localhost:55514
 Upgrade: websocket
 Sec-WebSocket-Protocol: acp.v1, hydra-acp-token.<token>
 ```
