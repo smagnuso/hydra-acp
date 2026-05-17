@@ -223,6 +223,7 @@ function npxPackageBasename(agent: RegistryAgent): string | undefined {
 export async function planSpawn(
   agent: RegistryAgent,
   callerArgs: string[] = [],
+  options: { npmRegistry?: string } = {},
 ): Promise<SpawnPlan> {
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
@@ -244,6 +245,7 @@ export async function planSpawn(
       version: agent.version ?? "current",
       packageSpec: npx.package,
       bin,
+      registry: options.npmRegistry,
     });
     return {
       command: binPath,

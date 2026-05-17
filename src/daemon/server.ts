@@ -105,6 +105,7 @@ export async function startDaemon(config: HydraConfig): Promise<DaemonHandle> {
     defaultModels: config.defaultModels,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,
+    npmRegistry: config.npmRegistry,
   });
 
   const extensions = new ExtensionManager(extensionList(config));
