@@ -239,7 +239,32 @@ export function registerAcpWsEndpoint(
         err.code = JsonRpcErrorCodes.SessionNotFound;
         throw err;
       }
-      const session = deps.manager.require(params.sessionId);
+      let session = deps.manager.get(params.sessionId);
+      if (!session) {
+        // Session was killed while this WS connection remained open — the
+        // state.attached entry is stale. Resurrect from disk so the prompt
+        // proceeds without requiring the client to re-attach explicitly.
+        const fromDisk = await deps.manager.loadFromDisk(params.sessionId);
+        if (!fromDisk) {
+          const err = new Error(
+            `session ${params.sessionId} not found`,
+          ) as Error & { code: number };
+          err.code = JsonRpcErrorCodes.SessionNotFound;
+          throw err;
+        }
+        app.log.info(
+          `session/prompt auto-resurrecting cold sessionId=${params.sessionId}`,
+        );
+        session = await deps.manager.resurrect(fromDisk);
+        const client = bindClientToSession(
+          connection,
+          session,
+          state,
+          undefined,
+          att.clientId,
+        );
+        await session.attach(client, "none");
+      }
       return session.prompt(att.clientId, params);
     });
 
