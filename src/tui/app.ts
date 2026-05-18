@@ -1099,6 +1099,25 @@ async function runSession(
     resume(nextOpts);
   };
 
+  const cycleLiveSession = async (): Promise<void> => {
+    if (!finishSession)
+      return;
+    const sessions = await listSessions(config, serviceToken);
+    const live = sessions.filter((s) => s.status === "live");
+    if (live.length <= 1)
+      return;
+    const idx = live.findIndex((s) => s.sessionId === resolvedSessionId);
+    const next = live[(idx + 1) % live.length]!;
+    const resume = finishSession;
+    finishSession = null;
+    process.off("SIGINT", sigintHandler);
+    void stream.close().catch(() => undefined);
+    const nextOpts: TuiOptions = { ...opts, sessionId: next.sessionId, cwd: resolvedCwd };
+    if (next.agentId !== undefined)
+      nextOpts.agentId = next.agentId;
+    resume(nextOpts);
+  };
+
   // The dispatcher's queue indices reference the "waiting" slice (the
   // head being processed is invisible to queue editing). Translate back
   // into the real promptQueue offset when applying changes.
@@ -1178,6 +1197,9 @@ async function runSession(
         return;
       case "switch-session":
         void switchSession();
+        return;
+      case "next-live-session":
+        void cycleLiveSession();
         return;
       case "toggle-tools":
         toolsExpanded = !toolsExpanded;

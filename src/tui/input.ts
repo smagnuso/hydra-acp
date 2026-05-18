@@ -32,6 +32,7 @@ export type KeyName =
   | "ctrl-s"
   | "ctrl-u"
   | "ctrl-v"
+  | "ctrl-t"
   | "ctrl-w"
   | "ctrl-y"
   | "escape";
@@ -78,6 +79,7 @@ export type InputEffect =
   | { type: "scroll-to-top" }
   | { type: "scroll-to-bottom" }
   | { type: "switch-session" }
+  | { type: "next-live-session" }
   | { type: "toggle-tools" }
   // Dispatcher → app: please acquire an image from the named source
   // (currently only the system clipboard) and call addAttachment().
@@ -378,6 +380,8 @@ export class InputDispatcher {
         return [{ type: "redraw" }];
       case "ctrl-p":
         return [{ type: "switch-session" }];
+      case "ctrl-t":
+        return [{ type: "next-live-session" }];
       case "ctrl-r":
         return this.startHistorySearch();
       case "ctrl-s":

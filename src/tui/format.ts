@@ -111,7 +111,8 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
       // Usage is rendered in the header by the app, not in scrollback.
       return [];
     case "available-commands":
-      // Commands are stored as completion data, not rendered to scrollback.
+    case "available-modes":
+      // Stored as completion/mode data, not rendered to scrollback.
       return [];
     case "session-info":
       // Title is rendered in the header by the app, not in scrollback.

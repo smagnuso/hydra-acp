@@ -211,7 +211,7 @@ export class Screen {
   private banner: BannerState = {
     status: "ready",
     currentMode: undefined,
-    hint: "⇧⇥ mode · ⌥⏎ newline · ⌃V paste · ⌃P pick · ⌃C cancel · ⌃D detach",
+    hint: "⇧⇥ mode · ⌃V paste · ⌃P pick · ⌃C cancel · ⌃D detach",
     queued: 0,
   };
   private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
@@ -2958,6 +2958,8 @@ function mapKeyName(name: string): KeyName | null {
     case "ALT_ENTER":
     case "META_ENTER":
       return "alt-enter";
+    case "CTRL_T":
+      return "ctrl-t";
     case "SHIFT_TAB":
       return "shift-tab";
     case "TAB":

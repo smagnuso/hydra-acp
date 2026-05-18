@@ -1,5 +1,6 @@
 import { EventEmitter, Readable } from "node:stream";
 import fs from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -72,21 +73,18 @@ function withOsascriptCapture(
   png: Buffer | null,
 ): SpawnLike {
   return (cmd, args) => {
-    let chosenPath: string | null = null;
-    for (const a of args) {
-      const m = a.match(/POSIX file "([^"]+)"/);
-      if (m) {
-        chosenPath = m[1] ?? null;
+    // Write the file synchronously before inner() queues the close
+    // microtask — otherwise close fires before the async write lands.
+    if (png) {
+      for (const a of args) {
+        const m = a.match(/POSIX file "([^"]+)"/);
+        if (m?.[1]) {
+          writeFileSync(m[1], png);
+          break;
+        }
       }
     }
-    const proc = inner(cmd, args);
-    if (chosenPath && png) {
-      const dest = chosenPath;
-      queueMicrotask(() => {
-        fs.writeFile(dest, png).catch(() => undefined);
-      });
-    }
-    return proc;
+    return inner(cmd, args);
   };
 }
 
