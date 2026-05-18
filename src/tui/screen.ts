@@ -696,12 +696,12 @@ export class Screen {
       return;
     }
     this.lastWindowTitle = clean;
-    process.stdout.write(`\x1b]2;${clean}\x1b\\`);
+    process.stdout.write(`\x1b]0;${clean}\x1b\\`);
   }
 
   clearWindowTitle(): void {
     this.lastWindowTitle = null;
-    process.stdout.write("\x1b]2;\x1b\\");
+    process.stdout.write("\x1b]0;\x1b\\");
   }
 
   setBanner(banner: Partial<BannerState>): void {
