@@ -114,8 +114,10 @@ export function registerAcpWsEndpoint(
           }
         })();
       });
+      const modesPayload = buildModesPayload(session);
       return {
         sessionId: session.sessionId,
+        ...(modesPayload ? { modes: modesPayload } : {}),
         _meta: buildResponseMeta(session),
       };
     });
@@ -189,6 +191,7 @@ export function registerAcpWsEndpoint(
         await connection.notify(note.method, note.params);
       }
       session.replayPendingPermissions(client);
+      const modesPayload = buildModesPayload(session);
       return {
         sessionId: session.sessionId,
         clientId: client.clientId,
@@ -199,6 +202,7 @@ export function registerAcpWsEndpoint(
         // ran, not what was asked for.
         historyPolicy: appliedPolicy,
         replayed: replay.length,
+        ...(modesPayload ? { modes: modesPayload } : {}),
         _meta: buildResponseMeta(session),
       };
     });
@@ -342,8 +346,10 @@ export function registerAcpWsEndpoint(
         await connection.notify(note.method, note.params);
       }
       session.replayPendingPermissions(client);
+      const modesPayload = buildModesPayload(session);
       return {
         sessionId: session.sessionId,
+        ...(modesPayload ? { modes: modesPayload } : {}),
         _meta: buildResponseMeta(session),
       };
     });
@@ -381,6 +387,44 @@ export function registerAcpWsEndpoint(
   });
 }
 
+// Spec-shaped `modes` payload for session/new and session/attach responses.
+// Per zNewSessionResponse in the ACP SDK, the response should include a
+// top-level `modes: { currentModeId, availableModes: SessionMode[] }`.
+// Hydra exposes its tracked modes here so generic clients (agent-shell, Zed)
+// see the mode list without needing to read hydra's `_meta` namespace.
+// Returns undefined when the session has no advertised modes — in that
+// case we omit the field entirely (the schema is `.nullish()`).
+function buildModesPayload(
+  session: Session,
+):
+  | {
+      currentModeId: string;
+      availableModes: Array<{ id: string; name: string; description?: string }>;
+    }
+  | undefined {
+  const modes = session.availableModes();
+  if (modes.length === 0) {
+    return undefined;
+  }
+  const availableModes = modes.map((m) => {
+    const out: { id: string; name: string; description?: string } = {
+      id: m.id,
+      // ACP spec requires `name` — fall back to id when the agent didn't
+      // supply one so we never emit an invalid SessionMode.
+      name: m.name ?? m.id,
+    };
+    if (m.description !== undefined) {
+      out.description = m.description;
+    }
+    return out;
+  });
+  // If we never observed a current mode (e.g. agent emits only the list and
+  // not a current_mode_update), point at the first mode so the spec field
+  // is non-empty rather than dropping `currentModeId` entirely.
+  const currentModeId = session.currentMode ?? modes[0]!.id;
+  return { currentModeId, availableModes };
+}
+
 function buildResponseMeta(session: Session): Record<string, unknown> {
   const ours: Record<string, unknown> = {
     upstreamSessionId: session.upstreamSessionId,
@@ -409,6 +453,10 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
   const commands = session.mergedAvailableCommands();
   if (commands.length > 0) {
     ours.availableCommands = commands;
+  }
+  const modes = session.availableModes();
+  if (modes.length > 0) {
+    ours.availableModes = modes;
   }
   // Mid-turn at attach time: hand the client the original prompt's
   // recordedAt so it can boot directly into "busy · Ns" instead of

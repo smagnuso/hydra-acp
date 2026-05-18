@@ -42,7 +42,7 @@ export interface ScreenOptions {
 
 interface BannerState {
   status: string;
-  planMode: boolean;
+  currentMode: string | undefined;
   hint: string;
   queued: number;
   // Elapsed time the current turn has been running, in milliseconds.
@@ -210,8 +210,8 @@ export class Screen {
   private bannerSearchIndicator: string | null = null;
   private banner: BannerState = {
     status: "ready",
-    planMode: false,
-    hint: "⇧⇥ plan · ⌥⏎ newline · ⌃V paste · ⌃P pick · ⌃C cancel · ⌃D detach",
+    currentMode: undefined,
+    hint: "⇧⇥ mode · ⌥⏎ newline · ⌃V paste · ⌃P pick · ⌃C cancel · ⌃D detach",
     queued: 0,
   };
   private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
@@ -709,6 +709,10 @@ export class Screen {
     this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
     this.drawBanner();
     this.placeCursor();
+  }
+
+  currentModeId(): string | undefined {
+    return this.banner.currentMode;
   }
 
   // OSC 9;4 progress-bar control. State 3 = indeterminate (pulsing
@@ -1912,11 +1916,10 @@ export class Screen {
     const sig =
       `bnr|${w}|${this.banner.status}|${elapsedStr}|` +
       `${this.banner.queued}|${this.scrollOffset}|` +
-      `${this.banner.planMode ? "1" : "0"}|${this.banner.hint}|` +
+      `${this.banner.currentMode ?? ""}|${this.banner.hint}|` +
       rightSig;
     this.paintRow(row, sig, () => {
       const dot = this.banner.status === "busy" ? "●" : "○";
-      const planLabel = this.banner.planMode ? "plan: ON " : "plan: off";
       if (this.banner.status === "busy") {
         this.term.brightYellow(`${dot} ${this.banner.status}`);
         if (elapsedStr) {
@@ -1935,13 +1938,13 @@ export class Screen {
       if (this.scrollOffset > 0) {
         this.term(" · ").brightCyan(`↑ ${this.scrollOffset}`);
       }
-      this.term(" · ");
-      if (this.banner.planMode) {
-        this.term.brightYellow(planLabel);
-      } else {
-        this.term.dim(planLabel);
-      }
-      this.term(" · ").dim(this.banner.hint);
+      const hint = this.banner.currentMode
+        ? this.banner.hint.replace(
+            "⇧⇥ mode",
+            `⇧⇥ mode(${this.banner.currentMode})`,
+          )
+        : this.banner.hint;
+      this.term(" · ").dim(hint);
       if (right) {
         // Right-aligned. moveTo + eraseLineAfter clears anything the
         // hint extended into this region, then we write the slot text.

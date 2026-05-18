@@ -129,6 +129,12 @@ export interface HydraAdvertisedCommand {
   description?: string;
 }
 
+export interface HydraAdvertisedMode {
+  id: string;
+  name?: string;
+  description?: string;
+}
+
 export interface HydraMeta {
   upstreamSessionId?: string;
   agentId?: string;
@@ -151,6 +157,7 @@ export interface HydraMeta {
   // the next live usage_update.
   currentUsage?: SessionListUsage;
   availableCommands?: HydraAdvertisedCommand[];
+  availableModes?: HydraAdvertisedMode[];
   // Epoch-ms when the in-flight agent turn began. Present only when
   // mid-turn at attach response time; lets a fresh client boot with
   // the busy banner already showing the right elapsed time rather
@@ -227,6 +234,29 @@ export function extractHydraMeta(
     }
     if (cmds.length > 0) {
       out.availableCommands = cmds;
+    }
+  }
+  if (Array.isArray(obj.availableModes)) {
+    const modes: HydraAdvertisedMode[] = [];
+    for (const raw of obj.availableModes) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const m = raw as Record<string, unknown>;
+      if (typeof m.id !== "string") {
+        continue;
+      }
+      const mode: HydraAdvertisedMode = { id: m.id };
+      if (typeof m.name === "string") {
+        mode.name = m.name;
+      }
+      if (typeof m.description === "string") {
+        mode.description = m.description;
+      }
+      modes.push(mode);
+    }
+    if (modes.length > 0) {
+      out.availableModes = modes;
     }
   }
   return out;

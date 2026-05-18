@@ -15,6 +15,7 @@ import {
   generateLineageId,
   recordFromMemorySession,
   type PersistedAgentCommand,
+  type PersistedAgentMode,
   type PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
@@ -22,7 +23,7 @@ import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-
 import { paths } from "./paths.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
 import type { Bundle } from "./bundle.js";
-import type { AdvertisedCommand } from "./hydra-commands.js";
+import type { AdvertisedCommand, AdvertisedMode } from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
 import { HYDRA_VERSION } from "./hydra-version.js";
@@ -57,6 +58,7 @@ export interface ResurrectParams {
   currentMode?: string;
   currentUsage?: UsageSnapshot;
   agentCommands?: AdvertisedCommand[];
+  agentModes?: AdvertisedMode[];
   // Original create time, preserved across resurrect so `sessions list`
   // shows when the conversation actually began rather than the latest
   // wakeup.
@@ -143,6 +145,8 @@ export class SessionManager {
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: fresh.initialModel,
+      currentMode: fresh.initialMode,
+      agentModes: fresh.initialModes,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -273,9 +277,12 @@ export class SessionManager {
       // session/load response body.
       currentModel:
         params.currentModel ?? extractInitialModel(loadResult ?? {}),
-      currentMode: params.currentMode,
+      currentMode:
+        params.currentMode ?? extractInitialCurrentMode(loadResult ?? {}),
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
+      agentModes:
+        params.agentModes ?? nonEmptyOrUndefined(extractInitialModes(loadResult ?? {})),
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
       // or never seeded) should re-derive from the next prompt rather
@@ -326,9 +333,10 @@ export class SessionManager {
       // Prefer the stored value (set by a previous current_model_update);
       // fall back to whatever the agent ships in its session/new response.
       currentModel: params.currentModel ?? fresh.initialModel,
-      currentMode: params.currentMode,
+      currentMode: params.currentMode ?? fresh.initialMode,
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
+      agentModes: params.agentModes ?? fresh.initialModes,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
@@ -370,6 +378,8 @@ export class SessionManager {
     upstreamSessionId: string;
     agentMeta?: Record<string, unknown>;
     initialModel?: string;
+    initialModes?: AdvertisedMode[];
+    initialMode?: string;
   }> {
     const agentDef = await this.registry.getAgent(params.agentId);
     if (!agentDef) {
@@ -425,11 +435,15 @@ export class SessionManager {
           // old model; misconfigurations surface in daemon logs upstream.
         }
       }
+      const initialModes = extractInitialModes(newResult);
+      const initialMode = extractInitialCurrentMode(newResult);
       return {
         agent,
         upstreamSessionId: sessionIdRaw,
         agentMeta: newResult._meta as Record<string, unknown> | undefined,
         initialModel,
+        initialModes: initialModes.length > 0 ? initialModes : undefined,
+        initialMode,
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);
@@ -482,6 +496,15 @@ export class SessionManager {
         agentCommands: commands.map((c) => ({
           name: c.name,
           ...(c.description !== undefined ? { description: c.description } : {}),
+        })),
+      }).catch(() => undefined);
+    });
+    session.onAgentModesChange((modes) => {
+      void this.persistSnapshot(session.sessionId, {
+        agentModes: modes.map((m) => ({
+          id: m.id,
+          ...(m.name !== undefined ? { name: m.name } : {}),
+          ...(m.description !== undefined ? { description: m.description } : {}),
         })),
       }).catch(() => undefined);
     });
@@ -541,6 +564,7 @@ export class SessionManager {
       currentMode: record.currentMode,
       currentUsage: persistedUsageToSnapshot(record.currentUsage),
       agentCommands: record.agentCommands,
+      agentModes: record.agentModes,
       createdAt: record.createdAt,
     };
   }
@@ -871,6 +895,7 @@ export class SessionManager {
       currentMode?: string;
       currentUsage?: PersistedUsage;
       agentCommands?: PersistedAgentCommand[];
+      agentModes?: PersistedAgentMode[];
     },
   ): Promise<void> {
     await this.enqueueMetaWrite(sessionId, async () => {
@@ -891,6 +916,9 @@ export class SessionManager {
           : {}),
         ...(update.agentCommands !== undefined
           ? { agentCommands: update.agentCommands }
+          : {}),
+        ...(update.agentModes !== undefined
+          ? { agentModes: update.agentModes }
           : {}),
         updatedAt: new Date().toISOString(),
       });
@@ -953,6 +981,21 @@ function mergeForPersistence(
           })
       : undefined;
   const agentCommands = persistedCommands ?? existing?.agentCommands;
+  const sessionModes = session.availableModes();
+  const persistedModes =
+    sessionModes.length > 0
+      ? sessionModes.map((m): PersistedAgentMode => {
+          const out: PersistedAgentMode = { id: m.id };
+          if (m.name !== undefined) {
+            out.name = m.name;
+          }
+          if (m.description !== undefined) {
+            out.description = m.description;
+          }
+          return out;
+        })
+      : undefined;
+  const agentModes = persistedModes ?? existing?.agentModes;
   return recordFromMemorySession({
     sessionId: session.sessionId,
     lineageId: existing?.lineageId ?? generateLineageId(),
@@ -969,6 +1012,7 @@ function mergeForPersistence(
     currentUsage:
       usageSnapshotToPersisted(session.currentUsage) ?? existing?.currentUsage,
     agentCommands,
+    agentModes,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }
@@ -1063,6 +1107,126 @@ function asString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function nonEmptyOrUndefined<T>(arr: T[]): T[] | undefined {
+  return arr.length > 0 ? arr : undefined;
+}
+
+// Pull an available-modes list from a session/new or session/load response.
+// Agents are inconsistent about where they put it:
+//   - claude-agent-acp / opencode: `result.modes.availableModes` (items have
+//     `{ id, name?, description? }` — sometimes `modeId` instead of `id`)
+//   - hypothetical spec-strict agent: top-level `result.availableModes`
+//   - notification-only agents: nothing here; modes arrive later via
+//     `available_modes_update` and this path returns []
+export function extractInitialModes(
+  result: Record<string, unknown>,
+): AdvertisedMode[] {
+  const direct = parseModesList(result.availableModes);
+  if (direct.length > 0) {
+    return direct;
+  }
+  const modes = result.modes;
+  if (modes && typeof modes === "object" && !Array.isArray(modes)) {
+    const fromModesObj = parseModesList(
+      (modes as Record<string, unknown>).availableModes,
+    );
+    if (fromModesObj.length > 0) {
+      return fromModesObj;
+    }
+  }
+  const meta = result._meta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    for (const [key, value] of Object.entries(
+      meta as Record<string, unknown>,
+    )) {
+      if (key === "hydra-acp") {
+        continue;
+      }
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const fromMeta = parseModesList(
+          (value as Record<string, unknown>).availableModes,
+        );
+        if (fromMeta.length > 0) {
+          return fromMeta;
+        }
+      }
+    }
+  }
+  return [];
+}
+
+// Pull a current-mode id from a session/new or session/load response.
+// Mirrors extractInitialModel's structure.
+export function extractInitialCurrentMode(
+  result: Record<string, unknown>,
+): string | undefined {
+  const direct =
+    asString(result.currentModeId) ??
+    asString(result.currentMode) ??
+    asString(result.modeId) ??
+    asString(result.mode);
+  if (direct) {
+    return direct;
+  }
+  const modes = result.modes;
+  if (modes && typeof modes === "object" && !Array.isArray(modes)) {
+    const m =
+      asString((modes as Record<string, unknown>).currentModeId) ??
+      asString((modes as Record<string, unknown>).currentMode);
+    if (m) {
+      return m;
+    }
+  }
+  const meta = result._meta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    for (const [key, value] of Object.entries(
+      meta as Record<string, unknown>,
+    )) {
+      if (key === "hydra-acp") {
+        continue;
+      }
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const m =
+          asString((value as Record<string, unknown>).currentModeId) ??
+          asString((value as Record<string, unknown>).currentMode) ??
+          asString((value as Record<string, unknown>).modeId);
+        if (m) {
+          return m;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function parseModesList(list: unknown): AdvertisedMode[] {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const out: AdvertisedMode[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const r = raw as Record<string, unknown>;
+    const id = asString(r.id) ?? asString(r.modeId);
+    if (!id) {
+      continue;
+    }
+    const mode: AdvertisedMode = { id };
+    const name = asString(r.name);
+    if (name) {
+      mode.name = name;
+    }
+    const description = asString(r.description);
+    if (description) {
+      mode.description = description;
+    }
+    out.push(mode);
+  }
+  return out;
 }
 
 async function loadPromptHistorySafely(sessionId: string): Promise<string[]> {

@@ -52,6 +52,7 @@ import {
   normalizeAdvertisedCommands,
   sanitizeSingleLine,
   type AvailableCommand,
+  type AvailableMode,
   type RenderEvent,
 } from "../core/render-update.js";
 import {
@@ -82,10 +83,6 @@ interface SessionContext {
   cwd: string;
 }
 
-const PLAN_PREFIX_TEXT =
-  "Plan mode is on. Outline what you would do without making any changes. " +
-  "Do not edit files, run shell commands, or otherwise execute side effects; " +
-  "produce a plan only.";
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const config = await loadConfig();
@@ -529,6 +526,7 @@ async function runSession(
   let initialModel: string | undefined;
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
+  let initialModes: AvailableMode[] | undefined;
   // Last-known usage at attach time, surfaced by the daemon's meta so the
   // sessionbar can show tokens/cost immediately on reopen rather than
   // waiting for the next live usage_update event.
@@ -572,6 +570,9 @@ async function runSession(
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
     }
+    if (hydraMeta.availableModes) {
+      initialModes = hydraMeta.availableModes;
+    }
   } else {
     const attached = (await conn.request("session/attach", {
       sessionId: ctx.sessionId,
@@ -597,6 +598,9 @@ async function runSession(
     initialTurnStartedAt = hydraMeta.turnStartedAt;
     if (hydraMeta.availableCommands) {
       initialCommands = normalizeAdvertisedCommands(hydraMeta.availableCommands);
+    }
+    if (hydraMeta.availableModes) {
+      initialModes = hydraMeta.availableModes;
     }
   }
 
@@ -690,6 +694,8 @@ async function runSession(
   // Seeded from the attach/new response _meta so the slash-completion
   // palette is populated before any history replay or live update.
   let agentCommands: AvailableCommand[] = initialCommands ?? [];
+  // Available modes advertised by the agent. Used by Shift+Tab to cycle.
+  let agentModes: AvailableMode[] = initialModes ?? [];
 
   const allCommands = (): AvailableCommand[] => {
     const seen = new Set<string>();
@@ -878,12 +884,10 @@ async function runSession(
   });
   // Surface initial snapshot state (delivered via _meta on attach) so a
   // late-joining or cold-resurrected client sees the current mode
-  // immediately — equivalent to what history replay used to do before
-  // these moved into meta.json. The model isn't replayed: it's already
-  // visible in the header (`agent(model)`), so a scrollback line would
-  // just be noise on every session start.
+  // immediately. The banner shows it; no need to also write it into
+  // scrollback (that would re-noise every session start).
   if (initialMode) {
-    screen.appendLines(formatEvent({ kind: "mode-changed", mode: initialMode }));
+    screen.setBanner({ currentMode: initialMode });
   }
   void getPendingUpdate().then((info) => {
     if (info) {
@@ -1103,19 +1107,14 @@ async function runSession(
   const handleEffect = (effect: InputEffect): void => {
     switch (effect.type) {
       case "send":
-        enqueuePrompt(effect.text, effect.planMode, effect.attachments);
+        enqueuePrompt(effect.text, effect.attachments);
         return;
       case "queue-edit": {
         const realIdx = effect.index + queueHeadOffset();
         const existing = promptQueue[realIdx];
         if (existing) {
-          // Preserve the slot's original planMode — the user is editing
-          // text, not re-deciding plan mode for this slot. Attachments
-          // are overwritten with the new submission's set: editing
-          // produces a new "draft" so the user's most recent chips win.
           promptQueue[realIdx] = {
             text: effect.text,
-            planMode: existing.planMode,
             attachments: effect.attachments,
           };
           refreshQueueDisplay();
@@ -1163,7 +1162,7 @@ async function runSession(
         void requestExit();
         return;
       case "plan-toggle":
-        screen.setBanner({ planMode: effect.on });
+        void handleModeToggle(effect.on);
         return;
       case "redraw-banner":
         screen.setBanner({});
@@ -1297,7 +1296,6 @@ async function runSession(
   // prompts back-to-back.
   const promptQueue: Array<{
     text: string;
-    planMode: boolean;
     attachments: Attachment[];
   }> = [];
   let workerActive = false;
@@ -1320,7 +1318,6 @@ async function runSession(
 
   const enqueuePrompt = (
     text: string,
-    planMode: boolean,
     attachments: Attachment[],
   ): void => {
     // Sending a prompt always snaps the view to the bottom — the user
@@ -1332,9 +1329,35 @@ async function runSession(
     history = appendEntry(history, text);
     dispatcher.setHistory(history);
     saveHistory(historyFile, history).catch(() => undefined);
-    promptQueue.push({ text, planMode, attachments });
+    promptQueue.push({ text, attachments });
     refreshQueueDisplay();
     tickWorker();
+  };
+
+  // Handles Shift+Tab: cycles through agentModes and sets the mode on the
+  // agent via session/set_mode. When no modes are advertised, we have
+  // nothing to cycle through — agents typically reject empty modeId.
+  const handleModeToggle = async (_on: boolean): Promise<void> => {
+    if (agentModes.length === 0) {
+      screen.notify("no modes advertised by agent");
+      return;
+    }
+    const currentMode = screen.currentModeId();
+    const idx = agentModes.findIndex((m) => m.id === currentMode);
+    const nextIdx = idx === -1 ? 0 : (idx + 1) % agentModes.length;
+    const newModeId = agentModes[nextIdx]?.id;
+    if (!newModeId) {
+      return;
+    }
+    screen.setBanner({ currentMode: newModeId });
+    try {
+      await conn.request("session/set_mode", {
+        sessionId: resolvedSessionId,
+        modeId: newModeId,
+      });
+    } catch (err) {
+      screen.notify(`set_mode failed: ${(err as Error).message}`);
+    }
   };
 
   // Start the worker iff there's queued work and the session is idle.
@@ -1517,7 +1540,7 @@ async function runSession(
         // Drop the head from the visual queue zone — it's about to be
         // echoed into scrollback as a real user message.
         refreshQueueDisplay();
-        await processPrompt(next.text, next.planMode, next.attachments);
+        await processPrompt(next.text, next.attachments);
         // Now that processing is fully done (including turn-complete),
         // shift the head off so the next iteration's slice(1) is correct.
         promptQueue.shift();
@@ -1544,7 +1567,6 @@ async function runSession(
 
   const processPrompt = async (
     text: string,
-    planMode: boolean,
     attachments: Attachment[],
   ): Promise<void> => {
     const userBlocks: Array<Record<string, unknown>> = [];
@@ -1554,9 +1576,7 @@ async function runSession(
     for (const a of attachments) {
       userBlocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
     }
-    const promptArr = planMode
-      ? [{ type: "text", text: PLAN_PREFIX_TEXT }, ...userBlocks]
-      : userBlocks;
+    const promptArr = userBlocks;
 
     // Mark a turn as in-flight before any await so a near-simultaneous
     // enqueue from this client (or a peer broadcast) doesn't slip a
@@ -1819,6 +1839,14 @@ async function runSession(
     if (event.kind === "available-commands") {
       agentCommands = event.commands;
       refreshCompletions();
+      return;
+    }
+    if (event.kind === "available-modes") {
+      agentModes = event.modes;
+      return;
+    }
+    if (event.kind === "mode-changed") {
+      screen.setBanner({ currentMode: event.mode || undefined });
       return;
     }
     if (event.kind === "session-info") {

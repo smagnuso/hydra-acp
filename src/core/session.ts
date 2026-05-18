@@ -31,6 +31,7 @@ import {
   HYDRA_COMMANDS,
   hydraCommandsAsAdvertised,
   type AdvertisedCommand,
+  type AdvertisedMode,
 } from "./hydra-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
@@ -103,6 +104,7 @@ export interface SessionInit {
   currentMode?: string;
   currentUsage?: UsageSnapshot;
   agentCommands?: AdvertisedCommand[];
+  agentModes?: AdvertisedMode[];
   // Suppress the first-prompt title heuristic. Set by SessionManager
   // when resurrecting a session whose title is already meaningful (from
   // a prior life's prompt seed, /hydra title, or regenTitle) — without
@@ -207,12 +209,16 @@ export class Session {
   // can deliver the merged list via _meta without depending on history
   // replay.
   private agentAdvertisedCommands: AdvertisedCommand[] = [];
+  // Last available_modes_update we observed from the agent. Same
+  // pattern as commands: cache, persist, broadcast on change.
+  private agentAdvertisedModes: AdvertisedMode[] = [];
   // Persist hooks for snapshot-shaped state. SessionManager hooks these
   // to mirror changes into meta.json so cold-resurrect attaches can
   // surface the latest snapshot via the attach response _meta.
   private agentCommandsHandlers: Array<
     (commands: AdvertisedCommand[]) => void
   > = [];
+  private agentModesHandlers: Array<(modes: AdvertisedMode[]) => void> = [];
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
@@ -232,6 +238,9 @@ export class Session {
     this.currentUsage = init.currentUsage;
     if (init.agentCommands && init.agentCommands.length > 0) {
       this.agentAdvertisedCommands = [...init.agentCommands];
+    }
+    if (init.agentModes && init.agentModes.length > 0) {
+      this.agentAdvertisedModes = [...init.agentModes];
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
@@ -267,6 +276,16 @@ export class Session {
     });
   }
 
+  private broadcastAvailableModes(): void {
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "available_modes_update",
+        availableModes: this.agentAdvertisedModes,
+      },
+    });
+  }
+
   // Register session/update, session/request_permission, and onExit
   // handlers on an agent connection. Re-run on every /hydra agent so
   // the new agent is plumbed identically. The exit handler's identity
@@ -291,6 +310,12 @@ export class Session {
       const agentCmds = extractAdvertisedCommands(params);
       if (agentCmds !== null) {
         this.setAgentAdvertisedCommands(agentCmds);
+        return;
+      }
+      // available_modes_update: same pattern as commands.
+      const agentModes = extractAdvertisedModes(params);
+      if (agentModes !== null) {
+        this.setAgentAdvertisedModes(agentModes);
         return;
       }
       // current_model_update / current_mode_update are similarly
@@ -508,7 +533,7 @@ export class Session {
           sessionId,
           update: {
             sessionUpdate: "current_mode_update",
-            currentMode: this.currentMode,
+            currentModeId: this.currentMode,
           },
         },
         recordedAt,
@@ -523,6 +548,19 @@ export class Session {
           update: {
             sessionUpdate: "available_commands_update",
             availableCommands: cmds,
+          },
+        },
+        recordedAt,
+      });
+    }
+    if (this.agentAdvertisedModes.length > 0) {
+      out.push({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "available_modes_update",
+            availableModes: [...this.agentAdvertisedModes],
           },
         },
         recordedAt,
@@ -886,6 +924,7 @@ export class Session {
     const obj = (params ?? {}) as { update?: unknown };
     const update = (obj.update ?? {}) as {
       sessionUpdate?: unknown;
+      currentModeId?: unknown;
       currentMode?: unknown;
       mode?: unknown;
     };
@@ -893,7 +932,9 @@ export class Session {
       return false;
     }
     const raw =
-      typeof update.currentMode === "string"
+      typeof update.currentModeId === "string"
+        ? update.currentModeId
+        : typeof update.currentMode === "string"
         ? update.currentMode
         : typeof update.mode === "string"
         ? update.mode
@@ -991,6 +1032,22 @@ export class Session {
     this.broadcastMergedCommands();
   }
 
+  private setAgentAdvertisedModes(modes: AdvertisedMode[]): void {
+    if (sameAdvertisedModes(this.agentAdvertisedModes, modes)) {
+      this.broadcastAvailableModes();
+      return;
+    }
+    this.agentAdvertisedModes = modes;
+    for (const handler of this.agentModesHandlers) {
+      try {
+        handler(modes);
+      } catch {
+        void 0;
+      }
+    }
+    this.broadcastAvailableModes();
+  }
+
   // Subscribe to snapshot-state updates. SessionManager wires these to
   // persist the new value into meta.json so cold resurrect can restore
   // them via the attach response _meta.
@@ -998,6 +1055,10 @@ export class Session {
     handler: (commands: AdvertisedCommand[]) => void,
   ): void {
     this.agentCommandsHandlers.push(handler);
+  }
+
+  onAgentModesChange(handler: (modes: AdvertisedMode[]) => void): void {
+    this.agentModesHandlers.push(handler);
   }
 
   onModelChange(handler: (model: string) => void): void {
@@ -1024,6 +1085,11 @@ export class Session {
   // can re-deliver via the attach response _meta.
   agentOnlyAdvertisedCommands(): AdvertisedCommand[] {
     return [...this.agentAdvertisedCommands];
+  }
+
+  // The agent's advertised modes list, for callers that need a snapshot.
+  availableModes(): AdvertisedMode[] {
+    return [...this.agentAdvertisedModes];
   }
 
   // Pick up an agent-emitted session_info_update and store its title
@@ -1654,6 +1720,7 @@ const STATE_UPDATE_KINDS = new Set([
   "current_model_update",
   "current_mode_update",
   "available_commands_update",
+  "available_modes_update",
   "usage_update",
 ]);
 
@@ -1679,6 +1746,56 @@ function sameAdvertisedCommands(
     }
   }
   return true;
+}
+
+function sameAdvertisedModes(a: AdvertisedMode[], b: AdvertisedMode[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i]?.id !== b[i]?.id ||
+      a[i]?.name !== b[i]?.name ||
+      a[i]?.description !== b[i]?.description
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function extractAdvertisedModes(params: unknown): AdvertisedMode[] | null {
+  const obj = (params ?? {}) as { update?: unknown };
+  const update = (obj.update ?? {}) as {
+    sessionUpdate?: unknown;
+    availableModes?: unknown;
+  };
+  if (update.sessionUpdate !== "available_modes_update") {
+    return null;
+  }
+  const list = update.availableModes;
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const out: AdvertisedMode[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const m = raw as { id?: unknown; name?: unknown; description?: unknown };
+    if (typeof m.id !== "string" || m.id.length === 0) {
+      continue;
+    }
+    const mode: AdvertisedMode = { id: m.id };
+    if (typeof m.name === "string") {
+      mode.name = m.name;
+    }
+    if (typeof m.description === "string") {
+      mode.description = m.description;
+    }
+    out.push(mode);
+  }
+  return out;
 }
 
 // Pull text out of an agent_message_chunk session/update notification

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   PersistedAgentCommand,
+  PersistedAgentMode,
   PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
@@ -36,6 +37,7 @@ const BundleSession = z.object({
   currentMode: z.string().optional(),
   currentUsage: PersistedUsage.optional(),
   agentCommands: z.array(PersistedAgentCommand).optional(),
+  agentModes: z.array(PersistedAgentMode).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -89,6 +91,9 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
         : {}),
       ...(params.record.agentCommands !== undefined
         ? { agentCommands: params.record.agentCommands }
+        : {}),
+      ...(params.record.agentModes !== undefined
+        ? { agentModes: params.record.agentModes }
         : {}),
       createdAt: params.record.createdAt,
       updatedAt: params.record.updatedAt,

@@ -532,7 +532,7 @@ describe("Session", () => {
         | { update: { currentModel: string } }
         | undefined;
       const mode = findKind("current_mode_update") as
-        | { update: { currentMode: string } }
+        | { update: { currentModeId: string } }
         | undefined;
       const usage = findKind("usage_update") as
         | {
@@ -544,7 +544,7 @@ describe("Session", () => {
           }
         | undefined;
       expect(model?.update.currentModel).toBe("gpt-5");
-      expect(mode?.update.currentMode).toBe("code");
+      expect(mode?.update.currentModeId).toBe("code");
       expect(usage?.update.used).toBe(1234);
       expect(usage?.update.size).toBe(200_000);
       expect(usage?.update.cost?.amount).toBe(0.42);

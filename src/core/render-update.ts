@@ -68,11 +68,18 @@ export type RenderEvent =
       costCurrency?: string;
     }
   | { kind: "available-commands"; commands: AvailableCommand[] }
+  | { kind: "available-modes"; modes: AvailableMode[] }
   | { kind: "session-info"; title?: string; agentId?: string }
   | { kind: "unknown"; sessionUpdate: string; raw: unknown };
 
 export interface AvailableCommand {
   name: string;
+  description?: string;
+}
+
+export interface AvailableMode {
+  id: string;
+  name?: string;
   description?: string;
 }
 
@@ -125,6 +132,8 @@ export function mapUpdate(update: unknown): RenderEvent | null {
       return mapUsage(u);
     case "available_commands_update":
       return mapAvailableCommands(u);
+    case "available_modes_update":
+      return mapAvailableModes(u);
     case "session_info_update":
       return mapSessionInfo(u);
     default:
@@ -198,6 +207,32 @@ function mapAvailableCommands(u: UpdateLike): RenderEvent | null {
     return null;
   }
   return { kind: "available-commands", commands: normalizeAdvertisedCommands(list) };
+}
+
+function mapAvailableModes(u: UpdateLike): RenderEvent | null {
+  const list = u.availableModes;
+  if (!Array.isArray(list)) {
+    return null;
+  }
+  const modes: AvailableMode[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const m = raw as Record<string, unknown>;
+    if (typeof m.id !== "string" || m.id.length === 0) {
+      continue;
+    }
+    const mode: AvailableMode = { id: sanitizeSingleLine(m.id) };
+    if (typeof m.name === "string") {
+      mode.name = sanitizeSingleLine(m.name);
+    }
+    if (typeof m.description === "string") {
+      mode.description = sanitizeSingleLine(m.description);
+    }
+    modes.push(mode);
+  }
+  return { kind: "available-modes", modes };
 }
 
 function mapUsage(u: UpdateLike): RenderEvent {
@@ -360,7 +395,10 @@ function mapPlan(u: UpdateLike): RenderEvent | null {
 }
 
 function mapMode(u: UpdateLike): RenderEvent | null {
-  const mode = readString(u, "currentMode") ?? readString(u, "mode");
+  const mode =
+    readString(u, "currentModeId") ??
+    readString(u, "currentMode") ??
+    readString(u, "mode");
   if (!mode) {
     return null;
   }

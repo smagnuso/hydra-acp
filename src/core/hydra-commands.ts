@@ -50,6 +50,16 @@ export interface AdvertisedCommand {
   description?: string;
 }
 
+// Shape used by the agent-modes protocol channel (session/update
+// kind=available_modes_update). id is what gets sent to session/set_mode.
+// name is required by the ACP spec (zSessionMode) but we keep it optional
+// here to tolerate agents that don't supply one — callers fall back to id.
+export interface AdvertisedMode {
+  id: string;
+  name?: string;
+  description?: string;
+}
+
 export function hydraCommandsAsAdvertised(): AdvertisedCommand[] {
   return HYDRA_COMMANDS.map((c) => ({
     name: c.argsHint ? `${c.name} ${c.argsHint}` : c.name,
