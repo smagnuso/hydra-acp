@@ -2681,7 +2681,7 @@ describe("Session", () => {
           .prompt[0]?.text,
       ).toBe("from disk");
       const added = aliceStream.sent.find(
-        (m) =>
+        (m): m is JsonRpcNotification =>
           "method" in m && m.method === "hydra-acp/prompt_queue_added",
       );
       expect(added).toBeDefined();

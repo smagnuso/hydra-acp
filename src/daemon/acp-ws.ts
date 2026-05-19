@@ -119,6 +119,11 @@ export function registerAcpWsEndpoint(
       const modesPayload = buildModesPayload(session);
       return {
         sessionId: session.sessionId,
+        // session/new is implicitly an attach; mirror session/attach's
+        // shape by including the clientId so deferred-echo clients
+        // (TUI's queue work) can recognize their own prompt_queue_added
+        // events without an extra round-trip.
+        clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         _meta: buildResponseMeta(session),
       };
@@ -377,6 +382,9 @@ export function registerAcpWsEndpoint(
       const modesPayload = buildModesPayload(session);
       return {
         sessionId: session.sessionId,
+        // Same as session/new: include clientId so the deferred-echo
+        // path in queue-aware clients can recognize own broadcasts.
+        clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         _meta: buildResponseMeta(session),
       };
