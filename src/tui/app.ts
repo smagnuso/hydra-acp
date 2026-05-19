@@ -302,10 +302,29 @@ async function runSession(
   // a mid-turn reattach leaves ^C falling through to the exit path.
   let screenRef: Screen | null = null;
   let dispatcherRef: InputDispatcher | null = null;
-  conn.onNotification("session/update", (params) => {
-    if (teardownStarted) {
-      return;
-    }
+  // Last messageId we observed from a recordable session/update. Drives
+  // onReconnect's `historyPolicy: "after_message"` request so the daemon
+  // replays only the delta we missed. State-kind updates (model/mode/usage
+  // snapshots) aren't persisted to history, so we deliberately skip them
+  // here — tracking one would force after_message to fall back to "full".
+  let lastSeenMessageId: string | undefined = undefined;
+  // When non-null, session/update notifications get parked here instead of
+  // running. Set by onReconnect before issuing session/attach with
+  // after_message so the daemon's replay (delivered via notify() during
+  // the attach handler — see daemon/acp-ws.ts) can be inspected against
+  // the response's appliedPolicy before being flushed: if the daemon fell
+  // back to "full" replay (because afterMessageId wasn't in history), we
+  // discard the buffer rather than render the entire history a second time.
+  let reconnectReplayBuffer: unknown[] | null = null;
+  const STATE_UPDATE_KINDS = new Set([
+    "session_info_update",
+    "current_model_update",
+    "current_mode_update",
+    "available_commands_update",
+    "available_modes_update",
+    "usage_update",
+  ]);
+  const handleSessionUpdate = (params: unknown): void => {
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
     debugLogUpdate(update, event);
@@ -316,6 +335,15 @@ async function runSession(
     // the prompt queue.
     const rawTag = (update as { sessionUpdate?: unknown } | undefined)
       ?.sessionUpdate;
+    // Capture messageId for after_message reconnect replay. Skip state-
+    // kind updates — those aren't persisted, so the daemon can't find
+    // them when computing the replay cutoff (see session.ts:1827).
+    if (typeof rawTag === "string" && !STATE_UPDATE_KINDS.has(rawTag)) {
+      const u = (update as { messageId?: unknown }) ?? {};
+      if (typeof u.messageId === "string") {
+        lastSeenMessageId = u.messageId;
+      }
+    }
     if (rawTag === "prompt_received") {
       adjustPendingTurns(1);
     } else if (event?.kind === "turn-complete") {
@@ -327,6 +355,16 @@ async function runSession(
     }
     appendRender(event);
     maybeDismissPermissionByToolUpdate(update);
+  };
+  conn.onNotification("session/update", (params) => {
+    if (teardownStarted) {
+      return;
+    }
+    if (reconnectReplayBuffer !== null) {
+      reconnectReplayBuffer.push(params);
+      return;
+    }
+    handleSessionUpdate(params);
   });
 
   // Daemon-side close (user typed /hydra kill, an idle-close fired, the
@@ -2343,6 +2381,23 @@ async function runSession(
         toolsBlockStopReason = event.stopReason ?? null;
         renderToolsBlock();
         screen.clearKey("tools");
+      } else if (
+        event.stopReason !== undefined &&
+        event.stopReason !== "end_turn"
+      ) {
+        // Defense-in-depth: a non-success turn ended but we have no tools
+        // block to freeze (typically because a reconnect-recovery-failed
+        // path already cleared it, or because the turn arrived from a
+        // path that never started one). Without this the failure would
+        // be invisible — exactly the "looks like it succeeded" trap.
+        screen.appendLines([
+          {
+            prefix: "⚠ ",
+            prefixStyle: "tool-status-fail",
+            body: `turn ended: ${event.stopReason}`,
+            bodyStyle: "tool-status-fail",
+          },
+        ]);
       }
       toolStates.clear();
       toolCallOrder.length = 0;
@@ -2401,10 +2456,14 @@ async function runSession(
     adjustPendingTurns(-pendingTurns);
   }
 
-  // Tear down any visible in-flight UI state so the next live signal
-  // (turn-complete on reconnect, our own next prompt, etc.) starts from
-  // a clean slate. Scrollback lines stay intact — we just sever the
-  // keyed-block splice points so new content appends below.
+  // Tear down volatile in-flight UI state ahead of a reconnect attach.
+  // Deliberately leaves the tools block live (toolsBlockStartedAt stays
+  // populated) so a replayed or live turn_complete can finalize it with
+  // the real stopReason. Previously we eagerly froze the block here with
+  // stopReason=null, which made a turn that actually errored on the
+  // daemon look like a benign "thought · 0s" — the live turn_complete
+  // arriving later was silently dropped because toolsBlockStartedAt had
+  // been cleared.
   const resetInFlightUiState = (): void => {
     if (pendingPermission) {
       const resolve = pendingPermission.resolve;
@@ -2413,29 +2472,28 @@ async function runSession(
       resolve({ outcome: { outcome: "cancelled" } });
     }
     closeAgentText();
-    if (toolsBlockStartedAt !== null) {
-      // Freeze the block in place (with "thought · Xs" when no tool ever
-      // fired) instead of removing it. Matches the turn-complete handler
-      // and ensures a silent reconnect mid-turn doesn't strip the only
-      // visible signal that the agent was reasoning. No stopReason is
-      // known here, so the block freezes as plain "thought · Xs" — the
-      // turn is genuinely unfinished from our side.
-      toolsBlockEndedAt = Date.now();
-      toolsBlockStopReason = null;
-      renderToolsBlock();
-      screen.clearKey("tools");
-      toolStates.clear();
-      toolCallOrder.length = 0;
-      toolsBlockStartedAt = null;
-      toolsBlockEndedAt = null;
-      toolsBlockStopReason = null;
-      toolsExpanded = false;
+  };
+
+  // Force-finalize an in-flight tools block as recovery-failed. Used when
+  // onReconnect can't get an incremental replay (daemon fell back to
+  // "full") and we can no longer trust the locally-tracked turn state.
+  // Renders the block as red "stopped (reconnect-recovery-failed) · Xs"
+  // so the user sees that something went wrong even though we don't have
+  // a real stopReason from the daemon.
+  const markToolsBlockRecoveryFailed = (): void => {
+    if (toolsBlockStartedAt === null) {
+      return;
     }
-    screen.clearKey("plan");
-    lastPlanEvent = null;
-    if (pendingTurns > 0) {
-      adjustPendingTurns(-pendingTurns);
-    }
+    toolsBlockEndedAt = Date.now();
+    toolsBlockStopReason = "reconnect-recovery-failed";
+    renderToolsBlock();
+    screen.clearKey("tools");
+    toolStates.clear();
+    toolCallOrder.length = 0;
+    toolsBlockStartedAt = null;
+    toolsBlockEndedAt = null;
+    toolsBlockStopReason = null;
+    toolsExpanded = false;
   };
 
   // Disconnect signal arrives the moment the underlying WS drops and a
@@ -2450,9 +2508,13 @@ async function runSession(
   // conn / the connectGate) because we need this handshake to complete
   // BEFORE the resilient stream flushes its outbound queue — otherwise a
   // prompt the user typed while the daemon was down could race the
-  // attach. historyPolicy=none avoids re-replaying scrollback we already
-  // have locally; the daemon will still re-dispatch any in-flight
-  // permission via replayPendingPermissions.
+  // attach. When we have a lastSeenMessageId we ask for
+  // historyPolicy:"after_message" so the daemon replays only the events
+  // we missed during the outage; if the daemon falls back to "full"
+  // (cutoff messageId not in history) we'd duplicate scrollback, so
+  // notifications fired during the attach are parked in
+  // reconnectReplayBuffer and only flushed when appliedPolicy confirms
+  // an incremental replay.
   onReconnect = async (): Promise<void> => {
     resetInFlightUiState();
     const initReq: JsonRpcRequest = {
@@ -2474,13 +2536,15 @@ async function runSession(
       // initialize failing on reconnect is non-fatal; the daemon may
       // still accept the attach below.
     }
+    const useAfterMessage = lastSeenMessageId !== undefined;
     const attachReq: JsonRpcRequest = {
       jsonrpc: "2.0",
       id: `tui-reattach-${nanoid()}`,
       method: "session/attach",
       params: {
         sessionId: resolvedSessionId,
-        historyPolicy: "none",
+        historyPolicy: useAfterMessage ? "after_message" : "none",
+        ...(useAfterMessage ? { afterMessageId: lastSeenMessageId } : {}),
         clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
         ...(upstreamSessionId !== undefined
           ? {
@@ -2497,22 +2561,63 @@ async function runSession(
           : {}),
       },
     };
+    // Arm the buffer BEFORE we send attach. The daemon delivers replay via
+    // notify() inside its attach handler (daemon/acp-ws.ts:197-199), so
+    // notifications start landing before stream.request returns. Without
+    // the buffer they'd render as live events, and we couldn't undo them
+    // if appliedPolicy came back as "full".
+    reconnectReplayBuffer = [];
+    let appliedPolicy: string | undefined;
+    let attachErr: Error | undefined;
     try {
       const resp = await stream.request(attachReq);
       if (resp.error) {
         throw new Error(resp.error.message);
       }
+      const result = (resp.result ?? {}) as { historyPolicy?: unknown };
+      if (typeof result.historyPolicy === "string") {
+        appliedPolicy = result.historyPolicy;
+      }
     } catch (err) {
-      // Surface in scrollback so the user understands why state may
-      // diverge. The next live event (or their next prompt) will keep
-      // things moving.
+      attachErr = err as Error;
+    }
+    const buffered = reconnectReplayBuffer ?? [];
+    reconnectReplayBuffer = null;
+    if (attachErr) {
+      // Reattach failed entirely — drop any buffered events (we can't
+      // trust them in isolation) and surface the failure. Mark any
+      // in-flight tools block as recovery-failed so a turn that was
+      // running on the daemon doesn't keep counting forever.
+      markToolsBlockRecoveryFailed();
       screen.appendLines([
         {
           prefix: "  ",
-          body: `reattach failed: ${(err as Error).message}`,
+          body: `reattach failed: ${attachErr.message}`,
           bodyStyle: "tool-status-fail",
         },
       ]);
+    } else if (useAfterMessage && appliedPolicy !== "after_message") {
+      // Daemon couldn't find our afterMessageId and fell back to a full
+      // replay. Discarding the buffer keeps scrollback consistent
+      // (no duplicated history); the warning makes the gap visible.
+      // Any in-flight tools block is now unknown to us — freeze it
+      // loudly rather than leave it counting up against stale state.
+      markToolsBlockRecoveryFailed();
+      screen.appendLines([
+        {
+          prefix: "⚠ ",
+          prefixStyle: "tool-status-fail",
+          body: "reconnect couldn't replay events since last seen — scrollback may be incomplete",
+          bodyStyle: "tool-status-fail",
+        },
+      ]);
+    } else {
+      // Either incremental replay landed cleanly, or we never had a
+      // messageId to anchor on (first reconnect of a fresh session) and
+      // the daemon returned no replay. Flush whatever showed up.
+      for (const params of buffered) {
+        handleSessionUpdate(params);
+      }
     }
     screen.setBanner({
       status: pendingTurns > 0 ? "busy" : "ready",
