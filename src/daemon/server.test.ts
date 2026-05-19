@@ -384,6 +384,43 @@ describe("startDaemon", () => {
       ws.close();
     });
 
+    it("advertises promptQueueing capability in initialize _meta", async () => {
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+
+      const responsePromise = new Promise<unknown>((resolve) => {
+        ws.on("message", (data) => {
+          resolve(JSON.parse(data.toString("utf8")));
+        });
+      });
+
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 42,
+          method: "initialize",
+          params: {
+            protocolVersion: 1,
+            clientCapabilities: {},
+            clientInfo: { name: "test-client" },
+          },
+        }),
+      );
+
+      const response = (await responsePromise) as {
+        id: number;
+        result: {
+          _meta?: { "hydra-acp"?: { promptQueueing?: boolean } };
+        };
+      };
+      expect(response.result._meta?.["hydra-acp"]?.promptQueueing).toBe(true);
+
+      ws.close();
+    });
+
     it("returns an empty session/list over ACP", async () => {
       const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
       await new Promise<void>((resolve, reject) => {

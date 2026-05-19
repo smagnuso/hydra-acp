@@ -135,6 +135,30 @@ export interface HydraAdvertisedMode {
   description?: string;
 }
 
+// Identity of the client whose composer originated a prompt. Used as
+// the `originator` field on prompt_queue_* notifications so peer
+// clients can render "queued from <name>" chips.
+export interface PromptOriginator {
+  clientId: string;
+  name?: string;
+  version?: string;
+}
+
+// One entry in the daemon-owned prompt queue, surfaced to clients via
+// the attach-response queue snapshot and the prompt_queue_added
+// notification. `prompt` is the original session/prompt prompt array
+// (text + attachments) so peer clients can render the chip preview
+// without needing the prompt to start before they see what it is.
+export interface PromptQueueEntry {
+  messageId: string;
+  originator: PromptOriginator;
+  prompt: unknown[];
+  // 0 = currently in-flight (head); 1..N = waiting. At enqueue time
+  // this is the count of entries already ahead of the new one.
+  position: number;
+  enqueuedAt: number;
+}
+
 export interface HydraMeta {
   upstreamSessionId?: string;
   agentId?: string;
@@ -163,6 +187,16 @@ export interface HydraMeta {
   // the busy banner already showing the right elapsed time rather
   // than waiting for the next live update.
   turnStartedAt?: number;
+  // Daemon advertises whether it accepts concurrent session/prompt
+  // requests for a given session (queueing the second behind the
+  // first). Surfaced on the initialize response so capability-aware
+  // clients can stop running their own local queues.
+  promptQueueing?: boolean;
+  // Snapshot of the daemon-side prompt queue at attach time. Lets a
+  // late-joining client paint queue chips for entries that landed
+  // before it attached without waiting for new prompt_queue_added
+  // notifications.
+  queue?: PromptQueueEntry[];
 }
 
 export function extractHydraMeta(
@@ -234,6 +268,42 @@ export function extractHydraMeta(
     }
     if (cmds.length > 0) {
       out.availableCommands = cmds;
+    }
+  }
+  if (typeof obj.promptQueueing === "boolean") {
+    out.promptQueueing = obj.promptQueueing;
+  }
+  if (Array.isArray(obj.queue)) {
+    const entries: PromptQueueEntry[] = [];
+    for (const raw of obj.queue) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const r = raw as Record<string, unknown>;
+      const orig = r.originator as Record<string, unknown> | undefined;
+      if (
+        typeof r.messageId !== "string" ||
+        !orig ||
+        typeof orig.clientId !== "string" ||
+        !Array.isArray(r.prompt) ||
+        typeof r.position !== "number" ||
+        typeof r.enqueuedAt !== "number"
+      ) {
+        continue;
+      }
+      const originator: PromptOriginator = { clientId: orig.clientId };
+      if (typeof orig.name === "string") originator.name = orig.name;
+      if (typeof orig.version === "string") originator.version = orig.version;
+      entries.push({
+        messageId: r.messageId,
+        originator,
+        prompt: r.prompt as unknown[],
+        position: r.position,
+        enqueuedAt: r.enqueuedAt,
+      });
+    }
+    if (entries.length > 0) {
+      out.queue = entries;
     }
   }
   if (Array.isArray(obj.availableModes)) {
@@ -334,6 +404,74 @@ export const SessionCancelParams = z.object({
 });
 export type SessionCancelParams = z.infer<typeof SessionCancelParams>;
 
+// hydra-acp/prompt_queue_* wire shapes. The daemon owns the prompt
+// queue per RFD-draft "Prompt Queueing" + visibility extensions; these
+// notifications keep all attached clients in sync so any of them can
+// render queue chips, cancel a queued entry, or edit it before it runs.
+
+const PromptOriginatorSchema = z.object({
+  clientId: z.string(),
+  name: z.string().optional(),
+  version: z.string().optional(),
+});
+
+export const PromptQueueAddedParams = z.object({
+  sessionId: z.string(),
+  messageId: z.string(),
+  originator: PromptOriginatorSchema,
+  prompt: z.array(z.unknown()),
+  // 0 = head (currently in-flight). At enqueue time the new entry's
+  // position equals the count of entries already ahead of it.
+  position: z.number().int().nonnegative(),
+  queueDepth: z.number().int().positive(),
+  enqueuedAt: z.number(),
+});
+export type PromptQueueAddedParams = z.infer<typeof PromptQueueAddedParams>;
+
+export const PromptQueueUpdatedParams = z.object({
+  sessionId: z.string(),
+  messageId: z.string(),
+  prompt: z.array(z.unknown()),
+});
+export type PromptQueueUpdatedParams = z.infer<typeof PromptQueueUpdatedParams>;
+
+// `started` = head transitioned to in-flight (the active turn begins).
+// `cancelled` = explicit hydra-acp/cancel_prompt. `abandoned` = session
+// tear-down with queued entries that never ran.
+export const PromptQueueRemovedParams = z.object({
+  sessionId: z.string(),
+  messageId: z.string(),
+  reason: z.enum(["started", "cancelled", "abandoned"]),
+});
+export type PromptQueueRemovedParams = z.infer<typeof PromptQueueRemovedParams>;
+
+export const CancelPromptParams = z.object({
+  sessionId: z.string(),
+  messageId: z.string(),
+});
+export type CancelPromptParams = z.infer<typeof CancelPromptParams>;
+
+// `already_running` means the messageId matched the in-flight head;
+// caller should fall back to session/cancel to abort the active turn.
+export const CancelPromptResult = z.object({
+  cancelled: z.boolean(),
+  reason: z.enum(["ok", "not_found", "already_running"]),
+});
+export type CancelPromptResult = z.infer<typeof CancelPromptResult>;
+
+export const UpdatePromptParams = z.object({
+  sessionId: z.string(),
+  messageId: z.string(),
+  prompt: z.array(z.unknown()),
+});
+export type UpdatePromptParams = z.infer<typeof UpdatePromptParams>;
+
+export const UpdatePromptResult = z.object({
+  updated: z.boolean(),
+  reason: z.enum(["ok", "not_found", "already_running"]),
+});
+export type UpdatePromptResult = z.infer<typeof UpdatePromptResult>;
+
 export interface SessionCapabilities {
   attach?: Record<string, never>;
   list?: boolean;
@@ -368,6 +506,9 @@ export interface InitializeResult {
     id: string;
     description: string;
   }>;
+  // Hydra-only extensions ride in _meta["hydra-acp"]; see HydraMeta.
+  // Generic ACP clients ignore the field, so this is additive only.
+  _meta?: Record<string, unknown>;
 }
 
 export const ProxyInitializeParams = z.object({

@@ -2038,4 +2038,573 @@ describe("Session", () => {
       expect(session.attachedCount).toBe(0);
     });
   });
+
+  describe("prompt queueing (hydra-acp/prompt_queue_*)", () => {
+    // Pulls a particular queue lifecycle event off a client's outbound
+    // stream — there's usually exactly one per event-kind/messageId pair.
+    function findQueueEvent(
+      sent: ReturnType<typeof makeClient>["stream"]["sent"],
+      method: string,
+      messageId?: string,
+    ):
+      | (JsonRpcNotification & { method: string; params: Record<string, unknown> })
+      | undefined {
+      return sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === method &&
+          (messageId === undefined ||
+            (m.params as { messageId?: unknown }).messageId === messageId),
+      ) as
+        | (JsonRpcNotification & { method: string; params: Record<string, unknown> })
+        | undefined;
+    }
+
+    it("broadcasts prompt_queue_added with the same messageId as prompt_received", async () => {
+      const { session, mock } = makeSession("hydra_session_Q1", "u_Q1");
+      const { client: alice } = makeClient();
+      alice.clientInfo = { name: "tui", version: "0.2.0" };
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q1",
+        prompt: [{ type: "text", text: "hello queue" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const added = findQueueEvent(
+        bobStream.sent,
+        "hydra-acp/prompt_queue_added",
+      );
+      const received = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "prompt_received",
+      ) as JsonRpcNotification | undefined;
+
+      expect(added).toBeDefined();
+      expect(received).toBeDefined();
+      const addedMid = (added!.params as { messageId: string }).messageId;
+      const receivedMid = (received!.params as { update: { messageId: string } })
+        .update.messageId;
+      expect(addedMid).toMatch(/^m_[A-Za-z0-9]{16}$/);
+      expect(addedMid).toBe(receivedMid);
+      expect(added!.params).toMatchObject({
+        sessionId: "hydra_session_Q1",
+        originator: {
+          clientId: alice.clientId,
+          name: "tui",
+          version: "0.2.0",
+        },
+        prompt: [{ type: "text", text: "hello queue" }],
+        position: 0,
+        queueDepth: 1,
+      });
+      expect(typeof (added!.params as { enqueuedAt: number }).enqueuedAt).toBe(
+        "number",
+      );
+    });
+
+    it("broadcasts prompt_queue_added to the originator too (not just peers)", async () => {
+      const { session, mock } = makeSession("hydra_session_Q2", "u_Q2");
+      const { client: alice, stream: aliceStream } = makeClient();
+      session.attach(alice, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q2",
+        prompt: [{ type: "text", text: "my own prompt" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // prompt_received is NOT sent to alice (RFD #533 excludes the
+      // originator), but prompt_queue_added IS — alice needs the
+      // server-assigned messageId to drive chip state.
+      const added = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      );
+      expect(added).toBeDefined();
+      const promptReceived = aliceStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "prompt_received",
+      );
+      expect(promptReceived).toBeUndefined();
+    });
+
+    it("a second concurrent prompt enqueues with position=1 and queueDepth=2", async () => {
+      const { session, mock } = makeSession("hydra_session_Q3", "u_Q3");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // First prompt hangs upstream so the second one is forced to queue.
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q3",
+        prompt: [{ type: "text", text: "first" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      void session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q3",
+        prompt: [{ type: "text", text: "second" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const addedEvents = bobStream.sent.filter(
+        (m) => "method" in m && m.method === "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification[];
+      expect(addedEvents).toHaveLength(2);
+      const [first, second] = addedEvents;
+      expect((first!.params as { position: number }).position).toBe(0);
+      expect((first!.params as { queueDepth: number }).queueDepth).toBe(1);
+      expect((second!.params as { position: number }).position).toBe(1);
+      expect((second!.params as { queueDepth: number }).queueDepth).toBe(2);
+      expect(
+        (second!.params as { originator: { clientId: string } }).originator
+          .clientId,
+      ).toBe(bob.clientId);
+
+      // Only the first prompt has hit the upstream agent — the second
+      // is still queued behind it.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(1);
+    });
+
+    it("emits prompt_queue_removed(started) before forwarding the next prompt to the agent", async () => {
+      const { session, mock } = makeSession("hydra_session_Q4", "u_Q4");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // Resolve the agent's session/prompt the moment hydra calls it so
+      // drainQueue keeps going. We snapshot the bob-stream send order
+      // before/after to verify "started" landed before the second's
+      // upstream call.
+      requestMock.mockImplementation(async () => ({ stopReason: "end_turn" }));
+
+      await session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q4",
+        prompt: [{ type: "text", text: "first" }],
+      });
+      await session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q4",
+        prompt: [{ type: "text", text: "second" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const startedEvents = bobStream.sent.filter(
+        (m) =>
+          "method" in m &&
+          m.method === "hydra-acp/prompt_queue_removed" &&
+          (m.params as { reason?: string }).reason === "started",
+      );
+      // Two prompts → two started events. Both prompts also resolved
+      // (no leftover waiting entries).
+      expect(startedEvents).toHaveLength(2);
+
+      // Agent saw both session/prompts in order.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(2);
+      expect(
+        (sessionPromptCalls[0]?.[1] as { prompt: Array<{ text: string }> })
+          .prompt[0]?.text,
+      ).toBe("first");
+      expect(
+        (sessionPromptCalls[1]?.[1] as { prompt: Array<{ text: string }> })
+          .prompt[0]?.text,
+      ).toBe("second");
+    });
+
+    it("cancelQueuedPrompt splices a waiting entry, broadcasts removed(cancelled), and resolves with cancelled stop reason", async () => {
+      const { session, mock } = makeSession("hydra_session_Q5", "u_Q5");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // alice's prompt hangs upstream so bob's prompt waits in the queue.
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q5",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      const bobPromise = session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q5",
+        prompt: [{ type: "text", text: "to-be-cancelled" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Grab bob's enqueue messageId off the wire so we can cancel it.
+      const bobAdded = bobStream.sent
+        .filter(
+          (m) =>
+            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+        )
+        .at(-1) as JsonRpcNotification;
+      const bobMid = (bobAdded.params as { messageId: string }).messageId;
+
+      const res = session.cancelQueuedPrompt(bobMid);
+      expect(res).toEqual({ cancelled: true, reason: "ok" });
+
+      // Broadcast for bob is on bob's own stream too.
+      const removed = findQueueEvent(
+        bobStream.sent,
+        "hydra-acp/prompt_queue_removed",
+        bobMid,
+      );
+      expect(removed).toBeDefined();
+      expect((removed!.params as { reason: string }).reason).toBe("cancelled");
+
+      // bob's session/prompt resolves with cancelled.
+      await expect(bobPromise).resolves.toMatchObject({
+        stopReason: "cancelled",
+      });
+
+      // Agent only ever saw the first prompt (alice's), never bob's.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(1);
+      expect(
+        (sessionPromptCalls[0]?.[1] as { prompt: Array<{ text: string }> })
+          .prompt[0]?.text,
+      ).toBe("head");
+    });
+
+    it("cancelQueuedPrompt on the in-flight head returns already_running and does not abort the turn", async () => {
+      const { session, mock } = makeSession("hydra_session_Q6", "u_Q6");
+      const { client: alice, stream: aliceStream } = makeClient();
+      session.attach(alice, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      let resolveAgent: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementation(
+        () => new Promise((r) => (resolveAgent = r)),
+      );
+
+      const turnPromise = session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q6",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const added = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const mid = (added.params as { messageId: string }).messageId;
+
+      // After the drain loop has shifted the head onto currentEntry,
+      // cancel_prompt on that messageId should reject.
+      await new Promise((r) => setImmediate(r));
+      const res = session.cancelQueuedPrompt(mid);
+      expect(res).toEqual({ cancelled: false, reason: "already_running" });
+
+      // The running turn is unaffected — completing the upstream call
+      // resolves the prompt normally.
+      resolveAgent!({ stopReason: "end_turn" });
+      await expect(turnPromise).resolves.toMatchObject({
+        stopReason: "end_turn",
+      });
+    });
+
+    it("cancelQueuedPrompt on an unknown messageId returns not_found", () => {
+      const { session } = makeSession("hydra_session_Q7", "u_Q7");
+      expect(session.cancelQueuedPrompt("m_doesnotexist")).toEqual({
+        cancelled: false,
+        reason: "not_found",
+      });
+    });
+
+    it("updateQueuedPrompt mutates the entry and the agent sees the new prompt at exec time", async () => {
+      const { session, mock } = makeSession("hydra_session_Q8", "u_Q8");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // Hold the first prompt so the second one queues, then complete
+      // the first to let drainQueue advance into the (now-updated) second.
+      let resolveAlice: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveAlice = r)),
+      );
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q8",
+        prompt: [{ type: "text", text: "first" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      void session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q8",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const bobAdded = bobStream.sent
+        .filter(
+          (m) =>
+            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+        )
+        .at(-1) as JsonRpcNotification;
+      const bobMid = (bobAdded.params as { messageId: string }).messageId;
+
+      const newPrompt = [{ type: "text", text: "revised" }];
+      const res = session.updateQueuedPrompt(bobMid, newPrompt);
+      expect(res).toEqual({ updated: true, reason: "ok" });
+
+      const updated = findQueueEvent(
+        bobStream.sent,
+        "hydra-acp/prompt_queue_updated",
+        bobMid,
+      );
+      expect(updated).toBeDefined();
+      expect((updated!.params as { prompt: unknown[] }).prompt).toEqual(
+        newPrompt,
+      );
+
+      // Now release the head and resolve the second one too so the
+      // upstream agent receives the *updated* prompt array.
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+      resolveAlice!({ stopReason: "end_turn" });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(2);
+      expect(
+        (sessionPromptCalls[1]?.[1] as { prompt: unknown[] }).prompt,
+      ).toEqual(newPrompt);
+    });
+
+    it("updateQueuedPrompt on the in-flight head returns already_running and does not touch the agent's in-flight params", async () => {
+      const { session, mock } = makeSession("hydra_session_Q9", "u_Q9");
+      const { client: alice, stream: aliceStream } = makeClient();
+      session.attach(alice, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q9",
+        prompt: [{ type: "text", text: "in-flight" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const added = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const mid = (added.params as { messageId: string }).messageId;
+
+      await new Promise((r) => setImmediate(r));
+      const res = session.updateQueuedPrompt(mid, [
+        { type: "text", text: "too late" },
+      ]);
+      expect(res).toEqual({ updated: false, reason: "already_running" });
+
+      // The agent saw the original prompt, not the attempted update.
+      const call = requestMock.mock.calls.find(
+        ([method]) => method === "session/prompt",
+      );
+      expect((call?.[1] as { prompt: Array<{ text: string }> }).prompt[0]?.text)
+        .toBe("in-flight");
+    });
+
+    it("updateQueuedPrompt on an unknown messageId returns not_found", () => {
+      const { session } = makeSession("hydra_session_Q10", "u_Q10");
+      expect(
+        session.updateQueuedPrompt("m_nope", [{ type: "text", text: "x" }]),
+      ).toEqual({ updated: false, reason: "not_found" });
+    });
+
+    it("queueSnapshot returns the in-flight head at position 0 and waiting entries after it", async () => {
+      const { session, mock } = makeSession("hydra_session_Q11", "u_Q11");
+      const { client: alice } = makeClient();
+      const { client: bob } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q11",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      void session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q11",
+        prompt: [{ type: "text", text: "waiting" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const snap = session.queueSnapshot();
+      expect(snap).toHaveLength(2);
+      expect(snap[0]?.position).toBe(0);
+      expect(snap[0]?.originator.clientId).toBe(alice.clientId);
+      expect(snap[0]?.prompt).toEqual([{ type: "text", text: "head" }]);
+      expect(snap[1]?.position).toBe(1);
+      expect(snap[1]?.originator.clientId).toBe(bob.clientId);
+      expect(snap[1]?.prompt).toEqual([{ type: "text", text: "waiting" }]);
+    });
+
+    it("defers prompt_received until the entry actually leaves the queue head (deviation from RFD #533)", async () => {
+      const { session, mock } = makeSession("hydra_session_Qrcv", "u_Qrcv");
+      const { client: alice } = makeClient();
+      const { client: bob } = makeClient();
+      // carol is a non-originator observer for both alice's and bob's
+      // prompts — RFD #533 excludes the originator from prompt_received,
+      // so we can't watch bob's own stream for bob's prompt_received.
+      const { client: carol, stream: carolStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+      session.attach(carol, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      let resolveAlice: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveAlice = r)),
+      );
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Qrcv",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      void session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Qrcv",
+        prompt: [{ type: "text", text: "waiting" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const promptReceivedFor = (text: string) =>
+        carolStream.sent.find(
+          (m) =>
+            "method" in m &&
+            m.method === "session/update" &&
+            (m.params as {
+              update?: { sessionUpdate?: string; prompt?: Array<{ text?: string }> };
+            } | undefined)?.update?.sessionUpdate === "prompt_received" &&
+            (m.params as {
+              update?: { prompt?: Array<{ text?: string }> };
+            } | undefined)?.update?.prompt?.[0]?.text === text,
+        );
+
+      // alice's "head" entry drained into runQueueEntry immediately, so
+      // its prompt_received already landed on carol. bob's "waiting"
+      // entry is parked behind the hanging upstream call — its
+      // prompt_received MUST NOT have fired yet (this is the deviation).
+      expect(promptReceivedFor("head")).toBeDefined();
+      expect(promptReceivedFor("waiting")).toBeUndefined();
+
+      // Release the head. drainQueue advances into bob's entry,
+      // broadcasts prompt_queue_removed(started), then prompt_received,
+      // then forwards to the agent. The next request hangs so the
+      // observation is stable.
+      requestMock.mockImplementationOnce(() => new Promise(() => undefined));
+      resolveAlice!({ stopReason: "end_turn" });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      expect(promptReceivedFor("waiting")).toBeDefined();
+    });
+
+    it("session close abandons queued entries: broadcasts removed(abandoned) and resolves the originators' promises with cancelled", async () => {
+      const { session, mock } = makeSession("hydra_session_Q12", "u_Q12");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q12",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      const bobPromise = session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q12",
+        prompt: [{ type: "text", text: "queued" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const bobAdded = bobStream.sent
+        .filter(
+          (m) =>
+            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+        )
+        .at(-1) as JsonRpcNotification;
+      const bobMid = (bobAdded.params as { messageId: string }).messageId;
+
+      // Triggering an agent exit fires the close path which abandons
+      // anything still queued behind the (now-killed) in-flight entry.
+      mock.triggerExit(0, null);
+      await new Promise((r) => setImmediate(r));
+
+      const removed = findQueueEvent(
+        bobStream.sent,
+        "hydra-acp/prompt_queue_removed",
+        bobMid,
+      );
+      expect(removed).toBeDefined();
+      expect((removed!.params as { reason: string }).reason).toBe("abandoned");
+
+      await expect(bobPromise).resolves.toMatchObject({
+        stopReason: "cancelled",
+      });
+    });
+  });
 });

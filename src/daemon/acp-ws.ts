@@ -6,6 +6,7 @@ import { wsToMessageStream } from "../acp/ws-stream.js";
 import { SessionManager } from "../core/session-manager.js";
 import { Session, type AttachedClient } from "../core/session.js";
 import {
+  CancelPromptParams,
   InitializeParams,
   ProxyInitializeParams,
   SessionAttachParams,
@@ -14,6 +15,7 @@ import {
   SessionListParams,
   SessionNewParams,
   SessionPromptParams,
+  UpdatePromptParams,
   extractHydraMeta,
   mergeMeta,
   type InitializeResult,
@@ -311,6 +313,32 @@ export function registerAcpWsEndpoint(
       return null;
     });
 
+    connection.onRequest("hydra-acp/cancel_prompt", async (raw) => {
+      const params = CancelPromptParams.parse(raw);
+      const session = deps.manager.get(params.sessionId);
+      if (!session) {
+        const err = new Error(`session ${params.sessionId} not found`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      return session.cancelQueuedPrompt(params.messageId);
+    });
+
+    connection.onRequest("hydra-acp/update_prompt", async (raw) => {
+      const params = UpdatePromptParams.parse(raw);
+      const session = deps.manager.get(params.sessionId);
+      if (!session) {
+        const err = new Error(`session ${params.sessionId} not found`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      return session.updateQueuedPrompt(params.messageId, params.prompt);
+    });
+
     connection.onRequest("session/load", async (raw) => {
       const rawObj = (raw ?? {}) as Record<string, unknown>;
       const rawSessionId =
@@ -464,6 +492,14 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
   if (session.turnStartedAt !== undefined) {
     ours.turnStartedAt = session.turnStartedAt;
   }
+  // Snapshot of the daemon-owned prompt queue. Lets a late attacher
+  // paint queue chips for entries that landed before it joined without
+  // waiting for new prompt_queue_added notifications. Omitted entirely
+  // when the queue is empty (the common case).
+  const queue = session.queueSnapshot();
+  if (queue.length > 0) {
+    ours.queue = queue;
+  }
   return mergeMeta(session.agentMeta, ours);
 }
 
@@ -496,6 +532,12 @@ function buildInitializeResult(): InitializeResult {
         description: "Bearer token presented at WS upgrade",
       },
     ],
+    // Advertise hydra-only capabilities via _meta["hydra-acp"]. Generic
+    // ACP clients ignore the field; capability-aware clients learn here
+    // that hydra accepts concurrent session/prompt requests and emits
+    // prompt_queue_* notifications so they can stop running their own
+    // local queue.
+    _meta: mergeMeta(undefined, { promptQueueing: true }),
   };
 }
 

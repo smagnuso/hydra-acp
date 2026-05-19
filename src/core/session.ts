@@ -35,7 +35,13 @@ import {
 } from "./hydra-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
-import type { HistoryPolicy } from "../acp/types.js";
+import type {
+  CancelPromptResult,
+  HistoryPolicy,
+  PromptOriginator,
+  PromptQueueEntry as PromptQueueSnapshotEntry,
+  UpdatePromptResult,
+} from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
 
 export interface AttachedClient {
@@ -127,6 +133,40 @@ export interface CloseOptions {
 
 const DEFAULT_HISTORY_MAX_ENTRIES = 1000;
 
+// Two flavors of queue entry share the same FIFO. User-prompt entries
+// are wire-visible (every transition fires a hydra-acp/prompt_queue_*
+// broadcast); internal entries (title regen, agent switch, import seed)
+// serialize through the same gate but are invisible to clients — they
+// look like a brief moment of busyness from outside.
+interface UserPromptQueueEntry {
+  kind: "user";
+  messageId: string;
+  originator: PromptOriginator;
+  // clientId is the original sender's id (== originator.clientId), kept
+  // separately so broadcastTurnComplete keeps its "exclude originator"
+  // semantics even after the entry has been spliced out of the queue.
+  clientId: string;
+  // The session/prompt prompt array, kept mutable so updateQueuedPrompt
+  // can swap it before drainQueue picks the entry up.
+  prompt: unknown[];
+  enqueuedAt: number;
+  cancelled: boolean;
+  resolve: (value: unknown) => void;
+  reject: (err: Error) => void;
+}
+
+interface InternalQueueEntry {
+  kind: "internal";
+  messageId: string;
+  enqueuedAt: number;
+  cancelled: boolean;
+  task: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (err: Error) => void;
+}
+
+type QueueEntry = UserPromptQueueEntry | InternalQueueEntry;
+
 export class Session {
   readonly sessionId: string;
   readonly cwd: string;
@@ -151,7 +191,13 @@ export class Session {
 
   private clients = new Map<string, AttachedClient>();
   private historyStore: HistoryStore | undefined;
-  private promptQueue: Array<() => Promise<void>> = [];
+  private promptQueue: QueueEntry[] = [];
+  // The entry that drainQueue is currently awaiting. Distinct from
+  // promptQueue[0] (which is the *next* one to dequeue): once shifted
+  // off, the entry lives here for the duration of its task() so
+  // cancelQueuedPrompt can distinguish "still in line" from "running"
+  // and return already_running for the latter.
+  private currentEntry: QueueEntry | undefined;
   private promptInFlight = false;
   private closed = false;
   private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
@@ -673,45 +719,33 @@ export class Session {
     if (promptText.startsWith("/hydra")) {
       return this.handleSlashCommand(promptText);
     }
-    this.broadcastPromptReceived(client, params);
+    // Mint the messageId once; it's the stable identifier for the
+    // prompt across both prompt_queue_added (fires now, on accept) and
+    // prompt_received (fires later, when the entry leaves the queue
+    // head — see deviation note on broadcastPromptReceived).
+    const messageId = generateMessageId();
     this.maybeSeedTitleFromPrompt(params);
-    return this.enqueuePrompt(async () => {
-      // We always pair broadcastPromptReceived with a broadcastTurnComplete,
-      // even when the agent request throws. The recorded history is what
-      // late-joining clients replay on attach — leaving prompts unmatched
-      // means the next turn's keyed blocks anchor mid-scrollback (the
-      // TUI freezes them as "thought · Xs" but never closes the
-      // logical turn). A synthetic stopReason here surfaces the failure
-      // to history without burying the trail.
-      let response: unknown;
-      try {
-        response = await this.agent.connection.request<unknown>(
-          "session/prompt",
-          {
-            ...(params as object),
-            sessionId: this.upstreamSessionId,
-          },
-        );
-      } catch (err) {
-        this.broadcastTurnComplete(client.clientId, { stopReason: "error" });
-        throw err;
-      }
-      this.broadcastTurnComplete(client.clientId, response);
-      return response;
-    });
+    return this.enqueueUserPrompt(client, params, messageId);
   }
 
-  private broadcastPromptReceived(
-    client: AttachedClient,
-    params: unknown,
-  ): void {
-    const promptParams = (params ?? {}) as Record<string, unknown>;
-    const sentBy: Record<string, unknown> = { clientId: client.clientId };
-    if (client.clientInfo?.name) {
-      sentBy.name = client.clientInfo.name;
+  // DEVIATION FROM RFD #533: this broadcast is deliberately deferred
+  // until the prompt actually becomes the active turn (i.e. drainQueue
+  // is about to forward it to the agent), NOT when hydra first accepts
+  // the request. The literal RFD doesn't pin the timing — it just says
+  // peers should learn about the turn — but it was authored before
+  // prompt queueing existed, so accept-time and start-time were the
+  // same moment. With hydra's per-session FIFO, deferring gives
+  // prompt_received a single, useful meaning ("the agent is now taking
+  // a turn on this prompt"), which is how attached clients (notably
+  // agent-shell) consume it. The accept-time signal that peers can use
+  // for queue chip rendering is hydra-acp/prompt_queue_added instead.
+  private broadcastPromptReceived(entry: UserPromptQueueEntry): void {
+    const sentBy: Record<string, unknown> = { clientId: entry.originator.clientId };
+    if (entry.originator.name) {
+      sentBy.name = entry.originator.name;
     }
-    if (client.clientInfo?.version) {
-      sentBy.version = client.clientInfo.version;
+    if (entry.originator.version) {
+      sentBy.version = entry.originator.version;
     }
     this.promptStartedAt = Date.now();
     this.recordAndBroadcast(
@@ -720,18 +754,18 @@ export class Session {
         sessionId: this.sessionId,
         update: {
           sessionUpdate: "prompt_received",
-          messageId: generateMessageId(),
-          prompt: promptParams.prompt,
+          messageId: entry.messageId,
+          prompt: entry.prompt,
           sentBy,
         },
       },
-      client.clientId,
+      entry.clientId,
     );
 
     // Compat shim for clients that don't yet implement RFD #533's
     // prompt_received. The marker in _meta lets prompt_received-aware
     // clients short-circuit this duplicate.
-    const text = extractPromptText(promptParams.prompt);
+    const text = extractPromptText(entry.prompt);
     if (text.length > 0) {
       this.recordAndBroadcast(
         "session/update",
@@ -743,7 +777,7 @@ export class Session {
             _meta: { "hydra-acp": { compatFor: "prompt_received" } },
           },
         },
-        client.clientId,
+        entry.clientId,
       );
     }
   }
@@ -775,6 +809,154 @@ export class Session {
       },
       originatorClientId,
     );
+  }
+
+  // Total visible-or-running entries: the in-flight head (if any) plus
+  // the queue's user-visible waiting entries. Internal entries don't
+  // count — they're an implementation detail and the wire never
+  // surfaces them.
+  private visibleQueueDepth(): number {
+    let count =
+      this.currentEntry?.kind === "user" && !this.currentEntry.cancelled
+        ? 1
+        : 0;
+    for (const entry of this.promptQueue) {
+      if (entry.kind === "user" && !entry.cancelled) count += 1;
+    }
+    return count;
+  }
+
+  private broadcastQueueAdded(entry: UserPromptQueueEntry): void {
+    const depth = this.visibleQueueDepth();
+    // entry just landed at the tail of the queue. Its position equals
+    // the count of user-visible entries already ahead of it = depth-1.
+    const position = Math.max(0, depth - 1);
+    const params = {
+      sessionId: this.sessionId,
+      messageId: entry.messageId,
+      originator: entry.originator,
+      prompt: entry.prompt,
+      position,
+      queueDepth: depth,
+      enqueuedAt: entry.enqueuedAt,
+    };
+    this.broadcastQueueNotification("hydra-acp/prompt_queue_added", params);
+  }
+
+  private broadcastQueueUpdated(
+    messageId: string,
+    prompt: unknown[],
+  ): void {
+    this.broadcastQueueNotification("hydra-acp/prompt_queue_updated", {
+      sessionId: this.sessionId,
+      messageId,
+      prompt,
+    });
+  }
+
+  private broadcastQueueRemoved(
+    messageId: string,
+    reason: "started" | "cancelled" | "abandoned",
+  ): void {
+    this.broadcastQueueNotification("hydra-acp/prompt_queue_removed", {
+      sessionId: this.sessionId,
+      messageId,
+      reason,
+    });
+  }
+
+  // Fan-out for queue lifecycle notifications. Ephemeral by design —
+  // these signals describe transient daemon state, not conversation
+  // content, so we deliberately bypass recordAndBroadcast (no history,
+  // no idle-timer arm, no rewrite-for-client since we already emit the
+  // hydra sessionId).
+  private broadcastQueueNotification(
+    method: string,
+    params: Record<string, unknown>,
+  ): void {
+    for (const client of this.clients.values()) {
+      void client.connection.notify(method, params).catch(() => undefined);
+    }
+  }
+
+  // Snapshot of user-visible queue state at this moment. Surfaced to
+  // late-attaching clients via the session/attach response _meta so
+  // they boot with the same chip list as their peers without waiting
+  // for new prompt_queue_added notifications. Internal entries are
+  // omitted (they're not surfaced on the wire at all).
+  queueSnapshot(): PromptQueueSnapshotEntry[] {
+    const out: PromptQueueSnapshotEntry[] = [];
+    let position = 0;
+    if (
+      this.currentEntry?.kind === "user" &&
+      !this.currentEntry.cancelled
+    ) {
+      out.push({
+        messageId: this.currentEntry.messageId,
+        originator: this.currentEntry.originator,
+        prompt: this.currentEntry.prompt,
+        position: position++,
+        enqueuedAt: this.currentEntry.enqueuedAt,
+      });
+    }
+    for (const entry of this.promptQueue) {
+      if (entry.kind !== "user" || entry.cancelled) continue;
+      out.push({
+        messageId: entry.messageId,
+        originator: entry.originator,
+        prompt: entry.prompt,
+        position: position++,
+        enqueuedAt: entry.enqueuedAt,
+      });
+    }
+    return out;
+  }
+
+  // Drop a queued prompt by messageId. Returns already_running when
+  // the messageId names the in-flight entry — callers should fall back
+  // to session/cancel for that case. Originator-agnostic: any attached
+  // client may cancel any queued prompt (matches the existing slack
+  // :stop_sign: reaction UX and the TUI's queue-edit dispatcher).
+  cancelQueuedPrompt(messageId: string): CancelPromptResult {
+    if (this.currentEntry?.messageId === messageId) {
+      return { cancelled: false, reason: "already_running" };
+    }
+    const idx = this.promptQueue.findIndex((e) => e.messageId === messageId);
+    if (idx < 0) {
+      return { cancelled: false, reason: "not_found" };
+    }
+    const entry = this.promptQueue[idx]!;
+    entry.cancelled = true;
+    this.promptQueue.splice(idx, 1);
+    if (entry.kind === "user") {
+      this.broadcastQueueRemoved(messageId, "cancelled");
+    }
+    // The drainQueue loop won't see this entry again (we just spliced
+    // it out). Resolve the original session/prompt promise so the
+    // caller's await unblocks with a clean cancelled stop reason.
+    entry.resolve({ stopReason: "cancelled" });
+    return { cancelled: true, reason: "ok" };
+  }
+
+  // Replace the prompt payload of a queued (not-yet-running) entry.
+  // Returns already_running for the in-flight head; not_found for
+  // unknown messageIds or for internal queue entries (internal tasks
+  // don't expose a mutable prompt). Broadcasts prompt_queue_updated on
+  // success so every attached client refreshes its chip.
+  updateQueuedPrompt(
+    messageId: string,
+    prompt: unknown[],
+  ): UpdatePromptResult {
+    if (this.currentEntry?.messageId === messageId) {
+      return { updated: false, reason: "already_running" };
+    }
+    const entry = this.promptQueue.find((e) => e.messageId === messageId);
+    if (!entry || entry.kind !== "user") {
+      return { updated: false, reason: "not_found" };
+    }
+    entry.prompt = prompt;
+    this.broadcastQueueUpdated(messageId, prompt);
+    return { updated: true, reason: "ok" };
   }
 
   async cancel(clientId: string): Promise<void> {
@@ -1440,6 +1622,25 @@ export class Session {
     }
     this.closed = true;
     this.cancelIdleTimer();
+    // Drain any still-queued entries. Broadcast prompt_queue_removed
+    // (abandoned) for user-visible ones so attached clients can drop
+    // their chips, and resolve every entry's promise with cancelled so
+    // callers awaiting the session/prompt response don't dangle. Do
+    // this BEFORE notifying session_closed so the queue events arrive
+    // ahead of the terminal signal.
+    const stranded = this.promptQueue;
+    this.promptQueue = [];
+    for (const entry of stranded) {
+      entry.cancelled = true;
+      if (entry.kind === "user") {
+        this.broadcastQueueRemoved(entry.messageId, "abandoned");
+      }
+      try {
+        entry.resolve({ stopReason: "cancelled" });
+      } catch {
+        void 0;
+      }
+    }
     for (const client of this.clients.values()) {
       void client.connection
         .notify("hydra-acp/session_closed", { sessionId: this.sessionId })
@@ -1673,17 +1874,57 @@ export class Session {
     });
   }
 
+  // Schedule an internal task (title regen, agent swap transcript
+  // injection, import seed). Serializes behind any user prompts already
+  // in flight, but doesn't emit prompt_queue_* broadcasts — clients
+  // shouldn't see hydra's housekeeping in their chip list.
   private async enqueuePrompt(task: () => Promise<unknown>): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
-      const run = async (): Promise<void> => {
-        try {
-          const result = await task();
-          resolve(result);
-        } catch (err) {
-          reject(err as Error);
-        }
+      const entry: InternalQueueEntry = {
+        kind: "internal",
+        messageId: generateMessageId(),
+        enqueuedAt: Date.now(),
+        cancelled: false,
+        task,
+        resolve,
+        reject,
       };
-      this.promptQueue.push(run);
+      this.promptQueue.push(entry);
+      void this.drainQueue();
+    });
+  }
+
+  // Schedule a user-originated session/prompt. Emits prompt_queue_added
+  // immediately on enqueue (so peer clients can render the queued chip)
+  // and prompt_queue_removed when the entry leaves the queue. The
+  // returned promise resolves with the upstream agent's session/prompt
+  // result, or { stopReason: "cancelled" } if the entry is dropped via
+  // cancelQueuedPrompt before reaching the head.
+  private async enqueueUserPrompt(
+    client: AttachedClient,
+    params: unknown,
+    messageId: string,
+  ): Promise<unknown> {
+    const promptArray = (((params ?? {}) as { prompt?: unknown[] }).prompt ??
+      []) as unknown[];
+    const originator: PromptOriginator = { clientId: client.clientId };
+    if (client.clientInfo?.name) originator.name = client.clientInfo.name;
+    if (client.clientInfo?.version)
+      originator.version = client.clientInfo.version;
+    return new Promise<unknown>((resolve, reject) => {
+      const entry: UserPromptQueueEntry = {
+        kind: "user",
+        messageId,
+        originator,
+        clientId: client.clientId,
+        prompt: promptArray,
+        enqueuedAt: Date.now(),
+        cancelled: false,
+        resolve,
+        reject,
+      };
+      this.promptQueue.push(entry);
+      this.broadcastQueueAdded(entry);
       void this.drainQueue();
     });
   }
@@ -1696,13 +1937,68 @@ export class Session {
     try {
       while (this.promptQueue.length > 0) {
         const next = this.promptQueue.shift();
-        if (next) {
-          await next();
+        if (!next) {
+          break;
+        }
+        // Entry was cancelled while queued. The cancel path already
+        // resolved the promise and broadcast prompt_queue_removed; we
+        // just need to advance to the next entry. Defensive double-check
+        // — the resolve here is harmless since cancelQueuedPrompt
+        // already settled with cancelled stopReason.
+        if (next.cancelled) {
+          continue;
+        }
+        this.currentEntry = next;
+        // Wire transition fires before task() so a fast task can't race
+        // ahead of its own "started" broadcast.
+        if (next.kind === "user") {
+          this.broadcastQueueRemoved(next.messageId, "started");
+        }
+        try {
+          const result = await this.runQueueEntry(next);
+          next.resolve(result);
+        } catch (err) {
+          next.reject(err as Error);
+        } finally {
+          this.currentEntry = undefined;
         }
       }
     } finally {
       this.promptInFlight = false;
     }
+  }
+
+  // Execute a queue entry. User-prompt entries forward to the upstream
+  // agent and pair with broadcastTurnComplete; internal entries run
+  // their captured task closure. Reads entry.prompt at dispatch time
+  // so updateQueuedPrompt's mutations are honoured.
+  //
+  // For user entries, broadcastPromptReceived fires HERE — not in
+  // Session.prompt — so peer clients see prompt_received only when the
+  // turn actually starts (a deliberate deviation from a naive reading
+  // of RFD #533; see the comment on broadcastPromptReceived). Order on
+  // the wire: prompt_queue_removed{started} (already emitted by
+  // drainQueue) → prompt_received → upstream session/prompt.
+  private async runQueueEntry(entry: QueueEntry): Promise<unknown> {
+    if (entry.kind === "internal") {
+      return entry.task();
+    }
+    this.broadcastPromptReceived(entry);
+    let response: unknown;
+    try {
+      response = await this.agent.connection.request<unknown>(
+        "session/prompt",
+        {
+          sessionId: this.upstreamSessionId,
+          prompt: entry.prompt,
+        },
+      );
+    } catch (err) {
+      this.broadcastTurnComplete(entry.clientId, { stopReason: "error" });
+      throw err;
+    }
+    this.broadcastTurnComplete(entry.clientId, response);
+    return response;
   }
 }
 
