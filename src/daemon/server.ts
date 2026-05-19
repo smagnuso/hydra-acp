@@ -12,6 +12,10 @@ import { ExtensionManager } from "../core/extensions.js";
 import { paths } from "../core/paths.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
 import { setNpmInstallLogger } from "../core/npm-install.js";
+import {
+  pruneStaleAgentVersions,
+  setAgentPruneLogger,
+} from "../core/agent-prune.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import { SessionTokenStore } from "../core/session-tokens.js";
 import {
@@ -115,7 +119,17 @@ export async function startDaemon(
   );
   sweepInterval.unref();
 
-  const registry = new Registry(config);
+  // `registry` and `manager` reference each other through the prune hook:
+  // the registry's onFetched closure reads `manager` to discover live
+  // sessions, while `manager` is constructed from `registry`. Both names
+  // are captured by reference (the closure only fires after construction
+  // returns), so this is safe at runtime.
+  const registry: Registry = new Registry(config, {
+    onFetched: () => {
+      void pruneStaleAgentVersions(registry, manager);
+    },
+  });
+  setAgentPruneLogger((msg) => app.log.info(msg));
   // Inject the configured stderr-tail size into every spawned agent so a
   // crash diagnostic includes the user-tuned trailing bytes. The logger
   // routes agent stderr + unexpected exits to daemon.log — without it,
@@ -212,6 +226,7 @@ export async function startDaemon(
     await manager.flushMetaWrites();
     setBinaryInstallLogger(null);
     setNpmInstallLogger(null);
+    setAgentPruneLogger(null);
     await app.close();
     try {
       fs.unlinkSync(paths.pidFile());

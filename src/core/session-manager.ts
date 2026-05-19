@@ -605,6 +605,24 @@ export class SessionManager {
     return this.sessions.get(sessionId);
   }
 
+  // Snapshot of which agent versions are currently in use by live
+  // sessions, keyed by agentId. Read by the registry-fetch prune sweep
+  // so it can skip install dirs that still back a running process.
+  activeAgentVersions(): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    for (const session of this.sessions.values()) {
+      const id = session.agent.agentId;
+      const version = session.agent.version;
+      let set = out.get(id);
+      if (!set) {
+        set = new Set<string>();
+        out.set(id, set);
+      }
+      set.add(version);
+    }
+    return out;
+  }
+
   // Resolve a user-typed session id (which may have the hydra_session_
   // prefix stripped — that's what `sessions list` and the picker show) to
   // the canonical form that actually exists. Tries the input as-given

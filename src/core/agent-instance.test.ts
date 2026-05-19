@@ -5,7 +5,12 @@ import { AgentInstance } from "./agent-instance.js";
 import type { SpawnPlan } from "./registry.js";
 
 function nodeScript(script: string): SpawnPlan {
-  return { command: process.execPath, args: ["-e", script], env: {} };
+  return {
+    command: process.execPath,
+    args: ["-e", script],
+    env: {},
+    version: "test",
+  };
 }
 
 async function settled(p: Promise<unknown>): Promise<Error> {
@@ -26,6 +31,7 @@ describe("AgentInstance: spawn-level failures", () => {
         command: "definitely-not-a-real-binary-xyz-12345",
         args: [],
         env: {},
+        version: "test",
       },
     });
     const err = await settled(agent.connection.request("initialize", {}));

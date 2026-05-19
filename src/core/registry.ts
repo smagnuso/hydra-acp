@@ -79,10 +79,20 @@ interface CachedRegistry {
   data: RegistryDocument;
 }
 
+export interface RegistryOptions {
+  // Fires after every successful network fetch (both explicit refresh()
+  // and the TTL-driven refetch inside load()). The callback's errors are
+  // swallowed so a faulty hook can never wedge a registry refresh.
+  onFetched?: (doc: RegistryDocument) => void | Promise<void>;
+}
+
 export class Registry {
   private cache: CachedRegistry | undefined;
 
-  constructor(private config: HydraConfig) {}
+  constructor(
+    private config: HydraConfig,
+    private options: RegistryOptions = {},
+  ) {}
 
   async load(): Promise<RegistryDocument> {
     if (this.cache && this.isFresh(this.cache.fetchedAt)) {
@@ -136,7 +146,15 @@ export class Registry {
     }
     const raw = await response.json();
     const data = RegistryDocument.parse(raw);
-    return { fetchedAt: Date.now(), raw, data };
+    const cached: CachedRegistry = { fetchedAt: Date.now(), raw, data };
+    const hook = this.options.onFetched;
+    if (hook) {
+      // Fire-and-forget: never let a misbehaving hook wedge a refresh.
+      void Promise.resolve()
+        .then(() => hook(data))
+        .catch(() => undefined);
+    }
+    return cached;
   }
 
   private async readDiskCache(): Promise<CachedRegistry | undefined> {
@@ -202,6 +220,11 @@ export interface SpawnPlan {
   command: string;
   args: string[];
   env: Record<string, string>;
+  // Version string used to construct the install dir. Mirrors the
+  // `version: agent.version ?? "current"` default that ensureBinary /
+  // ensureNpmPackage already use, so the prune sweep can identify
+  // which install dirs are owned by live agents.
+  version: string;
 }
 
 function npxPackageBasename(agent: RegistryAgent): string | undefined {
@@ -225,6 +248,7 @@ export async function planSpawn(
   callerArgs: string[] = [],
   options: { npmRegistry?: string } = {},
 ): Promise<SpawnPlan> {
+  const version = agent.version ?? "current";
   if (agent.distribution.npx) {
     const npx = agent.distribution.npx;
     const tail = callerArgs.length > 0 ? callerArgs : (npx.args ?? []);
@@ -237,12 +261,13 @@ export async function planSpawn(
         command: "npx",
         args: ["-y", npx.package, ...tail],
         env: npx.env ?? {},
+        version,
       };
     }
     const bin = npx.bin ?? npxPackageBasename(agent) ?? npx.package;
     const binPath = await ensureNpmPackage({
       agentId: agent.id,
-      version: agent.version ?? "current",
+      version,
       packageSpec: npx.package,
       bin,
       registry: options.npmRegistry,
@@ -251,6 +276,7 @@ export async function planSpawn(
       command: binPath,
       args: tail,
       env: npx.env ?? {},
+      version,
     };
   }
   if (agent.distribution.binary) {
@@ -262,7 +288,7 @@ export async function planSpawn(
     }
     const cmdPath = await ensureBinary({
       agentId: agent.id,
-      version: agent.version ?? "current",
+      version,
       target,
     });
     const tail = callerArgs.length > 0 ? callerArgs : (target.args ?? []);
@@ -270,6 +296,7 @@ export async function planSpawn(
       command: cmdPath,
       args: tail,
       env: target.env ?? {},
+      version,
     };
   }
   if (agent.distribution.uvx) {
@@ -279,6 +306,7 @@ export async function planSpawn(
       command: "uvx",
       args: [uvx.package, ...tail],
       env: uvx.env ?? {},
+      version,
     };
   }
   throw new Error(`Agent ${agent.id} has no usable distribution method.`);

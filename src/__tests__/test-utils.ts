@@ -75,6 +75,7 @@ export interface MockAgentControls {
 export function makeMockAgent(opts: {
   agentId?: string;
   cwd?: string;
+  version?: string;
 } = {}): MockAgentControls {
   const requestHandlers = new Map<string, RequestHandler>();
   const notificationHandlers = new Map<string, NotificationHandler>();
@@ -120,6 +121,7 @@ export function makeMockAgent(opts: {
 
   const agent = {
     agentId: opts.agentId ?? "mock-agent",
+    version: opts.version ?? "test",
     cwd: opts.cwd ?? "/tmp/mock",
     connection: fakeConnection,
     onExit(handler: (code: number | null, signal: NodeJS.Signals | null) => void): void {

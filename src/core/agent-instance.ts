@@ -28,6 +28,9 @@ const DEFAULT_STDERR_TAIL_BYTES = 4096;
 
 export class AgentInstance {
   readonly agentId: string;
+  // Version this process was spawned from — used by the registry-fetch
+  // prune sweep to skip install dirs belonging to a live agent.
+  readonly version: string;
   readonly cwd: string;
   readonly connection: JsonRpcConnection;
   private child: ChildProcess;
@@ -40,6 +43,7 @@ export class AgentInstance {
 
   private constructor(opts: AgentInstanceOptions, child: ChildProcess) {
     this.agentId = opts.agentId;
+    this.version = opts.plan.version;
     this.cwd = opts.cwd;
     this.child = child;
     this.stderrTailBytes = opts.stderrTailBytes ?? DEFAULT_STDERR_TAIL_BYTES;
