@@ -75,6 +75,13 @@ describe("InputDispatcher", () => {
     expect(feed(d, [k("ctrl-p")])).toEqual([{ type: "switch-session" }]);
   });
 
+  it("Ctrl+G emits show-help without mutating the buffer", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("h"), ch("i")]);
+    expect(feed(d, [k("ctrl-g")])).toEqual([{ type: "show-help" }]);
+    expect(d.state().buffer).toEqual(["hi"]);
+  });
+
   it("Enter while plan mode on sends with planMode: true", () => {
     const d = new InputDispatcher({ planMode: true });
     feed(d, [ch("x")]);

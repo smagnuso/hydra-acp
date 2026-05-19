@@ -25,6 +25,7 @@ export type KeyName =
   | "ctrl-d"
   | "ctrl-e"
   | "ctrl-f"
+  | "ctrl-g"
   | "ctrl-k"
   | "ctrl-l"
   | "ctrl-n"
@@ -83,6 +84,7 @@ export type InputEffect =
   | { type: "switch-session" }
   | { type: "next-live-session" }
   | { type: "toggle-tools" }
+  | { type: "show-help" }
   // Dispatcher → app: please acquire an image from the named source
   // (currently only the system clipboard) and call addAttachment().
   // Emitted by ctrl-v. The dispatcher stays synchronous; the app owns
@@ -355,6 +357,8 @@ export class InputDispatcher {
       case "ctrl-f":
         this.moveRight();
         return [];
+      case "ctrl-g":
+        return [{ type: "show-help" }];
       case "alt-b":
         this.moveWordBackward();
         return [];

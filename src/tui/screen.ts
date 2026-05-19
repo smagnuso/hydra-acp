@@ -85,6 +85,16 @@ export interface ConfirmPromptSpec {
   hint: string;
 }
 
+// Modal that displays a hotkey cheatsheet. `entries` is an ordered list
+// of [keys, description] pairs (or null for a visual separator) and is
+// rendered as a left-padded two-column block above the prompt area.
+// The caller dismisses by passing null to setHelpPrompt.
+export interface HelpPromptSpec {
+  title: string;
+  entries: ReadonlyArray<readonly [string, string] | null>;
+  hint: string;
+}
+
 export interface CompletionItem {
   name: string;
   description?: string;
@@ -96,6 +106,7 @@ const SEPARATOR_ROWS = 1;
 const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
+const MAX_HELP_ROWS = 30;
 const MAX_COMPLETION_ROWS = 6;
 const MAX_CHIP_ROWS = 4;
 const CONFIRM_PROMPT_ROWS = 2;
@@ -178,6 +189,7 @@ export class Screen {
   private lastFrameH = 0;
   private permissionPrompt: PermissionPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
+  private helpPrompt: HelpPromptSpec | null = null;
   private completions: CompletionItem[] = [];
   // Scrollback offset: 0 = pinned to bottom (live), N = N wrapped lines
   // above the bottom. Mouse wheel and PgUp/PgDn adjust this; new content
@@ -211,7 +223,7 @@ export class Screen {
   private banner: BannerState = {
     status: "ready",
     currentMode: undefined,
-    hint: "⇧⇥ mode · ⌃V paste · ⌃P pick · ⌃C cancel · ⌃D detach",
+    hint: "⇧⇥ mode · ⌃P pick · ⌃G guide · ⌃D detach",
     queued: 0,
   };
   private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
@@ -908,6 +920,20 @@ export class Screen {
     this.repaint();
   }
 
+  // Multi-row help cheatsheet that takes over the prompt area. Used by
+  // the ^G hotkey to surface every binding without dropping the user
+  // out of the session. Pass null to dismiss.
+  setHelpPrompt(spec: HelpPromptSpec | null): void {
+    this.helpPrompt = spec
+      ? { ...spec, entries: [...spec.entries] }
+      : null;
+    this.repaint();
+  }
+
+  isHelpPromptActive(): boolean {
+    return this.helpPrompt !== null;
+  }
+
   // Slash-command completion list shown directly above the separator. App
   // calls this after each keystroke; pass [] to dismiss. Suppressed when
   // the permission modal is active (the modal owns the prompt area).
@@ -1571,9 +1597,9 @@ export class Screen {
   }
 
   private completionRows(): number {
-    if (this.permissionPrompt) {
+    if (this.permissionPrompt || this.confirmPrompt || this.helpPrompt) {
       // Completions are pointless when the prompt area is taken over by
-      // the permission modal — the user can't be typing into it.
+      // a modal — the user can't be typing into it.
       return 0;
     }
     return Math.min(MAX_COMPLETION_ROWS, this.completions.length);
@@ -1775,6 +1801,10 @@ export class Screen {
       this.drawConfirmPrompt();
       return;
     }
+    if (this.helpPrompt) {
+      this.drawHelpPrompt();
+      return;
+    }
     const w = this.term.width;
     const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
@@ -1842,6 +1872,67 @@ export class Screen {
     this.paintRow(top + 1, `confirm|h|${w}|${spec.hint}`, () => {
       this.term.dim(` ${truncate(spec.hint, w - 2)}`);
     });
+  }
+
+  private drawHelpPrompt(): void {
+    const spec = this.helpPrompt;
+    if (!spec) {
+      return;
+    }
+    const w = this.term.width;
+    const rows = this.helpRows();
+    const top =
+      this.term.height -
+      rows -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
+    let row = top;
+    const writeRow = (sig: string, paint: () => void): void => {
+      if (row >= top + rows) {
+        return;
+      }
+      this.paintRow(row, sig, paint);
+      row += 1;
+    };
+    writeRow(`help|t|${w}|${spec.title}`, () => {
+      this.term.brightYellow(` ❓ ${truncate(spec.title, w - 5)}`);
+    });
+    const keysWidth = Math.min(
+      24,
+      Math.max(
+        ...spec.entries.map((e) => (e === null ? 0 : e[0].length)),
+        4,
+      ),
+    );
+    for (const entry of spec.entries) {
+      if (row >= top + rows - 1) {
+        break;
+      }
+      if (entry === null) {
+        writeRow(`help|sep|${w}|${row}`, () => undefined);
+        continue;
+      }
+      const [keys, desc] = entry;
+      const paddedKeys = keys.padEnd(keysWidth);
+      writeRow(`help|e|${w}|${keys}|${desc}`, () => {
+        this.term(" ");
+        this.term.brightCyan.noFormat(paddedKeys);
+        this.term.noFormat(` ${truncate(desc, w - 2 - keysWidth - 1)}`);
+      });
+    }
+    writeRow(`help|hint|${w}|${spec.hint}`, () => {
+      this.term.dim(` ${truncate(spec.hint, w - 2)}`);
+    });
+  }
+
+  private helpRows(): number {
+    if (!this.helpPrompt) {
+      return 0;
+    }
+    // title + N entries (including separators) + hint
+    return Math.min(MAX_HELP_ROWS, 2 + this.helpPrompt.entries.length);
   }
 
   private drawPermissionPrompt(): void {
@@ -1995,6 +2086,20 @@ export class Screen {
       this.term.moveTo(2, top);
       return;
     }
+    if (this.helpPrompt) {
+      // Park on the title row; there is no input here, but the cursor
+      // visually anchors the modal.
+      const rows = this.helpRows();
+      const top =
+        this.term.height -
+        rows -
+        BANNER_ROWS -
+        SEPARATOR_ROWS -
+        SESSIONBAR_ROWS +
+        1;
+      this.term.moveTo(2, top);
+      return;
+    }
     if (this.scrollbackSearch) {
       // Hide the cursor entirely — the prompt area shows the user's
       // existing buffer unchanged, and their typing actually lands in
@@ -2036,6 +2141,9 @@ export class Screen {
     }
     if (this.confirmPrompt) {
       return CONFIRM_PROMPT_ROWS;
+    }
+    if (this.helpPrompt) {
+      return this.helpRows();
     }
     const w = this.term.width;
     const room = Math.max(1, w - 2);
@@ -2998,6 +3106,8 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-e";
     case "CTRL_F":
       return "ctrl-f";
+    case "CTRL_G":
+      return "ctrl-g";
     case "CTRL_K":
       return "ctrl-k";
     case "CTRL_L":

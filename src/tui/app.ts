@@ -86,6 +86,38 @@ interface SessionContext {
   cwd: string;
 }
 
+// Hotkey cheatsheet rendered by the ^G modal. `null` is a visual
+// separator between groups. Kept at module scope so the array identity
+// is stable and the modal's draw signature can short-circuit.
+const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
+  ["Enter", "send prompt (or queue while a turn is running)"],
+  ["Alt+Enter", "newline in prompt"],
+  ["Shift+Tab", "cycle agent modes (plan / accept-edits / etc.)"],
+  ["Tab", "indent · slash-command completion"],
+  null,
+  ["↑ / ↓", "prompt history · queue navigation"],
+  ["←/→ Home/End", "cursor movement"],
+  ["Alt+B / Alt+F", "word back / forward"],
+  ["^A / ^E", "line start / end"],
+  ["^W / ^U / ^K", "kill word / line / to end"],
+  ["^Y", "yank last kill"],
+  null,
+  ["^P", "switch session (picker)"],
+  ["^T", "next live session"],
+  ["^V", "paste image from clipboard"],
+  ["^O", "expand / collapse tools block"],
+  null,
+  ["^R / ^S", "history reverse / forward search"],
+  ["PgUp / PgDn", "scroll scrollback"],
+  ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
+  null,
+  ["^C", "cancel turn (twice to exit)"],
+  ["Esc", "cancel turn and prefill draft"],
+  ["^D", "exit (or delete-forward in prompt)"],
+  ["^L", "force full redraw"],
+  ["^G", "toggle this help"],
+];
+
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const config = await loadConfig();
@@ -776,6 +808,9 @@ async function runSession(
         if (exitConfirmation && tryHandleExitConfirmKey(ev)) {
           continue;
         }
+        if (tryHandleHelpKey(ev)) {
+          continue;
+        }
         if (tryHandleScrollbackSearchKey(ev)) {
           continue;
         }
@@ -1144,6 +1179,35 @@ async function runSession(
     }
     return true;
   };
+  // Open or close the global hotkey cheatsheet (^G). Toggling lets the
+  // same key dismiss it without a second binding.
+  const toggleHelpModal = (): void => {
+    if (screen.isHelpPromptActive()) {
+      screen.setHelpPrompt(null);
+      return;
+    }
+    screen.setHelpPrompt({
+      title: "Hotkeys",
+      entries: HELP_ENTRIES,
+      hint: "any key dismisses · /help lists commands",
+    });
+  };
+
+  const tryHandleHelpKey = (ev: KeyEvent): boolean => {
+    if (!screen.isHelpPromptActive()) {
+      return false;
+    }
+    // Treat any key (other than re-pressing ^G, which toggles via the
+    // dispatcher path) as dismissal. Swallow all input so a stray
+    // keystroke can't leak into the prompt buffer behind the modal.
+    if (ev.type === "key" && ev.name === "ctrl-g") {
+      screen.setHelpPrompt(null);
+      return true;
+    }
+    screen.setHelpPrompt(null);
+    return true;
+  };
+
   const teardown = (): void => {
     // Set first so any inbound notification/request that lands between
     // here and stream.close() bails before touching the screen.
@@ -1365,6 +1429,9 @@ async function runSession(
       case "toggle-tools":
         toolsExpanded = !toolsExpanded;
         renderToolsBlock();
+        return;
+      case "show-help":
+        toggleHelpModal();
         return;
       case "escalate-search":
         // Prompt-history reverse-search ran out (no match, or the user

@@ -45,6 +45,28 @@ export interface PickOptions {
 // "New session" label so its truncation matches.
 const ROW_PREFIX_WIDTH = 2;
 
+// Help dialog content. `null` entries are blank-line separators. The
+// keys column is left-aligned and padded to HELP_KEYS_WIDTH so the
+// descriptions stack into a clean second column.
+const HELP_KEYS_WIDTH = 20;
+const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
+  ["↑ / ↓ or n / p", "navigate"],
+  ["PgUp / PgDn", "page up / page down"],
+  ["Home / End", "first / last"],
+  ["Enter", "open selected session (or create new)"],
+  null,
+  ["/", "search sessions"],
+  ["o", "toggle cwd-only filter"],
+  ["r", "refresh from daemon"],
+  null,
+  ["k", "kill the selected live session"],
+  ["d", "delete the selected cold session"],
+  null,
+  ["c", "create new session"],
+  ["?", "toggle this help"],
+  ["q / Esc / ^C", "quit picker"],
+];
+
 export async function pickSession(
   term: Terminal,
   opts: PickOptions,
@@ -107,7 +129,14 @@ export async function pickSession(
   // ignore navigation until the user resolves (y/n/ESC). `pendingAction`
   // pins the row that was targeted when the prompt opened so concurrent
   // refreshes don't drift the action onto a different session.
-  type Mode = "normal" | "confirm-kill" | "confirm-delete" | "busy";
+  // 'help' replaces the entire screen with a hotkey cheatsheet that any
+  // key dismisses.
+  type Mode =
+    | "normal"
+    | "confirm-kill"
+    | "confirm-delete"
+    | "busy"
+    | "help";
   let mode: Mode = "normal";
   let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
   // Transient one-line hint shown in the indicator slot (e.g. "live —
@@ -278,6 +307,10 @@ export async function pickSession(
   // to rely on a cursor-position query) and on resize (where the cleanest
   // way to recover is to start over).
   const renderFromScratch = (): void => {
+    if (mode === "help") {
+      renderHelp();
+      return;
+    }
     computeLayout();
     adjustScroll();
     startRow = 1;
@@ -291,6 +324,22 @@ export async function pickSession(
     }
     paintIndicator();
     term("\n");
+  };
+
+  const renderHelp = (): void => {
+    term.moveTo(1, 1).eraseDisplayBelow();
+    term.brightWhite.bold.noFormat("  Picker hotkeys")("\n\n");
+    for (const entry of HELP_ENTRIES) {
+      if (entry === null) {
+        term("\n");
+        continue;
+      }
+      const [keys, desc] = entry;
+      term.brightCyan.noFormat(`  ${keys.padEnd(HELP_KEYS_WIDTH)}`);
+      term.noFormat(desc)("\n");
+    }
+    term("\n");
+    term.dim.noFormat("  press any key to dismiss")("\n");
   };
 
   const repaintNewItem = (): void => {
@@ -442,6 +491,19 @@ export async function pickSession(
       if (mode === "busy") {
         return;
       }
+      // Help dialog: any key dismisses and restores the picker. ^c still
+      // aborts the picker entirely so the user can't feel trapped if
+      // they hit help by mistake mid-session.
+      if (mode === "help") {
+        if (name === "CTRL_C") {
+          cleanup();
+          resolve({ kind: "abort" });
+          return;
+        }
+        mode = "normal";
+        renderFromScratch();
+        return;
+      }
       if (mode === "confirm-kill" || mode === "confirm-delete") {
         if (data?.isCharacter && (name === "y" || name === "Y")) {
           const kind = mode === "confirm-kill" ? "kill" : "delete";
@@ -466,6 +528,13 @@ export async function pickSession(
       // into the next action's context. We still fall through and run
       // the key's normal behavior.
       clearTransient();
+      // `?` opens the help overlay outside of search mode (in search,
+      // it's a literal character that may appear in a query).
+      if (!searchActive && data?.isCharacter && name === "?") {
+        mode = "help";
+        renderHelp();
+        return;
+      }
       // Search mode: chars build the filter, navigation keys still move
       // through the filtered list, ^c / ESC clears the filter. r/k/d/etc.
       // are intentionally NOT interpreted as actions here — the user is
