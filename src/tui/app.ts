@@ -410,6 +410,7 @@ async function runSession(
     if (echo) {
       ownPendingByMid.delete(p.messageId);
       if (p.reason === "started") {
+        echo.flushed = true;
         appendRender({
           kind: "user-text",
           text: echo.text,
@@ -1534,6 +1535,13 @@ async function runSession(
     text: string;
     attachments: Attachment[];
     messageId?: string;
+    // True once the prompt actually started processing and we flushed
+    // the user-text to scrollback. Used by runPrompt's finally to
+    // gate the synthesized turn-complete: a prompt cancelled while
+    // still in the queue never started a turn, so there's nothing
+    // to mark complete and rendering "stopped (cancelled): <text>"
+    // for a never-run prompt is just noise.
+    flushed: boolean;
   }
   // FIFO of own prompts awaiting their prompt_queue_added confirmation
   // from hydra. Drained in order — hydra serializes session/prompt
@@ -1809,7 +1817,7 @@ async function runSession(
     // Stash the user-text echo for later flush. Hold a reference so
     // we can splice this entry out on error even if other prompts
     // have been pushed behind it in the meantime.
-    const echo: PendingEcho = { text, attachments };
+    const echo: PendingEcho = { text, attachments, flushed: false };
     pendingEchoes.push(echo);
 
     let cancelled = false;
@@ -1859,12 +1867,17 @@ async function runSession(
       adjustPendingTurns(-1);
       // Daemon broadcasts turn_complete to other clients but excludes
       // the originator. Synthesize it locally so the streaming buffer
-      // resets and a separator lands before the next turn.
-      appendRender(
-        stopReason !== undefined
-          ? { kind: "turn-complete", stopReason }
-          : { kind: "turn-complete" },
-      );
+      // resets and a separator lands before the next turn — but ONLY
+      // if the prompt actually started. A prompt cancelled while
+      // still in the queue never ran, never echoed to scrollback, and
+      // shouldn't leave a "stopped (cancelled)" marker behind.
+      if (echo.flushed) {
+        appendRender(
+          stopReason !== undefined
+            ? { kind: "turn-complete", stopReason }
+            : { kind: "turn-complete" },
+        );
+      }
       // Escape-cancel staged this. Apply only if the buffer is still
       // empty — the user may have started typing while the cancelled
       // turn was settling, and we don't want to clobber that draft.
