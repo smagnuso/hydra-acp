@@ -8,8 +8,11 @@ import { JsonRpcConnection } from "../acp/connection.js";
 import {
   HYDRA_META_KEY,
   extractHydraMeta,
+  type CancelPromptResult,
   type JsonRpcRequest,
+  type PromptQueueEntry,
   type SessionListUsage,
+  type UpdatePromptResult,
   ACP_PROTOCOL_VERSION,
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
@@ -200,20 +203,20 @@ async function runSession(
   // clients, not just ours. Incremented when we observe a peer's
   // prompt_received (the daemon excludes us from our own broadcasts, so
   // a user-text notification arriving here is always a peer) or when we
-  // start one of our own (in processPrompt). Decremented on every
-  // turn_complete (peer's, observed here; ours, in processPrompt's
-  // finally). The worker refuses to fire session/prompt while this is
-  // non-zero so we don't barge into a sibling's turn.
+  // start one of our own (in runPrompt). Decremented on every
+  // turn_complete (peer's, observed here; ours, in runPrompt's finally).
+  // Hydra serializes session/prompt requests on the wire so we don't
+  // gate sending on this — it's purely for the banner busy state.
   let pendingTurns = 0;
   // Wall-clock moment the session became busy (pendingTurns went 0 → >0).
   // Drives the banner's elapsed counter so the user sees "● running 30s"
   // for peer-triggered turns too, not just our own.
   let sessionBusySince: number | null = null;
   let sessionElapsedTimer: NodeJS.Timeout | null = null;
-  // Centralized pending-turn arithmetic so banner state, elapsed timer,
-  // and (on decrement) tickWorker all stay in sync regardless of whether
-  // the underlying turn was ours or a peer's. Without this the banner
-  // would stay on "ready" while a peer is mid-turn.
+  // Centralized pending-turn arithmetic so banner state and elapsed
+  // timer stay in sync regardless of whether the underlying turn was
+  // ours or a peer's. Without this the banner would stay on "ready"
+  // while a peer is mid-turn.
   const adjustPendingTurns = (delta: number): void => {
     const before = pendingTurns;
     pendingTurns = Math.max(0, pendingTurns + delta);
@@ -258,9 +261,7 @@ async function runSession(
         screenRef!.setBanner({ status: "ready", elapsedMs: undefined });
       }
     }
-    if (delta < 0) {
-      tickWorker();
-    }
+    void delta;
   };
   // Late-bound references so adjustPendingTurns (which can run via
   // onNotification before `screen` and `dispatcher` are assigned) can
@@ -311,6 +312,46 @@ async function runSession(
     const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
     if (screenReady) {
       screenRef!.setBanner({ status: "cold", elapsedMs: undefined });
+    }
+  });
+
+  // Hydra-owned prompt queue: maintain a local cache so the chip row
+  // and the input dispatcher's queue-edit/queue-remove targets agree
+  // with what the daemon thinks. All three events arrive on every
+  // attached client, so peer-originated prompts surface here too —
+  // two TUIs on the same session see each other's queues.
+  conn.onNotification("hydra-acp/prompt_queue_added", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as {
+      messageId?: unknown;
+      prompt?: unknown;
+    };
+    if (typeof p.messageId !== "string") return;
+    queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
+    if (screenRef && dispatcherRef) {
+      refreshQueueDisplay();
+    }
+  });
+  conn.onNotification("hydra-acp/prompt_queue_updated", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as {
+      messageId?: unknown;
+      prompt?: unknown;
+    };
+    if (typeof p.messageId !== "string") return;
+    if (!queueCache.has(p.messageId)) return;
+    queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
+    if (screenRef && dispatcherRef) {
+      refreshQueueDisplay();
+    }
+  });
+  conn.onNotification("hydra-acp/prompt_queue_removed", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as { messageId?: unknown };
+    if (typeof p.messageId !== "string") return;
+    if (!queueCache.delete(p.messageId)) return;
+    if (screenRef && dispatcherRef) {
+      refreshQueueDisplay();
     }
   });
 
@@ -527,6 +568,11 @@ async function runSession(
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
   let initialModes: AvailableMode[] | undefined;
+  // Snapshot of the daemon-owned prompt queue at attach time. Lets the
+  // chip row paint stale-but-correct queue state right after the
+  // dispatcher is constructed, without waiting for new
+  // prompt_queue_added notifications to arrive on the wire.
+  let initialQueue: PromptQueueEntry[] | undefined;
   // Last-known usage at attach time, surfaced by the daemon's meta so the
   // sessionbar can show tokens/cost immediately on reopen rather than
   // waiting for the next live usage_update event.
@@ -573,6 +619,7 @@ async function runSession(
     if (hydraMeta.availableModes) {
       initialModes = hydraMeta.availableModes;
     }
+    initialQueue = hydraMeta.queue;
   } else {
     const attached = (await conn.request("session/attach", {
       sessionId: ctx.sessionId,
@@ -602,6 +649,7 @@ async function runSession(
     if (hydraMeta.availableModes) {
       initialModes = hydraMeta.availableModes;
     }
+    initialQueue = hydraMeta.queue;
   }
 
   const historyFile = paths.tuiHistoryFile(resolvedSessionId);
@@ -1118,34 +1166,64 @@ async function runSession(
     resume(nextOpts);
   };
 
-  // The dispatcher's queue indices reference the "waiting" slice (the
-  // head being processed is invisible to queue editing). Translate back
-  // into the real promptQueue offset when applying changes.
-  const queueHeadOffset = (): number => (workerActive ? 1 : 0);
-
   const handleEffect = (effect: InputEffect): void => {
     switch (effect.type) {
       case "send":
         enqueuePrompt(effect.text, effect.attachments);
         return;
       case "queue-edit": {
-        const realIdx = effect.index + queueHeadOffset();
-        const existing = promptQueue[realIdx];
-        if (existing) {
-          promptQueue[realIdx] = {
-            text: effect.text,
-            attachments: effect.attachments,
-          };
-          refreshQueueDisplay();
+        const mid = queueMessageIdAt(effect.index);
+        if (!mid) {
+          return;
         }
+        const blocks: Array<Record<string, unknown>> = [];
+        if (effect.text.length > 0) {
+          blocks.push({ type: "text", text: effect.text });
+        }
+        for (const a of effect.attachments) {
+          blocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
+        }
+        // Fire-and-forget the wire request; daemon broadcasts
+        // prompt_queue_updated on success, which refreshes the chip.
+        // If the entry started or got cancelled between Up-arrow and
+        // Enter, hydra returns already_running / not_found — surface
+        // those quietly so the user knows the edit didn't land.
+        conn
+          .request("hydra-acp/update_prompt", {
+            sessionId: resolvedSessionId,
+            messageId: mid,
+            prompt: blocks,
+          })
+          .then((raw) => {
+            const res = raw as UpdatePromptResult;
+            if (!res.updated && res.reason !== "ok") {
+              screen.notify(`queue edit skipped (${res.reason})`);
+            }
+          })
+          .catch((err: Error) => {
+            screen.notify(`queue edit failed: ${err.message}`);
+          });
         return;
       }
       case "queue-remove": {
-        const realIdx = effect.index + queueHeadOffset();
-        if (realIdx >= 0 && realIdx < promptQueue.length) {
-          promptQueue.splice(realIdx, 1);
-          refreshQueueDisplay();
+        const mid = queueMessageIdAt(effect.index);
+        if (!mid) {
+          return;
         }
+        conn
+          .request("hydra-acp/cancel_prompt", {
+            sessionId: resolvedSessionId,
+            messageId: mid,
+          })
+          .then((raw) => {
+            const res = raw as CancelPromptResult;
+            if (!res.cancelled && res.reason !== "ok") {
+              screen.notify(`queue cancel skipped (${res.reason})`);
+            }
+          })
+          .catch((err: Error) => {
+            screen.notify(`queue cancel failed: ${err.message}`);
+          });
         return;
       }
       case "cancel": {
@@ -1154,8 +1232,7 @@ async function runSession(
         // nothing else is queued behind it and the buffer is empty (we
         // never overwrite text the user has typed). Plain ^C skips this.
         if (effect.prefill && turnInFlight) {
-          const headOffset = workerActive ? 1 : 0;
-          const waitingEmpty = promptQueue.length <= headOffset;
+          const waitingEmpty = queueCache.size === 0;
           const bufferEmpty = dispatcher
             .state()
             .buffer.every((line) => line === "");
@@ -1171,10 +1248,10 @@ async function runSession(
         } else if (pendingTurns > 0) {
           cancelRemoteTurn();
         }
-        // ^C stops only the in-flight turn. Queued prompts stay put — the
-        // worker loop will pick the next one up once the cancelled turn
-        // settles. Use queue editing (Up + ^C / Enter) to drop individual
-        // queued items, or repeat ^C as each one starts.
+        // ^C stops only the in-flight turn. Queued prompts stay put —
+        // the daemon's queue picks the next one up once the cancelled
+        // turn settles. Use Up + ^C / Enter to drop a specific queued
+        // entry via hydra-acp/cancel_prompt.
         return;
       }
       case "exit":
@@ -1311,32 +1388,93 @@ async function runSession(
     screen.refreshPrompt();
   };
 
-  // Serial prompt queue. While a turn is running, Enter pushes here; the
-  // worker dequeues and processes one at a time. The user echo is rendered
-  // when the prompt is *processed*, not enqueued, so each turn lands as a
-  // clean (user → reply) pair in scrollback even if the user typed several
-  // prompts back-to-back.
-  const promptQueue: Array<{
+  // Per-chip view of a queued entry, derived from the prompt array on the
+  // wire. text/attachmentCount are pre-computed once at add/update time so
+  // refreshQueueDisplay doesn't re-walk the prompt blocks on every render.
+  interface QueueChipEntry {
+    messageId: string;
     text: string;
-    attachments: Attachment[];
-  }> = [];
-  let workerActive = false;
+    attachmentCount: number;
+  }
+
+  const formatQueueChipText = (entry: QueueChipEntry): string =>
+    entry.attachmentCount > 0
+      ? `${entry.text} · 📎×${entry.attachmentCount}`
+      : entry.text;
+
+  // Convert a wire-shaped prompt array (the session/prompt prompt blocks)
+  // into the chip-display shape. Mirrors the on-send projection so a chip
+  // for a self-originated entry matches what the user typed.
+  const chipFromPrompt = (
+    messageId: string,
+    prompt: unknown,
+  ): QueueChipEntry => {
+    const blocks = Array.isArray(prompt) ? prompt : [];
+    let text = "";
+    let attachmentCount = 0;
+    for (const raw of blocks) {
+      if (!raw || typeof raw !== "object") continue;
+      const b = raw as Record<string, unknown>;
+      if (b.type === "text" && typeof b.text === "string") {
+        text += b.text;
+      } else if (b.type === "image") {
+        attachmentCount += 1;
+      }
+    }
+    return {
+      messageId,
+      text: sanitizeSingleLine(text),
+      attachmentCount,
+    };
+  };
+
+  // Server-driven view of the daemon-owned prompt queue. Populated by
+  // hydra-acp/prompt_queue_added notifications and by the queue snapshot
+  // delivered on attach (_meta["hydra-acp"].queue). Entries are removed
+  // by prompt_queue_removed regardless of reason — once gone, the chip
+  // disappears whether the entry started, was cancelled, or abandoned.
+  //
+  // The cache holds ALL user-visible entries (self + peers) so two TUIs
+  // on the same session see each other's queues. The chip row renders
+  // straight from this map; the dispatcher's queue-edit / queue-remove
+  // index into it by insertion order to resolve a slot to its messageId
+  // for the wire request.
+  const queueCache = new Map<string, QueueChipEntry>();
 
   const refreshQueueDisplay = (): void => {
-    // Skip the head — that one is being processed and is already echoed in
-    // scrollback. Show only those still waiting. Attached image count is
-    // surfaced as a "📎×N" suffix on the chip text so a queued slot with
-    // chips is visually distinct from one without.
-    const waiting = promptQueue.slice(workerActive ? 1 : 0);
-    const displayTexts = waiting.map((p) =>
-      p.attachments.length > 0
-        ? `${p.text} · 📎×${p.attachments.length}`
-        : p.text,
-    );
+    const entries = [...queueCache.values()];
+    const displayTexts = entries.map(formatQueueChipText);
     screen.setQueuedPrompts(displayTexts);
-    screen.setBanner({ queued: waiting.length });
-    dispatcher.setQueue(waiting.map((p) => p.text));
+    screen.setBanner({ queued: entries.length });
+    dispatcher.setQueue(entries.map((e) => e.text));
   };
+
+  // Resolve a queue-display slot index to the messageId hydra knows it
+  // by. Returns undefined if the index has been spliced out from under
+  // the dispatcher (e.g. the entry started or was cancelled between
+  // the Up-arrow render and the user's Enter / ^C).
+  const queueMessageIdAt = (index: number): string | undefined => {
+    const entries = [...queueCache.values()];
+    return entries[index]?.messageId;
+  };
+
+  // Hydrate the cache from the attach-response queue snapshot so the
+  // chip row reflects daemon state immediately, not just after the
+  // first live prompt_queue_added arrives. Skips the in-flight head
+  // (position 0) — that prompt's user-text is already in scrollback
+  // history; only waiting entries get visible chips.
+  if (initialQueue && initialQueue.length > 0) {
+    for (const entry of initialQueue) {
+      if (entry.position === 0) continue;
+      queueCache.set(
+        entry.messageId,
+        chipFromPrompt(entry.messageId, entry.prompt),
+      );
+    }
+    if (queueCache.size > 0) {
+      refreshQueueDisplay();
+    }
+  }
 
   const enqueuePrompt = (
     text: string,
@@ -1351,9 +1489,7 @@ async function runSession(
     history = appendEntry(history, text);
     dispatcher.setHistory(history);
     saveHistory(historyFile, history).catch(() => undefined);
-    promptQueue.push({ text, attachments });
-    refreshQueueDisplay();
-    tickWorker();
+    void runPrompt(text, attachments);
   };
 
   // Handles Shift+Tab: cycles through agentModes and sets the mode on the
@@ -1380,16 +1516,6 @@ async function runSession(
     } catch (err) {
       screen.notify(`set_mode failed: ${(err as Error).message}`);
     }
-  };
-
-  // Start the worker iff there's queued work and the session is idle.
-  // Called from enqueuePrompt and from the turn_complete observer, so a
-  // queued prompt fires the moment a peer's turn finishes.
-  const tickWorker = (): void => {
-    if (workerActive || pendingTurns > 0 || promptQueue.length === 0) {
-      return;
-    }
-    void runQueueWorker();
   };
 
   // Returns true if the input was a TUI built-in slash command and was
@@ -1551,43 +1677,14 @@ async function runSession(
     }
   };
 
-  const runQueueWorker = async (): Promise<void> => {
-    workerActive = true;
-    try {
-      while (promptQueue.length > 0 && pendingTurns === 0) {
-        const next = promptQueue[0];
-        if (!next) {
-          break;
-        }
-        // Drop the head from the visual queue zone — it's about to be
-        // echoed into scrollback as a real user message.
-        refreshQueueDisplay();
-        await processPrompt(next.text, next.attachments);
-        // Now that processing is fully done (including turn-complete),
-        // shift the head off so the next iteration's slice(1) is correct.
-        promptQueue.shift();
-      }
-    } finally {
-      workerActive = false;
-      refreshQueueDisplay();
-      // Escape-cancel staged this. Apply only if the buffer is still
-      // empty — the user may have started typing while the cancelled
-      // turn was settling, and we don't want to clobber that draft.
-      if (pendingPrefill !== null) {
-        const { text, attachments } = pendingPrefill;
-        pendingPrefill = null;
-        const bufferEmpty = dispatcher
-          .state()
-          .buffer.every((line) => line === "");
-        if (bufferEmpty) {
-          dispatcher.setBuffer(text, attachments);
-          screen.refreshPrompt();
-        }
-      }
-    }
-  };
-
-  const processPrompt = async (
+  // Fire a user prompt over the wire. Replaces the old local-queue
+  // worker: hydra serializes for us, so we send eagerly and let the
+  // daemon's prompt_queue_* notifications drive the chip area. The
+  // user-text echo lands in scrollback right away regardless of whether
+  // this prompt ends up queued behind something — chip + scrollback
+  // play distinct roles (queue position vs. conversation history) and
+  // both belong to the user as soon as they hit Enter.
+  const runPrompt = async (
     text: string,
     attachments: Attachment[],
   ): Promise<void> => {
@@ -1598,13 +1695,7 @@ async function runSession(
     for (const a of attachments) {
       userBlocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
     }
-    const promptArr = userBlocks;
 
-    // Mark a turn as in-flight before any await so a near-simultaneous
-    // enqueue from this client (or a peer broadcast) doesn't slip a
-    // second session/prompt past the gate. The adjust helper handles
-    // banner status and the elapsed timer in one place so peer-triggered
-    // turns get the same "running · 30s" treatment as ours.
     adjustPendingTurns(1);
     appendRender({ kind: "user-text", text, attachments });
 
@@ -1626,7 +1717,7 @@ async function runSession(
     try {
       const response = (await conn.request("session/prompt", {
         sessionId: resolvedSessionId,
-        prompt: promptArr,
+        prompt: userBlocks,
       })) as { stopReason?: unknown };
       if (response && typeof response.stopReason === "string") {
         stopReason = response.stopReason;
@@ -1643,14 +1734,28 @@ async function runSession(
     } finally {
       turnInFlight = null;
       adjustPendingTurns(-1);
-      // Daemon broadcasts turn_complete to other clients but excludes the
-      // originator (core/session.ts:138). Synthesize it locally so the
-      // streaming buffer resets and a separator lands before the next turn.
+      // Daemon broadcasts turn_complete to other clients but excludes
+      // the originator. Synthesize it locally so the streaming buffer
+      // resets and a separator lands before the next turn.
       appendRender(
         stopReason !== undefined
           ? { kind: "turn-complete", stopReason }
           : { kind: "turn-complete" },
       );
+      // Escape-cancel staged this. Apply only if the buffer is still
+      // empty — the user may have started typing while the cancelled
+      // turn was settling, and we don't want to clobber that draft.
+      if (pendingPrefill !== null) {
+        const { text: pt, attachments: pa } = pendingPrefill;
+        pendingPrefill = null;
+        const bufferEmpty = dispatcher
+          .state()
+          .buffer.every((line) => line === "");
+        if (bufferEmpty) {
+          dispatcher.setBuffer(pt, pa);
+          screen.refreshPrompt();
+        }
+      }
     }
   };
 
@@ -1814,7 +1919,7 @@ async function runSession(
   // user has a visible "agent is working" indicator from the moment a turn
   // starts — even if no tool calls fire for a while. Called from the
   // user-text handler so it fires for both our own prompts (synthesized
-  // via processPrompt) and peers' prompts (broadcast by the daemon).
+  // via runPrompt) and peers' prompts (broadcast by the daemon).
   const startToolsBlock = (): void => {
     toolsBlockStartedAt = Date.now();
     toolsBlockEndedAt = null;
