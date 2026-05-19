@@ -325,11 +325,27 @@ async function runSession(
     const p = (params ?? {}) as {
       messageId?: unknown;
       prompt?: unknown;
+      originator?: { clientId?: unknown };
     };
     if (typeof p.messageId !== "string") return;
     queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
     if (screenRef && dispatcherRef) {
       refreshQueueDisplay();
+    }
+    // If this prompt_queue_added is for one of our own session/prompt
+    // sends, bind the FIFO head to its messageId so we can flush the
+    // scrollback echo when prompt_queue_removed{started} arrives. Hydra
+    // serializes session/prompt arrivals per session, so the order of
+    // our-originator events matches the order we sent.
+    if (
+      ownClientId !== undefined &&
+      p.originator?.clientId === ownClientId
+    ) {
+      const echo = pendingEchoes.shift();
+      if (echo) {
+        echo.messageId = p.messageId;
+        ownPendingByMid.set(p.messageId, echo);
+      }
     }
   });
   conn.onNotification("hydra-acp/prompt_queue_updated", (params) => {
@@ -341,17 +357,65 @@ async function runSession(
     if (typeof p.messageId !== "string") return;
     if (!queueCache.has(p.messageId)) return;
     queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
+    // If the underlying prompt of one of our own deferred echoes was
+    // mutated (via hydra-acp/update_prompt), refresh the pending echo's
+    // text/attachments too so the eventual scrollback flush reflects
+    // what actually got forwarded upstream.
+    const pending = ownPendingByMid.get(p.messageId);
+    if (pending) {
+      const blocks = Array.isArray(p.prompt) ? p.prompt : [];
+      let text = "";
+      const attachments: Attachment[] = [];
+      for (const raw of blocks) {
+        if (!raw || typeof raw !== "object") continue;
+        const b = raw as Record<string, unknown>;
+        if (b.type === "text" && typeof b.text === "string") {
+          text += b.text;
+        } else if (
+          b.type === "image" &&
+          typeof b.data === "string" &&
+          typeof b.mimeType === "string"
+        ) {
+          // Approximate the original byte count from the base64 size —
+          // exact sizeBytes isn't on the wire, and the field is only
+          // used for display. 3/4 of base64 length is the decoded length.
+          attachments.push({
+            data: b.data,
+            mimeType: b.mimeType,
+            sizeBytes: Math.floor((b.data.length * 3) / 4),
+          });
+        }
+      }
+      pending.text = text;
+      pending.attachments = attachments;
+    }
     if (screenRef && dispatcherRef) {
       refreshQueueDisplay();
     }
   });
   conn.onNotification("hydra-acp/prompt_queue_removed", (params) => {
     if (teardownStarted) return;
-    const p = (params ?? {}) as { messageId?: unknown };
+    const p = (params ?? {}) as { messageId?: unknown; reason?: unknown };
     if (typeof p.messageId !== "string") return;
-    if (!queueCache.delete(p.messageId)) return;
-    if (screenRef && dispatcherRef) {
+    const hadChip = queueCache.delete(p.messageId);
+    if (hadChip && screenRef && dispatcherRef) {
       refreshQueueDisplay();
+    }
+    // If this is one of our own deferred echoes, decide what to do based
+    // on the reason: started → flush user-text to scrollback (the
+    // prompt is actually being forwarded upstream now); cancelled or
+    // abandoned → drop silently (it never ran, so it shouldn't appear
+    // in scrollback at all).
+    const echo = ownPendingByMid.get(p.messageId);
+    if (echo) {
+      ownPendingByMid.delete(p.messageId);
+      if (p.reason === "started") {
+        appendRender({
+          kind: "user-text",
+          text: echo.text,
+          attachments: echo.attachments,
+        });
+      }
     }
   });
 
@@ -564,6 +628,11 @@ async function runSession(
   let resolvedAgentId = ctx.agentId;
   let resolvedCwd = ctx.cwd;
   let resolvedTitle: string | undefined;
+  // Captured from the session/new or session/attach response. Used to
+  // filter prompt_queue_added events for entries that originated from
+  // this TUI so the deferred-echo plumbing can bind a local pending
+  // entry to the messageId hydra minted.
+  let ownClientId: string | undefined;
   let initialModel: string | undefined;
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
@@ -595,8 +664,15 @@ async function runSession(
       ...(Object.keys(hydraNewMeta).length > 0
         ? { _meta: { [HYDRA_META_KEY]: hydraNewMeta } }
         : {}),
-    })) as { sessionId: string; _meta?: Record<string, unknown> };
+    })) as {
+      sessionId: string;
+      clientId?: string;
+      _meta?: Record<string, unknown>;
+    };
     resolvedSessionId = created.sessionId;
+    if (created.clientId) {
+      ownClientId = created.clientId;
+    }
     exitHint.sessionId = resolvedSessionId;
     const hydraMeta = extractHydraMeta(created._meta ?? undefined);
     upstreamSessionId = hydraMeta.upstreamSessionId;
@@ -625,8 +701,15 @@ async function runSession(
       sessionId: ctx.sessionId,
       historyPolicy: "full",
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
-    })) as { sessionId: string; _meta?: Record<string, unknown> };
+    })) as {
+      sessionId: string;
+      clientId?: string;
+      _meta?: Record<string, unknown>;
+    };
     resolvedSessionId = attached.sessionId;
+    if (attached.clientId) {
+      ownClientId = attached.clientId;
+    }
     exitHint.sessionId = resolvedSessionId;
     const hydraMeta = extractHydraMeta(attached._meta ?? undefined);
     upstreamSessionId = hydraMeta.upstreamSessionId;
@@ -1441,6 +1524,27 @@ async function runSession(
   // for the wire request.
   const queueCache = new Map<string, QueueChipEntry>();
 
+  // Deferred-echo plumbing. Own prompts are NOT echoed to scrollback at
+  // submit time — they're held here until hydra signals the prompt has
+  // actually been forwarded upstream (prompt_queue_removed{started}).
+  // Otherwise a prompt typed while another turn runs would land in
+  // scrollback as if it had started, even though the chip area shows it
+  // as queued.
+  interface PendingEcho {
+    text: string;
+    attachments: Attachment[];
+    messageId?: string;
+  }
+  // FIFO of own prompts awaiting their prompt_queue_added confirmation
+  // from hydra. Drained in order — hydra serializes session/prompt
+  // arrivals per session, so the Nth prompt_queue_added with our
+  // originator corresponds to the Nth entry we pushed here.
+  const pendingEchoes: PendingEcho[] = [];
+  // Echoes that have already been bound to a messageId. Held here
+  // until prompt_queue_removed for that messageId tells us to flush
+  // (started) or drop (cancelled / abandoned).
+  const ownPendingByMid = new Map<string, PendingEcho>();
+
   const refreshQueueDisplay = (): void => {
     const entries = [...queueCache.values()];
     const displayTexts = entries.map(formatQueueChipText);
@@ -1680,10 +1784,15 @@ async function runSession(
   // Fire a user prompt over the wire. Replaces the old local-queue
   // worker: hydra serializes for us, so we send eagerly and let the
   // daemon's prompt_queue_* notifications drive the chip area. The
-  // user-text echo lands in scrollback right away regardless of whether
-  // this prompt ends up queued behind something — chip + scrollback
-  // play distinct roles (queue position vs. conversation history) and
-  // both belong to the user as soon as they hit Enter.
+  // user-text echo into scrollback is DEFERRED: we hold the text +
+  // attachments in `pendingEchoes` (a FIFO matched against incoming
+  // prompt_queue_added events with our originator) and only flush to
+  // scrollback when prompt_queue_removed{started} for our messageId
+  // arrives — i.e. when hydra actually forwards the prompt upstream
+  // to the agent. That way a prompt typed during another in-flight
+  // turn shows up in the chip row as queued and does not appear in
+  // scrollback until it really starts processing.
+
   const runPrompt = async (
     text: string,
     attachments: Attachment[],
@@ -1697,7 +1806,11 @@ async function runSession(
     }
 
     adjustPendingTurns(1);
-    appendRender({ kind: "user-text", text, attachments });
+    // Stash the user-text echo for later flush. Hold a reference so
+    // we can splice this entry out on error even if other prompts
+    // have been pushed behind it in the meantime.
+    const echo: PendingEcho = { text, attachments };
+    pendingEchoes.push(echo);
 
     let cancelled = false;
     turnInFlight = {
@@ -1723,6 +1836,16 @@ async function runSession(
         stopReason = response.stopReason;
       }
     } catch (err) {
+      // The send didn't make it through hydra → there will never be a
+      // prompt_queue_added for this echo. Splice it out wherever it
+      // sits (still in FIFO, or already bound to a messageId).
+      const idx = pendingEchoes.indexOf(echo);
+      if (idx >= 0) {
+        pendingEchoes.splice(idx, 1);
+      }
+      if (echo.messageId !== undefined) {
+        ownPendingByMid.delete(echo.messageId);
+      }
       screen.appendLines([
         {
           prefix: "✗ ",
