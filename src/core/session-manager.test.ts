@@ -1718,3 +1718,102 @@ describe("SessionManager: defaultModels", () => {
   });
 });
 
+describe("SessionManager: resurrectPendingQueues", () => {
+  it("replays queued prompts persisted on disk against a resurrected session", async () => {
+    const { paths } = await import("./paths.js");
+    const { SessionStore } = await import("./session-store.js");
+    const { rewriteQueue } = await import("./queue-store.js");
+    const store = new SessionStore();
+
+    // Persist a session record so SessionManager.list / loadFromDisk
+    // can find it on startup.
+    await store.write({
+      sessionId: "hydra_session_replay",
+      cwd: "/work",
+      agentId: "claude-code",
+      upstreamSessionId: "u_replay",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date(Date.now() - 30_000).toISOString(),
+    });
+    // And drop a fresh queue file alongside it.
+    await rewriteQueue("hydra_session_replay", [
+      {
+        messageId: "m_replay_AAA",
+        originator: { clientInfo: { name: "tui", version: "0.3.0" } },
+        prompt: [{ type: "text", text: "resume me" }],
+        enqueuedAt: Date.now() - 5_000,
+      },
+    ]);
+
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_replay" })
+      // The replayed queue's upstream session/prompt — hangs so we
+      // can observe it was called without the test running to
+      // completion.
+      .mockImplementationOnce(() => new Promise(() => undefined));
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    await manager.resurrectPendingQueues();
+    // Give the replay's drainQueue a tick to fire the upstream
+    // session/prompt.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const promptCalls = requestMock.mock.calls.filter(
+      ([m]) => m === "session/prompt",
+    );
+    expect(promptCalls).toHaveLength(1);
+    expect(
+      (promptCalls[0]?.[1] as { prompt: Array<{ text: string }> })
+        .prompt[0]?.text,
+    ).toBe("resume me");
+  });
+
+  it("drops persisted entries past the TTL and doesn't resurrect for stale-only queues", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    const { rewriteQueue, loadQueue } = await import("./queue-store.js");
+    const store = new SessionStore();
+
+    await store.write({
+      sessionId: "hydra_session_stale",
+      cwd: "/work",
+      agentId: "claude-code",
+      upstreamSessionId: "u_stale",
+      createdAt: new Date(Date.now() - 86_400_000).toISOString(),
+      updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+    });
+    // enqueuedAt well past TTL (TTL is 15 min, this is a day).
+    await rewriteQueue("hydra_session_stale", [
+      {
+        messageId: "m_stale_AAA",
+        originator: { clientInfo: { name: "tui" } },
+        prompt: [{ type: "text", text: "yesterday's prompt" }],
+        enqueuedAt: Date.now() - 86_400_000,
+      },
+    ]);
+
+    let spawnCount = 0;
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        spawnCount += 1;
+        return makeMockAgent({ agentId: "claude-code", cwd: "/work" }).agent;
+      },
+    );
+
+    await manager.resurrectPendingQueues();
+
+    // No spawn happened — the queue was all stale, nothing to replay.
+    expect(spawnCount).toBe(0);
+    // And the stale file got rewritten to empty (and then deleted).
+    expect(await loadQueue("hydra_session_stale")).toEqual([]);
+  });
+});
+

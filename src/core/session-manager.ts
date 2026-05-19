@@ -27,6 +27,15 @@ import type { AdvertisedCommand, AdvertisedMode } from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
 import { HYDRA_VERSION } from "./hydra-version.js";
+import { loadQueue, rewriteQueue } from "./queue-store.js";
+
+// Persisted queued prompts older than this are dropped at restart
+// rather than re-fired. Queues are live intent; if hydra was down
+// long enough for the prompts to go stale, blasting through them on
+// restart would surprise the user (and burn API tokens). 15 minutes
+// is a defensible default — a crash-restart cycle should be under
+// that, and longer downtime means the user has likely moved on.
+const QUEUE_REPLAY_TTL_MS = 15 * 60 * 1000;
 
 const HYDRA_ID_ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -958,6 +967,56 @@ export class SessionManager {
       return;
     }
     await Promise.allSettled(pending);
+  }
+
+  // Startup hook: scan persisted sessions for non-empty queue files,
+  // apply the TTL, resurrect anything with surviving entries, and
+  // replay them through the normal queue path. Called from the daemon
+  // boot sequence; failures per session are logged and don't block
+  // the boot.
+  //
+  // Concurrency is deliberately sequential — resurrect each session
+  // one at a time so a runaway daemon with 100 queued sessions
+  // doesn't burst-spawn 100 agents on startup. Inside a single
+  // session, the queue still drains in parallel-friendly fashion via
+  // drainQueue once resurrect() completes.
+  async resurrectPendingQueues(): Promise<void> {
+    const records = await this.store.list().catch(() => []);
+    for (const rec of records) {
+      const queue = await loadQueue(rec.sessionId).catch(() => []);
+      if (queue.length === 0) continue;
+      const now = Date.now();
+      const fresh = queue.filter((e) => now - e.enqueuedAt < QUEUE_REPLAY_TTL_MS);
+      const dropped = queue.length - fresh.length;
+      if (dropped > 0) {
+        this.logger?.info(
+          `queue replay: dropping ${dropped} stale prompt(s) for ${rec.sessionId} (TTL ${QUEUE_REPLAY_TTL_MS / 1000}s)`,
+        );
+        await rewriteQueue(rec.sessionId, fresh).catch(() => undefined);
+      }
+      if (fresh.length === 0) continue;
+      const fromDisk = await this.loadFromDisk(rec.sessionId).catch(() => undefined);
+      if (!fromDisk) {
+        // Orphan queue file with no meta.json — can't resurrect, but
+        // also don't leave the file around as restart cruft.
+        this.logger?.warn(
+          `queue replay: no meta for ${rec.sessionId}; discarding ${fresh.length} entr${fresh.length === 1 ? "y" : "ies"}`,
+        );
+        await rewriteQueue(rec.sessionId, []).catch(() => undefined);
+        continue;
+      }
+      try {
+        const session = await this.resurrect(fromDisk);
+        this.logger?.info(
+          `queue replay: resurrected ${rec.sessionId} and replaying ${fresh.length} prompt(s)`,
+        );
+        session.replayPersistedQueue(fresh);
+      } catch (err) {
+        this.logger?.warn(
+          `queue replay: failed to resurrect ${rec.sessionId}: ${(err as Error).message}`,
+        );
+      }
+    }
   }
 }
 

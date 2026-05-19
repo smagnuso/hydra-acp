@@ -2610,6 +2610,86 @@ describe("Session", () => {
       expect(promptReceivedFor("waiting")).toBeDefined();
     });
 
+    it("persists queued entries to disk; head is excluded from disk before invocation", async () => {
+      const { session, mock } = makeSession("hydra_session_Qpersist", "u_Q");
+      const { client: alice } = makeClient();
+      const { client: bob } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // Hold the head so the second entry sits in the queue.
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Qpersist",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      void session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Qpersist",
+        prompt: [{ type: "text", text: "waiting" }],
+      });
+      // All persistRewrite calls go through the per-session queue
+      // write chain. Drain it via the test helper rather than
+      // guessing setImmediate ticks.
+      await session.flushPersistWrites();
+
+      const { loadQueue } = await import("./queue-store.js");
+      const persisted = await loadQueue("hydra_session_Qpersist");
+      // Only the waiter is on disk — the head was rewritten out
+      // BEFORE the agent invocation so a crash mid-generation won't
+      // double-fire on restart.
+      expect(persisted).toHaveLength(1);
+      expect(
+        (persisted[0]?.prompt[0] as { text: string }).text,
+      ).toBe("waiting");
+    });
+
+    it("replays a persisted queue through drainQueue", async () => {
+      const { session, mock } = makeSession("hydra_session_Qreplay", "u_QR");
+      const { client: alice, stream: aliceStream } = makeClient();
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      // Pretend the daemon just resurrected this session with a
+      // persisted entry on disk. Use the public replay entry point.
+      session.replayPersistedQueue([
+        {
+          messageId: "m_resurrect_test_000",
+          originator: { clientInfo: { name: "tui", version: "0.2.0" } },
+          prompt: [{ type: "text", text: "from disk" }],
+          enqueuedAt: Date.now() - 1000,
+        },
+      ]);
+      await new Promise((r) => setImmediate(r));
+
+      // The replayed entry hit drainQueue → broadcasted
+      // prompt_queue_added + prompt_queue_removed(started) + sent
+      // session/prompt upstream.
+      const upstreamCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(upstreamCalls).toHaveLength(1);
+      expect(
+        (upstreamCalls[0]?.[1] as { prompt: Array<{ text: string }> })
+          .prompt[0]?.text,
+      ).toBe("from disk");
+      const added = aliceStream.sent.find(
+        (m) =>
+          "method" in m && m.method === "hydra-acp/prompt_queue_added",
+      );
+      expect(added).toBeDefined();
+      expect(
+        (added!.params as { messageId: string }).messageId,
+      ).toBe("m_resurrect_test_000");
+    });
+
     it("session close abandons queued entries: broadcasts removed(abandoned) and resolves the originators' promises with cancelled", async () => {
       const { session, mock } = makeSession("hydra_session_Q12", "u_Q12");
       const { client: alice } = makeClient();

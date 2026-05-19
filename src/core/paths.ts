@@ -74,6 +74,13 @@ export const paths = {
     path.join(hydraHome(), "sessions", id, "meta.json"),
   historyFile: (id: string) =>
     path.join(hydraHome(), "sessions", id, "history.jsonl"),
+  // Persisted prompt queue for a session. ndjson, one record per
+  // entry. Survives daemon restarts so queued prompts get a chance to
+  // run rather than being silently lost. Entries are removed BEFORE
+  // the agent invocation (see Session.drainQueue) so a crash mid-
+  // generation doesn't double-run on restart.
+  queueFile: (id: string) =>
+    path.join(hydraHome(), "sessions", id, "queue.ndjson"),
   extensionsDir: () => path.join(hydraHome(), "extensions"),
   extensionLogFile: (name: string) =>
     path.join(hydraHome(), "extensions", `${name}.log`),

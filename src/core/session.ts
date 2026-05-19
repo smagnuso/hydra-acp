@@ -35,6 +35,11 @@ import {
 } from "./hydra-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
+import {
+  deleteQueue,
+  rewriteQueue,
+  type PersistedQueueEntry,
+} from "./queue-store.js";
 import type {
   CancelPromptResult,
   HistoryPolicy,
@@ -199,6 +204,11 @@ export class Session {
   // and return already_running for the latter.
   private currentEntry: QueueEntry | undefined;
   private promptInFlight = false;
+  // Serialize disk writes to the persisted queue file. Without this
+  // chain, fire-and-forget appends/rewrites can interleave (e.g.
+  // drainQueue's rewrite-to-empty races a sibling's append-on-
+  // enqueue) and leave the file out of sync with in-memory state.
+  private queueWriteChain: Promise<unknown> = Promise.resolve();
   private closed = false;
   private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
   private titleHandlers: Array<(title: string) => void> = [];
@@ -912,6 +922,55 @@ export class Session {
     return out;
   }
 
+  // Wait for any pending queue-file writes to settle. Test hook so
+  // assertions about on-disk state don't race with fire-and-forget
+  // rewrites. Production code doesn't need this — the chain
+  // self-serializes.
+  async flushPersistWrites(): Promise<void> {
+    await this.queueWriteChain.catch(() => undefined);
+  }
+
+  // Push pre-existing queue entries back through the daemon-side
+  // pipeline on startup. Called by SessionManager after resurrecting
+  // a session that had a non-empty queue.ndjson on disk. Each entry
+  // gets a synthetic UserPromptQueueEntry with no real caller
+  // (resolve/reject are no-ops since the original WS is long gone),
+  // then drainQueue picks it up like any other entry. Late-attaching
+  // clients see the entries via prompt_queue_added broadcasts and the
+  // attach-response snapshot.
+  replayPersistedQueue(entries: PersistedQueueEntry[]): void {
+    for (const persisted of entries) {
+      const originator: PromptOriginator = {
+        clientId: `hydra-resurrected_${persisted.messageId}`,
+      };
+      if (persisted.originator.clientInfo.name !== undefined) {
+        originator.name = persisted.originator.clientInfo.name;
+      }
+      if (persisted.originator.clientInfo.version !== undefined) {
+        originator.version = persisted.originator.clientInfo.version;
+      }
+      const entry: UserPromptQueueEntry = {
+        kind: "user",
+        messageId: persisted.messageId,
+        originator,
+        // Synthetic clientId. broadcastTurnComplete uses this as
+        // excludeClientId for the peer-only broadcast; with a synthetic
+        // id no real attached client matches the exclude, so everyone
+        // sees turn_complete — which is what we want, since none of
+        // them originated this restart-replayed prompt.
+        clientId: originator.clientId,
+        prompt: persisted.prompt as unknown[],
+        enqueuedAt: persisted.enqueuedAt,
+        cancelled: false,
+        resolve: () => undefined,
+        reject: () => undefined,
+      };
+      this.promptQueue.push(entry);
+      this.broadcastQueueAdded(entry);
+    }
+    void this.drainQueue();
+  }
+
   // Drop a queued prompt by messageId. Returns already_running when
   // the messageId names the in-flight entry — callers should fall back
   // to session/cancel for that case. Originator-agnostic: any attached
@@ -930,6 +989,7 @@ export class Session {
     this.promptQueue.splice(idx, 1);
     if (entry.kind === "user") {
       this.broadcastQueueRemoved(messageId, "cancelled");
+      this.persistRewrite();
     }
     // The drainQueue loop won't see this entry again (we just spliced
     // it out). Resolve the original session/prompt promise so the
@@ -956,6 +1016,7 @@ export class Session {
     }
     entry.prompt = prompt;
     this.broadcastQueueUpdated(messageId, prompt);
+    this.persistRewrite();
     return { updated: true, reason: "ok" };
   }
 
@@ -1641,6 +1702,16 @@ export class Session {
         void 0;
       }
     }
+    // markClosed is the explicit-shutdown path (close() was called,
+    // user typed /hydra kill, agent exited, idle timer fired, etc.).
+    // The session is going cold; clear the persisted queue so it
+    // doesn't get replayed on the next daemon start. Daemon-crash
+    // paths bypass this and the queue file persists for restart
+    // resurrection.
+    const sessionId = this.sessionId;
+    this.queueWriteChain = this.queueWriteChain
+      .catch(() => undefined)
+      .then(() => deleteQueue(sessionId).catch(() => undefined));
     for (const client of this.clients.values()) {
       void client.connection
         .notify("hydra-acp/session_closed", { sessionId: this.sessionId })
@@ -1925,9 +1996,53 @@ export class Session {
         reject,
       };
       this.promptQueue.push(entry);
+      this.persistRewrite();
       this.broadcastQueueAdded(entry);
       void this.drainQueue();
     });
+  }
+
+  // Rewrite the on-disk queue to reflect the current set of WAITING
+  // entries (excluding currentEntry, the in-flight head). Excluding
+  // the head is the key idempotency choice: once drainQueue shifts an
+  // entry off and calls persistRewrite, a daemon crash mid-generation
+  // will NOT re-run it on restart. Partial output (if any streamed
+  // before the crash) stays in history; the prompt itself is lost
+  // and the user can re-submit if they care.
+  //
+  // Snapshots in-memory state synchronously (so subsequent mutations
+  // can't perturb what we're about to write) and chains the write
+  // onto queueWriteChain so all persists are serialized.
+  private persistRewrite(): void {
+    const entries: PersistedQueueEntry[] = [];
+    for (const entry of this.promptQueue) {
+      if (entry.kind !== "user" || entry.cancelled) continue;
+      entries.push(this.persistedFromEntry(entry));
+    }
+    const sessionId = this.sessionId;
+    this.queueWriteChain = this.queueWriteChain
+      .catch(() => undefined)
+      .then(() => rewriteQueue(sessionId, entries).catch(() => undefined));
+  }
+
+  private persistedFromEntry(
+    entry: UserPromptQueueEntry,
+  ): PersistedQueueEntry {
+    return {
+      messageId: entry.messageId,
+      originator: {
+        clientInfo: {
+          ...(entry.originator.name !== undefined
+            ? { name: entry.originator.name }
+            : {}),
+          ...(entry.originator.version !== undefined
+            ? { version: entry.originator.version }
+            : {}),
+        },
+      },
+      prompt: entry.prompt,
+      enqueuedAt: entry.enqueuedAt,
+    };
   }
 
   private async drainQueue(): Promise<void> {
@@ -1950,6 +2065,12 @@ export class Session {
           continue;
         }
         this.currentEntry = next;
+        // Drop this entry from the persisted queue BEFORE invoking
+        // the agent. If we crash mid-generation, restart sees no
+        // record of it and doesn't re-run.
+        if (next.kind === "user") {
+          this.persistRewrite();
+        }
         // Wire transition fires before task() so a fast task can't race
         // ahead of its own "started" broadcast.
         if (next.kind === "user") {

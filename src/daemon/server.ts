@@ -191,6 +191,16 @@ export async function startDaemon(
   });
   await extensions.start();
 
+  // Fire-and-forget: resurrect any sessions that had pending queued
+  // prompts at the last shutdown / crash and replay them. Errors are
+  // logged inside the method; not awaited so daemon boot isn't held
+  // up by N agent spawns.
+  void manager.resurrectPendingQueues().catch((err: unknown) => {
+    app.log.warn(
+      `queue replay scan failed: ${(err as Error).message}`,
+    );
+  });
+
   const shutdown = async (): Promise<void> => {
     clearInterval(sweepInterval);
     await sessionTokenStore.flush();
