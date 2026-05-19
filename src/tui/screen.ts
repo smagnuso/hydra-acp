@@ -2958,6 +2958,12 @@ function mapKeyName(name: string): KeyName | null {
     case "ALT_ENTER":
     case "META_ENTER":
       return "alt-enter";
+    case "ALT_B":
+    case "META_B":
+      return "alt-b";
+    case "ALT_F":
+    case "META_F":
+      return "alt-f";
     case "CTRL_T":
       return "ctrl-t";
     case "SHIFT_TAB":

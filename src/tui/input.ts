@@ -7,6 +7,8 @@
 export type KeyName =
   | "enter"
   | "alt-enter"
+  | "alt-b"
+  | "alt-f"
   | "shift-tab"
   | "tab"
   | "up"
@@ -353,6 +355,12 @@ export class InputDispatcher {
       case "ctrl-f":
         this.moveRight();
         return [];
+      case "alt-b":
+        this.moveWordBackward();
+        return [];
+      case "alt-f":
+        this.moveWordForward();
+        return [];
       case "ctrl-k":
         this.killToEnd();
         return [];
@@ -580,6 +588,46 @@ export class InputDispatcher {
       this.row += 1;
       this.col = 0;
     }
+  }
+
+  private moveWordBackward(): void {
+    if (this.col === 0) {
+      if (this.row === 0) {
+        return;
+      }
+      this.row -= 1;
+      this.col = this.currentLine().length;
+      return;
+    }
+    const line = this.currentLine();
+    let i = this.col;
+    while (i > 0 && /\s/.test(line[i - 1] ?? "")) {
+      i -= 1;
+    }
+    while (i > 0 && !/\s/.test(line[i - 1] ?? "")) {
+      i -= 1;
+    }
+    this.col = i;
+  }
+
+  private moveWordForward(): void {
+    const line = this.currentLine();
+    if (this.col >= line.length) {
+      if (this.row >= this.buffer.length - 1) {
+        return;
+      }
+      this.row += 1;
+      this.col = 0;
+      return;
+    }
+    let i = this.col;
+    while (i < line.length && /\s/.test(line[i] ?? "")) {
+      i += 1;
+    }
+    while (i < line.length && !/\s/.test(line[i] ?? "")) {
+      i += 1;
+    }
+    this.col = i;
   }
 
   // Up walks the navigation stack from newest to oldest: pending queue

@@ -226,6 +226,60 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["hello "]);
   });
 
+  it("alt-b walks back to the start of the previous word", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "hello world" }]);
+    expect(d.state().col).toBe(11);
+    feed(d, [k("alt-b")]);
+    expect(d.state().col).toBe(6);
+    feed(d, [k("alt-b")]);
+    expect(d.state().col).toBe(0);
+    feed(d, [k("alt-b")]);
+    expect(d.state().col).toBe(0);
+  });
+
+  it("alt-b skips trailing whitespace before walking back through the word", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "hello world  " }]);
+    feed(d, [k("alt-b")]);
+    expect(d.state().col).toBe(6);
+  });
+
+  it("alt-f walks forward to the end of the next word", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "hello world" }, k("home")]);
+    expect(d.state().col).toBe(0);
+    feed(d, [k("alt-f")]);
+    expect(d.state().col).toBe(5);
+    feed(d, [k("alt-f")]);
+    expect(d.state().col).toBe(11);
+    feed(d, [k("alt-f")]);
+    expect(d.state().col).toBe(11);
+  });
+
+  it("alt-f skips leading whitespace before walking forward through the word", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "  hello world" }, k("home")]);
+    feed(d, [k("alt-f")]);
+    expect(d.state().col).toBe(7);
+  });
+
+  it("alt-b crosses to the previous line when at column 0", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("a"), k("alt-enter"), ch("b"), k("ctrl-a")]);
+    expect(d.state()).toMatchObject({ row: 1, col: 0 });
+    feed(d, [k("alt-b")]);
+    expect(d.state()).toMatchObject({ row: 0, col: 1 });
+  });
+
+  it("alt-f crosses to the next line when at end of current line", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("a"), k("alt-enter"), ch("b"), k("up")]);
+    expect(d.state()).toMatchObject({ row: 0, col: 1 });
+    feed(d, [k("alt-f")]);
+    expect(d.state()).toMatchObject({ row: 1, col: 0 });
+  });
+
   it("ctrl-y yanks back what ctrl-w just killed", () => {
     const d = new InputDispatcher();
     feed(d, [{ type: "paste", text: "hello world" }]);
