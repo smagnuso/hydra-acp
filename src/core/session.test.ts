@@ -2019,6 +2019,58 @@ describe("Session", () => {
         vi.useRealTimers();
       }
     });
+
+    it("does NOT close while there are queued prompts waiting behind an in-flight turn", async () => {
+      // Regression guard for the daemon-side queue: an entry sitting in
+      // promptQueue (not yet at the head) represents intent we shouldn't
+      // discard via idle close. The in-flight head already keeps
+      // turnStartedAt set, but on agents whose turns flap fast or whose
+      // turn_complete races with the idle timer firing, we want the
+      // queue itself to count as active work.
+      vi.useFakeTimers();
+      try {
+        const mock = makeMockAgent({ agentId: "mock", cwd: "/w" });
+        const session = new Session({
+          sessionId: "hydra_session_queue_alive",
+          cwd: "/w",
+          agentId: "mock",
+          agent: mock.agent,
+          upstreamSessionId: "u",
+          idleTimeoutMs: 1_000,
+        });
+        const closeSpy = vi.fn();
+        session.onClose(closeSpy);
+        const { client: alice } = makeClient();
+        const { client: bob } = makeClient();
+        session.attach(alice, "full");
+        session.attach(bob, "full");
+        const requestMock = mock.agent.connection.request as ReturnType<
+          typeof vi.fn
+        >;
+        // Hold both prompts at the upstream so the second sits in the
+        // queue behind the first.
+        requestMock.mockImplementation(() => new Promise(() => undefined));
+
+        void session.prompt(alice.clientId, {
+          sessionId: "hydra_session_queue_alive",
+          prompt: [{ type: "text", text: "head" }],
+        });
+        await Promise.resolve();
+        void session.prompt(bob.clientId, {
+          sessionId: "hydra_session_queue_alive",
+          prompt: [{ type: "text", text: "waiting" }],
+        });
+        await Promise.resolve();
+
+        // Advance well past the idle window. The queue gate must keep
+        // the session alive even though the test-time wall clock would
+        // otherwise have called checkIdle into closing.
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(closeSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("agent exit", () => {

@@ -1692,14 +1692,15 @@ export class Session {
     if (this.closed || this.idleTimeoutMs <= 0) {
       return;
     }
-    // Never abandon active work. An in-flight turn or unresolved
-    // permission request defers the close by a full idle window —
-    // the next broadcast will re-arm us sooner anyway, and this
-    // avoids a tight reschedule loop when activity is stale but
-    // work is genuinely in flight.
+    // Never abandon active work. An in-flight turn, unresolved
+    // permission request, or non-empty prompt queue defers the close
+    // by a full idle window — the next broadcast will re-arm us sooner
+    // anyway, and this avoids a tight reschedule loop when activity is
+    // stale but work is genuinely in flight or queued behind it.
     if (
       this.turnStartedAt !== undefined ||
-      this.inFlightPermissions.size > 0
+      this.inFlightPermissions.size > 0 ||
+      this.promptQueue.length > 0
     ) {
       this.armIdleTimer(this.idleTimeoutMs);
       return;
