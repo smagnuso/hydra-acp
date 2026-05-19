@@ -486,6 +486,12 @@ async function runSession(
           text: echo.text,
           attachments: echo.attachments,
         });
+        // applyRenderEvent's user-text handler clears currentTurnEcho
+        // back to null (so peer/replay user-texts don't claim our
+        // echo's ownership). Re-stamp it here, after the synchronous
+        // render, so runPrompt's finally can recognize that this echo
+        // still owns the live tools block.
+        currentTurnEcho = echo;
       }
     }
   });
@@ -1657,6 +1663,15 @@ async function runSession(
   // until prompt_queue_removed for that messageId tells us to flush
   // (started) or drop (cancelled / abandoned).
   const ownPendingByMid = new Map<string, PendingEcho>();
+  // The echo currently associated with the visible tools block. Set
+  // by the prompt_queue_removed{started} handler immediately after it
+  // flushes user-text to scrollback; cleared by any subsequent
+  // user-text render (peer prompt, replay, or our own next queued
+  // prompt). runPrompt's finally consults this to decide whether to
+  // fire its synthetic turn-complete: if a newer prompt has already
+  // taken over the block, freezing it would render as "thought · 0s"
+  // — the bug we're avoiding here.
+  let currentTurnEcho: PendingEcho | null = null;
 
   const refreshQueueDisplay = (): void => {
     const entries = [...queueCache.values()];
@@ -1973,15 +1988,20 @@ async function runSession(
       // Daemon broadcasts turn_complete to other clients but excludes
       // the originator. Synthesize it locally so the streaming buffer
       // resets and a separator lands before the next turn — but ONLY
-      // if the prompt actually started. A prompt cancelled while
-      // still in the queue never ran, never echoed to scrollback, and
-      // shouldn't leave a "stopped (cancelled)" marker behind.
-      if (echo.flushed) {
+      // if the prompt actually started AND the live tools block still
+      // belongs to this echo. When the daemon dispatches the next
+      // queued prompt before our session/prompt response returns, the
+      // next prompt's user-text handler has already replaced the live
+      // block (and frozen ours in passing); firing turn-complete here
+      // would re-freeze the new turn's block at near-zero elapsed —
+      // the "thought · 0s" symptom we're avoiding.
+      if (echo.flushed && currentTurnEcho === echo) {
         appendRender(
           stopReason !== undefined
             ? { kind: "turn-complete", stopReason }
             : { kind: "turn-complete" },
         );
+        currentTurnEcho = null;
       }
       // Escape-cancel staged this. Apply only if the buffer is still
       // empty — the user may have started typing while the cancelled
@@ -2263,6 +2283,23 @@ async function runSession(
       // emitting user-text the block would land above the prompt and the
       // chronology would read backwards.
       closeAgentText();
+      // The previous turn's tools block may still be live: that happens
+      // when hydra dispatches the next prompt (queued or peer) before
+      // the previous turn's local synthetic turn-complete fires. Freeze
+      // it in place now — with elapsed time but no stopReason, since the
+      // reason hasn't reached us yet — so the prior "thinking · Xs"
+      // header transitions to a frozen "thought · Xs" / "took Xs" trace
+      // before this new turn replaces it.
+      if (toolsBlockStartedAt !== null) {
+        toolsBlockEndedAt = Date.now();
+        renderToolsBlock();
+      }
+      // Any pending ownership belongs to the prior turn; clear it so
+      // peer/replay user-texts don't accidentally keep an old echo
+      // associated with the new block. Our own queued prompts re-stamp
+      // currentTurnEcho in the prompt_queue_removed{started} handler
+      // immediately after appendRender returns.
+      currentTurnEcho = null;
       screen.ensureSeparator();
       const formatted = formatEvent(event);
       if (formatted.length > 0) {
