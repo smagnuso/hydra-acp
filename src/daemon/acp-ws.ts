@@ -6,6 +6,7 @@ import { wsToMessageStream } from "../acp/ws-stream.js";
 import { SessionManager } from "../core/session-manager.js";
 import { Session, type AttachedClient } from "../core/session.js";
 import {
+  AmendPromptParams,
   CancelPromptParams,
   InitializeParams,
   ProxyInitializeParams,
@@ -344,6 +345,27 @@ export function registerAcpWsEndpoint(
       return session.updateQueuedPrompt(params.messageId, params.prompt);
     });
 
+    connection.onRequest("hydra-acp/amend_prompt", async (raw) => {
+      const params = AmendPromptParams.parse(raw);
+      const att = state.attached.get(params.sessionId);
+      if (!att) {
+        const err = new Error("not attached to session") as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      const session = deps.manager.get(params.sessionId);
+      if (!session) {
+        const err = new Error(`session ${params.sessionId} not found`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      return session.amendPrompt(att.clientId, params);
+    });
+
     connection.onRequest("session/load", async (raw) => {
       const rawObj = (raw ?? {}) as Record<string, unknown>;
       const rawSessionId =
@@ -542,10 +564,17 @@ function buildInitializeResult(): InitializeResult {
     ],
     // Advertise hydra-only capabilities via _meta["hydra-acp"]. Generic
     // ACP clients ignore the field; capability-aware clients learn here
-    // that hydra accepts concurrent session/prompt requests and emits
-    // prompt_queue_* notifications so they can stop running their own
-    // local queue.
-    _meta: mergeMeta(undefined, { promptQueueing: true }),
+    // which hydra-acp extensions the daemon supports so they can gate
+    // UI surface accordingly. promptPipelining is false until the
+    // streaming-input probe lands (Option A in the steering brief);
+    // the others are unconditional method-availability flags.
+    _meta: mergeMeta(undefined, {
+      promptQueueing: true,
+      promptCancelling: true,
+      promptUpdating: true,
+      promptAmending: true,
+      promptPipelining: false,
+    }),
   };
 }
 

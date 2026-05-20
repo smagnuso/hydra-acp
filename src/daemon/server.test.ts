@@ -421,6 +421,59 @@ describe("startDaemon", () => {
       ws.close();
     });
 
+    it("advertises the full hydra-acp capability family (queueing, cancelling, updating, amending, pipelining) in initialize _meta", async () => {
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+
+      const responsePromise = new Promise<unknown>((resolve) => {
+        ws.on("message", (data) => {
+          resolve(JSON.parse(data.toString("utf8")));
+        });
+      });
+
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: 1,
+            clientCapabilities: {},
+            clientInfo: { name: "test-client" },
+          },
+        }),
+      );
+
+      const response = (await responsePromise) as {
+        id: number;
+        result: {
+          _meta?: {
+            "hydra-acp"?: {
+              promptQueueing?: boolean;
+              promptCancelling?: boolean;
+              promptUpdating?: boolean;
+              promptAmending?: boolean;
+              promptPipelining?: boolean;
+            };
+          };
+        };
+      };
+      const flags = response.result._meta?.["hydra-acp"];
+      expect(flags).toBeDefined();
+      expect(flags!.promptQueueing).toBe(true);
+      expect(flags!.promptCancelling).toBe(true);
+      expect(flags!.promptUpdating).toBe(true);
+      expect(flags!.promptAmending).toBe(true);
+      // pipelining stays false until the streaming-input probe lands
+      // (Option A in the steering brief).
+      expect(flags!.promptPipelining).toBe(false);
+
+      ws.close();
+    });
+
     it("returns an empty session/list over ACP", async () => {
       const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
       await new Promise<void>((resolve, reject) => {

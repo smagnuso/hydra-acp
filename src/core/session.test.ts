@@ -2514,6 +2514,481 @@ describe("Session", () => {
       ).toEqual({ updated: false, reason: "not_found" });
     });
 
+    it("amendPrompt on the in-flight head: cancels, emits prompt_amended, splices new prompt at queue head, drains into new turn", async () => {
+      const { session, mock } = makeSession("hydra_session_A1", "u_A1");
+      const { client: alice, stream: aliceStream } = makeClient({
+        name: "tui",
+        version: "0.2.0",
+      });
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      const notifyMock = mock.agent.connection.notify as ReturnType<
+        typeof vi.fn
+      >;
+      // First session/prompt hangs until we manually resolve it
+      // (simulating a real cancel-after-issue dance).
+      let resolveAlice: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveAlice = r)),
+      );
+      // Second session/prompt (M2) resolves with end_turn so the test
+      // can verify the new turn ran to completion.
+      requestMock.mockImplementationOnce(async () => ({
+        stopReason: "end_turn",
+      }));
+
+      const alicePromise = session.prompt(alice.clientId, {
+        sessionId: "hydra_session_A1",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Find alice's messageId from her queue_added broadcast.
+      const aliceAdded = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
+
+      // Amend alice's running prompt with new content. Originator is alice.
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A1",
+        targetMessageId: aliceMid,
+        prompt: [{ type: "text", text: "amended" }],
+      });
+      expect(result.amended).toBe(true);
+      expect(result.reason).toBe("ok");
+      expect(result.messageId).toBeDefined();
+      expect(result.messageId).not.toBe(aliceMid);
+      const amendMid = result.messageId!;
+
+      // A session/cancel notification was sent to the agent (fire-and-forget
+      // — no need to await).
+      expect(notifyMock).toHaveBeenCalledWith("session/cancel", {
+        sessionId: "u_A1",
+      });
+
+      // bob (a peer) sees prompt_queue_added for the amendment, with the
+      // amending hint pointing at alice's original messageId.
+      const amendAdded = findQueueEvent(
+        bobStream.sent,
+        "hydra-acp/prompt_queue_added",
+        amendMid,
+      );
+      expect(amendAdded).toBeDefined();
+      expect(
+        (amendAdded!.params as { _meta?: { "hydra-acp"?: { amending?: string } } })
+          ._meta?.["hydra-acp"]?.amending,
+      ).toBe(aliceMid);
+
+      // Settle the original prompt with cancelled. drainQueue should then
+      // advance to the amendment.
+      resolveAlice!({ stopReason: "cancelled" });
+      await alicePromise;
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      // alice's turn_complete (broadcast to peers) carries the amend marker.
+      const aliceTurnComplete = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          ((m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete"),
+      ) as JsonRpcNotification | undefined;
+      expect(aliceTurnComplete).toBeDefined();
+      const update = (
+        aliceTurnComplete!.params as {
+          update: { stopReason: string; _meta?: Record<string, unknown> };
+        }
+      ).update;
+      expect(update.stopReason).toBe("cancelled");
+      expect(
+        (update._meta as { "hydra-acp"?: { amended?: { cancelledMessageId: string } } })
+          ?.["hydra-acp"]?.amended?.cancelledMessageId,
+      ).toBe(aliceMid);
+
+      // The dedicated prompt_amended notification fires too.
+      const promptAmended = bobStream.sent.find(
+        (m) =>
+          "method" in m && m.method === "hydra-acp/prompt_amended",
+      ) as JsonRpcNotification | undefined;
+      expect(promptAmended).toBeDefined();
+      const amendedParams = promptAmended!.params as {
+        cancelledMessageId: string;
+        newMessageId: string;
+        prompt: unknown[];
+      };
+      expect(amendedParams.cancelledMessageId).toBe(aliceMid);
+      expect(amendedParams.newMessageId).toBe(amendMid);
+      expect(amendedParams.prompt).toEqual([{ type: "text", text: "amended" }]);
+
+      // The agent received the amendment as a fresh session/prompt call.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([m]) => m === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(2);
+      expect(
+        (sessionPromptCalls[1]?.[1] as { prompt: Array<{ text: string }> })
+          .prompt[0]?.text,
+      ).toBe("amended");
+    });
+
+    it("amendPrompt during the amend window: update_prompt(M2) updates content, the new turn starts with the updated content", async () => {
+      const { session, mock } = makeSession("hydra_session_A2", "u_A2");
+      const { client: alice, stream: aliceStream } = makeClient();
+      session.attach(alice, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      let resolveAlice: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveAlice = r)),
+      );
+      requestMock.mockImplementationOnce(async () => ({
+        stopReason: "end_turn",
+      }));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_A2",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const aliceAdded = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
+
+      // Amend with content "amended"
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A2",
+        targetMessageId: aliceMid,
+        prompt: [{ type: "text", text: "amended" }],
+      });
+      const amendMid = result.messageId!;
+
+      // Now during the window, update M2 to "amended-then-edited"
+      const updRes = session.updateQueuedPrompt(amendMid, [
+        { type: "text", text: "amended-then-edited" },
+      ]);
+      expect(updRes).toEqual({ updated: true, reason: "ok" });
+
+      // Settle the original prompt, let the amendment run.
+      resolveAlice!({ stopReason: "cancelled" });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      // The agent saw the EDITED amendment content.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([m]) => m === "session/prompt",
+      );
+      expect(
+        (sessionPromptCalls[1]?.[1] as { prompt: Array<{ text: string }> })
+          .prompt[0]?.text,
+      ).toBe("amended-then-edited");
+    });
+
+    it("amendPrompt during the amend window: cancel_prompt(M2) drops the amendment, M1 still completes as cancelled with no amend marker, no replacement turn runs", async () => {
+      const { session, mock } = makeSession("hydra_session_A3", "u_A3");
+      const { client: alice, stream: aliceStream } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      let resolveAlice: ((v: unknown) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () => new Promise((r) => (resolveAlice = r)),
+      );
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_A3",
+        prompt: [{ type: "text", text: "original" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const aliceAdded = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
+
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A3",
+        targetMessageId: aliceMid,
+        prompt: [{ type: "text", text: "amended" }],
+      });
+      const amendMid = result.messageId!;
+
+      // Cancel the amendment during the window.
+      const cancelRes = session.cancelQueuedPrompt(amendMid);
+      expect(cancelRes).toEqual({ cancelled: true, reason: "ok" });
+
+      // Settle the original prompt as cancelled.
+      resolveAlice!({ stopReason: "cancelled" });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      // M1's turn_complete fires WITHOUT the amend marker — the user walked
+      // back the amendment.
+      const turnComplete = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          ((m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete"),
+      ) as JsonRpcNotification | undefined;
+      expect(turnComplete).toBeDefined();
+      const update = (
+        turnComplete!.params as {
+          update: { stopReason: string; _meta?: Record<string, unknown> };
+        }
+      ).update;
+      expect(update.stopReason).toBe("cancelled");
+      expect(update._meta).toBeUndefined();
+
+      // No prompt_amended notification fired.
+      const promptAmended = bobStream.sent.find(
+        (m) =>
+          "method" in m && m.method === "hydra-acp/prompt_amended",
+      );
+      expect(promptAmended).toBeUndefined();
+
+      // No second session/prompt was sent to the agent.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([m]) => m === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(1);
+    });
+
+    it("amendPrompt with replaceQueue: true drops every other waiting entry before splicing the amendment at the head", async () => {
+      const { session, mock } = makeSession("hydra_session_A4", "u_A4");
+      const { client: alice, stream: aliceStream } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_A4",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      const bobPromise = session.prompt(bob.clientId, {
+        sessionId: "hydra_session_A4",
+        prompt: [{ type: "text", text: "waiting" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const aliceAdded = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
+
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A4",
+        targetMessageId: aliceMid,
+        prompt: [{ type: "text", text: "replace-everything" }],
+        replaceQueue: true,
+      });
+      expect(result.amended).toBe(true);
+
+      // bob's session/prompt promise resolves with cancelled stop reason.
+      await expect(bobPromise).resolves.toMatchObject({
+        stopReason: "cancelled",
+      });
+
+      // The queue (in user-visible terms) now has just M1 in flight and
+      // the amendment waiting.
+      const snap = session.queueSnapshot();
+      expect(snap).toHaveLength(2);
+      expect(snap[1]?.prompt).toEqual([
+        { type: "text", text: "replace-everything" },
+      ]);
+    });
+
+    it("amendPrompt with targetMessageId matching a queued (not yet running) entry edits in place — same observable behavior as update_prompt", async () => {
+      const { session, mock } = makeSession("hydra_session_A5", "u_A5");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_A5",
+        prompt: [{ type: "text", text: "head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      void session.prompt(bob.clientId, {
+        sessionId: "hydra_session_A5",
+        prompt: [{ type: "text", text: "original-queued" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const bobAdded = bobStream.sent
+        .filter(
+          (m) =>
+            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+        )
+        .at(-1) as JsonRpcNotification;
+      const bobMid = (bobAdded.params as { messageId: string }).messageId;
+
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A5",
+        targetMessageId: bobMid,
+        prompt: [{ type: "text", text: "edited" }],
+      });
+      expect(result).toEqual({
+        amended: true,
+        reason: "ok",
+        messageId: bobMid,
+      });
+
+      // prompt_queue_updated fires (just like update_prompt).
+      const queueUpdated = findQueueEvent(
+        bobStream.sent,
+        "hydra-acp/prompt_queue_updated",
+        bobMid,
+      );
+      expect(queueUpdated).toBeDefined();
+      expect((queueUpdated!.params as { prompt: unknown[] }).prompt).toEqual([
+        { type: "text", text: "edited" },
+      ]);
+
+      // No agent interaction (cancel notify) happened.
+      const notifyMock = mock.agent.connection.notify as ReturnType<
+        typeof vi.fn
+      >;
+      expect(notifyMock).not.toHaveBeenCalledWith(
+        "session/cancel",
+        expect.anything(),
+      );
+    });
+
+    it("amendPrompt on a target that already completed returns target_completed and does NOT send by default", async () => {
+      const { session, mock } = makeSession("hydra_session_A6", "u_A6");
+      const { client: alice, stream: aliceStream } = makeClient();
+      session.attach(alice, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        sessionId: "hydra_session_A6",
+        prompt: [{ type: "text", text: "completed" }],
+      });
+      // Drain pending broadcasts.
+      await new Promise((r) => setImmediate(r));
+
+      const aliceAdded = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
+
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A6",
+        targetMessageId: aliceMid,
+        prompt: [{ type: "text", text: "too-late" }],
+      });
+      expect(result).toEqual({
+        amended: false,
+        reason: "target_completed",
+      });
+
+      // No new session/prompt issued — call count should still be 1.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([m]) => m === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(1);
+    });
+
+    it("amendPrompt with onTargetCompleted: send_anyway forwards the amendment as a regular session/prompt", async () => {
+      const { session, mock } = makeSession("hydra_session_A7", "u_A7");
+      const { client: alice, stream: aliceStream } = makeClient();
+      session.attach(alice, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+      requestMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        sessionId: "hydra_session_A7",
+        prompt: [{ type: "text", text: "completed" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const aliceAdded = findQueueEvent(
+        aliceStream.sent,
+        "hydra-acp/prompt_queue_added",
+      ) as JsonRpcNotification;
+      const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
+
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A7",
+        targetMessageId: aliceMid,
+        prompt: [{ type: "text", text: "sent-anyway" }],
+        onTargetCompleted: "send_anyway",
+      });
+      expect(result.amended).toBe(false);
+      expect(result.reason).toBe("target_completed");
+      expect(result.messageId).toBeDefined();
+      expect(result.messageId).not.toBe(aliceMid);
+
+      // Wait for the new turn to run.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([m]) => m === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(2);
+      expect(
+        (sessionPromptCalls[1]?.[1] as { prompt: Array<{ text: string }> })
+          .prompt[0]?.text,
+      ).toBe("sent-anyway");
+    });
+
+    it("amendPrompt with unknown targetMessageId returns target_not_found and does nothing", () => {
+      const { session } = makeSession("hydra_session_A8", "u_A8");
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+
+      const result = session.amendPrompt(alice.clientId, {
+        sessionId: "hydra_session_A8",
+        targetMessageId: "m_never_existed",
+        prompt: [{ type: "text", text: "x" }],
+      });
+      expect(result).toEqual({
+        amended: false,
+        reason: "target_not_found",
+      });
+    });
+
     it("queueSnapshot returns the in-flight head at position 0 and waiting entries after it", async () => {
       const { session, mock } = makeSession("hydra_session_Q11", "u_Q11");
       const { client: alice } = makeClient();

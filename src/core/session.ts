@@ -41,8 +41,11 @@ import {
   type PersistedQueueEntry,
 } from "./queue-store.js";
 import type {
+  AmendPromptParams,
+  AmendPromptResult,
   CancelPromptResult,
   HistoryPolicy,
+  PromptAmendedParams,
   PromptOriginator,
   PromptQueueEntry as PromptQueueSnapshotEntry,
   UpdatePromptResult,
@@ -138,6 +141,12 @@ export interface CloseOptions {
 
 const DEFAULT_HISTORY_MAX_ENTRIES = 1000;
 
+// Cap on the recently-terminal messageId LRU. Bounds memory growth on
+// a long-running session; older entries fall out and resolve to
+// target_not_found, which is the correct behavior for an amend that
+// targets a turn from minutes ago.
+const RECENTLY_TERMINAL_LIMIT = 64;
+
 // Two flavors of queue entry share the same FIFO. User-prompt entries
 // are wire-visible (every transition fires a hydra-acp/prompt_queue_*
 // broadcast); internal entries (title regen, agent switch, import seed)
@@ -156,6 +165,12 @@ interface UserPromptQueueEntry {
   prompt: unknown[];
   enqueuedAt: number;
   cancelled: boolean;
+  // True when this entry was created via hydra-acp/amend_prompt rather
+  // than session/prompt. The originator has no awaiting session/prompt
+  // promise to receive a stopReason on; broadcastTurnComplete therefore
+  // includes the originator in the wire turn_complete (no exclusion) so
+  // their TUI can clear currentHeadMessageId and adjust pendingTurns.
+  wasAmend?: boolean;
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
 }
@@ -278,6 +293,25 @@ export class Session {
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
+  // Set by amendPrompt at the start of a cancel-and-resubmit dance.
+  // broadcastTurnComplete reads it to attach the _meta.amended marker
+  // to the cancelled turn's turn_complete notification, and to fire the
+  // dedicated prompt_amended notification. Cleared when the cancelled
+  // turn's task completes (runQueueEntry) OR if the amendment is
+  // cancelled mid-window via cancel_prompt(M2) before drainQueue picks
+  // it up.
+  private amendInProgress:
+    | { cancelledMessageId: string; newMessageId: string }
+    | undefined;
+  // LRU of recently-terminal messageIds → stopReason. Used by
+  // amendPrompt to resolve targets that completed/cancelled before
+  // the amend arrived. Capped at RECENTLY_TERMINAL_LIMIT entries;
+  // older entries fall out and resolve to target_not_found, which is
+  // the correct behavior.
+  private recentlyTerminal = new Map<
+    string,
+    { stopReason: string; terminatedAt: number }
+  >();
 
   constructor(init: SessionInit) {
     this.sessionId =
@@ -795,6 +829,8 @@ export class Session {
   private broadcastTurnComplete(
     originatorClientId: string,
     response: unknown,
+    promptMessageId?: string,
+    wasAmend?: boolean,
   ): void {
     const stopReason =
       response &&
@@ -810,15 +846,112 @@ export class Session {
     if (stopReason !== undefined) {
       update.stopReason = stopReason;
     }
+    // Attach the amend marker when this turn_complete closes an
+    // amended turn, so renderer clients can paint the cancellation
+    // as "amended" rather than the user-cancelled red banner without
+    // waiting for the follow-up prompt_amended notification.
+    const amend = this.amendInProgress;
+    if (
+      amend &&
+      promptMessageId !== undefined &&
+      amend.cancelledMessageId === promptMessageId
+    ) {
+      update._meta = {
+        "hydra-acp": {
+          amended: {
+            cancelledMessageId: amend.cancelledMessageId,
+            newMessageId: amend.newMessageId,
+          },
+        },
+      };
+    }
     this.promptStartedAt = undefined;
+    if (promptMessageId !== undefined && stopReason !== undefined) {
+      this.recordTerminal(promptMessageId, stopReason);
+    }
+    // For amend-originated entries (sent via hydra-acp/amend_prompt, not
+    // session/prompt), the originator has no awaiting session/prompt
+    // promise that would deliver the turn outcome — so include them in
+    // the broadcast so their TUI can clear currentHeadMessageId and
+    // adjust pendingTurns. For regular session/prompt entries, exclude
+    // as before since the response itself carries the stopReason.
     this.recordAndBroadcast(
       "session/update",
       {
         sessionId: this.sessionId,
         update,
       },
-      originatorClientId,
+      wasAmend ? undefined : originatorClientId,
     );
+    if (
+      amend &&
+      promptMessageId !== undefined &&
+      amend.cancelledMessageId === promptMessageId
+    ) {
+      this.broadcastPromptAmended(amend);
+    }
+  }
+
+  // Record that a prompt's turn has ended, with its terminal stopReason.
+  // Used by amendPrompt to resolve targetMessageIds that completed/cancelled
+  // before the amend arrived. LRU-trimmed at RECENTLY_TERMINAL_LIMIT.
+  private recordTerminal(messageId: string, stopReason: string): void {
+    this.recentlyTerminal.set(messageId, {
+      stopReason,
+      terminatedAt: Date.now(),
+    });
+    while (this.recentlyTerminal.size > RECENTLY_TERMINAL_LIMIT) {
+      const oldest = this.recentlyTerminal.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.recentlyTerminal.delete(oldest);
+    }
+  }
+
+  // Fire hydra-acp/prompt_amended for the M1→M2 linkage. The amendment's
+  // current content is read live from the queue entry so any update_prompt
+  // calls during the amend window are reflected. Best-effort: if M2 has
+  // already been cancelled out of the queue by the time we get here, we
+  // skip — the amendInProgress clearing in cancelQueuedPrompt should have
+  // prevented this code path from running in that case.
+  private broadcastPromptAmended(amend: {
+    cancelledMessageId: string;
+    newMessageId: string;
+  }): void {
+    const entry = this.findUserEntry(amend.newMessageId);
+    if (!entry) {
+      return;
+    }
+    const params: PromptAmendedParams = {
+      sessionId: this.sessionId,
+      cancelledMessageId: amend.cancelledMessageId,
+      newMessageId: amend.newMessageId,
+      prompt: entry.prompt,
+      originator: entry.originator,
+      amendedAt: Date.now(),
+    };
+    this.broadcastQueueNotification(
+      "hydra-acp/prompt_amended",
+      params as unknown as Record<string, unknown>,
+    );
+  }
+
+  // Look up a user-prompt queue entry by messageId, searching both the
+  // currentEntry slot and the waiting queue.
+  private findUserEntry(
+    messageId: string,
+  ): UserPromptQueueEntry | undefined {
+    if (
+      this.currentEntry?.messageId === messageId &&
+      this.currentEntry.kind === "user"
+    ) {
+      return this.currentEntry;
+    }
+    const queued = this.promptQueue.find(
+      (e) => e.messageId === messageId && e.kind === "user",
+    );
+    return queued?.kind === "user" ? queued : undefined;
   }
 
   // Total visible-or-running entries: the in-flight head (if any) plus
@@ -836,12 +969,19 @@ export class Session {
     return count;
   }
 
-  private broadcastQueueAdded(entry: UserPromptQueueEntry): void {
+  private broadcastQueueAdded(
+    entry: UserPromptQueueEntry,
+    options?: { amending?: string; position?: number },
+  ): void {
     const depth = this.visibleQueueDepth();
     // entry just landed at the tail of the queue. Its position equals
     // the count of user-visible entries already ahead of it = depth-1.
-    const position = Math.max(0, depth - 1);
-    const params = {
+    // For amend-pending entries spliced at the head, the caller passes
+    // an explicit position so the notification reflects the actual
+    // queue order rather than the default tail-position derivation.
+    const position =
+      options?.position ?? Math.max(0, depth - 1);
+    const params: Record<string, unknown> = {
       sessionId: this.sessionId,
       messageId: entry.messageId,
       originator: entry.originator,
@@ -850,6 +990,11 @@ export class Session {
       queueDepth: depth,
       enqueuedAt: entry.enqueuedAt,
     };
+    if (options?.amending !== undefined) {
+      params._meta = {
+        "hydra-acp": { amending: options.amending },
+      };
+    }
     this.broadcastQueueNotification("hydra-acp/prompt_queue_added", params);
   }
 
@@ -991,6 +1136,12 @@ export class Session {
       this.broadcastQueueRemoved(messageId, "cancelled");
       this.persistRewrite();
     }
+    // If this was the in-window amendment, clear amendInProgress so M1's
+    // upcoming turn_complete doesn't claim it was amended — the user
+    // walked back the amendment, leaving M1 as a plain cancel.
+    if (this.amendInProgress?.newMessageId === messageId) {
+      this.amendInProgress = undefined;
+    }
     // The drainQueue loop won't see this entry again (we just spliced
     // it out). Resolve the original session/prompt promise so the
     // caller's await unblocks with a clean cancelled stop reason.
@@ -1018,6 +1169,186 @@ export class Session {
     this.broadcastQueueUpdated(messageId, prompt);
     this.persistRewrite();
     return { updated: true, reason: "ok" };
+  }
+
+  // Amend the head prompt: cancel the in-flight turn and submit a
+  // replacement that sits at the head of the queue. Resolves the
+  // request immediately (the caller doesn't wait on cancel-settle).
+  // Honours race outcomes — if the target finished or was cancelled
+  // before this arrived, the request resolves with an outcome explaining
+  // why and (depending on onTargetCompleted) optionally forwards as a
+  // plain prompt. Queued targets are edited in place (same machinery
+  // as updateQueuedPrompt).
+  amendPrompt(
+    clientId: string,
+    params: AmendPromptParams,
+  ): AmendPromptResult {
+    const client = this.clients.get(clientId);
+    if (!client) {
+      throw withCode(
+        new Error("client not attached"),
+        JsonRpcErrorCodes.SessionNotFound,
+      );
+    }
+    const { targetMessageId, prompt, replaceQueue, onTargetCompleted } = params;
+
+    // Success path: target is the in-flight head.
+    if (
+      this.currentEntry?.messageId === targetMessageId &&
+      this.currentEntry.kind === "user" &&
+      !this.currentEntry.cancelled &&
+      this.amendInProgress === undefined
+    ) {
+      return this.amendOnHead(client, prompt, targetMessageId, replaceQueue);
+    }
+
+    // Queued target: edit in place. Shares the same observable behavior
+    // as update_prompt — prompt_queue_updated fires, no agent interaction.
+    const queuedEntry = this.promptQueue.find(
+      (e) => e.messageId === targetMessageId && e.kind === "user",
+    );
+    if (queuedEntry && queuedEntry.kind === "user" && !queuedEntry.cancelled) {
+      queuedEntry.prompt = prompt;
+      this.broadcastQueueUpdated(targetMessageId, prompt);
+      this.persistRewrite();
+      return { amended: true, reason: "ok", messageId: targetMessageId };
+    }
+
+    // Recently-terminal target — resolve by stopReason.
+    const terminal = this.recentlyTerminal.get(targetMessageId);
+    if (terminal) {
+      if (terminal.stopReason === "cancelled") {
+        return { amended: false, reason: "target_cancelled" };
+      }
+      if (onTargetCompleted === "send_anyway") {
+        const newMessageId = this.enqueueAmendmentAsFollowUp(client, prompt);
+        return {
+          amended: false,
+          reason: "target_completed",
+          messageId: newMessageId,
+        };
+      }
+      return { amended: false, reason: "target_completed" };
+    }
+
+    return { amended: false, reason: "target_not_found" };
+  }
+
+  // Head-of-queue amendment: splice M2 in front of any waiting entries,
+  // broadcast the amend window's queue_added with the amending hint,
+  // mark amendInProgress so the cancelled turn's broadcastTurnComplete
+  // attaches the _meta marker and fires prompt_amended, then fire the
+  // upstream session/cancel without awaiting it. drainQueue is already
+  // running on the head; when its session/prompt returns, it advances
+  // to M2 in the normal way.
+  private amendOnHead(
+    client: AttachedClient,
+    prompt: unknown[],
+    targetMessageId: string,
+    replaceQueue: boolean | undefined,
+  ): AmendPromptResult {
+    const newMessageId = generateMessageId();
+    const originator: PromptOriginator = { clientId: client.clientId };
+    if (client.clientInfo?.name) {
+      originator.name = client.clientInfo.name;
+    }
+    if (client.clientInfo?.version) {
+      originator.version = client.clientInfo.version;
+    }
+
+    if (replaceQueue) {
+      // Drop every other waiting user entry. Each gets a cancelled
+      // queue_removed broadcast and its promise resolves with
+      // cancelled stopReason so callers awaiting session/prompt unblock.
+      const survivors: QueueEntry[] = [];
+      for (const entry of this.promptQueue) {
+        if (entry.kind === "user" && !entry.cancelled) {
+          entry.cancelled = true;
+          this.broadcastQueueRemoved(entry.messageId, "cancelled");
+          entry.resolve({ stopReason: "cancelled" });
+          continue;
+        }
+        survivors.push(entry);
+      }
+      this.promptQueue = survivors;
+    }
+
+    const entry: UserPromptQueueEntry = {
+      kind: "user",
+      messageId: newMessageId,
+      originator,
+      clientId: client.clientId,
+      prompt,
+      enqueuedAt: Date.now(),
+      cancelled: false,
+      wasAmend: true,
+      // No-op resolve/reject: there's no client request awaiting M2's
+      // session/prompt response. The amend_prompt request has already
+      // returned by this point. drainQueue calls these unconditionally
+      // when runQueueEntry settles; making them no-ops is safe.
+      resolve: () => undefined,
+      reject: () => undefined,
+    };
+    // Splice at the head of the waiting queue. currentEntry still holds
+    // M1 until its turn settles; M2 is position 1 from the user's POV
+    // (M1 in flight, M2 next).
+    this.promptQueue.unshift(entry);
+    this.persistRewrite();
+    this.broadcastQueueAdded(entry, {
+      amending: targetMessageId,
+      position: 1,
+    });
+
+    this.amendInProgress = {
+      cancelledMessageId: targetMessageId,
+      newMessageId,
+    };
+
+    // Fire-and-forget the cancel notification. The agent's session/prompt
+    // for M1 will return with stopReason cancelled; drainQueue's await
+    // resolves and we advance to M2 naturally.
+    void this.agent.connection
+      .notify("session/cancel", { sessionId: this.upstreamSessionId })
+      .catch(() => undefined);
+
+    return {
+      amended: true,
+      reason: "ok",
+      messageId: newMessageId,
+    };
+  }
+
+  // Send the amendment as a plain follow-up prompt — used when the
+  // target already completed and the caller opted in to send_anyway.
+  // Returns the new prompt's messageId so the result can surface it.
+  private enqueueAmendmentAsFollowUp(
+    client: AttachedClient,
+    prompt: unknown[],
+  ): string {
+    const messageId = generateMessageId();
+    const originator: PromptOriginator = { clientId: client.clientId };
+    if (client.clientInfo?.name) {
+      originator.name = client.clientInfo.name;
+    }
+    if (client.clientInfo?.version) {
+      originator.version = client.clientInfo.version;
+    }
+    const entry: UserPromptQueueEntry = {
+      kind: "user",
+      messageId,
+      originator,
+      clientId: client.clientId,
+      prompt,
+      enqueuedAt: Date.now(),
+      cancelled: false,
+      resolve: () => undefined,
+      reject: () => undefined,
+    };
+    this.promptQueue.push(entry);
+    this.persistRewrite();
+    this.broadcastQueueAdded(entry);
+    void this.drainQueue();
+    return messageId;
   }
 
   async cancel(clientId: string): Promise<void> {
@@ -2079,6 +2410,17 @@ export class Session {
         try {
           const result = await this.runQueueEntry(next);
           next.resolve(result);
+          // Yield to the microtask queue so the originator's
+          // session/prompt response (awaiting on next.resolve) flushes
+          // to the WS BEFORE we synchronously broadcast prompt_queue_
+          // removed{started} for the next entry. Critical for the amend
+          // path: without this yield, peers see {M1 turn_complete,
+          // M2 started} ordering where the originator's M1 response
+          // arrives after M2 started — which prevents runPrompt's
+          // finally from rendering the M1 freeze (currentTurnEcho has
+          // already moved to M2). The tools block then stays at
+          // "thinking · Xs" instead of "stopped (amended) · Xs".
+          await Promise.resolve();
         } catch (err) {
           next.reject(err as Error);
         } finally {
@@ -2116,11 +2458,33 @@ export class Session {
         },
       );
     } catch (err) {
-      this.broadcastTurnComplete(entry.clientId, { stopReason: "error" });
+      this.broadcastTurnComplete(
+        entry.clientId,
+        { stopReason: "error" },
+        entry.messageId,
+        entry.wasAmend,
+      );
+      this.clearAmendIfMatches(entry.messageId);
       throw err;
     }
-    this.broadcastTurnComplete(entry.clientId, response);
+    this.broadcastTurnComplete(
+      entry.clientId,
+      response,
+      entry.messageId,
+      entry.wasAmend,
+    );
+    this.clearAmendIfMatches(entry.messageId);
     return response;
+  }
+
+  // Clear amendInProgress once the cancelled turn's task has fully
+  // settled. broadcastTurnComplete needs the marker still set when it
+  // fires, so the clear must happen *after*. Called from runQueueEntry's
+  // settle path for both success and error.
+  private clearAmendIfMatches(messageId: string): void {
+    if (this.amendInProgress?.cancelledMessageId === messageId) {
+      this.amendInProgress = undefined;
+    }
   }
 }
 

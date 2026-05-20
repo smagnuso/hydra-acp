@@ -192,6 +192,24 @@ export interface HydraMeta {
   // first). Surfaced on the initialize response so capability-aware
   // clients can stop running their own local queues.
   promptQueueing?: boolean;
+  // Daemon supports hydra-acp/cancel_prompt for cancelling queued
+  // (not-yet-running) prompts. Backfilled for consistency with the
+  // newer capability flags — clients that already call the method
+  // unconditionally aren't affected; future clients can gate UI
+  // surface on the flag instead of relying on method-not-found.
+  promptCancelling?: boolean;
+  // Daemon supports hydra-acp/update_prompt for editing the content
+  // of a queued (not-yet-running) prompt. Backfilled, same as
+  // promptCancelling.
+  promptUpdating?: boolean;
+  // Daemon supports hydra-acp/amend_prompt — interrupt the in-flight
+  // head turn with a replacement (cancel-and-resubmit, with the
+  // partial agent response preserved in conversation history).
+  promptAmending?: boolean;
+  // Daemon forwards concurrent session/prompt requests directly to
+  // the agent (true only when the agent supports streaming-input
+  // style absorption). Implies promptQueueing.
+  promptPipelining?: boolean;
   // Snapshot of the daemon-side prompt queue at attach time. Lets a
   // late-joining client paint queue chips for entries that landed
   // before it attached without waiting for new prompt_queue_added
@@ -272,6 +290,18 @@ export function extractHydraMeta(
   }
   if (typeof obj.promptQueueing === "boolean") {
     out.promptQueueing = obj.promptQueueing;
+  }
+  if (typeof obj.promptCancelling === "boolean") {
+    out.promptCancelling = obj.promptCancelling;
+  }
+  if (typeof obj.promptUpdating === "boolean") {
+    out.promptUpdating = obj.promptUpdating;
+  }
+  if (typeof obj.promptAmending === "boolean") {
+    out.promptAmending = obj.promptAmending;
+  }
+  if (typeof obj.promptPipelining === "boolean") {
+    out.promptPipelining = obj.promptPipelining;
   }
   if (Array.isArray(obj.queue)) {
     const entries: PromptQueueEntry[] = [];
@@ -471,6 +501,50 @@ export const UpdatePromptResult = z.object({
   reason: z.enum(["ok", "not_found", "already_running"]),
 });
 export type UpdatePromptResult = z.infer<typeof UpdatePromptResult>;
+
+// hydra-acp/amend_prompt — interrupt the in-flight head turn with a
+// replacement prompt. Pin the prompt being amended via targetMessageId
+// so the daemon can resolve the race deterministically (the target
+// might finish naturally before the amend arrives). For a queued
+// target, the daemon edits in place (same machinery as update_prompt).
+export const AmendPromptParams = z.object({
+  sessionId: z.string(),
+  targetMessageId: z.string(),
+  prompt: z.array(z.unknown()),
+  replaceQueue: z.boolean().optional(),
+  onTargetCompleted: z.enum(["reject", "send_anyway"]).optional(),
+});
+export type AmendPromptParams = z.infer<typeof AmendPromptParams>;
+
+export const AmendPromptResult = z.object({
+  amended: z.boolean(),
+  reason: z.enum([
+    "ok",
+    "target_completed",
+    "target_cancelled",
+    "target_not_found",
+  ]),
+  // Present when a prompt was sent or replaced: the amendment's id on
+  // success, or the regular follow-up's id when onTargetCompleted is
+  // "send_anyway" and the daemon forwarded the prompt anyway.
+  messageId: z.string().optional(),
+});
+export type AmendPromptResult = z.infer<typeof AmendPromptResult>;
+
+// hydra-acp/prompt_amended notification — dedicated linkage event
+// fired after a successful amend. Carries both messageIds and the
+// amendment content so subscribers that want to render the M1→M2
+// relationship don't have to correlate turn_complete + prompt_received
+// via _meta or sequence.
+export const PromptAmendedParams = z.object({
+  sessionId: z.string(),
+  cancelledMessageId: z.string(),
+  newMessageId: z.string(),
+  prompt: z.array(z.unknown()),
+  originator: PromptOriginatorSchema,
+  amendedAt: z.number(),
+});
+export type PromptAmendedParams = z.infer<typeof PromptAmendedParams>;
 
 export interface SessionCapabilities {
   attach?: Record<string, never>;
