@@ -64,7 +64,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   null,
   ["c", "create new session"],
   ["?", "toggle this help"],
-  ["q / Esc / ^C", "quit picker"],
+  ["q / Esc / ^C / ^D", "quit picker (detach)"],
 ];
 
 export async function pickSession(
@@ -692,6 +692,7 @@ export async function pickSession(
         }
         case "ESCAPE":
         case "CTRL_C":
+        case "CTRL_D":
           cleanup();
           resolve({ kind: "abort" });
           return;
