@@ -870,6 +870,27 @@ export class SessionManager {
     return record !== undefined;
   }
 
+  // Public retitle entry point that works on live AND cold sessions.
+  // - Live: routes through Session.retitle so attached clients receive
+  //   a session_info_update broadcast (and persistTitle fires from the
+  //   onTitleChange handler, just like /hydra title).
+  // - Cold: writes the new title straight into meta.json — there's
+  //   nothing in memory to broadcast to, but a later resurrect / list
+  //   will pick up the new title.
+  // Returns false when no record exists at all (live or on disk).
+  async setTitle(sessionId: string, title: string): Promise<boolean> {
+    const live = this.get(sessionId);
+    if (live) {
+      await live.retitle(title);
+      return true;
+    }
+    if (!(await this.hasRecord(sessionId))) {
+      return false;
+    }
+    await this.persistTitle(sessionId, title);
+    return true;
+  }
+
   // Persist a title update from Session.setTitle. The on-disk record
   // was written at create time; updating it here keeps the session
   // record's title in sync with what was broadcast to clients so a

@@ -98,6 +98,60 @@ export async function killSession(
   }
 }
 
+// Retitle a session via PATCH .../sessions/:id. Works on live AND cold
+// sessions (cold just writes meta.json). A 404 is tolerated so callers
+// don't need to handle the rare race where the record vanished between
+// list and rename.
+export async function renameSession(
+  config: HydraConfig,
+  serviceToken: string,
+  id: string,
+  title: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const response = await fetchImpl(`${base}/v1/sessions/${id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${serviceToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok && response.status !== 204 && response.status !== 404) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+}
+
+// Ask the daemon to regenerate a live session's title via its agent
+// (equivalent to typing bare `/hydra title` in the composer). 404 (no
+// such record) and 409 (cold — no agent to talk to) are both tolerated
+// silently; the picker's `T` is treated as a no-op in those cases.
+export async function regenSessionTitle(
+  config: HydraConfig,
+  serviceToken: string,
+  id: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const response = await fetchImpl(`${base}/v1/sessions/${id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${serviceToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ regen: true }),
+  });
+  if (
+    !response.ok &&
+    response.status !== 204 &&
+    response.status !== 404 &&
+    response.status !== 409
+  ) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+}
+
 export async function deleteSession(
   config: HydraConfig,
   serviceToken: string,

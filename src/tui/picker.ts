@@ -22,6 +22,8 @@ import {
   deleteSession,
   killSession,
   listSessions,
+  regenSessionTitle,
+  renameSession,
   type DiscoveredSession,
 } from "./discovery.js";
 
@@ -61,6 +63,8 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   null,
   ["k", "kill the selected live session"],
   ["d", "delete the selected cold session"],
+  ["t", "retitle the selected session"],
+  ["T", "regenerate title via agent (live session)"],
   null,
   ["c", "create new session"],
   ["?", "toggle this help"],
@@ -135,10 +139,15 @@ export async function pickSession(
     | "normal"
     | "confirm-kill"
     | "confirm-delete"
+    | "rename"
     | "busy"
     | "help";
   let mode: Mode = "normal";
   let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
+  // Rename input buffer. Pre-filled with the current title when `t` is
+  // pressed on a live row; the user edits in-place (^U clears the line,
+  // ^W deletes a word, Backspace pops a char). Enter saves, Esc cancels.
+  let renameBuffer = "";
   // Transient one-line hint shown in the indicator slot (e.g. "live —
   // press k first" when 'd' was used on a live row). Cleared on the next
   // key press so it never lingers.
@@ -275,6 +284,12 @@ export async function pickSession(
     }
     if (mode === "busy" && pendingAction) {
       term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
+      return;
+    }
+    if (mode === "rename" && pendingAction) {
+      term.brightYellow.noFormat(`  title: ${renameBuffer}`);
+      term.bgBrightYellow(" ");
+      term.dim.noFormat("  Enter saves · Esc cancels");
       return;
     }
     if (transientStatus !== null) {
@@ -420,6 +435,43 @@ export async function pickSession(
         renderFromScratch();
       }
     };
+    const performRename = async (title: string): Promise<void> => {
+      if (!pendingAction) {
+        return;
+      }
+      const target = pendingAction;
+      mode = "busy";
+      paintIndicator();
+      try {
+        await renameSession(opts.config, opts.serviceToken, target.sessionId, title);
+        mode = "normal";
+        pendingAction = null;
+        renameBuffer = "";
+        await refresh(target.sessionId);
+      } catch (err) {
+        mode = "normal";
+        pendingAction = null;
+        renameBuffer = "";
+        transientStatus = `rename failed: ${(err as Error).message}`;
+        paintIndicator();
+      }
+    };
+    const performRegen = async (target: { sessionId: string; cwd: string; status: "live" | "cold" }): Promise<void> => {
+      pendingAction = target;
+      mode = "busy";
+      paintIndicator();
+      try {
+        await regenSessionTitle(opts.config, opts.serviceToken, target.sessionId);
+        mode = "normal";
+        pendingAction = null;
+        await refresh(target.sessionId);
+      } catch (err) {
+        mode = "normal";
+        pendingAction = null;
+        transientStatus = `regen failed: ${(err as Error).message}`;
+        paintIndicator();
+      }
+    };
     const performAction = async (kind: "kill" | "delete"): Promise<void> => {
       if (!pendingAction) {
         return;
@@ -502,6 +554,54 @@ export async function pickSession(
         }
         mode = "normal";
         renderFromScratch();
+        return;
+      }
+      if (mode === "rename") {
+        if (name === "ENTER" || name === "KP_ENTER") {
+          const trimmed = renameBuffer.trim();
+          if (trimmed.length === 0) {
+            mode = "normal";
+            pendingAction = null;
+            renameBuffer = "";
+            paintIndicator();
+            return;
+          }
+          void performRename(trimmed);
+          return;
+        }
+        if (name === "ESCAPE" || name === "CTRL_C") {
+          mode = "normal";
+          pendingAction = null;
+          renameBuffer = "";
+          paintIndicator();
+          return;
+        }
+        if (name === "BACKSPACE") {
+          if (renameBuffer.length > 0) {
+            renameBuffer = renameBuffer.slice(0, -1);
+            paintIndicator();
+          }
+          return;
+        }
+        if (name === "CTRL_U") {
+          renameBuffer = "";
+          paintIndicator();
+          return;
+        }
+        if (name === "CTRL_W") {
+          // Trim trailing whitespace then drop the last whitespace-delimited
+          // word, matching what most readline-style editors do.
+          const trimmedRight = renameBuffer.replace(/\s+$/, "");
+          const lastSpace = trimmedRight.lastIndexOf(" ");
+          renameBuffer = lastSpace >= 0 ? trimmedRight.slice(0, lastSpace) : "";
+          paintIndicator();
+          return;
+        }
+        if (data?.isCharacter) {
+          renameBuffer += name;
+          paintIndicator();
+          return;
+        }
         return;
       }
       if (mode === "confirm-kill" || mode === "confirm-delete") {
@@ -624,6 +724,33 @@ export async function pickSession(
           };
           mode = "confirm-kill";
           paintIndicator();
+          return;
+        }
+        if (name === "t" && selectedIdx > 0) {
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          pendingAction = {
+            sessionId: session.sessionId,
+            cwd: session.cwd,
+            status: session.status,
+          };
+          renameBuffer = session.title ?? "";
+          mode = "rename";
+          paintIndicator();
+          return;
+        }
+        if (name === "T" && selectedIdx > 0) {
+          const session = visible[selectedIdx - 1];
+          if (!session || session.status !== "live") {
+            return;
+          }
+          void performRegen({
+            sessionId: session.sessionId,
+            cwd: session.cwd,
+            status: session.status,
+          });
           return;
         }
         if ((name === "d" || name === "D") && selectedIdx > 0) {

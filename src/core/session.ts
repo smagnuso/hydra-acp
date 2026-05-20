@@ -1410,6 +1410,20 @@ export class Session {
     this.titleHandlers.push(handler);
   }
 
+  // External entry point for retitling a live session from outside the
+  // ACP slash-command path (e.g. PATCH /v1/sessions/:id from the picker).
+  // Goes through the same enqueuePrompt path as /hydra title so it
+  // serializes after any in-flight turn and shares broadcast/persistence.
+  retitle(title: string): Promise<unknown> {
+    return this.runTitleCommand(title);
+  }
+
+  // External entry point for the LLM-regen title path (T in the picker,
+  // equivalent to bare /hydra title with no arg).
+  retitleFromAgent(): Promise<unknown> {
+    return this.runTitleCommand("");
+  }
+
   // Update the canonical title and broadcast a session_info_update to
   // every attached client. Clients that already speak the spec's
   // session_info_update need no hydra-specific wiring to pick this up.

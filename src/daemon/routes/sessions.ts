@@ -68,6 +68,38 @@ export function registerSessionRoutes(
     reply.code(204).send();
   });
 
+  // Retitle a session. Body shape: { title: string } sets the title
+  // directly; { regen: true } triggers the LLM-regen path (same as bare
+  // /hydra title in the composer). Plain retitle works on live AND cold
+  // sessions — cold just persists straight to meta.json. Regen still
+  // requires a live session (no agent to talk to when cold) and 409s
+  // otherwise. Empty/whitespace title without regen is rejected as 400.
+  app.patch("/v1/sessions/:id", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const body = (request.body ?? {}) as { title?: unknown; regen?: unknown };
+    if (body.regen === true) {
+      const session = manager.get(id);
+      if (!session) {
+        reply.code(409).send({ error: "regen requires a live session" });
+        return;
+      }
+      await session.retitleFromAgent();
+      reply.code(204).send();
+      return;
+    }
+    if (typeof body.title !== "string" || body.title.trim().length === 0) {
+      reply.code(400).send({ error: "title must be a non-empty string" });
+      return;
+    }
+    const ok = await manager.setTitle(id, body.title);
+    if (!ok) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    reply.code(204).send();
+  });
+
   app.delete("/v1/sessions/:id", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;

@@ -98,6 +98,107 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(await harness.manager.hasRecord(session.sessionId)).toBe(true);
   });
 
+  it("PATCH /v1/sessions/:id with { title } sets the title and broadcasts session_info_update", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const stream = makeControlledStream();
+    await session.attach(
+      { clientId: "c1", connection: new JsonRpcConnection(stream) },
+      "full",
+    );
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Renamed from picker" }),
+      },
+    );
+    expect(res.status).toBe(204);
+
+    const infoMsg = stream.sent.find(
+      (m) =>
+        "method" in m &&
+        m.method === "session/update" &&
+        (m as { params?: { update?: { sessionUpdate?: string } } }).params
+          ?.update?.sessionUpdate === "session_info_update",
+    );
+    expect(infoMsg).toMatchObject({
+      params: {
+        sessionId: session.sessionId,
+        update: { title: "Renamed from picker" },
+      },
+    });
+  });
+
+  it("PATCH /v1/sessions/:id rejects empty title with 400", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "   " }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH /v1/sessions/:id retitles a cold (non-live) session by writing meta.json", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const id = session.sessionId;
+    await session.close({ deleteRecord: false });
+    expect(harness.manager.get(id)).toBeUndefined();
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Cold rename" }),
+    });
+    expect(res.status).toBe(204);
+
+    const entries = await harness.manager.list({ cwd: "/w" });
+    const entry = entries.find((e) => e.sessionId === id);
+    expect(entry?.title).toBe("Cold rename");
+  });
+
+  it("PATCH /v1/sessions/:id 404s when no record exists at all", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra-doesnotexist`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "nope" }),
+      },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("PATCH /v1/sessions/:id with { regen: true } 409s on a cold session", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const id = session.sessionId;
+    await session.close({ deleteRecord: false });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ regen: true }),
+    });
+    expect(res.status).toBe(409);
+  });
+
   it("DELETE /v1/sessions/:id notifies attached clients and removes the record", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
