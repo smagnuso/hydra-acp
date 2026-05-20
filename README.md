@@ -439,6 +439,16 @@ hydra-acp extension start hydra-acp-approver
 
 Without a config file the approver abstains on everything — installing it has no behavioral effect until you write a rule.
 
+**[`@hydra-acp/archiver`](https://github.com/smagnuso/hydra-acp-archiver) — cross-machine session sync.** Uploads session bundles to a shared backend (Google Drive, plain filesystem) after every turn and imports peers' bundles in the background, so a session started on machine A shows up on machine B without manual export/import. Imported sessions carry an `importedFromMachine` breadcrumb that the picker, browser, slack, and `sessions list` honor for host filtering.
+
+```sh
+npm install -g @hydra-acp/archiver
+hydra-acp extension add hydra-acp-archiver
+hydra-acp extension start hydra-acp-archiver
+```
+
+See the [package README](https://github.com/smagnuso/hydra-acp-archiver#readme) for backend setup (Drive OAuth, filesystem path).
+
 Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extension logs <name> -f` tails an extension's stdout/stderr if you need to debug.
 
 The service token (stored at `~/.hydra-acp/auth-token`, mode 0600) is generated on `hydra-acp init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. The token never leaves `~/.hydra-acp/`.
