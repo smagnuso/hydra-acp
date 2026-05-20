@@ -145,6 +145,98 @@ describe("mapUpdate", () => {
     });
   });
 
+  it("extracts errorText from content[] on a failed tool_call_update", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        status: "failed",
+        content: [
+          { type: "content", content: { type: "text", text: "boom: ENOENT" } },
+        ],
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      status: "failed",
+      errorText: "boom: ENOENT",
+    });
+  });
+
+  it("falls back to rawOutput.error when content[] has no text", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        status: "failed",
+        rawOutput: { error: "fallback error" },
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      status: "failed",
+      errorText: "fallback error",
+    });
+  });
+
+  it("flags upstreamInterrupted on rawOutput.metadata.interrupted===true", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        status: "failed",
+        content: [
+          { type: "content", content: { type: "text", text: "Tool execution aborted" } },
+        ],
+        rawOutput: {
+          error: "Tool execution aborted",
+          metadata: { interrupted: true },
+        },
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      status: "failed",
+      errorText: "Tool execution aborted",
+      upstreamInterrupted: true,
+    });
+  });
+
+  it("flags upstreamInterrupted on 'Tool execution aborted' text without metadata", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        status: "failed",
+        content: [
+          { type: "content", content: { type: "text", text: "Tool execution aborted" } },
+        ],
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      status: "failed",
+      errorText: "Tool execution aborted",
+      upstreamInterrupted: true,
+    });
+  });
+
+  it("does NOT flag upstreamInterrupted on a regular failed tool", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        status: "failed",
+        content: [{ type: "content", content: { type: "text", text: "ENOENT" } }],
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      status: "failed",
+      errorText: "ENOENT",
+    });
+  });
+
   it("suppresses intermediate tool_call_update with no title and non-terminal status", () => {
     // Agents fan out a stream of "updated" pings during a tool call;
     // those would clutter the scrollback with one line per chunk if we

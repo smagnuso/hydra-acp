@@ -4,7 +4,7 @@
 
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
-import type { RenderEvent } from "../core/render-update.js";
+import { sanitizeSingleLine, type RenderEvent } from "../core/render-update.js";
 
 export type Style =
   | "user"
@@ -462,14 +462,17 @@ export interface ToolLineState {
   // to initialTitle.
   latestTitle: string;
   status: string;
+  // Optional error text from a `failed` update. When present, rendered as
+  // an indented continuation line under the tool row so the user sees
+  // *why* the tool failed instead of just a red ✗.
+  errorText?: string;
 }
 
-// Render the single line that represents a tool call. Combines the initial
-// (generic) title with the refined update title when they add information,
-// and folds them into one when the refinement subsumes the initial label.
-// The icon is styled independently from the title so the active glyph (◐)
-// stays yellow even while the title is dimmed to mark a queued call.
-export function formatToolLine(state: ToolLineState): FormattedLine {
+// One tool call → one or more FormattedLines. The primary row is the
+// icon + title (combined from initialTitle and latestTitle when the
+// update refined the label). On failure, a second indented line carries
+// the error text so a small red ✗ doesn't hide the actual cause.
+export function formatToolLine(state: ToolLineState): FormattedLine[] {
   const initial = state.initialTitle;
   const latest = state.latestTitle;
   const initialLc = initial.toLowerCase();
@@ -482,12 +485,22 @@ export function formatToolLine(state: ToolLineState): FormattedLine {
   } else {
     title = `${initial} · ${latest}`;
   }
-  return {
-    prefix: `  ${toolStatusIcon(state.status)} `,
-    prefixStyle: toolIconStyle(state.status),
-    body: title,
-    bodyStyle: toolStatusStyle(state.status),
-  };
+  const lines: FormattedLine[] = [
+    {
+      prefix: `  ${toolStatusIcon(state.status)} `,
+      prefixStyle: toolIconStyle(state.status),
+      body: title,
+      bodyStyle: toolStatusStyle(state.status),
+    },
+  ];
+  if (state.status === "failed" && state.errorText) {
+    lines.push({
+      prefix: "     ",
+      body: sanitizeSingleLine(state.errorText),
+      bodyStyle: "tool-status-fail",
+    });
+  }
+  return lines;
 }
 
 function toolStatusIcon(status: string): string {

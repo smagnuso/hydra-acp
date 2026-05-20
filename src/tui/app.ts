@@ -86,6 +86,14 @@ interface SessionContext {
   cwd: string;
 }
 
+// How long the upstream may be silent (no session/update arrivals)
+// during a busy turn before the banner flips to a red "stalled"
+// treatment. Picked at 2 min so legitimately long single-LLM-call quiet
+// periods (e.g. slow reasoning models) don't trip it, but a hung
+// proxy retry loop becomes obvious well before the 43-minute outages
+// we've seen in practice.
+const STALL_THRESHOLD_MS = 120_000;
+
 // Hotkey cheatsheet rendered by the ^G modal. `null` is a visual
 // separator between groups. The Enter / Shift+Enter pair is built
 // dynamically per-session so the modal reflects which key enqueues
@@ -251,6 +259,16 @@ async function runSession(
   // for peer-triggered turns too, not just our own.
   let sessionBusySince: number | null = null;
   let sessionElapsedTimer: NodeJS.Timeout | null = null;
+  // Wall-clock moment of the most recent session/update we received from
+  // the daemon. The 1Hz timer reads this to detect a stalled upstream
+  // (silence past STALL_THRESHOLD_MS while busy) and flip the banner red.
+  let lastUpdateAt: number | null = null;
+  // Latched per-turn: any tool_call_update arriving with
+  // upstreamInterrupted=true sets this to true. Consumed at turn_complete
+  // to override a misleadingly clean end_turn from the upstream agent —
+  // opencode's retry loop reports the failed tool but still returns
+  // stopReason=end_turn, which otherwise hides the failure entirely.
+  let upstreamInterruptedSeen = false;
   // Centralized pending-turn arithmetic so banner state and elapsed
   // timer stay in sync regardless of whether the underlying turn was
   // ours or a peer's. Without this the banner would stay on "ready"
@@ -270,9 +288,10 @@ async function runSession(
     const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
     if (before === 0 && pendingTurns > 0) {
       sessionBusySince = Date.now();
+      lastUpdateAt = Date.now();
       dispatcherRef?.setTurnRunning(true);
       if (screenReady) {
-        screenRef!.setBanner({ status: "busy", elapsedMs: 0 });
+        screenRef!.setBanner({ status: "busy", elapsedMs: 0, stalled: false });
       }
       if (sessionElapsedTimer === null && screenReady) {
         // Tick once per second so the "thinking · Xs" indicator visibly
@@ -284,19 +303,29 @@ async function runSession(
           if (sessionBusySince === null || screenRef === null) {
             return;
           }
-          screenRef.setBanner({ elapsedMs: Date.now() - sessionBusySince });
+          const idleMs =
+            lastUpdateAt === null ? 0 : Date.now() - lastUpdateAt;
+          screenRef.setBanner({
+            elapsedMs: Date.now() - sessionBusySince,
+            stalled: idleMs >= STALL_THRESHOLD_MS,
+          });
           renderToolsBlock();
         }, 1_000);
       }
     } else if (before > 0 && pendingTurns === 0) {
       sessionBusySince = null;
+      lastUpdateAt = null;
       dispatcherRef?.setTurnRunning(false);
       if (sessionElapsedTimer !== null) {
         clearInterval(sessionElapsedTimer);
         sessionElapsedTimer = null;
       }
       if (screenReady) {
-        screenRef!.setBanner({ status: "ready", elapsedMs: undefined });
+        screenRef!.setBanner({
+          status: "ready",
+          elapsedMs: undefined,
+          stalled: false,
+        });
       }
     }
     void delta;
@@ -334,6 +363,11 @@ async function runSession(
     const { update } = (params ?? {}) as { update?: unknown };
     const event = mapUpdate(update);
     debugLogUpdate(update, event);
+    // Any wire activity counts as "upstream alive" for the stall
+    // watchdog — state-kind updates (usage_update, current_model_update
+    // …) included, since they signal the upstream is still talking to
+    // us. Read by the 1Hz timer in adjustPendingTurns.
+    lastUpdateAt = Date.now();
     // Only prompt_received signals a new turn. user_message_chunk also
     // maps to a "user-text" event but agents legitimately emit it
     // mid-turn (e.g. echoing a user's reply during a permission/elicit
@@ -2421,7 +2455,7 @@ async function runSession(
     for (const id of visibleIds) {
       const state = toolStates.get(id);
       if (state) {
-        lines.push(formatToolLine(state));
+        lines.push(...formatToolLine(state));
       }
     }
     screen.upsertLines("tools", lines);
@@ -2443,6 +2477,7 @@ async function runSession(
     id: string,
     title: string | undefined,
     status: string | undefined,
+    errorText: string | undefined,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -2459,6 +2494,9 @@ async function runSession(
     }
     if (!existing) {
       state.status = status ?? "pending";
+    }
+    if (errorText !== undefined) {
+      state.errorText = errorText;
     }
     toolStates.set(id, state);
     if (wasNew) {
@@ -2599,7 +2637,7 @@ async function runSession(
     }
     if (event.kind === "tool-call") {
       closeAgentText();
-      recordToolCall(event.toolCallId, event.title, event.status);
+      recordToolCall(event.toolCallId, event.title, event.status, undefined);
       renderToolsBlock();
       return;
     }
@@ -2617,7 +2655,15 @@ async function runSession(
     }
     if (event.kind === "tool-call-update") {
       closeAgentText();
-      recordToolCall(event.toolCallId, event.title, event.status);
+      recordToolCall(
+        event.toolCallId,
+        event.title,
+        event.status,
+        event.errorText,
+      );
+      if (event.upstreamInterrupted) {
+        upstreamInterruptedSeen = true;
+      }
       renderToolsBlock();
       return;
     }
@@ -2647,9 +2693,23 @@ async function runSession(
       // stopped-state, tools block header, "turn ended" warning) display
       // whatever string they see, so "amended" reads as a softer, more
       // informative transition than "cancelled".
-      const effectiveStopReason = event.amended
+      //
+      // Override end_turn → error when any tool in this turn carried the
+      // upstream-interrupted signature. Opencode's retry loop reports
+      // its failed sub-task but still returns stopReason=end_turn, which
+      // would otherwise paint the turn as a clean finish despite the
+      // hidden failure. The amended substitution wins over the error
+      // override since an amend-cancel is a deliberate user action.
+      let effectiveStopReason = event.amended
         ? "amended"
         : event.stopReason;
+      if (
+        !event.amended &&
+        upstreamInterruptedSeen &&
+        (effectiveStopReason === undefined || effectiveStopReason === "end_turn")
+      ) {
+        effectiveStopReason = "error";
+      }
       // Repaint the plan one last time with stopped=true when the turn
       // ended on a non-success reason (cancelled, refused, max_tokens, …).
       // Header flips to red and any in_progress rows dim — so a cancelled
@@ -2706,6 +2766,7 @@ async function runSession(
       toolsBlockEndedAt = null;
       toolsBlockStopReason = null;
       toolsExpanded = false;
+      upstreamInterruptedSeen = false;
       screen.ensureSeparator();
     }
   };

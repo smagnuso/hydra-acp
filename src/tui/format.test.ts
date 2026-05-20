@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatEvent, parseAgentMarkdown } from "./format.js";
+import { formatEvent, formatToolLine, parseAgentMarkdown } from "./format.js";
 
 const ESC = "";
 
@@ -198,5 +198,63 @@ describe("formatEvent — user-text with attachments", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]?.body).toBe("plain");
     expect(lines[0]?.iterm2Image).toBeUndefined();
+  });
+});
+
+describe("formatToolLine", () => {
+  it("returns a single line for a non-failed tool", () => {
+    const lines = formatToolLine({
+      initialTitle: "Terminal",
+      latestTitle: "ls -la",
+      status: "completed",
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.body).toBe("Terminal · ls -la");
+  });
+
+  it("appends an indented error line when status=failed and errorText present", () => {
+    const lines = formatToolLine({
+      initialTitle: "task",
+      latestTitle: "task",
+      status: "failed",
+      errorText: "Tool execution aborted",
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]?.body).toBe("task");
+    expect(lines[0]?.bodyStyle).toBe("tool-status-fail");
+    expect(lines[1]?.body).toBe("Tool execution aborted");
+    expect(lines[1]?.bodyStyle).toBe("tool-status-fail");
+    expect(lines[1]?.prefix).toBe("     ");
+  });
+
+  it("returns one line when status=failed but errorText is missing", () => {
+    const lines = formatToolLine({
+      initialTitle: "task",
+      latestTitle: "task",
+      status: "failed",
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.body).toBe("task");
+  });
+
+  it("does not emit an error line when status is not failed even with errorText set", () => {
+    const lines = formatToolLine({
+      initialTitle: "task",
+      latestTitle: "task",
+      status: "completed",
+      errorText: "stale text",
+    });
+    expect(lines).toHaveLength(1);
+  });
+
+  it("collapses multi-line errorText to a single line", () => {
+    const lines = formatToolLine({
+      initialTitle: "task",
+      latestTitle: "task",
+      status: "failed",
+      errorText: "line one\nline two\tline three",
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]?.body).toBe("line one line two line three");
   });
 });

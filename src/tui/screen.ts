@@ -50,6 +50,12 @@ interface BannerState {
   // continuous feedback that the agent is alive even when it falls
   // silent mid-thought.
   elapsedMs?: number;
+  // True when the turn is busy but no session/update has arrived for
+  // longer than the stall threshold (see STALL_THRESHOLD_MS in app.ts).
+  // When set alongside status="busy", the dot+label paints red and the
+  // word "stalled" replaces "busy" so a hung upstream is visible at a
+  // glance rather than hiding behind a quietly-ticking elapsed clock.
+  stalled?: boolean;
 }
 
 interface SessionbarState {
@@ -2071,15 +2077,20 @@ export class Screen {
         : "";
     const right = this.bannerRightContent();
     const rightSig = right ? `${right.kind}|${right.text}` : "";
+    const stalled = this.banner.status === "busy" && this.banner.stalled === true;
     const sig =
-      `bnr|${w}|${this.banner.status}|${elapsedStr}|` +
+      `bnr|${w}|${this.banner.status}|${elapsedStr}|${stalled ? "1" : "0"}|` +
       `${this.banner.queued}|${this.scrollOffset}|` +
       `${this.banner.currentMode ?? ""}|${this.banner.hint}|` +
       rightSig;
     this.paintRow(row, sig, () => {
       const dot = this.banner.status === "busy" ? "●" : "○";
       if (this.banner.status === "busy") {
-        this.term.brightYellow(`${dot} ${this.banner.status}`);
+        if (stalled) {
+          this.term.brightRed(`${dot} stalled`);
+        } else {
+          this.term.brightYellow(`${dot} ${this.banner.status}`);
+        }
         if (elapsedStr) {
           this.term(" ").dim(elapsedStr);
         }

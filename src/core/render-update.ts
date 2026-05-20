@@ -55,6 +55,16 @@ export type RenderEvent =
       toolCallId: string;
       title?: string;
       status?: string;
+      // Best-effort error text extracted from a `failed` update. Pulled
+      // from the first text payload in `content[]`, falling back to a
+      // string `rawOutput.error`. Surfaced inline under the tool row.
+      errorText?: string;
+      // True when the failure carries an "upstream silently gave up"
+      // signature — either `rawOutput.metadata.interrupted === true` or
+      // the canonical "Tool execution aborted" text. Consumed by the
+      // turn-complete handler to override a misleadingly clean
+      // `end_turn` stopReason from the upstream agent.
+      upstreamInterrupted?: boolean;
     }
   | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean }
   | { kind: "mode-changed"; mode: string }
@@ -361,7 +371,75 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
   if (status !== undefined) {
     event.status = status;
   }
+  if (status === "failed") {
+    const errorText = extractToolFailureText(u);
+    if (errorText !== null) {
+      event.errorText = errorText;
+    }
+    if (isUpstreamInterrupted(u, errorText)) {
+      event.upstreamInterrupted = true;
+    }
+  }
   return event;
+}
+
+// Pull the human-readable failure text out of a tool_call_update. Two
+// shapes seen on the wire:
+//   - content: [{ type: "content", content: { type: "text", text } }]   (ACP)
+//   - rawOutput.error: "…"                                              (fallback)
+// We try `content[]` first since it's the canonical ACP carrier; fall
+// back to rawOutput.error so non-conforming agents still surface
+// something useful.
+function extractToolFailureText(u: UpdateLike): string | null {
+  const content = u.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      const b = block as { content?: unknown };
+      const text = extractContentText(b.content);
+      if (text !== null && text.length > 0) {
+        return text;
+      }
+    }
+  }
+  const rawOutput = u.rawOutput;
+  if (rawOutput && typeof rawOutput === "object") {
+    const err = (rawOutput as { error?: unknown }).error;
+    if (typeof err === "string" && err.length > 0) {
+      return sanitizeWireText(err);
+    }
+  }
+  return null;
+}
+
+// True when a failed tool_call_update carries the canonical "upstream
+// silently gave up" signature: either the explicit
+// `rawOutput.metadata.interrupted` flag, or the "Tool execution aborted"
+// text that opencode emits when its retry loop runs out. Used by the
+// turn-complete handler to override a misleadingly clean end_turn from
+// the upstream agent.
+function isUpstreamInterrupted(
+  u: UpdateLike,
+  errorText: string | null,
+): boolean {
+  const rawOutput = u.rawOutput;
+  if (rawOutput && typeof rawOutput === "object") {
+    const meta = (rawOutput as { metadata?: unknown }).metadata;
+    if (meta && typeof meta === "object") {
+      if ((meta as { interrupted?: unknown }).interrupted === true) {
+        return true;
+      }
+    }
+  }
+  if (
+    errorText !== null &&
+    errorText.toLowerCase().includes("tool execution aborted")
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function mapPlan(u: UpdateLike): RenderEvent | null {
