@@ -456,18 +456,18 @@ export async function pickSession(
         paintIndicator();
       }
     };
-    const performRegen = async (target: { sessionId: string; cwd: string; status: "live" | "cold" }): Promise<void> => {
-      pendingAction = target;
-      mode = "busy";
-      paintIndicator();
+    // Regen is fire-and-forget on the daemon side (202 Accepted) so the
+    // picker doesn't block on the session's prompt queue draining. We
+    // show a transient hint to confirm the request was accepted; the
+    // new title surfaces on the next manual refresh (r) or on the next
+    // picker open. Stays in normal mode throughout — no busy spinner,
+    // no auto-refresh that would race the regen.
+    const performRegen = async (target: { sessionId: string }): Promise<void> => {
       try {
         await regenSessionTitle(opts.config, opts.serviceToken, target.sessionId);
-        mode = "normal";
-        pendingAction = null;
-        await refresh(target.sessionId);
+        transientStatus = "title regen queued (press r to refresh)";
+        paintIndicator();
       } catch (err) {
-        mode = "normal";
-        pendingAction = null;
         transientStatus = `regen failed: ${(err as Error).message}`;
         paintIndicator();
       }
@@ -746,11 +746,7 @@ export async function pickSession(
           if (!session || session.status !== "live") {
             return;
           }
-          void performRegen({
-            sessionId: session.sessionId,
-            cwd: session.cwd,
-            status: session.status,
-          });
+          void performRegen({ sessionId: session.sessionId });
           return;
         }
         if ((name === "d" || name === "D") && selectedIdx > 0) {

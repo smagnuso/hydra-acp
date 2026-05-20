@@ -74,6 +74,11 @@ export function registerSessionRoutes(
   // sessions — cold just persists straight to meta.json. Regen still
   // requires a live session (no agent to talk to when cold) and 409s
   // otherwise. Empty/whitespace title without regen is rejected as 400.
+  //
+  // Regen is fire-and-forget: we accept the request, queue it on the
+  // session's prompt queue, and respond 202 immediately so the picker
+  // doesn't hang waiting for an in-flight turn to finish. The new title
+  // surfaces on the next list/refresh once the regen completes.
   app.patch("/v1/sessions/:id", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
@@ -84,8 +89,12 @@ export function registerSessionRoutes(
         reply.code(409).send({ error: "regen requires a live session" });
         return;
       }
-      await session.retitleFromAgent();
-      reply.code(204).send();
+      void session.retitleFromAgent().catch((err) => {
+        app.log.warn(
+          `title regen failed for ${id}: ${(err as Error).message}`,
+        );
+      });
+      reply.code(202).send();
       return;
     }
     if (typeof body.title !== "string" || body.title.trim().length === 0) {

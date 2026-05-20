@@ -124,9 +124,13 @@ export async function renameSession(
 }
 
 // Ask the daemon to regenerate a live session's title via its agent
-// (equivalent to typing bare `/hydra title` in the composer). 404 (no
-// such record) and 409 (cold — no agent to talk to) are both tolerated
-// silently; the picker's `T` is treated as a no-op in those cases.
+// (equivalent to typing bare `/hydra title` in the composer). The daemon
+// responds 202 immediately — the regen runs asynchronously on the
+// session's prompt queue, so the new title shows up on the next list
+// refresh once the in-flight turn (if any) plus the regen complete.
+// 404 (no such record) and 409 (cold — no agent to talk to) are both
+// tolerated silently; the picker's `T` is treated as a no-op in those
+// cases.
 export async function regenSessionTitle(
   config: HydraConfig,
   serviceToken: string,
@@ -144,6 +148,7 @@ export async function regenSessionTitle(
   });
   if (
     !response.ok &&
+    response.status !== 202 &&
     response.status !== 204 &&
     response.status !== 404 &&
     response.status !== 409

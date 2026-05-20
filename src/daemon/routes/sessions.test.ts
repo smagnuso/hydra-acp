@@ -183,6 +183,34 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(res.status).toBe(404);
   });
 
+  it("PATCH /v1/sessions/:id with { regen: true } returns 202 without waiting for the agent", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const requestMock = harness.mocks[0]!.agent.connection
+      .request as ReturnType<typeof vi.fn>;
+    // Make the underlying session/prompt that runTitleRegen issues hang
+    // forever — if the route awaited it, this test would time out. We
+    // expect 202 to come back essentially immediately.
+    requestMock.mockImplementationOnce(() => new Promise(() => undefined));
+
+    const t0 = Date.now();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ regen: true }),
+      },
+    );
+    const elapsed = Date.now() - t0;
+    expect(res.status).toBe(202);
+    // Generous bound — what we care about is that we DIDN'T block on
+    // the (intentionally never-resolving) agent request.
+    expect(elapsed).toBeLessThan(1000);
+  });
+
   it("PATCH /v1/sessions/:id with { regen: true } 409s on a cold session", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
