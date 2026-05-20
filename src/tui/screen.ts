@@ -465,6 +465,48 @@ export class Screen {
           return;
         }
       }
+      // Kitty keyboard protocol level 1 (\x1b[>1u) causes iTerm2 and other
+      // kitty-protocol terminals to send Ctrl+letter as \x1b[{codepoint};5u
+      // instead of the traditional ASCII control byte. terminal-kit doesn't
+      // parse this format and would insert the literal "[99;5u" etc. into the
+      // buffer. Intercept any such sequence here and emit the matching key
+      // event, using the same split-and-recurse pattern as the markers above.
+      const csiUCtrlMap: Record<number, KeyName> = {
+        97: "ctrl-a",
+        98: "ctrl-b",
+        99: "ctrl-c",
+        100: "ctrl-d",
+        101: "ctrl-e",
+        102: "ctrl-f",
+        103: "ctrl-g",
+        107: "ctrl-k",
+        108: "ctrl-l",
+        110: "ctrl-n",
+        111: "ctrl-o",
+        112: "ctrl-p",
+        114: "ctrl-r",
+        115: "ctrl-s",
+        116: "ctrl-t",
+        117: "ctrl-u",
+        118: "ctrl-v",
+        119: "ctrl-w",
+        121: "ctrl-y",
+      };
+      const csiUCtrlRe = /\x1b\[(\d+);5u/;
+      const m = csiUCtrlRe.exec(text);
+      if (m !== null) {
+        const keyName = csiUCtrlMap[parseInt(m[1]!, 10)];
+        if (keyName !== undefined) {
+          const parts = text.split(m[0]);
+          for (let i = 0; i < parts.length; i++) {
+            if (parts[i]!.length > 0)
+              this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
+            if (i < parts.length - 1)
+              this.onKey([{ type: "key", name: keyName }]);
+          }
+          return;
+        }
+      }
     }
     this.handleRawStdinSegment(text);
   }
