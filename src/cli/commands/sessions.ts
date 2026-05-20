@@ -13,7 +13,7 @@ import {
 } from "../session-row.js";
 
 export async function runSessionsList(
-  opts: { all?: boolean; json?: boolean } = {},
+  opts: { all?: boolean; json?: boolean; host?: string } = {},
 ): Promise<void> {
   const config = await loadConfig();
   const serviceToken = await loadServiceToken();
@@ -43,19 +43,53 @@ export async function runSessionsList(
       attachedClients: number;
       updatedAt: string;
       status?: "live" | "cold";
+      importedFromMachine?: string;
     }>;
   };
+  // Host filter:
+  //   "local" — sessions created here OR imported and bound to a local
+  //             agent (upstreamSessionId set). The "I'm working on this
+  //             here" bucket.
+  //   "all"   — every session, no filter.
+  //   <host>  — passive mirrors imported from <host> that haven't been
+  //             attached locally yet. Once you attach, the session
+  //             graduates to "local" and stops appearing here.
+  // Default is "local". Applied before --json so scripts see the same
+  // view as humans.
+  const host = opts.host ?? "local";
+  const hostFiltered = host === "all"
+    ? body.sessions
+    : host === "local"
+      ? body.sessions.filter(
+          (s) => !s.importedFromMachine || !!s.upstreamSessionId,
+        )
+      : body.sessions.filter(
+          (s) =>
+            s.importedFromMachine === host && !s.upstreamSessionId,
+        );
   // --json bypasses the table renderer and the cold-cap truncation:
   // a script wants the full list verbatim, not a TTY-trimmed view.
+  // The host filter still applies — scripts read the same world view
+  // as the table does, so `--json --host=all` is the way to get raw.
   if (opts.json) {
-    process.stdout.write(JSON.stringify(body.sessions, null, 2) + "\n");
+    process.stdout.write(JSON.stringify(hostFiltered, null, 2) + "\n");
     return;
   }
-  if (body.sessions.length === 0) {
+  if (hostFiltered.length === 0) {
+    if (host === "local" && body.sessions.length > 0) {
+      process.stdout.write(
+        "No local sessions. Use --host=all to include imported sessions.\n",
+      );
+      return;
+    }
+    if (host !== "local" && host !== "all") {
+      process.stdout.write(`No sessions from ${host}.\n`);
+      return;
+    }
     process.stdout.write("No active sessions.\n");
     return;
   }
-  const sorted = body.sessions.slice().sort((a, b) => {
+  const sorted = hostFiltered.slice().sort((a, b) => {
     const liveDiff = (b.status === "live" ? 1 : 0) - (a.status === "live" ? 1 : 0);
     if (liveDiff !== 0) {
       return liveDiff;

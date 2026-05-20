@@ -59,6 +59,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   null,
   ["/", "search sessions"],
   ["o", "toggle cwd-only filter"],
+  ["h", "cycle host filter (local / <peer> / all)"],
   ["r", "refresh from daemon"],
   null,
   ["k", "kill the selected live session"],
@@ -94,13 +95,34 @@ export async function pickSession(
     });
   };
 
+  // `o` toggles a cwd-only filter that narrows `visible` to sessions whose
+  // cwd matches the current cwd. Composes with search — both are AND'd.
+  let cwdOnly = false;
+
+  // `h` cycles a host filter. "__local" (default) hides every imported
+  // session; "__all" hides nothing; any other value matches the row's
+  // importedFromMachine literally. Cycle order is local → each unique
+  // peer host (alphabetical) → all → back to local. If the picker was
+  // opened from inside an imported session (^p), bump straight to
+  // "__all" so the current row is still findable below.
+  let hostFilter: string = "__local";
+  if (opts.currentSessionId !== undefined) {
+    const current = opts.sessions.find(
+      (s) => s.sessionId === opts.currentSessionId,
+    );
+    if (current?.importedFromMachine) {
+      hostFilter = "__all";
+    }
+  }
+
   // sorted/rows/widths are rebuilt whenever the underlying session list
   // changes (kill / delete refetches from the daemon). `allSessions` is the
-  // full sorted source; `visible` is the currently displayed slice — equal
-  // to `allSessions` when the picker isn't filtering, otherwise the subset
-  // matching `searchTerm`.
+  // full sorted source; `visible` is the currently displayed slice — the
+  // subset of allSessions after the cwd-only / host filter / search
+  // filters compose. Initial `visible` already respects the default
+  // host filter so a fresh picker doesn't flash the unfiltered list.
   let allSessions: DiscoveredSession[] = sortSessions(opts.sessions);
-  let visible: DiscoveredSession[] = allSessions;
+  let visible: DiscoveredSession[] = filterByHost(allSessions, hostFilter);
   let rows: Row[] = visible.map((s) => toRow(s, Date.now()));
   let widths: Widths = computeWidths(rows);
 
@@ -123,10 +145,6 @@ export async function pickSession(
   // pickSession calls — state is local to this invocation.
   let searchActive = false;
   let searchTerm = "";
-
-  // `o` toggles a cwd-only filter that narrows `visible` to sessions whose
-  // cwd matches the current cwd. Composes with search — both are AND'd.
-  let cwdOnly = false;
 
   // Confirmation state. While in 'confirm-kill' or 'confirm-delete' we
   // hijack key handling, replace the indicator with a yes/no prompt, and
@@ -196,6 +214,7 @@ export async function pickSession(
     if (cwdOnly) {
       base = base.filter((s) => s.cwd === opts.cwd);
     }
+    base = filterByHost(base, hostFilter);
     if (searchActive && searchTerm.length > 0) {
       visible = base.filter((s) => matchesSearch(s, searchTerm));
     } else {
@@ -253,6 +272,13 @@ export async function pickSession(
     const parts: string[] = [];
     if (cwdOnly) {
       parts.push("cwd-only");
+    }
+    if (hostFilter !== "__all") {
+      parts.push(
+        hostFilter === "__local"
+          ? "host: local"
+          : `host: ${hostFilter}`,
+      );
     }
     if (above > 0) {
       parts.push(`↑ ${above} above`);
@@ -706,6 +732,21 @@ export async function pickSession(
           renderFromScratch();
           return;
         }
+        if (name === "h" || name === "H") {
+          const keepId =
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+          hostFilter = nextHostFilter(hostFilter, allSessions);
+          applyFilter();
+          if (keepId !== undefined) {
+            const idx = visible.findIndex((s) => s.sessionId === keepId);
+            if (idx >= 0) {
+              selectedIdx = idx + 1;
+              adjustScroll();
+            }
+          }
+          renderFromScratch();
+          return;
+        }
         if (name === "r" || name === "R") {
           const currentId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
@@ -842,6 +883,57 @@ function formatNewSessionLabel(cwd: string, maxWidth: number): string {
   const prefix = "New session in ";
   const budget = Math.max(1, maxWidth - prefix.length);
   return prefix + truncateMiddle(shortenHomePath(cwd), budget);
+}
+
+// Apply the picker's host filter to a session list. Sentinel values:
+//   "__all"   — no filter.
+//   "__local" — sessions created here OR imported and already bound to
+//               a local agent (upstreamSessionId set). The "I'm working
+//               on this here" bucket.
+//   <host>    — passive mirrors imported from <host> that haven't been
+//               attached locally yet. Once you attach, the session
+//               graduates to "__local" and stops appearing here.
+export function filterByHost(
+  sessions: DiscoveredSession[],
+  hostFilter: string,
+): DiscoveredSession[] {
+  if (hostFilter === "__all") {
+    return sessions;
+  }
+  if (hostFilter === "__local") {
+    return sessions.filter(
+      (s) => !s.importedFromMachine || !!s.upstreamSessionId,
+    );
+  }
+  return sessions.filter(
+    (s) => s.importedFromMachine === hostFilter && !s.upstreamSessionId,
+  );
+}
+
+// Cycle the host filter through "__local" → each peer host with at
+// least one passive mirror (alphabetical) → "__all" → back to "__local".
+// A peer host whose sessions have all been attached locally drops out
+// of the cycle because the "<host>" filter would render an empty list
+// for it. Exported so picker.test.ts can drive the transitions.
+export function nextHostFilter(
+  current: string,
+  sessions: ReadonlyArray<{
+    importedFromMachine?: string;
+    upstreamSessionId?: string;
+  }>,
+): string {
+  const hosts = new Set<string>();
+  for (const s of sessions) {
+    if (s.importedFromMachine && !s.upstreamSessionId) {
+      hosts.add(s.importedFromMachine);
+    }
+  }
+  const ordered = ["__local", ...[...hosts].sort(), "__all"];
+  const idx = ordered.indexOf(current);
+  if (idx === -1) {
+    return "__local";
+  }
+  return ordered[(idx + 1) % ordered.length] ?? "__local";
 }
 
 // Case-insensitive substring match across the session's user-visible
