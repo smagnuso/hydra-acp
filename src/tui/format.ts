@@ -182,7 +182,8 @@ export function parseAgentMarkdown(text: string): FormattedLine[] {
     codeBuffer = [];
     codeLang = "";
   };
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
     const fence = line.match(/^\s*```\s*(\w*)\s*$/);
     if (fence) {
       if (!inCode) {
@@ -211,6 +212,29 @@ export function parseAgentMarkdown(text: string): FormattedLine[] {
         body: text,
         bodyStyle: style,
       });
+      continue;
+    }
+    // Pipe table: a header row, an `|---|---|` separator on the very next
+    // line with the same column count, then zero or more body rows. The
+    // separator is the disambiguator — a stray `a | b` in prose without a
+    // following separator falls through to the default branch and renders
+    // as plain text.
+    const next = lines[i + 1];
+    if (
+      line.includes("|") &&
+      next !== undefined &&
+      isTableSeparatorLine(next) &&
+      parseTableRow(line).length === parseTableRow(next).length
+    ) {
+      const header = parseTableRow(line);
+      const body: string[][] = [];
+      let j = i + 2;
+      while (j < lines.length && lines[j]!.includes("|")) {
+        body.push(parseTableRow(lines[j]!));
+        j++;
+      }
+      out.push(...formatTable(header, body));
+      i = j - 1;
       continue;
     }
     const bullet = line.match(/^(\s*)[-*+]\s+(.*)$/);
@@ -247,6 +271,84 @@ export function parseAgentMarkdown(text: string): FormattedLine[] {
   // hint was captured (or none) so the user sees content as it streams.
   if (inCode) {
     flushCode();
+  }
+  return out;
+}
+
+// Split a `| a | b | c |` row into trimmed cells. Outer pipes are
+// optional in GFM — strip them when present so `a | b` and `| a | b |`
+// both parse to the same two cells. We don't support escaped `\|` inside
+// cells; agent output overwhelmingly uses plain pipes.
+function parseTableRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) {
+    s = s.slice(1);
+  }
+  if (s.endsWith("|")) {
+    s = s.slice(0, -1);
+  }
+  return s.split("|").map((c) => c.trim());
+}
+
+// GFM separator row: every cell is `-+` with optional leading/trailing
+// `:` for alignment. We accept 1+ dashes (strict GFM wants 3+) since
+// agent output is sometimes terse. Alignment markers are accepted but
+// not yet honored — every column renders left-aligned.
+function isTableSeparatorLine(line: string): boolean {
+  if (!line.includes("|")) {
+    return false;
+  }
+  const cells = parseTableRow(line);
+  if (cells.length === 0) {
+    return false;
+  }
+  return cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+// Emit a header row (heading-3), a dim `─┼─` rule, then one row per body
+// entry. Column widths are computed from raw cell text (pre-markup) so
+// inline marks like **bold** don't inflate the measured width.
+function formatTable(header: string[], body: string[][]): FormattedLine[] {
+  const cols = header.length;
+  const widths: number[] = new Array(cols).fill(0);
+  for (let c = 0; c < cols; c++) {
+    widths[c] = header[c]?.length ?? 0;
+  }
+  for (const row of body) {
+    for (let c = 0; c < cols; c++) {
+      const cell = row[c] ?? "";
+      if (cell.length > widths[c]!) {
+        widths[c] = cell.length;
+      }
+    }
+  }
+  const renderRow = (cells: string[], style: Style): FormattedLine => {
+    const padded: string[] = [];
+    for (let c = 0; c < cols; c++) {
+      const cell = cells[c] ?? "";
+      const w = widths[c]!;
+      const marked = applyInlineMarkup(cell);
+      padded.push(marked + " ".repeat(Math.max(0, w - cell.length)));
+    }
+    return {
+      prefix: "  ",
+      body: padded.join(" │ "),
+      bodyStyle: style,
+    };
+  };
+  const out: FormattedLine[] = [];
+  out.push(renderRow(header, "heading-3"));
+  const rules: string[] = [];
+  for (let c = 0; c < cols; c++) {
+    rules.push("─".repeat(widths[c]!));
+  }
+  out.push({
+    prefix: "  ",
+    body: rules.join("─┼─"),
+    bodyStyle: "dim",
+  });
+  for (const row of body) {
+    out.push(renderRow(row, "agent"));
   }
   return out;
 }

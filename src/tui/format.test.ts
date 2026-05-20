@@ -117,6 +117,62 @@ describe("parseAgentMarkdown", () => {
     });
     expect(lines[2]?.ansi).toBeUndefined();
   });
+
+  it("renders a basic 2-column pipe table aligned by widest cell", () => {
+    const lines = parseAgentMarkdown(
+      "| Subscriber concern | Subscribes to |\n|---|---|\n| Queue chip rendering | prompt_queue_added |\n| Turn lifecycle | turn_complete |",
+    );
+    expect(lines).toHaveLength(4);
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[0]?.body).toBe("Subscriber concern   │ Subscribes to     ");
+    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.body).toBe("─────────────────────┼───────────────────");
+    expect(lines[2]?.bodyStyle).toBe("agent");
+    expect(lines[2]?.body).toBe("Queue chip rendering │ prompt_queue_added");
+    expect(lines[3]?.body).toBe("Turn lifecycle       │ turn_complete     ");
+  });
+
+  it("does NOT treat a stray `a | b` in prose as a table", () => {
+    const lines = parseAgentMarkdown("here is a thing: a | b in a sentence");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.bodyStyle).toBe("agent");
+    expect(lines[0]?.body).toBe("here is a thing: a | b in a sentence");
+  });
+
+  it("renders mid-stream: header + separator with no body rows yet", () => {
+    const lines = parseAgentMarkdown("| a | b |\n|---|---|");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[0]?.body).toBe("a │ b");
+    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.body).toBe("──┼──");
+  });
+
+  it("accepts tables without outer pipes", () => {
+    const lines = parseAgentMarkdown("a | b\n---|---\nfoo | bar");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[0]?.body).toBe("a   │ b  ");
+    expect(lines[2]?.bodyStyle).toBe("agent");
+    expect(lines[2]?.body).toBe("foo │ bar");
+  });
+
+  it("widens column to fit the widest body cell", () => {
+    const lines = parseAgentMarkdown(
+      "| a | b |\n|---|---|\n| short | a_much_longer_value |",
+    );
+    expect(lines[0]?.body).toBe("a     │ b                  ");
+    expect(lines[2]?.body).toBe("short │ a_much_longer_value");
+  });
+
+  it("ignores GFM alignment markers (renders left-aligned) but accepts them as a valid separator", () => {
+    const lines = parseAgentMarkdown(
+      "| a | b |\n| :--- | ---: |\n| x | y |",
+    );
+    expect(lines).toHaveLength(3);
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[2]?.body).toBe("x │ y");
+  });
 });
 
 describe("formatEvent — user-text with attachments", () => {
