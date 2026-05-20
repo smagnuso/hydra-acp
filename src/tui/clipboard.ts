@@ -8,10 +8,15 @@
 //
 // Platform strategy:
 //   - macOS: shell out to `osascript` with «class PNGf» (writes to
-//     temp PNG); if that fails, run `pbpaste` for text.
-//   - Linux: detect `wl-paste` (Wayland) or `xclip` (X11). Try the
-//     image target first, fall back to plain text on the same tool.
-//     Neither installed → graceful "install wl-clipboard or xclip".
+//     temp PNG); if that fails, run `pbpaste` for text. The coercion
+//     converts JPEG/TIFF/PDF clipboard images to PNG transparently.
+//   - Linux: detect `wl-paste` (Wayland) or `xclip` (X11). First ask
+//     the tool which mimes the clipboard advertises, pick a supported
+//     image type (png > jpeg > gif > webp), and only then fetch. This
+//     matters because xclip, asked for `-t image/png` on a text-only
+//     clipboard, exits 0 and dumps the *text* — so we must gate the
+//     image fetch on an explicit advertisement to avoid base64-ing
+//     plain text into a fake PNG attachment.
 //   - Windows: not yet supported; returns a structured error.
 //
 // The spawn fn is injectable so tests can mock platform tools without
@@ -133,30 +138,36 @@ async function readLinux(env: ClipboardEnv): Promise<ClipboardReadResult> {
         "install wl-clipboard (Wayland) or xclip (X11) to paste from the clipboard",
     };
   }
-  // Image first.
-  try {
-    const buf = await runCapture(env.spawn, tool.cmd, tool.imageArgs);
-    if (buf.length > 0) {
-      if (buf.length > MAX_ATTACHMENT_BYTES) {
+  const targets = await listTargets(env, tool);
+  const imageMime = pickImageTarget(targets);
+  if (imageMime) {
+    try {
+      const buf = await runCapture(
+        env.spawn,
+        tool.cmd,
+        tool.imageArgs(imageMime),
+      );
+      if (buf.length > 0) {
+        if (buf.length > MAX_ATTACHMENT_BYTES) {
+          return {
+            ok: false,
+            reason: `clipboard image is ${formatSize(buf.length)}, max ${formatSize(MAX_ATTACHMENT_BYTES)}`,
+          };
+        }
         return {
-          ok: false,
-          reason: `clipboard image is ${formatSize(buf.length)}, max ${formatSize(MAX_ATTACHMENT_BYTES)}`,
+          ok: true,
+          kind: "image",
+          attachment: {
+            mimeType: imageMime,
+            data: buf.toString("base64"),
+            sizeBytes: buf.length,
+          },
         };
       }
-      return {
-        ok: true,
-        kind: "image",
-        attachment: {
-          mimeType: "image/png",
-          data: buf.toString("base64"),
-          sizeBytes: buf.length,
-        },
-      };
+    } catch {
+      // Listed but fetch failed — fall through to text.
     }
-  } catch {
-    // No image target available — fall through to text.
   }
-  // Text fallback on the same tool.
   try {
     const buf = await runCapture(env.spawn, tool.cmd, tool.textArgs);
     if (buf.length === 0) {
@@ -174,7 +185,8 @@ async function readLinux(env: ClipboardEnv): Promise<ClipboardReadResult> {
 
 interface LinuxTool {
   cmd: string;
-  imageArgs: string[];
+  listTargetsArgs: string[];
+  imageArgs: (mime: string) => string[];
   textArgs: string[];
 }
 
@@ -182,7 +194,8 @@ async function detectLinuxTool(env: ClipboardEnv): Promise<LinuxTool | null> {
   if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-paste"))) {
     return {
       cmd: "wl-paste",
-      imageArgs: ["-t", "image/png"],
+      listTargetsArgs: ["--list-types"],
+      imageArgs: (mime) => ["-t", mime],
       // -n: drop trailing newline wl-paste adds by default. We further
       // normalize line endings below, but this avoids a spurious
       // empty trailing row from a single-line clipboard text.
@@ -192,11 +205,49 @@ async function detectLinuxTool(env: ClipboardEnv): Promise<LinuxTool | null> {
   if (env.env.DISPLAY && (await which(env, "xclip"))) {
     return {
       cmd: "xclip",
-      imageArgs: ["-selection", "clipboard", "-t", "image/png", "-o"],
+      listTargetsArgs: ["-selection", "clipboard", "-t", "TARGETS", "-o"],
+      imageArgs: (mime) => ["-selection", "clipboard", "-t", mime, "-o"],
       textArgs: ["-selection", "clipboard", "-o"],
     };
   }
   return null;
+}
+
+// Preference order matters: PNG is lossless and the format every agent
+// definitely accepts, so we'd rather take it when the source offered
+// multiple representations. JPEG/GIF/WEBP only come through when PNG
+// isn't on offer.
+const SUPPORTED_IMAGE_MIMES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
+function pickImageTarget(targets: string[]): string | null {
+  const offered = new Set(targets.map((t) => t.toLowerCase()));
+  for (const mime of SUPPORTED_IMAGE_MIMES) {
+    if (offered.has(mime)) {
+      return mime;
+    }
+  }
+  return null;
+}
+
+async function listTargets(
+  env: ClipboardEnv,
+  tool: LinuxTool,
+): Promise<string[]> {
+  try {
+    const buf = await runCapture(env.spawn, tool.cmd, tool.listTargetsArgs);
+    return buf
+      .toString("utf-8")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
 }
 
 // Match the bracketed-paste handler in screen.ts: collapse \r\n / \r

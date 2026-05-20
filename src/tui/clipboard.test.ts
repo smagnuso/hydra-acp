@@ -169,10 +169,16 @@ describe("readClipboard — macOS", () => {
 });
 
 describe("readClipboard — Linux", () => {
-  it("returns an image when wl-paste delivers PNG bytes", async () => {
+  it("returns an image when wl-paste advertises and delivers PNG bytes", async () => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
     const { spawn, calls } = makeSpawnFake([
       { cmd: "which", args: ["wl-paste"], code: 0 },
+      {
+        cmd: "wl-paste",
+        args: ["--list-types"],
+        code: 0,
+        stdout: Buffer.from("image/png\ntext/plain\n"),
+      },
       { cmd: "wl-paste", args: ["-t", "image/png"], code: 0, stdout: png },
     ]);
     const result = await readClipboard({
@@ -183,20 +189,25 @@ describe("readClipboard — Linux", () => {
     });
     expect(result.ok && result.kind).toBe("image");
     if (result.ok && result.kind === "image") {
+      expect(result.attachment.mimeType).toBe("image/png");
       expect(Buffer.from(result.attachment.data, "base64")).toEqual(png);
     }
-    expect(calls.map((c) => c.cmd)).toEqual(["which", "wl-paste"]);
+    expect(calls.map((c) => c.cmd)).toEqual([
+      "which",
+      "wl-paste",
+      "wl-paste",
+    ]);
   });
 
-  it("falls back to text on wl-paste when the image target is empty", async () => {
+  it("skips the image fetch when no image target is advertised", async () => {
     const text = Buffer.from("hello\nworld");
     const { spawn, calls } = makeSpawnFake([
       { cmd: "which", args: ["wl-paste"], code: 0 },
       {
         cmd: "wl-paste",
-        args: ["-t", "image/png"],
+        args: ["--list-types"],
         code: 0,
-        stdout: Buffer.alloc(0),
+        stdout: Buffer.from("text/plain;charset=utf-8\nUTF8_STRING\n"),
       },
       { cmd: "wl-paste", args: ["-n"], code: 0, stdout: text },
     ]);
@@ -211,15 +222,21 @@ describe("readClipboard — Linux", () => {
     );
     expect(calls.map((c) => c.args.join(" "))).toEqual([
       "wl-paste",
-      "-t image/png",
+      "--list-types",
       "-n",
     ]);
   });
 
-  it("falls back to text on wl-paste when the image target errors", async () => {
+  it("falls back to text when the image fetch fails after being listed", async () => {
     const text = Buffer.from("text-only clipboard");
     const { spawn } = makeSpawnFake([
       { cmd: "which", args: ["wl-paste"], code: 0 },
+      {
+        cmd: "wl-paste",
+        args: ["--list-types"],
+        code: 0,
+        stdout: Buffer.from("image/png\n"),
+      },
       { cmd: "wl-paste", args: ["-t", "image/png"], code: 1 },
       { cmd: "wl-paste", args: ["-n"], code: 0, stdout: text },
     ]);
@@ -240,6 +257,12 @@ describe("readClipboard — Linux", () => {
       { cmd: "which", args: ["xclip"], code: 0 },
       {
         cmd: "xclip",
+        args: ["-selection", "clipboard", "-t", "TARGETS", "-o"],
+        code: 0,
+        stdout: Buffer.from("TARGETS\nimage/png\ntext/plain\n"),
+      },
+      {
+        cmd: "xclip",
         args: ["-selection", "clipboard", "-t", "image/png", "-o"],
         code: 0,
         stdout: png,
@@ -252,7 +275,91 @@ describe("readClipboard — Linux", () => {
       tmpdir: () => "/tmp",
     });
     expect(result.ok && result.kind).toBe("image");
-    expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip", "xclip"]);
+  });
+
+  // Regression: xclip exits 0 and dumps text when asked for `-t image/png`
+  // on a text-only clipboard. The TARGETS probe must gate the image fetch
+  // so this text never reaches the attachment path.
+  it("treats text-only xclip clipboards as text, not an image", async () => {
+    const text = Buffer.from("plain pasted text");
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 0 },
+      {
+        cmd: "xclip",
+        args: ["-selection", "clipboard", "-t", "TARGETS", "-o"],
+        code: 0,
+        stdout: Buffer.from(
+          "TARGETS\nUTF8_STRING\ntext/plain;charset=utf-8\ntext/plain\nSTRING\n",
+        ),
+      },
+      {
+        cmd: "xclip",
+        args: ["-selection", "clipboard", "-o"],
+        code: 0,
+        stdout: text,
+      },
+    ]);
+    const result = await readClipboard({
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result.ok && result.kind === "text" && result.text).toBe(
+      "plain pasted text",
+    );
+    expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip", "xclip"]);
+  });
+
+  it("returns image/jpeg when JPEG is the only image target offered", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const { spawn } = makeSpawnFake([
+      { cmd: "which", args: ["wl-paste"], code: 0 },
+      {
+        cmd: "wl-paste",
+        args: ["--list-types"],
+        code: 0,
+        stdout: Buffer.from("image/jpeg\ntext/plain\n"),
+      },
+      { cmd: "wl-paste", args: ["-t", "image/jpeg"], code: 0, stdout: jpeg },
+    ]);
+    const result = await readClipboard({
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "wayland-0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result.ok && result.kind).toBe("image");
+    if (result.ok && result.kind === "image") {
+      expect(result.attachment.mimeType).toBe("image/jpeg");
+      expect(Buffer.from(result.attachment.data, "base64")).toEqual(jpeg);
+    }
+  });
+
+  it("prefers PNG over JPEG when both are advertised", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["wl-paste"], code: 0 },
+      {
+        cmd: "wl-paste",
+        args: ["--list-types"],
+        code: 0,
+        stdout: Buffer.from("image/jpeg\nimage/png\ntext/plain\n"),
+      },
+      { cmd: "wl-paste", args: ["-t", "image/png"], code: 0, stdout: png },
+    ]);
+    const result = await readClipboard({
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "wayland-0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result.ok && result.kind).toBe("image");
+    if (result.ok && result.kind === "image") {
+      expect(result.attachment.mimeType).toBe("image/png");
+    }
+    expect(calls.at(-1)?.args).toEqual(["-t", "image/png"]);
   });
 
   it("returns install hint when neither tool is available", async () => {
@@ -269,12 +376,12 @@ describe("readClipboard — Linux", () => {
     }
   });
 
-  it("returns clipboard-empty when both image and text are empty", async () => {
+  it("returns clipboard-empty when no image is advertised and text is empty", async () => {
     const { spawn } = makeSpawnFake([
       { cmd: "which", args: ["wl-paste"], code: 0 },
       {
         cmd: "wl-paste",
-        args: ["-t", "image/png"],
+        args: ["--list-types"],
         code: 0,
         stdout: Buffer.alloc(0),
       },
