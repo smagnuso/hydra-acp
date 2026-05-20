@@ -388,7 +388,7 @@ Extension stdout/stderr are appended to `~/.hydra-acp/extensions/<name>.log`.
 While the daemon is running you can manage extensions without bouncing it:
 
 ```text
-hydra-acp extension               # table of name/status/pid/restarts/started/log
+hydra-acp extension list
 hydra-acp extension restart hydra-acp-slack
 hydra-acp extension logs hydra-acp-slack --follow
 ```
@@ -405,8 +405,8 @@ Various ready-made extensions ship under the same `@hydra-acp` npm scope. All ar
 
 ```sh
 npm install -g @hydra-acp/slack
-hydra-acp extension add hydra-acp-slack --command hydra-acp-slack
-hydra-acp extension start hydra-acp-slack   # if the daemon is already running
+hydra-acp extension add hydra-acp-slack
+hydra-acp extension restart hydra-acp-slack
 ```
 
 You'll also need a Slack app and a config at `~/.hydra-acp-slack.conf` — see the [package's setup section](https://github.com/smagnuso/hydra-acp-slack#setup) for scopes, tokens, and authorized users.
@@ -415,8 +415,8 @@ You'll also need a Slack app and a config at `~/.hydra-acp-slack.conf` — see t
 
 ```sh
 npm install -g @hydra-acp/browser
-hydra-acp extension add hydra-acp-browser --command hydra-acp-browser
-hydra-acp extension start hydra-acp-browser
+hydra-acp extension add hydra-acp-browser
+hydra-acp extension restart hydra-acp-browser
 ```
 
 The first launch generates `~/.hydra-acp-browser/authkey` and writes the open URL (with `?authkey=…`) to `~/.hydra-acp-browser/link`. Defaults to localhost-only; see the [package's HTTPS section](https://github.com/smagnuso/hydra-acp-browser#https) for binding to a LAN address with TLS.
@@ -425,15 +425,15 @@ The first launch generates `~/.hydra-acp-browser/authkey` and writes the open UR
 
 ```sh
 npm install -g @hydra-acp/notifier
-hydra-acp extension add hydra-acp-notifier --command hydra-acp-notifier
+hydra-acp extension add hydra-acp-notifier
 hydra-acp extension start hydra-acp-notifier
 ```
 
-**[`@hydra-acp/approver`](https://github.com/smagnuso/hydra-acp-approver) — headless permission auto-responder.** Attaches to every live session and answers `session/request_permission` based on a JS rule at `~/.hydra-acp/approver.config.js`. When the rule returns an `optionId` it wins the race and dismisses the prompt before any human client sees it; when it abstains (returns `null`), the prompt stays open for your interactive clients. Useful for centralizing approval policy in one place so per-client approve lambdas can go away.
+**[`@hydra-acp/approver`](https://github.com/smagnuso/hydra-acp-approver) — headless permission auto-responder.** Attaches to every live session and answers `session/request_permission` based on a JS rule at `~/.hydra-acp/approver.config.js`. When the rule returns an `optionId` it wins the race and dismisses the prompt before any human client sees it; when it abstains (returns `null`), the prompt stays open for your interactive clients. Useful for centralizing approval policy in one place so per-client approval can go away.
 
 ```sh
 npm install -g @hydra-acp/approver
-hydra-acp extension add hydra-acp-approver --command hydra-acp-approver
+hydra-acp extension add hydra-acp-approver
 hydra-acp extension start hydra-acp-approver
 ```
 
@@ -463,7 +463,7 @@ The daemon refuses to bind to non-loopback hosts without TLS configured.
 ```
 ~/.hydra-acp/
 ├── config.json              # daemon config (safe to version-control)
-├── auth-token               # service token (mode 0600, never in config.json)
+├── auth-token               # service token (mode 0600)
 ├── daemon.pid               # PID + port lockfile (when running)
 ├── daemon.<N>.log           # rotated daemon logs (10 MB or daily, whichever first)
 ├── current.log              # symlink to the active daemon.<N>.log
