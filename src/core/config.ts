@@ -67,6 +67,14 @@ const TuiConfig = z.object({
   // running. Set false if your terminal renders this obnoxiously or you
   // just don't want it.
   progressIndicator: z.boolean().default(true),
+  // What the unmodified Enter key does in the prompt composer.
+  //   "enqueue" (default) — Enter enqueues the prompt (sends immediately
+  //     when idle, queues behind an in-flight turn); Shift+Enter amends
+  //     the in-flight turn.
+  //   "amend" — flips the two: Enter amends the in-flight turn,
+  //     Shift+Enter enqueues. With no turn in flight either key just
+  //     enqueues, since there's nothing to amend.
+  defaultEnterAction: z.enum(["enqueue", "amend"]).default("enqueue"),
 });
 
 const ExtensionName = z
@@ -120,6 +128,7 @@ export const HydraConfig = z.object({
     logMaxBytes: 5 * 1024 * 1024,
     cwdColumnMaxWidth: 24,
     progressIndicator: true,
+    defaultEnterAction: "enqueue",
   }),
 });
 

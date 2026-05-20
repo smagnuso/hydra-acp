@@ -221,6 +221,33 @@ describe("mapUpdate", () => {
     });
   });
 
+  it("reads the hydra-acp amended marker from turn_complete _meta and surfaces it as amended: true", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "turn_complete",
+        stopReason: "cancelled",
+        _meta: {
+          "hydra-acp": {
+            amended: {
+              cancelledMessageId: "m_old",
+              newMessageId: "m_new",
+            },
+          },
+        },
+      }),
+    ).toEqual({
+      kind: "turn-complete",
+      stopReason: "cancelled",
+      amended: true,
+    });
+  });
+
+  it("does NOT set amended for a normal turn_complete without the _meta marker", () => {
+    expect(
+      mapUpdate({ sessionUpdate: "turn_complete", stopReason: "cancelled" }),
+    ).toEqual({ kind: "turn-complete", stopReason: "cancelled" });
+  });
+
   it("handles usage_update", () => {
     expect(
       mapUpdate({

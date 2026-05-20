@@ -59,7 +59,7 @@ export type RenderEvent =
   | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean }
   | { kind: "mode-changed"; mode: string }
   | { kind: "model-changed"; model: string }
-  | { kind: "turn-complete"; stopReason?: string }
+  | { kind: "turn-complete"; stopReason?: string; amended?: boolean }
   | {
       kind: "usage-update";
       used?: number;
@@ -415,9 +415,24 @@ function mapModel(u: UpdateLike): RenderEvent | null {
 
 function mapTurnComplete(u: UpdateLike): RenderEvent {
   const stopReason = readString(u, "stopReason");
-  return stopReason !== undefined
-    ? { kind: "turn-complete", stopReason }
-    : { kind: "turn-complete" };
+  // Daemon attaches _meta["hydra-acp"].amended on the cancelled turn's
+  // turn_complete when the cancellation was caused by an amend_prompt.
+  // Renderers use this to paint an "amended" treatment instead of the
+  // red cancelled banner.
+  const meta = u._meta as
+    | { "hydra-acp"?: { amended?: unknown } }
+    | undefined;
+  const amended =
+    meta?.["hydra-acp"]?.amended !== undefined &&
+    meta["hydra-acp"]!.amended !== null;
+  const out: RenderEvent = { kind: "turn-complete" };
+  if (stopReason !== undefined) {
+    out.stopReason = stopReason;
+  }
+  if (amended) {
+    out.amended = true;
+  }
+  return out;
 }
 
 function extractContentText(content: unknown): string | null {

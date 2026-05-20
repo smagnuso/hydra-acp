@@ -87,10 +87,11 @@ interface SessionContext {
 }
 
 // Hotkey cheatsheet rendered by the ^G modal. `null` is a visual
-// separator between groups. Kept at module scope so the array identity
-// is stable and the modal's draw signature can short-circuit.
-const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
-  ["Enter", "send prompt (or queue while a turn is running)"],
+// separator between groups. The Enter / Shift+Enter pair is built
+// dynamically per-session so the modal reflects which key enqueues
+// and which amends (see buildHelpEntries) — config.tui.defaultEnterAction
+// flips the meaning.
+const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+Enter", "newline in prompt"],
   ["Shift+Tab", "cycle agent modes (plan / accept-edits / etc.)"],
   ["Tab", "indent · slash-command completion"],
@@ -240,6 +241,11 @@ async function runSession(
   // Hydra serializes session/prompt requests on the wire so we don't
   // gate sending on this — it's purely for the banner busy state.
   let pendingTurns = 0;
+  // messageId of the prompt currently being processed by the agent
+  // (whether ours or a peer's). Tracked from prompt_received and
+  // cleared on turn_complete. Used as the targetMessageId for
+  // hydra-acp/amend_prompt when the user presses Shift+Enter.
+  let currentHeadMessageId: string | undefined;
   // Wall-clock moment the session became busy (pendingTurns went 0 → >0).
   // Drives the banner's elapsed counter so the user sees "● running 30s"
   // for peer-triggered turns too, not just our own.
@@ -349,6 +355,12 @@ async function runSession(
     } else if (event?.kind === "turn-complete") {
       adjustPendingTurns(-1);
     }
+    // currentHeadMessageId is tracked from prompt_queue_removed{started}
+    // (set) and cleared in the render-event handler's turn-complete
+    // branch. prompt_received doesn't work as the SET signal because the
+    // daemon excludes the originator from that broadcast, so the TUI
+    // would miss own-prompt heads. prompt_queue_removed broadcasts to
+    // everyone including the originator.
     if (rawTag === "permission_resolved") {
       handlePermissionResolved(update);
       return;
@@ -390,17 +402,43 @@ async function runSession(
   // with what the daemon thinks. All three events arrive on every
   // attached client, so peer-originated prompts surface here too —
   // two TUIs on the same session see each other's queues.
+  // Amend-pending entries get a minimum-display-delay before their chip
+  // paints, so a fast cancel-and-resubmit doesn't flash a chip in and
+  // out. Each pending paint is keyed by messageId → setTimeout handle.
+  // If prompt_queue_removed arrives before the timer fires, the chip
+  // never gets cached and the user never sees it.
+  const amendPendingPaintTimers = new Map<string, NodeJS.Timeout>();
+  const AMEND_CHIP_DISPLAY_DELAY_MS = 200;
+
   conn.onNotification("hydra-acp/prompt_queue_added", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as {
       messageId?: unknown;
       prompt?: unknown;
       originator?: { clientId?: unknown };
+      _meta?: { "hydra-acp"?: { amending?: unknown } };
     };
     if (typeof p.messageId !== "string") return;
-    queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
-    if (screenRef && dispatcherRef) {
-      refreshQueueDisplay();
+    const isAmendPending =
+      typeof p._meta?.["hydra-acp"]?.amending === "string";
+    if (isAmendPending) {
+      // Defer adding the chip; if started/cancelled fires within the
+      // delay window, the chip is never painted.
+      const mid = p.messageId;
+      const prompt = p.prompt;
+      const timer = setTimeout(() => {
+        amendPendingPaintTimers.delete(mid);
+        queueCache.set(mid, chipFromPrompt(mid, prompt));
+        if (screenRef && dispatcherRef) {
+          refreshQueueDisplay();
+        }
+      }, AMEND_CHIP_DISPLAY_DELAY_MS);
+      amendPendingPaintTimers.set(mid, timer);
+    } else {
+      queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
+      if (screenRef && dispatcherRef) {
+        refreshQueueDisplay();
+      }
     }
     // If this prompt_queue_added is for one of our own session/prompt
     // sends, bind the FIFO head to its messageId so we can flush the
@@ -467,6 +505,20 @@ async function runSession(
     if (teardownStarted) return;
     const p = (params ?? {}) as { messageId?: unknown; reason?: unknown };
     if (typeof p.messageId !== "string") return;
+    // reason === "started" → this messageId is now the in-flight head.
+    // Universal signal that reaches the originator too, unlike
+    // prompt_received which excludes them. Used as targetMessageId for
+    // Shift+Enter amend.
+    if (p.reason === "started") {
+      currentHeadMessageId = p.messageId;
+    }
+    // Cancel any deferred amend-chip paint so a fast-case amend doesn't
+    // flash a chip after the remove notification has already arrived.
+    const pendingTimer = amendPendingPaintTimers.get(p.messageId);
+    if (pendingTimer !== undefined) {
+      clearTimeout(pendingTimer);
+      amendPendingPaintTimers.delete(p.messageId);
+    }
     const hadChip = queueCache.delete(p.messageId);
     if (hadChip && screenRef && dispatcherRef) {
       refreshQueueDisplay();
@@ -500,6 +552,38 @@ async function runSession(
   // a cancellation on disconnect). Reconstruct the JSON-RPC response shape
   // the modal expects from the update's `outcome` (preferred) or
   // `chosenOptionId` so the awaiting Promise resolves cleanly.
+  conn.onNotification("hydra-acp/prompt_amended", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as { cancelledMessageId?: unknown };
+    if (typeof p.cancelledMessageId !== "string") return;
+    const cancelledId = p.cancelledMessageId;
+    amendedMessageIds.add(cancelledId);
+    // If the cancelled prompt is our own current turn, synthesize the
+    // turn-complete immediately so the tools block freeze uses "amended"
+    // before M2's prompt_queue_removed{started} arrives and triggers
+    // the user-text handler's plain freeze (which has no stopReason and
+    // ends up reading as "took Xs"). The wire order guarantees this
+    // notification precedes M2's started — both are emitted from inside
+    // broadcastTurnComplete and the next-iteration of drainQueue with
+    // no microtask hop between them, but a multi-step async chain
+    // separates them from M1's session/prompt response. runPrompt's
+    // finally sees currentTurnEcho === null after this and skips its
+    // own synth, so there's no double-render.
+    if (
+      currentTurnEcho !== null &&
+      currentTurnEcho.messageId !== undefined &&
+      currentTurnEcho.messageId === cancelledId
+    ) {
+      appendRender({
+        kind: "turn-complete",
+        stopReason: "cancelled",
+        amended: true,
+      });
+      currentTurnEcho = null;
+      amendedMessageIds.delete(cancelledId);
+    }
+  });
+
   const handlePermissionResolved = (update: unknown): void => {
     const u = (update ?? {}) as {
       toolCallId?: unknown;
@@ -677,6 +761,10 @@ async function runSession(
   // blocks unchanged; an old agent that explicitly says image=false
   // flips this and gates the chip/clipboard UI.
   let agentAcceptsImages = true;
+  // Set from the initialize response's hydra-acp _meta. Gates the
+  // Shift+Enter affordance — without daemon support the chord falls
+  // through to plain session/prompt.
+  let daemonSupportsAmend = false;
   try {
     const initResult = (await conn.request("initialize", {
       protocolVersion: ACP_PROTOCOL_VERSION,
@@ -690,6 +778,7 @@ async function runSession(
       agentCapabilities?: {
         promptCapabilities?: { image?: boolean };
       };
+      _meta?: Record<string, unknown>;
     };
     agentInfoName = initResult?.agentInfo?.name;
     const imageCap =
@@ -697,6 +786,8 @@ async function runSession(
     if (imageCap === false) {
       agentAcceptsImages = false;
     }
+    const hydraMeta = extractHydraMeta(initResult?._meta ?? undefined);
+    daemonSupportsAmend = hydraMeta.promptAmending === true;
   } catch {
     // initialize is optional from the daemon's perspective; proceed regardless.
   }
@@ -1225,6 +1316,28 @@ async function runSession(
   };
   // Open or close the global hotkey cheatsheet (^G). Toggling lets the
   // same key dismiss it without a second binding.
+  const buildHelpEntries = (): ReadonlyArray<
+    readonly [string, string] | null
+  > => {
+    const enqueueDesc = "enqueue prompt (sends now, or queues during a turn)";
+    const amendDesc = "amend the in-flight turn (cancel + replace)";
+    // Ctrl+Enter leads — it works universally (bare LF byte), unlike
+    // Shift+Enter which depends on modifyOtherKeys / kitty-protocol
+    // support that some terminals (libvte / gnome-terminal pre-0.78)
+    // don't have.
+    const head: Array<readonly [string, string] | null> =
+      config.tui.defaultEnterAction === "amend"
+        ? [
+            ["Enter", amendDesc],
+            ["Ctrl+Enter / Shift+Enter", enqueueDesc],
+          ]
+        : [
+            ["Enter", enqueueDesc],
+            ["Ctrl+Enter / Shift+Enter", amendDesc],
+          ];
+    return [...head, ...HELP_ENTRIES_TAIL];
+  };
+
   const toggleHelpModal = (): void => {
     if (screen.isHelpPromptActive()) {
       screen.setHelpPrompt(null);
@@ -1232,7 +1345,7 @@ async function runSession(
     }
     screen.setHelpPrompt({
       title: "Hotkeys",
-      entries: HELP_ENTRIES,
+      entries: buildHelpEntries(),
       hint: "any key dismisses · /help lists commands",
     });
   };
@@ -1361,7 +1474,23 @@ async function runSession(
   const handleEffect = (effect: InputEffect): void => {
     switch (effect.type) {
       case "send":
-        enqueuePrompt(effect.text, effect.attachments);
+        // config.tui.defaultEnterAction == "amend" swaps the meaning of
+        // the two send routes: Enter goes through the amend path and
+        // Shift+Enter enqueues. The dispatcher doesn't know about the
+        // config; the swap happens here so the input layer stays a pure
+        // state machine.
+        if (config.tui.defaultEnterAction === "amend") {
+          amendPrompt(effect.text, effect.attachments);
+        } else {
+          enqueuePrompt(effect.text, effect.attachments);
+        }
+        return;
+      case "amend":
+        if (config.tui.defaultEnterAction === "amend") {
+          enqueuePrompt(effect.text, effect.attachments);
+        } else {
+          amendPrompt(effect.text, effect.attachments);
+        }
         return;
       case "queue-edit": {
         const mid = queueMessageIdAt(effect.index);
@@ -1663,6 +1792,14 @@ async function runSession(
   // until prompt_queue_removed for that messageId tells us to flush
   // (started) or drop (cancelled / abandoned).
   const ownPendingByMid = new Map<string, PendingEcho>();
+  // messageIds that were the target of a hydra-acp/amend_prompt — used
+  // by runPrompt's finally to synthesize a turn-complete with
+  // amended: true so the cancelled turn renders as "stopped (amended)"
+  // instead of "stopped (cancelled)". The daemon broadcasts
+  // prompt_amended to the originator (unlike turn_complete itself which
+  // excludes the originator), so by the time the session/prompt
+  // response returns, this set already has the id.
+  const amendedMessageIds = new Set<string>();
   // The echo currently associated with the visible tools block. Set
   // by the prompt_queue_removed{started} handler immediately after it
   // flushes user-text to scrollback; cleared by any subsequent
@@ -1722,6 +1859,106 @@ async function runSession(
     dispatcher.setHistory(history);
     saveHistory(historyFile, history).catch(() => undefined);
     void runPrompt(text, attachments);
+  };
+
+  // Shift+Enter route. Three cases:
+  //   1. Daemon doesn't advertise promptAmending → fall through to a
+  //      regular send. The chord still works on older daemons.
+  //   2. No in-flight head (currentHeadMessageId undefined) → also a
+  //      regular send. Nothing to amend.
+  //   3. Head is in flight → fire hydra-acp/amend_prompt with the head
+  //      as targetMessageId. On target_completed, surface a "send
+  //      anyway?" affordance instead of silently submitting; the user
+  //      can re-press Shift+Enter or Enter to confirm.
+  const amendPrompt = (text: string, attachments: Attachment[]): void => {
+    screen.scrollToBottom();
+    if (handleBuiltinCommand(text)) {
+      return;
+    }
+    history = appendEntry(history, text);
+    dispatcher.setHistory(history);
+    saveHistory(historyFile, history).catch(() => undefined);
+    if (!daemonSupportsAmend || currentHeadMessageId === undefined) {
+      void runPrompt(text, attachments);
+      return;
+    }
+    const target = currentHeadMessageId;
+    const blocks: Array<Record<string, unknown>> = [];
+    if (text.length > 0) {
+      blocks.push({ type: "text", text });
+    }
+    for (const a of attachments) {
+      blocks.push({ type: "image", data: a.data, mimeType: a.mimeType });
+    }
+    // Mirror runPrompt's pendingEcho dance — the typed text only flushes
+    // to scrollback when prompt_queue_removed{started} fires for the
+    // amendment's messageId. Without this, the user's input would be
+    // invisible: amend_prompt doesn't drive runPrompt, and the daemon
+    // broadcasts prompt_received for M2 excluding the originator (us).
+    const echo: PendingEcho = { text, attachments, flushed: false };
+    pendingEchoes.push(echo);
+    const popEcho = (): void => {
+      const idx = pendingEchoes.indexOf(echo);
+      if (idx >= 0) {
+        pendingEchoes.splice(idx, 1);
+      }
+      if (echo.messageId !== undefined) {
+        ownPendingByMid.delete(echo.messageId);
+      }
+    };
+    conn
+      .request("hydra-acp/amend_prompt", {
+        sessionId: resolvedSessionId,
+        targetMessageId: target,
+        prompt: blocks,
+      })
+      .then((raw) => {
+        const res = raw as {
+          amended: boolean;
+          reason: string;
+          messageId?: string;
+        };
+        if (res.amended && res.reason === "ok") {
+          // The amendment will run as a fresh turn (M2). Increment
+          // pendingTurns so the banner stays busy through the
+          // transition; the wire turn_complete for M2 — now included
+          // for amend-originated entries via the daemon's wasAmend
+          // flag — will decrement it back when M2 ends.
+          adjustPendingTurns(1);
+          return;
+        }
+        // Daemon didn't accept the amend → echo will never bind to a
+        // messageId, so it'd sit in the FIFO forever and steal the next
+        // unrelated prompt's binding. Pop it.
+        popEcho();
+        if (res.reason === "target_completed") {
+          screen.notify(
+            "previous response finished — press Enter to send as a new turn",
+          );
+          // Restore the typed text so the user can re-send via Enter.
+          dispatcher.setBuffer(text, attachments);
+          screen.refreshPrompt();
+          return;
+        }
+        if (res.reason === "target_cancelled") {
+          screen.notify("amend skipped — previous turn was cancelled");
+          dispatcher.setBuffer(text, attachments);
+          screen.refreshPrompt();
+          return;
+        }
+        if (res.reason === "target_not_found") {
+          screen.notify("amend skipped — no matching prompt");
+          dispatcher.setBuffer(text, attachments);
+          screen.refreshPrompt();
+          return;
+        }
+      })
+      .catch((err: Error) => {
+        popEcho();
+        screen.notify(`amend failed: ${err.message}`);
+        dispatcher.setBuffer(text, attachments);
+        screen.refreshPrompt();
+      });
   };
 
   // Handles Shift+Tab: cycles through agentModes and sets the mode on the
@@ -1996,11 +2233,25 @@ async function runSession(
       // would re-freeze the new turn's block at near-zero elapsed —
       // the "thought · 0s" symptom we're avoiding.
       if (echo.flushed && currentTurnEcho === echo) {
-        appendRender(
-          stopReason !== undefined
-            ? { kind: "turn-complete", stopReason }
-            : { kind: "turn-complete" },
-        );
+        // If this turn was the cancellation half of an amend, the daemon
+        // sent us a prompt_amended notification (originator NOT excluded)
+        // before this session/prompt response returned. The synthesized
+        // turn-complete carries amended: true so the tools block freezes
+        // as "stopped (amended)" instead of "stopped (cancelled)".
+        const wasAmended =
+          echo.messageId !== undefined &&
+          amendedMessageIds.has(echo.messageId);
+        if (wasAmended && echo.messageId !== undefined) {
+          amendedMessageIds.delete(echo.messageId);
+        }
+        const tc: RenderEvent = { kind: "turn-complete" };
+        if (stopReason !== undefined) {
+          tc.stopReason = stopReason;
+        }
+        if (wasAmended) {
+          tc.amended = true;
+        }
+        appendRender(tc);
         currentTurnEcho = null;
       }
       // Escape-cancel staged this. Apply only if the buffer is still
@@ -2380,12 +2631,25 @@ async function runSession(
       screen.appendLines(formatted);
     }
     if (event.kind === "turn-complete") {
+      // Clear here (not in handleSessionUpdate) so own-prompt turns —
+      // whose wire turn_complete the daemon excludes from the originator
+      // and which runPrompt synthesizes locally via appendRender — also
+      // clear the tracked head id.
+      currentHeadMessageId = undefined;
       // The plan upsert is keyed by "plan" so within a turn each update
       // splices in place. Reset that key at the turn boundary so the next
       // turn's first plan event appends as a fresh block below — otherwise
       // it would splice into the previous turn's plan, possibly far up in
       // (or off the top of) scrollback.
       closeAgentText();
+      // Substitute "amended" for the stopReason when the daemon flagged
+      // this turn as cancel-due-to-amend. Downstream renderers (plan
+      // stopped-state, tools block header, "turn ended" warning) display
+      // whatever string they see, so "amended" reads as a softer, more
+      // informative transition than "cancelled".
+      const effectiveStopReason = event.amended
+        ? "amended"
+        : event.stopReason;
       // Repaint the plan one last time with stopped=true when the turn
       // ended on a non-success reason (cancelled, refused, max_tokens, …).
       // Header flips to red and any in_progress rows dim — so a cancelled
@@ -2393,8 +2657,8 @@ async function runSession(
       // clearKey so the upsert lands on the existing scrollback block.
       if (
         lastPlanEvent !== null &&
-        event.stopReason !== undefined &&
-        event.stopReason !== "end_turn"
+        effectiveStopReason !== undefined &&
+        effectiveStopReason !== "end_turn"
       ) {
         const lines = formatEvent({ ...lastPlanEvent, stopped: true });
         if (lines.length > 0) {
@@ -2415,12 +2679,12 @@ async function runSession(
         // turn look indistinguishable from one where the TUI silently
         // dropped events.
         toolsBlockEndedAt = Date.now();
-        toolsBlockStopReason = event.stopReason ?? null;
+        toolsBlockStopReason = effectiveStopReason ?? null;
         renderToolsBlock();
         screen.clearKey("tools");
       } else if (
-        event.stopReason !== undefined &&
-        event.stopReason !== "end_turn"
+        effectiveStopReason !== undefined &&
+        effectiveStopReason !== "end_turn"
       ) {
         // Defense-in-depth: a non-success turn ended but we have no tools
         // block to freeze (typically because a reconnect-recovery-failed
@@ -2431,7 +2695,7 @@ async function runSession(
           {
             prefix: "⚠ ",
             prefixStyle: "tool-status-fail",
-            body: `turn ended: ${event.stopReason}`,
+            body: `turn ended: ${effectiveStopReason}`,
             bodyStyle: "tool-status-fail",
           },
         ]);

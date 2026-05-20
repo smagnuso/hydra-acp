@@ -7,6 +7,8 @@
 export type KeyName =
   | "enter"
   | "alt-enter"
+  | "shift-enter"
+  | "ctrl-enter"
   | "alt-b"
   | "alt-f"
   | "shift-tab"
@@ -64,6 +66,10 @@ export type KeyEvent =
 
 export type InputEffect =
   | { type: "send"; text: string; planMode: boolean; attachments: Attachment[] }
+  // Amend the in-flight turn — interrupt and replace via
+  // hydra-acp/amend_prompt. App falls through to "send" if no turn is
+  // running or the daemon doesn't advertise the capability.
+  | { type: "amend"; text: string; planMode: boolean; attachments: Attachment[] }
   | {
       type: "queue-edit";
       index: number;
@@ -319,6 +325,14 @@ export class InputDispatcher {
     switch (name) {
       case "enter":
         return this.send();
+      case "shift-enter":
+      case "ctrl-enter":
+        // Ctrl+Enter is the gnome-terminal-friendly fallback for
+        // Shift+Enter — gnome's libvte doesn't reliably distinguish
+        // Shift+Enter from plain Enter without the kitty keyboard
+        // protocol, but Ctrl+Enter has a unique byte (0x0a) that any
+        // terminal can send. Both chords map to the same effect.
+        return this.amend();
       case "alt-enter":
         this.insertNewline();
         return [];
@@ -962,6 +976,32 @@ export class InputDispatcher {
     const attachments = [...this.attachments];
     this.clearBuffer();
     return [{ type: "send", text, planMode, attachments }];
+  }
+
+  // Shift+Enter: amend the in-flight turn. Editing a queued slot
+  // delegates to the existing queue-edit / queue-remove path — Shift+Enter
+  // there has no special meaning since the entry is already queued (not
+  // running). With an empty draft and no attachments we emit nothing
+  // (no-op). Otherwise emit an "amend" effect; the app decides whether
+  // to route through amend_prompt or fall through to a regular send.
+  private amend(): InputEffect[] {
+    const text = this.bufferText();
+    if (this.queueIndex >= 0 && this.queueIndex < this.queue.length) {
+      const index = this.queueIndex;
+      const attachments = [...this.attachments];
+      this.clearBuffer();
+      if (text.trim().length === 0) {
+        return [{ type: "queue-remove", index }];
+      }
+      return [{ type: "queue-edit", index, text, attachments }];
+    }
+    if (text.trim().length === 0 && this.attachments.length === 0) {
+      return [];
+    }
+    const planMode = this.planMode;
+    const attachments = [...this.attachments];
+    this.clearBuffer();
+    return [{ type: "amend", text, planMode, attachments }];
   }
 
   // Home: jump to the very start of the prompt buffer. If we're already

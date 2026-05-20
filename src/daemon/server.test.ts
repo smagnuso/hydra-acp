@@ -35,6 +35,7 @@ function testConfig(): HydraConfig {
       logMaxBytes: 5 * 1024 * 1024,
       cwdColumnMaxWidth: 24,
       progressIndicator: true,
+      defaultEnterAction: "enqueue" as const,
     },
   };
 }
@@ -690,6 +691,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         logMaxBytes: 5 * 1024 * 1024,
         cwdColumnMaxWidth: 24,
         progressIndicator: true,
+        defaultEnterAction: "enqueue" as const,
       },
     };
     handle = await startDaemon(cfg, TEST_TOKEN);

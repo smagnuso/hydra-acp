@@ -357,14 +357,32 @@ export class Screen {
     this.term("\n");
   }
 
-  // Enables bracketed paste mode on the terminal and rewires stdin so we
-  // see the \x1b[200~/\x1b[201~ markers BEFORE terminal-kit's key
-  // parser. Non-paste data is forwarded to terminal-kit unchanged; paste
-  // content is buffered and dispatched as a single "paste" KeyEvent.
+  // Enables bracketed paste mode + modifyOtherKeys on the terminal and
+  // rewires stdin so we see the \x1b[200~/\x1b[201~ paste markers and
+  // CSI-u modified-key sequences (Shift+Enter etc.) BEFORE terminal-kit's
+  // key parser. Non-special data is forwarded to terminal-kit unchanged.
   private installBracketedPaste(): void {
     // Enable bracketed paste — terminals that don't support it ignore
     // the sequence harmlessly.
     process.stdout.write("\x1b[?2004h");
+    // Enable two key-reporting protocols so modified Enter arrives as
+    // a CSI-u sequence (Shift+Enter = \x1b[13;2u). Different terminals
+    // support different things:
+    //   xterm modifyOtherKeys=2 + formatOtherKeys=1 — xterm-family
+    //     (xterm, foot, gnome-terminal, etc.). Level 2 reports
+    //     modifiers on every key (level 1 skips ones with ASCII
+    //     representations like Enter). formatOtherKeys=1 picks the
+    //     CSI-u format over the legacy CSI 27;… format.
+    //   kitty keyboard protocol — kitty, ghostty, wezterm, alacritty,
+    //     iterm2 3.5+. Single push (\x1b[>1u) enables disambiguating
+    //     escape codes; Shift+Enter comes through as \x1b[13;2u.
+    // Terminals that don't support either ignore the requests and
+    // Shift+Enter just behaves like Enter — the right fallback. We
+    // also intercept the legacy CSI 27;…~ format below in case
+    // formatOtherKeys=1 is unsupported.
+    process.stdout.write("\x1b[>4;2m");
+    process.stdout.write("\x1b[>5;1m");
+    process.stdout.write("\x1b[>1u");
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
       onStdin: (chunk: Buffer) => void;
@@ -379,6 +397,9 @@ export class Screen {
 
   private uninstallBracketedPaste(): void {
     process.stdout.write("\x1b[?2004l");
+    process.stdout.write("\x1b[>4;0m");
+    process.stdout.write("\x1b[>5;0m");
+    process.stdout.write("\x1b[<u");
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
     };
@@ -400,6 +421,52 @@ export class Screen {
     // string. (binary preserves the byte sequence; node's binary↔Buffer
     // round-trip is lossless.)
     let text = chunk.toString("binary");
+    // Modified Enter arrives in one of several shapes:
+    //   Shift+Enter, CSI-u:     \x1b[13;2u
+    //   Shift+Enter, legacy:    \x1b[27;2;13~
+    //   Ctrl+Enter,  CSI-u:     \x1b[13;5u
+    //   Ctrl+Enter,  legacy:    \x1b[27;5;13~
+    //   Ctrl+Enter,  bare:      \x0a (universal — gnome-terminal etc.)
+    // Intercept before terminal-kit sees them — terminal-kit treats
+    // unknown CSI sequences as character runs, which would otherwise
+    // insert literal "[13;2u" etc. into the buffer. Strip the sequence
+    // and emit the corresponding key event. Skipped while a paste is in
+    // progress so the inner segment handler can still see the paste end
+    // marker (and so pasted LFs aren't misinterpreted as Ctrl+Enter).
+    if (!this.pasteActive) {
+      const markers: Array<{ seq: string; name: KeyName }> = [
+        { seq: "\x1b[13;2u", name: "shift-enter" },
+        { seq: "\x1b[27;2;13~", name: "shift-enter" },
+        { seq: "\x1b[13;5u", name: "ctrl-enter" },
+        { seq: "\x1b[27;5;13~", name: "ctrl-enter" },
+        // Bare LF — universal fallback for terminals without
+        // modifyOtherKeys / kitty protocol. Last so the longer escape
+        // sequences match first and we don't double-fire.
+        { seq: "\x0a", name: "ctrl-enter" },
+      ];
+      for (const { seq, name } of markers) {
+        if (text.includes(seq)) {
+          const parts = text.split(seq);
+          for (let i = 0; i < parts.length; i++) {
+            if (parts[i]!.length > 0) {
+              // Recurse so other markers in the same chunk are handled.
+              this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
+            }
+            if (i < parts.length - 1) {
+              this.onKey([{ type: "key", name }]);
+            }
+          }
+          return;
+        }
+      }
+    }
+    this.handleRawStdinSegment(text);
+  }
+
+  // Inner stdin-segment handler — paste-marker detection and forwarding
+  // to terminal-kit. Split out so shift-enter interception can call it
+  // for the non-shift-enter portions of a mixed chunk.
+  private handleRawStdinSegment(text: string): void {
     const startMarker = "\x1b[200~";
     const endMarker = "\x1b[201~";
     while (text.length > 0) {
@@ -3066,6 +3133,17 @@ function mapKeyName(name: string): KeyName | null {
     case "ALT_ENTER":
     case "META_ENTER":
       return "alt-enter";
+    case "SHIFT_ENTER":
+      return "shift-enter";
+    case "CTRL_ENTER":
+      return "ctrl-enter";
+    case "CTRL_J":
+      // gnome-terminal etc. send the LF byte (0x0a) for Ctrl+Enter.
+      // Our raw-stdin handler usually catches that before terminal-kit
+      // sees it, but if anything slips through (e.g. a non-paste chunk
+      // we didn't pre-process), terminal-kit identifies the byte as
+      // CTRL_J. Route to ctrl-enter so the behavior is consistent.
+      return "ctrl-enter";
     case "ALT_B":
     case "META_B":
       return "alt-b";
