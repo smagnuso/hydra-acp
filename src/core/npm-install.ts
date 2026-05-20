@@ -152,53 +152,99 @@ function safeEmit(
   }
 }
 
+// Retry budget for ETXTBSY ("text file busy") on exec. The kernel
+// briefly refuses to execve a file whose inode has any outstanding
+// writer fd, and on Linux under load that window can persist tens of
+// milliseconds AFTER the writer has closed the fd (libuv worker
+// thread close ops are not always synchronous w.r.t. inode
+// bookkeeping). We retry with a small exponential backoff so a real
+// user who just `npm update -g npm`-ed in another shell doesn't see
+// a spurious failure either.
+const ETXTBSY_RETRIES = 5;
+const ETXTBSY_BACKOFF_MS = 25;
+
 function runNpmInstall(args: {
   packageSpec: string;
   cwd: string;
   registry?: string;
 }): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const registryArgs = args.registry ? ["--registry", args.registry] : [];
-    const child = spawn(
-      "npm",
-      ["install", "--no-audit", "--no-fund", "--silent", ...registryArgs, args.packageSpec],
-      {
-        cwd: args.cwd,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let stderrTail = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      void chunk;
-    });
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => {
-      stderrTail = (stderrTail + chunk).slice(-4096);
-    });
-    child.on("error", (err) => {
-      const msg =
-        (err as NodeJS.ErrnoException).code === "ENOENT"
-          ? `npm not found on PATH (install Node.js / npm, or use a binary-distributed agent)`
-          : err.message;
-      reject(new Error(msg));
-    });
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
+  return runNpmInstallOnce(args, 0);
+}
+
+async function runNpmInstallOnce(
+  args: { packageSpec: string; cwd: string; registry?: string },
+  attempt: number,
+): Promise<void> {
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const registryArgs = args.registry ? ["--registry", args.registry] : [];
+      let child;
+      try {
+        child = spawn(
+          "npm",
+          [
+            "install",
+            "--no-audit",
+            "--no-fund",
+            "--silent",
+            ...registryArgs,
+            args.packageSpec,
+          ],
+          { cwd: args.cwd, stdio: ["ignore", "pipe", "pipe"] },
+        );
+      } catch (err) {
+        reject(err);
         return;
       }
-      const reason =
-        code !== null ? `exit code ${code}` : `signal ${signal ?? "unknown"}`;
-      const tail = stderrTail.trim();
-      reject(
-        new Error(
-          tail
-            ? `npm install ${args.packageSpec} failed (${reason})\nstderr: ${tail}`
-            : `npm install ${args.packageSpec} failed (${reason})`,
-        ),
-      );
+      let stderrTail = "";
+      child.stdout?.on("data", (chunk: Buffer) => {
+        void chunk;
+      });
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        stderrTail = (stderrTail + chunk).slice(-4096);
+      });
+      child.on("error", (err) => {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code === "ENOENT") {
+          reject(
+            new Error(
+              `npm not found on PATH (install Node.js / npm, or use a binary-distributed agent)`,
+            ),
+          );
+          return;
+        }
+        reject(err);
+      });
+      child.on("exit", (code, signal) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        const reason =
+          code !== null
+            ? `exit code ${code}`
+            : `signal ${signal ?? "unknown"}`;
+        const tail = stderrTail.trim();
+        reject(
+          new Error(
+            tail
+              ? `npm install ${args.packageSpec} failed (${reason})\nstderr: ${tail}`
+              : `npm install ${args.packageSpec} failed (${reason})`,
+          ),
+        );
+      });
     });
-  });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ETXTBSY" && attempt < ETXTBSY_RETRIES) {
+      await new Promise((r) =>
+        setTimeout(r, ETXTBSY_BACKOFF_MS * (attempt + 1)),
+      );
+      return runNpmInstallOnce(args, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 async function fileExists(p: string): Promise<boolean> {

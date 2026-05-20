@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { vi } from "vitest";
 import type { MessageStream } from "../acp/framing.js";
 import type { JsonRpcMessage } from "../acp/types.js";
@@ -7,6 +8,35 @@ import type {
   NotificationHandler,
 } from "../acp/connection.js";
 import { JsonRpcConnection } from "../acp/connection.js";
+
+// Write an executable script to disk in a way that minimizes the
+// window for execve's ETXTBSY race on Linux. The kernel briefly
+// refuses to exec a file whose inode has any outstanding writer fd;
+// libuv worker threads can hold that fd for tens of milliseconds
+// after the JS-level close resolves. Writing to a temp path + atomic
+// rename means by the time the target name exists, the writer fd was
+// closed against a *different* path, shrinking the race window.
+//
+// Production callers (runNpmInstall) handle the residual race with a
+// retry on ETXTBSY; we still write through this helper so tests
+// minimize the chance of needing those retries — every retry costs
+// 25ms+ which would add up across the suite.
+export async function writeExecutable(
+  filePath: string,
+  body: string,
+): Promise<void> {
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  const handle = await fs.open(tmp, "w", 0o755);
+  try {
+    await handle.writeFile(body);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await fs.rename(tmp, filePath);
+}
 
 export interface ControlledStream extends MessageStream {
   sent: JsonRpcMessage[];

@@ -218,10 +218,20 @@ describe("ExtensionManager", () => {
     await manager.start();
     await waitForProbe();
 
+    // The PROBE_SCRIPT writes its JSON file (which unblocks waitForProbe)
+    // BEFORE emitting `probe ready` on stdout, and stdout has to flow
+    // through the child's pipe and the manager's log writer before it
+    // hits the log file. Poll a short window so this isn't flaky under
+    // load. The "starting extension loggy" line comes from the manager
+    // itself and is in place by the time start() resolves, but we still
+    // poll both checks together for symmetry.
     const logPath = path.join(tmpHome, "extensions", "loggy.log");
-    const content = await fs.readFile(logPath, "utf8");
-    expect(content).toContain("starting extension loggy");
-    expect(content).toContain("probe ready");
+    await expect
+      .poll(async () => await fs.readFile(logPath, "utf8"), { timeout: 3_000 })
+      .toContain("starting extension loggy");
+    await expect
+      .poll(async () => await fs.readFile(logPath, "utf8"), { timeout: 3_000 })
+      .toContain("probe ready");
   });
 
   describe("per-name lifecycle", () => {

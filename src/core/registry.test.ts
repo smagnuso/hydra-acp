@@ -15,6 +15,7 @@ import {
 import { paths } from "./paths.js";
 import { currentPlatformKey } from "./binary-install.js";
 import type { HydraConfig } from "./config.js";
+import { writeExecutable } from "../__tests__/test-utils.js";
 
 const FIXTURE: { agents: RegistryAgent[] } = {
   agents: [
@@ -246,10 +247,9 @@ describe("planSpawn", () => {
     const fakeNpm = path.join(sandbox, "npm");
     // Restore /bin:/usr/bin so mkdir/touch/chmod resolve inside the
     // script even though the outer PATH is scoped to the sandbox.
-    await fs.writeFile(
+    await writeExecutable(
       fakeNpm,
       "#!/bin/sh\nexport PATH=/bin:/usr/bin\nmkdir -p node_modules/.bin\ntouch node_modules/.bin/planspawn-npm-bin\nchmod +x node_modules/.bin/planspawn-npm-bin\nexit 0\n",
-      { mode: 0o755 },
     );
     const originalPath = process.env.PATH;
     const originalSkip = process.env.HYDRA_ACP_SKIP_NPM_PREFETCH;

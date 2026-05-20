@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { ensureNpmPackage, type NpmInstallProgress } from "./npm-install.js";
 import { paths } from "./paths.js";
 import { currentPlatformKey } from "./binary-install.js";
+import { writeExecutable } from "../__tests__/test-utils.js";
 
 describe("ensureNpmPackage", () => {
   // Save and restore PATH per test so we can simulate npm-missing and
@@ -68,10 +69,9 @@ describe("ensureNpmPackage", () => {
     // failure: writes an error to stderr and exits non-zero. The temp
     // partial dir we created should be cleaned up.
     const fakeNpm = path.join(pathSandbox!, "npm");
-    await fs.writeFile(
+    await writeExecutable(
       fakeNpm,
       "#!/bin/sh\necho 'npm ERR! code EACCES' >&2\necho 'npm ERR! syscall mkdir' >&2\nexit 243\n",
-      { mode: 0o755 },
     );
     process.env.PATH = pathSandbox!;
 
@@ -97,10 +97,9 @@ describe("ensureNpmPackage", () => {
     // node_modules/.bin. Models a package whose declared bin name
     // doesn't match its actual one.
     const fakeNpm = path.join(pathSandbox!, "npm");
-    await fs.writeFile(
+    await writeExecutable(
       fakeNpm,
       "#!/bin/sh\nmkdir -p node_modules/.bin\nexit 0\n",
-      { mode: 0o755 },
     );
     process.env.PATH = pathSandbox!;
 
@@ -132,10 +131,9 @@ describe("ensureNpmPackage", () => {
     // resolve — the outer test deliberately scopes PATH to the sandbox
     // (to prove npm-not-found surfacing), but here we need a working
     // shell to actually drop the expected bin on disk.
-    await fs.writeFile(
+    await writeExecutable(
       fakeNpm,
       "#!/bin/sh\nexport PATH=/bin:/usr/bin\nmkdir -p node_modules/.bin\ntouch node_modules/.bin/progress-bin\nchmod +x node_modules/.bin/progress-bin\nexit 0\n",
-      { mode: 0o755 },
     );
     process.env.PATH = pathSandbox!;
     const events: NpmInstallProgress[] = [];
@@ -187,10 +185,9 @@ describe("ensureNpmPackage", () => {
 
   it("swallows callback exceptions so a throwing subscriber doesn't abort the install", async () => {
     const fakeNpm = path.join(pathSandbox!, "npm");
-    await fs.writeFile(
+    await writeExecutable(
       fakeNpm,
       "#!/bin/sh\nexport PATH=/bin:/usr/bin\nmkdir -p node_modules/.bin\ntouch node_modules/.bin/boom-bin\nchmod +x node_modules/.bin/boom-bin\nexit 0\n",
-      { mode: 0o755 },
     );
     process.env.PATH = pathSandbox!;
     const binPath = await ensureNpmPackage({
