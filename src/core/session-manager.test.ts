@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { SessionManager, extractInitialModel } from "./session-manager.js";
+import {
+  SessionManager,
+  extractInitialModel,
+  extractInitialModels,
+} from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
 import {
   makeMockAgent,
@@ -1548,6 +1552,82 @@ describe("extractInitialModel", () => {
   });
 });
 
+describe("extractInitialModels", () => {
+  it("pulls top-level availableModels (spec-strict agent)", () => {
+    expect(
+      extractInitialModels({
+        sessionId: "x",
+        availableModels: [
+          { modelId: "openai/gpt-5", name: "GPT-5" },
+          { modelId: "openai/o3" },
+        ],
+      }),
+    ).toEqual([
+      { modelId: "openai/gpt-5", name: "GPT-5" },
+      { modelId: "openai/o3" },
+    ]);
+  });
+
+  it("pulls models.availableModels (opencode / claude-agent-acp shape)", () => {
+    expect(
+      extractInitialModels({
+        sessionId: "x",
+        models: {
+          currentModelId: "ollama/qwen3:8b",
+          availableModels: [{ modelId: "ollama/qwen3:8b" }],
+        },
+      }),
+    ).toEqual([{ modelId: "ollama/qwen3:8b" }]);
+  });
+
+  it("pulls _meta.<ns>.availableModels when the agent only namespaces it", () => {
+    expect(
+      extractInitialModels({
+        sessionId: "x",
+        _meta: {
+          opencode: {
+            availableModels: [{ modelId: "x" }, { modelId: "y" }],
+          },
+          "hydra-acp": { upstreamSessionId: "u" },
+        },
+      }),
+    ).toEqual([{ modelId: "x" }, { modelId: "y" }]);
+  });
+
+  it("accepts the opencode config-option shape ({ value, name }) interchangeably", () => {
+    // parseModelsList is the shared parser so it must accept both
+    // { modelId, name } and { value, name }. This guards against a
+    // future refactor splitting the two shapes apart.
+    expect(
+      extractInitialModels({
+        sessionId: "x",
+        availableModels: [
+          { value: "x/y", name: "X over Y" },
+          { value: "a/b" },
+        ],
+      }),
+    ).toEqual([{ modelId: "x/y", name: "X over Y" }, { modelId: "a/b" }]);
+  });
+
+  it("returns [] when the response carries nothing", () => {
+    expect(extractInitialModels({ sessionId: "x" })).toEqual([]);
+  });
+
+  it("drops malformed entries silently rather than crashing", () => {
+    expect(
+      extractInitialModels({
+        sessionId: "x",
+        availableModels: [
+          null,
+          "not-an-object",
+          { description: "no id" },
+          { modelId: "good" },
+        ],
+      }),
+    ).toEqual([{ modelId: "good" }]);
+  });
+});
+
 describe("SessionManager: defaultModels", () => {
   it("issues session/set_model after session/new and seeds currentModel", async () => {
     const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
@@ -1715,6 +1795,81 @@ describe("SessionManager: defaultModels", () => {
 
     const session = await manager.create({ cwd: "/work", agentId: "opencode" });
     expect(session.currentModel).toBe("openai/gpt-4o");
+  });
+
+  it("skips session/set_model when defaultModels[agentId] is not in the agent's advertised availableModels", async () => {
+    // Regression: with defaultModels[opencode] set to a value that
+    // looks like a claude-acp id (e.g. "claude-opus-4-7[1m]" — a real
+    // user-config bug we hit), the old code would fire set_model
+    // anyway, opencode would silently store garbage as the model id,
+    // and every subsequent prompt returned end_turn with no message.
+    // Validate against the response's advertised list before firing.
+    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        models: {
+          currentModelId: "ncp-anthropic/claude-opus-4-7",
+          availableModels: [
+            { modelId: "ncp-anthropic/claude-opus-4-7" },
+            { modelId: "openai/gpt-5" },
+          ],
+        },
+      });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      // Intentionally a claude-acp-shaped id on an opencode agent.
+      { defaultModels: { opencode: "claude-opus-4-7[1m]" } },
+    );
+
+    const session = await manager.create({ cwd: "/work", agentId: "opencode" });
+
+    // initialize + session/new only — NO session/set_model.
+    expect(requestMock.mock.calls.length).toBe(2);
+    expect(requestMock.mock.calls.map(([m]) => m)).toEqual([
+      "initialize",
+      "session/new",
+    ]);
+    // The session falls through to whatever the agent already picked.
+    expect(session.currentModel).toBe("ncp-anthropic/claude-opus-4-7");
+    // And the advertised list propagates into the in-memory snapshot.
+    expect(session.availableModels()).toEqual([
+      { modelId: "ncp-anthropic/claude-opus-4-7" },
+      { modelId: "openai/gpt-5" },
+    ]);
+  });
+
+  it("still fires set_model when the agent didn't advertise an availableModels list (pass-through fallback)", async () => {
+    // Some agents only announce their model via current_model_update
+    // later, not in the session/new response. In that case we can't
+    // validate locally — fall back to the previous behavior of
+    // forwarding optimistically. The agent's own validation (or
+    // silence) is the safety net.
+    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_fresh" })
+      .mockResolvedValueOnce({ ok: true });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+    );
+
+    await manager.create({ cwd: "/work", agentId: "opencode" });
+
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_model",
+      { sessionId: "u_fresh", modelId: "openai/gpt-5-codex" },
+    ]);
   });
 });
 

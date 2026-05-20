@@ -60,6 +60,16 @@ export interface AdvertisedMode {
   description?: string;
 }
 
+// Shape used by the agent-models protocol channel (session/update
+// kind=current_model_update with availableModels payload, or
+// session/new / session/load result.models.availableModels).
+// modelId is what gets sent to session/set_model.
+export interface AdvertisedModel {
+  modelId: string;
+  name?: string;
+  description?: string;
+}
+
 export function hydraCommandsAsAdvertised(): AdvertisedCommand[] {
   return HYDRA_COMMANDS.map((c) => ({
     name: c.argsHint ? `${c.name} ${c.argsHint}` : c.name,

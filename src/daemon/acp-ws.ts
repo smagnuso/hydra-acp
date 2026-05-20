@@ -122,6 +122,7 @@ export function registerAcpWsEndpoint(
         })();
       });
       const modesPayload = buildModesPayload(session);
+      const modelsPayload = buildModelsPayload(session);
       return {
         sessionId: session.sessionId,
         // session/new is implicitly an attach; mirror session/attach's
@@ -130,6 +131,7 @@ export function registerAcpWsEndpoint(
         // events without an extra round-trip.
         clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
+        ...(modelsPayload ? { models: modelsPayload } : {}),
         _meta: buildResponseMeta(session),
       };
     });
@@ -207,6 +209,7 @@ export function registerAcpWsEndpoint(
       }
       session.replayPendingPermissions(client);
       const modesPayload = buildModesPayload(session);
+      const modelsPayload = buildModelsPayload(session);
       return {
         sessionId: session.sessionId,
         clientId: client.clientId,
@@ -218,6 +221,7 @@ export function registerAcpWsEndpoint(
         historyPolicy: appliedPolicy,
         replayed: replay.length,
         ...(modesPayload ? { modes: modesPayload } : {}),
+        ...(modelsPayload ? { models: modelsPayload } : {}),
         _meta: buildResponseMeta(session),
       };
     });
@@ -409,14 +413,62 @@ export function registerAcpWsEndpoint(
       }
       session.replayPendingPermissions(client);
       const modesPayload = buildModesPayload(session);
+      const modelsPayload = buildModelsPayload(session);
       return {
         sessionId: session.sessionId,
         // Same as session/new: include clientId so the deferred-echo
         // path in queue-aware clients can recognize own broadcasts.
         clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
+        ...(modelsPayload ? { models: modelsPayload } : {}),
         _meta: buildResponseMeta(session),
       };
+    });
+
+    // Validate session/set_model against the session's cached
+    // availableModels before forwarding to the agent. Originally
+    // this fell through to the default handler (transparent forward),
+    // but that let cross-agent set_model requests through — e.g. an
+    // emacs agent-shell client that thinks it's talking to claude-acp
+    // would send `modelId: "claude-opus-4-7[1m]"` to an opencode
+    // session, which opencode would silently accept as `{ providerID:
+    // "claude-opus-4-7[1m]", modelID: "" }` and then return end_turn
+    // instantly for every subsequent prompt (no agent_message_chunks,
+    // no error — the worst possible failure mode). Validating against
+    // the agent's own advertised list catches it cleanly and surfaces
+    // an actionable JSON-RPC error.
+    //
+    // When the agent never advertised any models (availableModels
+    // empty), we pass-through with a log line — better to defer to the
+    // agent's own validation than block a model id we don't recognize.
+    connection.onRequest("session/set_model", async (rawParams) => {
+      const decision = decideSetModel(rawParams, deps.manager);
+      if (decision.kind === "error") {
+        app.log.warn(decision.logMessage);
+        const err = new Error(decision.message) as Error & { code: number };
+        err.code = decision.code;
+        throw err;
+      }
+      if (decision.kind === "no_op") {
+        // Validation failed but the session has a current model — keep
+        // the client transparent. Resync its local view with what the
+        // session is actually on, then return success without forwarding.
+        // Originating client gets the notification directly; other
+        // attached clients aren't affected (their view never changed).
+        app.log.warn(decision.logMessage);
+        await connection
+          .notify("session/update", {
+            sessionId: decision.sessionId,
+            update: {
+              sessionUpdate: "current_model_update",
+              currentModel: decision.currentModel,
+            },
+          })
+          .catch(() => undefined);
+        return null;
+      }
+      app.log.info(decision.logMessage);
+      return decision.session.forwardRequest("session/set_model", rawParams);
     });
 
     connection.setDefaultHandler(async (rawParams, method) => {
@@ -525,6 +577,162 @@ function buildModesPayload(
   return { currentModeId, availableModes };
 }
 
+// Spec-shaped `models` payload for session/new, session/attach, and
+// session/load responses. Mirrors buildModesPayload: surfaces the
+// agent's advertised model list on a `models: { currentModelId,
+// availableModels }` field so generic ACP clients (agent-shell, Zed)
+// see the picker without needing to read hydra's `_meta` namespace.
+// Without this, an attaching client only sees the agent's models if
+// the agent re-emits a current_model_update notification after the
+// response goes out — which most agents don't do on attach.
+function buildModelsPayload(
+  session: Session,
+):
+  | {
+      currentModelId: string;
+      availableModels: Array<{
+        modelId: string;
+        name?: string;
+        description?: string;
+      }>;
+    }
+  | undefined {
+  const models = session.availableModels();
+  if (models.length === 0) {
+    return undefined;
+  }
+  const availableModels = models.map((m) => {
+    const out: { modelId: string; name?: string; description?: string } = {
+      modelId: m.modelId,
+    };
+    if (m.name !== undefined) {
+      out.name = m.name;
+    }
+    if (m.description !== undefined) {
+      out.description = m.description;
+    }
+    return out;
+  });
+  // Mirror modes: if we never observed a current model, point at the
+  // first one so the spec field stays non-empty. Most agents do send
+  // a current model, so this is a defensive fallback.
+  const currentModelId = session.currentModel ?? models[0]!.modelId;
+  return { currentModelId, availableModels };
+}
+
+// Pure decision function for the session/set_model handler — extracted
+// so the validation logic can be unit-tested without spinning a real
+// WebSocket. Three outcomes:
+//   - `ok`: forward to the agent (the modelId validates, or no list to
+//     validate against).
+//   - `no_op`: validation failed but the session already has a current
+//     model set. Caller resyncs the originating client by emitting a
+//     current_model_update for the actual current model and returns
+//     success without forwarding. This preserves transparency for
+//     unsophisticated clients (notably emacs agent-shell) that
+//     auto-fire set_model on connect with a hardcoded provider id —
+//     they get a clean reply, the session keeps working, and their
+//     local picker resyncs to whatever the agent is actually on.
+//   - `error`: outright reject. Reserved for malformed params and the
+//     pathological case where the agent never told us a current model
+//     and the requested id isn't valid either (genuinely nothing to
+//     fall back to).
+// The handler in registerAcpWsEndpoint is the only production
+// consumer; tests drive it directly to avoid spinning a WebSocket.
+export type SetModelDecision =
+  | { kind: "ok"; session: Session; logMessage: string }
+  | {
+      kind: "no_op";
+      session: Session;
+      sessionId: string;
+      currentModel: string;
+      logMessage: string;
+    }
+  | { kind: "error"; code: number; message: string; logMessage: string };
+
+export function decideSetModel(
+  rawParams: unknown,
+  manager: SessionManager,
+): SetModelDecision {
+  if (!rawParams || typeof rawParams !== "object") {
+    return {
+      kind: "error",
+      code: JsonRpcErrorCodes.InvalidParams,
+      message: "session/set_model requires params",
+      logMessage: "session/set_model rejected: params not an object",
+    };
+  }
+  const params = rawParams as { sessionId?: unknown; modelId?: unknown };
+  if (typeof params.sessionId !== "string") {
+    return {
+      kind: "error",
+      code: JsonRpcErrorCodes.InvalidParams,
+      message: "session/set_model requires string sessionId",
+      logMessage: "session/set_model rejected: missing/non-string sessionId",
+    };
+  }
+  if (typeof params.modelId !== "string") {
+    return {
+      kind: "error",
+      code: JsonRpcErrorCodes.InvalidParams,
+      message: "session/set_model requires string modelId",
+      logMessage: `session/set_model rejected: missing/non-string modelId sessionId=${params.sessionId}`,
+    };
+  }
+  const session = manager.get(params.sessionId);
+  if (!session) {
+    return {
+      kind: "error",
+      code: JsonRpcErrorCodes.SessionNotFound,
+      message: `session ${params.sessionId} not found`,
+      logMessage: `session/set_model rejected: session not found sessionId=${params.sessionId}`,
+    };
+  }
+  const advertised = session.availableModels();
+  if (advertised.length === 0) {
+    // Agent never told us its model list. Forward and trust the agent's
+    // own validation (or its silence). The log line lets the operator
+    // distinguish pass-through events from validated ones when triaging.
+    return {
+      kind: "ok",
+      session,
+      logMessage: `session/set_model passthrough (no availableModels) sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)}`,
+    };
+  }
+  const match = advertised.find((m) => m.modelId === params.modelId);
+  if (!match) {
+    const known = advertised.map((m) => m.modelId).join(", ");
+    // If the session already has a current model, fall back to no_op
+    // semantics: tell the client "ok" without forwarding, and have the
+    // handler resync the client's local view via a current_model_update
+    // notification. The session keeps working on whatever it was; no
+    // garbage gets persisted upstream.
+    if (session.currentModel !== undefined && session.currentModel.length > 0) {
+      return {
+        kind: "no_op",
+        session,
+        sessionId: params.sessionId,
+        currentModel: session.currentModel,
+        logMessage: `session/set_model no_op (resyncing client) sessionId=${params.sessionId} requested=${JSON.stringify(params.modelId)} actual=${JSON.stringify(session.currentModel)} agentId=${session.agentId} known=[${known}]`,
+      };
+    }
+    // No current model to fall back to — refusing here is the safest
+    // option. This is rare in practice: an agent that advertises an
+    // availableModels list but no current model is unusual.
+    return {
+      kind: "error",
+      code: JsonRpcErrorCodes.InvalidParams,
+      message: `model "${params.modelId}" is not in this session's availableModels (agent ${session.agentId}); known models: ${known}`,
+      logMessage: `session/set_model rejected sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)} agentId=${session.agentId} known=[${known}] (no current model to fall back to)`,
+    };
+  }
+  return {
+    kind: "ok",
+    session,
+    logMessage: `session/set_model accepted sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)}`,
+  };
+}
+
 function buildResponseMeta(session: Session): Record<string, unknown> {
   const ours: Record<string, unknown> = {
     upstreamSessionId: session.upstreamSessionId,
@@ -557,6 +765,10 @@ function buildResponseMeta(session: Session): Record<string, unknown> {
   const modes = session.availableModes();
   if (modes.length > 0) {
     ours.availableModes = modes;
+  }
+  const models = session.availableModels();
+  if (models.length > 0) {
+    ours.availableModels = models;
   }
   // Mid-turn at attach time: hand the client the original prompt's
   // recordedAt so it can boot directly into "busy · Ns" instead of

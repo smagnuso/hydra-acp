@@ -32,6 +32,7 @@ import {
   hydraCommandsAsAdvertised,
   type AdvertisedCommand,
   type AdvertisedMode,
+  type AdvertisedModel,
 } from "./hydra-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
@@ -119,6 +120,7 @@ export interface SessionInit {
   currentUsage?: UsageSnapshot;
   agentCommands?: AdvertisedCommand[];
   agentModes?: AdvertisedMode[];
+  agentModels?: AdvertisedModel[];
   // Suppress the first-prompt title heuristic. Set by SessionManager
   // when resurrecting a session whose title is already meaningful (from
   // a prior life's prompt seed, /hydra title, or regenTitle) — without
@@ -283,6 +285,13 @@ export class Session {
   // Last available_modes_update we observed from the agent. Same
   // pattern as commands: cache, persist, broadcast on change.
   private agentAdvertisedModes: AdvertisedMode[] = [];
+  // Last availableModels payload we observed (from current_model_update,
+  // a session/new / session/load response, or — for opencode — a
+  // config_option_update where configOptions[i].id === "model").
+  // Cached so a mid-session attach can synthesize a model picker
+  // snapshot, and so session/set_model can validate the requested id
+  // against what the agent claims to support.
+  private agentAdvertisedModels: AdvertisedModel[] = [];
   // Persist hooks for snapshot-shaped state. SessionManager hooks these
   // to mirror changes into meta.json so cold-resurrect attaches can
   // surface the latest snapshot via the attach response _meta.
@@ -290,6 +299,7 @@ export class Session {
     (commands: AdvertisedCommand[]) => void
   > = [];
   private agentModesHandlers: Array<(modes: AdvertisedMode[]) => void> = [];
+  private agentModelsHandlers: Array<(models: AdvertisedModel[]) => void> = [];
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
@@ -331,6 +341,9 @@ export class Session {
     }
     if (init.agentModes && init.agentModes.length > 0) {
       this.agentAdvertisedModes = [...init.agentModes];
+    }
+    if (init.agentModels && init.agentModels.length > 0) {
+      this.agentAdvertisedModels = [...init.agentModels];
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
@@ -376,6 +389,24 @@ export class Session {
     });
   }
 
+  // Re-broadcast our cached availableModels via current_model_update.
+  // Spec shape: { currentModel, availableModels } — we only include the
+  // currentModel field when we know it, so this broadcast can also fire
+  // model-list updates standalone before any current model is set.
+  private broadcastAvailableModels(): void {
+    const update: Record<string, unknown> = {
+      sessionUpdate: "current_model_update",
+      availableModels: [...this.agentAdvertisedModels],
+    };
+    if (this.currentModel !== undefined && this.currentModel.length > 0) {
+      update.currentModel = this.currentModel;
+    }
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update,
+    });
+  }
+
   // Register session/update, session/request_permission, and onExit
   // handlers on an agent connection. Re-run on every /hydra agent so
   // the new agent is plumbed identically. The exit handler's identity
@@ -417,6 +448,15 @@ export class Session {
         return;
       }
       if (this.maybeApplyAgentMode(params)) {
+        this.recordAndBroadcast("session/update", params);
+        return;
+      }
+      // config_option_update is opencode's non-spec way of carrying the
+      // current model + available model list. Harvest the "model" entry
+      // for our cache so set_model validation has something to compare
+      // against; the broadcast still fires verbatim so opencode-aware
+      // clients render the full picker UI from the original shape.
+      if (this.maybeApplyAgentConfigOption(params)) {
         this.recordAndBroadcast("session/update", params);
         return;
       }
@@ -603,16 +643,22 @@ export class Session {
         recordedAt,
       });
     }
-    if (this.currentModel !== undefined && this.currentModel.length > 0) {
+    if (
+      (this.currentModel !== undefined && this.currentModel.length > 0) ||
+      this.agentAdvertisedModels.length > 0
+    ) {
+      const update: Record<string, unknown> = {
+        sessionUpdate: "current_model_update",
+      };
+      if (this.currentModel !== undefined && this.currentModel.length > 0) {
+        update.currentModel = this.currentModel;
+      }
+      if (this.agentAdvertisedModels.length > 0) {
+        update.availableModels = [...this.agentAdvertisedModels];
+      }
       out.push({
         method: "session/update",
-        params: {
-          sessionId,
-          update: {
-            sessionUpdate: "current_model_update",
-            currentModel: this.currentModel,
-          },
-        },
+        params: { sessionId, update },
         recordedAt,
       });
     }
@@ -1474,15 +1520,23 @@ export class Session {
   // Apply an agent-emitted current_model_update. Returns true if the
   // notification was a model update (caller still needs to broadcast
   // it). Returns false otherwise so the caller can try the next kind.
+  // current_model_update can carry availableModels in the same payload
+  // (per ACP spec); we cache that list too so session/set_model can
+  // validate against it.
   private maybeApplyAgentModel(params: unknown): boolean {
     const obj = (params ?? {}) as { update?: unknown };
     const update = (obj.update ?? {}) as {
       sessionUpdate?: unknown;
       currentModel?: unknown;
       model?: unknown;
+      availableModels?: unknown;
     };
     if (update.sessionUpdate !== "current_model_update") {
       return false;
+    }
+    const models = parseModelsList(update.availableModels);
+    if (models.length > 0) {
+      this.setAgentAdvertisedModels(models);
     }
     const raw =
       typeof update.currentModel === "string"
@@ -1504,6 +1558,64 @@ export class Session {
       } catch {
         void 0;
       }
+    }
+    return true;
+  }
+
+  // Apply an opencode-style config_option_update. opencode emits this
+  // (not the spec-shaped current_model_update / available_models_update)
+  // to carry both the current model and the list of available models.
+  // The payload is `configOptions: [{ id: "model", currentValue, options:
+  // [{ value, name }] }, ...]`. We harvest only the entry whose id is
+  // "model" — other ids ("mode", "effort", etc.) are opencode-internal
+  // and not consumed by hydra. Returns true when we recognized and
+  // handled the notification so the wireAgent loop can stop trying
+  // further extractors (the broadcast still fires; clients that grok
+  // config_option_update render it directly).
+  private maybeApplyAgentConfigOption(params: unknown): boolean {
+    const obj = (params ?? {}) as { update?: unknown };
+    const update = (obj.update ?? {}) as {
+      sessionUpdate?: unknown;
+      configOptions?: unknown;
+    };
+    if (update.sessionUpdate !== "config_option_update") {
+      return false;
+    }
+    const list = update.configOptions;
+    if (!Array.isArray(list)) {
+      return true;
+    }
+    for (const raw of list) {
+      if (!raw || typeof raw !== "object") {
+        continue;
+      }
+      const opt = raw as {
+        id?: unknown;
+        currentValue?: unknown;
+        options?: unknown;
+      };
+      if (opt.id !== "model") {
+        continue;
+      }
+      const models = parseModelsList(opt.options);
+      if (models.length > 0) {
+        this.setAgentAdvertisedModels(models);
+      }
+      const cv = opt.currentValue;
+      if (typeof cv === "string") {
+        const trimmed = cv.trim();
+        if (trimmed && trimmed !== this.currentModel) {
+          this.currentModel = trimmed;
+          for (const handler of this.modelHandlers) {
+            try {
+              handler(trimmed);
+            } catch {
+              void 0;
+            }
+          }
+        }
+      }
+      break;
     }
     return true;
   }
@@ -1636,6 +1748,25 @@ export class Session {
     this.broadcastAvailableModes();
   }
 
+  private setAgentAdvertisedModels(models: AdvertisedModel[]): void {
+    if (sameAdvertisedModels(this.agentAdvertisedModels, models)) {
+      // No structural change — skip the persistence fan-out but still
+      // rebroadcast so a racing mid-session attach gets the snapshot
+      // (same idempotency contract as commands/modes setters).
+      this.broadcastAvailableModels();
+      return;
+    }
+    this.agentAdvertisedModels = models;
+    for (const handler of this.agentModelsHandlers) {
+      try {
+        handler(models);
+      } catch {
+        void 0;
+      }
+    }
+    this.broadcastAvailableModels();
+  }
+
   // Subscribe to snapshot-state updates. SessionManager wires these to
   // persist the new value into meta.json so cold resurrect can restore
   // them via the attach response _meta.
@@ -1647,6 +1778,10 @@ export class Session {
 
   onAgentModesChange(handler: (modes: AdvertisedMode[]) => void): void {
     this.agentModesHandlers.push(handler);
+  }
+
+  onAgentModelsChange(handler: (models: AdvertisedModel[]) => void): void {
+    this.agentModelsHandlers.push(handler);
   }
 
   onModelChange(handler: (model: string) => void): void {
@@ -1678,6 +1813,16 @@ export class Session {
   // The agent's advertised modes list, for callers that need a snapshot.
   availableModes(): AdvertisedMode[] {
     return [...this.agentAdvertisedModes];
+  }
+
+  // The agent's advertised models list. Used by acp-ws.ts's dedicated
+  // session/set_model handler to validate the requested modelId before
+  // forwarding to the agent (catches cross-agent set_model storms from
+  // clients that assume a different agent is on the other end). When
+  // the agent never advertised any models, returns [] and the
+  // set_model handler falls back to pass-through.
+  availableModels(): AdvertisedModel[] {
+    return [...this.agentAdvertisedModels];
   }
 
   // Pick up an agent-emitted session_info_update and store its title
@@ -1844,6 +1989,16 @@ export class Session {
       // advertises its own.
       this.agentAdvertisedCommands = [];
       this.broadcastMergedCommands();
+      // Old agent's model list and modes no longer apply either; clear
+      // them so a session/set_model arriving before the new agent
+      // re-advertises doesn't validate against the dead agent's list.
+      // The persistence hooks fire so meta.json drops the stale snapshot.
+      if (this.agentAdvertisedModels.length > 0) {
+        this.setAgentAdvertisedModels([]);
+      }
+      if (this.agentAdvertisedModes.length > 0) {
+        this.setAgentAdvertisedModes([]);
+      }
       await oldAgent.kill().catch(() => undefined);
 
       if (transcript) {
@@ -2558,6 +2713,60 @@ function sameAdvertisedModes(a: AdvertisedMode[], b: AdvertisedMode[]): boolean 
     }
   }
   return true;
+}
+
+function sameAdvertisedModels(
+  a: AdvertisedModel[],
+  b: AdvertisedModel[],
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i]?.modelId !== b[i]?.modelId ||
+      a[i]?.name !== b[i]?.name ||
+      a[i]?.description !== b[i]?.description
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Parse a wire-shape availableModels list. Accepts the ACP-spec form
+// (`{ modelId, name?, description? }`) and the opencode config_option
+// form (`{ value, name?, description? }`) so a single helper handles
+// both notification kinds. Entries missing a usable id are dropped
+// silently — better to lose a malformed entry than poison the cache.
+export function parseModelsList(list: unknown): AdvertisedModel[] {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const out: AdvertisedModel[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const r = raw as Record<string, unknown>;
+    const modelId =
+      (typeof r.modelId === "string" && r.modelId.trim()) ||
+      (typeof r.value === "string" && r.value.trim()) ||
+      (typeof r.id === "string" && r.id.trim()) ||
+      undefined;
+    if (!modelId) {
+      continue;
+    }
+    const model: AdvertisedModel = { modelId };
+    if (typeof r.name === "string" && r.name.length > 0) {
+      model.name = r.name;
+    }
+    if (typeof r.description === "string" && r.description.length > 0) {
+      model.description = r.description;
+    }
+    out.push(model);
+  }
+  return out;
 }
 
 function extractAdvertisedModes(params: unknown): AdvertisedMode[] | null {

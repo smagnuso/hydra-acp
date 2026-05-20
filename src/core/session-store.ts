@@ -41,6 +41,15 @@ export const PersistedAgentMode = z.object({
 });
 export type PersistedAgentMode = z.infer<typeof PersistedAgentMode>;
 
+// One agent-advertised model. Shape mirrors current_model_update's
+// availableModels entries (spec: { modelId, name?, description? }).
+export const PersistedAgentModel = z.object({
+  modelId: z.string(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+});
+export type PersistedAgentModel = z.infer<typeof PersistedAgentModel>;
+
 // Last-known snapshot of a session's usage_update notification. Fields
 // mirror the wire shape but flattened (costAmount/costCurrency rather
 // than a nested cost object) so partial updates can merge cleanly.
@@ -95,6 +104,7 @@ export const SessionRecord = z.object({
   currentUsage: PersistedUsage.optional(),
   agentCommands: z.array(PersistedAgentCommand).optional(),
   agentModes: z.array(PersistedAgentMode).optional(),
+  agentModels: z.array(PersistedAgentModel).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -227,6 +237,7 @@ export function recordFromMemorySession(args: {
   currentUsage?: PersistedUsage;
   agentCommands?: PersistedAgentCommand[];
   agentModes?: PersistedAgentMode[];
+  agentModels?: PersistedAgentModel[];
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -247,6 +258,7 @@ export function recordFromMemorySession(args: {
     currentUsage: args.currentUsage,
     agentCommands: args.agentCommands,
     agentModes: args.agentModes,
+    agentModels: args.agentModels,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

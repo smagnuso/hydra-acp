@@ -12,6 +12,7 @@ import {
   Session,
   extractPromptText,
   firstLine,
+  parseModelsList,
   type UsageSnapshot,
 } from "./session.js";
 import {
@@ -20,6 +21,7 @@ import {
   recordFromMemorySession,
   type PersistedAgentCommand,
   type PersistedAgentMode,
+  type PersistedAgentModel,
   type PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
@@ -27,7 +29,11 @@ import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-
 import { paths } from "./paths.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
 import type { Bundle } from "./bundle.js";
-import type { AdvertisedCommand, AdvertisedMode } from "./hydra-commands.js";
+import type {
+  AdvertisedCommand,
+  AdvertisedMode,
+  AdvertisedModel,
+} from "./hydra-commands.js";
 import type { SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
 import { HYDRA_VERSION } from "./hydra-version.js";
@@ -82,6 +88,7 @@ export interface ResurrectParams {
   currentUsage?: UsageSnapshot;
   agentCommands?: AdvertisedCommand[];
   agentModes?: AdvertisedMode[];
+  agentModels?: AdvertisedModel[];
   // Original create time, preserved across resurrect so `sessions list`
   // shows when the conversation actually began rather than the latest
   // wakeup.
@@ -171,6 +178,7 @@ export class SessionManager {
       currentModel: fresh.initialModel,
       currentMode: fresh.initialMode,
       agentModes: fresh.initialModes,
+      agentModels: fresh.initialModels,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -310,6 +318,9 @@ export class SessionManager {
       agentCommands: params.agentCommands,
       agentModes:
         params.agentModes ?? nonEmptyOrUndefined(extractInitialModes(loadResult ?? {})),
+      agentModels:
+        params.agentModels ??
+        nonEmptyOrUndefined(extractInitialModels(loadResult ?? {})),
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
       // or never seeded) should re-derive from the next prompt rather
@@ -365,6 +376,7 @@ export class SessionManager {
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
       agentModes: params.agentModes ?? fresh.initialModes,
+      agentModels: params.agentModels ?? fresh.initialModels,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
@@ -410,6 +422,7 @@ export class SessionManager {
     upstreamSessionId: string;
     agentMeta?: Record<string, unknown>;
     initialModel?: string;
+    initialModels?: AdvertisedModel[];
     initialModes?: AdvertisedMode[];
     initialMode?: string;
   }> {
@@ -455,19 +468,39 @@ export class SessionManager {
       // something to render from the very first paint, before any turn
       // runs that might cause the agent to emit a current_model_update.
       let initialModel = extractInitialModel(newResult);
+      const initialModels = extractInitialModels(newResult);
       const desired = params.model ?? this.defaultModels[params.agentId];
       if (desired && desired !== initialModel) {
-        try {
-          await agent.connection.request("session/set_model", {
-            sessionId: sessionIdRaw,
-            modelId: desired,
-          });
-          initialModel = desired;
-        } catch {
-          // Bad / unsupported model id in config shouldn't break session
-          // creation — fall back to whatever the agent picked itself.
-          // The user-visible signal is just that the header keeps the
-          // old model; misconfigurations surface in daemon logs upstream.
+        // Validate against the agent's advertised model list when we
+        // have one. Surfaces config typos (e.g. defaultModels[opencode]
+        // set to a claude-acp-shaped id) before they corrupt the
+        // session — opencode in particular silently splits an unknown
+        // modelId on `/` and stores garbage, which then makes every
+        // subsequent prompt return end_turn instantly. When the agent
+        // didn't advertise a list yet, we fall back to optimistic
+        // forwarding (the previous behavior) so we don't block a
+        // legitimate id we just can't see.
+        const validates =
+          initialModels.length === 0 ||
+          initialModels.some((m) => m.modelId === desired);
+        if (validates) {
+          try {
+            await agent.connection.request("session/set_model", {
+              sessionId: sessionIdRaw,
+              modelId: desired,
+            });
+            initialModel = desired;
+          } catch {
+            // Bad / unsupported model id in config shouldn't break session
+            // creation — fall back to whatever the agent picked itself.
+            // The user-visible signal is just that the header keeps the
+            // old model; misconfigurations surface in daemon logs upstream.
+          }
+        } else {
+          const known = initialModels.map((m) => m.modelId).join(", ");
+          process.stderr.write(
+            `hydra-acp: defaultModels[${params.agentId}]=${JSON.stringify(desired)} is not in the agent's availableModels (${known}); skipping session/set_model\n`,
+          );
         }
       }
       const initialModes = extractInitialModes(newResult);
@@ -477,6 +510,7 @@ export class SessionManager {
         upstreamSessionId: sessionIdRaw,
         agentMeta: newResult._meta as Record<string, unknown> | undefined,
         initialModel,
+        initialModels: initialModels.length > 0 ? initialModels : undefined,
         initialModes: initialModes.length > 0 ? initialModes : undefined,
         initialMode,
       };
@@ -543,6 +577,15 @@ export class SessionManager {
         })),
       }).catch(() => undefined);
     });
+    session.onAgentModelsChange((models) => {
+      void this.persistSnapshot(session.sessionId, {
+        agentModels: models.map((m) => ({
+          modelId: m.modelId,
+          ...(m.name !== undefined ? { name: m.name } : {}),
+          ...(m.description !== undefined ? { description: m.description } : {}),
+        })),
+      }).catch(() => undefined);
+    });
     this.sessions.set(session.sessionId, session);
     // Read-modify-write so a resurrect preserves fields the in-memory
     // Session doesn't know about (originally agentCommands, and
@@ -600,6 +643,7 @@ export class SessionManager {
       currentUsage: persistedUsageToSnapshot(record.currentUsage),
       agentCommands: record.agentCommands,
       agentModes: record.agentModes,
+      agentModels: record.agentModels,
       createdAt: record.createdAt,
     };
   }
@@ -970,6 +1014,7 @@ export class SessionManager {
       currentUsage?: PersistedUsage;
       agentCommands?: PersistedAgentCommand[];
       agentModes?: PersistedAgentMode[];
+      agentModels?: PersistedAgentModel[];
     },
   ): Promise<void> {
     await this.enqueueMetaWrite(sessionId, async () => {
@@ -993,6 +1038,9 @@ export class SessionManager {
           : {}),
         ...(update.agentModes !== undefined
           ? { agentModes: update.agentModes }
+          : {}),
+        ...(update.agentModels !== undefined
+          ? { agentModels: update.agentModels }
           : {}),
         updatedAt: new Date().toISOString(),
       });
@@ -1120,6 +1168,21 @@ function mergeForPersistence(
         })
       : undefined;
   const agentModes = persistedModes ?? existing?.agentModes;
+  const sessionModels = session.availableModels();
+  const persistedModels =
+    sessionModels.length > 0
+      ? sessionModels.map((m): PersistedAgentModel => {
+          const out: PersistedAgentModel = { modelId: m.modelId };
+          if (m.name !== undefined) {
+            out.name = m.name;
+          }
+          if (m.description !== undefined) {
+            out.description = m.description;
+          }
+          return out;
+        })
+      : undefined;
+  const agentModels = persistedModels ?? existing?.agentModels;
   return recordFromMemorySession({
     sessionId: session.sessionId,
     lineageId: existing?.lineageId ?? generateLineageId(),
@@ -1137,6 +1200,7 @@ function mergeForPersistence(
       usageSnapshotToPersisted(session.currentUsage) ?? existing?.currentUsage,
     agentCommands,
     agentModes,
+    agentModels,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }
@@ -1235,6 +1299,54 @@ function asString(value: unknown): string | undefined {
 
 function nonEmptyOrUndefined<T>(arr: T[]): T[] | undefined {
   return arr.length > 0 ? arr : undefined;
+}
+
+// Pull an available-models list from a session/new or session/load response.
+// Symmetric to extractInitialModes; agents put it in one of:
+//   - claude-agent-acp / opencode: `result.models.availableModels` (items
+//     are `{ modelId, name?, description? }` — sometimes `value` instead
+//     of `modelId` for opencode's config-option shape)
+//   - hypothetical spec-strict agent: top-level `result.availableModels`
+//   - notification-only agents: nothing here; the list arrives later via
+//     `current_model_update.availableModels` or, for opencode, a
+//     `config_option_update` with `configOptions[i].id === "model"`.
+//     This path returns [] in that case and the wireAgent extractors
+//     pick it up.
+export function extractInitialModels(
+  result: Record<string, unknown>,
+): AdvertisedModel[] {
+  const direct = parseModelsList(result.availableModels);
+  if (direct.length > 0) {
+    return direct;
+  }
+  const models = result.models;
+  if (models && typeof models === "object" && !Array.isArray(models)) {
+    const fromModelsObj = parseModelsList(
+      (models as Record<string, unknown>).availableModels,
+    );
+    if (fromModelsObj.length > 0) {
+      return fromModelsObj;
+    }
+  }
+  const meta = result._meta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    for (const [key, value] of Object.entries(
+      meta as Record<string, unknown>,
+    )) {
+      if (key === "hydra-acp") {
+        continue;
+      }
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const fromMeta = parseModelsList(
+          (value as Record<string, unknown>).availableModels,
+        );
+        if (fromMeta.length > 0) {
+          return fromMeta;
+        }
+      }
+    }
+  }
+  return [];
 }
 
 // Pull an available-modes list from a session/new or session/load response.

@@ -135,6 +135,12 @@ export interface HydraAdvertisedMode {
   description?: string;
 }
 
+export interface HydraAdvertisedModel {
+  modelId: string;
+  name?: string;
+  description?: string;
+}
+
 // Identity of the client whose composer originated a prompt. Used as
 // the `originator` field on prompt_queue_* notifications so peer
 // clients can render "queued from <name>" chips.
@@ -182,6 +188,7 @@ export interface HydraMeta {
   currentUsage?: SessionListUsage;
   availableCommands?: HydraAdvertisedCommand[];
   availableModes?: HydraAdvertisedMode[];
+  availableModels?: HydraAdvertisedModel[];
   // Epoch-ms when the in-flight agent turn began. Present only when
   // mid-turn at attach response time; lets a fresh client boot with
   // the busy banner already showing the right elapsed time rather
@@ -357,6 +364,29 @@ export function extractHydraMeta(
     }
     if (modes.length > 0) {
       out.availableModes = modes;
+    }
+  }
+  if (Array.isArray(obj.availableModels)) {
+    const models: HydraAdvertisedModel[] = [];
+    for (const raw of obj.availableModels) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        continue;
+      }
+      const m = raw as Record<string, unknown>;
+      if (typeof m.modelId !== "string") {
+        continue;
+      }
+      const model: HydraAdvertisedModel = { modelId: m.modelId };
+      if (typeof m.name === "string") {
+        model.name = m.name;
+      }
+      if (typeof m.description === "string") {
+        model.description = m.description;
+      }
+      models.push(model);
+    }
+    if (models.length > 0) {
+      out.availableModels = models;
     }
   }
   return out;

@@ -52,6 +52,7 @@ import { readClipboard } from "./clipboard.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
+import { parseReattachResponse } from "./reconnect-state.js";
 import {
   mapUpdate,
   normalizeAdvertisedCommands,
@@ -2961,9 +2962,16 @@ async function runSession(
       if (resp.error) {
         throw new Error(resp.error.message);
       }
-      const result = (resp.result ?? {}) as { historyPolicy?: unknown };
-      if (typeof result.historyPolicy === "string") {
-        appliedPolicy = result.historyPolicy;
+      const fields = parseReattachResponse(resp.result);
+      appliedPolicy = fields.appliedPolicy;
+      // Refresh ownClientId from the reattach response. The daemon mints
+      // a fresh clientId on every session/attach, including transparent
+      // reconnects — without this update the cached id goes stale, the
+      // own-prompt FIFO binding at the prompt_queue_added handler stops
+      // matching, and typed prompts no longer echo to scrollback. See
+      // reconnect-state.ts.
+      if (fields.clientId !== undefined) {
+        ownClientId = fields.clientId;
       }
     } catch (err) {
       attachErr = err as Error;

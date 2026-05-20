@@ -1,12 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { JsonRpcConnection } from "../acp/connection.js";
-import { makeControlledStream } from "../__tests__/test-utils.js";
-import { makeInstallProgressForwarder } from "./acp-ws.js";
+import {
+  makeControlledStream,
+  makeMockAgent,
+} from "../__tests__/test-utils.js";
+import { decideSetModel, makeInstallProgressForwarder } from "./acp-ws.js";
 import {
   AGENT_INSTALL_PROGRESS_METHOD,
   AgentInstallProgressParams,
+  JsonRpcErrorCodes,
 } from "../acp/types.js";
 import type { JsonRpcNotification } from "../acp/types.js";
+import { Session } from "../core/session.js";
+import { SessionManager } from "../core/session-manager.js";
+import type { AdvertisedModel } from "../core/hydra-commands.js";
 
 describe("makeInstallProgressForwarder", () => {
   it("translates binary download progress into a wire notification", async () => {
@@ -119,5 +126,203 @@ describe("makeInstallProgressForwarder", () => {
       });
     }
     expect(Date.now() - start).toBeLessThan(200);
+  });
+});
+
+// Minimal SessionManager stand-in for decideSetModel — we only need
+// get(sessionId), so a plain Map-backed shim with the right method
+// signature is enough and keeps the test off the real spawner /
+// registry / disk path.
+function fakeManager(
+  sessions: Record<string, Session | undefined>,
+): SessionManager {
+  return {
+    get: (id: string): Session | undefined => sessions[id],
+  } as unknown as SessionManager;
+}
+
+function makeSessionWithModels(
+  sessionId: string,
+  upstream: string,
+  models: AdvertisedModel[],
+  currentModel?: string,
+): Session {
+  const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+  const session = new Session({
+    sessionId,
+    cwd: "/work",
+    agentId: "opencode",
+    agent: mock.agent,
+    upstreamSessionId: upstream,
+    agentModels: models,
+    currentModel,
+  });
+  return session;
+}
+
+describe("decideSetModel", () => {
+  it("returns no_op (resync) when modelId is not in availableModels but the session has a current model", () => {
+    // The regression case: emacs agent-shell sends a claude-acp-shaped
+    // modelId to an opencode session. The advertised list belongs to
+    // opencode and doesn't include the request. Instead of erroring
+    // (which would wedge agent-shell — it auto-fires set_model on
+    // connect and doesn't recover from failures), hydra returns no_op
+    // so the handler can resync the client without forwarding garbage
+    // upstream. Net effect: session stays on whatever it was, no
+    // corruption, client's local picker view re-syncs to reality.
+    const session = makeSessionWithModels(
+      "sess_oc",
+      "u_oc",
+      [
+        { modelId: "ncp-anthropic/claude-opus-4-7" },
+        { modelId: "openai/gpt-5" },
+      ],
+      "ncp-anthropic/claude-opus-4-7",
+    );
+    const decision = decideSetModel(
+      { sessionId: "sess_oc", modelId: "claude-opus-4-7[1m]" },
+      fakeManager({ sess_oc: session }),
+    );
+    expect(decision.kind).toBe("no_op");
+    if (decision.kind === "no_op") {
+      expect(decision.sessionId).toBe("sess_oc");
+      expect(decision.currentModel).toBe("ncp-anthropic/claude-opus-4-7");
+      expect(decision.logMessage).toContain("no_op");
+      expect(decision.logMessage).toContain("resyncing client");
+      expect(decision.logMessage).toContain(
+        'requested="claude-opus-4-7[1m]"',
+      );
+      expect(decision.logMessage).toContain(
+        'actual="ncp-anthropic/claude-opus-4-7"',
+      );
+    }
+  });
+
+  it("errors with InvalidParams only when no current model is set to fall back to", () => {
+    // Edge case: agent advertises a list but somehow has no current
+    // model (atypical — every agent we know about sets one). With
+    // nothing to resync to, no_op would lie; reject honestly.
+    const session = makeSessionWithModels(
+      "sess_nocur",
+      "u_nocur",
+      [{ modelId: "openai/gpt-5" }],
+      // currentModel left undefined.
+    );
+    const decision = decideSetModel(
+      { sessionId: "sess_nocur", modelId: "bogus/id" },
+      fakeManager({ sess_nocur: session }),
+    );
+    expect(decision.kind).toBe("error");
+    if (decision.kind === "error") {
+      expect(decision.code).toBe(JsonRpcErrorCodes.InvalidParams);
+      expect(decision.message).toContain('"bogus/id"');
+      expect(decision.logMessage).toContain(
+        "no current model to fall back to",
+      );
+    }
+  });
+
+  it("accepts a modelId present in availableModels and forwards via the session", async () => {
+    const session = makeSessionWithModels(
+      "sess_ok",
+      "u_ok",
+      [
+        { modelId: "ncp-anthropic/claude-opus-4-7" },
+        { modelId: "openai/gpt-5" },
+      ],
+      "ncp-anthropic/claude-opus-4-7",
+    );
+    const requestSpy = vi
+      .spyOn(session.agent.connection, "request")
+      .mockResolvedValueOnce({ ok: true });
+
+    const decision = decideSetModel(
+      { sessionId: "sess_ok", modelId: "openai/gpt-5" },
+      fakeManager({ sess_ok: session }),
+    );
+    expect(decision.kind).toBe("ok");
+    if (decision.kind !== "ok") {
+      return;
+    }
+    expect(decision.logMessage).toContain("accepted");
+
+    // The handler in registerAcpWsEndpoint forwards via the same
+    // session.forwardRequest path — exercise it directly to prove the
+    // session's upstream id rewrite still applies after validation.
+    const result = await decision.session.forwardRequest("session/set_model", {
+      sessionId: "sess_ok",
+      modelId: "openai/gpt-5",
+    });
+    expect(result).toEqual({ ok: true });
+    expect(requestSpy).toHaveBeenCalledWith("session/set_model", {
+      sessionId: "u_ok",
+      modelId: "openai/gpt-5",
+    });
+  });
+
+  it("passes through when the agent has not advertised any models (no list to validate against)", () => {
+    // The pass-through path matters for two real cases: (1) agents that
+    // only announce their model via current_model_update later, not in
+    // session/new's response; (2) brand-new sessions whose extractor
+    // ran but the agent's response had no models block. We must not
+    // block a legitimate id we just can't see.
+    const session = makeSessionWithModels("sess_passthrough", "u_pt", []);
+    const decision = decideSetModel(
+      { sessionId: "sess_passthrough", modelId: "anything/at-all" },
+      fakeManager({ sess_passthrough: session }),
+    );
+    expect(decision.kind).toBe("ok");
+    if (decision.kind === "ok") {
+      expect(decision.logMessage).toContain("passthrough");
+      expect(decision.logMessage).toContain("no availableModels");
+    }
+  });
+
+  it("rejects with SessionNotFound when the sessionId doesn't map to a live session", () => {
+    const decision = decideSetModel(
+      { sessionId: "sess_missing", modelId: "openai/gpt-5" },
+      fakeManager({}),
+    );
+    expect(decision.kind).toBe("error");
+    if (decision.kind === "error") {
+      expect(decision.code).toBe(JsonRpcErrorCodes.SessionNotFound);
+      expect(decision.message).toContain("sess_missing");
+    }
+  });
+
+  it("rejects with InvalidParams on missing/wrong-typed sessionId or modelId", () => {
+    const session = makeSessionWithModels("sess_x", "u_x", [
+      { modelId: "openai/gpt-5" },
+    ]);
+    const manager = fakeManager({ sess_x: session });
+
+    const noParams = decideSetModel(undefined, manager);
+    expect(noParams.kind).toBe("error");
+    if (noParams.kind === "error") {
+      expect(noParams.code).toBe(JsonRpcErrorCodes.InvalidParams);
+    }
+
+    const noSessionId = decideSetModel({ modelId: "openai/gpt-5" }, manager);
+    expect(noSessionId.kind).toBe("error");
+    if (noSessionId.kind === "error") {
+      expect(noSessionId.code).toBe(JsonRpcErrorCodes.InvalidParams);
+      expect(noSessionId.message).toContain("sessionId");
+    }
+
+    const noModelId = decideSetModel({ sessionId: "sess_x" }, manager);
+    expect(noModelId.kind).toBe("error");
+    if (noModelId.kind === "error") {
+      expect(noModelId.code).toBe(JsonRpcErrorCodes.InvalidParams);
+      expect(noModelId.message).toContain("modelId");
+    }
+
+    const wrongTypes = decideSetModel(
+      { sessionId: 42, modelId: false },
+      manager,
+    );
+    expect(wrongTypes.kind).toBe("error");
+    if (wrongTypes.kind === "error") {
+      expect(wrongTypes.code).toBe(JsonRpcErrorCodes.InvalidParams);
+    }
   });
 });
