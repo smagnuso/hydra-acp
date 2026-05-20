@@ -312,6 +312,129 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual([""]);
   });
 
+  it("ctrl-u at col=0 swallows the previous line and the newline", () => {
+    const d = new InputDispatcher();
+    feed(d, [
+      { type: "paste", text: "first\nsecond\nthird" },
+      k("home"),
+    ]);
+    expect(d.state()).toMatchObject({
+      buffer: ["first", "second", "third"],
+      row: 0,
+      col: 0,
+    });
+    feed(d, [k("end"), k("down")]);
+    // Land at start of "third"
+    feed(d, [k("ctrl-a")]);
+    expect(d.state()).toMatchObject({ row: 2, col: 0 });
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["first", "third"]);
+    expect(d.state()).toMatchObject({ row: 1, col: 0 });
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["third"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 0 });
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["third"]);
+  });
+
+  it("ctrl-u still kills to start-of-line when there is content before cursor", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "abc\ndef" }]);
+    expect(d.state()).toMatchObject({ row: 1, col: 3 });
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["abc", ""]);
+    expect(d.state()).toMatchObject({ row: 1, col: 0 });
+    // Second press: current line is empty, so collapse it (don't slurp
+    // the prev line's contents). Cursor lands at end of "abc".
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["abc"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 3 });
+    // Third press: now col>0 again, kills "abc".
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(d.state()).toMatchObject({ row: 0, col: 0 });
+  });
+
+  it("ctrl-k on an empty current line collapses it instead of slurping the next line", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "abc\ndef" }, k("home"), k("ctrl-a")]);
+    // Cursor at start of "abc".
+    expect(d.state()).toMatchObject({ row: 0, col: 0 });
+    feed(d, [k("ctrl-k")]);
+    expect(d.state().buffer).toEqual(["", "def"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 0 });
+    // Empty current line — second ^K should drop the empty line, NOT
+    // also kill "def".
+    feed(d, [k("ctrl-k")]);
+    expect(d.state().buffer).toEqual(["def"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 0 });
+  });
+
+  it("ctrl-u on an empty current line collapses it instead of slurping the previous line", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "abc\ndef" }]);
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["abc", ""]);
+    expect(d.state()).toMatchObject({ row: 1, col: 0 });
+    // Empty current line — second ^U should drop the empty line, NOT
+    // also kill "abc". Cursor lands at end of the previous line.
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["abc"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 3 });
+  });
+
+  it("ctrl-k at end-of-line swallows the next line and the newline", () => {
+    const d = new InputDispatcher();
+    feed(d, [
+      { type: "paste", text: "first\nsecond\nthird" },
+      k("home"),
+    ]);
+    feed(d, [k("ctrl-e")]);
+    expect(d.state()).toMatchObject({ row: 0, col: 5 });
+    feed(d, [k("ctrl-k")]);
+    expect(d.state().buffer).toEqual(["first", "third"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 5 });
+    feed(d, [k("ctrl-k")]);
+    expect(d.state().buffer).toEqual(["first"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 5 });
+    feed(d, [k("ctrl-k")]);
+    expect(d.state().buffer).toEqual(["first"]);
+  });
+
+  it("ctrl-k still kills to end-of-line when there is content after cursor", () => {
+    const d = new InputDispatcher();
+    feed(d, [
+      { type: "paste", text: "abc\ndef" },
+      k("home"),
+      k("right"),
+    ]);
+    expect(d.state()).toMatchObject({ row: 0, col: 1 });
+    feed(d, [k("ctrl-k")]);
+    expect(d.state().buffer).toEqual(["a", "def"]);
+    expect(d.state()).toMatchObject({ row: 0, col: 1 });
+  });
+
+  it("ctrl-y restores a cross-line ctrl-u kill", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "foo\nbar" }, k("ctrl-a")]);
+    expect(d.state()).toMatchObject({ row: 1, col: 0 });
+    feed(d, [k("ctrl-u")]);
+    expect(d.state().buffer).toEqual(["bar"]);
+    feed(d, [k("ctrl-y")]);
+    expect(d.state().buffer).toEqual(["foo", "bar"]);
+  });
+
+  it("ctrl-y restores a cross-line ctrl-k kill", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "foo\nbar" }, k("home")]);
+    feed(d, [k("ctrl-e")]);
+    expect(d.state()).toMatchObject({ row: 0, col: 3 });
+    feed(d, [k("ctrl-k")]);
+    expect(d.state().buffer).toEqual(["foo"]);
+    feed(d, [k("ctrl-y")]);
+    expect(d.state().buffer).toEqual(["foo", "bar"]);
+  });
+
   it("ctrl-y can paste at the cursor mid-buffer", () => {
     const d = new InputDispatcher();
     feed(d, [{ type: "paste", text: "abcdef" }]);

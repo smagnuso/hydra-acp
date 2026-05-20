@@ -525,23 +525,65 @@ export class InputDispatcher {
     }
   }
 
+  // ^U: kill from cursor to start of current line. At col 0 with a line
+  // above:
+  //   - If the current line is empty, collapse it (kill just the
+  //     newline) so the cursor lands at the end of the previous line.
+  //     Don't slurp that line's contents.
+  //   - Otherwise, kill the previous line entirely + the joining
+  //     newline, so ^U from the start of a non-empty line walks up
+  //     line-by-line.
+  // Single-line behavior is unchanged.
   private killLine(): void {
-    const line = this.currentLine();
-    const killed = line.slice(0, this.col);
-    if (killed.length > 0) {
-      this.killBuffer = killed;
+    if (this.col > 0) {
+      const line = this.currentLine();
+      this.killBuffer = line.slice(0, this.col);
+      this.setCurrentLine(line.slice(this.col));
+      this.col = 0;
+      return;
     }
-    this.setCurrentLine(line.slice(this.col));
-    this.col = 0;
+    if (this.row === 0) {
+      return;
+    }
+    if (this.currentLine().length === 0) {
+      this.killBuffer = "\n";
+      this.buffer.splice(this.row, 1);
+      this.row -= 1;
+      this.col = this.currentLine().length;
+      return;
+    }
+    const prev = this.buffer[this.row - 1] ?? "";
+    this.killBuffer = prev + "\n";
+    this.buffer.splice(this.row - 1, 1);
+    this.row -= 1;
   }
 
+  // ^K: kill from cursor to end of current line. At end-of-line with a
+  // line below:
+  //   - If the current line is empty, collapse it (kill just the
+  //     newline) so what was the next line takes its place. Don't slurp
+  //     that line's contents.
+  //   - Otherwise, kill the joining newline + the entire next line, so
+  //     ^K from the end of a non-empty line walks down line-by-line.
+  // Single-line behavior is unchanged.
   private killToEnd(): void {
     const line = this.currentLine();
-    const killed = line.slice(this.col);
-    if (killed.length > 0) {
-      this.killBuffer = killed;
+    if (this.col < line.length) {
+      this.killBuffer = line.slice(this.col);
+      this.setCurrentLine(line.slice(0, this.col));
+      return;
     }
-    this.setCurrentLine(line.slice(0, this.col));
+    if (this.row >= this.buffer.length - 1) {
+      return;
+    }
+    if (line.length === 0) {
+      this.killBuffer = "\n";
+      this.buffer.splice(this.row, 1);
+      return;
+    }
+    const next = this.buffer[this.row + 1] ?? "";
+    this.killBuffer = "\n" + next;
+    this.buffer.splice(this.row + 1, 1);
   }
 
   private killWord(): void {
