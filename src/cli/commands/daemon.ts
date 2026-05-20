@@ -1,5 +1,6 @@
 import * as fsp from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
+import chalk from "chalk";
 import { paths } from "../../core/paths.js";
 import { loadConfig } from "../../core/config.js";
 import { ensureServiceToken } from "../../core/service-token.js";
@@ -9,6 +10,8 @@ import {
   spawnDaemonDetached,
   waitForDaemonReady,
 } from "../../core/daemon-bootstrap.js";
+import { HYDRA_VERSION } from "../../core/hydra-version.js";
+import type { HydraConfig } from "../../core/config.js";
 import { flagBool } from "../parse-args.js";
 import { runLogTail } from "./log-tail.js";
 
@@ -128,6 +131,7 @@ export async function runDaemonStatus(): Promise<void> {
   const info = await readPidFile();
   if (!info) {
     process.stdout.write("Daemon: not running\n");
+    process.stdout.write(`CLI version: ${HYDRA_VERSION}\n`);
     return;
   }
   const alive = isProcessAlive(info.pid);
@@ -135,6 +139,56 @@ export async function runDaemonStatus(): Promise<void> {
     `Daemon: ${alive ? "running" : "stale pid file"} pid=${info.pid} ` +
       `host=${info.host} port=${info.port} started=${info.startedAt}\n`,
   );
+
+  let daemonVersion: string | undefined;
+  if (alive) {
+    try {
+      const config = await loadConfig();
+      daemonVersion = await fetchDaemonVersion(config);
+    } catch {
+      void 0;
+    }
+  }
+
+  if (daemonVersion === undefined) {
+    process.stdout.write(`CLI version: ${HYDRA_VERSION}\n`);
+    if (alive) {
+      process.stdout.write(
+        "Daemon version: unknown (health endpoint unreachable)\n",
+      );
+    }
+    return;
+  }
+
+  if (daemonVersion === HYDRA_VERSION) {
+    process.stdout.write(`Version: ${HYDRA_VERSION}\n`);
+    return;
+  }
+
+  process.stdout.write(`CLI version:    ${HYDRA_VERSION}\n`);
+  process.stdout.write(`Daemon version: ${daemonVersion}\n`);
+  process.stdout.write(
+    chalk.yellow(
+      "Version mismatch — run `hydra-acp daemon restart` to upgrade the daemon.\n",
+    ),
+  );
+}
+
+async function fetchDaemonVersion(
+  config: HydraConfig,
+): Promise<string | undefined> {
+  const protocol = config.daemon.tls ? "https" : "http";
+  const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/v1/health`;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+    if (!response.ok) {
+      return undefined;
+    }
+    const body = (await response.json()) as { version?: unknown };
+    return typeof body.version === "string" ? body.version : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 interface PidInfo {
