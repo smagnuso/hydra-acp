@@ -546,6 +546,40 @@ export const PromptAmendedParams = z.object({
 });
 export type PromptAmendedParams = z.infer<typeof PromptAmendedParams>;
 
+// hydra-acp/agent_install_progress — daemon → client. Fires while the
+// agent's binary or npm package is being fetched during session/new or
+// session/attach. The notification is *not* keyed by sessionId (the
+// session doesn't exist yet on session/new); the originating WS
+// connection is the implicit scope. `phase` mirrors the structured
+// callback shape from binary-install / npm-install:
+//   - "download_start"     — total size known, bytes still 0
+//   - "download_progress"  — periodic byte tick (~150ms)
+//   - "download_done"      — last byte received
+//   - "extract"            — tar / unzip step (binary only)
+//   - "install_start"      — npm install began (npx only)
+//   - "installed"          — everything is on disk and ready
+// source distinguishes the channel so the TUI can pick the right copy
+// ("Downloading…" vs "Installing via npm…").
+export const AgentInstallProgressParams = z.object({
+  agentId: z.string(),
+  version: z.string(),
+  source: z.enum(["binary", "npm"]),
+  phase: z.enum([
+    "download_start",
+    "download_progress",
+    "download_done",
+    "extract",
+    "install_start",
+    "installed",
+  ]),
+  receivedBytes: z.number().optional(),
+  totalBytes: z.number().optional(),
+  packageSpec: z.string().optional(),
+});
+export type AgentInstallProgressParams = z.infer<typeof AgentInstallProgressParams>;
+
+export const AGENT_INSTALL_PROGRESS_METHOD = "hydra-acp/agent_install_progress";
+
 export interface SessionCapabilities {
   attach?: Record<string, never>;
   list?: boolean;

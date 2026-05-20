@@ -6,8 +6,23 @@ import {
   currentPlatformKey,
   ensureBinary,
   pickBinaryTarget,
+  type BinaryInstallProgress,
 } from "./binary-install.js";
-import { ensureNpmPackage } from "./npm-install.js";
+import {
+  ensureNpmPackage,
+  type NpmInstallProgress,
+} from "./npm-install.js";
+
+// Unified install-progress event surface for callers that want a single
+// callback regardless of which distribution channel (binary download vs.
+// npm) actually services the request. Discriminated by `source` so
+// downstream renderers can pick the right copy ("Downloading …" vs.
+// "Installing … via npm").
+export type AgentInstallProgress =
+  | ({ source: "binary" } & BinaryInstallProgress)
+  | ({ source: "npm" } & NpmInstallProgress);
+
+export type AgentInstallProgressCallback = (event: AgentInstallProgress) => void;
 
 const NpxDistribution = z.object({
   package: z.string(),
@@ -246,7 +261,10 @@ function npxPackageBasename(agent: RegistryAgent): string | undefined {
 export async function planSpawn(
   agent: RegistryAgent,
   callerArgs: string[] = [],
-  options: { npmRegistry?: string } = {},
+  options: {
+    npmRegistry?: string;
+    onInstallProgress?: AgentInstallProgressCallback;
+  } = {},
 ): Promise<SpawnPlan> {
   const version = agent.version ?? "current";
   if (agent.distribution.npx) {
@@ -265,12 +283,16 @@ export async function planSpawn(
       };
     }
     const bin = npx.bin ?? npxPackageBasename(agent) ?? npx.package;
+    const npmCb = options.onInstallProgress;
     const binPath = await ensureNpmPackage({
       agentId: agent.id,
       version,
       packageSpec: npx.package,
       bin,
       registry: options.npmRegistry,
+      onProgress: npmCb
+        ? (e) => npmCb({ source: "npm", ...e })
+        : undefined,
     });
     return {
       command: binPath,
@@ -286,10 +308,14 @@ export async function planSpawn(
         `Agent ${agent.id} has no binary distribution for ${currentPlatformKey() ?? "this platform"}.`,
       );
     }
+    const binCb = options.onInstallProgress;
     const cmdPath = await ensureBinary({
       agentId: agent.id,
       version,
       target,
+      onProgress: binCb
+        ? (e) => binCb({ source: "binary", ...e })
+        : undefined,
     });
     const tail = callerArgs.length > 0 ? callerArgs : (target.args ?? []);
     return {

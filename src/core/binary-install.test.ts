@@ -10,6 +10,7 @@ import {
   ensureBinary,
   pickBinaryTarget,
   type BinaryDistribution,
+  type BinaryInstallProgress,
 } from "./binary-install.js";
 import { paths } from "./paths.js";
 
@@ -60,6 +61,183 @@ describe("ensureBinary", () => {
     });
 
     expect(cmdPath).toBe(seeded);
+  });
+
+  it(
+    "emits structured onProgress events covering download_start → installed",
+    { timeout: 15_000 },
+    async () => {
+      if (process.platform === "win32") {
+        return;
+      }
+      const stage = await fs.mkdtemp(path.join(os.tmpdir(), "bin-progress-"));
+      try {
+        // Slightly larger payload so the download_progress tick has a
+        // chance to fire — the throttle is 150ms, well under the test
+        // timeout, but a tiny archive can finish in a single chunk.
+        const payloadDir = path.join(stage, "payload");
+        await fs.mkdir(payloadDir);
+        await fs.writeFile(
+          path.join(payloadDir, "fakebin"),
+          "#!/bin/sh\necho ok\n",
+        );
+        const archive = path.join(stage, "fake-2.0.0.tar.gz");
+        await runCmd("tar", ["-czf", archive, "-C", payloadDir, "fakebin"]);
+
+        const server = http.createServer((req, res) => {
+          if (req.url !== "/fake-2.0.0.tar.gz") {
+            res.statusCode = 404;
+            res.end();
+            return;
+          }
+          fs.readFile(archive)
+            .then((buf) => {
+              res.setHeader("content-type", "application/gzip");
+              // content-length header drives the totalBytes field in
+              // the progress events — without it the formatter would
+              // fall back to bytes-only, masking a regression.
+              res.setHeader("content-length", String(buf.length));
+              res.end(buf);
+            })
+            .catch(() => {
+              res.statusCode = 500;
+              res.end();
+            });
+        });
+        server.listen(0, "127.0.0.1");
+        await once(server, "listening");
+        try {
+          const addr = server.address();
+          if (!addr || typeof addr === "string") {
+            throw new Error("no server addr");
+          }
+          const url = `http://127.0.0.1:${addr.port}/fake-2.0.0.tar.gz`;
+          const events: BinaryInstallProgress[] = [];
+          await ensureBinary({
+            agentId: "progress-agent",
+            version: "2.0.0",
+            target: { archive: url, cmd: "./fakebin" },
+            onProgress: (e) => events.push(e),
+          });
+
+          const phases = events.map((e) => e.phase);
+          // Required ordered phases — download_progress is optional
+          // (the archive may finish in one chunk before the 150ms tick).
+          expect(phases[0]).toBe("download_start");
+          expect(phases).toContain("download_done");
+          expect(phases).toContain("extract");
+          expect(phases[phases.length - 1]).toBe("installed");
+          // Phases must be in the documented order.
+          const idxStart = phases.indexOf("download_start");
+          const idxDone = phases.indexOf("download_done");
+          const idxExtract = phases.indexOf("extract");
+          const idxInstalled = phases.lastIndexOf("installed");
+          expect(idxStart).toBeLessThan(idxDone);
+          expect(idxDone).toBeLessThan(idxExtract);
+          expect(idxExtract).toBeLessThan(idxInstalled);
+          // download_start carries totalBytes from content-length;
+          // download_done's receivedBytes matches the archive size.
+          const start = events.find(
+            (e) => e.phase === "download_start",
+          ) as Extract<BinaryInstallProgress, { phase: "download_start" }>;
+          const done = events.find(
+            (e) => e.phase === "download_done",
+          ) as Extract<BinaryInstallProgress, { phase: "download_done" }>;
+          const archiveSize = (await fs.stat(archive)).size;
+          expect(start.totalBytes).toBe(archiveSize);
+          expect(start.agentId).toBe("progress-agent");
+          expect(start.version).toBe("2.0.0");
+          expect(done.receivedBytes).toBe(archiveSize);
+        } finally {
+          server.close();
+          await once(server, "close");
+        }
+      } finally {
+        await fs.rm(stage, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("does not call onProgress when the cmd is already cached", async () => {
+    const platformKey = currentPlatformKey();
+    if (!platformKey) {
+      return;
+    }
+    const installDir = paths.agentInstallDir(
+      "cached-agent",
+      platformKey,
+      "1.2.3",
+    );
+    await fs.mkdir(installDir, { recursive: true });
+    await fs.writeFile(path.join(installDir, "cached-bin"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    const events: BinaryInstallProgress[] = [];
+    await ensureBinary({
+      agentId: "cached-agent",
+      version: "1.2.3",
+      target: {
+        archive: "https://example.invalid/never.tar.gz",
+        cmd: "./cached-bin",
+      },
+      onProgress: (e) => events.push(e),
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("swallows callback exceptions so a throwing subscriber doesn't abort the install", async () => {
+    // Same end-to-end download path as the structured-events test, but
+    // with an onProgress that throws on every call. ensureBinary must
+    // still succeed and produce a working cmd.
+    if (process.platform === "win32") {
+      return;
+    }
+    const stage = await fs.mkdtemp(path.join(os.tmpdir(), "bin-progress-throw-"));
+    try {
+      const payloadDir = path.join(stage, "payload");
+      await fs.mkdir(payloadDir);
+      await fs.writeFile(
+        path.join(payloadDir, "fakebin"),
+        "#!/bin/sh\necho ok\n",
+      );
+      const archive = path.join(stage, "fake-3.0.0.tar.gz");
+      await runCmd("tar", ["-czf", archive, "-C", payloadDir, "fakebin"]);
+      const server = http.createServer((req, res) => {
+        if (req.url !== "/fake-3.0.0.tar.gz") {
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        fs.readFile(archive).then((buf) => {
+          res.setHeader("content-length", String(buf.length));
+          res.end(buf);
+        });
+      });
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      try {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") {
+          throw new Error("no server addr");
+        }
+        const url = `http://127.0.0.1:${addr.port}/fake-3.0.0.tar.gz`;
+        const cmdPath = await ensureBinary({
+          agentId: "throwing-agent",
+          version: "3.0.0",
+          target: { archive: url, cmd: "./fakebin" },
+          onProgress: () => {
+            throw new Error("subscriber boom");
+          },
+        });
+        const st = await fs.stat(cmdPath);
+        expect(st.isFile()).toBe(true);
+      } finally {
+        server.close();
+        await once(server, "close");
+      }
+    } finally {
+      await fs.rm(stage, { recursive: true, force: true });
+    }
   });
 
   it(

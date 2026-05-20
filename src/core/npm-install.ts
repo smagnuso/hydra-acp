@@ -17,12 +17,23 @@ export function setNpmInstallLogger(log: NpmInstallLog | null): void {
   logSink = log ?? ((msg) => process.stderr.write(msg + "\n"));
 }
 
+// Structured per-call progress for npm-distributed agents. npm runs in
+// --silent mode and gives us no byte stream, so we only emit coarse
+// start/done events — the TUI renders these as an indeterminate
+// "Installing <agentId> via npm…" line rather than a percent bar.
+export type NpmInstallProgress =
+  | { phase: "install_start"; agentId: string; version: string; packageSpec: string }
+  | { phase: "installed"; agentId: string; version: string };
+
+export type NpmInstallProgressCallback = (event: NpmInstallProgress) => void;
+
 export interface EnsureNpmPackageArgs {
   agentId: string;
   version: string;
   packageSpec: string;
   bin: string;
   registry?: string;
+  onProgress?: NpmInstallProgressCallback;
 }
 
 // Ensure the npm package for an agent is installed at
@@ -50,9 +61,11 @@ export async function ensureNpmPackage(
   }
   await installInto({
     agentId: args.agentId,
+    version: args.version,
     packageSpec: args.packageSpec,
     installDir,
     registry: args.registry,
+    onProgress: args.onProgress,
   });
   if (!(await fileExists(binPath))) {
     throw new Error(
@@ -64,9 +77,11 @@ export async function ensureNpmPackage(
 
 async function installInto(args: {
   agentId: string;
+  version: string;
   packageSpec: string;
   installDir: string;
   registry?: string;
+  onProgress?: NpmInstallProgressCallback;
 }): Promise<void> {
   await fsp.mkdir(path.dirname(args.installDir), { recursive: true });
   const tempDir = await fsp.mkdtemp(`${args.installDir}.partial-`);
@@ -74,6 +89,12 @@ async function installInto(args: {
     logSink(
       `hydra-acp: installing ${args.packageSpec} for ${args.agentId} into ${tempDir}`,
     );
+    safeEmit(args.onProgress, {
+      phase: "install_start",
+      agentId: args.agentId,
+      version: args.version,
+      packageSpec: args.packageSpec,
+    });
     await runNpmInstall({
       packageSpec: args.packageSpec,
       cwd: tempDir,
@@ -93,16 +114,41 @@ async function installInto(args: {
         await fsp.rm(tempDir, { recursive: true, force: true }).catch(
           () => undefined,
         );
+        safeEmit(args.onProgress, {
+          phase: "installed",
+          agentId: args.agentId,
+          version: args.version,
+        });
         return;
       }
       throw err;
     }
     logSink(`hydra-acp: installed ${args.agentId} to ${args.installDir}`);
+    safeEmit(args.onProgress, {
+      phase: "installed",
+      agentId: args.agentId,
+      version: args.version,
+    });
   } catch (err) {
     await fsp.rm(tempDir, { recursive: true, force: true }).catch(
       () => undefined,
     );
     throw err;
+  }
+}
+
+function safeEmit(
+  cb: NpmInstallProgressCallback | undefined,
+  event: NpmInstallProgress,
+): void {
+  if (!cb) {
+    return;
+  }
+  try {
+    cb(event);
+  } catch {
+    // Progress callbacks are observational; a throwing subscriber
+    // (e.g. a WS connection that closed) must not abort the install.
   }
 }
 

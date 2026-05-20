@@ -14,6 +14,8 @@ import {
   type SessionListUsage,
   type UpdatePromptResult,
   ACP_PROTOCOL_VERSION,
+  AGENT_INSTALL_PROGRESS_METHOD,
+  AgentInstallProgressParams,
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
 import { loadConfig, type HydraConfig } from "../core/config.js";
@@ -181,11 +183,17 @@ async function runSession(
   // hung between the picker closing and screen.start() entering
   // fullscreen. The alternate-screen switch in screen.start() naturally
   // wipes whatever we printed here.
-  const launchLabel =
+  //
+  // The line is also rewritten in-place while a fresh agent's binary or
+  // npm package is being downloaded (see hydra-acp/agent_install_progress
+  // handler below) so the user gets bytes-and-percent feedback during
+  // what would otherwise look like a multi-second hang.
+  const launchLabelBase =
     ctx.sessionId === "__new__"
       ? "Starting new session…"
       : "Resuming session…";
-  term.brightYellow(launchLabel)("\n");
+  const installStatus = createInstallStatusLine(term, launchLabelBase);
+  installStatus.write(launchLabelBase);
 
   const protocol = config.daemon.tls ? "wss" : "ws";
   const wsUrl = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
@@ -218,6 +226,19 @@ async function runSession(
   });
   const conn = new JsonRpcConnection(stream);
   await stream.start();
+
+  // Subscribe BEFORE issuing session/new or session/attach. The daemon
+  // fires hydra-acp/agent_install_progress notifications during those
+  // requests if it has to fetch a binary or npm package — registering
+  // late would miss the first download_start tick. Stopped once the
+  // session is fully attached (see installStatus.finalize() below).
+  conn.onNotification(AGENT_INSTALL_PROGRESS_METHOD, (raw) => {
+    const parsed = AgentInstallProgressParams.safeParse(raw);
+    if (!parsed.success) {
+      return;
+    }
+    installStatus.applyProgress(parsed.data);
+  });
 
   // Buffer rendered events that arrive before the screen is wired up — most
   // importantly, the history replay during session/attach. Once
@@ -1209,6 +1230,10 @@ async function runSession(
   // sessionbar shows tokens/cost immediately on reopen, then merged in
   // place by the usage-update event handler.
   const usage: SessionListUsage = { ...(initialUsage ?? {}) };
+  // The install / attach is done; release the pre-screen status line
+  // before the alt-screen switch so any trailing OSC 9;4 progress
+  // pulse is cleared on terminals that latch it across screens.
+  installStatus.finalize();
   screen.start();
   screen.setSessionbar({
     agent: sessionbarAgent,
@@ -3102,6 +3127,140 @@ function writeDebugLine(payload: Record<string, unknown>): void {
   } catch {
     void 0;
   }
+}
+
+// Single-line, redraw-in-place status indicator used in the pre-screen
+// gap between the picker closing and screen.start() entering the
+// alternate screen. Backs the launch label ("Starting new session…"
+// / "Resuming session…") and overwrites it with live agent-install
+// progress when the daemon fires hydra-acp/agent_install_progress.
+//
+// Implementation notes:
+//   - We never know the previous line's printed width precisely (TTY
+//     line wrap, double-width glyphs), so we redraw by writing CR +
+//     eraseLineAfter + new content rather than counting columns.
+//   - OSC 9;4 (indeterminate pulse: ESC]9;4;3 ST, clear: ESC]9;4;0 ST)
+//     is emitted directly here — Screen.writeProgressIndicator only
+//     fires after .start(), and the install happens before that.
+//     Terminals that don't implement the sequence ignore it silently.
+//   - finalize() is idempotent: calling it after screen.start() (which
+//     wipes the line via alt-screen switch) is a no-op.
+interface InstallStatusLine {
+  write(text: string): void;
+  applyProgress(event: AgentInstallProgressParams): void;
+  finalize(): void;
+}
+
+function createInstallStatusLine(
+  term: termkit.Terminal,
+  baseLabel: string,
+): InstallStatusLine {
+  let finalized = false;
+  let lastText = "";
+  let osc94Active = false;
+
+  const writeOsc94 = (state: 0 | 3): void => {
+    if (finalized) {
+      return;
+    }
+    if (state === 3 && osc94Active) {
+      return;
+    }
+    if (state === 0 && !osc94Active) {
+      return;
+    }
+    osc94Active = state === 3;
+    process.stdout.write(`\x1b]9;4;${state}\x1b\\`);
+  };
+
+  const redraw = (text: string): void => {
+    if (finalized) {
+      return;
+    }
+    // CR + eraseLineAfter() rewrites in place without scrolling. We
+    // intentionally do NOT emit a trailing newline — the line stays
+    // open for the next redraw, then finalize() drops a newline once.
+    process.stdout.write("\r");
+    term.eraseLineAfter();
+    term.brightYellow(text);
+    lastText = text;
+  };
+
+  const formatProgressText = (event: AgentInstallProgressParams): string => {
+    const idVer = `${event.agentId}@${event.version}`;
+    if (event.source === "npm") {
+      if (event.phase === "install_start" || event.phase === "download_start") {
+        return `${baseLabel} installing ${idVer} via npm…`;
+      }
+      if (event.phase === "installed") {
+        return `${baseLabel} ${idVer} installed`;
+      }
+      return `${baseLabel} installing ${idVer} via npm…`;
+    }
+    // binary
+    if (event.phase === "download_start" || event.phase === "download_progress") {
+      const received = event.receivedBytes ?? 0;
+      const total = event.totalBytes ?? 0;
+      const rxMb = (received / 1_000_000).toFixed(1);
+      if (total > 0) {
+        const totalMb = (total / 1_000_000).toFixed(1);
+        const pct = Math.min(100, Math.floor((received / total) * 100));
+        return `${baseLabel} downloading ${idVer} ${rxMb}/${totalMb} MB (${pct}%)`;
+      }
+      return `${baseLabel} downloading ${idVer} ${rxMb} MB`;
+    }
+    if (event.phase === "download_done") {
+      return `${baseLabel} downloaded ${idVer}, verifying…`;
+    }
+    if (event.phase === "extract") {
+      return `${baseLabel} extracting ${idVer}…`;
+    }
+    if (event.phase === "installed") {
+      return `${baseLabel} ${idVer} installed`;
+    }
+    return lastText || baseLabel;
+  };
+
+  return {
+    write(text) {
+      if (finalized) {
+        return;
+      }
+      // First write — no leading CR needed, the cursor is already at
+      // column 1. Match the existing "static label" behavior of writing
+      // a single yellow line without a newline yet.
+      term.brightYellow(text);
+      lastText = text;
+    },
+    applyProgress(event) {
+      if (finalized) {
+        return;
+      }
+      const isActive =
+        event.phase === "download_start" ||
+        event.phase === "download_progress" ||
+        event.phase === "install_start" ||
+        event.phase === "extract" ||
+        event.phase === "download_done";
+      if (isActive) {
+        writeOsc94(3);
+      } else if (event.phase === "installed") {
+        writeOsc94(0);
+      }
+      redraw(formatProgressText(event));
+    },
+    finalize() {
+      if (finalized) {
+        return;
+      }
+      finalized = true;
+      writeOsc94(0);
+      // Drop a newline so anything we print next (or the alt-screen
+      // entry itself) starts on a fresh row rather than concatenating
+      // onto our status line.
+      process.stdout.write("\n");
+    },
+  };
 }
 
 // Single-step rotation: when the log crosses the size cap, rename it to

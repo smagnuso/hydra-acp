@@ -23,7 +23,10 @@ import {
   type SessionListResult,
   JsonRpcErrorCodes,
   ACP_PROTOCOL_VERSION,
+  AGENT_INSTALL_PROGRESS_METHOD,
+  type AgentInstallProgressParams,
 } from "../acp/types.js";
+import type { AgentInstallProgress } from "../core/registry.js";
 import { tokenFromUpgradeRequest, type TokenValidator } from "./auth.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 
@@ -89,6 +92,7 @@ export function registerAcpWsEndpoint(
         title: hydraMeta.name,
         agentArgs: hydraMeta.agentArgs,
         model: hydraMeta.model,
+        onInstallProgress: makeInstallProgressForwarder(connection),
       });
       const client = bindClientToSession(connection, session, state);
       // No conversation history to replay on a fresh session, but
@@ -174,7 +178,10 @@ export function registerAcpWsEndpoint(
           err.code = JsonRpcErrorCodes.SessionNotFound;
           throw err;
         }
-        session = await deps.manager.resurrect(resurrectParams);
+        session = await deps.manager.resurrect({
+          ...resurrectParams,
+          onInstallProgress: makeInstallProgressForwarder(connection),
+        });
       }
       const client = bindClientToSession(
         connection,
@@ -443,6 +450,41 @@ export function registerAcpWsEndpoint(
       return session.forwardRequest(method, rawParams);
     });
   });
+}
+
+// Build a callback that forwards agent install progress events as
+// hydra-acp/agent_install_progress notifications on the originating WS
+// connection. Per-request — each session/new or session/attach handler
+// gets its own forwarder, isolated from any other concurrent install
+// running on the same daemon. Notifies are fire-and-forget; failures
+// (e.g. client already disconnected mid-download) are swallowed so the
+// install itself isn't disrupted.
+//
+// Exported for unit testing — the WS layer is the only production
+// consumer.
+export function makeInstallProgressForwarder(
+  connection: JsonRpcConnection,
+): (event: AgentInstallProgress) => void {
+  return (event) => {
+    const payload: AgentInstallProgressParams = {
+      agentId: event.agentId,
+      version: event.version,
+      source: event.source,
+      phase: event.phase,
+    };
+    if ("receivedBytes" in event) {
+      payload.receivedBytes = event.receivedBytes;
+    }
+    if ("totalBytes" in event) {
+      payload.totalBytes = event.totalBytes;
+    }
+    if ("packageSpec" in event) {
+      payload.packageSpec = event.packageSpec;
+    }
+    void connection
+      .notify(AGENT_INSTALL_PROGRESS_METHOD, payload)
+      .catch(() => undefined);
+  };
 }
 
 // Spec-shaped `modes` payload for session/new and session/attach responses.

@@ -2,7 +2,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import { customAlphabet } from "nanoid";
 import { AgentInstance, type AgentInstanceOptions, type AgentLogger } from "./agent-instance.js";
-import { Registry, planSpawn } from "./registry.js";
+import {
+  Registry,
+  planSpawn,
+  type AgentInstallProgressCallback,
+} from "./registry.js";
 import {
   HYDRA_SESSION_PREFIX,
   Session,
@@ -51,6 +55,12 @@ export interface CreateSessionParams {
   // during bootstrapAgent. Not persisted — resurrect and agent-switch
   // paths don't see it.
   model?: string;
+  // Per-request callback that fires while the agent's binary or npm
+  // package is being fetched. Forwarded to planSpawn; the daemon WS
+  // handler uses it to push hydra-acp/agent_install_progress
+  // notifications back to the originating client, isolated from any
+  // other concurrent install on the same daemon.
+  onInstallProgress?: AgentInstallProgressCallback;
 }
 
 export interface ResurrectParams {
@@ -60,6 +70,10 @@ export interface ResurrectParams {
   cwd: string;
   title?: string;
   agentArgs?: string[];
+  // Per-request callback for agent install progress. See
+  // CreateSessionParams.onInstallProgress. Not persisted — populated
+  // only on the live call from the WS handler.
+  onInstallProgress?: AgentInstallProgressCallback;
   // Snapshot state restored from meta.json so the first attach response
   // can deliver the right model/mode/commands via _meta before the
   // agent re-emits.
@@ -138,6 +152,7 @@ export class SessionManager {
       agentArgs: params.agentArgs,
       mcpServers: params.mcpServers,
       model: params.model,
+      onInstallProgress: params.onInstallProgress,
     });
     const session = new Session({
       cwd: params.cwd,
@@ -212,7 +227,10 @@ export class SessionManager {
       return this.doResurrectFromImport(params);
     }
 
-    const plan = await planSpawn(agentDef, params.agentArgs ?? [], { npmRegistry: this.npmRegistry });
+    const plan = await planSpawn(agentDef, params.agentArgs ?? [], {
+      npmRegistry: this.npmRegistry,
+      onInstallProgress: params.onInstallProgress,
+    });
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
@@ -323,6 +341,7 @@ export class SessionManager {
       cwd,
       agentArgs: params.agentArgs,
       mcpServers: [],
+      onInstallProgress: params.onInstallProgress,
     });
     const session = new Session({
       sessionId: params.hydraSessionId,
@@ -382,6 +401,10 @@ export class SessionManager {
     // Only create() forwards this — the agent-switch and import-reseed
     // callsites omit it so the session stays on its existing model.
     model?: string;
+    // Per-invocation install-progress callback. Only the WS handler
+    // wires this — the in-process /hydra agent-switch path leaves it
+    // undefined and falls back to the daemon-log sink.
+    onInstallProgress?: AgentInstallProgressCallback;
   }): Promise<{
     agent: AgentInstance;
     upstreamSessionId: string;
@@ -398,7 +421,10 @@ export class SessionManager {
       err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
-    const plan = await planSpawn(agentDef, params.agentArgs ?? [], { npmRegistry: this.npmRegistry });
+    const plan = await planSpawn(agentDef, params.agentArgs ?? [], {
+      npmRegistry: this.npmRegistry,
+      onInstallProgress: params.onInstallProgress,
+    });
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,

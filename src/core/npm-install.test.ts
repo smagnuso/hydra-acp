@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { ensureNpmPackage } from "./npm-install.js";
+import { ensureNpmPackage, type NpmInstallProgress } from "./npm-install.js";
 import { paths } from "./paths.js";
 import { currentPlatformKey } from "./binary-install.js";
 
@@ -117,5 +117,92 @@ describe("ensureNpmPackage", () => {
   it("uses a fresh install dir per Node ABI (path keyed by process.versions.modules)", () => {
     const a = paths.agentNpmInstallDir("x", "linux-x86_64", "1.0.0");
     expect(a).toContain(`node${process.versions.modules}`);
+  });
+
+  it("emits install_start then installed via onProgress on a successful install", async () => {
+    // Fake npm that creates the expected bin so ensureNpmPackage's
+    // post-install check passes — we only care about the progress
+    // event sequence here, not the actual install semantics.
+    //
+    // Absolute paths to mkdir/touch/chmod because the surrounding tests
+    // set PATH to a single sandbox dir; without that, the shell builtin
+    // lookup fails and the script silently produces nothing.
+    const fakeNpm = path.join(pathSandbox!, "npm");
+    // Restore /bin:/usr/bin inside the script so mkdir/touch/chmod
+    // resolve — the outer test deliberately scopes PATH to the sandbox
+    // (to prove npm-not-found surfacing), but here we need a working
+    // shell to actually drop the expected bin on disk.
+    await fs.writeFile(
+      fakeNpm,
+      "#!/bin/sh\nexport PATH=/bin:/usr/bin\nmkdir -p node_modules/.bin\ntouch node_modules/.bin/progress-bin\nchmod +x node_modules/.bin/progress-bin\nexit 0\n",
+      { mode: 0o755 },
+    );
+    process.env.PATH = pathSandbox!;
+    const events: NpmInstallProgress[] = [];
+    await ensureNpmPackage({
+      agentId: "progress-pkg",
+      version: "1.0.0",
+      packageSpec: "progress-pkg@1.0.0",
+      bin: "progress-bin",
+      onProgress: (e) => events.push(e),
+    });
+    expect(events.length).toBe(2);
+    expect(events[0]).toMatchObject({
+      phase: "install_start",
+      agentId: "progress-pkg",
+      version: "1.0.0",
+      packageSpec: "progress-pkg@1.0.0",
+    });
+    expect(events[1]).toMatchObject({
+      phase: "installed",
+      agentId: "progress-pkg",
+      version: "1.0.0",
+    });
+  });
+
+  it("does not call onProgress when the bin is already cached", async () => {
+    const platformKey = currentPlatformKey()!;
+    const installDir = paths.agentNpmInstallDir(
+      "cached-pkg",
+      platformKey,
+      "1.0.0",
+    );
+    const binDir = path.join(installDir, "node_modules", ".bin");
+    await fs.mkdir(binDir, { recursive: true });
+    await fs.writeFile(path.join(binDir, "cached-pkg"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+    process.env.PATH = "";
+
+    const events: NpmInstallProgress[] = [];
+    await ensureNpmPackage({
+      agentId: "cached-pkg",
+      version: "1.0.0",
+      packageSpec: "cached-pkg",
+      bin: "cached-pkg",
+      onProgress: (e) => events.push(e),
+    });
+    expect(events).toEqual([]);
+  });
+
+  it("swallows callback exceptions so a throwing subscriber doesn't abort the install", async () => {
+    const fakeNpm = path.join(pathSandbox!, "npm");
+    await fs.writeFile(
+      fakeNpm,
+      "#!/bin/sh\nexport PATH=/bin:/usr/bin\nmkdir -p node_modules/.bin\ntouch node_modules/.bin/boom-bin\nchmod +x node_modules/.bin/boom-bin\nexit 0\n",
+      { mode: 0o755 },
+    );
+    process.env.PATH = pathSandbox!;
+    const binPath = await ensureNpmPackage({
+      agentId: "throwing-pkg",
+      version: "1.0.0",
+      packageSpec: "throwing-pkg@1.0.0",
+      bin: "boom-bin",
+      onProgress: () => {
+        throw new Error("subscriber boom");
+      },
+    });
+    const st = await fs.stat(binPath);
+    expect(st.isFile()).toBe(true);
   });
 });

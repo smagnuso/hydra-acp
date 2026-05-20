@@ -1,10 +1,19 @@
 import { describe, it, expect } from "vitest";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
+import * as path from "node:path";
+import * as os from "node:os";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { homedir } from "node:os";
-import { Registry, planSpawn, type RegistryAgent } from "./registry.js";
+import {
+  Registry,
+  planSpawn,
+  type AgentInstallProgress,
+  type RegistryAgent,
+} from "./registry.js";
 import { paths } from "./paths.js";
+import { currentPlatformKey } from "./binary-install.js";
 import type { HydraConfig } from "./config.js";
 
 const FIXTURE: { agents: RegistryAgent[] } = {
@@ -143,6 +152,139 @@ describe("planSpawn", () => {
     expect(plan.args).toEqual(["-y", "some-pkg@1", "--acp"]);
   });
 
+  it(
+    "forwards binary-install progress through onInstallProgress, tagged with source='binary'",
+    { timeout: 15_000 },
+    async () => {
+      if (process.platform === "win32") {
+        return;
+      }
+      const platformKey = currentPlatformKey();
+      if (!platformKey) {
+        return;
+      }
+      const stage = await fs.mkdtemp(
+        path.join(os.tmpdir(), "planSpawn-progress-"),
+      );
+      try {
+        // Build a tarball at the test fixture location and serve it
+        // over http so planSpawn's binary path actually downloads.
+        const payloadDir = path.join(stage, "payload");
+        await fs.mkdir(payloadDir);
+        await fs.writeFile(
+          path.join(payloadDir, "planbin"),
+          "#!/bin/sh\nexit 0\n",
+        );
+        const archive = path.join(stage, "planspawn-1.0.0.tar.gz");
+        await runArchive("tar", ["-czf", archive, "-C", payloadDir, "planbin"]);
+
+        const server = http.createServer((req, res) => {
+          if (req.url !== "/planspawn-1.0.0.tar.gz") {
+            res.statusCode = 404;
+            res.end();
+            return;
+          }
+          fs.readFile(archive).then((buf) => {
+            res.setHeader("content-length", String(buf.length));
+            res.end(buf);
+          });
+        });
+        server.listen(0, "127.0.0.1");
+        await once(server, "listening");
+        try {
+          const addr = server.address();
+          if (!addr || typeof addr === "string") {
+            throw new Error("no server addr");
+          }
+          const url = `http://127.0.0.1:${addr.port}/planspawn-1.0.0.tar.gz`;
+          const agent: RegistryAgent = {
+            id: "planspawn-binary",
+            name: "PlanSpawn Binary",
+            version: "1.0.0",
+            distribution: {
+              binary: {
+                [platformKey]: { archive: url, cmd: "./planbin" },
+              },
+            },
+          };
+          const events: AgentInstallProgress[] = [];
+          await planSpawn(agent, [], {
+            onInstallProgress: (e) => events.push(e),
+          });
+          // Every event must carry source="binary"; the registry must
+          // never leak a typo'd source onto npm events into the binary
+          // channel or vice versa.
+          expect(events.length).toBeGreaterThan(0);
+          for (const e of events) {
+            expect(e.source).toBe("binary");
+          }
+          const phases = events.map((e) => e.phase);
+          expect(phases[0]).toBe("download_start");
+          expect(phases[phases.length - 1]).toBe("installed");
+        } finally {
+          server.close();
+          await once(server, "close");
+        }
+      } finally {
+        await fs.rm(stage, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("forwards npm-install progress through onInstallProgress, tagged with source='npm'", async () => {
+    // Sandbox a fake `npm` that mimics a successful install. We rely
+    // on PATH manipulation rather than mocking the spawn API so the
+    // actual subprocess plumbing in npm-install runs.
+    //
+    // The global vitest.setup.ts pins HYDRA_ACP_SKIP_NPM_PREFETCH=1 so
+    // most tests get the legacy `npx -y` plan (no actual install).
+    // Override here so planSpawn takes the ensureNpmPackage branch and
+    // emits the progress events we're testing.
+    const sandbox = await fs.mkdtemp(
+      path.join(process.env.HYDRA_ACP_HOME!, "planspawn-npm-"),
+    );
+    const fakeNpm = path.join(sandbox, "npm");
+    // Restore /bin:/usr/bin so mkdir/touch/chmod resolve inside the
+    // script even though the outer PATH is scoped to the sandbox.
+    await fs.writeFile(
+      fakeNpm,
+      "#!/bin/sh\nexport PATH=/bin:/usr/bin\nmkdir -p node_modules/.bin\ntouch node_modules/.bin/planspawn-npm-bin\nchmod +x node_modules/.bin/planspawn-npm-bin\nexit 0\n",
+      { mode: 0o755 },
+    );
+    const originalPath = process.env.PATH;
+    const originalSkip = process.env.HYDRA_ACP_SKIP_NPM_PREFETCH;
+    process.env.PATH = sandbox;
+    delete process.env.HYDRA_ACP_SKIP_NPM_PREFETCH;
+    try {
+      const agent: RegistryAgent = {
+        id: "planspawn-npm",
+        name: "PlanSpawn npm",
+        version: "1.0.0",
+        distribution: {
+          npx: { package: "planspawn-pkg", bin: "planspawn-npm-bin" },
+        },
+      };
+      const events: AgentInstallProgress[] = [];
+      await planSpawn(agent, [], {
+        onInstallProgress: (e) => events.push(e),
+      });
+      expect(events.length).toBeGreaterThan(0);
+      for (const e of events) {
+        expect(e.source).toBe("npm");
+      }
+      const phases = events.map((e) => e.phase);
+      expect(phases).toContain("install_start");
+      expect(phases[phases.length - 1]).toBe("installed");
+    } finally {
+      if (originalPath !== undefined) {
+        process.env.PATH = originalPath;
+      }
+      if (originalSkip !== undefined) {
+        process.env.HYDRA_ACP_SKIP_NPM_PREFETCH = originalSkip;
+      }
+    }
+  });
+
   it("rejects a binary agent that has no target for the current platform", async () => {
     const agent: RegistryAgent = {
       id: "binary-only-windows",
@@ -270,3 +412,17 @@ describe("Registry disk cache", () => {
     }
   });
 });
+
+function runArchive(cmd: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: "ignore" });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${cmd} ${args.join(" ")} exited with code ${code}`));
+    });
+  });
+}

@@ -67,10 +67,41 @@ export function setBinaryInstallLogger(log: BinaryInstallLog | null): void {
   logSink = log ?? ((msg) => process.stderr.write(msg + "\n"));
 }
 
+// Structured per-call progress. Separate from setBinaryInstallLogger
+// (which remains the daemon-log sink for `hydra logs`) so each WS
+// request can route its own download progress to its own client
+// without racing other concurrent installs through a shared global.
+export type BinaryInstallProgress =
+  | {
+      phase: "download_start";
+      agentId: string;
+      version: string;
+      totalBytes: number;
+    }
+  | {
+      phase: "download_progress";
+      agentId: string;
+      version: string;
+      receivedBytes: number;
+      totalBytes: number;
+    }
+  | {
+      phase: "download_done";
+      agentId: string;
+      version: string;
+      receivedBytes: number;
+      totalBytes: number;
+    }
+  | { phase: "extract"; agentId: string; version: string }
+  | { phase: "installed"; agentId: string; version: string };
+
+export type BinaryInstallProgressCallback = (event: BinaryInstallProgress) => void;
+
 export interface EnsureBinaryArgs {
   agentId: string;
   version: string;
   target: BinaryTarget;
+  onProgress?: BinaryInstallProgressCallback;
 }
 
 // Ensure the binary for an agent is present at
@@ -103,8 +134,10 @@ export async function ensureBinary(args: EnsureBinaryArgs): Promise<string> {
   }
   await downloadAndExtract({
     agentId: args.agentId,
+    version: args.version,
     archiveUrl: args.target.archive,
     installDir,
+    onProgress: args.onProgress,
   });
   if (!(await fileExists(cmdPath))) {
     throw new Error(
@@ -119,8 +152,10 @@ export async function ensureBinary(args: EnsureBinaryArgs): Promise<string> {
 
 async function downloadAndExtract(args: {
   agentId: string;
+  version: string;
   archiveUrl: string;
   installDir: string;
+  onProgress?: BinaryInstallProgressCallback;
 }): Promise<void> {
   await fsp.mkdir(path.dirname(args.installDir), { recursive: true });
   const tempDir = await fsp.mkdtemp(`${args.installDir}.partial-`);
@@ -130,8 +165,15 @@ async function downloadAndExtract(args: {
       url: args.archiveUrl,
       dir: tempDir,
       agentId: args.agentId,
+      version: args.version,
+      onProgress: args.onProgress,
     });
     logSink(`hydra-acp: extracting ${args.agentId}`);
+    safeEmit(args.onProgress, {
+      phase: "extract",
+      agentId: args.agentId,
+      version: args.version,
+    });
     await extract(archivePath, tempDir);
     await fsp.unlink(archivePath).catch(() => undefined);
     try {
@@ -147,11 +189,21 @@ async function downloadAndExtract(args: {
         await fsp.rm(tempDir, { recursive: true, force: true }).catch(
           () => undefined,
         );
+        safeEmit(args.onProgress, {
+          phase: "installed",
+          agentId: args.agentId,
+          version: args.version,
+        });
         return;
       }
       throw err;
     }
     logSink(`hydra-acp: installed ${args.agentId} to ${args.installDir}`);
+    safeEmit(args.onProgress, {
+      phase: "installed",
+      agentId: args.agentId,
+      version: args.version,
+    });
   } catch (err) {
     await fsp
       .rm(tempDir, { recursive: true, force: true })
@@ -160,10 +212,28 @@ async function downloadAndExtract(args: {
   }
 }
 
+function safeEmit(
+  cb: BinaryInstallProgressCallback | undefined,
+  event: BinaryInstallProgress,
+): void {
+  if (!cb) {
+    return;
+  }
+  try {
+    cb(event);
+  } catch {
+    // Progress callbacks are observational. A throwing subscriber
+    // (e.g. a WS connection that closed mid-download) must not abort
+    // the install.
+  }
+}
+
 async function downloadTo(args: {
   url: string;
   dir: string;
   agentId: string;
+  version: string;
+  onProgress?: BinaryInstallProgressCallback;
 }): Promise<string> {
   const filename = inferArchiveName(args.url);
   const dest = path.join(args.dir, filename);
@@ -177,19 +247,40 @@ async function downloadTo(args: {
   const out = fs.createWriteStream(dest);
   const nodeStream = Readable.fromWeb(response.body as never);
 
+  safeEmit(args.onProgress, {
+    phase: "download_start",
+    agentId: args.agentId,
+    version: args.version,
+    totalBytes: total,
+  });
+
   let received = 0;
-  let lastEmit = Date.now();
-  // Throttle to one progress line per 2s; chatty enough to feel live in
-  // `hydra logs`, infrequent enough not to flood a 100MB+ download.
-  const EMIT_INTERVAL_MS = 2000;
+  let lastLogEmit = Date.now();
+  let lastCbEmit = 0;
+  // Throttle the daemon-log sink to one line per 2s; chatty enough to feel
+  // live in `hydra logs`, infrequent enough not to flood a 100MB+ download.
+  const LOG_INTERVAL_MS = 2000;
+  // The structured callback flushes far more often (every ~150ms) so the
+  // TUI's percent counter feels live — but still throttled, since a slow
+  // download chunk might fire `data` thousands of times per second.
+  const CB_INTERVAL_MS = 150;
   nodeStream.on("data", (chunk: Buffer) => {
     received += chunk.length;
     const now = Date.now();
-    if (now - lastEmit < EMIT_INTERVAL_MS) {
-      return;
+    if (now - lastCbEmit >= CB_INTERVAL_MS) {
+      lastCbEmit = now;
+      safeEmit(args.onProgress, {
+        phase: "download_progress",
+        agentId: args.agentId,
+        version: args.version,
+        receivedBytes: received,
+        totalBytes: total,
+      });
     }
-    lastEmit = now;
-    logSink(formatProgress(args.agentId, received, total));
+    if (now - lastLogEmit >= LOG_INTERVAL_MS) {
+      lastLogEmit = now;
+      logSink(formatProgress(args.agentId, received, total));
+    }
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -199,6 +290,13 @@ async function downloadTo(args: {
     nodeStream.pipe(out);
   });
   logSink(formatProgress(args.agentId, received, total, /* done */ true));
+  safeEmit(args.onProgress, {
+    phase: "download_done",
+    agentId: args.agentId,
+    version: args.version,
+    receivedBytes: received,
+    totalBytes: total,
+  });
   return dest;
 }
 
