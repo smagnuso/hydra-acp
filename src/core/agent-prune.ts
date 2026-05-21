@@ -88,6 +88,16 @@ export async function pruneStaleAgentVersions(
       if (activeVersions.has(version)) {
         continue;
       }
+      // `${installDir}.partial-XXXXXX` tempdirs are created by
+      // binary-install / npm-install as siblings of the real install
+      // dir while a download is in flight. They look like stale
+      // version dirs from readdir's perspective, but deleting one
+      // under an in-flight write ENOENTs the download mid-stream and
+      // bubbles out as a session-create 500. Leave them to the
+      // installer's own cleanup (success → rename, failure → rm).
+      if (version.includes(".partial-")) {
+        continue;
+      }
       const versionDir = path.join(agentDir, version);
       try {
         await fsp.rm(versionDir, { recursive: true, force: true });

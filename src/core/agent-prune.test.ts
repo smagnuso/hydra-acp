@@ -122,6 +122,27 @@ describe("pruneStaleAgentVersions", () => {
     expect(await exists(stale)).toBe(false);
   });
 
+  it("leaves in-flight .partial- tempdirs alone", async () => {
+    const platformKey = currentPlatformKey();
+    if (!platformKey) {
+      return;
+    }
+    const current = await seedVersion(platformKey, "foo", "2.0.0");
+    const inFlight = await seedVersion(
+      platformKey,
+      "foo",
+      "2.0.0.partial-AbCdEf",
+    );
+
+    await pruneStaleAgentVersions(
+      fakeRegistry([{ id: "foo", version: "2.0.0" }]),
+      { activeAgentVersions: () => new Map() },
+    );
+
+    expect(await exists(current)).toBe(true);
+    expect(await exists(inFlight)).toBe(true);
+  });
+
   it("is a no-op when the agents dir doesn't exist", async () => {
     await expect(
       pruneStaleAgentVersions(
