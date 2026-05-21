@@ -35,6 +35,7 @@ import {
   runAuthRevoke,
 } from "./cli/commands/auth.js";
 import { runShim } from "./shim/proxy.js";
+import { runCat } from "./cli/commands/cat.js";
 import {
   buildTitleFromArgv,
   setHydraProcessTitle,
@@ -146,6 +147,29 @@ async function main(): Promise<void> {
       suppressUpdateNotice = true;
       await runShim({ sessionId, name, agentId: agentIdFromFlag, model });
       return;
+    case "cat": {
+      // Accept -p as a short alias for --prompt inside the cat verb so
+      // the global parser doesn't have to grow short-flag support.
+      const promptFromShort = readShortPrompt(argv);
+      const longPrompt =
+        typeof flags.prompt === "string" ? flags.prompt : undefined;
+      const prompt = promptFromShort ?? longPrompt;
+      const cwd = resolveOption(flags, "cwd");
+      const catOpts: Parameters<typeof runCat>[0] = {
+        prompt,
+        sessionId,
+        name,
+        model,
+        agentId: agentIdFromFlag,
+        detach: flags.detach === true,
+      };
+      if (cwd !== undefined) {
+        catOpts.cwd = cwd;
+      }
+      suppressUpdateNotice = true;
+      await runCat(catOpts);
+      return;
+    }
     case "init":
       await runInit(flags);
       return;
@@ -366,6 +390,26 @@ async function dispatchTui(
   await runTui(tuiOpts);
 }
 
+// Pull a `-p <text>` (or `-p<text>`) value out of argv. Returns the
+// first occurrence's value, or undefined if -p wasn't passed. Walked
+// once in main() for the `cat` verb so we don't have to grow the
+// parser's short-flag surface (which today is long-only).
+function readShortPrompt(argv: string[]): string | undefined {
+  for (let i = 0; i < argv.length; i += 1) {
+    const tok = argv[i];
+    if (tok === undefined) {
+      continue;
+    }
+    if (tok === "-p") {
+      return argv[i + 1];
+    }
+    if (tok.startsWith("-p") && !tok.startsWith("--")) {
+      return tok.slice(2);
+    }
+  }
+  return undefined;
+}
+
 function bareResumeError(): void {
   process.stderr.write(
     "hydra-acp: --resume requires a session id. Use --resume <id> to attach to a specific session, or --reattach to pick the most recent one in cwd.\n",
@@ -394,6 +438,19 @@ function printHelp(): void {
       "  hydra-acp                          Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case)",
       "  hydra-acp shim                     Run as ACP shim explicitly (forces shim mode regardless of TTY)",
       "  hydra-acp tui [opts]               Run the terminal UI explicitly (see below for opts)",
+      "  hydra-acp cat [-p <prompt>] [--session-id <id>] [--detach] [--agent <id>] [--model <id>] [--name <label>]",
+      "                                     Pipe-friendly headless mode. Reads stdin and sends it",
+      "                                     as a prompt to a fresh session, streams the agent's",
+      "                                     response to stdout, exits when stdin closes. A bounded",
+      "                                     input (e.g. `cat file.log | hydra cat -p \"...\"`) goes in",
+      "                                     as one turn; a streaming input (e.g. `tail -f`) is",
+      "                                     chunked by the natural pauses in the writer. -p is an",
+      "                                     optional standing instruction prepended to every chunk;",
+      "                                     if stdin already contains the question, -p is not needed.",
+      "                                     With --session-id, attach to an existing session instead",
+      "                                     of creating a new one. With --detach, the session",
+      "                                     survives in the daemon for slack/browser/notifier",
+      "                                     extensions.",
       "  hydra-acp launch <agent> [agent-args...]",
       "                                     Shim mode, force daemon to spawn <agent>",
       "                                     from the registry. Args after <agent>",

@@ -11,6 +11,7 @@ export interface ParsedArgs {
 // user at --reattach.
 const KNOWN_BOOLEAN_FLAGS = new Set([
   "all",
+  "detach",
   "foreground",
   "help",
   "info",
