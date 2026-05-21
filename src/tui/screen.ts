@@ -251,6 +251,15 @@ export class Screen {
   private rawStdinHandler: (chunk: Buffer) => void;
   private mouseEnabled: boolean;
   private progressIndicatorEnabled: boolean;
+  // Listeners registered on process via installEmergencyCleanup so an
+  // ungraceful exit (SIGTERM, SIGHUP, uncaughtException) still restores
+  // mouse capture / alt-screen / kitty stack / cursor visibility — the
+  // graceful stop() path isn't guaranteed to run in those cases and
+  // would otherwise leave the host terminal wedged.
+  private emergencyCleanupInstalled = false;
+  private onProcessExit: (() => void) | null = null;
+  private onProcessSignal: ((sig: NodeJS.Signals) => void) | null = null;
+  private onProcessUncaught: ((err: Error) => void) | null = null;
   // Last OSC 9;4 state we wrote (3 = indeterminate, 0 = remove). Used to
   // suppress redundant writes when setBanner runs but `status` didn't
   // actually change, and to re-emit on start() if a picker round-trip
@@ -313,6 +322,7 @@ export class Screen {
     }
     this.term.on("resize", this.resizeHandler);
     this.installBracketedPaste();
+    this.installEmergencyCleanup();
     // Re-emit the progress indicator on entry. The OSC 9;4 state is
     // owned by the host terminal, not the alternate screen buffer, so
     // strictly we don't need to re-emit on a clean fullscreen swap —
@@ -340,6 +350,7 @@ export class Screen {
       this.throttledRepaintTimer = null;
     }
     this.uninstallBracketedPaste();
+    this.uninstallEmergencyCleanup();
     this.term.off("key", this.keyHandler);
     if (this.mouseEnabled) {
       this.term.off("mouse", this.mouseHandler);
@@ -406,6 +417,13 @@ export class Screen {
     process.stdout.write("\x1b[>4;0m");
     process.stdout.write("\x1b[>5;0m");
     process.stdout.write("\x1b[<u");
+    // Force normal cursor key mode (DECCKM off) + numeric keypad mode
+    // (DECPAM off). Alt-screen enable enables application cursor mode
+    // on iTerm, which makes arrows send \x1bOA. The picker uses
+    // terminal-kit's osx-256color config which only recognizes \x1b[A,
+    // so without this reset arrows don't reach the picker's key handler.
+    process.stdout.write("\x1b[?1l");
+    process.stdout.write("\x1b>");
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
     };
@@ -419,6 +437,48 @@ export class Screen {
     this.pasteBuffer = "";
   }
 
+  private installEmergencyCleanup(): void {
+    if (this.emergencyCleanupInstalled) {
+      return;
+    }
+    this.emergencyCleanupInstalled = true;
+    this.onProcessExit = () => emergencyTerminalReset();
+    this.onProcessSignal = (sig) => {
+      emergencyTerminalReset();
+      process.off(sig, this.onProcessSignal!);
+      process.kill(process.pid, sig);
+    };
+    this.onProcessUncaught = (err) => {
+      emergencyTerminalReset();
+      process.stderr.write(`\nuncaught: ${err.stack ?? err.message}\n`);
+      process.exit(1);
+    };
+    process.on("exit", this.onProcessExit);
+    process.on("SIGTERM", this.onProcessSignal);
+    process.on("SIGHUP", this.onProcessSignal);
+    process.on("uncaughtException", this.onProcessUncaught);
+  }
+
+  private uninstallEmergencyCleanup(): void {
+    if (!this.emergencyCleanupInstalled) {
+      return;
+    }
+    this.emergencyCleanupInstalled = false;
+    if (this.onProcessExit) {
+      process.off("exit", this.onProcessExit);
+      this.onProcessExit = null;
+    }
+    if (this.onProcessSignal) {
+      process.off("SIGTERM", this.onProcessSignal);
+      process.off("SIGHUP", this.onProcessSignal);
+      this.onProcessSignal = null;
+    }
+    if (this.onProcessUncaught) {
+      process.off("uncaughtException", this.onProcessUncaught);
+      this.onProcessUncaught = null;
+    }
+  }
+
   private handleRawStdin(chunk: Buffer): void {
     // Use 'binary' encoding so each byte maps to a single code unit —
     // important because the paste markers are byte-precise and we need
@@ -426,89 +486,81 @@ export class Screen {
     // content are reassembled by insertText when we hand off the
     // string. (binary preserves the byte sequence; node's binary↔Buffer
     // round-trip is lossless.)
-    let text = chunk.toString("binary");
-    // Modified Enter arrives in one of several shapes:
-    //   Shift+Enter, CSI-u:     \x1b[13;2u
-    //   Shift+Enter, legacy:    \x1b[27;2;13~
-    //   Ctrl+Enter,  CSI-u:     \x1b[13;5u
-    //   Ctrl+Enter,  legacy:    \x1b[27;5;13~
-    //   Ctrl+Enter,  bare:      \x0a (universal — gnome-terminal etc.)
-    // Intercept before terminal-kit sees them — terminal-kit treats
-    // unknown CSI sequences as character runs, which would otherwise
-    // insert literal "[13;2u" etc. into the buffer. Strip the sequence
-    // and emit the corresponding key event. Skipped while a paste is in
-    // progress so the inner segment handler can still see the paste end
-    // marker (and so pasted LFs aren't misinterpreted as Ctrl+Enter).
-    if (!this.pasteActive) {
-      const markers: Array<{ seq: string; name: KeyName }> = [
-        { seq: "\x1b[13;2u", name: "shift-enter" },
-        { seq: "\x1b[27;2;13~", name: "shift-enter" },
-        { seq: "\x1b[13;5u", name: "ctrl-enter" },
-        { seq: "\x1b[27;5;13~", name: "ctrl-enter" },
-        // Bare LF — universal fallback for terminals without
-        // modifyOtherKeys / kitty protocol. Last so the longer escape
-        // sequences match first and we don't double-fire.
-        { seq: "\x0a", name: "ctrl-enter" },
-      ];
-      for (const { seq, name } of markers) {
-        if (text.includes(seq)) {
-          const parts = text.split(seq);
-          for (let i = 0; i < parts.length; i++) {
-            if (parts[i]!.length > 0) {
-              // Recurse so other markers in the same chunk are handled.
-              this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
-            }
-            if (i < parts.length - 1) {
-              this.onKey([{ type: "key", name }]);
-            }
+    const text = chunk.toString("binary");
+    // While a paste is in progress, defer entirely to the segment
+    // handler so the paste-end marker is still detected and LFs inside
+    // pasted content aren't misinterpreted as Ctrl+Enter.
+    if (this.pasteActive) {
+      this.handleRawStdinSegment(text);
+      return;
+    }
+    // Two families of "modified key" sequences leak through terminal-kit
+    // because it doesn't parse them, and would otherwise insert literal
+    // "[13;2u" etc. into the buffer:
+    //   1. Legacy modifyOtherKeys CSI-27 form (e.g. Shift+Enter as
+    //      \x1b[27;2;13~). Fixed-shape; we look for the exact strings.
+    //   2. Kitty keyboard protocol CSI-u form (e.g. ESC alone as
+    //      \x1b[27u, Ctrl+letter as \x1b[99;5u, Alt+Enter as
+    //      \x1b[13;3u). Parameterized; we match a regex and look up
+    //      (codepoint, modifier).
+    // Both get filtered here BEFORE terminal-kit sees them. Unknown
+    // CSI-u sequences are dropped rather than leaked — defense in depth
+    // for kitty-mode keys we haven't mapped yet.
+    const legacyMarkers: Array<{ seq: string; name: KeyName }> = [
+      { seq: "\x1b[27;2;13~", name: "shift-enter" },
+      { seq: "\x1b[27;5;13~", name: "ctrl-enter" },
+      // Bare LF — universal fallback for terminals without
+      // modifyOtherKeys / kitty protocol. Last so the longer escape
+      // sequences match first and we don't double-fire.
+      { seq: "\x0a", name: "ctrl-enter" },
+    ];
+    for (const { seq, name } of legacyMarkers) {
+      if (text.includes(seq)) {
+        const parts = text.split(seq);
+        for (let i = 0; i < parts.length; i++) {
+          if (parts[i]!.length > 0) {
+            this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
           }
-          return;
-        }
-      }
-      // Kitty keyboard protocol level 1 (\x1b[>1u) causes iTerm2 and other
-      // kitty-protocol terminals to send Ctrl+letter as \x1b[{codepoint};5u
-      // instead of the traditional ASCII control byte. terminal-kit doesn't
-      // parse this format and would insert the literal "[99;5u" etc. into the
-      // buffer. Intercept any such sequence here and emit the matching key
-      // event, using the same split-and-recurse pattern as the markers above.
-      const csiUCtrlMap: Record<number, KeyName> = {
-        97: "ctrl-a",
-        98: "ctrl-b",
-        99: "ctrl-c",
-        100: "ctrl-d",
-        101: "ctrl-e",
-        102: "ctrl-f",
-        103: "ctrl-g",
-        107: "ctrl-k",
-        108: "ctrl-l",
-        110: "ctrl-n",
-        111: "ctrl-o",
-        112: "ctrl-p",
-        114: "ctrl-r",
-        115: "ctrl-s",
-        116: "ctrl-t",
-        117: "ctrl-u",
-        118: "ctrl-v",
-        119: "ctrl-w",
-        121: "ctrl-y",
-      };
-      const csiUCtrlRe = /\x1b\[(\d+);5u/;
-      const m = csiUCtrlRe.exec(text);
-      if (m !== null) {
-        const keyName = csiUCtrlMap[parseInt(m[1]!, 10)];
-        if (keyName !== undefined) {
-          const parts = text.split(m[0]);
-          for (let i = 0; i < parts.length; i++) {
-            if (parts[i]!.length > 0)
-              this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
-            if (i < parts.length - 1)
-              this.onKey([{ type: "key", name: keyName }]);
+          if (i < parts.length - 1) {
+            this.onKey([{ type: "key", name }]);
           }
-          return;
         }
+        return;
       }
     }
+    if (text.includes("\x1b[") && /\x1b\[\d+(?:;\d+)?u/.test(text)) {
+      this.handleCsiUStdin(text);
+      return;
+    }
     this.handleRawStdinSegment(text);
+  }
+
+  // Walk `text` extracting every kitty CSI-u sequence. Each non-CSI-u
+  // span is recursed back into handleRawStdin so paste markers and
+  // legacy-modifyOtherKeys sequences in the same chunk still get
+  // handled; each matched CSI-u is mapped to a KeyEvent (or dropped if
+  // unmapped). Caller has already verified at least one match exists.
+  private handleCsiUStdin(text: string): void {
+    const csiU = /\x1b\[(\d+)(?:;(\d+))?u/g;
+    let lastEnd = 0;
+    let m: RegExpExecArray | null;
+    while ((m = csiU.exec(text)) !== null) {
+      if (m.index > lastEnd) {
+        this.handleRawStdin(
+          Buffer.from(text.slice(lastEnd, m.index), "binary"),
+        );
+      }
+      const code = parseInt(m[1]!, 10);
+      const mod = m[2] !== undefined ? parseInt(m[2], 10) : 1;
+      const name = mapCsiUToKeyName(code, mod);
+      if (name !== null) {
+        this.onKey([{ type: "key", name }]);
+      }
+      lastEnd = m.index + m[0].length;
+    }
+    if (lastEnd < text.length) {
+      this.handleRawStdin(Buffer.from(text.slice(lastEnd), "binary"));
+    }
   }
 
   // Inner stdin-segment handler — paste-marker detection and forwarding
@@ -3266,4 +3318,105 @@ function mapKeyName(name: string): KeyName | null {
     default:
       return null;
   }
+}
+
+// Synchronous best-effort restore of every terminal mode the screen
+// enables. Called from process exit handlers — graceful stop() also
+// undoes these, but SIGTERM / SIGHUP / uncaughtException bypass it and
+// would otherwise leave iTerm wedged with mouse capture or kitty stack
+// stuck pushed. Sequences are idempotent: writing them when the mode
+// isn't set is harmless.
+export function emergencyTerminalReset(): void {
+  const seq = [
+    "\x1b[?1000l", // mouse button reporting off
+    "\x1b[?1002l", // mouse drag reporting off
+    "\x1b[?1003l", // mouse any-motion reporting off
+    "\x1b[?1006l", // SGR mouse mode off
+    "\x1b[?1015l", // urxvt mouse mode off
+    "\x1b[?2004l", // bracketed paste off
+    "\x1b[>4;0m", // xterm modifyOtherKeys off
+    "\x1b[>5;0m", // xterm formatOtherKeys off
+    "\x1b[<u", // pop kitty keyboard stack
+    "\x1b[?1l", // DECCKM off: arrows send CSI A/B/C/D not SS3 O A/B/C/D
+    "\x1b>", // DECPAM off: numeric keypad mode
+    "\x1b[?7h", // auto-wrap on
+    "\x1b[?25h", // show cursor
+    "\x1b]9;4;0\x07", // clear OSC 9;4 progress indicator
+    "\x1b[?1049l", // leave alternate screen
+  ].join("");
+  try {
+    process.stdout.write(seq);
+  } catch {
+    // stdout might already be closed — nothing else we can do.
+  }
+}
+
+// Kitty keyboard protocol modifier codes are 1 + bitfield of
+// shift(1) | alt(2) | ctrl(4) | super(8) | hyper(16) | meta(32).
+// We only care about plain (1), shift (2), alt (3), ctrl (5).
+export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
+  const CTRL_LETTERS: Record<number, KeyName> = {
+    97: "ctrl-a",
+    98: "ctrl-b",
+    99: "ctrl-c",
+    100: "ctrl-d",
+    101: "ctrl-e",
+    102: "ctrl-f",
+    103: "ctrl-g",
+    107: "ctrl-k",
+    108: "ctrl-l",
+    110: "ctrl-n",
+    111: "ctrl-o",
+    112: "ctrl-p",
+    114: "ctrl-r",
+    115: "ctrl-s",
+    116: "ctrl-t",
+    117: "ctrl-u",
+    118: "ctrl-v",
+    119: "ctrl-w",
+    121: "ctrl-y",
+  };
+  if (mod === 5) {
+    return CTRL_LETTERS[code] ?? null;
+  }
+  if (code === 27) {
+    return "escape";
+  }
+  if (code === 9) {
+    if (mod === 2) {
+      return "shift-tab";
+    }
+    if (mod === 1) {
+      return "tab";
+    }
+    return null;
+  }
+  if (code === 13) {
+    if (mod === 2) {
+      return "shift-enter";
+    }
+    if (mod === 3) {
+      return "alt-enter";
+    }
+    if (mod === 5) {
+      return "ctrl-enter";
+    }
+    if (mod === 1) {
+      return "enter";
+    }
+    return null;
+  }
+  if (code === 127 && mod === 1) {
+    return "backspace";
+  }
+  if (mod === 3) {
+    if (code === 98 || code === 66) {
+      return "alt-b";
+    }
+    if (code === 102 || code === 70) {
+      return "alt-f";
+    }
+    return null;
+  }
+  return null;
 }

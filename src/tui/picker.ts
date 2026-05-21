@@ -76,6 +76,27 @@ export async function pickSession(
   term: Terminal,
   opts: PickOptions,
 ): Promise<PickerResult> {
+  // Belt-and-suspenders: clear any sticky kitty / mouse / bracketed-paste
+  // state from a previous crashed run (or a previous screen session in
+  // this process) before we start grabbing input. The picker uses
+  // terminal-kit's native parser which can't handle CSI-u sequences, so
+  // leaving kitty pushed makes arrows and ESC misbehave here.
+  //
+  // Also force DECCKM off (\x1b[?1l) and DECPAM off (\x1b>): when the
+  // alternate screen is active, iTerm enables application-cursor-key
+  // mode, in which arrows are sent as \x1bOA/B/C/D instead of
+  // \x1b[A/B/C/D. terminal-kit detects iTerm as osx-256color whose
+  // keymap only recognizes the \x1b[ form, so without this reset the
+  // arrows are dropped as "unknown" sequences and never reach onKey.
+  process.stdout.write("\x1b[<u");
+  process.stdout.write("\x1b[?2004l");
+  process.stdout.write("\x1b[>4;0m");
+  process.stdout.write("\x1b[>5;0m");
+  process.stdout.write("\x1b[?1000l");
+  process.stdout.write("\x1b[?1002l");
+  process.stdout.write("\x1b[?1006l");
+  process.stdout.write("\x1b[?1l");
+  process.stdout.write("\x1b>");
   if (opts.sessions.length === 0) {
     return { kind: "new" };
   }
