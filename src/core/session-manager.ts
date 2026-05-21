@@ -898,6 +898,17 @@ export class SessionManager {
       args.sessionId,
       args.bundle.history as HistoryStoreEntry[],
     );
+    // Stamp the freshly-written history file with the source's last-turn
+    // mtime so AGE on a passive mirror reflects when the conversation
+    // last moved, not when we imported it. Without this, a cold import
+    // of many sessions would show every row as "just now" and reorder
+    // the session list nonsensically.
+    const sourceMtime = new Date(args.bundle.session.updatedAt);
+    if (!Number.isNaN(sourceMtime.getTime())) {
+      await fs
+        .utimes(paths.historyFile(args.sessionId), sourceMtime, sourceMtime)
+        .catch(() => undefined);
+    }
     if (args.bundle.promptHistory && args.bundle.promptHistory.length > 0) {
       await savePromptHistory(
         paths.tuiHistoryFile(args.sessionId),
@@ -921,7 +932,9 @@ export class SessionManager {
         currentUsage: args.bundle.session.currentUsage,
         agentCommands: args.bundle.session.agentCommands,
         createdAt: args.preservedCreatedAt ?? now,
-        updatedAt: now,
+        // Fallback path for historyMtimeIso (used when the history file
+        // is missing). Keep this consistent with the utimes stamp above.
+        updatedAt: args.bundle.session.updatedAt,
       });
     });
   }

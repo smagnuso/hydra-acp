@@ -959,6 +959,8 @@ describe("SessionManager: importBundle", () => {
     machine?: string;
     history?: Array<{ method: string; params: unknown; recordedAt: number }>;
     promptHistory?: string[];
+    createdAt?: string;
+    updatedAt?: string;
   }) {
     return {
       version: 1 as const,
@@ -973,8 +975,8 @@ describe("SessionManager: importBundle", () => {
         agentId: opts.agentId ?? "claude-code",
         cwd: opts.cwd ?? "/work",
         title: opts.title,
-        createdAt: "2026-05-13T00:00:00.000Z",
-        updatedAt: "2026-05-13T00:00:00.000Z",
+        createdAt: opts.createdAt ?? "2026-05-13T00:00:00.000Z",
+        updatedAt: opts.updatedAt ?? "2026-05-13T00:00:00.000Z",
       },
       history: opts.history ?? [],
       ...(opts.promptHistory ? { promptHistory: opts.promptHistory } : {}),
@@ -1037,6 +1039,34 @@ describe("SessionManager: importBundle", () => {
     const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
     expect(record.importedFromMachine).toBe("build-host");
     expect(record.importedFromUpstreamSessionId).toBe("agent-side-xyz");
+  });
+
+  it("stamps history file mtime with the bundle's updatedAt so AGE reflects source activity, not import time", async () => {
+    const manager = noSpawnManager();
+    const sourceUpdatedAt = "2026-05-13T00:00:00.000Z";
+    const result = await manager.importBundle(
+      bundleFor({
+        lineageId: "hydra_lineage_mtime",
+        updatedAt: sourceUpdatedAt,
+      }),
+    );
+    const historyPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "history.jsonl",
+    );
+    const st = await fs.stat(historyPath);
+    expect(new Date(st.mtimeMs).toISOString()).toBe(sourceUpdatedAt);
+
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      result.sessionId,
+      "meta.json",
+    );
+    const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
+    expect(record.updatedAt).toBe(sourceUpdatedAt);
   });
 
   it("preserves origin machine and origin upstream id across --replace", async () => {
