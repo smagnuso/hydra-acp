@@ -951,6 +951,67 @@ export class Screen {
     this.placeCursor();
   }
 
+  // Runtime toggle for terminal mouse capture. With capture on, the
+  // wheel drives scrollback but text selection requires shift+drag
+  // (terminals route mouse events to the app). With capture off, plain
+  // click-drag selects text but the wheel does nothing in the app —
+  // use PgUp/PgDn for scrollback instead. Bound to ^X so users can
+  // flip on demand without a config reload + restart. Idempotent.
+  //
+  // Re-issuing grabInput() reinstalls terminal-kit's own stdin "data"
+  // listener, so we have to redo the same listener swap that
+  // installBracketedPaste() did at startup — otherwise our raw handler
+  // and terminal-kit's both fire for every keystroke (each character
+  // appears twice in the prompt).
+  setMouseEnabled(enabled: boolean): void {
+    if (this.mouseEnabled === enabled) {
+      return;
+    }
+    this.mouseEnabled = enabled;
+    if (!this.started) {
+      return;
+    }
+    if (enabled) {
+      this.term.grabInput({ mouse: "button" });
+      this.term.on("mouse", this.mouseHandler);
+    } else {
+      this.term.off("mouse", this.mouseHandler);
+      this.term.grabInput(true);
+    }
+    this.reclaimStdinAfterGrabInput();
+  }
+
+  // After a grabInput() re-issue, terminal-kit has put its own "data"
+  // listener back on stdin. Pull it back off and reinstall hydra's
+  // rawStdinHandler — keeping the captured terminal-kit handler so our
+  // bracketed-paste extractor can still delegate non-paste bytes to it.
+  // No-op if installBracketedPaste() hasn't run yet (start() does it
+  // before any toggle path can reach here).
+  private reclaimStdinAfterGrabInput(): void {
+    if (this.terminalKitStdinHandler === null) {
+      return;
+    }
+    const t = this.term as unknown as {
+      stdin: NodeJS.ReadableStream;
+      onStdin: (chunk: Buffer) => void;
+    };
+    if (!t.stdin || typeof t.onStdin !== "function") {
+      return;
+    }
+    // Refresh the captured reference — grabInput may have bound a new
+    // closure even if it's functionally equivalent.
+    this.terminalKitStdinHandler = t.onStdin;
+    t.stdin.removeListener("data", t.onStdin);
+    // Defensive: ensure rawStdinHandler isn't doubled either, in case
+    // some future code path re-adds it.
+    t.stdin.removeListener("data", this.rawStdinHandler);
+    t.stdin.on("data", this.rawStdinHandler);
+  }
+
+  isMouseEnabled(): boolean {
+    return this.mouseEnabled;
+  }
+
   // Pushed by the app each onKey tick to reflect prompt-history
   // reverse-search state in the banner — the only place that mode's
   // query is visible. Pass null when not searching.
@@ -3338,6 +3399,8 @@ function mapKeyName(name: string): KeyName | null {
       return "ctrl-v";
     case "CTRL_W":
       return "ctrl-w";
+    case "CTRL_X":
+      return "ctrl-x";
     case "CTRL_Y":
       return "ctrl-y";
     case "ESCAPE":

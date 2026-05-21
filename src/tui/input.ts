@@ -39,6 +39,7 @@ export type KeyName =
   | "ctrl-v"
   | "ctrl-t"
   | "ctrl-w"
+  | "ctrl-x"
   | "ctrl-y"
   | "escape";
 
@@ -90,6 +91,7 @@ export type InputEffect =
   | { type: "switch-session" }
   | { type: "next-live-session" }
   | { type: "toggle-tools" }
+  | { type: "toggle-mouse" }
   | { type: "show-help" }
   // Dispatcher → app: please acquire an image from the named source
   // (currently only the system clipboard) and call addAttachment().
@@ -423,6 +425,8 @@ export class InputDispatcher {
       case "ctrl-w":
         this.killWord();
         return [];
+      case "ctrl-x":
+        return [{ type: "toggle-mouse" }];
       case "ctrl-y":
         this.yank();
         return [];

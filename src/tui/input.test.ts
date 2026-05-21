@@ -82,6 +82,13 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["hi"]);
   });
 
+  it("Ctrl+X emits toggle-mouse without mutating the buffer", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("h"), ch("i")]);
+    expect(feed(d, [k("ctrl-x")])).toEqual([{ type: "toggle-mouse" }]);
+    expect(d.state().buffer).toEqual(["hi"]);
+  });
+
   it("Enter while plan mode on sends with planMode: true", () => {
     const d = new InputDispatcher({ planMode: true });
     feed(d, [ch("x")]);
