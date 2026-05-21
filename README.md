@@ -362,7 +362,9 @@ The service token lives in its own file (`~/.hydra-acp/auth-token`, mode 0600) a
 
 `daemon.sessionRecentMinutes` (default 30) controls how far back `hydra-acp session` (and the `/v1/sessions` REST endpoint without `?all=true`) looks for cold (disk-only) sessions. Set to `0` to never list cold sessions.
 
-`tui.mouse` (default `true`) controls whether the TUI captures mouse events. With capture on, the scroll wheel drives scrollback but selecting text requires `shift+drag` to bypass mouse reporting in your terminal. Set to `false` to disable capture — plain click-drag selects text, but wheel-driven scrollback stops working (use `PgUp` / `PgDn` instead).
+`tui.mouse` (default `false`) controls whether the TUI captures mouse events. With capture off (the default), plain click-drag selects text via your terminal emulator, but wheel-driven scrollback stops working — use `PgUp` / `PgDn` instead. Set to `true` to enable capture, which lets the scroll wheel drive scrollback at the cost of requiring `shift+drag` to select text.
+
+`tui.defaultEnterAction` (default `"amend"`) controls what the unmodified Enter key does in the prompt composer. With `"amend"` (the default), Enter amends the in-flight turn and `Shift+Enter` enqueues a new prompt; with no turn in flight either key just enqueues, since there's nothing to amend. Set to `"enqueue"` to flip the two: Enter enqueues (sends immediately when idle, queues behind an in-flight turn) and `Shift+Enter` amends.
 
 ### Extensions
 

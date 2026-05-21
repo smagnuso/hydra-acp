@@ -29,8 +29,8 @@ export interface ScreenOptions {
   // Cap on logical lines retained in scrollback. Oldest are dropped on
   // overflow. Default 10_000.
   maxScrollbackLines?: number;
-  // When true (default), grabInput captures mouse events so the wheel
-  // can drive scrollback. When false, the wheel does nothing but text
+  // When true, grabInput captures mouse events so the wheel can drive
+  // scrollback. When false (default), the wheel does nothing but text
   // selection works with plain click-drag (no shift required).
   mouse?: boolean;
   // When true (default), emit OSC 9;4 progress-bar codes so the host
@@ -287,7 +287,7 @@ export class Screen {
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
     this.maxScrollbackLines =
       opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
-    this.mouseEnabled = opts.mouse ?? true;
+    this.mouseEnabled = opts.mouse ?? false;
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
     this.readonly = opts.readonly ?? false;
     this.resizeHandler = () => this.repaint();

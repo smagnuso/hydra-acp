@@ -31,11 +31,11 @@ function testConfig(): HydraConfig {
     tui: {
       repaintThrottleMs: 1000,
       maxScrollbackLines: 10_000,
-      mouse: true,
+      mouse: false,
       logMaxBytes: 5 * 1024 * 1024,
       cwdColumnMaxWidth: 24,
       progressIndicator: true,
-      defaultEnterAction: "enqueue" as const,
+      defaultEnterAction: "amend" as const,
     },
   };
 }
@@ -976,11 +976,11 @@ describe("startDaemon — extensions REST lifecycle", () => {
       tui: {
         repaintThrottleMs: 1000,
         maxScrollbackLines: 10_000,
-        mouse: true,
+        mouse: false,
         logMaxBytes: 5 * 1024 * 1024,
         cwdColumnMaxWidth: 24,
         progressIndicator: true,
-        defaultEnterAction: "enqueue" as const,
+        defaultEnterAction: "amend" as const,
       },
     };
     handle = await startDaemon(cfg, TEST_TOKEN);

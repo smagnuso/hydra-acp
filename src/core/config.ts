@@ -48,12 +48,12 @@ const TuiConfig = z.object({
   // buffer. Oldest lines are dropped on overflow. The on-disk session
   // history is unaffected; this only bounds the TUI's local view buffer.
   maxScrollbackLines: z.number().int().positive().default(10_000),
-  // When true (default), the TUI captures mouse events so the wheel can
-  // drive scrollback. The cost: terminals route clicks to the app, so
-  // text selection requires shift+drag to bypass mouse reporting. Set
-  // false to disable capture — wheel scrollback stops working, but
-  // plain click-drag selects text via the terminal emulator.
-  mouse: z.boolean().default(true),
+  // When true, the TUI captures mouse events so the wheel can drive
+  // scrollback. The cost: terminals route clicks to the app, so text
+  // selection requires shift+drag to bypass mouse reporting. Default
+  // false — wheel scrollback stops working, but plain click-drag
+  // selects text via the terminal emulator. Set true to opt back in.
+  mouse: z.boolean().default(false),
   // Size at which the TUI's session/update debug log (tui.log) rotates
   // to tui.log.0 and resets. Bounds on-disk use at ~2x this value.
   logMaxBytes: z.number().int().positive().default(5 * 1024 * 1024),
@@ -68,13 +68,13 @@ const TuiConfig = z.object({
   // just don't want it.
   progressIndicator: z.boolean().default(true),
   // What the unmodified Enter key does in the prompt composer.
-  //   "enqueue" (default) — Enter enqueues the prompt (sends immediately
-  //     when idle, queues behind an in-flight turn); Shift+Enter amends
-  //     the in-flight turn.
-  //   "amend" — flips the two: Enter amends the in-flight turn,
-  //     Shift+Enter enqueues. With no turn in flight either key just
-  //     enqueues, since there's nothing to amend.
-  defaultEnterAction: z.enum(["enqueue", "amend"]).default("enqueue"),
+  //   "amend" (default) — Enter amends the in-flight turn; Shift+Enter
+  //     enqueues. With no turn in flight either key just enqueues,
+  //     since there's nothing to amend.
+  //   "enqueue" — flips the two: Enter enqueues the prompt (sends
+  //     immediately when idle, queues behind an in-flight turn);
+  //     Shift+Enter amends the in-flight turn.
+  defaultEnterAction: z.enum(["enqueue", "amend"]).default("amend"),
 });
 
 const ExtensionName = z
@@ -124,11 +124,11 @@ export const HydraConfig = z.object({
   tui: TuiConfig.default({
     repaintThrottleMs: 1000,
     maxScrollbackLines: 10_000,
-    mouse: true,
+    mouse: false,
     logMaxBytes: 5 * 1024 * 1024,
     cwdColumnMaxWidth: 24,
     progressIndicator: true,
-    defaultEnterAction: "enqueue",
+    defaultEnterAction: "amend",
   }),
 });
 
