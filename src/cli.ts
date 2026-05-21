@@ -36,6 +36,10 @@ import {
 } from "./cli/commands/auth.js";
 import { runShim } from "./shim/proxy.js";
 import {
+  buildTitleFromArgv,
+  setHydraProcessTitle,
+} from "./core/process-title.js";
+import {
   formatUpdateNoticeLine,
   getPendingUpdate,
 } from "./core/update-check.js";
@@ -336,6 +340,12 @@ async function dispatchTui(
     );
     process.exit(2);
   }
+  // Rewrite argv0 so `ps`/`top` show the full command (TUI vs which
+  // session etc.) while `killall hydra` still finds every interactive
+  // hydra process without also killing the daemon. The daemon sets
+  // its own kernel comm name to "hydra-daemon" in runDaemonStart;
+  // setHydraProcessTitle keeps interactive procs anchored at "hydra".
+  setHydraProcessTitle(buildTitleFromArgv(process.argv.slice(2)));
   const { runTui } = await import("./tui/index.js");
   const tuiOpts: Parameters<typeof runTui>[0] = { resume, forceNew, readonly };
   if (base.sessionId !== undefined) {

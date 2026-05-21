@@ -10,6 +10,10 @@ import {
 import { ResilientWsStream } from "./resilient-ws.js";
 import { SessionTracker, type ResumeContext } from "./session-tracker.js";
 import type { MessageStream } from "../acp/framing.js";
+import {
+  buildTitleFromArgv,
+  setHydraProcessTitle,
+} from "../core/process-title.js";
 
 export interface ShimOptions {
   sessionId?: string;
@@ -20,6 +24,13 @@ export interface ShimOptions {
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
+  // Match the TUI's process title so `killall hydra` reaps both the
+  // interactive client and any editor-spawned shim instances, while
+  // leaving "hydra-daemon" untouched. setHydraProcessTitle preserves
+  // the original args in ps so editor-spawned shims are
+  // distinguishable from one another (different cwd / different
+  // session-id / etc.).
+  setHydraProcessTitle(buildTitleFromArgv(process.argv.slice(2)));
   const config = await loadConfig();
   const serviceToken = await ensureServiceToken();
   await ensureDaemonReachable(config);
