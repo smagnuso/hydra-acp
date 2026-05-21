@@ -325,8 +325,19 @@ async function dispatchTui(
   // --reattach is what now triggers "pick most recent in cwd".
   const resume = flags.reattach === true;
   const forceNew = flags.new === true;
+  const readonly = flags.readonly === true;
+  // --readonly opens an existing session as a transcript viewer; it
+  // doesn't make sense without a target. Bare --readonly without a
+  // session id has nothing to view — error so the user uses the
+  // picker's `v` keystroke instead.
+  if (readonly && base.sessionId === undefined) {
+    process.stderr.write(
+      "hydra-acp: --readonly requires a session id. Pass --resume <id> --readonly, or open the picker and press `v` on a session.\n",
+    );
+    process.exit(2);
+  }
   const { runTui } = await import("./tui/index.js");
-  const tuiOpts: Parameters<typeof runTui>[0] = { resume, forceNew };
+  const tuiOpts: Parameters<typeof runTui>[0] = { resume, forceNew, readonly };
   if (base.sessionId !== undefined) {
     tuiOpts.sessionId = base.sessionId;
   }
@@ -404,8 +415,9 @@ function printHelp(): void {
       "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
       "  hydra-acp auth revoke <id>                  Revoke a session token",
-      "  hydra-acp tui flags: [--resume <id>] [--reattach] [--new] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
+      "  hydra-acp tui flags: [--resume <id>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
       "                                     --resume <id> attaches to a specific session; --reattach picks the most-recent in cwd.",
+      "                                     --readonly opens a session as a transcript viewer (no agent spawn, no prompting). Requires --resume.",
       "                                     Smart default (no flags): shows a picker when sessions exist, else new.",
       "  hydra-acp --version                Print version",
       "  hydra-acp --help                   Show this help",

@@ -100,6 +100,17 @@ describe("parseArgs", () => {
     });
   });
 
+  it("treats --readonly as a pure boolean (no slurp)", () => {
+    expect(parseArgs(["--readonly"])).toEqual({
+      positional: [],
+      flags: { readonly: true },
+    });
+    expect(parseArgs(["--readonly", "--resume", "sess_abc"])).toEqual({
+      positional: [],
+      flags: { readonly: true, resume: "sess_abc" },
+    });
+  });
+
   it("still allows --resume <id> to carry a session id", () => {
     // --resume is intentionally NOT in the boolean set so the CLI can
     // distinguish "bare --resume" (which it rejects) from "--resume <id>".

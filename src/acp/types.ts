@@ -118,6 +118,12 @@ export const SessionAttachParams = z.object({
       version: z.string().optional(),
     })
     .optional(),
+  // When true, the connection observes the session but cannot mutate
+  // it: state-changing methods (session/prompt, session/cancel,
+  // session/set_model, etc.) are rejected with -32011, and attaching
+  // to a cold session does not resurrect or spawn an agent — just
+  // streams history from disk. Used by the TUI's view-only mode.
+  readonly: z.boolean().optional(),
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionAttachParams = z.infer<typeof SessionAttachParams>;

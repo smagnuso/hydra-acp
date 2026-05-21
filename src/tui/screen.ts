@@ -38,6 +38,13 @@ export interface ScreenOptions {
   // running (taskbar pulse on Windows Terminal, dock badge on Konsole,
   // etc.). When false, no progress sequences are written.
   progressIndicator?: boolean;
+  // View-only mode. When true: the composer pane is suppressed (all
+  // prompt rows return to scrollback), the OSC window title carries
+  // " [VIEW ONLY]", and a "🔒 read-only" badge appears in the banner.
+  // No keystroke can produce a prompt because the app's onKey gates
+  // dispatcher.feed; the screen-side suppression is what removes the
+  // visual affordance and frees the vertical real-estate.
+  readonly?: boolean;
 }
 
 interface BannerState {
@@ -266,6 +273,12 @@ export class Screen {
   // cleared the host terminal's indicator.
   private lastProgressState: 0 | 3 = 0;
 
+  // View-only mode. Set once at construction. When true, promptRows()
+  // returns 0 (composer collapses, scrollback expands), drawPrompt()
+  // bails before computing layout, and syncWindowTitle() appends
+  // "[VIEW ONLY]" so the chrome makes the mode obvious.
+  private readonly: boolean;
+
   constructor(opts: ScreenOptions) {
     this.term = opts.term;
     this.dispatcher = opts.dispatcher;
@@ -276,6 +289,7 @@ export class Screen {
       opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
     this.mouseEnabled = opts.mouse ?? true;
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
+    this.readonly = opts.readonly ?? false;
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name) => this.handleMouse(name);
@@ -868,9 +882,10 @@ export class Screen {
     const title = this.sessionbar.title?.trim();
     const fallback = shortId(this.sessionbar.sessionId) || "hydra";
     const raw = title && title.length > 0 ? title : fallback;
+    const tagged = this.readonly ? `${raw} [VIEW ONLY]` : raw;
     // Strip control chars (including ESC) so a hostile title can't
     // close the escape sequence early and inject further sequences.
-    const clean = raw.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
+    const clean = tagged.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
     if (clean === this.lastWindowTitle) {
       return;
     }
@@ -1972,6 +1987,13 @@ export class Screen {
       this.drawHelpPrompt();
       return;
     }
+    if (this.readonly) {
+      // View-only mode reserves zero prompt rows (promptRows() returns 0),
+      // so there's nothing to paint — the scrollback already absorbed
+      // those rows. Bail before computing layout so we don't trip over
+      // a zero-height window.
+      return;
+    }
     const w = this.term.width;
     const room = Math.max(1, w - 2);
     const state = this.dispatcher.state();
@@ -2316,6 +2338,11 @@ export class Screen {
     }
     if (this.helpPrompt) {
       return this.helpRows();
+    }
+    if (this.readonly) {
+      // View-only mode: no composer, no prompt area — the rows become
+      // additional scrollback so the user can see more transcript.
+      return 0;
     }
     const w = this.term.width;
     const room = Math.max(1, w - 2);

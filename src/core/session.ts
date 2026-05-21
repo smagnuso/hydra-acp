@@ -57,6 +57,10 @@ export interface AttachedClient {
   clientId: string;
   connection: JsonRpcConnection;
   clientInfo?: { name: string; version?: string };
+  // When true, the daemon refuses any state-changing JSON-RPC method
+  // from this connection (session/prompt, session/cancel, etc.).
+  // Set during session/attach from SessionAttachParams.readonly.
+  readonly?: boolean;
 }
 
 export type CachedNotification = HistoryEntry;

@@ -3,7 +3,7 @@ import type { WebSocket } from "ws";
 import { nanoid } from "nanoid";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
-import { SessionManager } from "../core/session-manager.js";
+import { SessionManager, type ResurrectParams } from "../core/session-manager.js";
 import { Session, type AttachedClient } from "../core/session.js";
 import {
   AmendPromptParams,
@@ -18,6 +18,7 @@ import {
   SessionPromptParams,
   UpdatePromptParams,
   extractHydraMeta,
+  HYDRA_META_KEY,
   mergeMeta,
   type InitializeResult,
   type SessionListResult,
@@ -32,7 +33,18 @@ import { HYDRA_VERSION } from "../core/hydra-version.js";
 
 interface ClientState {
   clientId: string;
-  attached: Map<string, { sessionId: string; clientId: string }>;
+  attached: Map<
+    string,
+    {
+      sessionId: string;
+      clientId: string;
+      // When true, this attachment was made with SessionAttachParams.readonly.
+      // Mutating JSON-RPC methods (session/prompt, session/cancel, etc.)
+      // sent for this sessionId from this connection are rejected with
+      // PermissionDenied (-32011).
+      readonly: boolean;
+    }
+  >;
 }
 
 export interface AcpWsDeps {
@@ -65,10 +77,29 @@ export function registerAcpWsEndpoint(
     connection.onClose(() => {
       for (const att of state.attached.values()) {
         const session = deps.manager.get(att.sessionId);
+        // Viewer attachments have no Session in manager.sessions — the
+        // get() returns undefined and detach is a no-op. Only live and
+        // resurrected sessions actually need the detach call.
         session?.detach(att.clientId);
       }
       state.attached.clear();
     });
+
+    // Refuse mutating JSON-RPC methods on a read-only attachment.
+    // Caller passes the sessionId from the request params; the
+    // per-attachment readonly bit (set during session/attach) decides.
+    // No-op for connections that haven't attached to that session, or
+    // attached non-readonly — existing checks downstream handle those.
+    const denyIfReadonly = (sessionId: string, method: string): void => {
+      const att = state.attached.get(sessionId);
+      if (att?.readonly) {
+        const err = new Error(
+          `${method} not permitted on a read-only attachment`,
+        ) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.PermissionDenied;
+        throw err;
+      }
+    };
 
     connection.onRequest("initialize", async (raw) => {
       InitializeParams.parse(raw ?? {});
@@ -104,6 +135,7 @@ export function registerAcpWsEndpoint(
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
+        readonly: false,
       });
       // Defer until after the response goes out. On session/new the
       // client only learns the new sessionId from the response, so
@@ -139,8 +171,9 @@ export function registerAcpWsEndpoint(
     connection.onRequest("session/attach", async (raw) => {
       const params = SessionAttachParams.parse(raw);
       const hydraHints = extractHydraMeta(params._meta).resume;
+      const readonly = params.readonly === true;
       app.log.info(
-        `session/attach sessionId=${params.sessionId} hasResumeHints=${!!hydraHints}`,
+        `session/attach sessionId=${params.sessionId} hasResumeHints=${!!hydraHints} readonly=${readonly}`,
       );
       // Without explicit hydraHints (the shim's reconnect path provides
       // the canonical id), the session id may have been typed by a human
@@ -151,6 +184,49 @@ export function registerAcpWsEndpoint(
         : (await deps.manager.resolveCanonicalId(params.sessionId)) ??
           params.sessionId;
       let session = deps.manager.get(lookupId);
+      // Read-only viewer path: cold session + readonly=true streams
+      // history from disk without resurrecting an agent. The connection
+      // gets a viewer attachment in state.attached (readonly=true) so
+      // session/detach and onClose cleanup work uniformly, and so
+      // denyIfReadonly is in effect for any subsequent mutating method.
+      // No Session object is created in manager.sessions; the session
+      // stays cold.
+      if (!session && readonly) {
+        const fromDisk = await deps.manager.loadFromDisk(lookupId);
+        if (!fromDisk) {
+          const err = new Error(
+            `session ${params.sessionId} not found`,
+          ) as Error & { code: number };
+          err.code = JsonRpcErrorCodes.SessionNotFound;
+          throw err;
+        }
+        const history = await deps.manager.loadHistory(lookupId);
+        const viewerClientId = params.clientId ?? `cli_${nanoid(8)}`;
+        state.attached.set(fromDisk.hydraSessionId, {
+          sessionId: fromDisk.hydraSessionId,
+          clientId: viewerClientId,
+          readonly: true,
+        });
+        app.log.info(
+          `session/attach OK (viewer) sessionId=${fromDisk.hydraSessionId} clientId=${viewerClientId} attachedCount=${state.attached.size} replayed=${history.length}`,
+        );
+        for (const entry of history) {
+          await connection
+            .notify(entry.method, entry.params)
+            .catch(() => undefined);
+        }
+        return {
+          sessionId: fromDisk.hydraSessionId,
+          clientId: viewerClientId,
+          connectedClients: [viewerClientId],
+          // No Session.attach() ran, so no history policy was applied —
+          // the viewer always gets full history. Report "full" so the
+          // wire shape matches the normal attach response.
+          historyPolicy: "full" as const,
+          replayed: history.length,
+          _meta: buildViewerResponseMeta(fromDisk),
+        };
+      }
       if (!session) {
         // Always consult disk so the resurrected session has its full
         // persisted state (title, snapshot fields, createdAt). When
@@ -200,9 +276,10 @@ export function registerAcpWsEndpoint(
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
+        readonly,
       });
       app.log.info(
-        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} requestedPolicy=${params.historyPolicy} appliedPolicy=${appliedPolicy} replayed=${replay.length}`,
+        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} requestedPolicy=${params.historyPolicy} appliedPolicy=${appliedPolicy} replayed=${replay.length} readonly=${readonly}`,
       );
       for (const note of replay) {
         await connection.notify(note.method, note.params);
@@ -251,6 +328,7 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("session/prompt", async (raw) => {
       const params = SessionPromptParams.parse(raw);
+      denyIfReadonly(params.sessionId, "session/prompt");
       const att = state.attached.get(params.sessionId);
       if (!att) {
         app.log.warn(
@@ -310,6 +388,15 @@ export function registerAcpWsEndpoint(
       if (!att) {
         return;
       }
+      if (att.readonly) {
+        // Notifications have no reply channel — we can't surface the
+        // PermissionDenied error to the client. Log and drop. The
+        // request-shaped variant below does throw.
+        app.log.warn(
+          `session/cancel dropped (readonly attachment) sessionId=${params.sessionId}`,
+        );
+        return;
+      }
       const session = deps.manager.get(params.sessionId);
       if (!session) {
         return;
@@ -326,12 +413,15 @@ export function registerAcpWsEndpoint(
     // request form just gets a null response since cancel itself yields
     // nothing meaningful.
     connection.onRequest("session/cancel", async (raw) => {
+      const params = SessionCancelParams.parse(raw);
+      denyIfReadonly(params.sessionId, "session/cancel");
       handleCancelParams(raw);
       return null;
     });
 
     connection.onRequest("hydra-acp/cancel_prompt", async (raw) => {
       const params = CancelPromptParams.parse(raw);
+      denyIfReadonly(params.sessionId, "hydra-acp/cancel_prompt");
       const session = deps.manager.get(params.sessionId);
       if (!session) {
         const err = new Error(`session ${params.sessionId} not found`) as Error & {
@@ -345,6 +435,7 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("hydra-acp/update_prompt", async (raw) => {
       const params = UpdatePromptParams.parse(raw);
+      denyIfReadonly(params.sessionId, "hydra-acp/update_prompt");
       const session = deps.manager.get(params.sessionId);
       if (!session) {
         const err = new Error(`session ${params.sessionId} not found`) as Error & {
@@ -358,6 +449,7 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("hydra-acp/amend_prompt", async (raw) => {
       const params = AmendPromptParams.parse(raw);
+      denyIfReadonly(params.sessionId, "hydra-acp/amend_prompt");
       const att = state.attached.get(params.sessionId);
       if (!att) {
         const err = new Error("not attached to session") as Error & {
@@ -407,6 +499,7 @@ export function registerAcpWsEndpoint(
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
+        readonly: false,
       });
       for (const note of replay) {
         await connection.notify(note.method, note.params);
@@ -442,6 +535,11 @@ export function registerAcpWsEndpoint(
     // empty), we pass-through with a log line — better to defer to the
     // agent's own validation than block a model id we don't recognize.
     connection.onRequest("session/set_model", async (rawParams) => {
+      const sessionIdField = (rawParams as { sessionId?: unknown } | undefined)
+        ?.sessionId;
+      if (typeof sessionIdField === "string") {
+        denyIfReadonly(sessionIdField, "session/set_model");
+      }
       const decision = decideSetModel(rawParams, deps.manager);
       if (decision.kind === "error") {
         app.log.warn(decision.logMessage);
@@ -491,6 +589,11 @@ export function registerAcpWsEndpoint(
         err.code = JsonRpcErrorCodes.MethodNotFound;
         throw err;
       }
+      // Any unhandled session/* method that reaches the default forwarder
+      // is by definition state-changing (the read-only-safe methods all
+      // have explicit handlers above). Reject for read-only attachments
+      // before forwarding to the agent.
+      denyIfReadonly(sessionId, method);
       const session = deps.manager.get(sessionId);
       if (!session) {
         const err = new Error(`session ${sessionId} not found`) as Error & {
@@ -731,6 +834,46 @@ export function decideSetModel(
     session,
     logMessage: `session/set_model accepted sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)}`,
   };
+}
+
+// Viewer-mode _meta builder. Mirrors buildResponseMeta but reads from the
+// on-disk ResurrectParams shape since no Session instance exists in
+// manager.sessions for a read-only cold attach. Omits live-only fields
+// (turnStartedAt, queue) — there's no agent driving the session so
+// neither is ever populated.
+function buildViewerResponseMeta(
+  fromDisk: ResurrectParams,
+): Record<string, unknown> {
+  const ours: Record<string, unknown> = {
+    upstreamSessionId: fromDisk.upstreamSessionId,
+    agentId: fromDisk.agentId,
+    cwd: fromDisk.cwd,
+  };
+  if (fromDisk.title !== undefined) {
+    ours.name = fromDisk.title;
+  }
+  if (fromDisk.agentArgs && fromDisk.agentArgs.length > 0) {
+    ours.agentArgs = fromDisk.agentArgs;
+  }
+  if (fromDisk.currentModel !== undefined) {
+    ours.currentModel = fromDisk.currentModel;
+  }
+  if (fromDisk.currentMode !== undefined) {
+    ours.currentMode = fromDisk.currentMode;
+  }
+  if (fromDisk.currentUsage !== undefined) {
+    ours.currentUsage = fromDisk.currentUsage;
+  }
+  if (fromDisk.agentCommands && fromDisk.agentCommands.length > 0) {
+    ours.availableCommands = fromDisk.agentCommands;
+  }
+  if (fromDisk.agentModes && fromDisk.agentModes.length > 0) {
+    ours.availableModes = fromDisk.agentModes;
+  }
+  if (fromDisk.agentModels && fromDisk.agentModels.length > 0) {
+    ours.availableModels = fromDisk.agentModels;
+  }
+  return { [HYDRA_META_KEY]: ours };
 }
 
 function buildResponseMeta(session: Session): Record<string, unknown> {

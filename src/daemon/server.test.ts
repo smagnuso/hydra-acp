@@ -564,6 +564,295 @@ describe("startDaemon", () => {
       ws.close();
     });
 
+    describe("read-only attach", () => {
+      async function importColdSession(): Promise<string> {
+        const bundle = {
+          version: 1,
+          exportedAt: "2026-05-13T00:00:00.000Z",
+          exportedFrom: { hydraVersion: "0.1.0", machine: "test-host" },
+          session: {
+            sessionId: "hydra_session_origin_ro",
+            lineageId: "hydra_lineage_readonly_test",
+            agentId: "claude-acp",
+            cwd: "/work",
+            createdAt: "2026-05-13T00:00:00.000Z",
+            updatedAt: "2026-05-13T00:00:00.000Z",
+          },
+          history: [
+            {
+              method: "session/update",
+              params: {
+                sessionId: "hydra_session_origin_ro",
+                update: {
+                  sessionUpdate: "prompt_received",
+                  prompt: [{ type: "text", text: "hello viewer" }],
+                },
+              },
+              recordedAt: 1000,
+            },
+            {
+              method: "session/update",
+              params: {
+                sessionId: "hydra_session_origin_ro",
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { type: "text", text: "hi from history" },
+                },
+              },
+              recordedAt: 2000,
+            },
+          ],
+        };
+        const r = await fetch(`${baseUrl}/v1/sessions/import`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${TEST_TOKEN}`,
+          },
+          body: JSON.stringify({ bundle }),
+        });
+        expect(r.status).toBe(201);
+        const body = (await r.json()) as { sessionId: string };
+        return body.sessionId;
+      }
+
+      async function openWs(): Promise<WebSocket> {
+        const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+        await new Promise<void>((resolve, reject) => {
+          ws.once("open", () => resolve());
+          ws.once("error", reject);
+        });
+        return ws;
+      }
+
+      it("cold session + readonly attaches without resurrecting an agent and streams history as replay", async () => {
+        const sessionId = await importColdSession();
+        // Sanity: the imported session is cold (not in manager.sessions).
+        expect(handle!.manager.get(sessionId)).toBeUndefined();
+
+        const ws = await openWs();
+        const notifications: Array<{ method: string; params: unknown }> = [];
+        const attachResponse = new Promise<{
+          id: number;
+          result: {
+            sessionId: string;
+            replayed: number;
+            historyPolicy: string;
+            _meta?: { "hydra-acp"?: { agentId?: string; cwd?: string } };
+          };
+        }>((resolve) => {
+          ws.on("message", (data) => {
+            const msg = JSON.parse(data.toString("utf8")) as {
+              id?: number;
+              method?: string;
+              params?: unknown;
+              result?: unknown;
+            };
+            if (msg.id === 1 && msg.result) {
+              resolve(msg as never);
+            } else if (msg.method) {
+              notifications.push({
+                method: msg.method,
+                params: msg.params,
+              });
+            }
+          });
+        });
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "session/attach",
+            params: {
+              sessionId,
+              readonly: true,
+              clientInfo: { name: "ro-test" },
+            },
+          }),
+        );
+        const response = await attachResponse;
+        expect(response.result.sessionId).toBe(sessionId);
+        expect(response.result.replayed).toBe(2);
+        expect(response.result.historyPolicy).toBe("full");
+        expect(response.result._meta?.["hydra-acp"]?.agentId).toBe("claude-acp");
+        expect(response.result._meta?.["hydra-acp"]?.cwd).toBe("/work");
+
+        // Crucially: the viewer path did NOT call manager.resurrect, so
+        // no Session is in the manager's live map. That's the core
+        // guarantee — no agent process was spawned to serve this read.
+        expect(handle!.manager.get(sessionId)).toBeUndefined();
+
+        // Give the deferred replay a tick to land on the wire.
+        await new Promise((r) => setTimeout(r, 50));
+        expect(notifications.length).toBe(2);
+        expect(notifications[0]?.method).toBe("session/update");
+        expect(
+          (notifications[0]?.params as { update?: { sessionUpdate?: string } })
+            ?.update?.sessionUpdate,
+        ).toBe("prompt_received");
+        expect(
+          (notifications[1]?.params as { update?: { sessionUpdate?: string } })
+            ?.update?.sessionUpdate,
+        ).toBe("agent_message_chunk");
+
+        ws.close();
+      });
+
+      it("readonly attach rejects session/prompt with PermissionDenied (-32011)", async () => {
+        const sessionId = await importColdSession();
+        const ws = await openWs();
+
+        const attachDone = new Promise<void>((resolve) => {
+          ws.on("message", (data) => {
+            const msg = JSON.parse(data.toString("utf8")) as { id?: number };
+            if (msg.id === 1) {
+              resolve();
+            }
+          });
+        });
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "session/attach",
+            params: { sessionId, readonly: true },
+          }),
+        );
+        await attachDone;
+
+        const promptResponse = new Promise<{
+          id: number;
+          error?: { code: number; message: string };
+        }>((resolve) => {
+          ws.on("message", (data) => {
+            const msg = JSON.parse(data.toString("utf8")) as {
+              id?: number;
+              error?: { code: number; message: string };
+            };
+            if (msg.id === 2) {
+              resolve(msg as never);
+            }
+          });
+        });
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "session/prompt",
+            params: {
+              sessionId,
+              prompt: [{ type: "text", text: "should not reach agent" }],
+            },
+          }),
+        );
+        const response = await promptResponse;
+        expect(response.error?.code).toBe(-32011);
+        expect(response.error?.message).toContain("read-only");
+
+        ws.close();
+      });
+
+      it("readonly attach rejects session/set_model with PermissionDenied", async () => {
+        const sessionId = await importColdSession();
+        const ws = await openWs();
+        const attachDone = new Promise<void>((resolve) => {
+          ws.on("message", (data) => {
+            const msg = JSON.parse(data.toString("utf8")) as { id?: number };
+            if (msg.id === 1) {
+              resolve();
+            }
+          });
+        });
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "session/attach",
+            params: { sessionId, readonly: true },
+          }),
+        );
+        await attachDone;
+
+        const setModelResponse = new Promise<{
+          id: number;
+          error?: { code: number };
+        }>((resolve) => {
+          ws.on("message", (data) => {
+            const msg = JSON.parse(data.toString("utf8")) as {
+              id?: number;
+              error?: { code: number };
+            };
+            if (msg.id === 2) {
+              resolve(msg as never);
+            }
+          });
+        });
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "session/set_model",
+            params: { sessionId, modelId: "claude-opus-4-7" },
+          }),
+        );
+        const response = await setModelResponse;
+        expect(response.error?.code).toBe(-32011);
+
+        ws.close();
+      });
+
+      it("session/detach cleanly tears down a viewer attachment", async () => {
+        const sessionId = await importColdSession();
+        const ws = await openWs();
+        const attachDone = new Promise<void>((resolve) => {
+          ws.on("message", (data) => {
+            const msg = JSON.parse(data.toString("utf8")) as { id?: number };
+            if (msg.id === 1) {
+              resolve();
+            }
+          });
+        });
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "session/attach",
+            params: { sessionId, readonly: true },
+          }),
+        );
+        await attachDone;
+
+        const detachResponse = new Promise<{ id: number; result?: unknown }>(
+          (resolve) => {
+            ws.on("message", (data) => {
+              const msg = JSON.parse(data.toString("utf8")) as {
+                id?: number;
+                result?: unknown;
+              };
+              if (msg.id === 2) {
+                resolve(msg as never);
+              }
+            });
+          },
+        );
+        ws.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "session/detach",
+            params: { sessionId },
+          }),
+        );
+        const response = await detachResponse;
+        expect(response.result).toMatchObject({
+          sessionId,
+          status: "detached",
+        });
+
+        ws.close();
+      });
+    });
+
     it("accepts session/cancel as a request for backward compat", async () => {
       const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
       await new Promise<void>((resolve, reject) => {

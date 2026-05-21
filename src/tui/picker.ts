@@ -28,7 +28,16 @@ import {
 } from "./discovery.js";
 
 export type PickerResult =
-  | { kind: "attach"; sessionId: string; agentId?: string }
+  | {
+      kind: "attach";
+      sessionId: string;
+      agentId?: string;
+      // When true, the caller should attach with TuiOptions.readonly so
+      // the daemon takes the viewer path (cold sessions don't resurrect)
+      // and the TUI hides the composer. Set by the picker's `v`
+      // keystroke; Enter leaves it undefined / false.
+      readonly?: boolean;
+    }
   | { kind: "new" }
   | { kind: "abort" };
 
@@ -56,6 +65,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["PgUp / PgDn", "page up / page down"],
   ["Home / End", "first / last"],
   ["Enter", "open selected session (or create new)"],
+  ["v", "view-only (open transcript without spawning the agent)"],
   null,
   ["/", "search sessions"],
   ["o", "toggle cwd-only filter"],
@@ -772,6 +782,26 @@ export async function pickSession(
           const currentId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
           void refresh(currentId);
+          return;
+        }
+        if ((name === "v" || name === "V") && selectedIdx > 0) {
+          // View-only: attach as a transcript viewer without spawning an
+          // agent. Same shape as the Enter path's attach result but with
+          // readonly:true so the TUI signals the daemon's viewer path.
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          cleanup();
+          const result: PickerResult = {
+            kind: "attach",
+            sessionId: session.sessionId,
+            readonly: true,
+          };
+          if (session.agentId !== undefined) {
+            result.agentId = session.agentId;
+          }
+          resolve(result);
           return;
         }
         if ((name === "k" || name === "K") && selectedIdx > 0) {

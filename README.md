@@ -259,6 +259,20 @@ hydra-acp --name "$BUFFER_NAME" launch claude-acp
 
 After the first user prompt lands, hydra automatically replaces the label with the first line of that prompt (truncated, ≤80 chars) and emits a `session_info_update` so every attached client (TUI, slack, browser) refreshes its header. Agents that emit their own `session_info_update` override that — last write wins.
 
+### Read-only viewer (`--readonly`)
+
+Sometimes you want to scroll through a session's transcript — usually one imported from another machine — without spawning the underlying agent. Pass `--readonly` to `tui` to attach in view-only mode:
+
+```text
+hydra-acp tui --resume <id> --readonly
+```
+
+The daemon enforces the contract: a `readonly: true` attach to a *cold* session takes a viewer path that streams history straight from disk — no `manager.resurrect`, no agent process. Any mutating JSON-RPC method (`session/prompt`, `session/cancel`, `session/set_model`, and the `hydra-acp/*` prompt-mutation methods) sent from a read-only connection is refused with `-32011 PermissionDenied`. History replay and `session/update` deliveries are unchanged, so the existing scrollback search (`^R` when scrolled back) works over the full transcript.
+
+The TUI suppresses the composer entirely — those rows go to scrollback so you see more of the conversation. The window title is suffixed `[VIEW ONLY]` so the mode is unambiguous. Prompt-shaped keys (Enter, Shift+Enter, Shift+Tab) are inert; `^P`, `^G`, `^L`, `^R`, `PgUp/PgDn`, `^C`, `^D` work as usual.
+
+From inside the TUI's session picker, **`v`** on a selected row enters view-only mode for that session. Enter still attaches normally. The mode is per-session: `^P` → pick another with Enter drops out of read-only; `v` re-enters it.
+
 ### Slash commands (typed in any composer)
 
 Slash commands of the form `/hydra <verb> [args]` are intercepted by hydra before the prompt reaches the agent. They never appear in the conversation log; the only client-visible signal is the notification(s) the verb implies.

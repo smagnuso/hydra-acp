@@ -81,6 +81,14 @@ export interface TuiOptions {
   model?: string;
   resume?: boolean;
   forceNew?: boolean;
+  // View-only mode. When true the TUI attaches with readonly:true so
+  // the daemon won't resurrect or spawn an agent (cold session viewer
+  // path) and refuses any state-changing JSON-RPC method from this
+  // connection. The composer is hidden; prompt/cancel/set_model
+  // keystrokes are inert. Per-session — switching to a different
+  // session via the picker drops out of read-only unless that session
+  // was re-selected via the picker's `v` keystroke.
+  readonly?: boolean;
 }
 
 interface SessionContext {
@@ -102,6 +110,25 @@ const STALL_THRESHOLD_MS = 120_000;
 // dynamically per-session so the modal reflects which key enqueues
 // and which amends (see buildHelpEntries) — config.tui.defaultEnterAction
 // flips the meaning.
+// Effects that mutate session state — dropped silently in read-only
+// mode. Everything else (navigation, exit, redraw, scroll, switch-
+// session, search escalation, etc.) passes through so the viewer
+// stays usable. The daemon would refuse these anyway (-32011) if one
+// slipped past the client; this filter just keeps the wire quiet.
+function isReadonlyForbiddenEffect(effect: InputEffect): boolean {
+  switch (effect.type) {
+    case "send":
+    case "amend":
+    case "queue-edit":
+    case "queue-remove":
+    case "plan-toggle":
+    case "attachment-request":
+      return true;
+    default:
+      return false;
+  }
+}
+
 const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+Enter", "newline in prompt"],
   ["Shift+Tab", "cycle agent modes (plan / accept-edits / etc.)"],
@@ -141,7 +168,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // Filled in by runSession as soon as a session is attached/created.
   // Used to print a "To resume: …" hint on the way out so the user
   // doesn't have to dig through `hydra-acp sessions list` to come back.
-  const exitHint: { sessionId?: string } = {};
+  const exitHint: { sessionId?: string; readonly?: boolean } = {};
   let nextOpts: TuiOptions | null = opts;
   while (nextOpts !== null) {
     nextOpts = await runSession(term, config, serviceToken, nextOpts, exitHint);
@@ -158,7 +185,10 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   }
   if (exitHint.sessionId) {
     const short = stripHydraSessionPrefix(exitHint.sessionId);
-    process.stdout.write(`To resume: hydra-acp tui --resume ${short}\n`);
+    const flags = exitHint.readonly ? " --readonly" : "";
+    process.stdout.write(
+      `To resume: hydra-acp tui --resume ${short}${flags}\n`,
+    );
   }
 }
 
@@ -167,7 +197,7 @@ async function runSession(
   config: HydraConfig,
   serviceToken: string,
   opts: TuiOptions,
-  exitHint: { sessionId?: string },
+  exitHint: { sessionId?: string; readonly?: boolean },
 ): Promise<TuiOptions | null> {
   const ctx = await resolveSession(term, config, serviceToken, opts);
   if (!ctx) {
@@ -898,6 +928,7 @@ async function runSession(
       ownClientId = created.clientId;
     }
     exitHint.sessionId = resolvedSessionId;
+    exitHint.readonly = false;
     const hydraMeta = extractHydraMeta(created._meta ?? undefined);
     upstreamSessionId = hydraMeta.upstreamSessionId;
     if (hydraMeta.agentId) {
@@ -925,6 +956,7 @@ async function runSession(
       sessionId: ctx.sessionId,
       historyPolicy: "full",
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
+      ...(opts.readonly === true ? { readonly: true } : {}),
     })) as {
       sessionId: string;
       clientId?: string;
@@ -935,6 +967,7 @@ async function runSession(
       ownClientId = attached.clientId;
     }
     exitHint.sessionId = resolvedSessionId;
+    exitHint.readonly = opts.readonly === true;
     const hydraMeta = extractHydraMeta(attached._meta ?? undefined);
     upstreamSessionId = hydraMeta.upstreamSessionId;
     if (hydraMeta.agentId) {
@@ -991,6 +1024,7 @@ async function runSession(
     maxScrollbackLines: config.tui.maxScrollbackLines,
     mouse: config.tui.mouse,
     progressIndicator: config.tui.progressIndicator,
+    readonly: opts.readonly === true,
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
         if (pendingPermission && tryHandlePermissionKey(ev)) {
@@ -1017,6 +1051,20 @@ async function runSession(
         }
         const effects = dispatcher.feed(ev);
         for (const effect of effects) {
+          // Read-only mode: drop effects that mutate session state
+          // (send, amend, queue-edit/remove, plan-toggle,
+          // attachment-request). Navigation, search, exit, redraw,
+          // ^P switch-session, ^T next-live, ^R escalate-search,
+          // ^D exit, ^C cancel — all pass through. The dispatcher
+          // still owns text accumulation for its internal buffer,
+          // but since the composer never renders (promptRows()
+          // returns 0 in readonly mode), the typed characters are
+          // invisible and the user can't fire send anyway. The
+          // daemon's deny check is the safety net for any effect
+          // that does slip through to a state-changing JSON-RPC.
+          if (opts.readonly === true && isReadonlyForbiddenEffect(effect)) {
+            continue;
+          }
           handleEffect(effect);
         }
       }
@@ -1498,13 +1546,19 @@ async function runSession(
     if (choice.kind === "new") {
       const { sessionId: _drop, ...rest } = opts;
       void _drop;
-      resume({ ...rest, cwd: resolvedCwd, forceNew: true });
+      // Fresh session is never read-only; explicitly clear so a viewer
+      // that pressed ^P → New doesn't inherit readonly into the new
+      // session's WS attach.
+      resume({ ...rest, cwd: resolvedCwd, forceNew: true, readonly: false });
       return;
     }
+    // Read-only is per-session; default off on a picker-driven switch.
+    // The picker's `v` keystroke is the only way to re-enter read-only.
     const nextOpts: TuiOptions = {
       ...opts,
       sessionId: choice.sessionId,
       cwd: resolvedCwd,
+      readonly: choice.readonly === true,
     };
     if (choice.agentId !== undefined) {
       nextOpts.agentId = choice.agentId;
@@ -1525,7 +1579,15 @@ async function runSession(
     finishSession = null;
     process.off("SIGINT", sigintHandler);
     void stream.close().catch(() => undefined);
-    const nextOpts: TuiOptions = { ...opts, sessionId: next.sessionId, cwd: resolvedCwd };
+    // ^T cycles to another live session. Live sessions are by
+    // definition agent-bound, so dropping any pending readonly state
+    // matches what the user expects when bouncing between active work.
+    const nextOpts: TuiOptions = {
+      ...opts,
+      sessionId: next.sessionId,
+      cwd: resolvedCwd,
+      readonly: false,
+    };
     if (next.agentId !== undefined)
       nextOpts.agentId = next.agentId;
     resume(nextOpts);
@@ -3085,6 +3147,12 @@ async function resolveSession(
   if (choice.kind === "new") {
     return newCtx(opts, cwd, config);
   }
+  // Propagate the picker's view-only choice (set by `v`) onto opts so
+  // the WS attach payload picks it up. The runtime opts is the same
+  // object referenced by the attach call later in runSession — without
+  // this mutation, first-launch `v` opens non-readonly even though the
+  // picker returned readonly:true.
+  opts.readonly = choice.readonly === true;
   return {
     sessionId: choice.sessionId,
     agentId: choice.agentId ?? "",

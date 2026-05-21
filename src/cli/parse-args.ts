@@ -17,6 +17,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "json",
   "new",
   "reattach",
+  "readonly",
   "replace",
   "rotate-token",
   "version",

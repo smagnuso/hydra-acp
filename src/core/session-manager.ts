@@ -617,6 +617,14 @@ export class SessionManager {
     return this.histories.load(sessionId).catch(() => []);
   }
 
+  // Read the on-disk history.jsonl for a session without constructing a
+  // Session instance. Used by the daemon's read-only viewer attach path
+  // (cli/src/daemon/acp-ws.ts) to stream replay events to a client for
+  // a cold session without spawning an agent.
+  async loadHistory(sessionId: string): Promise<HistoryStoreEntry[]> {
+    return this.histories.load(sessionId);
+  }
+
   async loadFromDisk(sessionId: string): Promise<ResurrectParams | undefined> {
     const record = await this.store.read(sessionId);
     if (!record) {
