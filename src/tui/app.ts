@@ -35,6 +35,7 @@ import {
 } from "./history.js";
 import { listSessions, pickMostRecent } from "./discovery.js";
 import { pickSession, type PickerResult } from "./picker.js";
+import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { formatElapsed, Screen } from "./screen.js";
 import {
   InputDispatcher,
@@ -95,6 +96,15 @@ interface SessionContext {
   sessionId: string;
   agentId: string;
   cwd: string;
+  // First-launch-on-this-machine for an imported session: the user
+  // picked a local cwd via promptForImportCwd. We forward a full resume
+  // hint on the initial session/attach so the daemon takes the
+  // import-resurrect path (upstreamSessionId === "") with that cwd
+  // instead of silently falling back to $HOME via resolveImportCwd.
+  importAttachHint?: {
+    agentId: string;
+    cwd: string;
+  };
 }
 
 // How long the upstream may be silent (no session/update arrivals)
@@ -149,6 +159,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^R / ^S", "history reverse / forward search"],
   ["PgUp / PgDn", "scroll scrollback"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
+  ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
   null,
   ["^C", "cancel turn (twice to exit)"],
   ["Esc", "cancel turn and prefill draft"],
@@ -957,6 +968,24 @@ async function runSession(
       historyPolicy: "full",
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
       ...(opts.readonly === true ? { readonly: true } : {}),
+      // Forward the user-chosen cwd for first-launch imported sessions
+      // via a full resume hint. upstreamSessionId is empty so the
+      // daemon routes through doResurrectFromImport (session-manager.ts)
+      // with the user-supplied cwd instead of silently falling back to
+      // $HOME in resolveImportCwd.
+      ...(ctx.importAttachHint !== undefined
+        ? {
+            _meta: {
+              [HYDRA_META_KEY]: {
+                resume: {
+                  upstreamSessionId: "",
+                  agentId: ctx.importAttachHint.agentId,
+                  cwd: ctx.importAttachHint.cwd,
+                },
+              },
+            },
+          }
+        : {}),
     })) as {
       sessionId: string;
       clientId?: string;
@@ -1725,6 +1754,16 @@ async function runSession(
         toolsExpanded = !toolsExpanded;
         renderToolsBlock();
         return;
+      case "toggle-mouse": {
+        const next = !screen.isMouseEnabled();
+        screen.setMouseEnabled(next);
+        screen.notify(
+          next
+            ? "mouse capture on — wheel scrolls; shift+drag to select text"
+            : "mouse capture off — click-drag selects text; PgUp/PgDn scrolls",
+        );
+        return;
+      }
       case "show-help":
         toggleHelpModal();
         return;
@@ -3153,6 +3192,32 @@ async function resolveSession(
   // this mutation, first-launch `v` opens non-readonly even though the
   // picker returned readonly:true.
   opts.readonly = choice.readonly === true;
+  // First-launch-on-this-machine for an imported session: the cwd on
+  // disk usually points at a path that exists only on the source
+  // machine. Without intervention the daemon would silently fall back
+  // to $HOME (see session-manager.ts resolveImportCwd). Prompt the user
+  // for a local cwd up front; we'll forward it via _meta.resume.cwd on
+  // session/attach so the daemon honors it during the first resurrect.
+  // Predicate matches picker.ts filterByHost's "<host>" bucket.
+  const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
+  const isImportedFirstLaunch =
+    chosen !== undefined &&
+    !!chosen.importedFromMachine &&
+    !chosen.upstreamSessionId &&
+    !opts.readonly;
+  if (isImportedFirstLaunch) {
+    const promptedCwd = await promptForImportCwd(term, chosen);
+    if (promptedCwd === null) {
+      return null;
+    }
+    const agentId = choice.agentId ?? chosen.agentId ?? "";
+    return {
+      sessionId: choice.sessionId,
+      agentId,
+      cwd: promptedCwd,
+      importAttachHint: { agentId, cwd: promptedCwd },
+    };
+  }
   return {
     sessionId: choice.sessionId,
     agentId: choice.agentId ?? "",
