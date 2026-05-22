@@ -17,6 +17,7 @@ import type {
   KeyEvent,
   KeyName,
 } from "./input.js";
+import { withSync } from "./sync.js";
 
 export interface ScreenOptions {
   term: Terminal;
@@ -933,8 +934,31 @@ export class Screen {
   setBanner(banner: Partial<BannerState>): void {
     this.banner = { ...this.banner, ...banner };
     this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
-    this.drawBanner();
-    this.placeCursor();
+    this.syncedPartialRepaint(() => this.drawBanner());
+  }
+
+  // Wrap a partial repaint (banner-only, indicator-only, etc.) in a
+  // synchronized-output bracket so the row swap is atomic on terminals
+  // that support DEC 2026, and hide the cursor across the paint so it
+  // doesn't visibly jump to the row being repainted before placeCursor
+  // snaps it back. placeCursor re-asserts visibility for normal /
+  // scrollback-search / readonly; modal modes only moveTo, so we
+  // re-show explicitly when one of them is active.
+  private syncedPartialRepaint(paint: () => void): void {
+    // Mirrors paintRow's started-guard: a stale timer tick (banner
+    // elapsed-time, notification timeout) firing after stop() must not
+    // bleed BSU / ESU sequences to the host shell.
+    if (!this.started) {
+      return;
+    }
+    withSync(() => {
+      this.term.hideCursor();
+      paint();
+      this.placeCursor();
+      if (this.permissionPrompt || this.confirmPrompt || this.helpPrompt) {
+        this.term.hideCursor(false);
+      }
+    });
   }
 
   currentModeId(): string | undefined {
@@ -976,11 +1000,9 @@ export class Screen {
     this.bannerNotificationTimer = setTimeout(() => {
       this.bannerNotification = null;
       this.bannerNotificationTimer = null;
-      this.drawBanner();
-      this.placeCursor();
+      this.syncedPartialRepaint(() => this.drawBanner());
     }, durationMs);
-    this.drawBanner();
-    this.placeCursor();
+    this.syncedPartialRepaint(() => this.drawBanner());
   }
 
   // Runtime toggle for terminal mouse capture. With capture on, the
@@ -1052,8 +1074,7 @@ export class Screen {
       return;
     }
     this.bannerSearchIndicator = text;
-    this.drawBanner();
-    this.placeCursor();
+    this.syncedPartialRepaint(() => this.drawBanner());
   }
 
   // Computes what (if anything) the right-side banner slot should show
@@ -1256,19 +1277,23 @@ export class Screen {
   // otherwise an in-place prompt redraw is enough. (Queued-zone changes
   // already trigger a full repaint via setQueuedPrompts.) Queue-edit
   // navigation may also change which queued row is marked, so check
-  // for that and redraw just that zone in-place.
+  // for that and redraw just that zone in-place. Wrap the per-keystroke
+  // paint in withSync + hide the cursor so the user doesn't see it walk
+  // across the prompt row each frame before snapping back to the typing
+  // position; placeCursor + hideCursor(false) restore it at the end.
   refreshPrompt(): void {
     if (this.promptRows() !== this.lastPromptRows) {
       this.repaint();
       return;
     }
-    const editingIndex = this.dispatcher.state().queueIndex;
-    if (editingIndex !== this.lastQueueEditingIndex) {
-      this.lastQueueEditingIndex = editingIndex;
-      this.drawQueuedZone();
-    }
-    this.drawPrompt();
-    this.placeCursor();
+    this.syncedPartialRepaint(() => {
+      const editingIndex = this.dispatcher.state().queueIndex;
+      if (editingIndex !== this.lastQueueEditingIndex) {
+        this.lastQueueEditingIndex = editingIndex;
+        this.drawQueuedZone();
+      }
+      this.drawPrompt();
+    });
   }
 
   private handleKey(name: string, data: { isCharacter?: boolean }): void {
@@ -1659,10 +1684,20 @@ export class Screen {
   }
 
   // Funnel for every row that any drawX method renders. Skips emitting
-  // moveTo+eraseLineAfter+paint when the row's signature matches the
-  // previous frame's. The signature must capture everything that affects
-  // visible output for that row (width, FormattedLine fields, banner
-  // state, etc.) so identical sigs guarantee identical bytes.
+  // moveTo + paint when the row's signature matches the previous frame's.
+  // The signature must capture everything that affects visible output for
+  // that row (width, FormattedLine fields, banner state, etc.) so
+  // identical sigs guarantee identical bytes.
+  //
+  // Order matters: we move, draw the new content over the old, reset SGR,
+  // then erase from the cursor to end of line. Erasing BEFORE paint
+  // blanks the whole row first — visible as a per-row flash on banner
+  // ticks and single-char prompt edits, since some terminals still
+  // render incrementally inside DEC 2026 brackets. Overwriting first
+  // and erasing only the trailing leftovers means the row is never
+  // blank mid-frame. The styleReset stops the trailing erase from
+  // inheriting the paint's last SGR (a bgBlue selection slice, etc.)
+  // and painting the rest of the line in that colour.
   private paintRow(row: number, signature: string, paint: () => void): void {
     if (!this.started) {
       return;
@@ -1674,8 +1709,10 @@ export class Screen {
       return;
     }
     this.lastFrameRows.set(row, signature);
-    this.term.moveTo(1, row).eraseLineAfter();
+    this.term.moveTo(1, row);
     paint();
+    this.term.styleReset();
+    this.term.eraseLineAfter();
   }
 
   private repaint(): void {
@@ -1701,35 +1738,42 @@ export class Screen {
       this.lastFrameW = w;
       this.lastFrameH = h;
     }
-    // Don't call term.clear() here. Each draw* method moves to its row
-    // and emits eraseLineAfter before writing, so every row is overwritten
-    // anyway. The full-screen clear caused a visible black-flash flicker
-    // on each repaint because there's a non-trivial gap between clearing
-    // and the first row write. (Fullscreen alternate-screen mode means
-    // the buffer starts clean; resize triggers a repaint that covers all
-    // rows in the new size.)
-    this.drawScrollback();
-    this.drawCompletionZone();
-    this.drawQueuedZone();
-    this.drawAttachmentChipZone();
-    const promptRows = this.promptRows();
-    // Stacking from the bottom:
-    //   row h            sessionbar
-    //   row h-1          separator (between banner and sessionbar)
-    //   row h-2          banner
-    //   rows above       prompt (promptRows tall)
-    //   row above prompt separator
-    // Total bottom reservation = promptRows + 2*SEPARATOR_ROWS +
-    // BANNER_ROWS + SESSIONBAR_ROWS.
-    const separatorAbovePromptRow =
-      h - promptRows - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
-    this.drawSeparator(separatorAbovePromptRow);
-    this.drawPrompt();
-    this.drawBanner();
-    this.drawSeparator(h - SESSIONBAR_ROWS);
-    this.drawSessionbar();
-    this.placeCursor();
-    this.lastPromptRows = promptRows;
+    // Wrap the whole frame in DEC 2026 synchronized output so terminals
+    // that support it commit every row change atomically. Big repaints
+    // (resize, /clear, scrollback scroll, modal open/close) used to land
+    // as a row-by-row waterfall; with this bracket they appear as one
+    // frame. Unsupported terminals discard the sequence harmlessly.
+    withSync(() => {
+      // Don't call term.clear() here. Each draw* method moves to its row
+      // and emits eraseLineAfter before writing, so every row is
+      // overwritten anyway. The full-screen clear caused a visible
+      // black-flash flicker on each repaint because there's a non-trivial
+      // gap between clearing and the first row write. (Fullscreen
+      // alternate-screen mode means the buffer starts clean; resize
+      // triggers a repaint that covers all rows in the new size.)
+      this.drawScrollback();
+      this.drawCompletionZone();
+      this.drawQueuedZone();
+      this.drawAttachmentChipZone();
+      const promptRows = this.promptRows();
+      // Stacking from the bottom:
+      //   row h            sessionbar
+      //   row h-1          separator (between banner and sessionbar)
+      //   row h-2          banner
+      //   rows above       prompt (promptRows tall)
+      //   row above prompt separator
+      // Total bottom reservation = promptRows + 2*SEPARATOR_ROWS +
+      // BANNER_ROWS + SESSIONBAR_ROWS.
+      const separatorAbovePromptRow =
+        h - promptRows - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+      this.drawSeparator(separatorAbovePromptRow);
+      this.drawPrompt();
+      this.drawBanner();
+      this.drawSeparator(h - SESSIONBAR_ROWS);
+      this.drawSessionbar();
+      this.placeCursor();
+      this.lastPromptRows = promptRows;
+    });
   }
 
   private drawSessionbar(): void {

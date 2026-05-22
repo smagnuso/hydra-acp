@@ -38,6 +38,7 @@ import {
   mapKeyName,
   type PromptVisualRow,
 } from "./screen.js";
+import { withSync } from "./sync.js";
 
 export type PickerResult =
   | {
@@ -89,7 +90,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["Composer", "type prompt for new session; Enter creates + submits"],
   ["↓ from composer", "drop focus into session list"],
   null,
-  ["↑ / ↓ or n / p", "navigate sessions"],
+  ["↑ / ↓, n / p, ^p / ^n", "navigate sessions"],
   ["PgUp / PgDn", "page up / page down"],
   ["Home / End", "first / last"],
   ["Enter", "open selected session"],
@@ -284,8 +285,16 @@ export async function pickSession(
     const reserved = 6 + composerRows;
     const maxViewportRows = Math.max(3, termHeight - reserved);
     viewportSize = Math.min(visible.length, maxViewportRows);
-    headerLine = formatRow(HEADER, widths, rowMaxWidth, cwdMaxWidth);
-    sessionLines = rows.map((r) => formatRow(r, widths, rowMaxWidth, cwdMaxWidth));
+    // Pad header / session lines to rowMaxWidth so paintSessionRow and the
+    // header paint can overwrite the previous frame without an
+    // eraseLineAfter. Without padding, a shorter new row would leave
+    // stale glyphs from the prior frame.
+    headerLine = formatRow(HEADER, widths, rowMaxWidth, cwdMaxWidth).padEnd(
+      rowMaxWidth,
+    );
+    sessionLines = rows.map((r) =>
+      formatRow(r, widths, rowMaxWidth, cwdMaxWidth).padEnd(rowMaxWidth),
+    );
   };
 
   // After the underlying session list changed (kill / delete), rebuild
@@ -450,46 +459,47 @@ export async function pickSession(
 
   // Paint just the indicator row in whatever style matches the current
   // mode. Used by every state transition that doesn't redraw the whole
-  // picker (most navigation, confirm/cancel, transient hints).
+  // picker (most navigation, confirm/cancel, transient hints). Content
+  // length varies (search hint, transient status), so we still have to
+  // clear leftover chars — but doing the erase AFTER paint (rather than
+  // before) means the row is never blanked mid-frame.
   const paintIndicator = (): void => {
-    term.moveTo(1, indicatorRow()).eraseLineAfter();
-    if (mode === "confirm-kill" && pendingAction) {
-      term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
-      return;
-    }
-    if (mode === "confirm-delete" && pendingAction) {
-      term.brightRed.noFormat(`  delete ${shortId(pendingAction.sessionId)}? [y/N]`);
-      return;
-    }
-    if (mode === "busy" && pendingAction) {
-      term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
-      return;
-    }
-    if (mode === "rename" && pendingAction) {
-      term.brightYellow.noFormat(`  title: ${renameBuffer}`);
-      term.bgBrightYellow(" ");
-      term.dim.noFormat("  Enter saves · Esc cancels");
-      return;
-    }
-    if (transientStatus !== null) {
-      term.dim.noFormat(`  ${transientStatus}`);
-      return;
-    }
-    if (searchActive) {
-      // Search line is anchored to the bottom of the picker so it stays
-      // visible regardless of how the session list scrolls above. ^c
-      // exits and clears the filter. A trailing block cursor reinforces
-      // that the line accepts input.
-      term.brightYellow.noFormat(`  /${searchTerm}`);
-      term.bgBrightYellow(" ");
-      const hint =
-        visible.length === 0
-          ? " no matches"
-          : ` ${visible.length} match${visible.length === 1 ? "" : "es"}`;
-      term.dim.noFormat(`${hint} · ^c clears`);
-      return;
-    }
-    term.dim.noFormat(formatIndicator());
+    withSync(() => {
+      term.moveTo(1, indicatorRow());
+      if (mode === "confirm-kill" && pendingAction) {
+        term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
+      } else if (mode === "confirm-delete" && pendingAction) {
+        term.brightRed.noFormat(`  delete ${shortId(pendingAction.sessionId)}? [y/N]`);
+      } else if (mode === "busy" && pendingAction) {
+        term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
+      } else if (mode === "rename" && pendingAction) {
+        term.brightYellow.noFormat(`  title: ${renameBuffer}`);
+        term.bgBrightYellow(" ");
+        term.dim.noFormat("  Enter saves · Esc cancels");
+      } else if (transientStatus !== null) {
+        term.dim.noFormat(`  ${transientStatus}`);
+      } else if (searchActive) {
+        // Search line is anchored to the bottom of the picker so it
+        // stays visible regardless of how the session list scrolls
+        // above. ^c exits and clears the filter. A trailing block
+        // cursor reinforces that the line accepts input.
+        term.brightYellow.noFormat(`  /${searchTerm}`);
+        term.bgBrightYellow(" ");
+        const hint =
+          visible.length === 0
+            ? " no matches"
+            : ` ${visible.length} match${visible.length === 1 ? "" : "es"}`;
+        term.dim.noFormat(`${hint} · ^c clears`);
+      } else {
+        term.dim.noFormat(formatIndicator());
+      }
+      // Trailing reset + erase: clears any stale chars past the new
+      // content from the previous frame, with default SGR so the
+      // erased cells don't inherit a bg colour from the rename / search
+      // bgBrightYellow span above.
+      term.styleReset();
+      term.eraseLineAfter();
+    });
   };
 
   // Composer rows:
@@ -524,92 +534,117 @@ export async function pickSession(
   // Full paint from a clean slate: clear the screen, anchor the picker at
   // row 1, and lay out every row. Used on initial entry (so we don't have
   // to rely on a cursor-position query) and on resize (where the cleanest
-  // way to recover is to start over).
+  // way to recover is to start over). Hides the cursor for the duration
+  // of the paint so the user never sees it skitter row-by-row across the
+  // frame; the trailing block places it where it belongs.
   const renderFromScratch = (): void => {
     if (mode === "help") {
       renderHelp();
       return;
     }
-    computeLayout();
-    adjustScroll();
-    startRow = 1;
-    term.moveTo(1, 1).eraseDisplayBelow();
-    paintComposerTopBorder();
-    term("\n");
-    for (let v = 0; v < composerRows; v++) {
-      paintComposerBodyRow(composerWindowStart + v);
-      term("\n");
-    }
-    paintComposerBottomBorder();
-    term("\n\n");
-    term.dim.noFormat(`  ${headerLine}`)("\n");
-    for (let v = 0; v < viewportSize; v++) {
-      paintSessionRow(scrollOffset + v);
-      term("\n");
-    }
-    paintIndicator();
-    term("\n");
-    if (selectedIdx === 0) {
-      placeComposerCursor();
-      term.hideCursor(false);
-    } else {
+    withSync(() => {
       term.hideCursor();
-    }
+      computeLayout();
+      adjustScroll();
+      startRow = 1;
+      term.moveTo(1, 1).eraseDisplayBelow();
+      paintComposerTopBorder();
+      term("\n");
+      for (let v = 0; v < composerRows; v++) {
+        paintComposerBodyRow(composerWindowStart + v);
+        term("\n");
+      }
+      paintComposerBottomBorder();
+      term("\n\n");
+      term.dim.noFormat(`  ${headerLine}`)("\n");
+      for (let v = 0; v < viewportSize; v++) {
+        paintSessionRow(scrollOffset + v);
+        term("\n");
+      }
+      paintIndicator();
+      term("\n");
+      if (selectedIdx === 0) {
+        placeComposerCursor();
+        term.hideCursor(false);
+      }
+    });
   };
 
   const renderHelp = (): void => {
-    term.moveTo(1, 1).eraseDisplayBelow();
-    term.brightWhite.bold.noFormat("  Picker hotkeys")("\n\n");
-    for (const entry of HELP_ENTRIES) {
-      if (entry === null) {
-        term("\n");
-        continue;
+    withSync(() => {
+      term.hideCursor();
+      term.moveTo(1, 1).eraseDisplayBelow();
+      term.brightWhite.bold.noFormat("  Picker hotkeys")("\n\n");
+      for (const entry of HELP_ENTRIES) {
+        if (entry === null) {
+          term("\n");
+          continue;
+        }
+        const [keys, desc] = entry;
+        term.brightCyan.noFormat(`  ${keys.padEnd(HELP_KEYS_WIDTH)}`);
+        term.noFormat(desc)("\n");
       }
-      const [keys, desc] = entry;
-      term.brightCyan.noFormat(`  ${keys.padEnd(HELP_KEYS_WIDTH)}`);
-      term.noFormat(desc)("\n");
-    }
-    term("\n");
-    term.dim.noFormat("  press any key to dismiss")("\n");
+      term("\n");
+      term.dim.noFormat("  press any key to dismiss")("\n");
+    });
   };
 
   // Repaint just the box chrome (top + bottom borders). Used when focus
   // toggles between composer and list so the border color flips without
-  // a full picker redraw.
+  // a full picker redraw. Borders + body rows are written full-width
+  // (border + pad + slice + pad + border = termWidth) so we skip the
+  // eraseLineAfter call that previously caused a blank-flash frame.
   const repaintComposerChrome = (): void => {
-    term.moveTo(1, startRow).eraseLineAfter();
-    paintComposerTopBorder();
-    term.moveTo(1, composerBottomRow()).eraseLineAfter();
-    paintComposerBottomBorder();
-    // Body's side borders carry the focus color too — repaint them so
-    // the whole frame is consistent.
-    for (let v = 0; v < composerRows; v++) {
-      term.moveTo(1, composerBodyRow(v)).eraseLineAfter();
-      paintComposerBodyRow(composerWindowStart + v);
-    }
+    withSync(() => {
+      const showCursor = selectedIdx === 0;
+      if (showCursor) {
+        term.hideCursor();
+      }
+      term.moveTo(1, startRow);
+      paintComposerTopBorder();
+      term.moveTo(1, composerBottomRow());
+      paintComposerBottomBorder();
+      for (let v = 0; v < composerRows; v++) {
+        term.moveTo(1, composerBodyRow(v));
+        paintComposerBodyRow(composerWindowStart + v);
+      }
+      if (showCursor) {
+        placeComposerCursor();
+        term.hideCursor(false);
+      }
+    });
   };
   // Redraw every composer body row without disturbing layout above or
   // below. Recomputes the visual rows from the dispatcher first; if the
   // dispatcher needs a wider window than this frame allotted, the caller
   // should renderFromScratch (handled by the row-count check in onKey).
+  // Hides the cursor while painting so each keystroke doesn't visibly
+  // walk it across the row before snapping back to the typing position.
   const repaintComposerBody = (): void => {
-    const state = composer.state();
-    composerVisualRows = computePromptVisualRows(state.buffer, composerRoom);
-    const layout = computePromptLayout(
-      composerVisualRows,
-      state,
-      PICKER_COMPOSER_MAX_ROWS,
-    );
-    composerWindowStart = layout.windowStart;
-    composerCursorRow = layout.cursorVisualRow;
-    composerCursorCol = layout.cursorVisualCol;
-    for (let v = 0; v < composerRows; v++) {
-      term.moveTo(1, composerBodyRow(v)).eraseLineAfter();
-      paintComposerBodyRow(composerWindowStart + v);
-    }
-    if (selectedIdx === 0) {
-      placeComposerCursor();
-    }
+    withSync(() => {
+      const state = composer.state();
+      composerVisualRows = computePromptVisualRows(state.buffer, composerRoom);
+      const layout = computePromptLayout(
+        composerVisualRows,
+        state,
+        PICKER_COMPOSER_MAX_ROWS,
+      );
+      composerWindowStart = layout.windowStart;
+      composerCursorRow = layout.cursorVisualRow;
+      composerCursorCol = layout.cursorVisualCol;
+      const showCursor = selectedIdx === 0;
+      if (showCursor) {
+        term.hideCursor();
+      }
+      for (let v = 0; v < composerRows; v++) {
+        term.moveTo(1, composerBodyRow(v));
+        paintComposerBodyRow(composerWindowStart + v);
+      }
+      if (showCursor) {
+        placeComposerCursor();
+        term.hideCursor(false);
+      }
+    });
   };
   const repaintSessionRow = (sessionIdx: number): void => {
     if (
@@ -618,19 +653,27 @@ export async function pickSession(
     ) {
       return;
     }
-    term.moveTo(1, sessionRow(sessionIdx)).eraseLineAfter();
-    paintSessionRow(sessionIdx);
+    withSync(() => {
+      term.moveTo(1, sessionRow(sessionIdx));
+      paintSessionRow(sessionIdx);
+    });
   };
   const repaintViewport = (): void => {
-    for (let v = 0; v < viewportSize; v++) {
-      const row = headerRow() + 1 + v;
-      term.moveTo(1, row).eraseLineAfter();
-      const sessionIdx = scrollOffset + v;
-      if (sessionIdx < visible.length) {
-        paintSessionRow(sessionIdx);
+    withSync(() => {
+      for (let v = 0; v < viewportSize; v++) {
+        const row = headerRow() + 1 + v;
+        const sessionIdx = scrollOffset + v;
+        if (sessionIdx < visible.length) {
+          term.moveTo(1, row);
+          paintSessionRow(sessionIdx);
+        } else {
+          // Past the end of the visible list — still need to erase so a
+          // stale row from a prior frame doesn't linger.
+          term.moveTo(1, row).eraseLineAfter();
+        }
       }
-    }
-    paintIndicator();
+      paintIndicator();
+    });
   };
 
   renderFromScratch();
@@ -768,18 +811,23 @@ export async function pickSession(
       const oldScroll = scrollOffset;
       selectedIdx = next;
       adjustScroll();
-      if (scrollOffset !== oldScroll) {
-        repaintViewport();
+      // Wrap the whole focus change so the two-row swap (and any
+      // composer chrome repaint on a focus-boundary crossing) commits
+      // as one atomic frame on terminals that support DEC 2026.
+      withSync(() => {
+        if (scrollOffset !== oldScroll) {
+          repaintViewport();
+          onFocusChange(old, selectedIdx);
+          return;
+        }
+        if (old !== 0) {
+          repaintSessionRow(old - 1);
+        }
+        if (selectedIdx !== 0) {
+          repaintSessionRow(selectedIdx - 1);
+        }
         onFocusChange(old, selectedIdx);
-        return;
-      }
-      if (old !== 0) {
-        repaintSessionRow(old - 1);
-      }
-      if (selectedIdx !== 0) {
-        repaintSessionRow(selectedIdx - 1);
-      }
-      onFocusChange(old, selectedIdx);
+      });
     };
     const clearTransient = (): boolean => {
       if (transientStatus === null) {
@@ -1164,10 +1212,12 @@ export async function pickSession(
       switch (name) {
         case "UP":
         case "SHIFT_TAB":
+        case "CTRL_P":
           move(-1);
           return;
         case "DOWN":
         case "TAB":
+        case "CTRL_N":
           move(1);
           return;
         case "PAGE_UP":
