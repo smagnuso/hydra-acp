@@ -167,7 +167,7 @@ export async function startDaemon(
     agentId: config.defaultAgent,
     cwd: config.defaultCwd,
   });
-  registerAgentRoutes(app, registry, manager);
+  registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
   registerExtensionRoutes(app, extensions);
   registerConfigRoutes(app, {
     defaultAgent: config.defaultAgent,

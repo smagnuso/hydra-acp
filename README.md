@@ -204,8 +204,8 @@ hydra-acp cat [-p <prompt>] [--detach]      # pipe-friendly headless mode: feeds
 hydra-acp --session <id-or-url>             # attach to existing session
                                             # (TUI in a TTY, shim otherwise)
 hydra-acp --reattach                        # pick the most-recent session for cwd
-hydra-acp --new                              # force a fresh session
-hydra-acp --readonly                         # open a session as a transcript viewer (with --session)
+hydra-acp --new                             # force a fresh session
+hydra-acp --readonly                        # open a session as a transcript viewer (with --session)
 
 hydra-acp init                              # generate the service token
 hydra-acp daemon start [--foreground]       # detached by default; --foreground to attach
@@ -214,9 +214,9 @@ hydra-acp daemon restart
 hydra-acp daemon status
 hydra-acp daemon logs [-f] [-n N]           # tail (default 50) or follow the daemon log
 
-hydra-acp session                          # list sessions
-hydra-acp session kill <id>                # close a live session (keeps the on-disk record so it can be resurrected)
-hydra-acp session remove <id>              # remove a session entirely (live or cold)
+hydra-acp session                           # list sessions
+hydra-acp session kill <id>                 # close a live session (keeps the on-disk record so it can be resurrected)
+hydra-acp session remove <id>               # remove a session entirely (live or cold)
 hydra-acp session export <id> [--out <file>|.]
                                             # write a session bundle (meta + history) to <file>,
                                             # to a default-named file when --out=., or to stdout
@@ -240,11 +240,11 @@ hydra-acp agent                            # list agents in the registry
 hydra-acp agent install <id>               # pre-install an agent (else lazy on first use)
 hydra-acp agent refresh                    # force a registry re-fetch
 hydra-acp agent sync <id>                  # spawn <id> just long enough to ACP session/list it,
-                                            # then persist any sessions it remembers as cold rows
-                                            # (lets you bring in pre-existing agent sessions)
+                                           # then persist any sessions it remembers as cold rows
+                                           # (lets you bring in pre-existing agent sessions)
 
+hydra-acp auth                             # list active session tokens
 hydra-acp auth password [--force]          # set the daemon's master password
-hydra-acp auth                              # list active session tokens
 hydra-acp auth revoke <id>                 # revoke a session token
 ```
 

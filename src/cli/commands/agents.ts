@@ -81,6 +81,70 @@ interface SyncedSession {
   updatedAt: string;
 }
 
+export async function runAgentsInstall(
+  agentId: string | undefined,
+): Promise<void> {
+  if (!agentId) {
+    process.stderr.write("Usage: hydra-acp agent install <agent-id>\n");
+    process.exit(2);
+    return;
+  }
+  const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  process.stdout.write(`Installing ${agentId}…\n`);
+  let body: {
+    agentId: string;
+    version: string;
+    distribution: string;
+    installed: boolean;
+    command?: string;
+    message?: string;
+  };
+  try {
+    const r = await fetch(
+      `${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/install`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${serviceToken}` },
+      },
+    );
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try {
+        const j = (await r.json()) as { error?: string };
+        if (j.error) {
+          detail = j.error;
+        }
+      } catch {
+        void 0;
+      }
+      process.stderr.write(`hydra agent install ${agentId}: ${detail}\n`);
+      process.exit(1);
+    }
+    body = (await r.json()) as typeof body;
+  } catch (err) {
+    process.stderr.write(
+      `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
+    );
+    process.exit(1);
+    return;
+  }
+
+  if (!body.installed) {
+    process.stdout.write(
+      `${body.agentId} (${body.version}, ${body.distribution}): ${body.message ?? "nothing to install"}\n`,
+    );
+    return;
+  }
+  process.stdout.write(
+    `Installed ${body.agentId} (${body.version}, ${body.distribution})\n`,
+  );
+  if (body.command) {
+    process.stdout.write(`  → ${body.command}\n`);
+  }
+}
+
 export async function runAgentsSync(agentId: string | undefined): Promise<void> {
   if (!agentId) {
     process.stderr.write("Usage: hydra-acp agent sync <agent-id>\n");

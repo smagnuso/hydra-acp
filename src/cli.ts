@@ -35,6 +35,7 @@ import {
   runExtensionsStop,
 } from "./cli/commands/extensions.js";
 import {
+  runAgentsInstall,
   runAgentsList,
   runAgentsRefresh,
   runAgentsSync,
@@ -370,6 +371,10 @@ async function main(): Promise<void> {
         await runAgentsRefresh();
         return;
       }
+      if (sub === "install") {
+        await runAgentsInstall(positional[2]);
+        return;
+      }
       if (sub === "sync") {
         await runAgentsSync(positional[2]);
         return;
@@ -586,6 +591,7 @@ function printHelp(): void {
       "  hydra-acp extension logs <name> [-f] [-n N]      Tail or follow an extension's log",
       "  hydra-acp agent [list]                      List agents in the cached registry",
       "  hydra-acp agent refresh                     Force a registry re-fetch",
+      "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)",
       "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
       "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
