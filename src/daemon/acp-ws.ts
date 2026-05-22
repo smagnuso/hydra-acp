@@ -9,7 +9,6 @@ import {
   AmendPromptParams,
   CancelPromptParams,
   InitializeParams,
-  ProxyInitializeParams,
   SessionAttachParams,
   SessionCancelParams,
   SessionDetachParams,
@@ -104,11 +103,6 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("initialize", async (raw) => {
       InitializeParams.parse(raw ?? {});
-      return buildInitializeResult();
-    });
-
-    connection.onRequest("proxy/initialize", async (raw) => {
-      ProxyInitializeParams.parse(raw ?? {});
       return buildInitializeResult();
     });
 

@@ -27,11 +27,11 @@
 
 ## What it is
 
-`hydra-acp` is a daemon + CLI shim that implements three open ACP RFDs as a single coherent surface, on top of the standard ACP protocol (including `session/list` for session discovery), plus the official ACP Registry as its agent-distribution mechanism.
+`hydra-acp` is a daemon + CLI shim that implements two open ACP RFDs as a single coherent surface, on top of the standard ACP protocol (including `session/list` for session discovery), plus the official ACP Registry as its agent-distribution mechanism.
 
 ### The standards it stitches together
 
-ACP itself is the [Agent Client Protocol](https://agentclientprotocol.com/) — a JSON-RPC 2.0 protocol between editors (clients) and AI coding agents. Today the protocol is canonically a 1:1 stdio relationship: one editor spawns one agent and owns its stdin/stdout. Three RFDs in the [`agentclientprotocol/agent-client-protocol`](https://github.com/agentclientprotocol/agent-client-protocol) repo extend that model. `hydra-acp` is one daemon that implements all three together so they can be used as a coherent system rather than three independent extensions.
+ACP itself is the [Agent Client Protocol](https://agentclientprotocol.com/) — a JSON-RPC 2.0 protocol between editors (clients) and AI coding agents. Today the protocol is canonically a 1:1 stdio relationship: one editor spawns one agent and owns its stdin/stdout. Two RFDs in the [`agentclientprotocol/agent-client-protocol`](https://github.com/agentclientprotocol/agent-client-protocol) repo extend that model. `hydra-acp` is one daemon that implements both together so they can be used as a coherent system rather than two independent extensions.
 
 #### 1. Multi-Client Session Attach — [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533)
 
@@ -42,11 +42,7 @@ Adds two new methods that turn ACP from 1:1 into 1:N:
 
 Every event the agent emits is broadcast to every attached client; clients self-filter what they act on. Permission requests broadcast the same way: the first response wins, and the rest receive a `session/update` notification with `sessionUpdate: "permission_resolved"`. Capability is advertised in `initialize` under `agentCapabilities.sessionCapabilities.attach`.
 
-#### 2. Agent Extensions via ACP Proxies — [RFD: proxy-chains](https://agentclientprotocol.com/rfds/proxy-chains)
-
-Defines the proxy-chain pattern: a component that sits between an ACP client and an ACP agent and either passes traffic through or transforms it. Proxies use `proxy/initialize` (instead of `initialize`) so the conductor of the chain can tell terminal agents apart from intermediate proxies. Proxies "send messages to successor and receive messages from successor" without knowing what or where the successor is — the conductor's job. `hydra-acp` operates as the conductor and as one such proxy: editors spawn it, and from their perspective it appears as a single ACP agent regardless of how many real agents the daemon is managing behind it.
-
-#### 3. Streamable HTTP & WebSocket Transport — [RFD: streamable-http-websocket-transport](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport)
+#### 2. Streamable HTTP & WebSocket Transport — [RFD: streamable-http-websocket-transport](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport)
 
 Defines the network transport that lets ACP run between processes that aren't parent and child. The relevant half for `hydra-acp` is the WebSocket binding: a client sends `GET /acp` with `Upgrade: websocket`, receives a `101 Switching Protocols` response, and the connection becomes a bidirectional stream of JSON-RPC text frames (binary frames are ignored). Authentication is layered on top — HTTP headers, query parameters, or WebSocket subprotocols — and is treated as orthogonal by the spec. `hydra-acp` exposes its WSS endpoint at `/acp` and authenticates via a bearer token carried in a WebSocket subprotocol or a query parameter.
 
@@ -83,7 +79,7 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 
 1. **Editor spawns `hydra-acp`** as it would any ACP agent. The shim looks like a normal stdio agent.
 2. **Shim opens a WSS connection** to the daemon at `/acp`, authenticating via the bearer token.
-3. **`session/new` from the editor** → daemon resolves the requested agent against the cached ACP Registry, downloads it on first use under `~/.hydra-acp/agents/`, spawns it as a child process, and creates an ACP session inside it (per RFD: proxy-chains).
+3. **`session/new` from the editor** → daemon resolves the requested agent against the cached ACP Registry, downloads it on first use under `~/.hydra-acp/agents/`, spawns it as a child process, and creates an ACP session inside it.
 4. **`session/attach` from a second client** → daemon adds the new client to the session's broadcast list and replays history per `historyPolicy` (per RFD #533).
 5. **Notifications** fan out to every attached client. **Prompts** are serialized through the daemon's per-session queue. **Permission requests** broadcast to every attached client; first response wins and the rest receive a `session/update` with `sessionUpdate: "permission_resolved"` carrying the resolving client's outcome.
 6. **`session/list`** returns the daemon's sessions (live and cold), filterable by `cwd`.
@@ -515,7 +511,7 @@ Sec-WebSocket-Protocol: acp.v1, hydra-acp-token.<token>
 
 Frames are JSON-RPC 2.0 text frames; binary frames are ignored.
 
-The first JSON-RPC message a client sends is `initialize` (per ACP), or `proxy/initialize` if the client wants the daemon to act as a proxy in the proxy-chain sense (per RFD: proxy-chains).
+The first JSON-RPC message a client sends is `initialize` (per ACP).
 
 ### Methods implemented
 
@@ -531,7 +527,6 @@ RFD additions:
 
 - `session/attach { sessionId, historyPolicy: "full"|"pending_only"|"none" }` — RFD #533
 - `session/detach { sessionId }` — RFD #533
-- `proxy/initialize` — RFD: proxy-chains
 
 Capabilities advertised in the `initialize` response:
 

@@ -722,19 +722,3 @@ export interface InitializeResult {
   _meta?: Record<string, unknown>;
 }
 
-export const ProxyInitializeParams = z.object({
-  protocolVersion: z.number().optional(),
-  proxyInfo: z
-    .object({
-      name: z.string(),
-      version: z.string().optional(),
-    })
-    .optional(),
-  successor: z
-    .object({
-      command: z.array(z.string()),
-      env: z.record(z.string()).optional(),
-    })
-    .optional(),
-});
-export type ProxyInitializeParams = z.infer<typeof ProxyInitializeParams>;
