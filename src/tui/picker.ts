@@ -1,9 +1,13 @@
-// Pre-screen interactive picker. Lists every session (live first, then
-// cold sorted by recency) with a "New session" entry at the top — the
-// default cursor position — so Enter creates a new session or the user
-// can arrow down into the list. Long lists scroll within a fixed
-// viewport so every session remains reachable. Lives outside the main
-// screen so it can run before fullscreen mode is engaged.
+// Pre-screen interactive picker. A multiline "Create new session"
+// composer sits at the top — focused by default — so the user can type
+// the first prompt before the session exists; Enter creates it and
+// submits the typed text. Below the composer is the session table
+// (live first, then cold sorted by recency); ↓ from the composer drops
+// focus into the list. The composer reuses the live screen's
+// InputDispatcher so every readline shortcut works identically. Long
+// lists scroll within a fixed viewport so every session remains
+// reachable. Lives outside the main screen so it can run before
+// fullscreen mode is engaged.
 
 import type { Terminal } from "terminal-kit";
 import {
@@ -27,6 +31,13 @@ import {
   renameSession,
   type DiscoveredSession,
 } from "./discovery.js";
+import { InputDispatcher, type KeyEvent } from "./input.js";
+import {
+  computePromptLayout,
+  computePromptVisualRows,
+  mapKeyName,
+  type PromptVisualRow,
+} from "./screen.js";
 
 export type PickerResult =
   | {
@@ -39,7 +50,7 @@ export type PickerResult =
       // keystroke; Enter leaves it undefined / false.
       readonly?: boolean;
     }
-  | { kind: "new" }
+  | { kind: "new"; prompt?: string }
   | { kind: "abort" };
 
 export interface PickOptions {
@@ -57,18 +68,31 @@ export interface PickOptions {
 
 // Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
 // content budget is termWidth - 2. Apply the same prefix to the
-// "New session" label so its truncation matches.
+// "Create new session" title so its truncation matches.
 const ROW_PREFIX_WIDTH = 2;
+
+// Visual rows the composer pane can occupy before its internal window
+// scrolls. Kept smaller than the live composer's MAX_PROMPT_ROWS (8)
+// because the picker still has to leave room for the session list.
+const PICKER_COMPOSER_MAX_ROWS = 4;
+
+// Composer box borders + 1-col inner pad on each side: "│ …slice… │".
+// Subtracted from termWidth to derive the soft-wrap budget so text
+// never collides with the right border.
+const BOX_HORIZONTAL_PAD = 4;
 
 // Help dialog content. `null` entries are blank-line separators. The
 // keys column is left-aligned and padded to HELP_KEYS_WIDTH so the
 // descriptions stack into a clean second column.
 const HELP_KEYS_WIDTH = 20;
 const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
-  ["↑ / ↓ or n / p", "navigate"],
+  ["Composer", "type prompt for new session; Enter creates + submits"],
+  ["↓ from composer", "drop focus into session list"],
+  null,
+  ["↑ / ↓ or n / p", "navigate sessions"],
   ["PgUp / PgDn", "page up / page down"],
   ["Home / End", "first / last"],
-  ["Enter", "open selected session (or create new)"],
+  ["Enter", "open selected session"],
   ["v", "view-only (open transcript without spawning the agent)"],
   null,
   ["/", "search sessions"],
@@ -81,7 +105,6 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["t", "retitle the selected session"],
   ["T", "regenerate title via agent (live session)"],
   null,
-  ["c", "create new session"],
   ["?", "toggle this help"],
   ["q / Esc / ^C / ^D", "quit picker (detach)"],
 ];
@@ -111,9 +134,6 @@ export async function pickSession(
   process.stdout.write("\x1b[?1006l");
   process.stdout.write("\x1b[?1l");
   process.stdout.write("\x1b>");
-  if (opts.sessions.length === 0) {
-    return { kind: "new" };
-  }
   const sortSessions = (sessions: DiscoveredSession[]): DiscoveredSession[] => {
     const score = (s: DiscoveredSession): number => {
       if (s.status !== "live") {
@@ -206,11 +226,29 @@ export async function pickSession(
   // key press so it never lingers.
   let transientStatus: string | null = null;
 
+  // Composer pane at the top of the picker. Reuses the live composer's
+  // InputDispatcher so every readline shortcut (Alt+Enter newline,
+  // ^A/^E, ^U/^K/^W, ^Y, etc.) works identically. The dispatcher's
+  // buffer text is sent as the new session's first prompt on Enter.
+  const composer = new InputDispatcher({ history: [] });
+
   // All layout state — recomputed on initial paint AND on every resize.
   let termHeight = readTermHeight(term);
   let termWidth = readTermWidth(term);
   let viewportSize = 0;
-  let newSessionLabel = "";
+  let composerTitle = "";
+  // Wrap budget for composer body slices; matches what computeLayout's
+  // computePromptVisualRows was called with so cursor placement uses
+  // the same room value as rendering.
+  let composerRoom = 0;
+  let composerVisualRows: PromptVisualRow[] = [];
+  // Rendered composer body row count this frame (1..PICKER_COMPOSER_MAX_ROWS).
+  let composerRows = 1;
+  // Window start into composerVisualRows when the buffer overflows
+  // PICKER_COMPOSER_MAX_ROWS. Recomputed via computePromptLayout.
+  let composerWindowStart = 0;
+  let composerCursorRow = 0;
+  let composerCursorCol = 0;
   let headerLine = "";
   let sessionLines: string[] = [];
   let startRow = 1;
@@ -219,10 +257,33 @@ export async function pickSession(
   const computeLayout = (): void => {
     termHeight = readTermHeight(term);
     termWidth = readTermWidth(term);
-    const maxViewportRows = Math.max(3, termHeight - 6);
-    viewportSize = Math.min(visible.length, maxViewportRows);
     const rowMaxWidth = Math.max(10, termWidth - ROW_PREFIX_WIDTH);
-    newSessionLabel = formatNewSessionLabel(opts.cwd, rowMaxWidth);
+    // Composer body sits inside a "│ … │" box, costing 4 cols (border +
+    // 1-col pad on each side). Buffer wrap is computed against this
+    // tighter budget so cursor placement matches what we paint.
+    composerRoom = Math.max(10, termWidth - BOX_HORIZONTAL_PAD);
+    // Title embeds in the top border as "╭─ <title> ──...─╮", so the
+    // title length is capped at termWidth - 8 to guarantee at least two
+    // trailing dashes before the corner glyph.
+    const titleBudget = Math.max(10, termWidth - 8);
+    composerTitle = formatComposerTitle(opts.cwd, titleBudget);
+    const state = composer.state();
+    composerVisualRows = computePromptVisualRows(state.buffer, composerRoom);
+    const layout = computePromptLayout(
+      composerVisualRows,
+      state,
+      PICKER_COMPOSER_MAX_ROWS,
+    );
+    composerRows = layout.rendered;
+    composerWindowStart = layout.windowStart;
+    composerCursorRow = layout.cursorVisualRow;
+    composerCursorCol = layout.cursorVisualCol;
+    // Reserve rows: top border (1) + body (composerRows) + bottom
+    // border (1) + blank (1) + header (1) + indicator (1) + trailing
+    // newline (1).
+    const reserved = 6 + composerRows;
+    const maxViewportRows = Math.max(3, termHeight - reserved);
+    viewportSize = Math.min(visible.length, maxViewportRows);
     headerLine = formatRow(HEADER, widths, rowMaxWidth, cwdMaxWidth);
     sessionLines = rows.map((r) => formatRow(r, widths, rowMaxWidth, cwdMaxWidth));
   };
@@ -284,12 +345,69 @@ export async function pickSession(
     }
   };
 
-  const paintNewItem = (): void => {
-    if (selectedIdx === 0) {
-      term.brightWhite.bgBlue.noFormat(`❯ ${newSessionLabel}`);
+  // Inner width of the box (cols between the two corner glyphs). At
+  // least 2 so we can always fit "──".
+  const composerBoxInner = (): number => Math.max(2, termWidth - 2);
+
+  // Top border with the title embedded:
+  //   ╭─ Create new session in ~/foo ────────────────────╮
+  // Title is middle-truncated by formatComposerTitle to fit composerRoom;
+  // the dashes flex to fill whatever remains so the border touches the
+  // right edge of the terminal.
+  const paintComposerTopBorder = (): void => {
+    const inner = composerBoxInner();
+    const focused = selectedIdx === 0;
+    const titleFragment = `─ ${composerTitle} `;
+    const dashCount = Math.max(1, inner - titleFragment.length);
+    const dashes = "─".repeat(dashCount);
+    if (focused) {
+      term.brightCyan.noFormat("╭");
+      term.brightCyan.bold.noFormat(titleFragment);
+      term.brightCyan.noFormat(`${dashes}╮`);
     } else {
-      term.noFormat(`  ${newSessionLabel}`);
+      term.dim.noFormat(`╭${titleFragment}${dashes}╮`);
     }
+  };
+
+  // Bottom border: ╰──...──╯ stretched to the terminal width.
+  const paintComposerBottomBorder = (): void => {
+    const inner = composerBoxInner();
+    const dashes = "─".repeat(inner);
+    if (selectedIdx === 0) {
+      term.brightCyan.noFormat(`╰${dashes}╯`);
+    } else {
+      term.dim.noFormat(`╰${dashes}╯`);
+    }
+  };
+
+  // One visual row of the composer body, wrapped in left/right box
+  // borders. Inside the box we keep just a one-column space between the
+  // border and the text — no "> " / "· " gutters because the box itself
+  // is the visual frame, and the cursor + content make the entry intent
+  // obvious.
+  const paintComposerBodyRow = (visualIdx: number): void => {
+    const inner = composerBoxInner();
+    const sideStyle = selectedIdx === 0 ? term.brightCyan : term.dim;
+    sideStyle.noFormat("│");
+    const vr = composerVisualRows[visualIdx];
+    let slice = "";
+    if (vr) {
+      slice = (composer.state().buffer[vr.bufferIdx] ?? "").slice(
+        vr.startCol,
+        vr.endCol,
+      );
+    }
+    // Inner cell content: " " + slice + pad so the right border lands
+    // exactly at column termWidth. inner counts only the cells between
+    // borders, so total inner-pad width is inner - 1 (left pad already
+    // written) - slice.length.
+    term.noFormat(" ");
+    term.noFormat(slice);
+    const padWidth = Math.max(0, inner - 1 - slice.length);
+    if (padWidth > 0) {
+      term.noFormat(" ".repeat(padWidth));
+    }
+    sideStyle.noFormat("│");
   };
 
   const paintSessionRow = (sessionIdx: number): void => {
@@ -374,9 +492,34 @@ export async function pickSession(
     term.dim.noFormat(formatIndicator());
   };
 
-  const indicatorRow = (): number => startRow + 3 + viewportSize;
+  // Composer rows:
+  //   startRow                            ╭─ title ─╮
+  //   startRow + 1 .. + composerRows      │ body  │
+  //   startRow + composerRows + 1         ╰─────────╯
+  //   startRow + composerRows + 2         blank
+  //   startRow + composerRows + 3         header
+  //   sessions follow; indicator after the viewport
+  const composerBodyRow = (visualOffset: number): number =>
+    startRow + 1 + visualOffset;
+  const composerBottomRow = (): number => startRow + composerRows + 1;
+  const headerRow = (): number => startRow + composerRows + 3;
   const sessionRow = (sessionIdx: number): number =>
-    startRow + 3 + (sessionIdx - scrollOffset);
+    headerRow() + 1 + (sessionIdx - scrollOffset);
+  const indicatorRow = (): number => headerRow() + 1 + viewportSize;
+
+  // Position the visible terminal cursor inside the composer body so the
+  // user can see where typed characters will land. Called after every
+  // render/repaint when selectedIdx === 0; hidden by callers otherwise.
+  // Column 1 is the left border, column 2 is the inner pad, so the
+  // first content column is 3.
+  const placeComposerCursor = (): void => {
+    const visualOffset = composerCursorRow - composerWindowStart;
+    if (visualOffset < 0 || visualOffset >= composerRows) {
+      return;
+    }
+    const col = 3 + composerCursorCol;
+    term.moveTo(col, composerBodyRow(visualOffset));
+  };
 
   // Full paint from a clean slate: clear the screen, anchor the picker at
   // row 1, and lay out every row. Used on initial entry (so we don't have
@@ -391,7 +534,13 @@ export async function pickSession(
     adjustScroll();
     startRow = 1;
     term.moveTo(1, 1).eraseDisplayBelow();
-    paintNewItem();
+    paintComposerTopBorder();
+    term("\n");
+    for (let v = 0; v < composerRows; v++) {
+      paintComposerBodyRow(composerWindowStart + v);
+      term("\n");
+    }
+    paintComposerBottomBorder();
     term("\n\n");
     term.dim.noFormat(`  ${headerLine}`)("\n");
     for (let v = 0; v < viewportSize; v++) {
@@ -400,6 +549,12 @@ export async function pickSession(
     }
     paintIndicator();
     term("\n");
+    if (selectedIdx === 0) {
+      placeComposerCursor();
+      term.hideCursor(false);
+    } else {
+      term.hideCursor();
+    }
   };
 
   const renderHelp = (): void => {
@@ -418,9 +573,43 @@ export async function pickSession(
     term.dim.noFormat("  press any key to dismiss")("\n");
   };
 
-  const repaintNewItem = (): void => {
+  // Repaint just the box chrome (top + bottom borders). Used when focus
+  // toggles between composer and list so the border color flips without
+  // a full picker redraw.
+  const repaintComposerChrome = (): void => {
     term.moveTo(1, startRow).eraseLineAfter();
-    paintNewItem();
+    paintComposerTopBorder();
+    term.moveTo(1, composerBottomRow()).eraseLineAfter();
+    paintComposerBottomBorder();
+    // Body's side borders carry the focus color too — repaint them so
+    // the whole frame is consistent.
+    for (let v = 0; v < composerRows; v++) {
+      term.moveTo(1, composerBodyRow(v)).eraseLineAfter();
+      paintComposerBodyRow(composerWindowStart + v);
+    }
+  };
+  // Redraw every composer body row without disturbing layout above or
+  // below. Recomputes the visual rows from the dispatcher first; if the
+  // dispatcher needs a wider window than this frame allotted, the caller
+  // should renderFromScratch (handled by the row-count check in onKey).
+  const repaintComposerBody = (): void => {
+    const state = composer.state();
+    composerVisualRows = computePromptVisualRows(state.buffer, composerRoom);
+    const layout = computePromptLayout(
+      composerVisualRows,
+      state,
+      PICKER_COMPOSER_MAX_ROWS,
+    );
+    composerWindowStart = layout.windowStart;
+    composerCursorRow = layout.cursorVisualRow;
+    composerCursorCol = layout.cursorVisualCol;
+    for (let v = 0; v < composerRows; v++) {
+      term.moveTo(1, composerBodyRow(v)).eraseLineAfter();
+      paintComposerBodyRow(composerWindowStart + v);
+    }
+    if (selectedIdx === 0) {
+      placeComposerCursor();
+    }
   };
   const repaintSessionRow = (sessionIdx: number): void => {
     if (
@@ -434,7 +623,7 @@ export async function pickSession(
   };
   const repaintViewport = (): void => {
     for (let v = 0; v < viewportSize; v++) {
-      const row = startRow + 3 + v;
+      const row = headerRow() + 1 + v;
       term.moveTo(1, row).eraseLineAfter();
       const sessionIdx = scrollOffset + v;
       if (sessionIdx < visible.length) {
@@ -445,7 +634,6 @@ export async function pickSession(
   };
 
   renderFromScratch();
-  term.hideCursor();
 
   return await new Promise<PickerResult>((resolve) => {
     let resolved = false;
@@ -556,6 +744,21 @@ export async function pickSession(
         paintIndicator();
       }
     };
+    // Side-effects for crossing the composer/list focus boundary: show /
+    // hide the visible terminal cursor and repaint the composer chrome
+    // so the border + title color reflects the new focus state.
+    const onFocusChange = (oldIdx: number, newIdx: number): void => {
+      if ((oldIdx === 0) === (newIdx === 0)) {
+        return;
+      }
+      repaintComposerChrome();
+      if (newIdx === 0) {
+        term.hideCursor(false);
+        placeComposerCursor();
+      } else {
+        term.hideCursor();
+      }
+    };
     const move = (delta: number): void => {
       const next = Math.min(total - 1, Math.max(0, selectedIdx + delta));
       if (next === selectedIdx) {
@@ -566,25 +769,17 @@ export async function pickSession(
       selectedIdx = next;
       adjustScroll();
       if (scrollOffset !== oldScroll) {
-        // Viewport scrolled — every session row may have changed. Also
-        // refresh "+ New" if its selection state flipped on this move.
         repaintViewport();
-        if (old === 0 || selectedIdx === 0) {
-          repaintNewItem();
-        }
+        onFocusChange(old, selectedIdx);
         return;
       }
-      // No scroll: just redraw the two rows whose selection state changed.
-      if (old === 0) {
-        repaintNewItem();
-      } else {
+      if (old !== 0) {
         repaintSessionRow(old - 1);
       }
-      if (selectedIdx === 0) {
-        repaintNewItem();
-      } else {
+      if (selectedIdx !== 0) {
         repaintSessionRow(selectedIdx - 1);
       }
+      onFocusChange(old, selectedIdx);
     };
     const clearTransient = (): boolean => {
       if (transientStatus === null) {
@@ -689,6 +884,102 @@ export async function pickSession(
       // into the next action's context. We still fall through and run
       // the key's normal behavior.
       clearTransient();
+      // Composer focused: route keys through the InputDispatcher so every
+      // readline shortcut works identically to the live composer. The
+      // composer eats hotkeys like `/`, `r`, `?`, `k`, etc. — they only
+      // fire when the user has moved focus down into the session list.
+      if (selectedIdx === 0 && !searchActive) {
+        if (name === "ESCAPE" || name === "CTRL_C" || name === "CTRL_D") {
+          cleanup();
+          resolve({ kind: "abort" });
+          return;
+        }
+        if (name === "ENTER" || name === "KP_ENTER") {
+          cleanup();
+          const text = composer.state().buffer.join("\n");
+          if (text.trim().length === 0) {
+            resolve({ kind: "new" });
+          } else {
+            resolve({ kind: "new", prompt: text });
+          }
+          return;
+        }
+        // ↓ at the bottom visual row of the buffer drops focus into the
+        // first session row. Anywhere else, ↓ feeds the dispatcher for
+        // intra-buffer cursor motion. With no sessions to drop into, ↓
+        // is a no-op (composer stays focused).
+        if (name === "DOWN") {
+          const atBottom =
+            composerVisualRows.length === 0 ||
+            composerCursorRow === composerVisualRows.length - 1;
+          if (atBottom && visible.length > 0) {
+            move(1);
+            return;
+          }
+          // fall through to dispatcher
+        }
+        // PgDn at the bottom of the buffer also escapes to the list, so
+        // a power user can jump straight from "type a prompt" into "pick
+        // a session" without arrowing through every line.
+        if (name === "PAGE_DOWN") {
+          const atBottom =
+            composerVisualRows.length === 0 ||
+            composerCursorRow === composerVisualRows.length - 1;
+          if (atBottom && visible.length > 0) {
+            move(1);
+            return;
+          }
+        }
+        // ^P switches the input dispatcher in the live composer; here it
+        // would emit a "switch-session" effect we'd just drop. Map it to
+        // the picker's list-focus instead so the chord stays useful.
+        if (name === "CTRL_P") {
+          if (visible.length > 0) {
+            move(1);
+          }
+          return;
+        }
+        const before = composer.state();
+        let event: KeyEvent | null = null;
+        if (data?.isCharacter) {
+          event = { type: "char", ch: name };
+        } else {
+          const mapped = mapKeyName(name);
+          if (mapped !== null) {
+            event = { type: "key", name: mapped };
+          }
+        }
+        if (event === null) {
+          placeComposerCursor();
+          return;
+        }
+        composer.feed(event);
+        const after = composer.state();
+        const unchanged =
+          before.buffer.length === after.buffer.length &&
+          before.buffer.every((line, i) => line === after.buffer[i]) &&
+          before.row === after.row &&
+          before.col === after.col;
+        if (unchanged) {
+          placeComposerCursor();
+          return;
+        }
+        // Recompute visual rows; if the rendered row count needs to grow
+        // or shrink, redraw the whole picker so the session list shifts
+        // in lockstep. Otherwise repaint just the composer body.
+        const newVisualRows = computePromptVisualRows(after.buffer, composerRoom);
+        const newLayout = computePromptLayout(
+          newVisualRows,
+          after,
+          PICKER_COMPOSER_MAX_ROWS,
+        );
+        if (newLayout.rendered !== composerRows) {
+          renderFromScratch();
+          return;
+        }
+        repaintComposerBody();
+        return;
+      }
       // `?` opens the help overlay outside of search mode (in search,
       // it's a literal character that may appear in a query).
       if (!searchActive && data?.isCharacter && name === "?") {
@@ -886,11 +1177,9 @@ export async function pickSession(
           move(viewportSize);
           return;
         case "HOME":
-          // Land on the topmost session (selectedIdx=1), not on "New
-          // session" (selectedIdx=0). adjustScroll then pulls
-          // scrollOffset back to 0 and move()'s scroll-detected branch
-          // repaints the viewport. Up arrow from there can still reach
-          // "New session" when the user wants it.
+          // Land on the topmost session (selectedIdx=1), not on the
+          // composer (selectedIdx=0). adjustScroll then pulls scrollOffset
+          // back to 0. Up arrow from there can still reach the composer.
           move(1 - selectedIdx);
           return;
         case "END":
@@ -940,11 +1229,11 @@ function readTermWidth(term: Terminal): number {
   return (term as unknown as { width?: number }).width ?? 80;
 }
 
-// Middle-truncate the cwd so the user still sees enough of it (home,
-// project root, leaf) to identify the session. ~/-shortened to match
-// the session rows below.
-function formatNewSessionLabel(cwd: string, maxWidth: number): string {
-  const prefix = "New session in ";
+// Title line for the composer pane. Middle-truncate the cwd so the user
+// still sees enough (home, project root, leaf) to identify where the
+// session will be created. ~/-shortened to match the session rows below.
+function formatComposerTitle(cwd: string, maxWidth: number): string {
+  const prefix = "Create new session in ";
   const budget = Math.max(1, maxWidth - prefix.length);
   return prefix + truncateMiddle(shortenHomePath(cwd), budget);
 }

@@ -87,6 +87,12 @@ export interface TuiOptions {
   model?: string;
   resume?: boolean;
   forceNew?: boolean;
+  // First-prompt seed for a freshly-created session. The picker's
+  // composer pane returns the typed text here; runSession fires it via
+  // enqueuePrompt once, immediately after the daemon attaches the
+  // freshly-spawned session. Only honored when ctx.sessionId === "__new__"
+  // so a stray forward into a resume/restart path can't re-fire it.
+  initialPrompt?: string;
   // View-only mode. When true the TUI attaches with readonly:true so
   // the daemon won't resurrect or spawn an agent (cold session viewer
   // path) and refuses any state-changing JSON-RPC method from this
@@ -1665,7 +1671,16 @@ async function runSession(
       // Fresh session is never read-only; explicitly clear so a viewer
       // that pressed ^P → New doesn't inherit readonly into the new
       // session's WS attach.
-      resume({ ...rest, cwd: resolvedCwd, forceNew: true, readonly: false });
+      const nextOpts: TuiOptions = {
+        ...rest,
+        cwd: resolvedCwd,
+        forceNew: true,
+        readonly: false,
+      };
+      if (choice.prompt !== undefined) {
+        nextOpts.initialPrompt = choice.prompt;
+      }
+      resume(nextOpts);
       return;
     }
     // Read-only is per-session; default off on a picker-driven switch.
@@ -3234,6 +3249,14 @@ async function runSession(
 
   process.on("SIGINT", sigintHandler);
 
+  // Composer prompt typed in the picker before the session existed.
+  // Fire it once, now that screen.start() and the dispatcher are wired
+  // up. Guarded by sessionId === "__new__" so a resume/restart that
+  // accidentally inherits opts.initialPrompt is a no-op.
+  if (opts.initialPrompt && ctx.sessionId === "__new__") {
+    enqueuePrompt(opts.initialPrompt, []);
+  }
+
   return await sessionDone;
 }
 
@@ -3280,9 +3303,6 @@ async function resolveSession(
   // imported row. Every other picker exit path resolves the function.
   while (true) {
     const sessions = await listSessions(target);
-    if (sessions.length === 0) {
-      return newCtx(opts, cwd, config);
-    }
     const choice: PickerResult = await pickSession(term, {
       cwd,
       sessions,
@@ -3293,6 +3313,9 @@ async function resolveSession(
       return null;
     }
     if (choice.kind === "new") {
+      if (choice.prompt !== undefined) {
+        opts.initialPrompt = choice.prompt;
+      }
       return newCtx(opts, cwd, config);
     }
     // Propagate the picker's view-only choice (set by `v`) onto opts so

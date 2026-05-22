@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { filterByHost, matchesSearch, nextHostFilter } from "./picker.js";
+import type { Terminal } from "terminal-kit";
+import {
+  filterByHost,
+  matchesSearch,
+  nextHostFilter,
+  pickSession,
+  type PickerResult,
+} from "./picker.js";
 import type { DiscoveredSession } from "./discovery.js";
+import type { HydraConfig } from "../core/config.js";
+import type { RemoteTarget } from "../core/remote-target.js";
 
 function session(overrides: Partial<DiscoveredSession>): DiscoveredSession {
   return {
@@ -10,6 +19,80 @@ function session(overrides: Partial<DiscoveredSession>): DiscoveredSession {
     attachedClients: 0,
     status: "cold",
     ...overrides,
+  };
+}
+
+// Test harness for pickSession: a fake terminal-kit Terminal that
+// captures the registered key handler so the test can drive synthetic
+// keystrokes. The chain-and-call Proxy mirrors screen.test.ts — terminal-
+// kit lets you write `term.brightWhite.bgBlue.noFormat("x")` so every
+// property access has to be both callable and chainable.
+interface KeyDriver {
+  press(name: string, opts?: { isCharacter?: boolean }): void;
+  type(text: string): void;
+  resolveOnce: Promise<PickerResult>;
+}
+
+function makePicker(opts: {
+  sessions: DiscoveredSession[];
+  cwd?: string;
+  currentSessionId?: string;
+}): KeyDriver {
+  let onKey: ((name: string, _matches: unknown, data?: { isCharacter?: boolean }) => void) | null = null;
+  const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
+    apply: () => term,
+    get(_target, prop) {
+      if (prop === "width") return 80;
+      if (prop === "height") return 24;
+      if (prop === "on") {
+        return (event: string, cb: typeof onKey): void => {
+          if (event === "key") {
+            onKey = cb;
+          }
+        };
+      }
+      if (prop === "off") {
+        return (): void => undefined;
+      }
+      return new Proxy(() => term, handler);
+    },
+  };
+  const term = new Proxy(
+    function noop() {} as (...args: unknown[]) => unknown,
+    handler,
+  ) as unknown as Terminal;
+
+  const config = {
+    tui: { cwdColumnMaxWidth: 40 },
+  } as unknown as HydraConfig;
+  const target = {} as RemoteTarget;
+
+  const resolveOnce = pickSession(term, {
+    cwd: opts.cwd ?? "/home/me/work/project",
+    sessions: opts.sessions,
+    config,
+    target,
+    ...(opts.currentSessionId !== undefined
+      ? { currentSessionId: opts.currentSessionId }
+      : {}),
+  });
+
+  return {
+    press(name, optsArg = {}) {
+      if (!onKey) {
+        throw new Error("onKey not registered yet");
+      }
+      onKey(name, undefined, optsArg);
+    },
+    type(text) {
+      if (!onKey) {
+        throw new Error("onKey not registered yet");
+      }
+      for (const ch of text) {
+        onKey(ch, undefined, { isCharacter: true });
+      }
+    },
+    resolveOnce,
   };
 }
 
@@ -164,5 +247,130 @@ describe("filterByHost", () => {
       }),
     ];
     expect(filterByHost(items, "__all")).toEqual(items);
+  });
+});
+
+describe("pickSession composer", () => {
+  const sessions = [
+    session({ sessionId: "hydra-aaa", title: "first" }),
+    session({ sessionId: "hydra-bbb", title: "second" }),
+  ];
+
+  it("returns kind:new with no prompt when Enter is hit on empty composer", async () => {
+    const drv = makePicker({ sessions });
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({ kind: "new" });
+  });
+
+  it("returns kind:new with prompt when text is typed then Enter", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("hello world");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "hello world",
+    });
+  });
+
+  it("ignores whitespace-only composer text on Enter", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("   ");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({ kind: "new" });
+  });
+
+  it("supports Alt+Enter for multiline prompts", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("line one");
+    drv.press("ALT_ENTER");
+    drv.type("line two");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "line one\nline two",
+    });
+  });
+
+  it("Down at bottom of empty buffer moves focus to first session row", async () => {
+    const drv = makePicker({ sessions });
+    drv.press("DOWN");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "attach",
+      sessionId: "hydra-aaa",
+    });
+  });
+
+  it("Up from first session row returns focus to composer", async () => {
+    const drv = makePicker({ sessions });
+    drv.press("DOWN");
+    drv.press("UP");
+    drv.type("from composer");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "from composer",
+    });
+  });
+
+  it("preserves typed text across composer↔list focus toggles", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("draft");
+    drv.press("DOWN");
+    drv.press("UP");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "draft",
+    });
+  });
+
+  it("opens with composer focused even when the session list is empty", async () => {
+    const drv = makePicker({ sessions: [] });
+    drv.type("only choice");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "only choice",
+    });
+  });
+
+  it("Ctrl+C aborts the picker while composer is focused", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("about to abort");
+    drv.press("CTRL_C");
+    await expect(drv.resolveOnce).resolves.toEqual({ kind: "abort" });
+  });
+
+  it("^U clears the composer buffer", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("scratch this");
+    drv.press("CTRL_U");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({ kind: "new" });
+  });
+
+  it("backspace deletes characters in the composer", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("hellox");
+    drv.press("BACKSPACE");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "hello",
+    });
+  });
+
+  it("hotkey letters are typed as text while composer is focused", async () => {
+    const drv = makePicker({ sessions });
+    // Letters like 'h', 'r', 'k' are picker hotkeys when the list is
+    // focused. In the composer they're just text and must NOT trigger
+    // refresh / host-filter / kill.
+    drv.type("hrkdcoqt?");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "hrkdcoqt?",
+    });
   });
 });

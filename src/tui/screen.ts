@@ -116,7 +116,7 @@ export interface CompletionItem {
 const SESSIONBAR_ROWS = 1;
 const BANNER_ROWS = 1;
 const SEPARATOR_ROWS = 1;
-const MAX_PROMPT_ROWS = 8;
+export const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
 const MAX_HELP_ROWS = 30;
@@ -2684,7 +2684,7 @@ function formattedLineSig(
   );
 }
 
-interface PromptVisualRow {
+export interface PromptVisualRow {
   bufferIdx: number;
   startCol: number;
   endCol: number;
@@ -2698,7 +2698,7 @@ interface PromptVisualRow {
 // on the upstream row, keeping [startCol, endCol) a contiguous partition
 // of the line — the cursor-positioning logic in computePromptLayout
 // depends on that invariant.
-function computePromptVisualRows(buffer: string[], room: number): PromptVisualRow[] {
+export function computePromptVisualRows(buffer: string[], room: number): PromptVisualRow[] {
   const rows: PromptVisualRow[] = [];
   for (let i = 0; i < buffer.length; i++) {
     const line = buffer[i] ?? "";
@@ -2734,7 +2734,7 @@ function computePromptVisualRows(buffer: string[], room: number): PromptVisualRo
   return rows;
 }
 
-interface PromptLayout {
+export interface PromptLayout {
   // Visual row index (into the unwindowed visualRows array) the cursor
   // sits on, and its column within that row.
   cursorVisualRow: number;
@@ -2747,7 +2747,7 @@ interface PromptLayout {
   rendered: number;
 }
 
-function computePromptLayout(
+export function computePromptLayout(
   visualRows: PromptVisualRow[],
   state: { buffer: string[]; row: number; col: number },
   maxRows: number,
@@ -3358,7 +3358,7 @@ function formatTokens(n: number): string {
   return `${n}`;
 }
 
-function mapKeyName(name: string): KeyName | null {
+export function mapKeyName(name: string): KeyName | null {
   switch (name) {
     case "ENTER":
     case "KP_ENTER":
