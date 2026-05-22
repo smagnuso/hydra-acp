@@ -1786,8 +1786,14 @@ export class Screen {
     // that support it commit every row change atomically. Big repaints
     // (resize, /clear, scrollback scroll, modal open/close) used to land
     // as a row-by-row waterfall; with this bracket they appear as one
-    // frame. Unsupported terminals discard the sequence harmlessly.
+    // frame. Unsupported terminals discard the sequence harmlessly —
+    // for those we also bracket the paint in hideCursor()/restore so
+    // the cursor doesn't visibly bounce between drawX rows during the
+    // walk. placeCursor at the end re-asserts visibility for normal /
+    // scrollback-search / readonly; modal modes only moveTo, so we
+    // re-show explicitly when one of them is active.
     withSync(() => {
+      this.term.hideCursor();
       // Don't call term.clear() here. Each draw* method moves to its row
       // and emits eraseLineAfter before writing, so every row is
       // overwritten anyway. The full-screen clear caused a visible
@@ -1816,6 +1822,9 @@ export class Screen {
       this.drawSeparator(h - SESSIONBAR_ROWS);
       this.drawSessionbar();
       this.placeCursor();
+      if (this.permissionPrompt || this.confirmPrompt || this.helpPrompt) {
+        this.term.hideCursor(false);
+      }
       this.lastPromptRows = promptRows;
     });
   }

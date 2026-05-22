@@ -119,6 +119,14 @@ export interface TuiOptions {
   };
 }
 
+// Shared view-only preferences that persist across the runSession loop
+// (picker switch, ^T cycle, forced reconnect) so toggles set by the
+// user during one session carry into the next. Seeded once from config
+// in runTuiApp; mutated by hotkey handlers inside runSession.
+interface ViewPrefs {
+  showThoughts: boolean;
+}
+
 interface SessionContext {
   sessionId: string;
   agentId: string;
@@ -218,9 +226,17 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // Used to print a "To resume: …" hint on the way out so the user
   // doesn't have to dig through `hydra-acp sessions list` to come back.
   const exitHint: { sessionId?: string; readonly?: boolean } = {};
+  // TUI-process-wide view preferences. Each runSession() invocation reads
+  // and mutates this container so that toggles (e.g. ^T thought
+  // visibility) outlive the per-session re-attach loop that picker /
+  // ^T cycle / forced reconnect drives. Seeded once from config; the
+  // hotkey handler inside runSession mutates in place.
+  const viewPrefs: ViewPrefs = {
+    showThoughts: config.tui.showThoughts,
+  };
   let nextOpts: TuiOptions | null = opts;
   while (nextOpts !== null) {
-    nextOpts = await runSession(term, config, target, nextOpts, exitHint);
+    nextOpts = await runSession(term, config, target, nextOpts, exitHint, viewPrefs);
   }
   // Re-surface the update notice on the way out so users who missed
   // the 30-second banner inside the TUI still see it. cli.ts suppresses
@@ -258,6 +274,7 @@ async function runSession(
   target: RemoteTarget,
   opts: TuiOptions,
   exitHint: { sessionId?: string; readonly?: boolean },
+  viewPrefs: ViewPrefs,
 ): Promise<TuiOptions | null> {
   const ctx = await resolveSession(term, config, target, opts);
   if (!ctx) {
@@ -1094,11 +1111,6 @@ async function runSession(
   let pendingPrefill: { text: string; attachments: Attachment[] } | null =
     null;
 
-  // Toggled by ^T. Seeded from config; the Screen owns the actual
-  // filter (setHideThoughts), this var mirrors the state so the notify
-  // text matches and re-toggling works without round-tripping the Screen.
-  let showThoughts = config.tui.showThoughts;
-
   const screen: Screen = new Screen({
     term,
     dispatcher,
@@ -1366,7 +1378,7 @@ async function runSession(
   // pulse is cleared on terminals that latch it across screens.
   installStatus.finalize();
   screen.start();
-  screen.setHideThoughts(!showThoughts);
+  screen.setHideThoughts(!viewPrefs.showThoughts);
   screen.setSessionbar({
     agent: sessionbarAgent,
     cwd: resolvedCwd,
@@ -1887,9 +1899,11 @@ async function runSession(
         renderToolsBlock();
         return;
       case "toggle-thoughts":
-        showThoughts = !showThoughts;
-        screen.setHideThoughts(!showThoughts);
-        screen.notify(showThoughts ? "thoughts shown" : "thoughts hidden");
+        viewPrefs.showThoughts = !viewPrefs.showThoughts;
+        screen.setHideThoughts(!viewPrefs.showThoughts);
+        screen.notify(
+          viewPrefs.showThoughts ? "thoughts shown" : "thoughts hidden",
+        );
         return;
       case "toggle-mouse": {
         const next = !screen.isMouseEnabled();
