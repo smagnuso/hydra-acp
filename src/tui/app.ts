@@ -2671,20 +2671,25 @@ async function runSession(
     const elapsed = end - toolsBlockStartedAt;
     // Any frozen non-success stopReason gets the loud "stopped (<reason>)"
     // treatment so cancel/refusal/max_tokens etc. aren't visually identical
-    // to a normal end_turn finish.
+    // to a normal end_turn finish. Amended is the exception: a deliberate
+    // user replacement, not a failure — rendered dim with a softer label.
     const stoppedReason =
       !inProgress &&
       toolsBlockStopReason !== null &&
       toolsBlockStopReason !== "end_turn"
         ? toolsBlockStopReason
         : null;
+    const isAmended = stoppedReason === "amended";
+    const stoppedLabel = isAmended
+      ? `amended · ${formatElapsed(elapsed)}`
+      : `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`;
     let summary: string;
     if (total === 0) {
       // Pre-tool state — the block exists purely as a "still working"
       // indicator while the agent is thinking, then freezes as "thought · Xs"
       // at turn end so the user has a visible trace of the reasoning time.
       if (stoppedReason !== null) {
-        summary = `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`;
+        summary = stoppedLabel;
       } else {
         summary = inProgress
           ? `thinking · ${formatElapsed(elapsed)}`
@@ -2694,7 +2699,7 @@ async function runSession(
       const noun = total === 1 ? "tool" : "tools";
       const timing =
         stoppedReason !== null
-          ? `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`
+          ? stoppedLabel
           : inProgress
             ? formatElapsed(elapsed)
             : `took ${formatElapsed(elapsed)}`;
@@ -2717,11 +2722,14 @@ async function runSession(
     // header dims so completed turns stop pulling the eye. A non-success
     // stopReason overrides the frozen dim and goes bold-red so the user
     // can spot a cancelled / refused / truncated turn at a glance.
+    // Amended is the exception: stays dim since it's a user action.
     const pureThinking = total === 0 && inProgress;
-    const frozenStyle: "tool-status-fail" | "tool" =
-      stoppedReason !== null ? "tool-status-fail" : "tool";
-    const frozenBodyStyle: "tool-status-fail" | "dim" =
-      stoppedReason !== null ? "tool-status-fail" : "dim";
+    const stoppedHeaderStyle: "tool-status-fail" | "tool-status-cancelled" =
+      isAmended ? "tool-status-cancelled" : "tool-status-fail";
+    const frozenStyle: "tool-status-fail" | "tool-status-cancelled" | "tool" =
+      stoppedReason !== null ? stoppedHeaderStyle : "tool";
+    const frozenBodyStyle: "tool-status-fail" | "tool-status-cancelled" | "dim" =
+      stoppedReason !== null ? stoppedHeaderStyle : "dim";
     const lines: FormattedLine[] = [
       {
         prefix: "⚙ ",
@@ -3001,7 +3009,11 @@ async function runSession(
         effectiveStopReason !== undefined &&
         effectiveStopReason !== "end_turn"
       ) {
-        const lines = formatEvent({ ...lastPlanEvent, stopped: true });
+        const lines = formatEvent({
+          ...lastPlanEvent,
+          stopped: true,
+          amended: event.amended === true,
+        });
         if (lines.length > 0) {
           screen.upsertLines("plan", lines);
         }
@@ -3025,13 +3037,16 @@ async function runSession(
         screen.clearKey("tools");
       } else if (
         effectiveStopReason !== undefined &&
-        effectiveStopReason !== "end_turn"
+        effectiveStopReason !== "end_turn" &&
+        effectiveStopReason !== "amended"
       ) {
         // Defense-in-depth: a non-success turn ended but we have no tools
         // block to freeze (typically because a reconnect-recovery-failed
         // path already cleared it, or because the turn arrived from a
         // path that never started one). Without this the failure would
         // be invisible — exactly the "looks like it succeeded" trap.
+        // Amended turns are skipped: the user-text replacement below
+        // already conveys the action, no warning needed.
         screen.appendLines([
           {
             prefix: "⚠ ",

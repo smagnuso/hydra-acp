@@ -66,7 +66,7 @@ export type RenderEvent =
       // `end_turn` stopReason from the upstream agent.
       upstreamInterrupted?: boolean;
     }
-  | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean }
+  | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean; amended?: boolean }
   | { kind: "mode-changed"; mode: string }
   | { kind: "model-changed"; model: string }
   | { kind: "turn-complete"; stopReason?: string; amended?: boolean }

@@ -586,11 +586,15 @@ function toolIconStyle(status: string): Style {
 
 function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLine[] {
   const stopped = event.stopped === true;
+  const amended = event.amended === true;
+  // Amended is a deliberate user action (the user replaced this prompt),
+  // not a failure — dim the header so it doesn't read as an error.
+  const stoppedStyle: Style = amended ? "tool-status-cancelled" : "tool-status-fail";
   if (event.entries.length === 0) {
     return [
       {
         prefix: "▣ ",
-        prefixStyle: stopped ? "tool-status-fail" : "plan",
+        prefixStyle: stopped ? stoppedStyle : "plan",
         body: "(empty plan)",
         bodyStyle: "dim",
       },
@@ -602,14 +606,15 @@ function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLin
   // finished plan stops drawing the eye like an active one. When the turn
   // ends with a non-success stopReason and the plan didn't finish, the
   // header flips to bold red ("tool-status-fail") to match the
-  // "stopped (<reason>)" treatment on the tools block.
+  // "stopped (<reason>)" treatment on the tools block — except for
+  // amended turns, which dim instead since they aren't errors.
   const allComplete = event.entries.every(
     (e) => (e.status ?? "pending") === "completed",
   );
   const headerStyle: Style = allComplete
     ? "plan-done"
     : stopped
-      ? "tool-status-fail"
+      ? stoppedStyle
       : "plan";
   const lines: FormattedLine[] = [
     {

@@ -969,13 +969,15 @@ export class Screen {
     this.syncedPartialRepaint(() => this.drawBanner());
   }
 
-  // Wrap a partial repaint (banner-only, indicator-only, etc.) in a
+  // Wrap a partial repaint (banner-only, prompt-only, etc.) in a
   // synchronized-output bracket so the row swap is atomic on terminals
-  // that support DEC 2026, and hide the cursor across the paint so it
-  // doesn't visibly jump to the row being repainted before placeCursor
-  // snaps it back. placeCursor re-asserts visibility for normal /
-  // scrollback-search / readonly; modal modes only moveTo, so we
-  // re-show explicitly when one of them is active.
+  // that support DEC 2026. Cursor movement (moveTo) is buffered inside
+  // BSU/ESU, so the cursor appears at its final placeCursor position
+  // without visibly visiting intermediate rows. We intentionally do NOT
+  // hide the cursor here: ?25l/h (cursor visibility) is terminal *state*
+  // applied immediately rather than buffered, so hiding inside a BSU/ESU
+  // block causes a visible blink (cursor disappears → frame commits →
+  // cursor reappears) on every banner tick — worse than any skitter.
   private syncedPartialRepaint(paint: () => void): void {
     // Mirrors paintRow's started-guard: a stale timer tick (banner
     // elapsed-time, notification timeout) firing after stop() must not
@@ -984,12 +986,8 @@ export class Screen {
       return;
     }
     withSync(() => {
-      this.term.hideCursor();
       paint();
       this.placeCursor();
-      if (this.permissionPrompt || this.confirmPrompt || this.helpPrompt) {
-        this.term.hideCursor(false);
-      }
     });
   }
 
