@@ -365,14 +365,11 @@ export async function pickSession(
   // right edge of the terminal.
   const paintComposerTopBorder = (): void => {
     const inner = composerBoxInner();
-    const focused = selectedIdx === 0;
     const titleFragment = `─ ${composerTitle} `;
     const dashCount = Math.max(1, inner - titleFragment.length);
     const dashes = "─".repeat(dashCount);
-    if (focused) {
-      term.brightCyan.noFormat("╭");
-      term.brightCyan.bold.noFormat(titleFragment);
-      term.brightCyan.noFormat(`${dashes}╮`);
+    if (selectedIdx === 0) {
+      term.brightBlue.noFormat(`╭${titleFragment}${dashes}╮`);
     } else {
       term.dim.noFormat(`╭${titleFragment}${dashes}╮`);
     }
@@ -383,21 +380,16 @@ export async function pickSession(
     const inner = composerBoxInner();
     const dashes = "─".repeat(inner);
     if (selectedIdx === 0) {
-      term.brightCyan.noFormat(`╰${dashes}╯`);
+      term.brightBlue.noFormat(`╰${dashes}╯`);
     } else {
       term.dim.noFormat(`╰${dashes}╯`);
     }
   };
 
-  // One visual row of the composer body, wrapped in left/right box
-  // borders. Inside the box we keep just a one-column space between the
-  // border and the text — no "> " / "· " gutters because the box itself
-  // is the visual frame, and the cursor + content make the entry intent
-  // obvious.
+  // One visual row of the composer body. Focused: border glyphs in
+  // brightBlue, content plain. Unfocused: borders dim, content plain.
   const paintComposerBodyRow = (visualIdx: number): void => {
     const inner = composerBoxInner();
-    const sideStyle = selectedIdx === 0 ? term.brightCyan : term.dim;
-    sideStyle.noFormat("│");
     const vr = composerVisualRows[visualIdx];
     let slice = "";
     if (vr) {
@@ -406,17 +398,17 @@ export async function pickSession(
         vr.endCol,
       );
     }
-    // Inner cell content: " " + slice + pad so the right border lands
-    // exactly at column termWidth. inner counts only the cells between
-    // borders, so total inner-pad width is inner - 1 (left pad already
-    // written) - slice.length.
-    term.noFormat(" ");
-    term.noFormat(slice);
     const padWidth = Math.max(0, inner - 1 - slice.length);
-    if (padWidth > 0) {
-      term.noFormat(" ".repeat(padWidth));
+    const pad = " ".repeat(padWidth);
+    if (selectedIdx === 0) {
+      term.brightBlue.noFormat("│");
+      term.noFormat(` ${slice}${pad}`);
+      term.brightBlue.noFormat("│");
+    } else {
+      term.dim.noFormat("│");
+      term.noFormat(` ${slice}${pad}`);
+      term.dim.noFormat("│");
     }
-    sideStyle.noFormat("│");
   };
 
   const paintSessionRow = (sessionIdx: number): void => {
