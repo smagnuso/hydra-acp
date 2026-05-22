@@ -2364,6 +2364,14 @@ export class Screen {
       this.term.hideCursor(true);
       return;
     }
+    if (this.readonly) {
+      // View-only: no composer to park on. Without this branch the
+      // fall-through below puts the cursor on the row where the prompt
+      // *would* be — which in readonly is the separator slid down by
+      // promptRows()=0, so the user sees a stray block on the dim line.
+      this.term.hideCursor(true);
+      return;
+    }
     // Outside of scrollback search, ensure the cursor is visible —
     // re-asserting on every paint is cheap and recovers from a stale
     // hide if the previous frame was in search mode.
