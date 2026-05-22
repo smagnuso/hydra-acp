@@ -329,6 +329,72 @@ describe("startDaemon", () => {
       }
     });
 
+    it("echoes acp.v1 in the 101 response when the client advertises it", async () => {
+      // The Streamable HTTP & WebSocket Transport RFD permits using
+      // WebSocket subprotocols for version/auth signaling. Hydra
+      // clients advertise `acp.v1` alongside `hydra-acp-token.<token>`;
+      // the server selects `acp.v1` deliberately via handleProtocols.
+      const ws = new WebSocket(wsUrl, [
+        "acp.v1",
+        `hydra-acp-token.${TEST_TOKEN}`,
+      ]);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ws.once("open", () => resolve());
+          ws.once("error", reject);
+        });
+        expect(ws.protocol).toBe("acp.v1");
+      } finally {
+        ws.close();
+      }
+    });
+
+    it("upgrades cleanly with no subprotocol echo when none is advertised", async () => {
+      // The query-string auth flow (?token=...) advertises no
+      // subprotocols at all. RFC 6455 says the server MUST NOT echo
+      // a Sec-WebSocket-Protocol header in that case, and the client
+      // doesn't expect one. This is the path browser clients and any
+      // caller without subprotocol-header control use.
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ws.once("open", () => resolve());
+          ws.once("error", reject);
+        });
+        expect(ws.protocol).toBe("");
+      } finally {
+        ws.close();
+      }
+    });
+
+    it("rejects a connection that advertises subprotocols but none we accept", async () => {
+      // RFC 6455: if a client requests subprotocols and the server
+      // doesn't select one, the negotiation has failed. The `ws`
+      // library enforces this on the client side. In practice this
+      // catches misconfigured/future clients that drop `acp.v1` —
+      // they get a clear failure instead of a quietly-upgraded
+      // connection that doesn't share a version contract with the
+      // server.
+      const ws = new WebSocket(wsUrl, [`hydra-acp-token.${TEST_TOKEN}`]);
+      const err = await new Promise<Error>((resolve) => {
+        ws.once("error", (e) => resolve(e));
+        ws.once("open", () => resolve(new Error("unexpectedly opened")));
+      });
+      expect(err.message).toMatch(/no subprotocol|unexpected/i);
+      ws.close();
+    });
+
+    it("rejects acp.v1 without a valid token (subprotocol auth still required)", async () => {
+      // Subprotocol selection is independent of auth — advertising
+      // `acp.v1` alone doesn't grant access.
+      const ws = new WebSocket(wsUrl, ["acp.v1"]);
+      const code = await new Promise<number>((resolve) => {
+        ws.once("close", (c) => resolve(c));
+        ws.once("error", () => undefined);
+      });
+      expect(code).toBe(4401);
+    });
+
     it("responds to initialize with hydra capabilities", async () => {
       const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
       await new Promise<void>((resolve, reject) => {

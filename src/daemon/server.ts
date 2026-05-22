@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocketPlugin from "@fastify/websocket";
+import { selectAcpSubprotocol } from "./ws-protocol.js";
 import pino, { type Level } from "pino";
 import createPinoRoll from "pino-roll";
 import { type HydraConfig, extensionList } from "../core/config.js";
@@ -76,7 +77,14 @@ export async function startDaemon(
     bodyLimit: 256 * 1024 * 1024,
   });
 
-  await app.register(websocketPlugin);
+  // `handleProtocols` makes WS subprotocol negotiation deliberate.
+  // Without it the underlying `ws` library echoes the first advertised
+  // protocol unconditionally — fine while the first slot always holds
+  // `acp.v1`, but it would silently echo arbitrary client-controlled
+  // strings if that ever changed. See src/daemon/ws-protocol.ts.
+  await app.register(websocketPlugin, {
+    options: { handleProtocols: selectAcpSubprotocol },
+  });
 
   // Route binary-install progress through the daemon's pino logger so
   // `hydra logs` (and daemon.log) surface tarball downloads — otherwise

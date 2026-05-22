@@ -42,9 +42,11 @@ Adds two new methods that turn ACP from 1:1 into 1:N:
 
 Every event the agent emits is broadcast to every attached client; clients self-filter what they act on. Permission requests broadcast the same way: the first response wins, and the rest receive a `session/update` notification with `sessionUpdate: "permission_resolved"`. Capability is advertised in `initialize` under `agentCapabilities.sessionCapabilities.attach`.
 
-#### 2. Streamable HTTP & WebSocket Transport — [RFD: streamable-http-websocket-transport](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport)
+#### 2. Streamable HTTP & WebSocket Transport — [RFD: streamable-http-websocket-transport](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport) (WebSocket profile only)
 
-Defines the network transport that lets ACP run between processes that aren't parent and child. The relevant half for `hydra-acp` is the WebSocket binding: a client sends `GET /acp` with `Upgrade: websocket`, receives a `101 Switching Protocols` response, and the connection becomes a bidirectional stream of JSON-RPC text frames (binary frames are ignored). Authentication is layered on top — HTTP headers, query parameters, or WebSocket subprotocols — and is treated as orthogonal by the spec. `hydra-acp` exposes its WSS endpoint at `/acp` and authenticates via a bearer token carried in a WebSocket subprotocol or a query parameter.
+Defines the network transport that lets ACP run between processes that aren't parent and child. The RFD specifies two profiles on one `/acp` endpoint: a Streamable HTTP profile (POST/GET-SSE/DELETE with `Acp-Connection-Id` and `Acp-Session-Id` headers, HTTP/2 required) and a WebSocket profile (GET with `Upgrade: websocket`). The RFD explicitly permits servers to support **only** the WebSocket profile, and that's the route `hydra-acp` takes — the Streamable HTTP half isn't implemented. The RFD itself is still Draft as of April 2026, with the routing model rewritten twice in the six weeks before this writing, so deferring HTTP-transport work until the spec stabilizes is deliberate.
+
+On the WebSocket side, `hydra-acp` exposes its WSS endpoint at `/acp`: a client sends `GET /acp` with `Upgrade: websocket`, receives a `101 Switching Protocols` response, and the connection becomes a bidirectional stream of JSON-RPC text frames (binary frames are ignored). The server negotiates the `acp.v1` subprotocol via the standard `Sec-WebSocket-Protocol` mechanism (echoed back in the 101 when advertised; absent otherwise). Authentication is layered on top — HTTP headers, query parameters, or WebSocket subprotocols — and is treated as orthogonal by the spec. `hydra-acp` authenticates via a bearer token carried in a `hydra-acp-token.<token>` subprotocol entry or a `?token=<token>` query parameter.
 
 ### Standard ACP it relies on
 
@@ -500,7 +502,7 @@ Logs are also fanned out to stderr while the daemon is running. To follow live: 
 
 ## Wire protocol
 
-The daemon's WSS endpoint follows the [Streamable HTTP & WebSocket Transport RFD](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport):
+The daemon's WSS endpoint follows the WebSocket profile of the [Streamable HTTP & WebSocket Transport RFD](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport) (the Streamable HTTP profile isn't implemented — see the transport section above):
 
 ```
 GET /acp HTTP/1.1
@@ -509,7 +511,7 @@ Upgrade: websocket
 Sec-WebSocket-Protocol: acp.v1, hydra-acp-token.<token>
 ```
 
-Frames are JSON-RPC 2.0 text frames; binary frames are ignored.
+The server selects `acp.v1` and echoes it back in `Sec-WebSocket-Protocol` on the 101 response; the `hydra-acp-token.<token>` entry is consumed as auth and never echoed. Frames are JSON-RPC 2.0 text frames; binary frames are ignored.
 
 The first JSON-RPC message a client sends is `initialize` (per ACP).
 
