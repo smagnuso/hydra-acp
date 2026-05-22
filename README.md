@@ -187,7 +187,7 @@ hydra-acp session
 
 # 6. Attach a second client to an existing session.
 #    Bare invocation auto-detects: TUI in a terminal, ACP shim when piped.
-hydra-acp --session-id hydra_session_abc123
+hydra-acp --session hydra_session_abc123
 ```
 
 ## CLI
@@ -198,13 +198,21 @@ hydra-acp shim                              # explicit shim mode (forces shim re
 hydra-acp tui                               # explicit terminal-UI mode
 hydra-acp launch <agent>                    # launcher mode: shim that forces the
                                             # daemon to spawn <agent> on session/new
-hydra-acp --session-id <id>                 # attach to existing session
+hydra-acp cat [-p <prompt>] [--detach]      # pipe-friendly headless mode: feeds stdin
+                                            # to a session as prompts and streams the
+                                            # agent's reply to stdout
+hydra-acp --session <id-or-url>             # attach to existing session
                                             # (TUI in a TTY, shim otherwise)
+hydra-acp --reattach                        # pick the most-recent session for cwd
+hydra-acp --new                              # force a fresh session
+hydra-acp --readonly                         # open a session as a transcript viewer (with --session)
 
 hydra-acp init                              # generate the service token
 hydra-acp daemon start [--foreground]       # detached by default; --foreground to attach
 hydra-acp daemon stop
+hydra-acp daemon restart
 hydra-acp daemon status
+hydra-acp daemon logs [-f] [-n N]           # tail (default 50) or follow the daemon log
 
 hydra-acp session                          # list sessions
 hydra-acp session kill <id>                # close a live session (keeps the on-disk record so it can be resurrected)
@@ -212,9 +220,15 @@ hydra-acp session remove <id>              # remove a session entirely (live or 
 hydra-acp session export <id> [--out <file>|.]
                                             # write a session bundle (meta + history) to <file>,
                                             # to a default-named file when --out=., or to stdout
-hydra-acp session import <file>|- [--replace]
+hydra-acp session transcript <id>|<file> [--out <file>|.]
+                                            # render a session (id via daemon, or a local .hydra
+                                            # bundle) as a markdown transcript
+hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]
                                             # import a bundle from <file> or stdin (-);
-                                            # --replace overwrites an existing lineage match
+                                            # --replace overwrites a lineage match (kills it
+                                            # if live); --cwd overrides the bundle's recorded
+                                            # working directory; --info prints the bundle's
+                                            # meta without importing
 
 hydra-acp extension                        # list configured extensions and live state
 hydra-acp extension add <name>             # add to config (--command, --args, --env, --disabled)
@@ -224,8 +238,14 @@ hydra-acp extension logs <name> [-f] [-n]  # tail (default 50) or follow an exte
 
 hydra-acp agent                            # list agents in the registry
 hydra-acp agent install <id>               # pre-install an agent (else lazy on first use)
+hydra-acp agent refresh                    # force a registry re-fetch
+hydra-acp agent sync <id>                  # spawn <id> just long enough to ACP session/list it,
+                                            # then persist any sessions it remembers as cold rows
+                                            # (lets you bring in pre-existing agent sessions)
 
-hydra-acp config                            # print resolved config path/values
+hydra-acp auth password [--force]          # set the daemon's master password
+hydra-acp auth                              # list active session tokens
+hydra-acp auth revoke <id>                 # revoke a session token
 ```
 
 A bare invocation (`hydra-acp` with no subcommand) auto-dispatches based on whether stdout is a TTY: a real terminal launches the TUI, a piped stdio (the editor-spawned case) drops into shim mode. Pass `shim` or `tui` explicitly to force one or the other. Editors should configure `hydra-acp shim` so the choice is unambiguous regardless of how the editor wires stdio.
@@ -317,11 +337,11 @@ Every config-knob flag has an `HYDRA_ACP_FOO_BAR` env-var equivalent. Flag wins 
 | `--name` | `HYDRA_ACP_NAME` |
 | `--agent` | `HYDRA_ACP_AGENT` |
 | `--model` | `HYDRA_ACP_MODEL` |
-| `--session-id` | `HYDRA_ACP_SESSION_ID` |
+| `--session` | `HYDRA_ACP_SESSION` |
 
 `--model` is a one-shot override for the per-agent `defaultModels` entry in `~/.hydra-acp/config.json`. It only applies at fresh session creation — resurrect and `/hydra agent` switch ignore it (resurrected sessions stay on whatever model they were last using).
 
-Action commands (`init`, `daemon`, `sessions`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
+Action commands (`init`, `daemon`, `session`, `extension`, `agent`, `auth`, `cat`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
 
 ### Registry id resolution
 
