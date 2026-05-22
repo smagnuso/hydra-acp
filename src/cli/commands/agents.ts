@@ -72,6 +72,87 @@ export async function runAgentsList(): Promise<void> {
   process.stdout.write(`\nRegistry version: ${body.version}\n`);
 }
 
+interface SyncedSession {
+  sessionId: string;
+  upstreamSessionId: string;
+  agentId: string;
+  cwd: string;
+  title?: string;
+  updatedAt: string;
+}
+
+export async function runAgentsSync(agentId: string | undefined): Promise<void> {
+  if (!agentId) {
+    process.stderr.write("Usage: hydra-acp agent sync <agent-id>\n");
+    process.exit(2);
+    return;
+  }
+  const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  let body: { synced: SyncedSession[]; skipped: number };
+  try {
+    const r = await fetch(`${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/sync`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${serviceToken}` },
+    });
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
+      try {
+        const j = (await r.json()) as { error?: string };
+        if (j.error) {
+          detail = j.error;
+        }
+      } catch {
+        void 0;
+      }
+      process.stderr.write(`hydra agent sync ${agentId}: ${detail}\n`);
+      process.exit(1);
+    }
+    body = (await r.json()) as { synced: SyncedSession[]; skipped: number };
+  } catch (err) {
+    process.stderr.write(
+      `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
+    );
+    process.exit(1);
+    return;
+  }
+
+  if (body.synced.length === 0) {
+    process.stdout.write(
+      `Nothing new to sync (${body.skipped} already tracked).\n`,
+    );
+    return;
+  }
+
+  const rows = body.synced.map((s) => ({
+    id: s.sessionId,
+    upstream: s.upstreamSessionId,
+    cwd: s.cwd,
+    title: s.title ?? "-",
+  }));
+  const header = { id: "ID", upstream: "UPSTREAM", cwd: "CWD", title: "TITLE" };
+  const widths = {
+    id: maxLen(header.id, rows.map((r) => r.id)),
+    upstream: maxLen(header.upstream, rows.map((r) => r.upstream)),
+    cwd: maxLen(header.cwd, rows.map((r) => r.cwd)),
+  };
+  const fmt = (r: typeof header): string =>
+    [
+      r.id.padEnd(widths.id),
+      r.upstream.padEnd(widths.upstream),
+      r.cwd.padEnd(widths.cwd),
+      r.title,
+    ].join("  ");
+  process.stdout.write(fmt(header) + "\n");
+  for (const r of rows) {
+    process.stdout.write(fmt(r) + "\n");
+  }
+  process.stdout.write(
+    `\nSynced ${body.synced.length} session(s); skipped ${body.skipped} already tracked.\n`,
+  );
+}
+
 export async function runAgentsRefresh(): Promise<void> {
   const config = await loadConfig();
   const serviceToken = await loadServiceToken();

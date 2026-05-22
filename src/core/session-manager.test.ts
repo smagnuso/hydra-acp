@@ -2002,3 +2002,186 @@ describe("SessionManager: resurrectPendingQueues", () => {
   });
 });
 
+describe("SessionManager.syncFromAgent", () => {
+  function makeSyncManager(opts: {
+    capability?: unknown;
+    pages: Array<{
+      sessions: Array<{
+        sessionId: string;
+        cwd: string;
+        title?: string;
+        updatedAt?: string;
+      }>;
+      nextCursor?: string;
+    }>;
+  }): { manager: SessionManager; mock: MockAgentControls } {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock.mockResolvedValueOnce({
+      protocolVersion: 1,
+      agentCapabilities:
+        opts.capability === undefined
+          ? {}
+          : { sessionCapabilities: { list: opts.capability } },
+    });
+    for (const page of opts.pages) {
+      requestMock.mockResolvedValueOnce(page);
+    }
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    return { manager, mock };
+  }
+
+  it("persists a cold record per agent-side session with pendingHistorySync set", async () => {
+    const { manager, mock } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            {
+              sessionId: "u_one",
+              cwd: "/projects/a",
+              title: "explore atlas",
+              updatedAt: "2026-05-01T00:00:00.000Z",
+            },
+            { sessionId: "u_two", cwd: "/projects/b" },
+          ],
+        },
+      ],
+    });
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(synced).toHaveLength(2);
+    expect(skipped).toBe(0);
+    expect(synced.every((r) => r.pendingHistorySync === true)).toBe(true);
+    expect(synced.map((r) => r.upstreamSessionId).sort()).toEqual([
+      "u_one",
+      "u_two",
+    ]);
+    expect(synced.find((r) => r.upstreamSessionId === "u_one")?.title).toBe(
+      "explore atlas",
+    );
+    expect(synced.find((r) => r.upstreamSessionId === "u_two")?.title).toBeUndefined();
+    expect(mock.agent.kill).toHaveBeenCalled();
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    expect(requestMock.mock.calls[0]?.[0]).toBe("initialize");
+    expect(requestMock.mock.calls[1]?.[0]).toBe("session/list");
+  });
+
+  it("skips entries whose (agentId, upstreamSessionId) is already tracked locally", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    await store.write({
+      sessionId: "hydra_session_existing",
+      cwd: "/projects/a",
+      agentId: "claude-code",
+      upstreamSessionId: "u_one",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            { sessionId: "u_one", cwd: "/projects/a" },
+            { sessionId: "u_new", cwd: "/projects/b" },
+          ],
+        },
+      ],
+    });
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(skipped).toBe(1);
+    expect(synced).toHaveLength(1);
+    expect(synced[0]?.upstreamSessionId).toBe("u_new");
+  });
+
+  it("throws and kills the agent when sessionCapabilities.list is not advertised", async () => {
+    const { manager, mock } = makeSyncManager({ pages: [] });
+    await expect(manager.syncFromAgent("claude-code")).rejects.toThrow(
+      /does not advertise sessionCapabilities\.list/,
+    );
+    expect(mock.agent.kill).toHaveBeenCalled();
+  });
+
+  it("threads nextCursor across pages", async () => {
+    const { manager, mock } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [{ sessionId: "u_p1", cwd: "/a" }],
+          nextCursor: "cursor-2",
+        },
+        { sessions: [{ sessionId: "u_p2", cwd: "/b" }] },
+      ],
+    });
+    const { synced } = await manager.syncFromAgent("claude-code");
+    expect(synced.map((r) => r.upstreamSessionId).sort()).toEqual([
+      "u_p1",
+      "u_p2",
+    ]);
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    expect(requestMock.mock.calls[1]).toEqual(["session/list", {}]);
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/list",
+      { cursor: "cursor-2" },
+    ]);
+  });
+
+  it("rejects when the agent is not in the registry", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => makeMockAgent({ agentId: "claude-code" }).agent,
+    );
+    await expect(manager.syncFromAgent("unknown-agent")).rejects.toMatchObject({
+      code: JsonRpcErrorCodes.AgentNotInstalled,
+    });
+  });
+});
+
+describe("SessionManager.resurrect: pendingHistorySync", () => {
+  it("keeps the agent's session/load replay and clears the flag", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({});
+    const drainSpy = vi.spyOn(mock.agent.connection, "drainBuffered");
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    // Seed the on-disk record with pendingHistorySync so the clear path
+    // has something to overwrite (loadFromDisk forwards the flag through
+    // ResurrectParams; using resurrect() directly mirrors that wire-up).
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    await store.write({
+      sessionId: "hydra_session_synced",
+      cwd: "/work",
+      agentId: "claude-code",
+      upstreamSessionId: "u_synced",
+      pendingHistorySync: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    await manager.resurrect({
+      hydraSessionId: "hydra_session_synced",
+      upstreamSessionId: "u_synced",
+      agentId: "claude-code",
+      cwd: "/work",
+      pendingHistorySync: true,
+    });
+
+    expect(drainSpy).not.toHaveBeenCalled();
+    await manager.flushMetaWrites();
+    const reread = await store.read("hydra_session_synced");
+    expect(reread?.pendingHistorySync).toBeUndefined();
+  });
+});
+

@@ -34,7 +34,11 @@ import {
   runExtensionsStart,
   runExtensionsStop,
 } from "./cli/commands/extensions.js";
-import { runAgentsList, runAgentsRefresh } from "./cli/commands/agents.js";
+import {
+  runAgentsList,
+  runAgentsRefresh,
+  runAgentsSync,
+} from "./cli/commands/agents.js";
 import {
   runAuthList,
   runAuthPasswordSet,
@@ -366,6 +370,10 @@ async function main(): Promise<void> {
         await runAgentsRefresh();
         return;
       }
+      if (sub === "sync") {
+        await runAgentsSync(positional[2]);
+        return;
+      }
       process.stderr.write(`Unknown agent subcommand: ${sub}\n`);
       process.exit(2);
       return;
@@ -578,6 +586,7 @@ function printHelp(): void {
       "  hydra-acp extension logs <name> [-f] [-n N]      Tail or follow an extension's log",
       "  hydra-acp agent [list]                      List agents in the cached registry",
       "  hydra-acp agent refresh                     Force a registry re-fetch",
+      "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
       "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
       "  hydra-acp auth revoke <id>                  Revoke a session token",

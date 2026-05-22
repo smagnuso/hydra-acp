@@ -93,6 +93,12 @@ export interface ResurrectParams {
   // shows when the conversation actually began rather than the latest
   // wakeup.
   createdAt?: string;
+  // One-shot: set true by `hydra agent sync` when the local record was
+  // minted from an agent-side session/list entry and we want this
+  // resurrect to keep the session/load replay so history.jsonl gets
+  // populated from the agent's memory. Cleared on the disk record
+  // after the resurrect completes.
+  pendingHistorySync?: boolean;
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -281,15 +287,20 @@ export class SessionManager {
     }
 
     // session/load asks the agent to replay the conversation via
-    // session/update notifications. We already have that history in
-    // history.jsonl, and we're about to wire up wireAgent's session/update
-    // handler — which would flush the buffered replay through
-    // recordAndBroadcast and re-append every entry. That doubles the log
-    // every resurrect, drags in /hydra-internal prompts the agent
-    // remembers but we deliberately didn't record, and breaks the TUI's
-    // turn bracketing on reload (each replayed slice looks like a turn
-    // that started but never reached turn_complete).
-    agent.connection.drainBuffered("session/update");
+    // session/update notifications. Normally we already have that
+    // history in history.jsonl and would double-log every resurrect by
+    // flushing the replay through wireAgent's session/update handler,
+    // so we drop the buffer. The exception is a row minted by
+    // `hydra agent sync`, which has no local history yet — there we
+    // *want* the replay to land in history.jsonl, and clear the
+    // pendingHistorySync flag once we've done so.
+    if (params.pendingHistorySync === true) {
+      void this.clearPendingHistorySync(params.hydraSessionId).catch(
+        () => undefined,
+      );
+    } else {
+      agent.connection.drainBuffered("session/update");
+    }
 
     const session = new Session({
       sessionId: params.hydraSessionId,
@@ -399,6 +410,172 @@ export class SessionManager {
       void 0;
     }
     return os.homedir();
+  }
+
+  // Pull every session the agent itself remembers (across all cwds) and
+  // persist a cold hydra record for each one we don't already track.
+  // Used by `hydra agent sync <id>` to surface sessions created outside
+  // hydra — or by other tools — in `hydra session list` so the picker
+  // can resurrect them. Spawns a throwaway agent process for the
+  // initialize + session/list pair, then kills it. Records are minted
+  // with pendingHistorySync:true so the first resurrect records the
+  // agent's session/load replay into history.jsonl rather than dropping
+  // it.
+  async syncFromAgent(
+    agentId: string,
+  ): Promise<{ synced: SessionRecord[]; skipped: number }> {
+    const agentDef = await this.registry.getAgent(agentId);
+    if (!agentDef) {
+      const err = new Error(
+        `agent ${agentId} not found in registry`,
+      ) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.AgentNotInstalled;
+      throw err;
+    }
+    const plan = await planSpawn(agentDef, [], {
+      npmRegistry: this.npmRegistry,
+    });
+    const agent = this.spawner({
+      agentId,
+      cwd: os.homedir(),
+      plan,
+    });
+
+    let initResult: Record<string, unknown>;
+    try {
+      initResult = await agent.connection.request<Record<string, unknown>>(
+        "initialize",
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {},
+          clientInfo: { name: "hydra", version: HYDRA_VERSION },
+        },
+      );
+    } catch (err) {
+      await agent.kill().catch(() => undefined);
+      throw err;
+    }
+
+    const caps = (initResult.agentCapabilities ?? {}) as {
+      sessionCapabilities?: { list?: unknown };
+    };
+    if (caps.sessionCapabilities?.list === undefined) {
+      await agent.kill().catch(() => undefined);
+      throw new Error(
+        `agent ${agentId} does not advertise sessionCapabilities.list; cannot sync`,
+      );
+    }
+
+    let entries: Array<{
+      sessionId: string;
+      cwd: string;
+      title?: string;
+      updatedAt?: string;
+    }>;
+    try {
+      entries = await this.collectAgentSessions(agent);
+    } catch (err) {
+      await agent.kill().catch(() => undefined);
+      throw err;
+    }
+    await agent.kill().catch(() => undefined);
+
+    const existing = new Set<string>();
+    for (const live of this.sessions.values()) {
+      existing.add(`${live.agentId}::${live.upstreamSessionId}`);
+    }
+    const stored = await this.store.list().catch(() => []);
+    for (const rec of stored) {
+      existing.add(`${rec.agentId}::${rec.upstreamSessionId}`);
+    }
+
+    const synced: SessionRecord[] = [];
+    let skipped = 0;
+    for (const entry of entries) {
+      const dedupeKey = `${agentId}::${entry.sessionId}`;
+      if (existing.has(dedupeKey)) {
+        skipped += 1;
+        continue;
+      }
+      existing.add(dedupeKey);
+      const newId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
+      const now = new Date().toISOString();
+      const ts = entry.updatedAt ?? now;
+      const recordArgs: Parameters<typeof recordFromMemorySession>[0] = {
+        sessionId: newId,
+        lineageId: generateLineageId(),
+        upstreamSessionId: entry.sessionId,
+        agentId,
+        cwd: entry.cwd,
+        pendingHistorySync: true,
+        createdAt: ts,
+        updatedAt: ts,
+      };
+      if (entry.title !== undefined) {
+        recordArgs.title = entry.title;
+      }
+      const record = recordFromMemorySession(recordArgs);
+      await this.store.write(record);
+      synced.push({ version: 1, ...record });
+    }
+    return { synced, skipped };
+  }
+
+  // Paginate the agent's session/list, threading nextCursor until the
+  // agent stops returning one. Each entry the spec guarantees has
+  // { sessionId, cwd }; title and updatedAt are optional.
+  private async collectAgentSessions(agent: AgentInstance): Promise<
+    Array<{ sessionId: string; cwd: string; title?: string; updatedAt?: string }>
+  > {
+    const out: Array<{
+      sessionId: string;
+      cwd: string;
+      title?: string;
+      updatedAt?: string;
+    }> = [];
+    let cursor: string | undefined;
+    // Bound the loop to defend against an agent that hands back the same
+    // cursor forever; 100 pages × any reasonable page size is well past
+    // anything sane.
+    for (let page = 0; page < 100; page += 1) {
+      const params: Record<string, unknown> = {};
+      if (cursor !== undefined) {
+        params.cursor = cursor;
+      }
+      const result = await agent.connection.request<{
+        sessions?: Array<{
+          sessionId?: unknown;
+          cwd?: unknown;
+          title?: unknown;
+          updatedAt?: unknown;
+        }>;
+        nextCursor?: unknown;
+      }>("session/list", params);
+      const rows = Array.isArray(result.sessions) ? result.sessions : [];
+      for (const row of rows) {
+        if (typeof row.sessionId !== "string" || typeof row.cwd !== "string") {
+          continue;
+        }
+        const entry: {
+          sessionId: string;
+          cwd: string;
+          title?: string;
+          updatedAt?: string;
+        } = { sessionId: row.sessionId, cwd: row.cwd };
+        if (typeof row.title === "string") {
+          entry.title = row.title;
+        }
+        if (typeof row.updatedAt === "string") {
+          entry.updatedAt = row.updatedAt;
+        }
+        out.push(entry);
+      }
+      if (typeof result.nextCursor !== "string" || result.nextCursor.length === 0) {
+        break;
+      }
+      cursor = result.nextCursor;
+    }
+    return out;
   }
 
   // Bootstrap a fresh agent process: registry resolve → spawn → initialize
@@ -653,7 +830,20 @@ export class SessionManager {
       agentModes: record.agentModes,
       agentModels: record.agentModels,
       createdAt: record.createdAt,
+      pendingHistorySync: record.pendingHistorySync,
     };
+  }
+
+  private async clearPendingHistorySync(sessionId: string): Promise<void> {
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record || record.pendingHistorySync !== true) {
+        return;
+      }
+      const next: SessionRecord = { ...record };
+      delete next.pendingHistorySync;
+      await this.store.write(next);
+    });
   }
 
   // Best-effort: peek at the persisted history's first prompt and use

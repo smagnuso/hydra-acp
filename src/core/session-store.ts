@@ -105,6 +105,12 @@ export const SessionRecord = z.object({
   agentCommands: z.array(PersistedAgentCommand).optional(),
   agentModes: z.array(PersistedAgentMode).optional(),
   agentModels: z.array(PersistedAgentModel).optional(),
+  // One-shot flag set when `hydra agent sync` mints a row from an
+  // agent-side session/list entry: signals that the first resurrect
+  // should *keep* the agent's session/load replay (instead of draining
+  // it) so the local history.jsonl gets populated from the agent's
+  // memory. Cleared after that first resurrect completes.
+  pendingHistorySync: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -238,6 +244,7 @@ export function recordFromMemorySession(args: {
   agentCommands?: PersistedAgentCommand[];
   agentModes?: PersistedAgentMode[];
   agentModels?: PersistedAgentModel[];
+  pendingHistorySync?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -259,6 +266,7 @@ export function recordFromMemorySession(args: {
     agentCommands: args.agentCommands,
     agentModes: args.agentModes,
     agentModels: args.agentModels,
+    pendingHistorySync: args.pendingHistorySync,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };
