@@ -1597,8 +1597,15 @@ async function runSession(
     // in the current session without a reconnect or history replay.
     // Updates that arrive while the picker is up land in the Screen's
     // in-memory state; repaints are deferred until we resume.
+    // keepFullscreen=true: stay in the alt-screen buffer across the
+    // picker round-trip so the user doesn't see a frame of the host
+    // shell's main buffer flash between the live session tearing down
+    // and the picker painting from row 1. The picker's moveTo(1,1) +
+    // eraseDisplayBelow simply overwrites the alt-screen buffer the
+    // live session was using; on return, screen.start() clears its
+    // row-sig cache and repaints over the picker content.
     screen.pauseRepaint();
-    screen.stop();
+    screen.stop({ keepFullscreen: true });
     saveHistory(historyFile, history).catch(() => undefined);
     // Loop: the imported-first-launch action dialog's Esc returns
     // "back" to re-show the picker, same as the initial-picker flow.
@@ -1615,7 +1622,9 @@ async function runSession(
         currentSessionId: resolvedSessionId,
       });
       if (choice.kind === "abort") {
-        screen.start();
+        // Pair with stop({ keepFullscreen: true }) above — we never left
+        // the alt screen buffer, so don't re-emit fullscreen(true).
+        screen.start({ skipFullscreen: true });
         screen.resumeRepaint();
         return;
       }
@@ -1642,7 +1651,7 @@ async function runSession(
       const opsShim: TuiOptions = { ...opts, readonly: false };
       const decided = await runImportedFirstLaunchFlow(term, chosen, choice, opsShim);
       if (decided.kind === "cancel") {
-        screen.start();
+        screen.start({ skipFullscreen: true });
         screen.resumeRepaint();
         return;
       }

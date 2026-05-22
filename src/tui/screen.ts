@@ -297,12 +297,23 @@ export class Screen {
     this.rawStdinHandler = (chunk) => this.handleRawStdin(chunk);
   }
 
-  start(): void {
+  // Starts (or resumes) the screen's painting + input pipeline. When
+  // called fresh from the process entrypoint (no opts), enters the
+  // alternate screen buffer and saves the host shell's cursor for
+  // later restore. When resuming from a picker that ran with
+  // `keepFullscreen: true` (`skipFullscreen: true`), we don't toggle
+  // fullscreen — re-emitting CSI ? 1049 h while already in alt would
+  // (a) clear the alt buffer, briefly showing black before our repaint
+  // lands, and (b) overwrite the cursor save with the picker's last
+  // cursor position, which then becomes wrong on final exit.
+  start(opts: { skipFullscreen?: boolean } = {}): void {
     if (this.started) {
       return;
     }
     this.started = true;
-    this.term.fullscreen(true);
+    if (!opts.skipFullscreen) {
+      this.term.fullscreen(true);
+    }
     // Entering the alternate screen buffer gives us a blank slate. Drop
     // the per-row sig cache (and frame-size / window-title shadows) so the
     // upcoming repaint actually emits every row — without this, a
@@ -349,7 +360,16 @@ export class Screen {
     this.repaint();
   }
 
-  stop(): void {
+  // Stops the screen's painting + input pipeline. When called from the
+  // process-exit path (no opts), also leaves the alternate screen buffer
+  // and re-enables auto-wrap so the host shell behaves normally. When
+  // entering the session picker (`keepFullscreen: true`), we skip the
+  // alt-screen toggle so the user doesn't see a frame of the host
+  // shell's main-buffer content flash between the live session
+  // tearing down and the picker painting from row 1 — the picker's
+  // moveTo(1,1) + eraseDisplayBelow simply repaints over the same alt
+  // screen buffer the live session was using.
+  stop(opts: { keepFullscreen?: boolean } = {}): void {
     if (!this.started) {
       return;
     }
@@ -373,8 +393,13 @@ export class Screen {
     this.term.off("resize", this.resizeHandler);
     this.term.grabInput(false);
     this.term.hideCursor(false);
-    // Restore auto-wrap so the host shell behaves normally after exit.
-    process.stdout.write("\x1b[?7h");
+    if (!opts.keepFullscreen) {
+      // Restore auto-wrap so the host shell behaves normally after exit.
+      // Only needed on the way out — the picker doesn't re-enable it,
+      // so leaving auto-wrap disabled across the picker round-trip is
+      // fine (start() will re-disable on resume anyway).
+      process.stdout.write("\x1b[?7h");
+    }
     // Clear any progress indicator so the host terminal's taskbar /
     // dock badge doesn't keep pulsing after we exit (or while a picker
     // is up). The host owns this state independently of the alternate
@@ -385,8 +410,10 @@ export class Screen {
     // after this point — late timer ticks, stray repaint callbacks —
     // is correctly rejected by paintRow/placeCursor/repaint.
     this.started = false;
-    this.term.fullscreen(false);
-    this.term("\n");
+    if (!opts.keepFullscreen) {
+      this.term.fullscreen(false);
+      this.term("\n");
+    }
   }
 
   // Enables bracketed paste mode + modifyOtherKeys on the terminal and
