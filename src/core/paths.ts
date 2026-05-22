@@ -92,5 +92,10 @@ export const paths = {
     path.join(hydraHome(), "extensions", `${name}.pid`),
   tuiHistoryFile: (id: string) =>
     path.join(hydraHome(), "sessions", id, "prompt-history"),
+  // Cross-session prompt history. Up-arrow / ^R fall through to this
+  // after the per-session list is exhausted. JSONL, one entry per
+  // line, append-only so concurrent TUIs don't lose each other's
+  // writes.
+  globalTuiHistoryFile: () => path.join(hydraHome(), "prompt-history"),
   tuiLogFile: () => path.join(hydraHome(), "tui.log"),
 };

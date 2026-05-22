@@ -34,6 +34,9 @@ import {
 } from "../core/update-check.js";
 import {
   appendEntry,
+  appendHistoryLine,
+  buildCombinedHistory,
+  GLOBAL_HISTORY_CAP,
   loadHistory,
   saveHistory,
 } from "./history.js";
@@ -1087,9 +1090,41 @@ async function runSession(
   }
 
   const historyFile = paths.tuiHistoryFile(resolvedSessionId);
+  const globalHistoryFile = paths.globalTuiHistoryFile();
   let history = await loadHistory(historyFile).catch(() => []);
-  const dispatcher = new InputDispatcher({ history });
+  let globalHistory = await loadHistory(globalHistoryFile).catch(() => []);
+  // The global file is append-only, so a long-lived install may grow
+  // past the cap on disk. Tail it once at load so the in-memory view
+  // (and any dispatcher walk we build from it) stays bounded.
+  if (globalHistory.length > GLOBAL_HISTORY_CAP) {
+    globalHistory = globalHistory.slice(globalHistory.length - GLOBAL_HISTORY_CAP);
+  }
+  const dispatcher = new InputDispatcher({
+    history: buildCombinedHistory(globalHistory, history),
+  });
   dispatcherRef = dispatcher;
+  // Funnel: every place a new prompt becomes part of history goes
+  // through here so the per-session list, the global list, the
+  // dispatcher view, and both files stay in sync.
+  const recordHistoryEntry = (entry: string): void => {
+    const trimmed = entry.replace(/\n+$/, "");
+    if (trimmed.length === 0) {
+      return;
+    }
+    const nextSession = appendEntry(history, trimmed);
+    const sessionChanged = nextSession !== history;
+    history = nextSession;
+    const nextGlobal = appendEntry(globalHistory, trimmed, GLOBAL_HISTORY_CAP);
+    const globalChanged = nextGlobal !== globalHistory;
+    globalHistory = nextGlobal;
+    dispatcher.setHistory(buildCombinedHistory(globalHistory, history));
+    if (sessionChanged) {
+      saveHistory(historyFile, history).catch(() => undefined);
+    }
+    if (globalChanged) {
+      appendHistoryLine(globalHistoryFile, trimmed).catch(() => undefined);
+    }
+  };
   // Replay catch-up: history replay may have already incremented
   // pendingTurns before the dispatcher existed (notification handler
   // skips the dispatcher call when dispatcherRef is null). If we're
@@ -1608,8 +1643,7 @@ async function runSession(
     // user gets up-arrow recall.
     const pendingDraft = dispatcher.state().buffer.join("\n");
     if (pendingDraft.replace(/\s+$/, "").length > 0) {
-      history = appendEntry(history, pendingDraft);
-      dispatcher.setHistory(history);
+      recordHistoryEntry(pendingDraft);
     }
     // Suspend the live screen but keep the daemon stream (and SIGINT
     // handler) alive — that way an aborted picker drops us right back
@@ -2167,9 +2201,7 @@ async function runSession(
     if (handleBuiltinCommand(text)) {
       return;
     }
-    history = appendEntry(history, text);
-    dispatcher.setHistory(history);
-    saveHistory(historyFile, history).catch(() => undefined);
+    recordHistoryEntry(text);
     void runPrompt(text, attachments);
   };
 
@@ -2187,9 +2219,7 @@ async function runSession(
     if (handleBuiltinCommand(text)) {
       return;
     }
-    history = appendEntry(history, text);
-    dispatcher.setHistory(history);
-    saveHistory(historyFile, history).catch(() => undefined);
+    recordHistoryEntry(text);
     if (!daemonSupportsAmend || currentHeadMessageId === undefined) {
       void runPrompt(text, attachments);
       return;
