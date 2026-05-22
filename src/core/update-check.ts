@@ -25,6 +25,44 @@ function disabled(): boolean {
   return false;
 }
 
+// Plain numeric MAJOR.MINOR.PATCH compare. A prerelease tag (anything
+// after '-') is stripped — close enough for the "is latest newer than
+// installed" guard, and avoids dragging in semver as a direct dep.
+function parseVersion(v: string): [number, number, number] | null {
+  const core = v.split("-", 1)[0] ?? v;
+  const parts = core.split(".");
+  const major = Number(parts[0]);
+  const minor = Number(parts[1]);
+  const patch = Number(parts[2]);
+  if (
+    !Number.isFinite(major) ||
+    !Number.isFinite(minor) ||
+    !Number.isFinite(patch)
+  ) {
+    return null;
+  }
+  return [major, minor, patch];
+}
+
+function isNewer(latest: string, current: string): boolean {
+  const a = parseVersion(latest);
+  const b = parseVersion(current);
+  if (!a || !b) {
+    return latest !== current;
+  }
+  for (let i = 0; i < 3; i++) {
+    const av = a[i] as number;
+    const bv = b[i] as number;
+    if (av > bv) {
+      return true;
+    }
+    if (av < bv) {
+      return false;
+    }
+  }
+  return false;
+}
+
 // Kick off (or refresh) the cached check and return whatever the most
 // recent run produced. The check itself runs in a detached child the
 // first time per TTL; subsequent calls in the same process just read
@@ -61,7 +99,7 @@ export async function getPendingUpdate(): Promise<PendingUpdate | null> {
       u &&
       typeof u.latest === "string" &&
       typeof u.current === "string" &&
-      u.latest !== u.current
+      isNewer(u.latest, u.current)
     ) {
       // update-notifier intentionally deletes the cached `update` field
       // after check() reads it (it's designed for the show-once-per-
@@ -81,6 +119,18 @@ export async function getPendingUpdate(): Promise<PendingUpdate | null> {
         type: typeof u.type === "string" ? u.type : "unknown",
       };
     } else {
+      // Either no update available, or the cached "latest" is older than
+      // what we have installed (user upgraded past the cached value
+      // before update-notifier's detached probe ran again). Clear the
+      // stale entry so other processes don't keep printing the bogus
+      // "downgrade available" notice for the rest of the day.
+      if (u && typeof u.latest === "string" && typeof u.current === "string") {
+        try {
+          notifier.config?.set?.("update", undefined);
+        } catch {
+          void 0;
+        }
+      }
       cached = null;
     }
   } catch {
