@@ -2356,7 +2356,7 @@ export class Screen {
       const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
       writeRow(`perm|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
         if (isSel) {
-          this.term.brightCyan(body);
+          this.term.brightYellow(body);
         } else {
           this.term.dim(body);
         }
