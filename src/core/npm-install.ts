@@ -41,6 +41,11 @@ export interface EnsureNpmPackageArgs {
 // the absolute path to its bin. Runs `npm install --prefix` once into a
 // temp dir, then atomic-renames into place; subsequent calls short-circuit
 // if the bin already exists.
+//
+// args.bin is a hint (registry-supplied or basename-derived). When the hint
+// doesn't match the actual bin the package declares, resolveBin() reads the
+// installed package.json and finds the right name before falling back to the
+// basename heuristic.
 export async function ensureNpmPackage(
   args: EnsureNpmPackageArgs,
 ): Promise<string> {
@@ -55,10 +60,23 @@ export async function ensureNpmPackage(
     platformKey,
     args.version,
   );
-  const binPath = path.join(installDir, "node_modules", ".bin", args.bin);
-  if (await fileExists(binPath)) {
-    return binPath;
+  const packageName = packageNameFromSpec(args.packageSpec);
+  const basename = packageBasename(packageName);
+  const resolveArgs = { installDir, packageName, hint: args.bin, basename };
+
+  // Fast-path: hint bin already on disk.
+  const hintPath = path.join(installDir, "node_modules", ".bin", args.bin);
+  if (await fileExists(hintPath))
+    return hintPath;
+
+  // Slow-path: install dir exists but hint doesn't match the real bin —
+  // resolve from the installed package.json without re-running npm install.
+  if (await fileExists(installDir)) {
+    const slowResolved = await resolveBin(resolveArgs);
+    if (slowResolved)
+      return slowResolved.binPath;
   }
+
   await installInto({
     agentId: args.agentId,
     version: args.version,
@@ -67,12 +85,25 @@ export async function ensureNpmPackage(
     registry: args.registry,
     onProgress: args.onProgress,
   });
-  if (!(await fileExists(binPath))) {
-    throw new Error(
-      `Agent ${args.agentId}: npm install of ${args.packageSpec} did not produce bin ${args.bin} (looked in ${installDir}/node_modules/.bin/)`,
-    );
-  }
-  return binPath;
+
+  const resolved = await resolveBin(resolveArgs);
+  if (resolved)
+    return resolved.binPath;
+
+  const binField = await readPackageJsonBin(installDir, packageName);
+  const declared =
+    typeof binField === "object" && binField !== null
+      ? Object.keys(binField)
+      : typeof binField === "string"
+        ? [basename]
+        : [];
+  const suffix =
+    declared.length > 0
+      ? ` (package declares bins: ${declared.join(", ")})`
+      : "";
+  throw new Error(
+    `Agent ${args.agentId}: npm install of ${args.packageSpec} did not produce bin ${args.bin} (looked in ${installDir}/node_modules/.bin/)${suffix}`,
+  );
 }
 
 async function installInto(args: {
@@ -245,6 +276,96 @@ async function runNpmInstallOnce(
     }
     throw err;
   }
+}
+
+function packageNameFromSpec(spec: string): string {
+  // "@scope/name@1.2.3" → "@scope/name", "name@1.2.3" → "name"
+  if (spec.startsWith("@")) {
+    const slashIdx = spec.indexOf("/");
+    if (slashIdx === -1)
+      return spec;
+    const rest = spec.slice(slashIdx + 1);
+    const atIdx = rest.indexOf("@");
+    if (atIdx === -1)
+      return spec;
+    return spec.slice(0, slashIdx + 1 + atIdx);
+  }
+  const atIdx = spec.indexOf("@");
+  if (atIdx <= 0)
+    return spec;
+  return spec.slice(0, atIdx);
+}
+
+function packageBasename(packageName: string): string {
+  const lastSlash = packageName.lastIndexOf("/");
+  return lastSlash === -1 ? packageName : packageName.slice(lastSlash + 1);
+}
+
+async function readPackageJsonBin(
+  installDir: string,
+  packageName: string,
+): Promise<string | Record<string, string> | undefined> {
+  const pkgPath = path.join(
+    installDir,
+    "node_modules",
+    packageName,
+    "package.json",
+  );
+  try {
+    const text = await fsp.readFile(pkgPath, "utf8");
+    const pkg = JSON.parse(text) as { bin?: unknown };
+    if (
+      typeof pkg.bin === "string" ||
+      (typeof pkg.bin === "object" && pkg.bin !== null && !Array.isArray(pkg.bin))
+    )
+      return pkg.bin as string | Record<string, string>;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Resolves the real bin name for an npm-installed agent. Tries (in order):
+// the registry-supplied hint, a single-bin or matching-key from package.json,
+// then the package basename. Returns undefined if nothing exists on disk.
+async function resolveBin(args: {
+  installDir: string;
+  packageName: string;
+  hint: string;
+  basename: string;
+}): Promise<{ binName: string; binPath: string } | undefined> {
+  const binDir = path.join(args.installDir, "node_modules", ".bin");
+
+  const hintPath = path.join(binDir, args.hint);
+  if (await fileExists(hintPath))
+    return { binName: args.hint, binPath: hintPath };
+
+  const binField = await readPackageJsonBin(args.installDir, args.packageName);
+  if (typeof binField === "object" && binField !== null) {
+    const keys = Object.keys(binField);
+    if (keys.length === 1) {
+      const key = keys[0] as string;
+      const p = path.join(binDir, key);
+      if (await fileExists(p))
+        return { binName: key, binPath: p };
+    } else if (keys.length > 1) {
+      for (const candidate of [args.hint, args.basename]) {
+        if (keys.includes(candidate)) {
+          const p = path.join(binDir, candidate);
+          if (await fileExists(p))
+            return { binName: candidate, binPath: p };
+        }
+      }
+    }
+  }
+
+  if (args.basename !== args.hint) {
+    const p = path.join(binDir, args.basename);
+    if (await fileExists(p))
+      return { binName: args.basename, binPath: p };
+  }
+
+  return undefined;
 }
 
 async function fileExists(p: string): Promise<boolean> {

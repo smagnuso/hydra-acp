@@ -183,6 +183,146 @@ describe("ensureNpmPackage", () => {
     expect(events).toEqual([]);
   });
 
+  it("resolves bin from package.json when hint doesn't match the real bin name", async () => {
+    // Models the qwen-code case: package is @qwen-code/qwen-code but the
+    // bin it declares is "qwen", not the basename "qwen-code".
+    const fakeNpm = path.join(pathSandbox!, "npm");
+    await writeExecutable(
+      fakeNpm,
+      [
+        "#!/bin/sh",
+        "export PATH=/bin:/usr/bin",
+        'mkdir -p node_modules/.bin "node_modules/@qwen-code/qwen-code"',
+        'printf \'{"bin":{"qwen":"./cli.js"}}\' > "node_modules/@qwen-code/qwen-code/package.json"',
+        "touch node_modules/.bin/qwen",
+        "chmod +x node_modules/.bin/qwen",
+        "exit 0",
+      ].join("\n"),
+    );
+    process.env.PATH = pathSandbox!;
+
+    const result = await ensureNpmPackage({
+      agentId: "qwen-code",
+      version: "0.16.0",
+      packageSpec: "@qwen-code/qwen-code@0.16.0",
+      bin: "qwen-code",
+    });
+    expect(result).toMatch(/node_modules[\\/]\.bin[\\/]qwen$/);
+  });
+
+  it("falls back to basename when package.json declares bin as a string", async () => {
+    // bin: "./cli.js" (string form) — npm populates .bin/<basename>, so the
+    // basename heuristic handles it correctly.
+    const fakeNpm = path.join(pathSandbox!, "npm");
+    await writeExecutable(
+      fakeNpm,
+      [
+        "#!/bin/sh",
+        "export PATH=/bin:/usr/bin",
+        'mkdir -p node_modules/.bin node_modules/string-bin-pkg',
+        'printf \'{"bin":"./cli.js"}\' > node_modules/string-bin-pkg/package.json',
+        "touch node_modules/.bin/string-bin-pkg",
+        "chmod +x node_modules/.bin/string-bin-pkg",
+        "exit 0",
+      ].join("\n"),
+    );
+    process.env.PATH = pathSandbox!;
+
+    const result = await ensureNpmPackage({
+      agentId: "string-bin-pkg",
+      version: "1.0.0",
+      packageSpec: "string-bin-pkg@1.0.0",
+      bin: "wrong-hint",
+    });
+    expect(result).toMatch(/node_modules[\\/]\.bin[\\/]string-bin-pkg$/);
+  });
+
+  it("picks matching key from a multi-bin package.json via basename", async () => {
+    const fakeNpm = path.join(pathSandbox!, "npm");
+    await writeExecutable(
+      fakeNpm,
+      [
+        "#!/bin/sh",
+        "export PATH=/bin:/usr/bin",
+        'mkdir -p node_modules/.bin node_modules/multi-tool',
+        'printf \'{"bin":{"multi-tool":"./main.js","multi-tool-legacy":"./legacy.js"}}\' > node_modules/multi-tool/package.json',
+        "touch node_modules/.bin/multi-tool node_modules/.bin/multi-tool-legacy",
+        "chmod +x node_modules/.bin/multi-tool node_modules/.bin/multi-tool-legacy",
+        "exit 0",
+      ].join("\n"),
+    );
+    process.env.PATH = pathSandbox!;
+
+    // hint is wrong but basename "multi-tool" matches a key in the object
+    const result = await ensureNpmPackage({
+      agentId: "multi-tool",
+      version: "1.0.0",
+      packageSpec: "multi-tool@1.0.0",
+      bin: "wrong-hint",
+    });
+    expect(result).toMatch(/node_modules[\\/]\.bin[\\/]multi-tool$/);
+  });
+
+  it("includes declared bins in the error when no candidate matches", async () => {
+    const fakeNpm = path.join(pathSandbox!, "npm");
+    await writeExecutable(
+      fakeNpm,
+      [
+        "#!/bin/sh",
+        "export PATH=/bin:/usr/bin",
+        'mkdir -p node_modules/.bin node_modules/ambiguous-pkg',
+        'printf \'{"bin":{"foo":"./foo.js","bar":"./bar.js"}}\' > node_modules/ambiguous-pkg/package.json',
+        "touch node_modules/.bin/foo node_modules/.bin/bar",
+        "chmod +x node_modules/.bin/foo node_modules/.bin/bar",
+        "exit 0",
+      ].join("\n"),
+    );
+    process.env.PATH = pathSandbox!;
+
+    // hint "ghost" and basename "ambiguous-pkg" don't match "foo" or "bar"
+    await expect(
+      ensureNpmPackage({
+        agentId: "ambiguous",
+        version: "1.0.0",
+        packageSpec: "ambiguous-pkg@1.0.0",
+        bin: "ghost",
+      }),
+    ).rejects.toThrow(/did not produce bin ghost.*package declares bins: (foo, bar|bar, foo)/);
+  });
+
+  it("resolves from installed package.json without re-running npm (slow-path cache)", async () => {
+    // Pre-populate the install dir as if a previous run already installed the
+    // package (hint-mismatched bin was never placed, but the real bin is there).
+    const platformKey = currentPlatformKey()!;
+    const installDir = paths.agentNpmInstallDir(
+      "slow-cache-pkg",
+      platformKey,
+      "1.0.0",
+    );
+    const binDir = path.join(installDir, "node_modules", ".bin");
+    const pkgDir = path.join(installDir, "node_modules", "slow-cache-pkg");
+    await fs.mkdir(binDir, { recursive: true });
+    await fs.mkdir(pkgDir, { recursive: true });
+    await fs.writeFile(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({ bin: { "slow-cache-real": "./cli.js" } }),
+    );
+    await fs.writeFile(path.join(binDir, "slow-cache-real"), "#!/bin/sh\nexit 0\n", {
+      mode: 0o755,
+    });
+
+    // Empty PATH: any npm invocation would fail, proving we never re-install.
+    process.env.PATH = "";
+
+    const result = await ensureNpmPackage({
+      agentId: "slow-cache-pkg",
+      version: "1.0.0",
+      packageSpec: "slow-cache-pkg@1.0.0",
+      bin: "slow-cache-wrong-hint",
+    });
+    expect(result).toMatch(/node_modules[\\/]\.bin[\\/]slow-cache-real$/);
+  });
+
   it("swallows callback exceptions so a throwing subscriber doesn't abort the install", async () => {
     const fakeNpm = path.join(pathSandbox!, "npm");
     await writeExecutable(
