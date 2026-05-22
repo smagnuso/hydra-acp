@@ -410,10 +410,14 @@ export const SessionDetachParams = z.object({
 });
 export type SessionDetachParams = z.infer<typeof SessionDetachParams>;
 
+// Per the ratified Session List spec
+// (https://agentclientprotocol.com/protocol/session-list), the only request
+// parameters are `cwd` (optional filter) and `cursor` (opaque pagination
+// token). `limit` was removed from the spec in the 2025-11-23 revision; we
+// don't accept it on the wire so we stay strictly compliant.
 export const SessionListParams = z.object({
   cwd: z.string().optional(),
   cursor: z.string().optional(),
-  limit: z.number().int().positive().max(200).optional(),
 });
 export type SessionListParams = z.infer<typeof SessionListParams>;
 
@@ -429,6 +433,10 @@ export const SessionListUsage = z.object({
 });
 export type SessionListUsage = z.infer<typeof SessionListUsage>;
 
+// Internal session list entry — used by the REST API (/v1/sessions),
+// the picker, and other hydra-internal callers. Carries hydra-specific
+// fields at the top level for convenience. The ACP wire shape is a
+// stripped-down subset; see SessionListEntryWire below.
 export const SessionListEntry = z.object({
   sessionId: z.string(),
   upstreamSessionId: z.string().optional(),
@@ -453,11 +461,67 @@ export const SessionListEntry = z.object({
 });
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
 
+// ACP-compliant `session/list` entry. Per the ratified spec
+// (https://agentclientprotocol.com/protocol/session-list), `sessionId`
+// and `cwd` are required; `title`, `updatedAt`, and `_meta` are optional.
+// Hydra-specific fields (agentId, currentModel, attachedClients, status,
+// upstream/import provenance) ride under `_meta["hydra-acp"]` per the
+// extensibility convention.
+export const SessionListEntryWire = z.object({
+  sessionId: z.string(),
+  cwd: z.string(),
+  title: z.string().optional(),
+  updatedAt: z.string().optional(),
+  _meta: z.record(z.unknown()).optional(),
+});
+export type SessionListEntryWire = z.infer<typeof SessionListEntryWire>;
+
 export const SessionListResult = z.object({
-  sessions: z.array(SessionListEntry),
+  sessions: z.array(SessionListEntryWire),
   nextCursor: z.string().optional(),
 });
 export type SessionListResult = z.infer<typeof SessionListResult>;
+
+// Map an internal SessionListEntry to the ACP wire shape, packing
+// hydra-specific fields into `_meta["hydra-acp"]` per the
+// Extensibility convention. Any pre-existing `_meta` keys outside
+// the hydra-acp namespace are passed through unchanged via mergeMeta.
+export function sessionListEntryToWire(
+  entry: SessionListEntry,
+): SessionListEntryWire {
+  const hydraMeta: Record<string, unknown> = {
+    attachedClients: entry.attachedClients,
+    status: entry.status,
+  };
+  if (entry.agentId !== undefined) {
+    hydraMeta.agentId = entry.agentId;
+  }
+  if (entry.upstreamSessionId !== undefined) {
+    hydraMeta.upstreamSessionId = entry.upstreamSessionId;
+  }
+  if (entry.currentModel !== undefined) {
+    hydraMeta.currentModel = entry.currentModel;
+  }
+  if (entry.currentUsage !== undefined) {
+    hydraMeta.currentUsage = entry.currentUsage;
+  }
+  if (entry.importedFromMachine !== undefined) {
+    hydraMeta.importedFromMachine = entry.importedFromMachine;
+  }
+  if (entry.importedFromUpstreamSessionId !== undefined) {
+    hydraMeta.importedFromUpstreamSessionId = entry.importedFromUpstreamSessionId;
+  }
+  const wire: SessionListEntryWire = {
+    sessionId: entry.sessionId,
+    cwd: entry.cwd,
+    updatedAt: entry.updatedAt,
+    _meta: mergeMeta(entry._meta, hydraMeta),
+  };
+  if (entry.title !== undefined) {
+    wire.title = entry.title;
+  }
+  return wire;
+}
 
 export const SessionPromptParams = z.object({
   sessionId: z.string(),
@@ -618,7 +682,10 @@ export const AGENT_INSTALL_PROGRESS_METHOD = "hydra-acp/agent_install_progress";
 
 export interface SessionCapabilities {
   attach?: Record<string, never>;
-  list?: boolean;
+  // Per the ratified Session List spec (stabilized 2026-03-09), capability
+  // is advertised as an empty object `{}`, matching the `attach` shape.
+  // See https://agentclientprotocol.com/protocol/session-list
+  list?: Record<string, never>;
 }
 
 export interface PromptCapabilities {

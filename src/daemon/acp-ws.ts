@@ -20,6 +20,7 @@ import {
   extractHydraMeta,
   HYDRA_META_KEY,
   mergeMeta,
+  sessionListEntryToWire,
   type InitializeResult,
   type SessionListResult,
   JsonRpcErrorCodes,
@@ -320,9 +321,18 @@ export function registerAcpWsEndpoint(
     });
 
     connection.onRequest("session/list", async (raw) => {
+      // Ratified spec (https://agentclientprotocol.com/protocol/session-list):
+      // request accepts optional `cwd` and `cursor`; response is
+      // `{ sessions: SessionInfo[], nextCursor? }` where each entry is
+      // `{ sessionId, cwd, title?, updatedAt?, _meta? }`. Hydra-specific
+      // fields ride under `_meta["hydra-acp"]` per the Extensibility
+      // convention. `cursor` is accepted for compliance; the daemon
+      // returns all matches in one page so it's currently a no-op.
       const params = SessionListParams.parse(raw ?? {});
-      const sessions = await deps.manager.list({ cwd: params.cwd });
-      const result: SessionListResult = { sessions };
+      const entries = await deps.manager.list({ cwd: params.cwd });
+      const result: SessionListResult = {
+        sessions: entries.map(sessionListEntryToWire),
+      };
       return result;
     });
 
@@ -950,7 +960,7 @@ function buildInitializeResult(): InitializeResult {
       loadSession: true,
       sessionCapabilities: {
         attach: {},
-        list: true,
+        list: {},
       },
     },
     authMethods: [

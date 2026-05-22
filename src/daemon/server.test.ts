@@ -363,7 +363,7 @@ describe("startDaemon", () => {
           agentCapabilities: {
             sessionCapabilities?: {
               attach?: Record<string, never>;
-              list?: boolean;
+              list?: Record<string, never>;
             };
             promptCapabilities?: { image?: boolean };
           };
@@ -372,12 +372,15 @@ describe("startDaemon", () => {
 
       expect(response.id).toBe(1);
       expect(response.result.agentInfo.name).toBe("hydra");
-      expect(response.result.agentCapabilities.sessionCapabilities?.list).toBe(
-        true,
-      );
+      // Per the ratified Session List spec (stabilized 2026-03-09), the
+      // `list` capability is advertised as an empty object — same shape
+      // as `attach` — not a boolean.
+      expect(
+        response.result.agentCapabilities.sessionCapabilities?.list,
+      ).toEqual({});
       expect(
         response.result.agentCapabilities.sessionCapabilities?.attach,
-      ).toBeDefined();
+      ).toEqual({});
       expect(response.result.agentCapabilities.promptCapabilities?.image).toBe(
         true,
       );
@@ -504,6 +507,123 @@ describe("startDaemon", () => {
       expect(response.id).toBe(9);
       expect(response.result.sessions).toEqual([]);
 
+      ws.close();
+    });
+
+    it("returns spec-compliant entries for session/list over ACP", async () => {
+      // Per the ratified Session List spec, each SessionInfo carries
+      // only { sessionId, cwd, title?, updatedAt?, _meta? }. Hydra-only
+      // fields (agentId, status, attachedClients, etc.) MUST ride under
+      // `_meta["hydra-acp"]`, never at the top level.
+      const bundle = {
+        version: 1,
+        exportedAt: "2026-05-13T00:00:00.000Z",
+        exportedFrom: { hydraVersion: "0.1.0", machine: "origin-host" },
+        session: {
+          sessionId: "hydra_session_wire_check",
+          lineageId: "hydra_lineage_wire_check",
+          agentId: "claude-acp",
+          cwd: "/wire-check",
+          title: "wire shape check",
+          createdAt: "2026-05-13T00:00:00.000Z",
+          updatedAt: "2026-05-13T00:00:00.000Z",
+        },
+        history: [],
+      };
+      const imp = await fetch(`${baseUrl}/v1/sessions/import`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${TEST_TOKEN}`,
+        },
+        body: JSON.stringify({ bundle }),
+      });
+      expect(imp.status).toBe(201);
+      const imported = (await imp.json()) as { sessionId: string };
+
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      const responsePromise = new Promise<unknown>((resolve) => {
+        ws.on("message", (data) =>
+          resolve(JSON.parse(data.toString("utf8"))),
+        );
+      });
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 10,
+          method: "session/list",
+          params: { cwd: "/wire-check" },
+        }),
+      );
+
+      const response = (await responsePromise) as {
+        id: number;
+        result: {
+          sessions: Array<Record<string, unknown>>;
+          nextCursor?: string;
+        };
+      };
+      expect(response.id).toBe(10);
+      const entry = response.result.sessions.find(
+        (s) => s.sessionId === imported.sessionId,
+      );
+      expect(entry).toBeDefined();
+      // Top-level keys MUST be only the spec-defined ones.
+      const allowed = new Set(["sessionId", "cwd", "title", "updatedAt", "_meta"]);
+      for (const key of Object.keys(entry!)) {
+        expect(allowed.has(key)).toBe(true);
+      }
+      expect(entry!.sessionId).toBe(imported.sessionId);
+      expect(entry!.cwd).toBe("/wire-check");
+      expect(entry!.title).toBe("wire shape check");
+      expect(typeof entry!.updatedAt).toBe("string");
+      // Hydra-only fields live under _meta["hydra-acp"].
+      const meta = entry!._meta as Record<string, unknown>;
+      const hydra = meta["hydra-acp"] as Record<string, unknown>;
+      expect(hydra.agentId).toBe("claude-acp");
+      expect(hydra.status).toBe("cold");
+      expect(hydra.attachedClients).toBe(0);
+
+      ws.close();
+    });
+
+    it("rejects non-standard params on session/list over ACP", async () => {
+      // The ratified spec accepts only `cwd` and `cursor`. The 2025-11-23
+      // revision removed `limit`. With strict-object schema parsing
+      // disabled we ignore unknown fields rather than 400, but `limit`
+      // is no longer in our schema — confirm that and that a known-good
+      // request with just `cwd` works.
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      const responsePromise = new Promise<unknown>((resolve) => {
+        ws.on("message", (data) =>
+          resolve(JSON.parse(data.toString("utf8"))),
+        );
+      });
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 11,
+          method: "session/list",
+          params: { cwd: "/no-such-dir" },
+        }),
+      );
+      const response = (await responsePromise) as {
+        id: number;
+        result: { sessions: unknown[]; nextCursor?: string };
+      };
+      expect(response.id).toBe(11);
+      expect(Array.isArray(response.result.sessions)).toBe(true);
+      // Single page: nextCursor MUST be absent when there are no more
+      // results.
+      expect(response.result.nextCursor).toBeUndefined();
       ws.close();
     });
 
