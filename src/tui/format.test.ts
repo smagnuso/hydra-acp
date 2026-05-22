@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { formatEvent, formatToolLine, parseAgentMarkdown } from "./format.js";
+import stringWidth from "string-width";
+import {
+  formatEvent,
+  formatToolLine,
+  parseAgentMarkdown,
+  type FormattedLine,
+} from "./format.js";
+
+// Measure the on-screen width of a rendered table line. Mirrors what
+// the screen layer eventually writes: prefix + body, with terminal-kit
+// caret-markup tokens (^X, ^+, ^C, ^:, doubled ^^) removed because
+// they're zero-width style commands when the agent bodyStyle is
+// interpreted via term(text). The escape `^^` -> `^` is unwound first
+// so a literal caret survives the strip.
+function visibleWidth(line: FormattedLine): number {
+  const text = (line.prefix ?? "") + line.body;
+  const stripped = text
+    .replace(/\^\^/g, "\u0000")
+    .replace(/\^[+CRGBMYWcrgbmyw:]/g, "")
+    .replace(/\u0000/g, "^");
+  return stringWidth(stripped);
+}
 
 const ESC = "";
 
@@ -172,6 +193,104 @@ describe("parseAgentMarkdown", () => {
     expect(lines).toHaveLength(3);
     expect(lines[0]?.bodyStyle).toBe("heading-3");
     expect(lines[2]?.body).toBe("x │ y");
+  });
+
+  // Alignment regression coverage. Pre-fix, formatTable measured cell
+  // widths with .length (UTF-16 code units) and padded by .length, so
+  // any cell whose visible width != code-point count produced rows
+  // that drifted out of column with the header / separator. The
+  // expectation here is that every emitted line of a table block has
+  // the same on-screen width.
+  it("aligns columns when cells contain non-ASCII (→ rightwards arrow)", () => {
+    const lines = parseAgentMarkdown(
+      "| a | b |\n|---|---|\n| client→server | x |\n| short | server→client |",
+    );
+    const widths = lines.map(visibleWidth);
+    expect(new Set(widths).size).toBe(1);
+  });
+
+  it("aligns columns when cells contain **bold** and `code` markdown", () => {
+    const lines = parseAgentMarkdown(
+      "| a | b |\n|---|---|\n| **bold cell** | plain |\n| plain | `code cell` |",
+    );
+    const widths = lines.map(visibleWidth);
+    expect(new Set(widths).size).toBe(1);
+    // Bold body cell renders via applyInlineMarkup (^+...^:).
+    expect(lines[2]?.body).toContain("^+bold cell^:");
+    // Code body cell renders via applyInlineMarkup (^C...^:).
+    expect(lines[3]?.body).toContain("^Ccode cell^:");
+  });
+
+  it("does NOT apply inline markup to header cells (heading-3 writes literally)", () => {
+    // applyInlineMarkup is suppressed for the header so heading-3
+    // lines (rendered through term.bold.noFormat) don't leak literal
+    // `^+` / `^:` into the user's terminal.
+    const lines = parseAgentMarkdown(
+      "| **bold header** | b |\n|---|---|\n| x | y |",
+    );
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[0]?.body).not.toContain("^+");
+    expect(lines[0]?.body).not.toContain("^:");
+    expect(lines[0]?.body).toContain("**bold header**");
+    const widths = lines.map(visibleWidth);
+    expect(new Set(widths).size).toBe(1);
+  });
+
+  it("aligns columns when cells contain *italic* markers (rendered literally)", () => {
+    // applyInlineMarkup doesn't process *…*, so the asterisks render
+    // literally and contribute to visible width. The padding math
+    // must account for them.
+    const lines = parseAgentMarkdown(
+      "| a | b |\n|---|---|\n| *italic cell* | plain |\n| plain | other |",
+    );
+    const widths = lines.map(visibleWidth);
+    expect(new Set(widths).size).toBe(1);
+    expect(lines[2]?.body).toContain("*italic cell*");
+  });
+
+  it("aligns columns when cells contain wide glyphs (✓ check mark)", () => {
+    const lines = parseAgentMarkdown(
+      "| feature | ok |\n|---|---|\n| basic | ✓ |\n| longer feature name | ✓ |",
+    );
+    const widths = lines.map(visibleWidth);
+    expect(new Set(widths).size).toBe(1);
+  });
+
+  // Regression: the exact RFD audit table the agent emitted in
+  // session hydra_session_w5CYtGbWRDnGOLVa (messageId
+  // msg_e4d229630001llp4x7sqsGbWms, lines ~62-74 of the reconstructed
+  // markdown), which surfaced the original alignment bug. Inlined
+  // verbatim — do not "clean up" the unicode (→, em-dash) or the
+  // *italic* markers; they're exactly what triggered the misalign.
+  it("aligns the RFD audit table from hydra_session_w5CYtGbWRDnGOLVa", () => {
+    const table = [
+      "| RFD requirement | hydra-acp | Status |",
+      "|---|---|---|",
+      "| `POST /acp` with `application/json` for client→server | Not implemented | **Doesn't implement** (server WS-only — allowed) |",
+      "| `GET /acp` SSE stream (connection-scoped) | Not implemented | **Doesn't implement** |",
+      "| `GET /acp` SSE stream (session-scoped) | Not implemented | **Doesn't implement** |",
+      "| `DELETE /acp` to terminate connection | Not implemented | **Doesn't implement** |",
+      "| `Acp-Connection-Id` / `Acp-Session-Id` headers | Not implemented anywhere | **Doesn't implement** |",
+      "| `Acp-Protocol-Version` header | Not implemented | **Doesn't implement** (RFD itself defers this to Phase 4) |",
+      "| Cookie support for sticky sessions | Not implemented | **Doesn't implement** (RFD makes this a *client* MUST, not server) |",
+      "| `initialize` returns 200+JSON over HTTP | N/A — hydra has no HTTP transport | **Doesn't implement** |",
+      "| Other POSTs return 202 Accepted | N/A | **Doesn't implement** |",
+      "| HTTP/2 required for Streamable HTTP | N/A; hydra serves WS over HTTP/1.1 upgrade, which is fine for the WS profile | **Doesn't implement** |",
+      "| Batch JSON-RPC returns 501 | hydra doesn't have a batch path at all | **N/A** |",
+    ].join("\n");
+    const lines = parseAgentMarkdown(table);
+    // header + separator + 11 body rows = 13.
+    expect(lines).toHaveLength(13);
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[1]?.bodyStyle).toBe("dim");
+    for (let i = 2; i < lines.length; i++) {
+      expect(lines[i]?.bodyStyle).toBe("agent");
+    }
+    const widths = lines.map(visibleWidth);
+    expect(
+      new Set(widths).size,
+      `expected all rows equal width, got widths ${widths.join(",")}`,
+    ).toBe(1);
   });
 });
 
