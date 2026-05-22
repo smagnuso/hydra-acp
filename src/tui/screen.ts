@@ -2319,7 +2319,7 @@ export class Screen {
       const hint = this.banner.currentMode
         ? this.banner.hint.replace(
             "⇧⇥ mode",
-            `⇧⇥ mode(${this.banner.currentMode})`,
+            `⇧⇥ mode: ${this.banner.currentMode}`,
           )
         : this.banner.hint;
       this.term(" · ").dim(hint);
