@@ -510,43 +510,75 @@ export class Screen {
     }
     // Two families of "modified key" sequences leak through terminal-kit
     // because it doesn't parse them, and would otherwise insert literal
-    // "[13;2u" etc. into the buffer:
-    //   1. Legacy modifyOtherKeys CSI-27 form (e.g. Shift+Enter as
-    //      \x1b[27;2;13~). Fixed-shape; we look for the exact strings.
-    //   2. Kitty keyboard protocol CSI-u form (e.g. ESC alone as
-    //      \x1b[27u, Ctrl+letter as \x1b[99;5u, Alt+Enter as
-    //      \x1b[13;3u). Parameterized; we match a regex and look up
-    //      (codepoint, modifier).
-    // Both get filtered here BEFORE terminal-kit sees them. Unknown
-    // CSI-u sequences are dropped rather than leaked — defense in depth
-    // for kitty-mode keys we haven't mapped yet.
-    const legacyMarkers: Array<{ seq: string; name: KeyName }> = [
-      { seq: "\x1b[27;2;13~", name: "shift-enter" },
-      { seq: "\x1b[27;5;13~", name: "ctrl-enter" },
-      // Bare LF — universal fallback for terminals without
-      // modifyOtherKeys / kitty protocol. Last so the longer escape
-      // sequences match first and we don't double-fire.
-      { seq: "\x0a", name: "ctrl-enter" },
-    ];
-    for (const { seq, name } of legacyMarkers) {
-      if (text.includes(seq)) {
-        const parts = text.split(seq);
-        for (let i = 0; i < parts.length; i++) {
-          if (parts[i]!.length > 0) {
-            this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
-          }
-          if (i < parts.length - 1) {
-            this.onKey([{ type: "key", name }]);
-          }
+    // "[27;2;73~" / "[13;2u" etc. into the buffer:
+    //   1. Legacy modifyOtherKeys CSI-27 form (\x1b[27;<mod>;<code>~).
+    //      xterm with modifyOtherKeys=2 reports EVERY modified key this
+    //      way — Shift+letter, Ctrl+letter, Shift+Enter, etc. Generalized
+    //      handler in handleCsi27Stdin maps known combos to key events
+    //      and injects unmapped printable+shift as text.
+    //   2. Kitty keyboard protocol CSI-u form (\x1b[<code>;<mod>u).
+    //      Parameterized; we match a regex and look up (codepoint,
+    //      modifier).
+    // Both get filtered here BEFORE terminal-kit sees them.
+    if (/\x1b\[27;\d+;\d+~/.test(text)) {
+      this.handleCsi27Stdin(text);
+      return;
+    }
+    // Bare LF — universal fallback for terminals without modifyOtherKeys
+    // / kitty protocol that still need a way to distinguish Ctrl+Enter
+    // from plain Enter.
+    if (text.includes("\x0a")) {
+      const parts = text.split("\x0a");
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i]!.length > 0) {
+          this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
         }
-        return;
+        if (i < parts.length - 1) {
+          this.onKey([{ type: "key", name: "ctrl-enter" }]);
+        }
       }
+      return;
     }
     if (text.includes("\x1b[") && /\x1b\[\d+(?:;\d+)?u/.test(text)) {
       this.handleCsiUStdin(text);
       return;
     }
     this.handleRawStdinSegment(text);
+  }
+
+  // Walk `text` extracting every legacy modifyOtherKeys CSI-27 sequence
+  // (\x1b[27;<mod>;<code>~). Each match is dispatched through
+  // mapCsiUToKeyName; unmapped printable codes with no modifier or
+  // shift are injected as text (Shift+I -> "I"), so xterm's
+  // modifyOtherKeys=2 echo doesn't leak escape sequences into the
+  // prompt. Other unmapped combos (Ctrl+symbol etc.) are dropped.
+  private handleCsi27Stdin(text: string): void {
+    const csi27 = /\x1b\[27;(\d+);(\d+)~/g;
+    let lastEnd = 0;
+    let m: RegExpExecArray | null;
+    while ((m = csi27.exec(text)) !== null) {
+      if (m.index > lastEnd) {
+        this.handleRawStdin(
+          Buffer.from(text.slice(lastEnd, m.index), "binary"),
+        );
+      }
+      const mod = parseInt(m[1]!, 10);
+      const code = parseInt(m[2]!, 10);
+      const name = mapCsiUToKeyName(code, mod);
+      if (name !== null) {
+        this.onKey([{ type: "key", name }]);
+      } else if ((mod === 1 || mod === 2) && code >= 32 && code < 127) {
+        // Printable ASCII with no modifier or shift — the user typed a
+        // character. xterm reports the already-shifted codepoint in the
+        // CSI-27 form, so Shift+i arrives as code=73 ('I') and we just
+        // forward it as text.
+        this.handleRawStdinSegment(String.fromCharCode(code));
+      }
+      lastEnd = m.index + m[0].length;
+    }
+    if (lastEnd < text.length) {
+      this.handleRawStdin(Buffer.from(text.slice(lastEnd), "binary"));
+    }
   }
 
   // Walk `text` extracting every kitty CSI-u sequence. Each non-CSI-u
@@ -3453,6 +3485,10 @@ export function emergencyTerminalReset(): void {
 // shift(1) | alt(2) | ctrl(4) | super(8) | hyper(16) | meta(32).
 // We only care about plain (1), shift (2), alt (3), ctrl (5).
 export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
+  // Full Ctrl+a–z table. h/i/j/m alias to backspace/tab/ctrl-enter/enter
+  // because those are the bytes those combos produce in terminals
+  // without modifyOtherKeys, and users press them expecting that
+  // behavior regardless of whether xterm chose to escape the keystroke.
   const CTRL_LETTERS: Record<number, KeyName> = {
     97: "ctrl-a",
     98: "ctrl-b",
@@ -3461,8 +3497,12 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
     101: "ctrl-e",
     102: "ctrl-f",
     103: "ctrl-g",
+    104: "backspace",
+    105: "tab",
+    106: "ctrl-enter",
     107: "ctrl-k",
     108: "ctrl-l",
+    109: "enter",
     110: "ctrl-n",
     111: "ctrl-o",
     112: "ctrl-p",
@@ -3472,6 +3512,7 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
     117: "ctrl-u",
     118: "ctrl-v",
     119: "ctrl-w",
+    120: "ctrl-x",
     121: "ctrl-y",
   };
   if (mod === 5) {
