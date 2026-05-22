@@ -712,6 +712,10 @@ export async function pickSession(
             searchTerm = searchTerm.slice(0, -1);
             applyFilter();
             renderFromScratch();
+          } else {
+            searchActive = false;
+            applyFilter();
+            renderFromScratch();
           }
           return;
         }

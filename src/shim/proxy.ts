@@ -32,13 +32,21 @@ export interface ShimOptions {
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
-  // Match the TUI's process title so `killall hydra` reaps both the
-  // interactive client and any editor-spawned shim instances, while
-  // leaving "hydra-daemon" untouched. setHydraProcessTitle preserves
-  // the original args in ps so editor-spawned shims are
-  // distinguishable from one another (different cwd / different
-  // session id / etc.).
-  setHydraProcessTitle(buildTitleFromArgv(process.argv.slice(2)));
+  // Shim mode is non-interactive — invoked by an editor over piped
+  // stdio, not typed by the user. Pin the comm name to "hydra-shim"
+  // so `killall hydra` (matches user-invoked TUI/cat) leaves these
+  // alone, and `killall hydra-shim` cleanly takes out only the
+  // editor-spawned children. Same logic as the daemon's
+  // process.title = "hydra-daemon" override: the user didn't pick
+  // this name, so it shouldn't follow the bin they invoked.
+  //
+  // The `ps`/`top` argv column still shows the full invocation
+  // (`hydra-acp shim ...` or `hydra launch claude-acp ...`) so
+  // multiple editor-spawned shims remain distinguishable from each
+  // other by cwd / session id / agent.
+  setHydraProcessTitle(buildTitleFromArgv(process.argv.slice(2)), {
+    commName: "hydra-shim",
+  });
   const config = await loadConfig();
   const target = opts.target ?? (await resolveLocalTarget(config));
   // Only autostart the daemon when we're talking to a local one. A
