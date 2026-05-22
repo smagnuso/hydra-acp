@@ -179,7 +179,8 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^Y", "yank last kill"],
   null,
   ["^P", "switch session (picker)"],
-  ["^T", "next live session"],
+  ["Alt+N / Alt+Tab", "next live session"],
+  ["^T", "show / hide thoughts"],
   ["^V", "paste image from clipboard"],
   ["^O", "expand / collapse tools block"],
   null,
@@ -1093,6 +1094,11 @@ async function runSession(
   let pendingPrefill: { text: string; attachments: Attachment[] } | null =
     null;
 
+  // Toggled by ^T. Seeded from config; the Screen owns the actual
+  // filter (setHideThoughts), this var mirrors the state so the notify
+  // text matches and re-toggling works without round-tripping the Screen.
+  let showThoughts = config.tui.showThoughts;
+
   const screen: Screen = new Screen({
     term,
     dispatcher,
@@ -1360,6 +1366,7 @@ async function runSession(
   // pulse is cleared on terminals that latch it across screens.
   installStatus.finalize();
   screen.start();
+  screen.setHideThoughts(!showThoughts);
   screen.setSessionbar({
     agent: sessionbarAgent,
     cwd: resolvedCwd,
@@ -1878,6 +1885,11 @@ async function runSession(
       case "toggle-tools":
         toolsExpanded = !toolsExpanded;
         renderToolsBlock();
+        return;
+      case "toggle-thoughts":
+        showThoughts = !showThoughts;
+        screen.setHideThoughts(!showThoughts);
+        screen.notify(showThoughts ? "thoughts shown" : "thoughts hidden");
         return;
       case "toggle-mouse": {
         const next = !screen.isMouseEnabled();
@@ -2882,7 +2894,10 @@ async function runSession(
     if (event.kind === "agent-thought") {
       // Thoughts get the streaming-line treatment — short, dim, italic,
       // no markdown. Closing the agent block first ensures the next
-      // text chunk starts a fresh block below the thought.
+      // text chunk starts a fresh block below the thought. We always
+      // append to scrollback even when thoughts are hidden — the
+      // Screen's setHideThoughts() filters at draw time, so toggling
+      // back on reveals the lines that streamed in while hidden.
       closeAgentText();
       screen.appendStreaming(event.text, "· ", "thought", "thought");
       return;

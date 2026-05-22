@@ -11,6 +11,8 @@ export type KeyName =
   | "ctrl-enter"
   | "alt-b"
   | "alt-f"
+  | "alt-n"
+  | "alt-tab"
   | "shift-tab"
   | "tab"
   | "up"
@@ -91,6 +93,7 @@ export type InputEffect =
   | { type: "switch-session" }
   | { type: "next-live-session" }
   | { type: "toggle-tools" }
+  | { type: "toggle-thoughts" }
   | { type: "toggle-mouse" }
   | { type: "show-help" }
   // Dispatcher → app: please acquire an image from the named source
@@ -409,6 +412,9 @@ export class InputDispatcher {
       case "ctrl-p":
         return [{ type: "switch-session" }];
       case "ctrl-t":
+        return [{ type: "toggle-thoughts" }];
+      case "alt-n":
+      case "alt-tab":
         return [{ type: "next-live-session" }];
       case "ctrl-r":
         return this.startHistorySearch();

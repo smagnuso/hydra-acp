@@ -36,6 +36,7 @@ function testConfig(): HydraConfig {
       cwdColumnMaxWidth: 24,
       progressIndicator: true,
       defaultEnterAction: "amend" as const,
+      showThoughts: true,
     },
   };
 }
@@ -1167,6 +1168,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         cwdColumnMaxWidth: 24,
         progressIndicator: true,
         defaultEnterAction: "amend" as const,
+        showThoughts: true,
       },
     };
     handle = await startDaemon(cfg, TEST_TOKEN);

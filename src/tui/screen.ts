@@ -157,6 +157,11 @@ export class Screen {
   // the starts of any later keyed blocks if the size changes.
   private keyedBlocks = new Map<string, { start: number; count: number }>();
   private streamingActive = false;
+  // When true, lines with bodyStyle="thought" are skipped at draw time
+  // (they remain in `this.lines` so toggling back on reveals them again).
+  // Set via setHideThoughts; the app drives this from the ^T hotkey and
+  // the tui.showThoughts config.
+  private hideThoughts = false;
   private lastPromptRows = 0;
   private queuedTexts: string[] = [];
   private lastQueueEditingIndex = -1;
@@ -1137,6 +1142,18 @@ export class Screen {
     this.wrapCacheWidth = 0;
     this.streamingActive = false;
     this.scrollOffset = 0;
+    this.repaint();
+  }
+
+  // Toggle visibility of agent-thought lines without removing them from
+  // storage. Idempotent — repeated calls with the same value are no-ops.
+  // Reveals are immediate (a repaint runs) so the user sees thoughts
+  // appear / disappear the moment they press ^T.
+  setHideThoughts(hide: boolean): void {
+    if (this.hideThoughts === hide) {
+      return;
+    }
+    this.hideThoughts = hide;
     this.repaint();
   }
 
@@ -2394,12 +2411,24 @@ export class Screen {
           )
         : this.banner.hint;
       this.term(" · ").dim(hint);
+      // Clear the gap between end-of-hint and start-of-right-slot before
+      // moving over. paintRow doesn't pre-clear the row, so a previous
+      // frame whose right text started at a column to the LEFT of this
+      // frame's right text would leak its leading characters into the
+      // gap (e.g. a "thoughts hidden" frame followed by "thoughts shown"
+      // — the shorter label starts one column further right, and without
+      // this erase the stranded "t" remains visible).
+      this.term.eraseLineAfter();
       if (right) {
-        // Right-aligned. moveTo + eraseLineAfter clears anything the
-        // hint extended into this region, then we write the slot text.
+        // Right-aligned, but with a 1-col gap on the very right edge.
+        // The outer paintRow trailing eraseLineAfter sits at col w with
+        // "pending wrap" after the last char is written, and on most
+        // terminals EL 0 erases that column — which would clip our last
+        // character (e.g. "thoughts hidden" → "thoughts hidde"). Landing
+        // the final char at col w-1 keeps the stray erase off our text.
         // string-width handles wide glyphs (emoji + CJK).
         const visibleWidth = stringWidth(right.text);
-        const col = Math.max(1, w - visibleWidth + 1);
+        const col = Math.max(1, w - visibleWidth);
         this.term.moveTo(col, row).eraseLineAfter();
         if (right.kind === "search") {
           this.term.brightCyan.noFormat(right.text);
@@ -2546,11 +2575,24 @@ export class Screen {
     width: number,
     needed: number,
   ): { rows: FormattedLine[]; exhausted: boolean } {
+    // bodyStyle === "thought" is the source of truth for thought-rendered
+    // lines (set by appendStreaming in the agent-thought path). When
+    // hideThoughts is on, skip those entries at measure / draw time;
+    // they stay in this.lines so toggling back on restores them.
+    const isThought = (line: FormattedLine): boolean =>
+      this.hideThoughts && line.bodyStyle === "thought";
     if (width <= 4) {
-      const take = Math.min(needed, this.lines.length);
+      const visible: FormattedLine[] = [];
+      for (const line of this.lines) {
+        if (isThought(line)) {
+          continue;
+        }
+        visible.push(line);
+      }
+      const take = Math.min(needed, visible.length);
       return {
-        rows: this.lines.slice(this.lines.length - take),
-        exhausted: needed >= this.lines.length,
+        rows: visible.slice(visible.length - take),
+        exhausted: needed >= visible.length,
       };
     }
     if (this.wrapCacheWidth !== width) {
@@ -2563,8 +2605,16 @@ export class Screen {
     const batches: FormattedLine[][] = [];
     let total = 0;
     let stoppedAt = 0;
+    let sawOldest = false;
     for (let i = this.lines.length - 1; i >= 0; i--) {
-      const wrapped = this.wrapOne(this.lines[i]!, width);
+      const line = this.lines[i]!;
+      if (isThought(line)) {
+        if (i === 0) {
+          sawOldest = true;
+        }
+        continue;
+      }
+      const wrapped = this.wrapOne(line, width);
       batches.push(wrapped);
       total += wrapped.length;
       stoppedAt = i;
@@ -2576,7 +2626,7 @@ export class Screen {
     for (let i = batches.length - 1; i >= 0; i--) {
       rows.push(...batches[i]!);
     }
-    return { rows, exhausted: stoppedAt === 0 };
+    return { rows, exhausted: stoppedAt === 0 || sawOldest };
   }
 
   private wrapOne(line: FormattedLine, width: number): FormattedLine[] {
@@ -3454,6 +3504,12 @@ export function mapKeyName(name: string): KeyName | null {
     case "ALT_F":
     case "META_F":
       return "alt-f";
+    case "ALT_N":
+    case "META_N":
+      return "alt-n";
+    case "ALT_TAB":
+    case "META_TAB":
+      return "alt-tab";
     case "CTRL_T":
       return "ctrl-t";
     case "SHIFT_TAB":
@@ -3596,6 +3652,9 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
     if (mod === 2) {
       return "shift-tab";
     }
+    if (mod === 3) {
+      return "alt-tab";
+    }
     if (mod === 1) {
       return "tab";
     }
@@ -3625,6 +3684,9 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
     }
     if (code === 102 || code === 70) {
       return "alt-f";
+    }
+    if (code === 110 || code === 78) {
+      return "alt-n";
     }
     return null;
   }

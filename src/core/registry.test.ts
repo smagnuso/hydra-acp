@@ -70,6 +70,7 @@ function fakeConfig(): HydraConfig {
       cwdColumnMaxWidth: 24,
       progressIndicator: true,
       defaultEnterAction: "amend" as const,
+      showThoughts: true,
     },
   };
 }

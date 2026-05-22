@@ -82,6 +82,11 @@ const TuiConfig = z.object({
   //     immediately when idle, queues behind an in-flight turn);
   //     Shift+Enter amends the in-flight turn.
   defaultEnterAction: z.enum(["enqueue", "amend"]).default("amend"),
+  // When true (default), agent_thought events render as dim italic
+  // streaming lines beneath the live thinking block. Set false to
+  // suppress them — the TUI hotkey ^T toggles this at runtime without
+  // persisting back to config.
+  showThoughts: z.boolean().default(true),
 });
 
 const ExtensionName = z
@@ -136,6 +141,7 @@ export const HydraConfig = z.object({
     cwdColumnMaxWidth: 24,
     progressIndicator: true,
     defaultEnterAction: "amend",
+    showThoughts: true,
   }),
 });
 
