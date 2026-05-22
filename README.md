@@ -208,13 +208,14 @@ hydra-acp --new                             # force a fresh session
 hydra-acp --readonly                        # open a session as a transcript viewer (with --session)
 
 hydra-acp init                              # generate the service token
+
+hydra-acp daemon [status]                   # output status of daemon
 hydra-acp daemon start [--foreground]       # detached by default; --foreground to attach
-hydra-acp daemon stop
-hydra-acp daemon restart
-hydra-acp daemon status
+hydra-acp daemon stop                       # stop running daemon
+hydra-acp daemon restart                    # stop then start the daemon
 hydra-acp daemon logs [-f] [-n N]           # tail (default 50) or follow the daemon log
 
-hydra-acp session                           # list sessions
+hydra-acp session [list ]                   # list sessions
 hydra-acp session kill <id>                 # close a live session (keeps the on-disk record so it can be resurrected)
 hydra-acp session remove <id>               # remove a session entirely (live or cold)
 hydra-acp session export <id> [--out <file>|.]
@@ -230,13 +231,13 @@ hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]
                                             # working directory; --info prints the bundle's
                                             # meta without importing
 
-hydra-acp extension                        # list configured extensions and live state
+hydra-acp extension [list]                 # list configured extensions and live state
 hydra-acp extension add <name>             # add to config (--command, --args, --env, --disabled)
 hydra-acp extension remove <name>          # remove from config
 hydra-acp extension start|stop|restart <n> # lifecycle on a running extension
 hydra-acp extension logs <name> [-f] [-n]  # tail (default 50) or follow an extension's log
 
-hydra-acp agent                            # list agents in the registry
+hydra-acp agent [list]                     # list agents in the registry
 hydra-acp agent install <id>               # pre-install an agent (else lazy on first use)
 hydra-acp agent refresh                    # force a registry re-fetch
 hydra-acp agent sync <id>                  # spawn <id> just long enough to ACP session/list it,

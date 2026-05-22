@@ -246,7 +246,11 @@ async function main(): Promise<void> {
       const daemonIdx = argv.indexOf("daemon");
       const tail = argv.slice(daemonIdx + 1);
       const sub = tail[0];
-      if (sub === "start" || sub === undefined) {
+      if (sub === undefined || sub === "status") {
+        await runDaemonStatus();
+        return;
+      }
+      if (sub === "start") {
         await runDaemonStart(flags);
         return;
       }
@@ -256,10 +260,6 @@ async function main(): Promise<void> {
       }
       if (sub === "restart") {
         await runDaemonRestart();
-        return;
-      }
-      if (sub === "status") {
-        await runDaemonStatus();
         return;
       }
       if (sub === "logs") {
@@ -568,8 +568,9 @@ function printHelp(): void {
       "  --readonly                         Open a session as a transcript viewer (requires --session).",
       "  HYDRA_ACP_SESSION                  Env var equivalent of --session (flag wins).",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
+      "  hydra-acp daemon [status]          Show daemon pid/version (default when no subcommand)",
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
-      "  hydra-acp daemon stop|restart|status",
+      "  hydra-acp daemon stop|restart",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
       "  hydra-acp session [list] [--all] [--json] [--host=<host>]",
       "                                     List sessions (live + 20 most-recent cold; --all for everything; --json emits JSON for scripts).",
