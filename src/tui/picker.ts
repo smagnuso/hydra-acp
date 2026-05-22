@@ -886,7 +886,12 @@ export async function pickSession(
           move(viewportSize);
           return;
         case "HOME":
-          move(-total);
+          // Land on the topmost session (selectedIdx=1), not on "New
+          // session" (selectedIdx=0). adjustScroll then pulls
+          // scrollOffset back to 0 and move()'s scroll-detected branch
+          // repaints the viewport. Up arrow from there can still reach
+          // "New session" when the user wants it.
+          move(1 - selectedIdx);
           return;
         case "END":
           move(total);

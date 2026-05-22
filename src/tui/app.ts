@@ -37,9 +37,10 @@ import {
   loadHistory,
   saveHistory,
 } from "./history.js";
-import { listSessions, pickMostRecent } from "./discovery.js";
+import { listSessions, pickMostRecent, type DiscoveredSession } from "./discovery.js";
 import { pickSession, type PickerResult } from "./picker.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
+import { promptForImportAction } from "./import-action-prompt.js";
 import { formatElapsed, Screen } from "./screen.js";
 import {
   InputDispatcher,
@@ -101,6 +102,15 @@ export interface TuiOptions {
   // leave this undefined and get the default service-token + local
   // daemon flow.
   target?: RemoteTarget;
+  // First-launch import hint forwarded from the ^p picker through the
+  // runSession loop. resolveSession's short-circuit copies it onto the
+  // returned SessionContext so the WS attach builds the same _meta
+  // resume payload as the initial-picker path. Cleared by the next
+  // attach.
+  importAttachHint?: {
+    agentId: string;
+    cwd: string;
+  };
 }
 
 interface SessionContext {
@@ -1584,19 +1594,65 @@ async function runSession(
     screen.pauseRepaint();
     screen.stop();
     saveHistory(historyFile, history).catch(() => undefined);
-    const sessions = await listSessions(target);
-    const choice: PickerResult = await pickSession(term, {
-      cwd: resolvedCwd,
-      sessions,
-      config,
-      target,
-      currentSessionId: resolvedSessionId,
-    });
-    if (choice.kind === "abort") {
-      screen.start();
-      screen.resumeRepaint();
-      return;
+    // Loop: the imported-first-launch action dialog's Esc returns
+    // "back" to re-show the picker, same as the initial-picker flow.
+    // Picker abort exits the loop and resumes the live session.
+    let resolvedChoice: { choice: PickerResult; sessions: DiscoveredSession[] } | null = null;
+    let attachOverrides: { readonly?: boolean; cwd?: string; importAttachHint?: { agentId: string; cwd: string } } | null = null;
+    while (resolvedChoice === null) {
+      const sessions = await listSessions(target);
+      const choice: PickerResult = await pickSession(term, {
+        cwd: resolvedCwd,
+        sessions,
+        config,
+        target,
+        currentSessionId: resolvedSessionId,
+      });
+      if (choice.kind === "abort") {
+        screen.start();
+        screen.resumeRepaint();
+        return;
+      }
+      if (choice.kind === "new") {
+        resolvedChoice = { choice, sessions };
+        break;
+      }
+      // attach: route imported-first-launch picks through the action /
+      // cwd wizard. cancel aborts the switch (resume live session);
+      // back loops to re-show the picker.
+      const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
+      const isImportedFirstLaunch =
+        chosen !== undefined &&
+        !!chosen.importedFromMachine &&
+        !chosen.upstreamSessionId &&
+        choice.readonly !== true;
+      if (!isImportedFirstLaunch) {
+        resolvedChoice = { choice, sessions };
+        break;
+      }
+      // Use a local opts shim so the helper can flip readonly without
+      // mutating the live session's opts (which still owns the current
+      // session). We translate the shim back into attachOverrides.
+      const opsShim: TuiOptions = { ...opts, readonly: false };
+      const decided = await runImportedFirstLaunchFlow(term, chosen, choice, opsShim);
+      if (decided.kind === "cancel") {
+        screen.start();
+        screen.resumeRepaint();
+        return;
+      }
+      if (decided.kind === "back") {
+        continue;
+      }
+      resolvedChoice = { choice, sessions };
+      attachOverrides = {
+        readonly: opsShim.readonly === true,
+        cwd: decided.ctx.cwd,
+      };
+      if (decided.ctx.importAttachHint !== undefined) {
+        attachOverrides.importAttachHint = decided.ctx.importAttachHint;
+      }
     }
+    const { choice } = resolvedChoice;
     // The user is actually switching: finish the teardown and let the
     // outer loop attach the chosen session.
     const resume = finishSession;
@@ -1613,15 +1669,29 @@ async function runSession(
       return;
     }
     // Read-only is per-session; default off on a picker-driven switch.
-    // The picker's `v` keystroke is the only way to re-enter read-only.
+    // The picker's `v` keystroke and the action dialog's view option
+    // are the only ways to re-enter read-only.
+    if (choice.kind !== "attach") {
+      // Unreachable — the loop only escapes on "attach" or "new", and
+      // "new" returned above. Belt-and-suspenders for the type
+      // narrowing.
+      return;
+    }
     const nextOpts: TuiOptions = {
       ...opts,
       sessionId: choice.sessionId,
-      cwd: resolvedCwd,
-      readonly: choice.readonly === true,
+      cwd: attachOverrides?.cwd ?? resolvedCwd,
+      readonly: attachOverrides?.readonly ?? (choice.readonly === true),
     };
     if (choice.agentId !== undefined) {
       nextOpts.agentId = choice.agentId;
+    }
+    if (attachOverrides?.importAttachHint !== undefined) {
+      nextOpts.importAttachHint = attachOverrides.importAttachHint;
+    } else {
+      // Clear any stale hint inherited from the current session's opts —
+      // it was for the previous attach, not the new one.
+      delete nextOpts.importAttachHint;
     }
     resume(nextOpts);
   };
@@ -3175,11 +3245,15 @@ async function resolveSession(
 ): Promise<SessionContext | null> {
   const cwd = opts.cwd ?? process.cwd();
   if (opts.sessionId) {
-    return {
+    const ctx: SessionContext = {
       sessionId: opts.sessionId,
       agentId: opts.agentId ?? "",
       cwd,
     };
+    if (opts.importAttachHint !== undefined) {
+      ctx.importAttachHint = opts.importAttachHint;
+    }
+    return ctx;
   }
   if (opts.forceNew) {
     return newCtx(opts, cwd, config);
@@ -3201,59 +3275,120 @@ async function resolveSession(
   // most-recently-touched cold ones so the list stays scannable even with
   // a deep on-disk history. The picker defaults its cursor to
   // "New session" so just pressing Enter creates a fresh one.
-  const sessions = await listSessions(target);
-  if (sessions.length === 0) {
-    return newCtx(opts, cwd, config);
-  }
-  const choice: PickerResult = await pickSession(term, {
-    cwd,
-    sessions,
-    config,
-    target,
-  });
-  if (choice.kind === "abort") {
-    return null;
-  }
-  if (choice.kind === "new") {
-    return newCtx(opts, cwd, config);
-  }
-  // Propagate the picker's view-only choice (set by `v`) onto opts so
-  // the WS attach payload picks it up. The runtime opts is the same
-  // object referenced by the attach call later in runSession — without
-  // this mutation, first-launch `v` opens non-readonly even though the
-  // picker returned readonly:true.
-  opts.readonly = choice.readonly === true;
-  // First-launch-on-this-machine for an imported session: the cwd on
-  // disk usually points at a path that exists only on the source
-  // machine. Without intervention the daemon would silently fall back
-  // to $HOME (see session-manager.ts resolveImportCwd). Prompt the user
-  // for a local cwd up front; we'll forward it via _meta.resume.cwd on
-  // session/attach so the daemon honors it during the first resurrect.
-  // Predicate matches picker.ts filterByHost's "<host>" bucket.
-  const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
-  const isImportedFirstLaunch =
-    chosen !== undefined &&
-    !!chosen.importedFromMachine &&
-    !chosen.upstreamSessionId &&
-    !opts.readonly;
-  if (isImportedFirstLaunch) {
-    const promptedCwd = await promptForImportCwd(term, chosen);
-    if (promptedCwd === null) {
+  // Outer loop: the action dialog's Esc returns "back" to re-show the
+  // picker so the user isn't trapped after pressing Enter on the wrong
+  // imported row. Every other picker exit path resolves the function.
+  while (true) {
+    const sessions = await listSessions(target);
+    if (sessions.length === 0) {
+      return newCtx(opts, cwd, config);
+    }
+    const choice: PickerResult = await pickSession(term, {
+      cwd,
+      sessions,
+      config,
+      target,
+    });
+    if (choice.kind === "abort") {
       return null;
+    }
+    if (choice.kind === "new") {
+      return newCtx(opts, cwd, config);
+    }
+    // Propagate the picker's view-only choice (set by `v`) onto opts so
+    // the WS attach payload picks it up. The runtime opts is the same
+    // object referenced by the attach call later in runSession — without
+    // this mutation, first-launch `v` opens non-readonly even though the
+    // picker returned readonly:true.
+    opts.readonly = choice.readonly === true;
+    // First-launch-on-this-machine for an imported session: route through
+    // the run-vs-view dialog (and on run-local, a cwd dialog). Cancel
+    // tears down the TUI; back returns here to re-show the picker.
+    const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
+    const isImportedFirstLaunch =
+      chosen !== undefined &&
+      !!chosen.importedFromMachine &&
+      !chosen.upstreamSessionId &&
+      !opts.readonly;
+    if (isImportedFirstLaunch) {
+      const decided = await runImportedFirstLaunchFlow(term, chosen, choice, opts);
+      if (decided.kind === "cancel") {
+        return null;
+      }
+      if (decided.kind === "back") {
+        continue;
+      }
+      return decided.ctx;
+    }
+    return {
+      sessionId: choice.sessionId,
+      agentId: choice.agentId ?? "",
+      cwd,
+    };
+  }
+}
+
+// Action-then-cwd wizard for imported-first-launch sessions. Returned
+// shape is a small sum type so the caller can either commit
+// (kind:"ctx"), bail entirely (kind:"cancel"), or re-show the picker
+// (kind:"back").
+type ImportedFirstLaunchDecision =
+  | { kind: "ctx"; ctx: SessionContext }
+  | { kind: "cancel" }
+  | { kind: "back" };
+
+async function runImportedFirstLaunchFlow(
+  term: termkit.Terminal,
+  chosen: DiscoveredSession,
+  choice: PickerResult & { kind: "attach" },
+  opts: TuiOptions,
+): Promise<ImportedFirstLaunchDecision> {
+  // Inner loop: cwd dialog's Esc returns "back" to re-show the action
+  // dialog. Action dialog's Esc bubbles out as "back" so the picker
+  // re-shows.
+  while (true) {
+    const action = await promptForImportAction(term, chosen);
+    if (action === "cancel") {
+      return { kind: "cancel" };
+    }
+    if (action === "back") {
+      return { kind: "back" };
+    }
+    if (action === "view") {
+      // Mirror the picker's `v` path: flip opts.readonly so the WS
+      // attach payload sets readonly:true (daemon takes the viewer
+      // path, no agent resurrect). The runtime opts is the same
+      // object referenced by the attach call later in runSession.
+      opts.readonly = true;
+      const agentId = choice.agentId ?? chosen.agentId ?? "";
+      return {
+        kind: "ctx",
+        ctx: {
+          sessionId: choice.sessionId,
+          agentId,
+          cwd: chosen.cwd,
+        },
+      };
+    }
+    // action === "run-local"
+    const cwdResult = await promptForImportCwd(term, chosen);
+    if (cwdResult.kind === "cancel") {
+      return { kind: "cancel" };
+    }
+    if (cwdResult.kind === "back") {
+      continue;
     }
     const agentId = choice.agentId ?? chosen.agentId ?? "";
     return {
-      sessionId: choice.sessionId,
-      agentId,
-      cwd: promptedCwd,
-      importAttachHint: { agentId, cwd: promptedCwd },
+      kind: "ctx",
+      ctx: {
+        sessionId: choice.sessionId,
+        agentId,
+        cwd: cwdResult.path,
+        importAttachHint: { agentId, cwd: cwdResult.path },
+      },
     };
   }
-  return {
-    sessionId: choice.sessionId,
-    agentId: choice.agentId ?? "",
-    cwd,
-  };
 }
 
 function newCtx(

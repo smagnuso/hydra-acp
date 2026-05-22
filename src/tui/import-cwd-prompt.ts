@@ -1,16 +1,14 @@
-// Pre-screen prompt for imported sessions on first local launch.
+// Pre-screen modal that asks the user for a local cwd when they pick
+// "Run locally" on an imported session that has never been launched on
+// this machine. Originally a plain stack of text lines under the
+// picker; now a centered bordered dialog matching
+// promptForImportAction's look.
 //
-// When the user picks (with Enter, not `v`) a session that was imported
-// from another machine and has never been attached locally yet
-// (importedFromMachine set + upstreamSessionId empty), the cwd stored on
-// disk usually points at a path that doesn't exist on this machine
-// (e.g. /home/alice/projects/foo on Bob's box). Without intervention,
-// the daemon silently falls back to $HOME when resurrecting the agent.
-// This prompt lets the user pick a local cwd instead.
-//
-// UI is modeled on picker.ts's "rename" mode: a single-line text input
-// with Enter/Esc/Backspace/^U/^W. Lives outside the main Screen so it
-// can run between picker close and WS attach.
+// Esc returns "back" so the caller can re-show the action dialog. ^C /
+// ^D return "cancel" which the caller treats as a full TUI exit. Enter
+// awaits validateLocalCwd() and only resolves with the path if the
+// directory exists; otherwise the error is rendered inline and the
+// user keeps editing.
 
 import type { Terminal } from "terminal-kit";
 import * as os from "node:os";
@@ -18,93 +16,118 @@ import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { validateLocalCwd } from "../core/cwd.js";
 import type { DiscoveredSession } from "./discovery.js";
+import {
+  drawBox,
+  resetTerminalModes,
+  type BoxLayout,
+} from "./prompt-utils.js";
 
 export interface PromptOptions {
-  // Allow tests / callers to override the default pre-fill. Defaults to
-  // os.homedir() so the user can just press Enter to accept the same
-  // fallback the daemon would have used silently.
   defaultCwd?: string;
 }
 
-// Returns the user-chosen absolute cwd, or null if the user cancelled
-// (Esc / ^C / ^D). The returned path is guaranteed to be an existing
-// directory on this machine — validateLocalCwd is awaited before
-// resolve().
+export type CwdPromptResult =
+  | { kind: "ok"; path: string }
+  | { kind: "back" }
+  | { kind: "cancel" };
+
 export async function promptForImportCwd(
   term: Terminal,
   session: DiscoveredSession,
   opts: PromptOptions = {},
-): Promise<string | null> {
+): Promise<CwdPromptResult> {
   const defaultCwd = opts.defaultCwd ?? os.homedir();
-  // Reset terminal state the same way the picker does. Without this the
-  // alternate screen / kitty / mouse modes from a previous picker run
-  // (or a crashed prior session) can swallow arrows and ESC.
-  process.stdout.write("\x1b[<u");
-  process.stdout.write("\x1b[?2004l");
-  process.stdout.write("\x1b[>4;0m");
-  process.stdout.write("\x1b[>5;0m");
-  process.stdout.write("\x1b[?1000l");
-  process.stdout.write("\x1b[?1002l");
-  process.stdout.write("\x1b[?1006l");
-  process.stdout.write("\x1b[?1l");
-  process.stdout.write("\x1b>");
+  resetTerminalModes();
 
   const shortId = stripHydraSessionPrefix(session.sessionId);
   const fromMachine = session.importedFromMachine ?? "another machine";
-  const originalCwd = session.cwd;
+  const originalCwd = shortenHomePath(session.cwd);
 
   let buffer = defaultCwd;
   let errorLine: string | null = null;
   let busy = false;
+  let layout: BoxLayout | null = null;
 
   const render = (): void => {
-    term("\n");
-    term.bold.cyan("Imported session: ");
-    term(`${shortId}\n`);
-    term.dim(`  from machine:   `);
-    term(`${fromMachine}\n`);
-    term.dim(`  original cwd:   `);
-    term(`${shortenHomePath(originalCwd)}\n`);
-    term("\n");
-    term(
-      "This session has never been launched on this machine. Pick a local\n",
-    );
-    term("cwd for the agent (Enter to accept, Esc to cancel):\n\n");
-    paintInput();
-    if (errorLine) {
-      term("\n");
-      term.red(`  ${errorLine}\n`);
+    const contentHeight = 9;
+    layout = drawBox(term, {
+      contentHeight,
+      title: "Run locally — choose cwd",
+    });
+    const innerW = layout.contentW;
+    const headerRows = [
+      { label: "session: ", value: shortId },
+      { label: "from:    ", value: fromMachine },
+      { label: "cwd:     ", value: originalCwd },
+    ];
+    let row = 0;
+    for (const hr of headerRows) {
+      term.moveTo(layout.contentX, layout.contentY + row);
+      term.dim.noFormat(` ${hr.label}`);
+      term.noFormat(truncate(hr.value, innerW - hr.label.length - 2));
+      row++;
+    }
+    row++;
+    term.moveTo(layout.contentX, layout.contentY + row);
+    term.noFormat(" Pick a local cwd for this session:");
+    row += 2;
+    paintInputRow(row);
+    row += 2;
+    if (errorLine !== null) {
+      term.moveTo(layout.contentX, layout.contentY + row);
+      term.red.noFormat(` ${truncate(errorLine, innerW - 2)}`);
+    } else {
+      term.moveTo(layout.contentX, layout.contentY + row);
+      term.dim.noFormat(
+        " Enter accept · Esc back · ^U clear · ^W kill word",
+      );
     }
   };
 
-  const paintInput = (): void => {
-    term.bold("cwd: ");
-    term(buffer);
+  const inputRow = (): number => 7;
+
+  const paintInputRow = (rowOffset?: number): void => {
+    if (!layout) {
+      return;
+    }
+    const r = rowOffset ?? inputRow();
+    term.moveTo(layout.contentX, layout.contentY + r).eraseLineAfter();
+    // Re-draw the right border the eraseLineAfter just wiped.
+    term.moveTo(layout.x + layout.w - 1, layout.contentY + r);
+    term.dim.noFormat("│");
+    term.moveTo(layout.contentX, layout.contentY + r);
+    term.bold.noFormat(" cwd: ");
+    const available = layout.contentW - " cwd: ".length - 2;
+    term.noFormat(truncateLeft(buffer, available));
     if (!busy) {
       term.bgWhite(" ");
     }
   };
 
-  // Repaint just the input + error lines without reprinting the header
-  // block. The input lives on its own line so we can rewrite the whole
-  // line in place rather than tracking column positions.
   const repaintInput = (): void => {
-    term.column(1);
-    term.eraseLine();
-    paintInput();
+    paintInputRow();
+    // The hint/error row sits right below; repaint it too so an error
+    // appearing or clearing updates immediately.
+    if (!layout) {
+      return;
+    }
+    const errRow = inputRow() + 2;
+    term.moveTo(layout.contentX, layout.contentY + errRow).eraseLineAfter();
+    term.moveTo(layout.x + layout.w - 1, layout.contentY + errRow);
+    term.dim.noFormat("│");
+    term.moveTo(layout.contentX, layout.contentY + errRow);
     if (errorLine !== null) {
-      term("\n");
-      term.eraseLine();
-      term.red(`  ${errorLine}`);
-      // Move back up so subsequent repaints land on the input row.
-      term.up(1);
-      term.column(1);
+      term.red.noFormat(` ${truncate(errorLine, layout.contentW - 2)}`);
+    } else {
+      term.dim.noFormat(
+        " Enter accept · Esc back · ^U clear · ^W kill word",
+      );
     }
   };
 
   render();
 
-  return await new Promise<string | null>((resolve) => {
+  return await new Promise<CwdPromptResult>((resolve) => {
     let resolved = false;
     const cleanup = (): void => {
       if (resolved) {
@@ -112,15 +135,26 @@ export async function promptForImportCwd(
       }
       resolved = true;
       term.off("key", onKey);
+      term.off("resize", onResize);
       term.grabInput(false);
       term.hideCursor(false);
-      term("\n\n");
+      term.moveTo(1, 1).eraseDisplayBelow();
     };
-    const finish = (value: string | null): void => {
+    const finish = (value: CwdPromptResult): void => {
       cleanup();
       resolve(value);
     };
-    const onKey = (name: string, _matches: string[], data?: { isCharacter?: boolean }): void => {
+    const onResize = (): void => {
+      if (resolved) {
+        return;
+      }
+      render();
+    };
+    const onKey = (
+      name: string,
+      _matches: unknown,
+      data?: { isCharacter?: boolean },
+    ): void => {
       if (busy) {
         return;
       }
@@ -132,7 +166,7 @@ export async function promptForImportCwd(
         void validateLocalCwd(candidate).then((result) => {
           busy = false;
           if (result.ok) {
-            finish(result.path);
+            finish({ kind: "ok", path: result.path });
             return;
           }
           errorLine = result.reason;
@@ -140,8 +174,12 @@ export async function promptForImportCwd(
         });
         return;
       }
-      if (name === "ESCAPE" || name === "CTRL_C" || name === "CTRL_D") {
-        finish(null);
+      if (name === "ESCAPE") {
+        finish({ kind: "back" });
+        return;
+      }
+      if (name === "CTRL_C" || name === "CTRL_D") {
+        finish({ kind: "cancel" });
         return;
       }
       if (name === "BACKSPACE") {
@@ -160,8 +198,6 @@ export async function promptForImportCwd(
       }
       if (name === "CTRL_W") {
         const trimmedRight = buffer.replace(/[/\s]+$/, "");
-        // Drop the last path segment (or whitespace-delimited word as a
-        // fallback). Mirrors what most readline-style editors do.
         const lastSep = Math.max(
           trimmedRight.lastIndexOf("/"),
           trimmedRight.lastIndexOf(" "),
@@ -180,5 +216,29 @@ export async function promptForImportCwd(
     };
     term.grabInput({});
     term.on("key", onKey);
+    term.on("resize", onResize);
   });
+}
+
+function truncate(s: string, max: number): string {
+  if (max <= 1) {
+    return "";
+  }
+  if (s.length <= max) {
+    return s;
+  }
+  return s.slice(0, Math.max(0, max - 1)) + "…";
+}
+
+// Used for the cwd input: when the buffer is longer than the visible
+// width, keep the right edge (where the cursor sits) visible by
+// trimming the left side with a leading ellipsis.
+function truncateLeft(s: string, max: number): string {
+  if (max <= 1) {
+    return "";
+  }
+  if (s.length <= max) {
+    return s;
+  }
+  return "…" + s.slice(s.length - (max - 1));
 }
