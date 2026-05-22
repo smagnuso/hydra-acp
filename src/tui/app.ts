@@ -19,8 +19,12 @@ import {
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
 import { loadConfig, type HydraConfig } from "../core/config.js";
-import { ensureServiceToken } from "../core/service-token.js";
+import {
+  resolveLocalTarget,
+  type RemoteTarget,
+} from "../core/remote-target.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
+import { invokedBinName } from "../core/bin-name.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
@@ -90,6 +94,13 @@ export interface TuiOptions {
   // session via the picker drops out of read-only unless that session
   // was re-selected via the picker's `v` keystroke.
   readonly?: boolean;
+  // Pre-resolved daemon target. When set, runTuiApp skips its own
+  // resolveLocalTarget() call (and the local-daemon autostart) and
+  // talks to this target instead. Used by `hydra session attach
+  // hydra://...` to attach to a remote daemon. Local TUI invocations
+  // leave this undefined and get the default service-token + local
+  // daemon flow.
+  target?: RemoteTarget;
 }
 
 interface SessionContext {
@@ -171,9 +182,19 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const config = await loadConfig();
-  const serviceToken = await ensureServiceToken();
+  // Local daemon target unless the caller pre-resolved a remote one.
+  // `hydra session attach hydra://...` does the resolution up front so
+  // the password prompt happens before we touch the terminal; the
+  // local TUI invocation falls through to resolveLocalTarget here.
+  const target = opts.target ?? (await resolveLocalTarget(config));
   logMaxBytes = config.tui.logMaxBytes;
-  await ensureDaemonReachable(config);
+  // Only autostart the daemon when it's on this machine. Remote
+  // targets get a connection error from the WS layer if the daemon
+  // isn't up, which is the right behavior (we can't reach across the
+  // network to spawn anything).
+  if (target.isLocal && !opts.target) {
+    await ensureDaemonReachable(config);
+  }
   const term = termkit.terminal;
 
   // Filled in by runSession as soon as a session is attached/created.
@@ -182,7 +203,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const exitHint: { sessionId?: string; readonly?: boolean } = {};
   let nextOpts: TuiOptions | null = opts;
   while (nextOpts !== null) {
-    nextOpts = await runSession(term, config, serviceToken, nextOpts, exitHint);
+    nextOpts = await runSession(term, config, target, nextOpts, exitHint);
   }
   // Re-surface the update notice on the way out so users who missed
   // the 30-second banner inside the TUI still see it. cli.ts suppresses
@@ -194,11 +215,22 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   if (pendingUpdate) {
     process.stderr.write(`✨ ${formatUpdateNoticeLine(pendingUpdate)}\n`);
   }
-  if (exitHint.sessionId) {
+  // Resume hint is only useful for humans — piped output (e.g. into
+  // an editor's "run command" pane) treats this as noise. Skip when
+  // stdout isn't a TTY.
+  if (exitHint.sessionId && process.stdout.isTTY) {
     const short = stripHydraSessionPrefix(exitHint.sessionId);
     const flags = exitHint.readonly ? " --readonly" : "";
+    // Clear the terminal before printing the hint. Leaving the alt
+    // screen restored whatever the host shell showed before launch,
+    // so without this the user is left staring at stale output with
+    // the hint tacked onto the bottom.
+    //
+    // \x1b[2J  clear entire screen
+    // \x1b[H   move cursor to home (1,1)
+    process.stdout.write("\x1b[2J\x1b[H");
     process.stdout.write(
-      `To resume: hydra-acp tui --resume ${short}${flags}\n`,
+      `To resume: ${invokedBinName()} tui --session ${short}${flags}\n`,
     );
   }
 }
@@ -206,11 +238,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
 async function runSession(
   term: termkit.Terminal,
   config: HydraConfig,
-  serviceToken: string,
+  target: RemoteTarget,
   opts: TuiOptions,
   exitHint: { sessionId?: string; readonly?: boolean },
 ): Promise<TuiOptions | null> {
-  const ctx = await resolveSession(term, config, serviceToken, opts);
+  const ctx = await resolveSession(term, config, target, opts);
   if (!ctx) {
     // Picker was aborted (Ctrl+C / Esc). singleColumnMenu leaves grabInput
     // engaged on cancel, which keeps the event loop alive past the return.
@@ -237,9 +269,8 @@ async function runSession(
   const installStatus = createInstallStatusLine(term, launchLabelBase);
   installStatus.write(launchLabelBase);
 
-  const protocol = config.daemon.tls ? "wss" : "ws";
-  const wsUrl = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const subprotocols = ["acp.v1", `hydra-acp-token.${serviceToken}`];
+  const wsUrl = target.wsUrl;
+  const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];
   // Forward-declared so the resilient stream's onConnect/onDisconnect
   // hooks (which fire before the Screen is built on first connect) can
   // call into them safely. Real implementations are assigned later.
@@ -1381,7 +1412,7 @@ async function runSession(
     }
     let onlyClient = false;
     try {
-      const sessions = await listSessions(config, serviceToken);
+      const sessions = await listSessions(target);
       const me = sessions.find((s) => s.sessionId === resolvedSessionId);
       onlyClient = !me || me.attachedClients <= 1;
     } catch {
@@ -1553,12 +1584,12 @@ async function runSession(
     screen.pauseRepaint();
     screen.stop();
     saveHistory(historyFile, history).catch(() => undefined);
-    const sessions = await listSessions(config, serviceToken);
+    const sessions = await listSessions(target);
     const choice: PickerResult = await pickSession(term, {
       cwd: resolvedCwd,
       sessions,
       config,
-      serviceToken,
+      target,
       currentSessionId: resolvedSessionId,
     });
     if (choice.kind === "abort") {
@@ -1598,7 +1629,7 @@ async function runSession(
   const cycleLiveSession = async (): Promise<void> => {
     if (!finishSession)
       return;
-    const sessions = await listSessions(config, serviceToken);
+    const sessions = await listSessions(target);
     const live = sessions.filter((s) => s.status === "live");
     if (live.length <= 1)
       return;
@@ -3139,7 +3170,7 @@ async function runSession(
 async function resolveSession(
   term: termkit.Terminal,
   config: HydraConfig,
-  serviceToken: string,
+  target: RemoteTarget,
   opts: TuiOptions,
 ): Promise<SessionContext | null> {
   const cwd = opts.cwd ?? process.cwd();
@@ -3154,15 +3185,15 @@ async function resolveSession(
     return newCtx(opts, cwd, config);
   }
   if (opts.resume) {
-    const sessions = await listSessions(config, serviceToken, { cwd, all: true });
-    const target = pickMostRecent(sessions, cwd);
-    if (!target) {
+    const sessions = await listSessions(target, { cwd, all: true });
+    const recent = pickMostRecent(sessions, cwd);
+    if (!recent) {
       term.yellow(`No sessions found for ${cwd}.\n`);
       return null;
     }
     return {
-      sessionId: target.sessionId,
-      agentId: target.agentId ?? "",
+      sessionId: recent.sessionId,
+      agentId: recent.agentId ?? "",
       cwd,
     };
   }
@@ -3170,7 +3201,7 @@ async function resolveSession(
   // most-recently-touched cold ones so the list stays scannable even with
   // a deep on-disk history. The picker defaults its cursor to
   // "New session" so just pressing Enter creates a fresh one.
-  const sessions = await listSessions(config, serviceToken);
+  const sessions = await listSessions(target);
   if (sessions.length === 0) {
     return newCtx(opts, cwd, config);
   }
@@ -3178,7 +3209,7 @@ async function resolveSession(
     cwd,
     sessions,
     config,
-    serviceToken,
+    target,
   });
   if (choice.kind === "abort") {
     return null;

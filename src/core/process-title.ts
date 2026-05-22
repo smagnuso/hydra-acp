@@ -22,7 +22,7 @@ import { writeFileSync } from "node:fs";
 //
 // The full title is built by the caller so each mode can include its
 // own subcommand and args. Examples:
-//   tui     → "hydra tui --resume hydra_session_abc"
+//   tui     → "hydra tui --session hydra_session_abc"
 //   shim    → "hydra shim"           (editor-spawned, args usually absent)
 //   cat     → "hydra cat -p '...' --detach"
 //   launch  → "hydra launch claude-acp -c sandbox_mode=..."

@@ -32,8 +32,8 @@ describe("parseArgs", () => {
   });
 
   it("parses --key value form (next token is the value)", () => {
-    expect(parseArgs(["--session-id", "sess_abc"])).toMatchObject({
-      flags: { "session-id": "sess_abc" },
+    expect(parseArgs(["--session", "sess_abc"])).toMatchObject({
+      flags: { session: "sess_abc" },
     });
   });
 
@@ -105,22 +105,24 @@ describe("parseArgs", () => {
       positional: [],
       flags: { readonly: true },
     });
-    expect(parseArgs(["--readonly", "--resume", "sess_abc"])).toEqual({
+    expect(parseArgs(["--readonly", "--session", "sess_abc"])).toEqual({
       positional: [],
-      flags: { readonly: true, resume: "sess_abc" },
+      flags: { readonly: true, session: "sess_abc" },
     });
   });
 
-  it("still allows --resume <id> to carry a session id", () => {
-    // --resume is intentionally NOT in the boolean set so the CLI can
-    // distinguish "bare --resume" (which it rejects) from "--resume <id>".
-    expect(parseArgs(["--resume", "sess_abc"])).toEqual({
+  it("value-taking flags slurp the next token (no following value → true)", () => {
+    // --session isn't in the boolean set, so the parser eats the
+    // next non-flag token as its value. Bare --session yields true,
+    // which the cli.ts dispatcher treats as "not set" via
+    // readSessionInput's typeof-string check.
+    expect(parseArgs(["--session", "sess_abc"])).toEqual({
       positional: [],
-      flags: { resume: "sess_abc" },
+      flags: { session: "sess_abc" },
     });
-    expect(parseArgs(["--resume"])).toEqual({
+    expect(parseArgs(["--session"])).toEqual({
       positional: [],
-      flags: { resume: true },
+      flags: { session: true },
     });
   });
 });
@@ -142,7 +144,7 @@ describe("flagString", () => {
 describe("envKeyForFlag", () => {
   it("maps kebab-case to HYDRA_ACP_UPPER_SNAKE", () => {
     expect(envKeyForFlag("name")).toBe("HYDRA_ACP_NAME");
-    expect(envKeyForFlag("session-id")).toBe("HYDRA_ACP_SESSION_ID");
+    expect(envKeyForFlag("rotate-token")).toBe("HYDRA_ACP_ROTATE_TOKEN");
     expect(envKeyForFlag("agent")).toBe("HYDRA_ACP_AGENT");
     expect(envKeyForFlag("model")).toBe("HYDRA_ACP_MODEL");
   });
@@ -153,7 +155,6 @@ describe("resolveOption", () => {
 
   beforeEach(() => {
     delete process.env.HYDRA_ACP_NAME;
-    delete process.env.HYDRA_ACP_SESSION_ID;
     delete process.env.HYDRA_ACP_AGENT;
     delete process.env.HYDRA_ACP_MODEL;
   });
@@ -168,8 +169,8 @@ describe("resolveOption", () => {
   });
 
   it("falls back to env when flag is unset", () => {
-    process.env.HYDRA_ACP_SESSION_ID = "sess_env";
-    expect(resolveOption({}, "session-id")).toBe("sess_env");
+    process.env.HYDRA_ACP_AGENT = "agent-from-env";
+    expect(resolveOption({}, "agent")).toBe("agent-from-env");
   });
 
   it("returns undefined when neither is set", () => {

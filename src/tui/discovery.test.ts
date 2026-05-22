@@ -6,20 +6,18 @@ import {
   pickMostRecent,
 } from "./discovery.js";
 import { DEFAULT_DAEMON_PORT } from "../core/config.js";
-import type { HydraConfig } from "../core/config.js";
+import type { RemoteTarget } from "../core/remote-target.js";
 
-const cfg = {
-  daemon: {
-    host: "127.0.0.1",
-    port: DEFAULT_DAEMON_PORT,
-    logLevel: "info" as const,
-  },
-} as unknown as HydraConfig;
-
-const TOKEN = "tok";
+const target: RemoteTarget = {
+  baseUrl: `http://127.0.0.1:${DEFAULT_DAEMON_PORT}`,
+  wsUrl: `ws://127.0.0.1:${DEFAULT_DAEMON_PORT}/acp`,
+  token: "tok",
+  display: `127.0.0.1:${DEFAULT_DAEMON_PORT}`,
+  isLocal: true,
+};
 
 const fakeOk = (body: unknown): typeof fetch =>
-  (async (input: string | URL | Request) => {
+  (async (_input: string | URL | Request) => {
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -49,7 +47,7 @@ describe("listSessions", () => {
         { status: 200 },
       );
     }) as typeof fetch;
-    const out = await listSessions(cfg, TOKEN, { cwd: "/x", all: true }, fetchImpl);
+    const out = await listSessions(target, { cwd: "/x", all: true }, fetchImpl);
     expect(captured.url).toBe(
       `http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions?cwd=%2Fx&all=true`,
     );
@@ -70,11 +68,11 @@ describe("listSessions", () => {
 
   it("throws on non-2xx", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 500 })) as typeof fetch;
-    await expect(listSessions(cfg, TOKEN, {}, fetchImpl)).rejects.toThrow(/HTTP 500/);
+    await expect(listSessions(target, {}, fetchImpl)).rejects.toThrow(/HTTP 500/);
   });
 
   it("returns [] when sessions field missing", async () => {
-    expect(await listSessions(cfg, TOKEN, {}, fakeOk({}))).toEqual([]);
+    expect(await listSessions(target, {}, fakeOk({}))).toEqual([]);
   });
 });
 
@@ -88,7 +86,7 @@ describe("killSession", () => {
       captured.auth = headers?.["Authorization"];
       return new Response(null, { status: 204 });
     }) as typeof fetch;
-    await killSession(cfg, TOKEN, "sess-1", fetchImpl);
+    await killSession(target, "sess-1", fetchImpl);
     expect(captured.url).toBe(`http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/sess-1/kill`);
     expect(captured.method).toBe("POST");
     expect(captured.auth).toBe("Bearer tok");
@@ -96,12 +94,12 @@ describe("killSession", () => {
 
   it("tolerates 404", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 404 })) as typeof fetch;
-    await expect(killSession(cfg, TOKEN, "sess-1", fetchImpl)).resolves.toBeUndefined();
+    await expect(killSession(target, "sess-1", fetchImpl)).resolves.toBeUndefined();
   });
 
   it("throws on other non-2xx", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 500 })) as typeof fetch;
-    await expect(killSession(cfg, TOKEN, "sess-1", fetchImpl)).rejects.toThrow(/HTTP 500/);
+    await expect(killSession(target, "sess-1", fetchImpl)).rejects.toThrow(/HTTP 500/);
   });
 });
 
@@ -115,7 +113,7 @@ describe("deleteSession", () => {
       captured.auth = headers?.["Authorization"];
       return new Response(null, { status: 204 });
     }) as typeof fetch;
-    await deleteSession(cfg, TOKEN, "sess-1", fetchImpl);
+    await deleteSession(target, "sess-1", fetchImpl);
     expect(captured.url).toBe(`http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/sess-1`);
     expect(captured.method).toBe("DELETE");
     expect(captured.auth).toBe("Bearer tok");
@@ -123,7 +121,7 @@ describe("deleteSession", () => {
 
   it("tolerates 404", async () => {
     const fetchImpl = (async () => new Response("nope", { status: 404 })) as typeof fetch;
-    await expect(deleteSession(cfg, TOKEN, "sess-1", fetchImpl)).resolves.toBeUndefined();
+    await expect(deleteSession(target, "sess-1", fetchImpl)).resolves.toBeUndefined();
   });
 });
 

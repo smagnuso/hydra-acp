@@ -1,9 +1,14 @@
 // Thin REST client over the daemon's /v1/sessions endpoint, used by the picker
-// and `--resume`. Mirrors the pattern in src/cli/commands/sessions.ts but only
+// and `--reattach`. Mirrors the pattern in src/cli/commands/sessions.ts but only
 // what the TUI needs.
+//
+// These functions take a RemoteTarget rather than (config, serviceToken)
+// so the same code paths work for both the local-service-token attach
+// and the remote-password-issued-session-token attach. The wire format
+// is identical — the daemon's CompositeTokenValidator accepts either
+// bearer kind.
 
-import type { HydraConfig } from "../core/config.js";
-import { httpBase } from "../cli/commands/sessions.js";
+import type { RemoteTarget } from "../core/remote-target.js";
 
 export interface DiscoveredSession {
   sessionId: string;
@@ -37,14 +42,12 @@ export interface ListOptions {
 }
 
 export async function listSessions(
-  config: HydraConfig,
-  serviceToken: string,
+  target: RemoteTarget,
   opts: ListOptions = {},
   // Allow tests to inject a fetch implementation. Defaults to the global one.
   fetchImpl: typeof fetch = fetch,
 ): Promise<DiscoveredSession[]> {
-  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const url = new URL(`${base}/v1/sessions`);
+  const url = new URL(`${target.baseUrl}/v1/sessions`);
   if (opts.cwd) {
     url.searchParams.set("cwd", opts.cwd);
   }
@@ -52,7 +55,7 @@ export async function listSessions(
     url.searchParams.set("all", "true");
   }
   const response = await fetchImpl(url.toString(), {
-    headers: { Authorization: `Bearer ${serviceToken}` },
+    headers: { Authorization: `Bearer ${target.token}` },
   });
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);
@@ -83,15 +86,13 @@ export async function listSessions(
 // callers don't have to special-case races where the session was already
 // removed by another client.
 export async function killSession(
-  config: HydraConfig,
-  serviceToken: string,
+  target: RemoteTarget,
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetchImpl(`${base}/v1/sessions/${id}/kill`, {
+  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}/kill`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${serviceToken}` },
+    headers: { Authorization: `Bearer ${target.token}` },
   });
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);
@@ -103,17 +104,15 @@ export async function killSession(
 // don't need to handle the rare race where the record vanished between
 // list and rename.
 export async function renameSession(
-  config: HydraConfig,
-  serviceToken: string,
+  target: RemoteTarget,
   id: string,
   title: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetchImpl(`${base}/v1/sessions/${id}`, {
+  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${serviceToken}`,
+      Authorization: `Bearer ${target.token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ title }),
@@ -132,16 +131,14 @@ export async function renameSession(
 // tolerated silently; the picker's `T` is treated as a no-op in those
 // cases.
 export async function regenSessionTitle(
-  config: HydraConfig,
-  serviceToken: string,
+  target: RemoteTarget,
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetchImpl(`${base}/v1/sessions/${id}`, {
+  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${serviceToken}`,
+      Authorization: `Bearer ${target.token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ regen: true }),
@@ -158,15 +155,13 @@ export async function regenSessionTitle(
 }
 
 export async function deleteSession(
-  config: HydraConfig,
-  serviceToken: string,
+  target: RemoteTarget,
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const base = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetchImpl(`${base}/v1/sessions/${id}`, {
+  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${serviceToken}` },
+    headers: { Authorization: `Bearer ${target.token}` },
   });
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);

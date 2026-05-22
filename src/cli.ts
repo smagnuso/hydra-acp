@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseArgs, resolveOption } from "./cli/parse-args.js";
+import {
+  readSessionInput,
+  resolveSessionFlag,
+  type ResolvedSession,
+} from "./cli/resolve-session.js";
 import { runInit } from "./cli/commands/init.js";
 import {
   runDaemonLogs,
@@ -17,6 +22,7 @@ import {
   runSessionsKill,
   runSessionsList,
   runSessionsRemove,
+  runSessionsShare,
   runSessionsTranscript,
 } from "./cli/commands/sessions.js";
 import {
@@ -64,13 +70,9 @@ async function main(): Promise<void> {
     const agentArgs = afterLaunch.slice(1);
 
     const { flags } = parseArgs(beforeLaunch);
-    if (flags.resume === true) {
-      bareResumeError();
-      return;
-    }
     if (flags.reattach === true) {
       process.stderr.write(
-        "hydra-acp launch: --reattach is not valid here. Pass --resume <id> to attach to a specific session.\n",
+        "hydra-acp launch: --reattach is not valid here. Pass --session <id-or-url> to attach to a specific session.\n",
       );
       process.exit(2);
       return;
@@ -84,14 +86,30 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
-    const sessionId =
-      typeof flags.resume === "string"
-        ? flags.resume
-        : resolveOption(flags, "session-id");
+    // `launch` is a non-interactive editor-spawned path (it produces a
+    // shim that talks JSON-RPC over stdio), so we never prompt for a
+    // password — if --session is a hydra:// URL the resolver must
+    // hit a cached credential or fail clearly.
+    const resolved = await resolveSessionFlagOrExit(
+      readSessionInput(flags),
+      { allowPrompt: false },
+    );
     const name = resolveOption(flags, "name");
     const model = resolveOption(flags, "model");
     suppressUpdateNotice = true;
-    await runShim({ sessionId, agentId, agentArgs, name, model });
+    const shimOpts: Parameters<typeof runShim>[0] = {
+      agentId,
+      agentArgs,
+      name,
+      model,
+    };
+    if (resolved?.sessionId !== undefined) {
+      shimOpts.sessionId = resolved.sessionId;
+    }
+    if (resolved?.target !== undefined && resolved.fromUrl) {
+      shimOpts.target = resolved.target;
+    }
+    await runShim(shimOpts);
     return;
   }
 
@@ -107,20 +125,39 @@ async function main(): Promise<void> {
   }
 
   const subcommand = positional[0];
-  if (flags.resume === true) {
-    bareResumeError();
-    return;
-  }
-  // --resume <id> attaches to a specific session. --session-id <id> is kept
-  // for env-var / backwards compatibility. --reattach (boolean) picks the
-  // most recent session for cwd; it used to be bare --resume.
-  const sessionId =
-    typeof flags.resume === "string"
-      ? flags.resume
-      : resolveOption(flags, "session-id");
   const name = resolveOption(flags, "name");
   const agentIdFromFlag = resolveOption(flags, "agent");
   const model = resolveOption(flags, "model");
+  // `--session <value>` (or HYDRA_ACP_SESSION env var) accepts either a
+  // bare session id or a hydra:// URL pointing at any daemon. URL
+  // resolution may hit a password prompt; that's gated below based on
+  // whether the entry point can support interactive prompting. The
+  // resolved RemoteTarget (when fromUrl) is threaded into TUI / shim /
+  // cat so they talk to the right daemon.
+  const sessionInput = readSessionInput(flags);
+  const interactive =
+    subcommand === "tui" || (subcommand === undefined && process.stdout.isTTY);
+  const resolved = await resolveSessionFlagOrExit(sessionInput, {
+    allowPrompt: interactive,
+  });
+  // --session <id> or <url-with-id> + --reattach is contradictory:
+  // one names a specific session, the other says "pick whatever's
+  // most recent for cwd." Reject up front rather than picking a
+  // winner silently. --session <url-no-id> + --reattach is allowed
+  // — the URL just picks the daemon, --reattach picks the session
+  // on it.
+  if (
+    resolved !== undefined &&
+    resolved.sessionId !== undefined &&
+    flags.reattach === true
+  ) {
+    process.stderr.write(
+      "hydra-acp: --session <id> and --reattach are mutually exclusive. Use one or the other.\n",
+    );
+    process.exit(2);
+  }
+  const sessionId = resolved?.sessionId;
+  const sessionTarget = resolved?.fromUrl ? resolved.target : undefined;
 
   if (!subcommand) {
     // Auto-dispatch when invoked with no subcommand: TUI when attached to
@@ -134,19 +171,43 @@ async function main(): Promise<void> {
         agentId: agentIdFromFlag,
         name,
         model,
+        target: sessionTarget,
       });
       return;
     }
     suppressUpdateNotice = true;
-    await runShim({ sessionId, name, agentId: agentIdFromFlag, model });
+    const shimOpts: Parameters<typeof runShim>[0] = {
+      name,
+      model,
+      agentId: agentIdFromFlag,
+    };
+    if (sessionId !== undefined) {
+      shimOpts.sessionId = sessionId;
+    }
+    if (sessionTarget !== undefined) {
+      shimOpts.target = sessionTarget;
+    }
+    await runShim(shimOpts);
     return;
   }
 
   switch (subcommand) {
-    case "shim":
+    case "shim": {
       suppressUpdateNotice = true;
-      await runShim({ sessionId, name, agentId: agentIdFromFlag, model });
+      const shimOpts: Parameters<typeof runShim>[0] = {
+        name,
+        model,
+        agentId: agentIdFromFlag,
+      };
+      if (sessionId !== undefined) {
+        shimOpts.sessionId = sessionId;
+      }
+      if (sessionTarget !== undefined) {
+        shimOpts.target = sessionTarget;
+      }
+      await runShim(shimOpts);
       return;
+    }
     case "cat": {
       // Accept -p as a short alias for --prompt inside the cat verb so
       // the global parser doesn't have to grow short-flag support.
@@ -165,6 +226,9 @@ async function main(): Promise<void> {
       };
       if (cwd !== undefined) {
         catOpts.cwd = cwd;
+      }
+      if (sessionTarget !== undefined) {
+        catOpts.target = sessionTarget;
       }
       suppressUpdateNotice = true;
       await runCat(catOpts);
@@ -235,6 +299,15 @@ async function main(): Promise<void> {
         await runSessionsImport(positional[2], {
           replace: flags.replace === true,
           info: flags.info === true,
+          ...(cwd !== undefined ? { cwd } : {}),
+        });
+        return;
+      }
+      if (sub === "share") {
+        const host = resolveOption(flags, "host");
+        const cwd = resolveOption(flags, "cwd");
+        await runSessionsShare(positional[2], {
+          ...(host !== undefined ? { host } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
         });
         return;
@@ -328,6 +401,7 @@ async function main(): Promise<void> {
         agentId: agentIdFromFlag,
         name,
         model,
+        target: sessionTarget,
       });
       return;
     default:
@@ -342,6 +416,7 @@ interface TuiBaseOpts {
   agentId?: string | undefined;
   name?: string | undefined;
   model?: string | undefined;
+  target?: ResolvedSession["target"] | undefined;
 }
 
 async function dispatchTui(
@@ -349,18 +424,16 @@ async function dispatchTui(
   base: TuiBaseOpts,
 ): Promise<void> {
   const cwd = resolveOption(flags, "cwd");
-  // --resume <id> was already promoted to base.sessionId in main();
-  // --reattach is what now triggers "pick most recent in cwd".
+  // --reattach picks the most-recent session for cwd. --new forces a
+  // fresh session. --readonly opens an existing session as a
+  // transcript viewer — requires a session id either via --session
+  // or via the picker's `v` keystroke.
   const resume = flags.reattach === true;
   const forceNew = flags.new === true;
   const readonly = flags.readonly === true;
-  // --readonly opens an existing session as a transcript viewer; it
-  // doesn't make sense without a target. Bare --readonly without a
-  // session id has nothing to view — error so the user uses the
-  // picker's `v` keystroke instead.
   if (readonly && base.sessionId === undefined) {
     process.stderr.write(
-      "hydra-acp: --readonly requires a session id. Pass --resume <id> --readonly, or open the picker and press `v` on a session.\n",
+      "hydra-acp: --readonly requires a session id. Pass --session <id-or-url> --readonly, or open the picker and press `v` on a session.\n",
     );
     process.exit(2);
   }
@@ -387,6 +460,9 @@ async function dispatchTui(
   if (base.model !== undefined) {
     tuiOpts.model = base.model;
   }
+  if (base.target !== undefined) {
+    tuiOpts.target = base.target;
+  }
   await runTui(tuiOpts);
 }
 
@@ -410,11 +486,22 @@ function readShortPrompt(argv: string[]): string | undefined {
   return undefined;
 }
 
-function bareResumeError(): void {
-  process.stderr.write(
-    "hydra-acp: --resume requires a session id. Use --resume <id> to attach to a specific session, or --reattach to pick the most recent one in cwd.\n",
-  );
-  process.exit(2);
+// Thin wrapper around resolveSessionFlag that prints the error message
+// to stderr and exits 2 on parse / lookup failure, rather than letting
+// the stack trace surface to the user. Returns the resolved value (or
+// undefined when no --session was supplied) so the caller can branch
+// on it directly. `allowPrompt` mirrors the inner option — pass true
+// for the TUI path, false for shim / cat.
+async function resolveSessionFlagOrExit(
+  input: string | undefined,
+  opts: { allowPrompt: boolean },
+): Promise<ResolvedSession | undefined> {
+  try {
+    return await resolveSessionFlag(input, opts);
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    process.exit(1);
+  }
 }
 
 function readVersion(): string {
@@ -435,10 +522,11 @@ function printHelp(): void {
       "hydra-acp — multi-client ACP session daemon",
       "",
       "Usage:",
-      "  hydra-acp                          Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case)",
-      "  hydra-acp shim                     Run as ACP shim explicitly (forces shim mode regardless of TTY)",
-      "  hydra-acp tui [opts]               Run the terminal UI explicitly (see below for opts)",
-      "  hydra-acp cat [-p <prompt>] [--session-id <id>] [--detach] [--agent <id>] [--model <id>] [--name <label>]",
+      "  hydra-acp [--session <id-or-url>] [--reattach] [opts]",
+      "                                     Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case).",
+      "  hydra-acp tui   [same flags]       Force TUI explicitly.",
+      "  hydra-acp shim  [same flags]       Force shim explicitly (non-interactive; password prompts not allowed).",
+      "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--agent <id>] [--model <id>] [--name <label>]",
       "                                     Pipe-friendly headless mode. Reads stdin and sends it",
       "                                     as a prompt to a fresh session, streams the agent's",
       "                                     response to stdout, exits when stdin closes. A bounded",
@@ -447,7 +535,7 @@ function printHelp(): void {
       "                                     chunked by the natural pauses in the writer. -p is an",
       "                                     optional standing instruction prepended to every chunk;",
       "                                     if stdin already contains the question, -p is not needed.",
-      "                                     With --session-id, attach to an existing session instead",
+      "                                     With --session, attach to an existing session instead",
       "                                     of creating a new one. With --detach, the session",
       "                                     survives in the daemon for slack/browser/notifier",
       "                                     extensions.",
@@ -455,8 +543,17 @@ function printHelp(): void {
       "                                     Shim mode, force daemon to spawn <agent>",
       "                                     from the registry. Args after <agent>",
       "                                     are forwarded to the agent's command.",
-      "  hydra-acp --resume <id>            Attach to an existing session (TUI when in a terminal, shim otherwise)",
-      "  hydra-acp --reattach               Attach to the most-recent session for the current cwd (TUI/shim auto-pick)",
+      "",
+      "Session selection (any entry point):",
+      "  --session <id>                     Attach to a local session by id.",
+      "  --session hydra://host[:port]/id   Attach to a session on another daemon (loopback uses the local service",
+      "                                     token; remote hosts use the cached credential from ~/.hydra-acp/remotes.json,",
+      "                                     falling back to a password prompt — but only on the TUI path).",
+      "  --session hydra://host/            URL with no id: picker (TUI) or fresh session (shim/cat).",
+      "  --reattach                         Pick the most-recent session for the current cwd.",
+      "  --new                              Force a fresh session.",
+      "  --readonly                         Open a session as a transcript viewer (requires --session).",
+      "  HYDRA_ACP_SESSION                  Env var equivalent of --session (flag wins).",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart|status",
@@ -472,6 +569,8 @@ function printHelp(): void {
       "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout",
       "  hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]",
       "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing",
+      "  hydra-acp session share [<id>] [--host <name>] [--cwd <path>]",
+      "                                     Print a hydra:// URL the recipient can paste into `--session`. With no id, picks the most-recent session for cwd. Host precedence: --host > config.daemon.publicHost > config.daemon.host > 127.0.0.1 (with a stderr warning that the URL is loopback-only).",
       "  hydra-acp extension list                    List configured extensions and live state",
       "  hydra-acp extension add <name> [opts]       Add an extension to config",
       "  hydra-acp extension remove <name>           Remove an extension from config",
@@ -482,17 +581,15 @@ function printHelp(): void {
       "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
       "  hydra-acp auth revoke <id>                  Revoke a session token",
-      "  hydra-acp tui flags: [--resume <id>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
-      "                                     --resume <id> attaches to a specific session; --reattach picks the most-recent in cwd.",
-      "                                     --readonly opens a session as a transcript viewer (no agent spawn, no prompting). Requires --resume.",
+      "  hydra-acp tui flags: [--session <id-or-url>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
       "                                     Smart default (no flags): shows a picker when sessions exist, else new.",
       "  hydra-acp --version                Print version",
       "  hydra-acp --help                   Show this help",
       "",
       "Config knob flags accept env-var equivalents (flag wins):",
       "  --agent                 HYDRA_ACP_AGENT",
-      "  --model                 HYDRA_ACP_MODEL    (one-shot at session/new; ignored on --resume)",
-      "  --resume / --session-id HYDRA_ACP_SESSION_ID",
+      "  --model                 HYDRA_ACP_MODEL    (one-shot at session/new; ignored on --session resume)",
+      "  --session               HYDRA_ACP_SESSION  (session id or hydra:// URL)",
       "  --name                  HYDRA_ACP_NAME",
       "",
     ].join("\n"),

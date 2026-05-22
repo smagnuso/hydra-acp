@@ -2,7 +2,10 @@ import { WebSocket } from "ws";
 import { JsonRpcConnection } from "../../acp/connection.js";
 import { wsToMessageStream } from "../../acp/ws-stream.js";
 import { loadConfig } from "../../core/config.js";
-import { ensureServiceToken } from "../../core/service-token.js";
+import {
+  resolveLocalTarget,
+  type RemoteTarget,
+} from "../../core/remote-target.js";
 import { ensureDaemonReachable } from "../../core/daemon-bootstrap.js";
 import { mapUpdate } from "../../core/render-update.js";
 import {
@@ -40,6 +43,11 @@ export interface CatOptions {
   sessionId?: string | undefined;
   cwd?: string | undefined;
   detach?: boolean | undefined;
+  // Pre-resolved daemon target. Set by the cli.ts dispatcher when
+  // --session is a hydra:// URL so cat talks to a remote daemon. Local
+  // invocations leave this undefined and fall through to
+  // resolveLocalTarget(config).
+  target?: RemoteTarget | undefined;
 }
 
 export async function runCat(opts: CatOptions): Promise<void> {
@@ -56,20 +64,20 @@ export async function runCat(opts: CatOptions): Promise<void> {
     // hoping the user knows to type and hit ^D for a brand-new
     // session that has no agent yet primed to do anything.
     process.stderr.write(
-      "hydra-acp cat: nothing to send. Pipe input on stdin, pass -p <text>, or attach to an existing session with --session-id.\n",
+      "hydra-acp cat: nothing to send. Pipe input on stdin, pass -p <text>, or attach to an existing session with --session.\n",
     );
     process.exit(2);
     return;
   }
 
   const config = await loadConfig();
-  const serviceToken = await ensureServiceToken();
-  await ensureDaemonReachable(config);
+  const target = opts.target ?? (await resolveLocalTarget(config));
+  if (target.isLocal && !opts.target) {
+    await ensureDaemonReachable(config);
+  }
 
-  const protocol = config.daemon.tls ? "wss" : "ws";
-  const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const subprotocols = ["acp.v1", `hydra-acp-token.${serviceToken}`];
-  const ws = await openWs(url, subprotocols);
+  const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];
+  const ws = await openWs(target.wsUrl, subprotocols);
   const stream = wsToMessageStream(ws);
   const conn = new JsonRpcConnection(stream);
 
@@ -173,7 +181,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   //      core/session.ts:177 + tui/app.ts:2386 for the same workaround
   //      in the TUI).
   //   2. On a peer's turn_complete notification — when we attached via
-  //      --session-id and another client is driving the session, the
+  //      --session and another client is driving the session, the
   //      daemon DOES broadcast turn_complete to us, and we still want
   //      a clean line break before the next chunk of text streams in.
   const finalizeTurn = (): void => {
@@ -196,7 +204,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
       // Peer-driven turn ending. Our own turns finish via the
       // session/prompt response; this branch only fires when someone
       // else's session/prompt was the originator (e.g. we attached
-      // via --session-id and a TUI / Slack client is driving the
+      // via --session and a TUI / Slack client is driving the
       // conversation).
       finalizeTurn();
     }
@@ -321,12 +329,12 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   // TTY-stdin behaviour splits on whether we have an obvious reason
   // to read from the keyboard:
   //
-  //   - With --session-id, the user is attaching to an existing
+  //   - With --session, the user is attaching to an existing
   //     session; typing into stdin (^D when done) is the natural way
   //     to drive that session from the terminal. Fall through to the
   //     read-stdin path below.
   //
-  //   - Without --session-id, this is a one-shot like `qwen -p`. The
+  //   - Without --session, this is a one-shot like `qwen -p`. The
   //     user passed -p with the whole instruction inline and isn't
   //     expecting an interactive prompt. Fire the standing prompt
   //     once and exit; reading the keyboard here would hang on a

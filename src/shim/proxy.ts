@@ -1,6 +1,9 @@
 import { ndjsonStreamFromStdio } from "../acp/framing.js";
 import { loadConfig } from "../core/config.js";
-import { ensureServiceToken } from "../core/service-token.js";
+import {
+  resolveLocalTarget,
+  type RemoteTarget,
+} from "../core/remote-target.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import {
   type JsonRpcMessage,
@@ -21,6 +24,11 @@ export interface ShimOptions {
   agentArgs?: string[];
   name?: string;
   model?: string;
+  // Pre-resolved daemon target. Set by the cli.ts dispatcher when
+  // --session is a hydra:// URL so the shim talks to a remote daemon
+  // rather than the local one. Local invocations leave this
+  // undefined and fall through to resolveLocalTarget(config).
+  target?: RemoteTarget;
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
@@ -29,18 +37,22 @@ export async function runShim(opts: ShimOptions): Promise<void> {
   // leaving "hydra-daemon" untouched. setHydraProcessTitle preserves
   // the original args in ps so editor-spawned shims are
   // distinguishable from one another (different cwd / different
-  // session-id / etc.).
+  // session id / etc.).
   setHydraProcessTitle(buildTitleFromArgv(process.argv.slice(2)));
   const config = await loadConfig();
-  const serviceToken = await ensureServiceToken();
-  await ensureDaemonReachable(config);
+  const target = opts.target ?? (await resolveLocalTarget(config));
+  // Only autostart the daemon when we're talking to a local one. A
+  // remote target either has the daemon up (good) or doesn't (we
+  // can't help from here; the WS layer will surface the failure).
+  if (target.isLocal && !opts.target) {
+    await ensureDaemonReachable(config);
+  }
 
   const tracker = new SessionTracker();
   const downstream = ndjsonStreamFromStdio(process.stdin, process.stdout);
 
-  const protocol = config.daemon.tls ? "wss" : "ws";
-  const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/acp`;
-  const subprotocols = ["acp.v1", `hydra-acp-token.${serviceToken}`];
+  const url = target.wsUrl;
+  const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];
   const upstream = new ResilientWsStream({
     url,
     subprotocols,

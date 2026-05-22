@@ -29,6 +29,13 @@ const DaemonConfig = z.object({
   // daemon can include it in the diagnostic message when a spawn fails.
   // Bump if your agents emit large tracebacks you want surfaced.
   agentStderrTailBytes: z.number().int().positive().default(4096),
+  // Externally-reachable hostname for this daemon, used when `hydra
+  // session share` constructs a URL to advertise. Useful when the
+  // daemon binds to loopback (the normal case) but is exposed via a
+  // tunnel (ngrok) or VPN (Tailscale) under a different name. The
+  // `--host` flag on `share` overrides this; omitting both falls
+  // back to `daemon.host`, then to "127.0.0.1" with a stderr warning.
+  publicHost: z.string().optional(),
 });
 
 const RegistryConfig = z.object({

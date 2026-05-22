@@ -2,6 +2,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
+import { resolveLocalTarget } from "../../core/remote-target.js";
+import { formatHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
+import { stripHydraSessionPrefix } from "../../core/session.js";
+import { listSessions, pickMostRecent } from "../../tui/discovery.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import {
@@ -453,4 +457,102 @@ function deriveFilenameFrom(response: Response, id: string): string {
 export function httpBase(host: string, port: number, tls: boolean): string {
   const protocol = tls ? "https" : "http";
   return `${protocol}://${host}:${port}`;
+}
+
+// Print a hydra:// URL the recipient can paste into `--session`.
+// Host precedence: --host flag > config.daemon.publicHost > config.daemon.host
+// > "127.0.0.1" (with a warning that the URL is loopback-only).
+//
+// With no id, falls back to the most-recent session in cwd — mirrors the
+// behavior of `hydra-acp tui --reattach`. The wire form of the session
+// id (hydra_session_<tail>) is stripped to the short display form so
+// the printed URL is short and copy-paste friendly; the attach side
+// accepts either form via the daemon's resolveCanonicalId.
+export async function runSessionsShare(
+  idArg: string | undefined,
+  opts: { host?: string; cwd?: string } = {},
+): Promise<void> {
+  const config = await loadConfig();
+
+  let sessionId: string;
+  if (idArg !== undefined && idArg.length > 0) {
+    sessionId = idArg;
+  } else {
+    const target = await resolveLocalTarget(config);
+    const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
+    const sessions = await listSessions(target, { cwd, all: true });
+    const recent = pickMostRecent(sessions, cwd);
+    if (!recent) {
+      process.stderr.write(`No sessions found for ${cwd}.\n`);
+      process.exit(1);
+    }
+    sessionId = recent.sessionId;
+  }
+
+  const { host, port, isFallback } = resolveShareHost(opts.host, config);
+  const short = stripHydraSessionPrefix(sessionId);
+  const url = formatHydraUrl({ host, port, sessionId: short });
+  process.stdout.write(url + "\n");
+
+  if (isFallback) {
+    process.stderr.write(
+      "Note: this URL points at loopback (127.0.0.1) and only works from the same machine. " +
+        "Set daemon.publicHost in config.json or pass --host <name> to advertise an externally-reachable hostname.\n",
+    );
+  }
+}
+
+// Pick the host (and port) to advertise. Precedence:
+//   1. --host flag — assume tunneled / public, default port 443.
+//   2. config.daemon.publicHost — same: public-facing name on 443.
+//   3. config.daemon.host (when non-loopback) — direct connection, so
+//      use the daemon's actual bound port.
+//   4. "127.0.0.1" + the daemon's port (with isFallback=true).
+// Either of #1 or #2 may carry an explicit ":port" suffix, which wins
+// over the 443 default.
+function resolveShareHost(
+  flag: string | undefined,
+  config: { daemon: { host: string; port: number; publicHost?: string } },
+): { host: string; port: number; isFallback: boolean } {
+  if (flag !== undefined && flag.length > 0) {
+    const { host, port } = splitHostPort(flag, 443);
+    return { host, port, isFallback: false };
+  }
+  if (config.daemon.publicHost && config.daemon.publicHost.length > 0) {
+    const { host, port } = splitHostPort(config.daemon.publicHost, 443);
+    return { host, port, isFallback: false };
+  }
+  if (!isLoopbackHost(config.daemon.host)) {
+    return { host: config.daemon.host, port: config.daemon.port, isFallback: false };
+  }
+  return { host: "127.0.0.1", port: config.daemon.port, isFallback: true };
+}
+
+// Parse a "host:port" or bare "host" value, returning the explicit
+// port when present or `defaultPort` otherwise. Bracketed IPv6
+// literals (`[::1]:443`) are tolerated. Invalid ports fall through
+// to defaultPort silently — we'd rather emit a working URL than abort
+// the share over a misconfigured publicHost.
+function splitHostPort(input: string, defaultPort: number): { host: string; port: number } {
+  if (input.startsWith("[")) {
+    const close = input.indexOf("]");
+    if (close > 0) {
+      const host = input.slice(1, close);
+      const rest = input.slice(close + 1);
+      if (rest.startsWith(":")) {
+        const n = Number(rest.slice(1));
+        return { host, port: Number.isInteger(n) && n > 0 ? n : defaultPort };
+      }
+      return { host, port: defaultPort };
+    }
+  }
+  const colon = input.lastIndexOf(":");
+  if (colon > 0 && input.indexOf(":") === colon) {
+    const host = input.slice(0, colon);
+    const n = Number(input.slice(colon + 1));
+    if (Number.isInteger(n) && n > 0) {
+      return { host, port: n };
+    }
+  }
+  return { host: input, port: defaultPort };
 }

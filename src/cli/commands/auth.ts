@@ -5,6 +5,7 @@ import {
   setPassword,
   verifyPassword,
 } from "../../core/password.js";
+import { promptPassword } from "../../core/prompt-password.js";
 import { httpBase } from "./sessions.js";
 import { flagBool } from "../parse-args.js";
 
@@ -14,79 +15,6 @@ interface SessionTokenSummary {
   createdAt: string;
   expiresAt: string;
   lastUsedAt: string;
-}
-
-// Read a single line from stdin without echoing it back. Falls back to a
-// plain readline if stdin isn't a TTY (e.g. piped input for tests).
-async function promptPassword(prompt: string): Promise<string> {
-  process.stdout.write(prompt);
-  if (!process.stdin.isTTY) {
-    return readLineFromStdin();
-  }
-  return new Promise<string>((resolve, reject) => {
-    const stdin = process.stdin;
-    const wasRaw = stdin.isRaw === true;
-    let buffer = "";
-    const cleanup = (): void => {
-      stdin.removeListener("data", onData);
-      stdin.removeListener("error", onError);
-      if (!wasRaw) {
-        stdin.setRawMode(false);
-      }
-      stdin.pause();
-    };
-    const onData = (chunk: Buffer): void => {
-      for (const byte of chunk) {
-        if (byte === 0x0a || byte === 0x0d) {
-          process.stdout.write("\n");
-          cleanup();
-          resolve(buffer);
-          return;
-        }
-        if (byte === 0x03) {
-          cleanup();
-          reject(new Error("password entry cancelled"));
-          return;
-        }
-        if (byte === 0x7f || byte === 0x08) {
-          buffer = buffer.slice(0, -1);
-          continue;
-        }
-        buffer += String.fromCharCode(byte);
-      }
-    };
-    const onError = (err: Error): void => {
-      cleanup();
-      reject(err);
-    };
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdin.on("data", onData);
-    stdin.on("error", onError);
-  });
-}
-
-function readLineFromStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    process.stdin.setEncoding("utf8");
-    const onData = (chunk: string): void => {
-      buffer += chunk;
-      const nl = buffer.indexOf("\n");
-      if (nl !== -1) {
-        process.stdin.removeListener("data", onData);
-        process.stdin.removeListener("error", onError);
-        resolve(buffer.slice(0, nl).replace(/\r$/, ""));
-      }
-    };
-    const onError = (err: Error): void => {
-      process.stdin.removeListener("data", onData);
-      process.stdin.removeListener("error", onError);
-      reject(err);
-    };
-    process.stdin.on("data", onData);
-    process.stdin.on("error", onError);
-  });
 }
 
 export async function runAuthPasswordSet(

@@ -18,6 +18,7 @@ import {
 import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import type { HydraConfig } from "../core/config.js";
+import type { RemoteTarget } from "../core/remote-target.js";
 import {
   deleteSession,
   killSession,
@@ -45,7 +46,10 @@ export interface PickOptions {
   cwd: string;
   sessions: DiscoveredSession[];
   config: HydraConfig;
-  serviceToken: string;
+  // Daemon connection — local or remote. Picker REST calls (list /
+  // rename / kill / delete) all route through this so the picker
+  // always operates on the same daemon as the active connection.
+  target: RemoteTarget;
   // When the picker is opened from inside a session (^p), pre-select that
   // session's row so the user can drop straight back in with Enter.
   currentSessionId?: string;
@@ -470,7 +474,7 @@ export async function pickSession(
     // which after delete lands on whatever now occupies the old slot.
     const refresh = async (preferredId?: string): Promise<void> => {
       try {
-        const next = await listSessions(opts.config, opts.serviceToken);
+        const next = await listSessions(opts.target);
         allSessions = sortSessions(next);
         applyFilter();
         if (preferredId !== undefined) {
@@ -496,15 +500,15 @@ export async function pickSession(
       if (!pendingAction) {
         return;
       }
-      const target = pendingAction;
+      const session = pendingAction;
       mode = "busy";
       paintIndicator();
       try {
-        await renameSession(opts.config, opts.serviceToken, target.sessionId, title);
+        await renameSession(opts.target, session.sessionId, title);
         mode = "normal";
         pendingAction = null;
         renameBuffer = "";
-        await refresh(target.sessionId);
+        await refresh(session.sessionId);
       } catch (err) {
         mode = "normal";
         pendingAction = null;
@@ -519,9 +523,9 @@ export async function pickSession(
     // new title surfaces on the next manual refresh (r) or on the next
     // picker open. Stays in normal mode throughout — no busy spinner,
     // no auto-refresh that would race the regen.
-    const performRegen = async (target: { sessionId: string }): Promise<void> => {
+    const performRegen = async (session: { sessionId: string }): Promise<void> => {
       try {
-        await regenSessionTitle(opts.config, opts.serviceToken, target.sessionId);
+        await regenSessionTitle(opts.target, session.sessionId);
         transientStatus = "title regen queued (press r to refresh)";
         paintIndicator();
       } catch (err) {
@@ -533,18 +537,18 @@ export async function pickSession(
       if (!pendingAction) {
         return;
       }
-      const target = pendingAction;
+      const session = pendingAction;
       mode = "busy";
       paintIndicator();
       try {
         if (kind === "kill") {
-          await killSession(opts.config, opts.serviceToken, target.sessionId);
+          await killSession(opts.target, session.sessionId);
         } else {
-          await deleteSession(opts.config, opts.serviceToken, target.sessionId);
+          await deleteSession(opts.target, session.sessionId);
         }
         mode = "normal";
         pendingAction = null;
-        await refresh(kind === "kill" ? target.sessionId : undefined);
+        await refresh(kind === "kill" ? session.sessionId : undefined);
       } catch (err) {
         mode = "normal";
         pendingAction = null;

@@ -41,6 +41,10 @@ export const paths = {
   // Auth token lives in its own file so config.json can be version-
   // controlled without leaking the secret. Raw string contents, mode 0600.
   authToken: () => path.join(hydraHome(), "auth-token"),
+  // Per-host cache of password-issued session tokens used by
+  // `hydra session attach hydra://<host>/...`. JSON object keyed by
+  // "<host>:<port>" → { token, expiresAt, label? }. Mode 0600.
+  remotes: () => path.join(hydraHome(), "remotes.json"),
   pidFile: () => path.join(hydraHome(), "daemon.pid"),
   logFile: () => path.join(hydraHome(), "daemon.log"),
   currentLogFile: () => path.join(hydraHome(), "current.log"),

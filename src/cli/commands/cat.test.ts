@@ -172,7 +172,7 @@ async function performHandshake(
   return sessionId;
 }
 
-// Variant of performHandshake for the --session-id path: the loop
+// Variant of performHandshake for the --session path: the loop
 // issues session/attach instead of session/new. Returns the attach
 // request so the test can inspect its params (e.g. historyPolicy).
 async function performAttachHandshake(
@@ -440,7 +440,7 @@ describe("runCatLoop", () => {
     await loopPromise;
   });
 
-  it("attaches to an existing session with pending_only history when --session-id is set", async () => {
+  it("attaches to an existing session with pending_only history when --session is set", async () => {
     const h = makeHarness();
     const loopPromise = runCatLoop({
       ...h.baseArgs,
@@ -502,7 +502,7 @@ describe("runCatLoop", () => {
     expect(h.stdout.join("")).toContain("/home/smagnuson");
   });
 
-  // Peer-driven turn: we attached via --session-id while a TUI / Slack
+  // Peer-driven turn: we attached via --session while a TUI / Slack
   // client was driving the conversation. The daemon DOES broadcast
   // turn_complete to us in that case, and our notification handler
   // should still finalize the turn so the trailing newline lands
@@ -530,8 +530,8 @@ describe("runCatLoop", () => {
     expect(h.stdout.join("")).toBe("no trailing newline\n");
   });
 
-  it("reads from stdin even when it is a TTY, as long as --session-id is set", async () => {
-    // The user typed `hydra-acp cat --session-id <id>` at the shell
+  it("reads from stdin even when it is a TTY, as long as --session is set", async () => {
+    // The user typed `hydra-acp cat --session <id>` at the shell
     // and is typing into the keyboard. stdinIsTty=true must NOT take
     // the fire-and-exit shortcut; instead the loop should wire up
     // stdin and serve what the user types until ^D.
