@@ -676,6 +676,68 @@ export async function pickSession(
     });
   };
 
+  // Bracketed-paste interceptor for the composer (same pattern as
+  // screen.ts installBracketedPaste). After term.grabInput() we swap out
+  // terminal-kit's own stdin listener with rawStdinHandler, which strips
+  // \x1b[200~…\x1b[201~ paste markers and feeds the accumulated text to
+  // the composer as a {type:"paste"} event. Non-paste bytes are forwarded
+  // to terminal-kit unchanged. This prevents pasted newlines (\r or \n)
+  // arriving as bare ENTER keys that submit the prompt.
+  let pasteActive = false;
+  let pasteBuffer = "";
+  let tkStdinHandler: ((chunk: Buffer) => void) | null = null;
+  const PASTE_START = "\x1b[200~";
+  const PASTE_END = "\x1b[201~";
+  const rawStdinHandler = (chunk: Buffer): void => {
+    let text = chunk.toString("binary");
+    if (pasteActive) {
+      const endIdx = text.indexOf(PASTE_END);
+      if (endIdx === -1) {
+        pasteBuffer += text;
+        return;
+      }
+      pasteBuffer += text.slice(0, endIdx);
+      pasteActive = false;
+      const pasted = Buffer.from(pasteBuffer, "binary")
+        .toString("utf-8")
+        .replace(/\r\n?/g, "\n");
+      pasteBuffer = "";
+      const remaining = text.slice(endIdx + PASTE_END.length);
+      if (selectedIdx === 0 && !searchActive) {
+        composer.feed({ type: "paste", text: pasted });
+        const after = composer.state();
+        const newVr = computePromptVisualRows(after.buffer, composerRoom);
+        const newLayout = computePromptLayout(
+          newVr,
+          after,
+          PICKER_COMPOSER_MAX_ROWS,
+        );
+        if (newLayout.rendered !== composerRows) {
+          renderFromScratch();
+        } else {
+          repaintComposerBody();
+        }
+      }
+      if (remaining.length > 0 && tkStdinHandler) {
+        tkStdinHandler(Buffer.from(remaining, "binary"));
+      }
+      return;
+    }
+    const startIdx = text.indexOf(PASTE_START);
+    if (startIdx === -1) {
+      tkStdinHandler?.(chunk);
+      return;
+    }
+    if (startIdx > 0) {
+      tkStdinHandler?.(Buffer.from(text.slice(0, startIdx), "binary"));
+    }
+    text = text.slice(startIdx + PASTE_START.length);
+    pasteActive = true;
+    if (text.length > 0) {
+      rawStdinHandler(Buffer.from(text, "binary"));
+    }
+  };
+
   renderFromScratch();
 
   return await new Promise<PickerResult>((resolve) => {
@@ -693,6 +755,16 @@ export async function pickSession(
       resolved = true;
       term.off("key", onKey);
       term.off("resize", onResize);
+      // Restore terminal-kit's stdin listener and disable bracketed paste.
+      process.stdout.write("\x1b[?2004l");
+      const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
+      if (tClean.stdin && tkStdinHandler) {
+        tClean.stdin.removeListener("data", rawStdinHandler);
+        tClean.stdin.on("data", tkStdinHandler);
+        tkStdinHandler = null;
+      }
+      pasteActive = false;
+      pasteBuffer = "";
       term.grabInput(false);
       term.hideCursor(false);
       term.moveTo(1, indicatorRow() + 1);
@@ -1266,6 +1338,17 @@ export async function pickSession(
       }
     };
     term.grabInput({});
+    // Swap terminal-kit's stdin listener for our bracketed-paste interceptor.
+    const tSetup = term as unknown as {
+      stdin: NodeJS.ReadableStream;
+      onStdin: (chunk: Buffer) => void;
+    };
+    if (tSetup.stdin && typeof tSetup.onStdin === "function") {
+      tkStdinHandler = tSetup.onStdin;
+      tSetup.stdin.removeListener("data", tSetup.onStdin);
+      tSetup.stdin.on("data", rawStdinHandler);
+      process.stdout.write("\x1b[?2004h");
+    }
     term.on("key", onKey);
     term.on("resize", onResize);
   });

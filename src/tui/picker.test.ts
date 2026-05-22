@@ -30,6 +30,9 @@ function session(overrides: Partial<DiscoveredSession>): DiscoveredSession {
 interface KeyDriver {
   press(name: string, opts?: { isCharacter?: boolean }): void;
   type(text: string): void;
+  // Simulate a bracketed-paste by sending the start/end markers + text
+  // through the raw stdin handler that pickSession installs.
+  paste(text: string): void;
   resolveOnce: Promise<PickerResult>;
 }
 
@@ -39,11 +42,27 @@ function makePicker(opts: {
   currentSessionId?: string;
 }): KeyDriver {
   let onKey: ((name: string, _matches: unknown, data?: { isCharacter?: boolean }) => void) | null = null;
+  // Fake stdin: captures whatever rawStdinHandler is registered via
+  // removeListener / on so the bracketed-paste interceptor can install
+  // itself and we can drive it from the test.
+  let stdinDataHandler: ((chunk: Buffer) => void) | null = null;
+  const fakeTkStdin = {
+    removeListener(_event: string, _cb: (chunk: Buffer) => void): void {
+      // terminal-kit's own handler; we don't need to do anything with it
+      // in tests since we just want to capture the replacement handler.
+    },
+    on(_event: string, cb: (chunk: Buffer) => void): void {
+      stdinDataHandler = cb;
+    },
+  };
+
   const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
     apply: () => term,
     get(_target, prop) {
       if (prop === "width") return 80;
       if (prop === "height") return 24;
+      if (prop === "stdin") return fakeTkStdin;
+      if (prop === "onStdin") return (): void => undefined;
       if (prop === "on") {
         return (event: string, cb: typeof onKey): void => {
           if (event === "key") {
@@ -91,6 +110,14 @@ function makePicker(opts: {
       for (const ch of text) {
         onKey(ch, undefined, { isCharacter: true });
       }
+    },
+    paste(text) {
+      if (!stdinDataHandler) {
+        throw new Error("stdin handler not installed yet");
+      }
+      // Send as a single chunk exactly as a terminal would for a paste.
+      const payload = `\x1b[200~${text}\x1b[201~`;
+      stdinDataHandler(Buffer.from(payload, "binary"));
     },
     resolveOnce,
   };
@@ -371,6 +398,40 @@ describe("pickSession composer", () => {
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
       prompt: "hrkdcoqt?",
+    });
+  });
+
+  it("bracketed paste inserts text including newlines without submitting", async () => {
+    const drv = makePicker({ sessions });
+    // Simulates the user pasting "line one\nline two" — without the
+    // bracketed-paste interceptor, the \n would arrive as ENTER and
+    // immediately submit.
+    drv.paste("line one\nline two");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "line one\nline two",
+    });
+  });
+
+  it("bracketed paste with \r\n normalises to \n", async () => {
+    const drv = makePicker({ sessions });
+    drv.paste("first\r\nsecond");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "first\nsecond",
+    });
+  });
+
+  it("pasted text mixed with typed text works correctly", async () => {
+    const drv = makePicker({ sessions });
+    drv.type("prefix: ");
+    drv.paste("pasted value");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "prefix: pasted value",
     });
   });
 });
