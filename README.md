@@ -436,7 +436,7 @@ hydra-acp extension logs hydra-acp-slack --follow
 
 `stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply.
 
-**Trust model**: each extension receives its own per-process token scoped to that process's lifetime. The token grants the same read/write access to the daemon's REST and WSS surfaces as a logged-in client. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism. See `cli/examples/client-extension.mjs` for an annotated reference implementation.
+**Trust model**: each extension receives its own per-process token scoped to that process's lifetime. The token grants the same read/write access to the daemon's REST and WSS surfaces as a logged-in client. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism. See `cli/examples/client-observe.mjs` for an annotated reference implementation.
 
 #### Optional extensions
 
@@ -506,15 +506,15 @@ This means a transformer can inspect every prompt before the LLM sees it and eve
 A transformer is configured in the same way as an extension but under a separate key. ```json
 {
   "transformers": {
-    "ultrawork": {
-      "command": ["node", "/path/to/ultrawork.mjs"]
+    "my-transformer": {
+      "command": ["node", "/path/to/my-transformer.mjs"]
     }
   },
-  "defaultTransformers": ["ultrawork"]
+  "defaultTransformers": ["my-transformer"]
 }
 ```
 
-`defaultTransformers` lists transformer names applied to every new session, **in order** — the array is the pipeline. Each message passes through T1, then T2, then T3 before reaching the agent (or clients on the way back). Order matters when transformers interact: a keyword-expansion transformer should come before a logging transformer so the logger sees the expanded prompt, not the original. Individual sessions can override the chain via `_meta["hydra-acp"].transformers` on `session/new`. The daemon resolves names to their live connections at session-creation time; a transformer that is configured but not yet connected is silently skipped (fail-open).
+`defaultTransformers` lists transformer names applied to every new session, **in order** — the array is the pipeline. Each message passes through T1, then T2, then T3 before reaching the agent (or clients on the way back). Order matters when transformers interact: a prompt-rewriting transformer should come before a logging transformer so the logger sees the rewritten prompt, not the original. Individual sessions can override the chain via `_meta["hydra-acp"].transformers` on `session/new`. The daemon resolves names to their live connections at session-creation time; a transformer that is configured but not yet connected is silently skipped (fail-open).
 
 Each transformer receives:
 - the same env vars as extensions (`HYDRA_ACP_TOKEN`, `HYDRA_ACP_WS_URL`, etc.)
@@ -522,7 +522,7 @@ Each transformer receives:
 
 A transformer process connects using its own token (same mechanism as extensions) and then calls `transformer/initialize` declaring the message kinds it wants to intercept. For each intercepted message the daemon calls `transformer/message` and waits for `{ action: "continue" }`. Future phases will add `stop` (block the message) and `processing` (transformer handles the request itself).
 
-See `cli/examples/transformer-extension.mjs` for a working reference implementation that logs all traffic and always continues.
+See `cli/examples/transformer-observe.mjs` for a working reference implementation that logs all traffic and always continues, and `cli/examples/transformer-edit.mjs` for one that modifies prompts before they reach the agent.
 
 **Trust model**: transformers receive the same per-process scoped token as extensions, but have structurally more access — they intercept traffic that no client ever sees. `transformer/initialize` and all transformer-specific methods are only callable with a transformer-kind token; an extension process that tries to call them receives `MethodNotFound`. Treat every entry in `transformers` as a higher-trust boundary than `extensions`.
 

@@ -467,14 +467,23 @@ export class Session {
 
   // Runs the response-side transformer chain, then the snapshot interceptors,
   // then recordAndBroadcast. All state mutation happens after the chain exits.
-  private async runResponseChain(params: unknown): Promise<void> {
+  // See forwardRequest for originatedBy / startIdx semantics.
+  private async runResponseChain(
+    params: unknown,
+    originatedBy = new Set<string>(),
+    startIdx = 0,
+  ): Promise<void> {
     let envelope = params;
-    for (const t of this.transformChain) {
+    for (let i = startIdx; i < this.transformChain.length; i++) {
+      const t = this.transformChain[i]!;
+      if (originatedBy.has(t.name)) {
+        continue;
+      }
       if (!t.intercepts.has("response:session/update")) {
         continue;
       }
       const token = `t_${generateChainToken()}`;
-      let result: { action: string } | undefined;
+      let result: { action: string; payload?: unknown } | undefined;
       try {
         result = await t.connection.request("transformer/message", {
           token,
@@ -483,7 +492,7 @@ export class Session {
           direction: "agent→client",
           sessionId: this.sessionId,
           envelope,
-        }) as { action: string } | undefined;
+        }) as { action: string; payload?: unknown } | undefined;
       } catch (err) {
         this.logger?.warn(
           `transformer ${t.name} error on response:session/update: ${(err as Error).message}`,
@@ -491,12 +500,15 @@ export class Session {
         continue;
       }
       const action = result?.action ?? "continue";
-      if (action === "stop" || action === "processing") {
-        // Phase 2: not yet supported — log and continue.
+      if (action === "stop") {
+        return; // daemon never sees this update — no state mutation, no broadcast
+      }
+      if (action === "processing") {
         this.logger?.warn(
-          `transformer ${t.name} returned '${action}' on response:session/update — not yet supported in Phase 2, continuing`,
+          `transformer ${t.name} returned 'processing' on response:session/update — not yet supported, continuing`,
         );
       }
+      originatedBy.add(t.name);
     }
     // Snapshot interceptors and broadcast run on the post-chain envelope.
     const agentCmds = extractAdvertisedCommands(envelope);
@@ -1457,15 +1469,28 @@ export class Session {
     });
   }
 
-  async forwardRequest(method: string, params: unknown): Promise<unknown> {
+  // Walk the request-side chain then forward to the agent.
+  // originatedBy: transformer names already in the lineage — skipped for loop
+  //   prevention and to implement resume-routing on re-entry from emit_message.
+  // startIdx: chain position to start from (0 for normal, emitterIdx+1 for re-entry).
+  async forwardRequest(
+    method: string,
+    params: unknown,
+    originatedBy = new Set<string>(),
+    startIdx = 0,
+  ): Promise<unknown> {
     let envelope = this.rewriteForAgent(params);
-    for (const t of this.transformChain) {
+    for (let i = startIdx; i < this.transformChain.length; i++) {
+      const t = this.transformChain[i]!;
+      if (originatedBy.has(t.name)) {
+        continue;
+      }
       const intercept = `request:${method}`;
       if (!t.intercepts.has(intercept)) {
         continue;
       }
       const token = `t_${generateChainToken()}`;
-      let result: { action: string } | undefined;
+      let result: { action: string; payload?: unknown } | undefined;
       try {
         result = await t.connection.request("transformer/message", {
           token,
@@ -1474,24 +1499,50 @@ export class Session {
           direction: "client→agent",
           sessionId: this.sessionId,
           envelope,
-        }) as { action: string } | undefined;
+        }) as { action: string; payload?: unknown } | undefined;
       } catch (err) {
-        // Fail-open: transformer error doesn't block the request.
         this.logger?.warn(
           `transformer ${t.name} error on ${intercept}: ${(err as Error).message}`,
         );
         continue;
       }
       const action = result?.action ?? "continue";
-      if (action === "stop" || action === "processing") {
-        // Phase 2: not yet supported — log and continue through the chain.
+      if (action === "stop") {
+        return (result?.payload as Record<string, unknown> | undefined) ??
+          defaultStopPayload(method);
+      }
+      if (action === "processing") {
+        // Phase 3 Task 14: park claim. Not yet implemented — fall through.
         this.logger?.warn(
-          `transformer ${t.name} returned '${action}' on ${intercept} — not yet supported in Phase 2, continuing`,
+          `transformer ${t.name} returned 'processing' on ${intercept} — not yet supported, continuing`,
         );
       }
-      // "continue" (or unsupported actions): pass envelope unchanged to next link.
+      originatedBy.add(t.name);
     }
     return this.agent.connection.request(method, envelope);
+  }
+
+  // Called by the WS handler when a transformer emits via route:"chain".
+  // Finds the emitter's position and re-enters the appropriate chain walk
+  // from the next slot, with the emitter in originatedBy so it cannot see
+  // its own re-emission.
+  async emitToChain(
+    emitterName: string,
+    method: string,
+    envelope: unknown,
+  ): Promise<void> {
+    const emitterIdx = this.transformChain.findIndex((t) => t.name === emitterName);
+    const startIdx = emitterIdx >= 0 ? emitterIdx + 1 : 0;
+    const originatedBy = new Set([emitterName]);
+
+    // session/update is a notification — run the response-side chain.
+    if (method === "session/update") {
+      await this.runResponseChain(envelope, originatedBy, startIdx);
+      return;
+    }
+    // Everything else is treated as a request — forward to the agent if the
+    // chain doesn't stop it.
+    await this.forwardRequest(method, envelope, originatedBy, startIdx);
   }
 
   private rewriteForAgent(params: unknown): unknown {
@@ -3261,6 +3312,16 @@ export function extractPromptText(prompt: unknown): string {
       return "";
     })
     .join("");
+}
+
+// Default response when a transformer returns { action: "stop" } on a
+// request without providing a payload. session/prompt uses stopReason so
+// a queueing caller unblocks cleanly; everything else gets an empty object.
+function defaultStopPayload(method: string): Record<string, unknown> {
+  if (method === "session/prompt") {
+    return { stopReason: "stopped" };
+  }
+  return {};
 }
 
 // First non-empty line of `text`, truncated to `max` chars with a

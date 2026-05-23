@@ -169,6 +169,57 @@ export function registerAcpWsEndpoint(
       connection.onClose(() => {
         deps.transformers?.deregisterConnection(processIdentity.name);
       });
+
+      // Outbox: transformer emits an ACP message back into the system.
+      connection.onRequest("hydra-acp/emit_message", async (raw) => {
+        const params = (raw ?? {}) as {
+          sessionId?: unknown;
+          method?: unknown;
+          envelope?: unknown;
+          route?: unknown;
+          respondsTo?: unknown;
+        };
+        const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+        const method = typeof params.method === "string" ? params.method : undefined;
+        const envelope = params.envelope;
+        const route = params.route;
+
+        if (!sessionId || !method) {
+          throw Object.assign(new Error("emit_message requires sessionId and method"), { code: -32602 });
+        }
+
+        const session = deps.manager.get(sessionId);
+        if (!session) {
+          throw Object.assign(new Error(`session ${sessionId} not found`), { code: JsonRpcErrorCodes.SessionNotFound });
+        }
+
+        if (route === "chain") {
+          await session.emitToChain(processIdentity.name, method, envelope);
+          return { ok: true };
+        }
+
+        if (route === "daemon") {
+          // Treat as a client-originated notification or request on the session.
+          // For session/update (notification): re-run the response chain from start
+          // with the emitter in originatedBy so it doesn't see its own emission.
+          if (method === "session/update") {
+            await session.emitToChain(processIdentity.name, method, envelope);
+            return { ok: true };
+          }
+          // For other daemon-route methods, forward as a request to the agent.
+          // The transformer acts like a client issuing the request.
+          await session.emitToChain(processIdentity.name, method, envelope);
+          return { ok: true };
+        }
+
+        throw Object.assign(new Error(`unsupported route: ${JSON.stringify(route)}`), { code: -32602 });
+      });
+
+      // Keep-alive: resets the abandonment timer for an outstanding processing claim.
+      connection.onRequest("hydra-acp/keep_alive", async (raw) => {
+        void raw; // Phase 3 Task 14: will use token to reset claim timer
+        return { ok: true };
+      });
     }
 
     connection.onRequest("session/new", async (raw) => {
