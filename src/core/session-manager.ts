@@ -34,7 +34,7 @@ import type {
   AdvertisedMode,
   AdvertisedModel,
 } from "./hydra-commands.js";
-import type { SessionListEntry } from "../acp/types.js";
+import type { AgentCapabilities, SessionListEntry } from "../acp/types.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
 import { HYDRA_VERSION } from "./hydra-version.js";
 import { loadQueue, rewriteQueue } from "./queue-store.js";
@@ -173,6 +173,7 @@ export class SessionManager {
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
       agentMeta: fresh.agentMeta,
+      agentCapabilities: fresh.agentCapabilities,
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
@@ -251,12 +252,19 @@ export class SessionManager {
       plan,
     });
 
+    let agentCapabilities: AgentCapabilities | undefined;
     try {
-      await agent.connection.request("initialize", {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: {},
-        clientInfo: { name: "hydra", version: HYDRA_VERSION },
-      });
+      const initResult = await agent.connection.request<Record<string, unknown>>(
+        "initialize",
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {},
+          clientInfo: { name: "hydra", version: HYDRA_VERSION },
+        },
+      );
+      agentCapabilities = initResult.agentCapabilities as
+        | AgentCapabilities
+        | undefined;
     } catch (err) {
       await agent.kill().catch(() => undefined);
       throw err;
@@ -309,6 +317,7 @@ export class SessionManager {
       agent,
       upstreamSessionId: params.upstreamSessionId,
       agentMeta: loadResult?._meta as Record<string, unknown> | undefined,
+      agentCapabilities,
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
@@ -372,6 +381,7 @@ export class SessionManager {
       agent: fresh.agent,
       upstreamSessionId: fresh.upstreamSessionId,
       agentMeta: fresh.agentMeta,
+      agentCapabilities: fresh.agentCapabilities,
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
@@ -598,6 +608,7 @@ export class SessionManager {
     agent: AgentInstance;
     upstreamSessionId: string;
     agentMeta?: Record<string, unknown>;
+    agentCapabilities?: AgentCapabilities;
     initialModel?: string;
     initialModels?: AdvertisedModel[];
     initialModes?: AdvertisedMode[];
@@ -621,11 +632,17 @@ export class SessionManager {
       plan,
     });
     try {
-      await agent.connection.request("initialize", {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: {},
-        clientInfo: { name: "hydra", version: HYDRA_VERSION },
-      });
+      const initResult = await agent.connection.request<Record<string, unknown>>(
+        "initialize",
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {},
+          clientInfo: { name: "hydra", version: HYDRA_VERSION },
+        },
+      );
+      const agentCapabilities = initResult.agentCapabilities as
+        | AgentCapabilities
+        | undefined;
       const newResult = await agent.connection.request<Record<string, unknown>>(
         "session/new",
         {
@@ -686,6 +703,7 @@ export class SessionManager {
         agent,
         upstreamSessionId: sessionIdRaw,
         agentMeta: newResult._meta as Record<string, unknown> | undefined,
+        agentCapabilities,
         initialModel,
         initialModels: initialModels.length > 0 ? initialModels : undefined,
         initialModes: initialModes.length > 0 ? initialModes : undefined,

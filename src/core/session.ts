@@ -28,6 +28,11 @@ export function stripHydraSessionPrefix(id: string): string {
 }
 import { AgentInstance } from "./agent-instance.js";
 import {
+  SessionStreamBuffer,
+  STREAM_READ_MAX_BYTES,
+  type StreamReadResult as RawStreamReadResult,
+} from "./stream-buffer.js";
+import {
   HYDRA_COMMANDS,
   hydraCommandsAsAdvertised,
   type AdvertisedCommand,
@@ -42,6 +47,7 @@ import {
   type PersistedQueueEntry,
 } from "./queue-store.js";
 import type {
+  AgentCapabilities,
   AmendPromptParams,
   AmendPromptResult,
   CancelPromptResult,
@@ -52,6 +58,7 @@ import type {
   UpdatePromptResult,
 } from "../acp/types.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
+import * as fsp from "node:fs/promises";
 
 export interface AttachedClient {
   clientId: string;
@@ -75,6 +82,7 @@ export interface SpawnReplacementAgentResult {
   agent: AgentInstance;
   upstreamSessionId: string;
   agentMeta?: Record<string, unknown>;
+  agentCapabilities?: AgentCapabilities;
 }
 
 export type SpawnReplacementAgent = (
@@ -100,6 +108,11 @@ export interface SessionInit {
   title?: string;
   sessionId?: string;
   agentMeta?: Record<string, unknown>;
+  // Capabilities the agent advertised in its initialize response.
+  // Captured by SessionManager.bootstrapAgent and doResurrect so we
+  // don't have to re-probe the agent later. Used by cat --stream to
+  // pick between MCP and file surfaces.
+  agentCapabilities?: AgentCapabilities;
   agentArgs?: string[];
   idleTimeoutMs?: number;
   // Pino-style logger for close + idle paths. Optional so tests/consumers
@@ -204,6 +217,7 @@ export class Session {
   agent: AgentInstance;
   upstreamSessionId: string;
   agentMeta: Record<string, unknown> | undefined;
+  agentCapabilities: AgentCapabilities | undefined;
   readonly agentArgs: string[] | undefined;
   title: string | undefined;
   // Snapshot state delivered to attaching clients via the attach
@@ -326,6 +340,11 @@ export class Session {
     string,
     { stopReason: string; terminatedAt: number }
   >();
+  // Optional ring buffer for piped stdin, populated by openStream() when
+  // a cat --stream session attaches. Lifecycle follows the session — the
+  // markClosed path closes the buffer and unlinks any file projection.
+  private streamBuffer: SessionStreamBuffer | undefined;
+  private streamFilePath: string | undefined;
 
   constructor(init: SessionInit) {
     this.sessionId =
@@ -335,6 +354,7 @@ export class Session {
     this.agent = init.agent;
     this.upstreamSessionId = init.upstreamSessionId;
     this.agentMeta = init.agentMeta;
+    this.agentCapabilities = init.agentCapabilities;
     this.agentArgs = init.agentArgs;
     this.title = init.title;
     this.currentModel = init.currentModel;
@@ -1988,6 +2008,7 @@ export class Session {
       this.agentId = newAgentId;
       this.upstreamSessionId = fresh.upstreamSessionId;
       this.agentMeta = fresh.agentMeta;
+      this.agentCapabilities = fresh.agentCapabilities;
       // Old agent's commands no longer apply; clear and re-broadcast
       // a merged update with just /hydra verbs until the new agent
       // advertises its own.
@@ -2181,6 +2202,142 @@ export class Session {
     });
   }
 
+  // stdin-stream lifecycle. Cat --stream calls openStream() once after
+  // session/new, then forwards stdin chunks via streamWrite(). The agent
+  // either consumes via the file path (when shell tools are available)
+  // or — once the MCP surface lands — via tool calls that route through
+  // streamRead() / streamTail() / streamHead() / streamWaitFor().
+  hasStreamBuffer(): boolean {
+    return this.streamBuffer !== undefined;
+  }
+
+  get streamPath(): string | undefined {
+    return this.streamFilePath;
+  }
+
+  openStream(opts: {
+    mode?: "memory" | "file";
+    capacityBytes?: number;
+    fileCapBytes?: number;
+    filePathFor?: (sessionId: string) => string;
+  }): { filePath?: string; capacityBytes: number; fileCapBytes?: number } {
+    if (this.streamBuffer !== undefined) {
+      throw new Error(
+        `stream buffer already open for session ${this.sessionId}`,
+      );
+    }
+    const mode = opts.mode ?? "memory";
+    const filePath =
+      mode === "file" && opts.filePathFor !== undefined
+        ? opts.filePathFor(this.sessionId)
+        : undefined;
+    const bufferOpts: ConstructorParameters<typeof SessionStreamBuffer>[0] = {};
+    if (opts.capacityBytes !== undefined) {
+      bufferOpts.capacityBytes = opts.capacityBytes;
+    }
+    if (filePath !== undefined) {
+      bufferOpts.filePath = filePath;
+    }
+    if (opts.fileCapBytes !== undefined) {
+      bufferOpts.fileCapBytes = opts.fileCapBytes;
+    }
+    bufferOpts.onFileCapReached = () => {
+      // Notify any attached client so the agent's UI / cat's caller can
+      // surface the truncation. The fact that the cap was hit is a
+      // recordable event — it changes how the agent should interpret
+      // subsequent reads of the file projection.
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "stream_truncated",
+          ...(filePath !== undefined ? { filePath } : {}),
+          fileCapBytes: opts.fileCapBytes,
+        },
+      });
+    };
+    const buf = new SessionStreamBuffer(bufferOpts);
+    this.streamBuffer = buf;
+    this.streamFilePath = filePath;
+    const result: { filePath?: string; capacityBytes: number; fileCapBytes?: number } = {
+      capacityBytes: buf.capacity,
+    };
+    if (filePath !== undefined) {
+      result.filePath = filePath;
+    }
+    if (opts.fileCapBytes !== undefined) {
+      result.fileCapBytes = opts.fileCapBytes;
+    }
+    return result;
+  }
+
+  streamWrite(chunkB64: string, eof?: boolean): { writeCursor: number } {
+    const buf = this.requireStreamBuffer();
+    if (chunkB64.length > 0) {
+      const chunk = Buffer.from(chunkB64, "base64");
+      buf.append(chunk);
+    }
+    if (eof === true) {
+      buf.close();
+    }
+    return { writeCursor: buf.writeCursorPos };
+  }
+
+  async streamRead(
+    cursor: number,
+    maxBytes: number | undefined,
+    waitMs: number | undefined,
+  ): Promise<{
+    bytes: string;
+    nextCursor: number;
+    gap?: number;
+    eof?: boolean;
+  }> {
+    const buf = this.requireStreamBuffer();
+    const cap = Math.max(
+      0,
+      Math.min(maxBytes ?? STREAM_READ_MAX_BYTES, STREAM_READ_MAX_BYTES),
+    );
+    let r: RawStreamReadResult = buf.read(cursor, cap);
+    if (
+      r.bytes.length === 0 &&
+      r.eof !== true &&
+      waitMs !== undefined &&
+      waitMs > 0
+    ) {
+      const outcome = await buf.waitForData(r.nextCursor, waitMs);
+      if (outcome === "data" || outcome === "eof") {
+        r = buf.read(r.nextCursor, cap);
+      }
+    }
+    const out: {
+      bytes: string;
+      nextCursor: number;
+      gap?: number;
+      eof?: boolean;
+    } = {
+      bytes: r.bytes.toString("base64"),
+      nextCursor: r.nextCursor,
+    };
+    if (r.gap !== undefined) {
+      out.gap = r.gap;
+    }
+    if (r.eof === true) {
+      out.eof = true;
+    }
+    return out;
+  }
+
+  private requireStreamBuffer(): SessionStreamBuffer {
+    if (this.streamBuffer === undefined) {
+      const err = new Error(
+        `session ${this.sessionId} has no stream buffer; call hydra-acp/stream_open first`,
+      ) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.StreamNotEnabled;
+      throw err;
+    }
+    return this.streamBuffer;
+  }
+
   private markClosed(opts: { deleteRecord: boolean }): void {
     if (this.closed) {
       return;
@@ -2222,6 +2379,18 @@ export class Session {
         .catch(() => undefined);
     }
     this.clients.clear();
+    if (this.streamBuffer !== undefined) {
+      const buf = this.streamBuffer;
+      const path = this.streamFilePath;
+      this.streamBuffer = undefined;
+      this.streamFilePath = undefined;
+      buf.close();
+      if (path !== undefined) {
+        void buf
+          .drainFileWrites()
+          .then(() => fsp.unlink(path).catch(() => undefined));
+      }
+    }
     for (const handler of this.closeHandlers) {
       handler(opts);
     }

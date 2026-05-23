@@ -228,12 +228,25 @@ async function main(): Promise<void> {
         model,
         agentId: agentIdFromFlag,
         detach: flags.detach === true,
+        stream: flags.stream === true,
       };
       if (cwd !== undefined) {
         catOpts.cwd = cwd;
       }
       if (sessionTarget !== undefined) {
         catOpts.target = sessionTarget;
+      }
+      const streamThreshold = parseNumericFlag(flags, "stream-threshold");
+      if (streamThreshold !== undefined) {
+        catOpts.streamThreshold = streamThreshold;
+      }
+      const streamBufferBytes = parseNumericFlag(flags, "stream-bytes");
+      if (streamBufferBytes !== undefined) {
+        catOpts.streamBufferBytes = streamBufferBytes;
+      }
+      const streamFileCap = parseNumericFlag(flags, "stream-file-cap");
+      if (streamFileCap !== undefined) {
+        catOpts.streamFileCapBytes = streamFileCap;
       }
       suppressUpdateNotice = true;
       await runCat(catOpts);
@@ -483,6 +496,26 @@ async function dispatchTui(
 // first occurrence's value, or undefined if -p wasn't passed. Walked
 // once in main() for the `cat` verb so we don't have to grow the
 // parser's short-flag surface (which today is long-only).
+function parseNumericFlag(
+  flags: Record<string, unknown>,
+  name: string,
+): number | undefined {
+  const raw = flags[name];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw;
+  }
+  if (typeof raw === "string") {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
 function readShortPrompt(argv: string[]): string | undefined {
   for (let i = 0; i < argv.length; i += 1) {
     const tok = argv[i];

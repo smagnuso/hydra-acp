@@ -59,6 +59,7 @@ export const JsonRpcErrorCodes = {
   BundleAlreadyImported: -32010,
   PermissionDenied: -32011,
   AlreadyAttached: -32012,
+  StreamNotEnabled: -32013,
 } as const;
 
 export const InitializeParams = z.object({
@@ -650,6 +651,85 @@ export const PromptAmendedParams = z.object({
   amendedAt: z.number(),
 });
 export type PromptAmendedParams = z.infer<typeof PromptAmendedParams>;
+
+// hydra-acp/stream_* — per-session ring buffer for piped stdin. Cat
+// invokes stream_open to allocate a SessionStreamBuffer on the session,
+// then streams stdin via stream_write. The agent consumes via either
+// the file path returned by stream_open (when running without HTTP MCP)
+// or — once Stage 2 lands — an MCP tool surface that wraps the read RPCs
+// below. All cursors are absolute monotonic byte offsets, never ring
+// indices, so eviction produces a well-defined `gap` count.
+
+export const StreamOpenParams = z.object({
+  sessionId: z.string(),
+  // 'memory' keeps the ring in RAM only — needed for the eventual MCP
+  // tool surface. 'file' adds a temp file projection that the agent can
+  // consume with shell tools (tail -f / head / grep) when MCP isn't
+  // available. The temp file's path is returned in the response.
+  mode: z.enum(["memory", "file"]).optional(),
+  // Ring capacity in bytes. Server clamps to a reasonable minimum and
+  // its configured max; omitted falls back to the daemon default.
+  capacityBytes: z.number().int().positive().optional(),
+  // File mode only. Soft cap in bytes; after this many bytes are
+  // written to the file, further appends still land in the ring but
+  // stop being mirrored to disk. The daemon emits one stream_truncated
+  // session/update notification when the cap is first hit.
+  fileCapBytes: z.number().int().positive().optional(),
+});
+export type StreamOpenParams = z.infer<typeof StreamOpenParams>;
+
+export const StreamOpenResult = z.object({
+  // Only present when mode === "file".
+  filePath: z.string().optional(),
+  capacityBytes: z.number().int().positive(),
+  fileCapBytes: z.number().int().positive().optional(),
+});
+export type StreamOpenResult = z.infer<typeof StreamOpenResult>;
+
+export const StreamWriteParams = z.object({
+  sessionId: z.string(),
+  // Base64-encoded bytes. UTF-8 stdin gets re-encoded on the wire; the
+  // ring is byte-exact so binary streams (audio, framed protocols) work
+  // identically.
+  chunk: z.string(),
+  // True on the final write. Pending long-poll reads / waits return with
+  // eof:true once this is observed.
+  eof: z.boolean().optional(),
+});
+export type StreamWriteParams = z.infer<typeof StreamWriteParams>;
+
+export const StreamWriteResult = z.object({
+  // Absolute writeCursor after this append landed.
+  writeCursor: z.number().int().nonnegative(),
+});
+export type StreamWriteResult = z.infer<typeof StreamWriteResult>;
+
+export const StreamReadParams = z.object({
+  sessionId: z.string(),
+  cursor: z.number().int().nonnegative(),
+  // Cap on bytes returned. Server enforces a hard ceiling (STREAM_READ_MAX_BYTES,
+  // currently 64 KiB) even when the caller asks for more.
+  maxBytes: z.number().int().positive().optional(),
+  // Long-poll timeout in ms. 0 / omitted returns immediately with
+  // whatever's available (possibly empty). Server cap 60s.
+  waitMs: z.number().int().nonnegative().optional(),
+});
+export type StreamReadParams = z.infer<typeof StreamReadParams>;
+
+export const StreamReadResult = z.object({
+  // Base64-encoded bytes. Empty string when nothing new is available
+  // and either waitMs was 0 or the long-poll expired without data.
+  bytes: z.string(),
+  nextCursor: z.number().int().nonnegative(),
+  // Set when `cursor` pointed before the oldest still-resident byte —
+  // value is the count of bytes that were evicted between the caller's
+  // cursor and what we still have.
+  gap: z.number().int().nonnegative().optional(),
+  // True when the producer has closed AND there are no more bytes
+  // after nextCursor.
+  eof: z.boolean().optional(),
+});
+export type StreamReadResult = z.infer<typeof StreamReadResult>;
 
 // hydra-acp/agent_install_progress — daemon → client. Fires while the
 // agent's binary or npm package is being fetched during session/new or

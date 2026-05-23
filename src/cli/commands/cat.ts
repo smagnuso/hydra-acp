@@ -48,7 +48,18 @@ export interface CatOptions {
   // invocations leave this undefined and fall through to
   // resolveLocalTarget(config).
   target?: RemoteTarget | undefined;
+  // --stream: buffer the first streamThreshold bytes, then switch to a
+  // pull surface (file projection in v1; HTTP MCP in Stage 2) so the
+  // agent can decide what to read instead of receiving every byte
+  // inlined as text blocks.
+  stream?: boolean | undefined;
+  streamThreshold?: number | undefined;
+  streamBufferBytes?: number | undefined;
+  streamFileCapBytes?: number | undefined;
 }
+
+const DEFAULT_STREAM_THRESHOLD = 32 * 1024;
+const DEFAULT_STREAM_FILE_CAP = 64 * 1024 * 1024;
 
 export async function runCat(opts: CatOptions): Promise<void> {
   // Match the TUI/shim process title so `killall hydra` reaps cat
@@ -347,6 +358,48 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     return done;
   }
 
+  // --stream mode: buffer the head, decide between INLINE (small) and
+  // FILE (everything else) at threshold-cross or EOF, then either send
+  // one inline prompt or open a stream and let the agent pull from the
+  // file projection. Falls back to the chunker path below when --stream
+  // is not set.
+  if (opts.stream && !stdinIsTty) {
+    if (typeof stdin.setEncoding === "function") {
+      stdin.setEncoding("utf8");
+    }
+    runStreamingPath({
+      conn,
+      sessionId,
+      opts,
+      stdin,
+      stderr,
+      sendInline: sendChunk,
+      onEof: () => {
+        stdinEnded = true;
+        if (!draining && chunkQueue.length === 0) {
+          void settle(exitCode);
+        }
+      },
+      onError: (err) => {
+        stderr(`hydra-acp cat: stdin error: ${err.message}\n`);
+        exitCode = 1;
+        stdinEnded = true;
+        if (!draining && chunkQueue.length === 0) {
+          void settle(exitCode);
+        }
+      },
+      onPromptFailed: (err) => {
+        stderr(`hydra-acp cat: ${err.message}\n`);
+        exitCode = 1;
+        stdinEnded = true;
+        if (!draining && chunkQueue.length === 0) {
+          void settle(exitCode);
+        }
+      },
+    });
+    return done;
+  }
+
   if (typeof stdin.setEncoding === "function") {
     stdin.setEncoding("utf8");
   }
@@ -370,6 +423,192 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   });
 
   return done;
+}
+
+// Drives stdin for --stream mode. Heads up at most streamThreshold bytes
+// into memory; when we cross the threshold OR see EOF below it, picks
+// between INLINE (one text-block prompt) and FILE (open a daemon-side
+// stream, hand the agent a file path, pump stdin into it).
+interface StreamingPathArgs {
+  conn: JsonRpcConnection;
+  sessionId: string;
+  opts: CatOptions;
+  stdin: CatStdin;
+  stderr: (chunk: string) => void;
+  sendInline: (text: string) => Promise<void>;
+  onEof: () => void;
+  onError: (err: Error) => void;
+  onPromptFailed: (err: Error) => void;
+}
+
+function runStreamingPath(args: StreamingPathArgs): void {
+  const { conn, sessionId, opts, stdin, stderr, sendInline } = args;
+  const threshold = opts.streamThreshold ?? DEFAULT_STREAM_THRESHOLD;
+
+  type Mode = "undecided" | "inline" | "file";
+  let mode: Mode = "undecided";
+  let headBuffer = Buffer.alloc(0);
+  let stdinClosed = false;
+  // Once we're in FILE mode, every stdin chunk goes through this
+  // promise chain so writes land in order even though they're fired
+  // sync from the "data" handler.
+  let writeChain: Promise<unknown> = Promise.resolve();
+
+  const writeToStream = (chunk: Buffer, eof: boolean): void => {
+    const payload: Record<string, unknown> = {
+      sessionId,
+      chunk: chunk.toString("base64"),
+    };
+    if (eof) {
+      payload.eof = true;
+    }
+    writeChain = writeChain
+      .then(() => conn.request("hydra-acp/stream_write", payload))
+      .catch((err) => {
+        stderr(
+          `hydra-acp cat: stream_write failed: ${(err as Error).message}\n`,
+        );
+      });
+  };
+
+  const flushInline = async (): Promise<void> => {
+    mode = "inline";
+    const text = headBuffer.toString("utf8");
+    headBuffer = Buffer.alloc(0);
+    try {
+      await sendInline(text);
+    } catch (err) {
+      args.onPromptFailed(err as Error);
+      return;
+    }
+    args.onEof();
+  };
+
+  const switchToFile = async (): Promise<void> => {
+    mode = "file";
+    let open: { filePath?: string; capacityBytes: number };
+    try {
+      const openParams: Record<string, unknown> = {
+        sessionId,
+        mode: "file",
+      };
+      if (opts.streamBufferBytes !== undefined) {
+        openParams.capacityBytes = opts.streamBufferBytes;
+      }
+      openParams.fileCapBytes =
+        opts.streamFileCapBytes ?? DEFAULT_STREAM_FILE_CAP;
+      open = (await conn.request("hydra-acp/stream_open", openParams)) as {
+        filePath?: string;
+        capacityBytes: number;
+      };
+    } catch (err) {
+      args.onPromptFailed(
+        new Error(`stream_open failed: ${(err as Error).message}`),
+      );
+      return;
+    }
+    const filePath = open.filePath;
+    if (filePath === undefined) {
+      args.onPromptFailed(
+        new Error("daemon did not return a filePath for stream mode"),
+      );
+      return;
+    }
+    // Drain the head buffer into the stream BEFORE firing the kick-off
+    // prompt — that way when the agent races to read the file it sees
+    // at minimum what cat had already buffered locally.
+    if (headBuffer.length > 0) {
+      writeToStream(headBuffer, false);
+      headBuffer = Buffer.alloc(0);
+    }
+    // Ensure the head bytes are on disk before the prompt arrives at the
+    // agent. await the chain rather than racing it.
+    await writeChain.catch(() => undefined);
+
+    const promptText = buildStreamPromptText(
+      opts.prompt,
+      filePath,
+      opts.streamFileCapBytes ?? DEFAULT_STREAM_FILE_CAP,
+    );
+    // Fire the kick-off prompt without awaiting — its response (turn
+    // completion) is what triggers settle below. We need to keep
+    // pumping stdin into the stream while the agent works.
+    const promptDone = conn
+      .request("session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: promptText }],
+      })
+      .catch((err) => {
+        args.onPromptFailed(
+          new Error(`prompt failed: ${(err as Error).message}`),
+        );
+      });
+    // When the prompt resolves (turn_complete), let the caller know so
+    // it can settle. If stdin is still open, the caller will treat the
+    // remaining stdin as orphan output — which matches today's "agent
+    // ended the turn first" semantics.
+    void promptDone.then(() => {
+      // Mark eof on the stream so any agent doing a follow-up live
+      // tail sees a clean end-of-input.
+      if (!stdinClosed) {
+        writeToStream(Buffer.alloc(0), true);
+      }
+      args.onEof();
+    });
+  };
+
+  stdin.on("data", (data: string | Buffer) => {
+    const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+    if (mode === "undecided") {
+      headBuffer = Buffer.concat([headBuffer, buf]);
+      if (headBuffer.length > threshold) {
+        void switchToFile();
+      }
+      return;
+    }
+    if (mode === "file") {
+      writeToStream(buf, false);
+      return;
+    }
+    // inline mode shouldn't see post-EOF data; if it does, just hold
+    // it in the buffer in case the caller wants to peek.
+    headBuffer = Buffer.concat([headBuffer, buf]);
+  });
+
+  stdin.on("end", () => {
+    stdinClosed = true;
+    if (mode === "undecided") {
+      void flushInline();
+      return;
+    }
+    if (mode === "file") {
+      writeToStream(Buffer.alloc(0), true);
+      // settle happens in switchToFile's promptDone.then() — don't
+      // double-fire.
+    }
+  });
+
+  stdin.on("error", args.onError);
+}
+
+function buildStreamPromptText(
+  standing: string | undefined,
+  filePath: string,
+  fileCapBytes: number,
+): string {
+  const capHuman =
+    fileCapBytes >= 1024 * 1024
+      ? `${(fileCapBytes / (1024 * 1024)).toFixed(0)} MB`
+      : `${(fileCapBytes / 1024).toFixed(0)} KB`;
+  const note =
+    `Stdin is being streamed to ${filePath}. ` +
+    `The file is being appended to live; use whatever shell tools fit ` +
+    `(\`tail -f\`, \`head\`, \`grep\`, \`wc -l\`, etc.). ` +
+    `Soft cap ${capHuman} — if more is written past that, older bytes are dropped.`;
+  if (standing && standing.length > 0) {
+    return `${standing}\n\n${note}`;
+  }
+  return note;
 }
 
 async function openOrAttachSession(

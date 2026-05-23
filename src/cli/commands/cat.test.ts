@@ -554,7 +554,158 @@ describe("runCatLoop", () => {
     h.fakeStdin.end();
     await loopPromise;
   });
+
+  describe("--stream", () => {
+    it("INLINE path: small stdin closes below threshold and is sent as one text-block prompt", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "summarize", stream: true, streamThreshold: 1024 },
+      });
+      await performHandshake(h);
+
+      h.fakeStdin.push("short stdin\n");
+      h.fakeStdin.end();
+
+      const prompt = await h.waitForRequest("session/prompt");
+      const params = prompt.params as { prompt: Array<{ text?: string }> };
+      // Inline mode reuses sendChunk → standing prompt + the buffered text.
+      expect(params.prompt[0]?.text).toBe("summarize");
+      expect(params.prompt[1]?.text).toBe("short stdin\n");
+      // No stream_open should have been issued.
+      const opens = h.stream.sent.filter(
+        (m) => "method" in m && m.method === "hydra-acp/stream_open",
+      );
+      expect(opens.length).toBe(0);
+
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      await loopPromise;
+    });
+
+    it("FILE path: stdin above threshold opens a stream, drains head + future bytes, fires one prompt with the file path", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "watch", stream: true, streamThreshold: 8 },
+      });
+      await performHandshake(h);
+
+      // Push 12 bytes — 4 over the 8-byte threshold. Should trigger a
+      // stream_open + drain of the buffered head.
+      h.fakeStdin.push("abcdefghijkl");
+
+      const openReq = await h.waitForRequest("hydra-acp/stream_open");
+      const openParams = openReq.params as {
+        sessionId: string;
+        mode: string;
+        fileCapBytes?: number;
+      };
+      expect(openParams.mode).toBe("file");
+      expect(openParams.fileCapBytes).toBe(64 * 1024 * 1024);
+      h.respondToRequest("hydra-acp/stream_open", {
+        filePath: "/tmp/hydra-stdin-hydra_session_test.log",
+        capacityBytes: 16 * 1024 * 1024,
+      });
+
+      // First stream_write: the buffered head (12 bytes).
+      const writeReq = await h.waitForRequest("hydra-acp/stream_write");
+      const writeParams = writeReq.params as { chunk: string; eof?: boolean };
+      expect(Buffer.from(writeParams.chunk, "base64").toString("utf8")).toBe(
+        "abcdefghijkl",
+      );
+      expect(writeParams.eof).toBeUndefined();
+      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 12 });
+
+      // Kick-off prompt: standing prompt + the file-path note.
+      const promptReq = await h.waitForRequest("session/prompt");
+      const promptParams = promptReq.params as {
+        prompt: Array<{ text?: string }>;
+      };
+      expect(promptParams.prompt).toHaveLength(1);
+      const text = promptParams.prompt[0]?.text ?? "";
+      expect(text).toContain("watch");
+      expect(text).toContain("/tmp/hydra-stdin-hydra_session_test.log");
+
+      // After the prompt resolves, cat should send an eof stream_write.
+      h.fakeStdin.end();
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+
+      await loopPromise;
+      const writes = h.stream.sent.filter(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "hydra-acp/stream_write",
+      );
+      // At least one eof write should have landed.
+      expect(
+        writes.some(
+          (w) => (w.params as { eof?: boolean }).eof === true,
+        ),
+      ).toBe(true);
+    });
+
+    it("FILE path: subsequent stdin chunks become stream_write calls", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "watch", stream: true, streamThreshold: 4 },
+      });
+      await performHandshake(h);
+
+      h.fakeStdin.push("aaaaa"); // 5 bytes, just over threshold
+      await h.waitForRequest("hydra-acp/stream_open");
+      h.respondToRequest("hydra-acp/stream_open", {
+        filePath: "/tmp/p.log",
+        capacityBytes: 1024,
+      });
+
+      // First write (the buffered head)
+      const w1 = await h.waitForRequest("hydra-acp/stream_write");
+      expect(Buffer.from((w1.params as { chunk: string }).chunk, "base64").toString("utf8")).toBe("aaaaa");
+      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 5 });
+
+      // Wait for the kick-off prompt to land so we know we're past the
+      // switchToFile() barrier and into the "stdin → stream_write"
+      // steady state.
+      await h.waitForRequest("session/prompt");
+
+      // Subsequent stdin chunks should arrive as stream_write calls.
+      h.fakeStdin.push("bbb");
+      const w2 = await waitForStreamWriteWithBytes(h, "bbb");
+      expect(Buffer.from((w2.params as { chunk: string }).chunk, "base64").toString("utf8")).toBe("bbb");
+
+      h.fakeStdin.end();
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 8 });
+      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 8 });
+      await loopPromise;
+    });
+  });
 });
+
+async function waitForStreamWriteWithBytes(
+  h: ReturnType<typeof makeHarness>,
+  expectedUtf8: string,
+  timeoutMs = 1_000,
+): Promise<JsonRpcRequest> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const w = h.stream.sent.find((m): m is JsonRpcRequest => {
+      if (!("method" in m) || m.method !== "hydra-acp/stream_write") {
+        return false;
+      }
+      const p = m.params as { chunk?: string } | undefined;
+      if (typeof p?.chunk !== "string") {
+        return false;
+      }
+      return Buffer.from(p.chunk, "base64").toString("utf8") === expectedUtf8;
+    });
+    if (w) {
+      return w;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for stream_write with bytes ${expectedUtf8}`);
+}
 
 function countPromptsSent(h: ReturnType<typeof makeHarness>): number {
   return h.stream.sent.filter(
