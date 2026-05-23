@@ -88,6 +88,10 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
       // events before reaching here, so this case is unreachable in
       // production but kept exhaustive for the switch.
       return [];
+    case "exit-plan-mode":
+      // Rendered as a keyed multi-line block by app.ts (upsertLines), not
+      // appended through here. Same unreachable-but-exhaustive treatment.
+      return [];
     case "plan":
       return formatPlan(event);
     case "mode-changed":
@@ -581,6 +585,74 @@ function toolIconStyle(status: string): Style {
       return "tool-status-cancelled";
     default:
       return "tool-status-running";
+  }
+}
+
+export interface ExitPlanState {
+  plan: string;
+  status?: string;
+}
+
+// Render Claude's ExitPlanMode plan as a scrollback block: a 📋 Plan header,
+// the markdown body parsed via parseAgentMarkdown (same renderer agent text
+// uses, so headers/bullets/fences are styled), and a trailing status line
+// reflecting the user's approval choice. Keyed by toolCallId via
+// screen.upsertLines so status flips amend the block in place.
+export function formatExitPlanMode(state: ExitPlanState): FormattedLine[] {
+  const lines: FormattedLine[] = [
+    {
+      prefix: "▣ ",
+      prefixStyle: "plan",
+      body: "Plan",
+      bodyStyle: "plan",
+    },
+  ];
+  lines.push(...parseAgentMarkdown(state.plan));
+  const status = state.status;
+  if (status !== undefined) {
+    const footer = exitPlanFooter(status);
+    if (footer !== null) {
+      lines.push(footer);
+    }
+  }
+  return lines;
+}
+
+function exitPlanFooter(status: string): FormattedLine | null {
+  switch (status) {
+    case "completed":
+    case "succeeded":
+    case "ok":
+      return {
+        prefix: "  ",
+        body: "✓ Approved",
+        bodyStyle: "tool-status-ok",
+      };
+    case "failed":
+    case "error":
+    case "rejected":
+      return {
+        prefix: "  ",
+        body: "✗ Rejected",
+        bodyStyle: "tool-status-fail",
+      };
+    case "cancelled":
+      return {
+        prefix: "  ",
+        body: "⊝ Cancelled",
+        bodyStyle: "tool-status-cancelled",
+      };
+    case "pending":
+    case "in_progress":
+    case "running":
+    case "updated":
+      return {
+        prefix: "  ",
+        body: "awaiting approval…",
+        bodyStyle: "dim",
+      };
+    default:
+      return null;
   }
 }
 

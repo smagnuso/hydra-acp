@@ -66,6 +66,18 @@ export type RenderEvent =
       // `end_turn` stopReason from the upstream agent.
       upstreamInterrupted?: boolean;
     }
+  | {
+      // Claude's ExitPlanMode tool carries the plan as markdown in its
+      // `rawInput.plan`. Promoted to a dedicated event so the render layer
+      // can surface the plan as a scrollback block instead of dropping it
+      // into a generic one-line tool row. `plan` is undefined on terminal
+      // status updates (the body is already rendered; only the status
+      // marker needs to mutate).
+      kind: "exit-plan-mode";
+      toolCallId: string;
+      plan?: string;
+      status?: string;
+    }
   | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean; amended?: boolean }
   | { kind: "mode-changed"; mode: string }
   | { kind: "model-changed"; model: string }
@@ -319,6 +331,30 @@ function mapPromptReceived(u: UpdateLike): RenderEvent | null {
   return { kind: "user-text", text: promptText };
 }
 
+// Recognise Claude's ExitPlanMode tool across the two casings seen on the
+// wire (camelCase from claude-acp today, snake_case in case the upstream
+// shape ever changes). Case-insensitive so `name` / `title` carry-overs
+// from arbitrary upstreams still match.
+export function isExitPlanModeTool(name: string | undefined): boolean {
+  if (!name) {
+    return false;
+  }
+  const normalised = name.toLowerCase().replace(/[_\s-]/g, "");
+  return normalised === "exitplanmode";
+}
+
+function readExitPlanMarkdown(u: UpdateLike): string | null {
+  const rawInput = u.rawInput;
+  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
+    return null;
+  }
+  const plan = (rawInput as Record<string, unknown>).plan;
+  if (typeof plan !== "string" || plan.length === 0) {
+    return null;
+  }
+  return sanitizeWireText(plan);
+}
+
 function mapToolCall(u: UpdateLike): RenderEvent | null {
   const toolCallId = readString(u, "toolCallId") ?? readString(u, "id");
   if (!toolCallId) {
@@ -329,6 +365,20 @@ function mapToolCall(u: UpdateLike): RenderEvent | null {
     readString(u, "name") ??
     readString(u, "label") ??
     "tool call";
+  const toolName = readString(u, "name") ?? readString(u, "title");
+  if (isExitPlanModeTool(toolName)) {
+    const plan = readExitPlanMarkdown(u);
+    if (plan !== null) {
+      const status = readString(u, "status");
+      const event: RenderEvent = { kind: "exit-plan-mode", toolCallId, plan };
+      if (status !== undefined) {
+        event.status = status;
+      }
+      return event;
+    }
+    // Falls through to the generic tool-call rendering when rawInput.plan
+    // is missing — better a one-line row than a vanished event.
+  }
   const title = sanitizeSingleLine(rawTitle);
   const status = readString(u, "status");
   const rawKind = readString(u, "kind");
@@ -363,6 +413,18 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
     status === "cancelled";
   if (!meaningful) {
     return null;
+  }
+  const toolName = readString(u, "name") ?? rawTitle;
+  if (isExitPlanModeTool(toolName)) {
+    const event: RenderEvent = { kind: "exit-plan-mode", toolCallId };
+    const plan = readExitPlanMarkdown(u);
+    if (plan !== null) {
+      event.plan = plan;
+    }
+    if (status !== undefined) {
+      event.status = status;
+    }
+    return event;
   }
   const event: RenderEvent = { kind: "tool-call-update", toolCallId };
   if (title !== undefined) {

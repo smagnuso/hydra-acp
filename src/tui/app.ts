@@ -72,8 +72,10 @@ import {
 } from "../core/render-update.js";
 import {
   formatEvent,
+  formatExitPlanMode,
   formatToolLine,
   parseAgentMarkdown,
+  type ExitPlanState,
   type FormattedLine,
   type ToolLineState,
 } from "./format.js";
@@ -2383,6 +2385,7 @@ async function runSession(
         return true;
       case "/clear":
         toolStates.clear();
+        exitPlanStates.clear();
         toolCallOrder.length = 0;
         toolsBlockStartedAt = null;
         toolsBlockEndedAt = null;
@@ -2655,6 +2658,10 @@ async function runSession(
   // turn's tools block. Cleared at turn boundaries (the block gets
   // frozen into scrollback first) so each turn starts fresh.
   const toolStates = new Map<string, ToolLineState>();
+  // toolCallId → Claude ExitPlanMode plan + latest status. Lives until
+  // turn end (cleared alongside toolStates) so a permission resolution
+  // landing as a tool_call_update can amend the rendered block in place.
+  const exitPlanStates = new Map<string, ExitPlanState>();
   // Ordered toolCallIds for the current turn — drives the rolling
   // "most recent K" window in the tools block and is the source of
   // truth for the "ran N tools" header count.
@@ -2964,6 +2971,7 @@ async function runSession(
       screen.clearKey("plan");
       lastPlanEvent = null;
       toolStates.clear();
+      exitPlanStates.clear();
       toolCallOrder.length = 0;
       toolsExpanded = false;
       toolsBlockEndedAt = null;
@@ -2990,6 +2998,26 @@ async function runSession(
       // back on reveals the lines that streamed in while hidden.
       closeAgentText();
       screen.appendStreaming(event.text, "· ", "thought", "thought");
+      return;
+    }
+    if (event.kind === "exit-plan-mode") {
+      closeAgentText();
+      const existing = exitPlanStates.get(event.toolCallId);
+      const merged: ExitPlanState = {
+        plan: event.plan ?? existing?.plan ?? "",
+        status: event.status ?? existing?.status,
+      };
+      exitPlanStates.set(event.toolCallId, merged);
+      // No plan body and none on file yet — skip until a payload carrying
+      // `plan` arrives. A bare status update before any body has been
+      // seen would otherwise render an empty block.
+      if (merged.plan.length === 0) {
+        return;
+      }
+      const lines = formatExitPlanMode(merged);
+      if (lines.length > 0) {
+        screen.upsertLines(event.toolCallId, lines);
+      }
       return;
     }
     if (event.kind === "tool-call") {
@@ -3125,6 +3153,7 @@ async function runSession(
         ]);
       }
       toolStates.clear();
+      exitPlanStates.clear();
       toolCallOrder.length = 0;
       toolsBlockStartedAt = null;
       toolsBlockEndedAt = null;
@@ -3215,6 +3244,7 @@ async function runSession(
     renderToolsBlock();
     screen.clearKey("tools");
     toolStates.clear();
+    exitPlanStates.clear();
     toolCallOrder.length = 0;
     toolsBlockStartedAt = null;
     toolsBlockEndedAt = null;

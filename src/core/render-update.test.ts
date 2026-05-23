@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isExitPlanModeTool,
   mapUpdate,
   sanitizeSingleLine,
   sanitizeWireText,
@@ -546,5 +547,110 @@ describe("mapUpdate collapses multi-line tool titles", () => {
     });
     const entries = (ev as { entries: { content: string }[] }).entries;
     expect(entries[0]?.content.includes("\n")).toBe(false);
+  });
+
+  it("promotes ExitPlanMode tool_call with rawInput.plan to exit-plan-mode", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-plan",
+        name: "ExitPlanMode",
+        status: "pending",
+        rawInput: { plan: "## Step 1\n- do thing" },
+      }),
+    ).toEqual({
+      kind: "exit-plan-mode",
+      toolCallId: "tc-plan",
+      plan: "## Step 1\n- do thing",
+      status: "pending",
+    });
+  });
+
+  it("accepts snake_case exit_plan_mode tool names", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-plan",
+      name: "exit_plan_mode",
+      rawInput: { plan: "plan body" },
+    });
+    expect((ev as { kind: string }).kind).toBe("exit-plan-mode");
+  });
+
+  it("falls back to generic tool-call when ExitPlanMode lacks rawInput.plan", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-plan",
+        name: "ExitPlanMode",
+        status: "pending",
+      }),
+    ).toEqual({
+      kind: "tool-call",
+      toolCallId: "tc-plan",
+      title: "ExitPlanMode",
+      status: "pending",
+    });
+  });
+
+  it("maps a terminal-status tool_call_update for ExitPlanMode to a status-only exit-plan-mode", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-plan",
+        name: "ExitPlanMode",
+        status: "completed",
+      }),
+    ).toEqual({
+      kind: "exit-plan-mode",
+      toolCallId: "tc-plan",
+      status: "completed",
+    });
+  });
+
+  it("carries plan markdown on a tool_call_update when rawInput arrives late", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-plan",
+        name: "ExitPlanMode",
+        status: "completed",
+        rawInput: { plan: "late body" },
+      }),
+    ).toEqual({
+      kind: "exit-plan-mode",
+      toolCallId: "tc-plan",
+      plan: "late body",
+      status: "completed",
+    });
+  });
+
+  it("sanitizes ANSI / control bytes from plan markdown", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-plan",
+      name: "ExitPlanMode",
+      rawInput: { plan: "## \x1b[31mHeading\x1b[0m\n\x07bell" },
+    });
+    const plan = (ev as { plan: string }).plan;
+    expect(plan).not.toMatch(/\x1b/);
+    expect(plan).not.toMatch(/\x07/);
+    expect(plan).toContain("Heading");
+  });
+});
+
+describe("isExitPlanModeTool", () => {
+  it("matches camelCase, snake_case, and mixed forms", () => {
+    expect(isExitPlanModeTool("ExitPlanMode")).toBe(true);
+    expect(isExitPlanModeTool("exit_plan_mode")).toBe(true);
+    expect(isExitPlanModeTool("exit-plan-mode")).toBe(true);
+    expect(isExitPlanModeTool("EXITPLANMODE")).toBe(true);
+    expect(isExitPlanModeTool("Exit Plan Mode")).toBe(true);
+  });
+
+  it("rejects unrelated names and empty input", () => {
+    expect(isExitPlanModeTool(undefined)).toBe(false);
+    expect(isExitPlanModeTool("")).toBe(false);
+    expect(isExitPlanModeTool("ExitPlanModeX")).toBe(false);
+    expect(isExitPlanModeTool("Read file")).toBe(false);
   });
 });

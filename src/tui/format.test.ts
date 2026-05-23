@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import stringWidth from "string-width";
 import {
   formatEvent,
+  formatExitPlanMode,
   formatToolLine,
   parseAgentMarkdown,
   type FormattedLine,
@@ -375,5 +376,48 @@ describe("formatToolLine", () => {
     });
     expect(lines).toHaveLength(2);
     expect(lines[1]?.body).toBe("line one line two line three");
+  });
+});
+
+describe("formatExitPlanMode", () => {
+  it("renders a Plan header followed by parsed markdown body", () => {
+    const lines = formatExitPlanMode({
+      plan: "## Step 1\n- do thing\n- do other",
+    });
+    expect(lines[0]).toMatchObject({ body: "Plan", bodyStyle: "plan" });
+    expect(lines[1]).toMatchObject({ body: "Step 1", bodyStyle: "heading-2" });
+    expect(lines[2]?.body).toContain("• do thing");
+    expect(lines[3]?.body).toContain("• do other");
+  });
+
+  it("appends an awaiting-approval footer when status is pending", () => {
+    const lines = formatExitPlanMode({ plan: "body", status: "pending" });
+    expect(lines.at(-1)).toMatchObject({
+      body: "awaiting approval…",
+      bodyStyle: "dim",
+    });
+  });
+
+  it("appends ✓ Approved on completed status", () => {
+    const lines = formatExitPlanMode({ plan: "body", status: "completed" });
+    expect(lines.at(-1)).toMatchObject({
+      body: "✓ Approved",
+      bodyStyle: "tool-status-ok",
+    });
+  });
+
+  it("appends ✗ Rejected on rejected status", () => {
+    const lines = formatExitPlanMode({ plan: "body", status: "rejected" });
+    expect(lines.at(-1)).toMatchObject({
+      body: "✗ Rejected",
+      bodyStyle: "tool-status-fail",
+    });
+  });
+
+  it("omits the footer when status is unset", () => {
+    const lines = formatExitPlanMode({ plan: "body" });
+    expect(lines.some((l) => l.body === "awaiting approval…")).toBe(false);
+    expect(lines.some((l) => l.body.startsWith("✓") || l.body.startsWith("✗")))
+      .toBe(false);
   });
 });
