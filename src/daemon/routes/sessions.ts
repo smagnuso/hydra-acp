@@ -6,10 +6,31 @@ import { decodeBundle, encodeBundle } from "../../core/bundle.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
+import { isLoopbackHost } from "../../core/remote-url.js";
 
 export interface SessionRouteDefaults {
   agentId: string;
   cwd: string;
+  // Externally-reachable name (and optional ":port") for this daemon,
+  // stamped into exported bundles as exportedFrom.hydraHost so importers
+  // can dial back. Resolution mirrors `hydra session share`: publicHost
+  // wins; daemon.host is used when non-loopback; loopback is never
+  // stamped (the field is omitted instead).
+  publicHost?: string;
+  host?: string;
+  port?: number;
+}
+
+function resolveHydraHost(defaults: SessionRouteDefaults): string | undefined {
+  if (defaults.publicHost && defaults.publicHost.length > 0) {
+    return defaults.publicHost;
+  }
+  if (defaults.host && !isLoopbackHost(defaults.host)) {
+    return defaults.port !== undefined
+      ? `${defaults.host}:${defaults.port}`
+      : defaults.host;
+  }
+  return undefined;
 }
 
 export function registerSessionRoutes(
@@ -147,6 +168,7 @@ export function registerSessionRoutes(
         exported.promptHistory.length > 0 ? exported.promptHistory : undefined,
       hydraVersion: HYDRA_VERSION,
       machine: os.hostname(),
+      hydraHost: resolveHydraHost(defaults),
     });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     reply.header(
@@ -175,6 +197,7 @@ export function registerSessionRoutes(
         exported.promptHistory.length > 0 ? exported.promptHistory : undefined,
       hydraVersion: HYDRA_VERSION,
       machine: os.hostname(),
+      hydraHost: resolveHydraHost(defaults),
     });
     reply.header("Content-Type", "text/markdown; charset=utf-8");
     reply.code(200).send(bundleToMarkdown(bundle));

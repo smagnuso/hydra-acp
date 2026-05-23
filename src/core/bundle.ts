@@ -48,6 +48,12 @@ export const Bundle = z.object({
   exportedFrom: z.object({
     hydraVersion: z.string(),
     machine: z.string(),
+    // Externally-reachable name (and optional ":port") for the exporting
+    // daemon, sourced from config.daemon.publicHost (or daemon.host when
+    // non-loopback). Carried so an importer can construct a hydra:// URL
+    // that dials back to the origin — e.g. over Tailscale. Omitted when
+    // the exporter has no routable address; never falls back to loopback.
+    hydraHost: z.string().optional(),
   }),
   session: BundleSession,
   history: z.array(HistoryEntrySchema),
@@ -61,6 +67,7 @@ export interface EncodeBundleParams {
   promptHistory?: string[];
   hydraVersion: string;
   machine: string;
+  hydraHost?: string;
 }
 
 export function encodeBundle(params: EncodeBundleParams): Bundle {
@@ -70,6 +77,9 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
     exportedFrom: {
       hydraVersion: params.hydraVersion,
       machine: params.machine,
+      ...(params.hydraHost !== undefined && params.hydraHost.length > 0
+        ? { hydraHost: params.hydraHost }
+        : {}),
     },
     session: {
       sessionId: params.record.sessionId,

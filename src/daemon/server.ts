@@ -166,6 +166,9 @@ export async function startDaemon(
   registerSessionRoutes(app, manager, {
     agentId: config.defaultAgent,
     cwd: config.defaultCwd,
+    publicHost: config.daemon.publicHost,
+    host: config.daemon.host,
+    port: config.daemon.port,
   });
   registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
   registerExtensionRoutes(app, extensions);

@@ -96,6 +96,37 @@ describe("Bundle", () => {
     expect(() => decodeBundle(broken)).toThrow();
   });
 
+  it("carries hydraHost when set, omits the field otherwise", () => {
+    const with_host = encodeBundle({
+      record: sampleRecord(),
+      history: [],
+      hydraVersion: "0.1.0",
+      machine: "h",
+      hydraHost: "samm.tailnet.example:443",
+    });
+    expect(with_host.exportedFrom.hydraHost).toBe("samm.tailnet.example:443");
+    expect(decodeBundle(with_host).exportedFrom.hydraHost).toBe(
+      "samm.tailnet.example:443",
+    );
+
+    const without = encodeBundle({
+      record: sampleRecord(),
+      history: [],
+      hydraVersion: "0.1.0",
+      machine: "h",
+    });
+    expect("hydraHost" in without.exportedFrom).toBe(false);
+
+    const empty = encodeBundle({
+      record: sampleRecord(),
+      history: [],
+      hydraVersion: "0.1.0",
+      machine: "h",
+      hydraHost: "",
+    });
+    expect("hydraHost" in empty.exportedFrom).toBe(false);
+  });
+
   it("treats promptHistory as optional", () => {
     const encoded = encodeBundle({
       record: sampleRecord(),
