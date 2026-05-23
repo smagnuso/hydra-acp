@@ -33,11 +33,17 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentInstallProgress } from "../core/registry.js";
-import { tokenFromUpgradeRequest, type TokenValidator } from "./auth.js";
+import {
+  tokenFromUpgradeRequest,
+  type TokenValidator,
+  type ProcessTokenRegistry,
+  type ProcessIdentity,
+} from "./auth.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 
 interface ClientState {
   clientId: string;
+  processIdentity: ProcessIdentity | undefined;
   attached: Map<
     string,
     {
@@ -56,6 +62,14 @@ export interface AcpWsDeps {
   validator: TokenValidator;
   manager: SessionManager;
   defaultAgent: string;
+  // When provided, used to resolve per-process identity (name, kind) from
+  // the connection token. Enables kind-based method gating and version
+  // reporting back to extension/transformer managers.
+  processRegistry?: ProcessTokenRegistry;
+  // Callbacks for version reporting after a process calls initialize with
+  // clientInfo.version. Called at most once per connection.
+  onExtensionVersion?: (name: string, version: string) => void;
+  onTransformerVersion?: (name: string, version: string) => void;
 }
 
 export function registerAcpWsEndpoint(
@@ -72,10 +86,13 @@ export function registerAcpWsEndpoint(
       return;
     }
 
+    const processIdentity = deps.processRegistry?.resolve(token);
+
     const stream = wsToMessageStream(socket);
     const connection = new JsonRpcConnection(stream);
     const state: ClientState = {
       clientId: `hydra_client_${nanoid(12)}`,
+      processIdentity,
       attached: new Map(),
     };
 
@@ -107,9 +124,34 @@ export function registerAcpWsEndpoint(
     };
 
     connection.onRequest("initialize", async (raw) => {
-      InitializeParams.parse(raw ?? {});
+      const params = InitializeParams.parse(raw ?? {});
+      // If the connecting process reported a version and the daemon knows its
+      // identity, push the version back to the appropriate manager.
+      const version = params.clientInfo?.version;
+      if (version && processIdentity) {
+        if (processIdentity.kind === "extension") {
+          deps.onExtensionVersion?.(processIdentity.name, version);
+        } else {
+          deps.onTransformerVersion?.(processIdentity.name, version);
+        }
+      }
       return buildInitializeResult();
     });
+
+    // transformer/initialize is only registered for transformer connections.
+    // Extension and client connections receive MethodNotFound if they attempt
+    // to call it, enforcing the kind boundary at the method-registration layer.
+    if (processIdentity?.kind === "transformer") {
+      connection.onRequest("transformer/initialize", async (raw) => {
+        // Phase 1: accept the handshake and ack. Chain registration comes in
+        // Phase 2 when session traffic starts flowing through transformers.
+        const params = (raw ?? {}) as {
+          transformerConfig?: unknown;
+        };
+        void params;
+        return { ack: true };
+      });
+    }
 
     connection.onRequest("session/new", async (raw) => {
       const params = SessionNewParams.parse(raw);
@@ -170,6 +212,17 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("session/attach", async (raw) => {
       const params = SessionAttachParams.parse(raw);
+      // Some extensions (slack, notifier) send clientInfo.version here rather
+      // than in initialize — capture it either way.
+      const attachVersion = (params as { clientInfo?: { version?: string } })
+        .clientInfo?.version;
+      if (attachVersion && processIdentity) {
+        if (processIdentity.kind === "extension") {
+          deps.onExtensionVersion?.(processIdentity.name, attachVersion);
+        } else {
+          deps.onTransformerVersion?.(processIdentity.name, attachVersion);
+        }
+      }
       const hydraHints = extractHydraMeta(params._meta).resume;
       const readonly = params.readonly === true;
       app.log.info(

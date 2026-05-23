@@ -14,6 +14,7 @@ interface ExtensionInfo {
   startedAt: number | null;
   lastExitCode: number | null;
   logPath: string;
+  version: string | null;
 }
 
 export async function runExtensionsList(): Promise<void> {
@@ -46,6 +47,7 @@ export async function runExtensionsList(): Promise<void> {
   const rows = body.extensions.map((e) => ({
     name: e.name,
     status: e.status.toUpperCase(),
+    version: e.version ?? "-",
     pid: e.pid != null ? String(e.pid) : "-",
     restarts: String(e.restartCount),
     started: e.startedAt ? formatRelative(e.startedAt) : "-",
@@ -54,6 +56,7 @@ export async function runExtensionsList(): Promise<void> {
   const header = {
     name: "NAME",
     status: "STATUS",
+    version: "VERSION",
     pid: "PID",
     restarts: "RESTARTS",
     started: "STARTED",
@@ -62,6 +65,7 @@ export async function runExtensionsList(): Promise<void> {
   const widths = {
     name: maxLen(header.name, rows.map((r) => r.name)),
     status: maxLen(header.status, rows.map((r) => r.status)),
+    version: maxLen(header.version, rows.map((r) => r.version)),
     pid: maxLen(header.pid, rows.map((r) => r.pid)),
     restarts: maxLen(header.restarts, rows.map((r) => r.restarts)),
     started: maxLen(header.started, rows.map((r) => r.started)),
@@ -70,6 +74,7 @@ export async function runExtensionsList(): Promise<void> {
     [
       r.name.padEnd(widths.name),
       r.status.padEnd(widths.status),
+      r.version.padEnd(widths.version),
       r.pid.padStart(widths.pid),
       r.restarts.padStart(widths.restarts),
       r.started.padEnd(widths.started),

@@ -1,5 +1,6 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import type { SessionTokenStore } from "../core/session-tokens.js";
+import { generateServiceToken } from "../core/service-token.js";
 
 const BEARER_PREFIX = "Bearer ";
 
@@ -100,6 +101,48 @@ export function tokenFromUpgradeRequest(
     }
   }
   return undefined;
+}
+
+export interface ProcessIdentity {
+  name: string;
+  kind: "extension" | "transformer";
+}
+
+// Per-process token registry. Each spawned extension or transformer receives
+// its own token minted at spawn time. The daemon resolves identity (name,
+// kind) from the token, so a process cannot impersonate another, and method
+// gating can be enforced by kind at the auth layer.
+export class ProcessTokenRegistry implements TokenValidator {
+  private tokens = new Map<string, ProcessIdentity>();
+
+  mint(name: string, kind: "extension" | "transformer"): string {
+    const token = generateServiceToken();
+    this.tokens.set(token, { name, kind });
+    return token;
+  }
+
+  // Revoke all tokens associated with the named process. Called when a
+  // process exits or is unregistered so stale tokens can't be reused if a
+  // new process happens to reconnect before a full daemon restart.
+  revoke(name: string): void {
+    for (const [token, identity] of this.tokens) {
+      if (identity.name === name) {
+        this.tokens.delete(token);
+      }
+    }
+  }
+
+  resolve(token: string): ProcessIdentity | undefined {
+    return this.tokens.get(token);
+  }
+
+  async validate(token: string): Promise<string | undefined> {
+    const identity = this.tokens.get(token);
+    if (!identity) {
+      return undefined;
+    }
+    return `${identity.kind}:${identity.name}`;
+  }
 }
 
 export function constantTimeEqual(a: string, b: string): boolean {

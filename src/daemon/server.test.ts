@@ -28,6 +28,8 @@ function testConfig(): HydraConfig {
     defaultCwd: os.homedir(),
     sessionListColdLimit: 20,
     extensions: {},
+    transformers: {},
+    defaultTransformers: [],
     tui: {
       repaintThrottleMs: 1000,
       maxScrollbackLines: 10_000,
@@ -1160,6 +1162,8 @@ describe("startDaemon — extensions REST lifecycle", () => {
           enabled: true,
         },
       },
+      transformers: {},
+      defaultTransformers: [],
       tui: {
         repaintThrottleMs: 1000,
         maxScrollbackLines: 10_000,

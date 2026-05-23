@@ -35,6 +35,15 @@ import {
   runExtensionsStop,
 } from "./cli/commands/extensions.js";
 import {
+  runTransformersAdd,
+  runTransformersList,
+  runTransformersLogs,
+  runTransformersRemove,
+  runTransformersRestart,
+  runTransformersStart,
+  runTransformersStop,
+} from "./cli/commands/transformers.js";
+import {
   runAgentsInstall,
   runAgentsList,
   runAgentsRefresh,
@@ -373,6 +382,45 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "transformer":
+    case "transformers": {
+      const trIdx = argv.indexOf(subcommand);
+      const tail = argv.slice(trIdx + 1);
+      const sub = tail[0];
+      const name = tail[1];
+      const rest = tail.slice(2);
+      if (sub === undefined || sub === "list") {
+        await runTransformersList();
+        return;
+      }
+      if (sub === "add") {
+        await runTransformersAdd(name, rest);
+        return;
+      }
+      if (sub === "remove") {
+        await runTransformersRemove(name);
+        return;
+      }
+      if (sub === "start") {
+        await runTransformersStart(name);
+        return;
+      }
+      if (sub === "stop") {
+        await runTransformersStop(name);
+        return;
+      }
+      if (sub === "restart") {
+        await runTransformersRestart(name);
+        return;
+      }
+      if (sub === "logs") {
+        await runTransformersLogs(name, rest);
+        return;
+      }
+      process.stderr.write(`Unknown transformer subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
     case "agent":
     case "agents": {
       const sub = positional[1];
@@ -623,6 +671,11 @@ function printHelp(): void {
       "  hydra-acp extension remove <name>           Remove an extension from config",
       "  hydra-acp extension start|stop|restart <n>|all   Lifecycle on one or all",
       "  hydra-acp extension logs <name> [-f] [-n N]      Tail or follow an extension's log",
+      "  hydra-acp transformer list                  List configured transformers and live state",
+      "  hydra-acp transformer add <name> [opts]     Add a transformer to config (disabled by default)",
+      "  hydra-acp transformer remove <name>         Remove a transformer from config",
+      "  hydra-acp transformer start|stop|restart <n>|all  Lifecycle on one or all",
+      "  hydra-acp transformer logs <name> [-f] [-n N]     Tail or follow a transformer's log",
       "  hydra-acp agent [list]                      List agents in the cached registry",
       "  hydra-acp agent refresh                     Force a registry re-fetch",
       "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)",

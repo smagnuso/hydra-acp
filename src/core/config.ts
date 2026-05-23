@@ -107,6 +107,19 @@ const ExtensionBody = z.object({
 export type ExtensionBody = z.infer<typeof ExtensionBody>;
 export type ExtensionConfig = ExtensionBody & { name: string };
 
+// Transformers have the same shape as extensions but default to disabled —
+// adding one is a deliberate act given the privilege gap (a transformer can
+// rewrite prompts and swallow tool calls).
+const TransformerBody = z.object({
+  command: z.array(z.string()).default([]),
+  args: z.array(z.string()).default([]),
+  env: z.record(z.string()).default({}),
+  enabled: z.boolean().default(false),
+});
+
+export type TransformerBody = z.infer<typeof TransformerBody>;
+export type TransformerConfig = TransformerBody & { name: string };
+
 export const HydraConfig = z.object({
   daemon: DaemonConfig.default({}),
   registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
@@ -128,6 +141,8 @@ export const HydraConfig = z.object({
   // recency and truncated to this count. `--all` overrides in the CLI.
   sessionListColdLimit: z.number().int().nonnegative().default(20),
   extensions: z.record(ExtensionName, ExtensionBody).default({}),
+  transformers: z.record(ExtensionName, TransformerBody).default({}),
+  defaultTransformers: z.array(z.string()).default([]),
   // npm registry URL used when installing npm-distributed agents into
   // ~/.hydra-acp/agents. Overrides the global ~/.npmrc registry so a
   // corporate .npmrc pointing at an internal registry doesn't break
@@ -149,6 +164,13 @@ export type HydraConfig = z.infer<typeof HydraConfig>;
 
 export function extensionList(config: HydraConfig): ExtensionConfig[] {
   return Object.entries(config.extensions).map(([name, body]) => ({
+    name,
+    ...body,
+  }));
+}
+
+export function transformerList(config: HydraConfig): TransformerConfig[] {
+  return Object.entries(config.transformers).map(([name, body]) => ({
     name,
     ...body,
   }));

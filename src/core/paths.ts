@@ -90,6 +90,11 @@ export const paths = {
     path.join(hydraHome(), "extensions", `${name}.log`),
   extensionPidFile: (name: string) =>
     path.join(hydraHome(), "extensions", `${name}.pid`),
+  transformersDir: () => path.join(hydraHome(), "transformers"),
+  transformerLogFile: (name: string) =>
+    path.join(hydraHome(), "transformers", `${name}.log`),
+  transformerPidFile: (name: string) =>
+    path.join(hydraHome(), "transformers", `${name}.pid`),
   tuiHistoryFile: (id: string) =>
     path.join(hydraHome(), "sessions", id, "prompt-history"),
   // Cross-session prompt history. Up-arrow / ^R fall through to this

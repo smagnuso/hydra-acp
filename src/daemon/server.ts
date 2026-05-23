@@ -5,11 +5,12 @@ import websocketPlugin from "@fastify/websocket";
 import { selectAcpSubprotocol } from "./ws-protocol.js";
 import pino, { type Level } from "pino";
 import createPinoRoll from "pino-roll";
-import { type HydraConfig, extensionList } from "../core/config.js";
+import { type HydraConfig, extensionList, transformerList } from "../core/config.js";
 import { Registry } from "../core/registry.js";
 import { AgentInstance } from "../core/agent-instance.js";
 import { SessionManager, type AgentSpawner } from "../core/session-manager.js";
 import { ExtensionManager } from "../core/extensions.js";
+import { TransformerManager } from "../core/transformer-manager.js";
 import { paths } from "../core/paths.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
 import { setNpmInstallLogger } from "../core/npm-install.js";
@@ -22,6 +23,7 @@ import { SessionTokenStore } from "../core/session-tokens.js";
 import {
   bearerAuth,
   CompositeTokenValidator,
+  ProcessTokenRegistry,
   SessionTokenValidator,
   StaticTokenValidator,
 } from "./auth.js";
@@ -30,6 +32,7 @@ import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAgentRoutes } from "./routes/agents.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerExtensionRoutes } from "./routes/extensions.js";
+import { registerTransformerRoutes } from "./routes/transformers.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
@@ -45,6 +48,7 @@ export interface DaemonHandle {
   manager: SessionManager;
   registry: Registry;
   extensions: ExtensionManager;
+  transformers: TransformerManager;
   shutdown: () => Promise<void>;
 }
 
@@ -99,9 +103,11 @@ export async function startDaemon(
 
   const sessionTokenStore = await SessionTokenStore.load();
   const authRateLimiter = new AuthRateLimiter();
+  const processRegistry = new ProcessTokenRegistry();
   const validator = new CompositeTokenValidator([
     new StaticTokenValidator(serviceToken),
     new SessionTokenValidator(sessionTokenStore),
+    processRegistry,
   ]);
 
   const auth = bearerAuth({ validator });
@@ -160,7 +166,12 @@ export async function startDaemon(
     npmRegistry: config.npmRegistry,
   });
 
-  const extensions = new ExtensionManager(extensionList(config));
+  const extensions = new ExtensionManager(extensionList(config), undefined, {
+    tokenRegistry: processRegistry,
+  });
+  const transformers = new TransformerManager(transformerList(config), undefined, {
+    tokenRegistry: processRegistry,
+  });
 
   registerHealthRoutes(app, HYDRA_VERSION);
   registerSessionRoutes(app, manager, {
@@ -172,6 +183,7 @@ export async function startDaemon(
   });
   registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
   registerExtensionRoutes(app, extensions);
+  registerTransformerRoutes(app, transformers);
   registerConfigRoutes(app, {
     defaultAgent: config.defaultAgent,
     defaultCwd: config.defaultCwd,
@@ -184,6 +196,9 @@ export async function startDaemon(
     validator,
     manager,
     defaultAgent: config.defaultAgent,
+    processRegistry,
+    onExtensionVersion: (name, version) => extensions.reportVersion(name, version),
+    onTransformerVersion: (name, version) => transformers.reportVersion(name, version),
   });
 
   await app.listen({ host: config.daemon.host, port: config.daemon.port });
@@ -206,15 +221,18 @@ export async function startDaemon(
 
   const scheme = config.daemon.tls ? "https" : "http";
   const wsScheme = config.daemon.tls ? "wss" : "ws";
-  extensions.setContext({
+  const processContext = {
     daemonUrl: `${scheme}://${config.daemon.host}:${boundPort}`,
     daemonHost: config.daemon.host,
     daemonPort: boundPort,
     serviceToken,
     daemonWsUrl: `${wsScheme}://${config.daemon.host}:${boundPort}/acp`,
     hydraHome: paths.home(),
-  });
+  };
+  extensions.setContext(processContext);
+  transformers.setContext(processContext);
   await extensions.start();
+  await transformers.start();
 
   // Fire-and-forget: resurrect any sessions that had pending queued
   // prompts at the last shutdown / crash and replay them. Errors are
@@ -230,6 +248,7 @@ export async function startDaemon(
     clearInterval(sweepInterval);
     await sessionTokenStore.flush();
     await extensions.stop();
+    await transformers.stop();
     await manager.closeAll();
     // Drain pending meta.json writes after closing sessions so any
     // final regenTitle/persistTitle from idle-close has a chance to
@@ -251,7 +270,7 @@ export async function startDaemon(
     }
   };
 
-  return { app, manager, registry, extensions, shutdown };
+  return { app, manager, registry, extensions, transformers, shutdown };
 }
 
 async function buildLogStream(level: string) {

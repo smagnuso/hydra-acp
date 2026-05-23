@@ -4,6 +4,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { paths } from "./paths.js";
 import type { ExtensionConfig } from "./config.js";
+import type { ProcessTokenRegistry } from "../daemon/auth.js";
 
 export interface ExtensionContext {
   daemonUrl: string;
@@ -29,6 +30,7 @@ export interface ExtensionInfo {
   startedAt: number | undefined;
   lastExitCode: number | undefined;
   logPath: string;
+  version: string | undefined;
 }
 
 const RESTART_BASE_MS = 1_000;
@@ -46,15 +48,25 @@ interface ExtensionEntry {
   lastExitCode: number | undefined;
   manuallyStopped: boolean;
   exitWaiters: Array<() => void>;
+  version: string | undefined;
+  // Per-process token minted at spawn time. Undefined when no registry is
+  // configured (backwards compat path).
+  processToken: string | undefined;
 }
 
 export class ExtensionManager {
   private entries = new Map<string, ExtensionEntry>();
   private stopping = false;
   private context: ExtensionContext | undefined;
+  private tokenRegistry: ProcessTokenRegistry | undefined;
 
-  constructor(extensions: ExtensionConfig[], context?: ExtensionContext) {
+  constructor(
+    extensions: ExtensionConfig[],
+    context?: ExtensionContext,
+    options: { tokenRegistry?: ProcessTokenRegistry } = {},
+  ) {
     this.context = context;
+    this.tokenRegistry = options.tokenRegistry;
     for (const ext of extensions) {
       this.entries.set(ext.name, this.makeEntry(ext));
     }
@@ -62,6 +74,15 @@ export class ExtensionManager {
 
   setContext(context: ExtensionContext): void {
     this.context = context;
+  }
+
+  // Called by the WS handler after a process connects and calls initialize
+  // with clientInfo.version. Stored on the entry and surfaced in list().
+  reportVersion(name: string, version: string): void {
+    const entry = this.entries.get(name);
+    if (entry) {
+      entry.version = version;
+    }
   }
 
   async start(): Promise<void> {
@@ -278,6 +299,7 @@ export class ExtensionManager {
       startedAt: entry.startedAt,
       lastExitCode: entry.lastExitCode,
       logPath: paths.extensionLogFile(entry.config.name),
+      version: entry.version,
     };
   }
 
@@ -293,6 +315,8 @@ export class ExtensionManager {
       lastExitCode: undefined,
       manuallyStopped: false,
       exitWaiters: [],
+      version: undefined,
+      processToken: undefined,
     };
   }
 
@@ -362,12 +386,21 @@ export class ExtensionManager {
       `[hydra-acp] ${new Date().toISOString()} starting extension ${ext.name} (attempt ${attempt + 1})\n`,
     );
 
+    // Mint a per-process token when a registry is available; fall back to the
+    // shared service token so existing setups without a registry still work.
+    const processToken =
+      this.tokenRegistry?.mint(ext.name, "extension") ?? ctx.serviceToken;
+    entry.processToken = processToken;
+    // Clear stale version from a previous run so we don't show the old
+    // version while the process is starting up.
+    entry.version = undefined;
+
     const env = {
       ...process.env,
       HYDRA_ACP_DAEMON_URL: ctx.daemonUrl,
       HYDRA_ACP_DAEMON_HOST: ctx.daemonHost,
       HYDRA_ACP_DAEMON_PORT: String(ctx.daemonPort),
-      HYDRA_ACP_TOKEN: ctx.serviceToken,
+      HYDRA_ACP_TOKEN: processToken,
       HYDRA_ACP_WS_URL: ctx.daemonWsUrl,
       HYDRA_ACP_HOME: ctx.hydraHome,
       HYDRA_ACP_EXTENSION_NAME: ext.name,
@@ -442,6 +475,11 @@ export class ExtensionManager {
       entry.child = undefined;
       entry.pid = undefined;
       entry.lastExitCode = typeof code === "number" ? code : undefined;
+      // Revoke the per-process token so it can't be reused between restarts.
+      if (entry.processToken) {
+        this.tokenRegistry?.revoke(ext.name);
+        entry.processToken = undefined;
+      }
       const waiters = entry.exitWaiters.splice(0);
       for (const resolve of waiters) {
         resolve();

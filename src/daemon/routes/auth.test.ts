@@ -27,6 +27,8 @@ function testConfig(): HydraConfig {
     defaultCwd: os.homedir(),
     sessionListColdLimit: 20,
     extensions: {},
+    transformers: {},
+    defaultTransformers: [],
     tui: {
       repaintThrottleMs: 1000,
       maxScrollbackLines: 10_000,
