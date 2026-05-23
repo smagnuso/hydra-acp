@@ -1984,12 +1984,13 @@ export class Screen {
         this.term(" · ").bold.noFormat(truncate(title, titleRoom));
       }
       if (usage) {
-        // paintRow already cleared this row before the callback ran, so
-        // the gap between the left-side writes and the right-aligned
-        // usage block is guaranteed blank. The extra eraseLineAfter is
-        // belt-and-suspenders against a future code path that paints to
-        // this row outside paintRow.
-        const col = Math.max(1, w - usage.length + 1);
+        // Land the final char at col w-1, not w: paintRow's trailing
+        // eraseLineAfter sits at col w with "pending wrap" set, and on
+        // most terminals EL 0 erases that column — clipping our last
+        // character (e.g. "$5.15" → "$5.1"). Same fix drawBanner() uses
+        // for its right slot.
+        const visibleWidth = stringWidth(usage);
+        const col = Math.max(1, w - visibleWidth);
         this.term.moveTo(col, row).eraseLineAfter();
         this.term.dim.noFormat(usage);
       }
