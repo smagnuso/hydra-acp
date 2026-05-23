@@ -2723,6 +2723,12 @@ export class Session {
       return;
     }
     this.promptInFlight = true;
+    // Yield past the I/O phase before processing the first entry so
+    // prompt_queue_added is sent in its own TCP write. Without this,
+    // an idle session emits both added and removed{started} in the
+    // same event loop tick and they can land in the same TCP packet —
+    // the client's queue chip never visibly enters the "queued" state.
+    await new Promise<void>((r) => setImmediate(r));
     try {
       while (this.promptQueue.length > 0) {
         const next = this.promptQueue.shift();
@@ -2752,17 +2758,19 @@ export class Session {
         try {
           const result = await this.runQueueEntry(next);
           next.resolve(result);
-          // Yield to the microtask queue so the originator's
-          // session/prompt response (awaiting on next.resolve) flushes
-          // to the WS BEFORE we synchronously broadcast prompt_queue_
-          // removed{started} for the next entry. Critical for the amend
-          // path: without this yield, peers see {M1 turn_complete,
-          // M2 started} ordering where the originator's M1 response
-          // arrives after M2 started — which prevents runPrompt's
-          // finally from rendering the M1 freeze (currentTurnEcho has
-          // already moved to M2). The tools block then stays at
-          // "thinking · Xs" instead of "stopped (amended) · Xs".
-          await Promise.resolve();
+          // Yield past the I/O phase so the originator's session/prompt
+          // response is sent in its own TCP write BEFORE we broadcast
+          // prompt_queue_removed{started} for the next entry. A microtask
+          // yield (Promise.resolve) is insufficient: both writes happen
+          // before Node's I/O phase and can land in the same TCP packet.
+          // When the client receives them together, the notification
+          // handler (synchronous) runs before runPrompt's promise
+          // continuation (microtask), so currentTurnEcho moves to M2
+          // before M1's finally fires — the turn-complete guard fails and
+          // M1's tools block stays at "thinking · Xs" / "stopped (amended)
+          // · Xs". setImmediate waits until after the I/O phase, ensuring
+          // the response is delivered before the next started fires.
+          await new Promise<void>((r) => setImmediate(r));
         } catch (err) {
           next.reject(err as Error);
         } finally {
