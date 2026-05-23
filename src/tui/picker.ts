@@ -147,7 +147,7 @@ export async function pickSession(
       if (tier !== 0) {
         return tier;
       }
-      return b.updatedAt.localeCompare(a.updatedAt);
+      return b.updatedAt.slice(0, 16).localeCompare(a.updatedAt.slice(0, 16));
     });
   };
 
