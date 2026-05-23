@@ -557,6 +557,15 @@ export class Screen {
       this.handleCsi27Stdin(text);
       return;
     }
+    // If the chunk contains a bracketed-paste start marker, route to the
+    // segment handler before the LF heuristic below — terminals like
+    // wezterm deliver the whole paste (start marker + LF-separated
+    // content + end marker) in a single read, and the LFs inside the
+    // payload must not be interpreted as Ctrl+Enter.
+    if (text.includes("\x1b[200~")) {
+      this.handleRawStdinSegment(text);
+      return;
+    }
     // Bare LF — universal fallback for terminals without modifyOtherKeys
     // / kitty protocol that still need a way to distinguish Ctrl+Enter
     // from plain Enter.
