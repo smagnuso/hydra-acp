@@ -95,6 +95,11 @@ export const paths = {
     path.join(hydraHome(), "transformers", `${name}.log`),
   transformerPidFile: (name: string) =>
     path.join(hydraHome(), "transformers", `${name}.pid`),
+  // Per-session scratch directory for transformer state. Each transformer
+  // gets an isolated directory keyed by session + transformer name so
+  // multiple transformers on the same session don't collide.
+  transformerState: (sessionId: string, transformerName: string) =>
+    path.join(hydraHome(), "sessions", sessionId, "transformer-state", transformerName),
   tuiHistoryFile: (id: string) =>
     path.join(hydraHome(), "sessions", id, "prompt-history"),
   // Cross-session prompt history. Up-arrow / ^R fall through to this

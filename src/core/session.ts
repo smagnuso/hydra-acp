@@ -150,6 +150,9 @@ export interface SessionInit {
   firstPromptSeeded?: boolean;
   createdAt?: number;
   transformChain?: TransformerRef[];
+  // How long after the last recordable broadcast before session.idle fires to
+  // the transformer chain. 0 disables. Defaults to 30 seconds.
+  idleEventTimeoutMs?: number;
 }
 
 export interface CloseOptions {
@@ -300,6 +303,10 @@ export class Session {
   private internalPromptCapture: { chunks: string[] } | undefined;
   private idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
+  // Separate timer that fires session.idle to the transformer chain after
+  // a quiet period. Distinct from idleTimer, which drives session close.
+  private idleEventTimer: NodeJS.Timeout | undefined;
+  private idleEventTimeoutMs: number;
   // Time of the last recordable broadcast (or session creation, if
   // none yet). Drives the inactivity-based idle close; deliberately
   // does NOT include snapshot state pings (model/mode/title/commands)
@@ -392,6 +399,7 @@ export class Session {
       this.agentAdvertisedModels = [...init.agentModels];
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
+    this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
     this.logger = init.logger;
     this.transformChain = init.transformChain ?? [];
@@ -410,6 +418,7 @@ export class Session {
 
     this.wireAgent(this.agent);
     this.scheduleIdleCheck();
+    this.notifyChain("session.opened", {});
   }
 
   private broadcastMergedCommands(): void {
@@ -2643,6 +2652,8 @@ export class Session {
         void 0;
       }
     }
+    // Notify transformers the session is closing before we tear down.
+    this.notifyChain("session.closed", {});
     // markClosed is the explicit-shutdown path (close() was called,
     // user typed /hydra kill, agent exited, idle timer fired, etc.).
     // The session is going cold; clear the persisted queue so it
@@ -2753,6 +2764,50 @@ export class Session {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
     }
+    this.cancelIdleEventTimer();
+  }
+
+  // ── Lifecycle event timer ────────────────────────────────────────────────
+
+  private scheduleIdleEvent(): void {
+    if (this.closed || this.idleEventTimeoutMs <= 0 || this.transformChain.length === 0) {
+      return;
+    }
+    if (this.idleEventTimer) {
+      clearTimeout(this.idleEventTimer);
+    }
+    this.idleEventTimer = setTimeout(() => {
+      this.idleEventTimer = undefined;
+      this.notifyChain("session.idle", {});
+    }, this.idleEventTimeoutMs);
+    if (typeof this.idleEventTimer.unref === "function") {
+      this.idleEventTimer.unref();
+    }
+  }
+
+  private cancelIdleEventTimer(): void {
+    if (this.idleEventTimer) {
+      clearTimeout(this.idleEventTimer);
+      this.idleEventTimer = undefined;
+    }
+  }
+
+  // Send a lifecycle notification to every transformer in the chain that
+  // declared the matching intercept. Fire-and-forget — no response expected.
+  private notifyChain(event: string, payload: Record<string, unknown>): void {
+    const intercept = `lifecycle:${event}`;
+    for (const t of this.transformChain) {
+      if (!t.intercepts.has(intercept)) {
+        continue;
+      }
+      void t.connection
+        .notify("transformer/session_event", {
+          event,
+          sessionId: this.sessionId,
+          payload,
+        })
+        .catch(() => undefined);
+    }
   }
 
   private rewriteForClient(params: unknown): unknown {
@@ -2821,6 +2876,7 @@ export class Session {
         }
       }
       this.scheduleIdleCheck();
+      this.scheduleIdleEvent();
     }
     this.updatedAt = Date.now();
     for (const client of this.clients.values()) {

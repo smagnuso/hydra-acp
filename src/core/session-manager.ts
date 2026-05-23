@@ -122,6 +122,9 @@ export interface SessionManagerOptions {
   // Default transformer names applied to every new session when the client
   // doesn't supply _meta["hydra-acp"].transformers.
   defaultTransformers?: string[];
+  // How long after the last recordable broadcast before session.idle fires
+  // to the transformer chain. 0 disables. Defaults to 30 seconds.
+  idleEventTimeoutMs?: number;
   // Pino-style logger forwarded to each Session so idle-close + explicit
   // close paths leave a trail in daemon.log (the close path used to be
   // completely silent, making it hard to tell agent-killed-by-us apart
@@ -141,6 +144,7 @@ export class SessionManager {
   private idleTimeoutMs: number;
   private defaultModels: Record<string, string>;
   readonly defaultTransformers: string[];
+  private idleEventTimeoutMs: number;
   private sessionHistoryMaxEntries: number;
   // Serialize meta.json read-modify-write operations per session id so
   // concurrent snapshot updates (e.g. an agent emitting model + mode
@@ -160,6 +164,7 @@ export class SessionManager {
     this.sessionHistoryMaxEntries = options.sessionHistoryMaxEntries ?? 1000;
     this.histories = new HistoryStore({ maxEntries: this.sessionHistoryMaxEntries });
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
+    this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
     this.defaultModels = options.defaultModels ?? {};
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
@@ -185,6 +190,7 @@ export class SessionManager {
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
+      idleEventTimeoutMs: this.idleEventTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
