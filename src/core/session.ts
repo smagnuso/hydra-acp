@@ -2344,6 +2344,21 @@ export class Session {
     }
     this.closed = true;
     this.cancelIdleTimer();
+    // If a user-prompt turn is currently in-flight, synthesize a
+    // turn_complete before clearing clients. This writes a proper close
+    // record to history so clients that replay after a restart don't see
+    // an open turn and get stuck in "busy" state. runQueueEntry's own
+    // broadcastTurnComplete is guarded by !this.closed and won't double-
+    // fire even if agent.kill() causes the upstream request to reject.
+    if (this.currentEntry?.kind === "user") {
+      this.broadcastTurnComplete(
+        this.currentEntry.clientId,
+        { stopReason: "interrupted" },
+        this.currentEntry.messageId,
+        this.currentEntry.wasAmend,
+      );
+      this.currentEntry = undefined;
+    }
     // Drain any still-queued entries. Broadcast prompt_queue_removed
     // (abandoned) for user-visible ones so attached clients can drop
     // their chips, and resolve every entry's promise with cancelled so
@@ -2808,21 +2823,27 @@ export class Session {
         },
       );
     } catch (err) {
-      this.broadcastTurnComplete(
-        entry.clientId,
-        { stopReason: "error" },
-        entry.messageId,
-        entry.wasAmend,
-      );
+      // Skip if markClosed already broadcast turn_complete for this entry
+      // (session was closed while the request was in-flight).
+      if (!this.closed) {
+        this.broadcastTurnComplete(
+          entry.clientId,
+          { stopReason: "error" },
+          entry.messageId,
+          entry.wasAmend,
+        );
+      }
       this.clearAmendIfMatches(entry.messageId);
       throw err;
     }
-    this.broadcastTurnComplete(
-      entry.clientId,
-      response,
-      entry.messageId,
-      entry.wasAmend,
-    );
+    if (!this.closed) {
+      this.broadcastTurnComplete(
+        entry.clientId,
+        response,
+        entry.messageId,
+        entry.wasAmend,
+      );
+    }
     this.clearAmendIfMatches(entry.messageId);
     return response;
   }
