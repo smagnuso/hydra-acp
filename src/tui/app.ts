@@ -237,9 +237,50 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const viewPrefs: ViewPrefs = {
     showThoughts: config.tui.showThoughts,
   };
+  // Enter the alternate screen here, BEFORE the picker can paint, so
+  // every TUI surface — picker included — lives in the alt buffer. On
+  // exit (CSI ? 1049 l) the host terminal restores its main buffer and
+  // cursor exactly as they were when the user typed `hydra-acp` at the
+  // shell. Without this, the picker's first paint went to the main
+  // buffer and the picker's last frame was what remained on screen
+  // after we left the TUI.
+  let altScreenEngaged = false;
+  const enterAltScreen = (): void => {
+    if (altScreenEngaged) {
+      return;
+    }
+    term.fullscreen(true);
+    altScreenEngaged = true;
+  };
+  const leaveAltScreen = (): void => {
+    if (!altScreenEngaged) {
+      return;
+    }
+    term.fullscreen(false);
+    altScreenEngaged = false;
+    // Land on a fresh line below the restored shell prompt so any
+    // trailing stderr/stdout (update notice, resume hint) doesn't
+    // collide with the user's original command line.
+    process.stdout.write("\n");
+  };
+  enterAltScreen();
+  // Ensure we leave the alt screen on any abnormal exit path so the
+  // host shell isn't stuck in the alt buffer.
+  const altScreenCleanup = (): void => {
+    if (altScreenEngaged) {
+      term.fullscreen(false);
+      altScreenEngaged = false;
+    }
+  };
+  process.once("exit", altScreenCleanup);
   let nextOpts: TuiOptions | null = opts;
-  while (nextOpts !== null) {
-    nextOpts = await runSession(term, config, target, nextOpts, exitHint, viewPrefs);
+  try {
+    while (nextOpts !== null) {
+      nextOpts = await runSession(term, config, target, nextOpts, exitHint, viewPrefs);
+    }
+  } finally {
+    leaveAltScreen();
+    process.off("exit", altScreenCleanup);
   }
   // Re-surface the update notice on the way out so users who missed
   // the 30-second banner inside the TUI still see it. cli.ts suppresses
@@ -257,14 +298,6 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   if (exitHint.sessionId && process.stdout.isTTY) {
     const short = stripHydraSessionPrefix(exitHint.sessionId);
     const flags = exitHint.readonly ? " --readonly" : "";
-    // Clear the terminal before printing the hint. Leaving the alt
-    // screen restored whatever the host shell showed before launch,
-    // so without this the user is left staring at stale output with
-    // the hint tacked onto the bottom.
-    //
-    // \x1b[2J  clear entire screen
-    // \x1b[H   move cursor to home (1,1)
-    process.stdout.write("\x1b[2J\x1b[H");
     process.stdout.write(
       `To resume: ${invokedBinName()} tui --session ${short}${flags}\n`,
     );
@@ -281,11 +314,11 @@ async function runSession(
 ): Promise<TuiOptions | null> {
   const ctx = await resolveSession(term, config, target, opts);
   if (!ctx) {
-    // Picker was aborted (Ctrl+C / Esc). singleColumnMenu leaves grabInput
-    // engaged on cancel, which keeps the event loop alive past the return.
-    // Release it and exit explicitly so the user gets their shell back.
+    // Picker was aborted (Ctrl+C / Esc). Belt-and-suspenders grab
+    // release — the picker already does this on every exit path, but
+    // a leaked grab here would keep the event loop alive past return.
     term.grabInput(false);
-    process.exit(0);
+    return null;
   }
 
   // Visible status while the daemon brings up (or attaches to) the
@@ -1412,7 +1445,9 @@ async function runSession(
   // before the alt-screen switch so any trailing OSC 9;4 progress
   // pulse is cleared on terminals that latch it across screens.
   installStatus.finalize();
-  screen.start();
+  // runTuiApp engages the alt screen for the lifetime of the TUI
+  // (so the picker lives in there too); skip the per-session toggle.
+  screen.start({ skipFullscreen: true });
   screen.setHideThoughts(!viewPrefs.showThoughts);
   screen.setSessionbar({
     agent: sessionbarAgent,
@@ -1618,7 +1653,10 @@ async function runSession(
       sessionElapsedTimer = null;
     }
     screen.clearWindowTitle();
-    screen.stop();
+    // runTuiApp owns alt-screen entry/exit for the whole TUI lifetime,
+    // so don't toggle fullscreen here — that's done after the outer
+    // runSession loop returns.
+    screen.stop({ keepFullscreen: true });
     saveHistory(historyFile, history).catch(() => undefined);
     void stream.close().catch(() => undefined);
   };
