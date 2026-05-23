@@ -2220,7 +2220,13 @@ async function runSession(
   // history; only waiting entries get visible chips.
   if (initialQueue && initialQueue.length > 0) {
     for (const entry of initialQueue) {
-      if (entry.position === 0) continue;
+      if (entry.position === 0) {
+        // In-flight head. The live "started" notification already fired
+        // before we attached, so capture the head's messageId here so
+        // Shift+Enter amend doesn't silently degrade to a regular send.
+        currentHeadMessageId = entry.messageId;
+        continue;
+      }
       queueCache.set(
         entry.messageId,
         chipFromPrompt(entry.messageId, entry.prompt),
