@@ -273,6 +273,13 @@ export class Screen {
   private onProcessExit: (() => void) | null = null;
   private onProcessSignal: ((sig: NodeJS.Signals) => void) | null = null;
   private onProcessUncaught: ((err: Error) => void) | null = null;
+  // Selective Mouse Reporting (MasterBandit `CSI = w` / `CSI ? w`). Probed
+  // on start() when mouseEnabled is false — terminals that support it let
+  // us receive wheel-up/down without claiming the mouse for clicks (so the
+  // host terminal still does native text selection on click+drag).
+  private selectiveMouseSupported = false;
+  private selectiveMouseProbing = false;
+  private selectiveMouseProbeTimer: NodeJS.Timeout | null = null;
   // Last OSC 9;4 state we wrote (3 = indeterminate, 0 = remove). Used to
   // suppress redundant writes when setBanner runs but `status` didn't
   // actually change, and to re-emit on start() if a picker round-trip
@@ -353,6 +360,7 @@ export class Screen {
     }
     this.term.on("resize", this.resizeHandler);
     this.installBracketedPaste();
+    this.installSelectiveMouseReporting();
     this.installEmergencyCleanup();
     // Re-emit the progress indicator on entry. The OSC 9;4 state is
     // owned by the host terminal, not the alternate screen buffer, so
@@ -389,6 +397,7 @@ export class Screen {
       clearTimeout(this.throttledRepaintTimer);
       this.throttledRepaintTimer = null;
     }
+    this.uninstallSelectiveMouseReporting();
     this.uninstallBracketedPaste();
     this.uninstallEmergencyCleanup();
     this.term.off("key", this.keyHandler);
@@ -484,6 +493,40 @@ export class Screen {
     this.pasteBuffer = "";
   }
 
+  // Probe for MasterBandit's Selective Mouse Reporting protocol. Sent
+  // unconditionally on terminals that don't recognise it (silently
+  // ignored). A supporting terminal replies with `\x1b[?<b>;<e> w` —
+  // matched in handleRawStdin, which then enables wheel-only reporting.
+  // Skipped when mouseEnabled is true: full mouse capture is already on
+  // via terminal-kit and selective would just be dormant per spec.
+  private installSelectiveMouseReporting(): void {
+    if (this.mouseEnabled || this.selectiveMouseProbing || this.selectiveMouseSupported) {
+      return;
+    }
+    this.selectiveMouseProbing = true;
+    process.stdout.write("\x1b[?w");
+    // 250ms is comfortably longer than any local terminal's reply
+    // latency. After the window we stop accepting probe replies; a
+    // late-arriving reply would be passed through as junk, but in
+    // practice replies are essentially synchronous.
+    this.selectiveMouseProbeTimer = setTimeout(() => {
+      this.selectiveMouseProbing = false;
+      this.selectiveMouseProbeTimer = null;
+    }, 250);
+  }
+
+  private uninstallSelectiveMouseReporting(): void {
+    if (this.selectiveMouseProbeTimer) {
+      clearTimeout(this.selectiveMouseProbeTimer);
+      this.selectiveMouseProbeTimer = null;
+    }
+    this.selectiveMouseProbing = false;
+    if (this.selectiveMouseSupported) {
+      process.stdout.write("\x1b[=0;0w");
+      this.selectiveMouseSupported = false;
+    }
+  }
+
   private installEmergencyCleanup(): void {
     if (this.emergencyCleanupInstalled) {
       return;
@@ -526,6 +569,59 @@ export class Screen {
     }
   }
 
+  // Strip Selective Mouse Reporting sequences from a stdin chunk and
+  // dispatch them. Returns the chunk with recognised sequences removed
+  // so the remaining text can flow through the existing key/paste
+  // pipeline. Matches:
+  //   - `\x1b[?<b>;<e> w`            probe reply (any digits, mandatory ' w' suffix)
+  //   - `\x1b[<64;<col>;<row>M`      wheel-up press
+  //   - `\x1b[<65;<col>;<row>M`      wheel-down press
+  private consumeSelectiveMouseSequences(text: string): string {
+    // Fast path: nothing to do if neither pattern can be present.
+    if (!text.includes("\x1b[")) {
+      return text;
+    }
+    // Probe reply. Only meaningful while probing — outside that window
+    // we let it fall through (no-op effect on terminal-kit either way).
+    if (this.selectiveMouseProbing) {
+      const probeRe = /\x1b\[\?(\d+);(\d+) w/;
+      const m = probeRe.exec(text);
+      if (m) {
+        this.selectiveMouseProbing = false;
+        if (this.selectiveMouseProbeTimer) {
+          clearTimeout(this.selectiveMouseProbeTimer);
+          this.selectiveMouseProbeTimer = null;
+        }
+        this.selectiveMouseSupported = true;
+        // Enable wheel-only reporting: bmask 0x18 (wheel up | wheel down),
+        // emask 0x1 (press). Matches the worked example in the spec.
+        process.stdout.write("\x1b[=24;1w");
+        text = text.slice(0, m.index) + text.slice(m.index + m[0].length);
+      }
+    }
+    if (!this.selectiveMouseSupported) {
+      return text;
+    }
+    // Wheel reports. Loop so a single chunk carrying multiple notches
+    // (rapid scroll) is fully consumed.
+    const wheelRe = /\x1b\[<(64|65);\d+;\d+M/g;
+    let out = "";
+    let lastEnd = 0;
+    let m: RegExpExecArray | null;
+    while ((m = wheelRe.exec(text)) !== null) {
+      out += text.slice(lastEnd, m.index);
+      const code = m[1];
+      if (code === "64") {
+        this.scrollBy(3);
+      } else {
+        this.scrollBy(-3);
+      }
+      lastEnd = m.index + m[0].length;
+    }
+    out += text.slice(lastEnd);
+    return out;
+  }
+
   private handleRawStdin(chunk: Buffer): void {
     // Use 'binary' encoding so each byte maps to a single code unit —
     // important because the paste markers are byte-precise and we need
@@ -533,7 +629,14 @@ export class Screen {
     // content are reassembled by insertText when we hand off the
     // string. (binary preserves the byte sequence; node's binary↔Buffer
     // round-trip is lossless.)
-    const text = chunk.toString("binary");
+    let text = chunk.toString("binary");
+    // Peel off Selective Mouse Reporting probe replies and SGR wheel
+    // reports before any other parsing — the rest of the pipeline would
+    // otherwise treat them as junk key data.
+    text = this.consumeSelectiveMouseSequences(text);
+    if (text.length === 0) {
+      return;
+    }
     // While a paste is in progress, defer entirely to the segment
     // handler so the paste-end marker is still detected and LFs inside
     // pasted content aren't misinterpreted as Ctrl+Enter.
@@ -3611,6 +3714,7 @@ export function emergencyTerminalReset(): void {
     "\x1b[?1003l", // mouse any-motion reporting off
     "\x1b[?1006l", // SGR mouse mode off
     "\x1b[?1015l", // urxvt mouse mode off
+    "\x1b[=0;0w", // MasterBandit selective mouse reporting off
     "\x1b[?2004l", // bracketed paste off
     "\x1b[>4;0m", // xterm modifyOtherKeys off
     "\x1b[>5;0m", // xterm formatOtherKeys off

@@ -18,6 +18,7 @@ function makeScreen(
     maxScrollbackLines?: number;
     repaintThrottleMs?: number;
     progressIndicator?: boolean;
+    mouse?: boolean;
   } = {},
 ): Screen {
   // Proxy-based mock: `term` itself is callable (`term("text")` writes
@@ -60,6 +61,7 @@ function makeScreen(
     repaintThrottleMs: opts.repaintThrottleMs ?? 0,
     maxScrollbackLines: opts.maxScrollbackLines,
     progressIndicator: opts.progressIndicator ?? false,
+    mouse: opts.mouse ?? false,
   });
 }
 
@@ -909,5 +911,153 @@ describe("Screen lifecycle", () => {
       process.stdout.write = original;
     }
     expect(writeCount).toBe(0);
+  });
+});
+
+describe("Selective Mouse Reporting probe + wheel", () => {
+  // Capture stdout writes while body runs; restore on return.
+  function captureStdout(body: () => void): string {
+    const original = process.stdout.write.bind(process.stdout);
+    const chunks: string[] = [];
+    process.stdout.write = ((chunk: unknown) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : (chunk as Buffer).toString("binary"),
+      );
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      body();
+    } finally {
+      process.stdout.write = original;
+    }
+    return chunks.join("");
+  }
+
+  // Reach into Screen's private consumeSelectiveMouseSequences for direct
+  // testing. Mirrors the rawStdinHandler chunk-arrival path.
+  function consume(screen: Screen, text: string): string {
+    return (
+      screen as unknown as { consumeSelectiveMouseSequences: (t: string) => string }
+    ).consumeSelectiveMouseSequences(text);
+  }
+
+  function isProbing(screen: Screen): boolean {
+    return (screen as unknown as { selectiveMouseProbing: boolean }).selectiveMouseProbing;
+  }
+
+  function isSupported(screen: Screen): boolean {
+    return (screen as unknown as { selectiveMouseSupported: boolean }).selectiveMouseSupported;
+  }
+
+  function getScrollOffset(screen: Screen): number {
+    return (screen as unknown as { scrollOffset: number }).scrollOffset;
+  }
+
+  it("emits probe sequence on start when mouseEnabled is false", () => {
+    const screen = makeScreen();
+    const out = captureStdout(() => screen.start());
+    expect(out).toContain("\x1b[?w");
+    expect(isProbing(screen)).toBe(true);
+    screen.stop();
+  });
+
+  it("does NOT emit probe when mouseEnabled is true", () => {
+    const screen = makeScreen({ mouse: true });
+    const out = captureStdout(() => screen.start());
+    expect(out).not.toContain("\x1b[?w");
+    expect(isProbing(screen)).toBe(false);
+    screen.stop();
+  });
+
+  it("on probe reply, enables wheel-only and marks supported", () => {
+    const screen = makeScreen();
+    screen.start();
+    const out = captureStdout(() => {
+      const remaining = consume(screen, "\x1b[?0;0 w");
+      expect(remaining).toBe("");
+    });
+    expect(out).toBe("\x1b[=24;1w");
+    expect(isSupported(screen)).toBe(true);
+    expect(isProbing(screen)).toBe(false);
+    screen.stop();
+  });
+
+  it("strips wheel SGR reports and dispatches scrollBy with correct sign", () => {
+    const screen = makeScreen({ maxScrollbackLines: 1000 });
+    screen.start();
+    // Fill scrollback so scrollBy(3) actually moves the offset (otherwise
+    // maxScrollOffset() clamps to 0 and the test can't observe a change).
+    for (let i = 0; i < 200; i++) {
+      screen.appendLine({ body: `line-${i}` });
+    }
+    // Probe-and-enable the protocol.
+    consume(screen, "\x1b[?0;0 w");
+    expect(isSupported(screen)).toBe(true);
+
+    // Wheel up = scroll into older content (positive offset).
+    const remainingUp = consume(screen, "\x1b[<64;10;5M");
+    expect(remainingUp).toBe("");
+    expect(getScrollOffset(screen)).toBeGreaterThan(0);
+
+    // Wheel down = back toward live tail.
+    const offsetAfterUp = getScrollOffset(screen);
+    const remainingDown = consume(screen, "\x1b[<65;10;5M");
+    expect(remainingDown).toBe("");
+    expect(getScrollOffset(screen)).toBeLessThan(offsetAfterUp);
+    screen.stop();
+  });
+
+  it("passes through text that isn't a probe reply or wheel report", () => {
+    const screen = makeScreen();
+    screen.start();
+    consume(screen, "\x1b[?0;0 w");
+    expect(consume(screen, "hello")).toBe("hello");
+    expect(consume(screen, "\x1b[A")).toBe("\x1b[A"); // arrow up
+    expect(consume(screen, "\x1b[<0;5;5M")).toBe("\x1b[<0;5;5M"); // left click — not consumed
+    screen.stop();
+  });
+
+  it("handles wheel report mixed with other input in the same chunk", () => {
+    const screen = makeScreen({ maxScrollbackLines: 1000 });
+    screen.start();
+    for (let i = 0; i < 200; i++) {
+      screen.appendLine({ body: `line-${i}` });
+    }
+    consume(screen, "\x1b[?0;0 w");
+    const remaining = consume(screen, "pre\x1b[<64;1;1Mmid\x1b[<64;1;1Mpost");
+    expect(remaining).toBe("premidpost");
+    expect(getScrollOffset(screen)).toBeGreaterThan(0);
+    screen.stop();
+  });
+
+  it("emits disable sequence on stop() after enabling", () => {
+    const screen = makeScreen();
+    screen.start();
+    consume(screen, "\x1b[?0;0 w");
+    const out = captureStdout(() => screen.stop());
+    expect(out).toContain("\x1b[=0;0w");
+  });
+
+  it("does NOT emit disable sequence on stop() if never enabled", () => {
+    const screen = makeScreen();
+    screen.start();
+    // Don't send a probe reply; protocol never enabled.
+    const out = captureStdout(() => screen.stop());
+    expect(out).not.toContain("\x1b[=0;0w");
+  });
+
+  it("ignores probe reply outside the probing window", () => {
+    const screen = makeScreen();
+    screen.start();
+    // Cancel probing manually (simulates timeout firing).
+    (screen as unknown as { selectiveMouseProbing: boolean }).selectiveMouseProbing = false;
+    const out = captureStdout(() => {
+      const remaining = consume(screen, "\x1b[?0;0 w");
+      // Outside the window: not consumed, falls through to other handlers.
+      expect(remaining).toBe("\x1b[?0;0 w");
+    });
+    expect(out).toBe("");
+    expect(isSupported(screen)).toBe(false);
+    screen.stop();
   });
 });
