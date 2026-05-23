@@ -47,9 +47,9 @@ describe("formatCost", () => {
     expect(formatCost(42, undefined)).toBe("$42.00");
   });
 
-  it("uses 4 decimals for sub-dollar amounts so they don't round to zero", () => {
-    expect(formatCost(0.0042, "USD")).toBe("$0.0042");
-    expect(formatCost(0.0042, undefined)).toBe("$0.0042");
+  it("caps at cents (2 decimals) for sub-dollar amounts", () => {
+    expect(formatCost(0.0042, "USD")).toBe("$0.00");
+    expect(formatCost(0.1114, undefined)).toBe("$0.11");
   });
 
   it("renders non-USD currencies with the code suffixed", () => {

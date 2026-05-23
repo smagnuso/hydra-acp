@@ -100,6 +100,9 @@ export interface UsageSnapshot {
   size?: number;
   costAmount?: number;
   costCurrency?: string;
+  // Accumulated cost from prior agent lives within this hydra session.
+  // The displayed total is cumulativeCost + costAmount.
+  cumulativeCost?: number;
 }
 
 export interface SessionInit {
@@ -338,6 +341,7 @@ export class Session {
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
+  private cumulativeCost: number = 0;
   // Set by amendPrompt at the start of a cancel-and-resubmit dance.
   // broadcastTurnComplete reads it to attach the _meta.amended marker
   // to the cancelled turn's turn_complete notification, and to fire the
@@ -377,6 +381,7 @@ export class Session {
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
     this.currentUsage = init.currentUsage;
+    this.cumulativeCost = init.currentUsage?.cumulativeCost ?? 0;
     if (init.agentCommands && init.agentCommands.length > 0) {
       this.agentAdvertisedCommands = [...init.agentCommands];
     }
@@ -567,7 +572,7 @@ export class Session {
       return;
     }
     if (this.maybeApplyAgentUsage(envelope)) {
-      this.recordAndBroadcast("session/update", envelope);
+      this.recordAndBroadcast("session/update", this.injectCumulativeCost(envelope));
       return;
     }
     this.maybeApplyAgentSessionInfo(envelope);
@@ -791,8 +796,8 @@ export class Session {
         recordedAt,
       });
     }
-    if (this.currentUsage !== undefined) {
-      const u = this.currentUsage;
+    if (this.currentUsage !== undefined || this.cumulativeCost > 0) {
+      const u = this.currentUsage ?? {};
       const update: Record<string, unknown> = {
         sessionUpdate: "usage_update",
       };
@@ -807,8 +812,8 @@ export class Session {
         typeof u.costCurrency === "string"
       ) {
         const cost: Record<string, unknown> = {};
-        if (typeof u.costAmount === "number") {
-          cost.amount = u.costAmount;
+        if (typeof u.costAmount === "number" || this.cumulativeCost) {
+          cost.amount = this.cumulativeCost + (u.costAmount ?? 0);
         }
         if (typeof u.costCurrency === "string") {
           cost.currency = u.costCurrency;
@@ -1930,6 +1935,69 @@ export class Session {
     return true;
   }
 
+  // Move currentUsage.costAmount into cumulativeCost and clear it so the
+  // next agent life starts accumulating from $0. Fires usageHandlers so
+  // meta.json is updated before the new agent starts emitting.
+  private accumulateAndResetCost(): void {
+    const amount = this.currentUsage?.costAmount;
+    if (!amount)
+      return;
+    this.cumulativeCost += amount;
+    const next: UsageSnapshot = {
+      ...(this.currentUsage ?? {}),
+      cumulativeCost: this.cumulativeCost,
+      costAmount: undefined,
+    };
+    this.currentUsage = next;
+    for (const handler of this.usageHandlers) {
+      try {
+        handler(next);
+      } catch {
+        void 0;
+      }
+    }
+  }
+
+  // Returns a modified envelope with cost.amount replaced by the running
+  // total (cumulativeCost + raw agent amount). No-op if the envelope
+  // doesn't carry a numeric cost.amount.
+  private injectCumulativeCost(envelope: unknown): unknown {
+    if (!this.cumulativeCost)
+      return envelope;
+    if (!envelope || typeof envelope !== "object")
+      return envelope;
+    const obj = envelope as Record<string, unknown>;
+    if (!obj.update || typeof obj.update !== "object")
+      return envelope;
+    const update = obj.update as Record<string, unknown>;
+    if (update.sessionUpdate !== "usage_update")
+      return envelope;
+    if (!update.cost || typeof update.cost !== "object")
+      return envelope;
+    const cost = update.cost as Record<string, unknown>;
+    if (typeof cost.amount !== "number")
+      return envelope;
+    return {
+      ...obj,
+      update: {
+        ...update,
+        cost: { ...cost, amount: this.cumulativeCost + cost.amount },
+      },
+    };
+  }
+
+  // Total cost across all agent lives for this hydra session. Used by
+  // session/list so list rows show the accumulated figure.
+  get totalUsage(): UsageSnapshot | undefined {
+    if (!this.currentUsage && !this.cumulativeCost)
+      return undefined;
+    const base = this.currentUsage ?? {};
+    return {
+      ...base,
+      costAmount: this.cumulativeCost + (this.currentUsage?.costAmount ?? 0),
+    };
+  }
+
   // Update the cached agent command list, fire persist handlers, and
   // broadcast the merged list to attached clients. Idempotent on a
   // structurally identical list so we don't churn meta.json on noisy
@@ -2197,6 +2265,7 @@ export class Session {
         cwd: this.cwd,
         agentArgs: this.agentArgs,
       });
+      this.accumulateAndResetCost();
       this.wireAgent(fresh.agent);
 
       const oldAgent = this.agent;

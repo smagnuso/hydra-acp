@@ -61,6 +61,7 @@ export const PersistedUsage = z.object({
   size: z.number().optional(),
   costAmount: z.number().optional(),
   costCurrency: z.string().optional(),
+  cumulativeCost: z.number().optional(),
 });
 export type PersistedUsage = z.infer<typeof PersistedUsage>;
 

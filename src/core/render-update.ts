@@ -506,7 +506,7 @@ function isUpstreamInterrupted(
 
 function mapPlan(u: UpdateLike): RenderEvent | null {
   const entries = u.entries;
-  if (!Array.isArray(entries)) {
+  if (!Array.isArray(entries) || entries.length === 0) {
     return null;
   }
   const normalized: PlanEntry[] = [];

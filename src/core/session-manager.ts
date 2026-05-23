@@ -852,7 +852,17 @@ export class SessionManager {
       agentArgs: record.agentArgs,
       currentModel: record.currentModel,
       currentMode: record.currentMode,
-      currentUsage: persistedUsageToSnapshot(record.currentUsage),
+      currentUsage: persistedUsageToSnapshot(
+        record.currentUsage
+          ? {
+              ...record.currentUsage,
+              cumulativeCost:
+                (record.currentUsage.cumulativeCost ?? 0) +
+                (record.currentUsage.costAmount ?? 0),
+              costAmount: undefined,
+            }
+          : undefined,
+      ),
       agentCommands: record.agentCommands,
       agentModes: record.agentModes,
       agentModels: record.agentModels,
@@ -968,7 +978,7 @@ export class SessionManager {
         title: session.title,
         agentId: session.agentId,
         currentModel: session.currentModel,
-        currentUsage: session.currentUsage,
+        currentUsage: session.totalUsage,
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
@@ -991,7 +1001,14 @@ export class SessionManager {
         title: r.title,
         agentId: r.agentId,
         currentModel: r.currentModel,
-        currentUsage: r.currentUsage,
+        currentUsage: r.currentUsage
+          ? {
+              ...r.currentUsage,
+              costAmount:
+                (r.currentUsage.cumulativeCost ?? 0) +
+                (r.currentUsage.costAmount ?? 0) || undefined,
+            }
+          : undefined,
         importedFromMachine: r.importedFromMachine,
         importedFromUpstreamSessionId: r.importedFromUpstreamSessionId,
         updatedAt: used,
@@ -1467,6 +1484,9 @@ function usageSnapshotToPersisted(
   }
   if (usage.costCurrency !== undefined) {
     out.costCurrency = usage.costCurrency;
+  }
+  if (usage.cumulativeCost !== undefined) {
+    out.cumulativeCost = usage.cumulativeCost;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }

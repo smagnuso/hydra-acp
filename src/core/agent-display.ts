@@ -66,11 +66,10 @@ export function formatAgentCell(
 
 // Formats a cost amount with sensible defaults for header display:
 // USD (or unspecified) renders as `$X.XX`; other currencies fall back to
-// `X.XX <code>`. More decimals for sub-dollar amounts so a $0.0042 cost
-// doesn't round to `$0.00`.
+// `X.XX <code>`.
 export function formatCost(amount: number, currency: string | undefined): string {
   const sign = currency === "USD" || currency === undefined ? "$" : "";
-  const decimals = amount >= 1 ? 2 : 4;
+  const decimals = 2;
   return `${sign}${amount.toFixed(decimals)}${
     currency && currency !== "USD" ? ` ${currency}` : ""
   }`;
