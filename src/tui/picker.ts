@@ -668,6 +668,32 @@ export async function pickSession(
     });
   };
 
+  // Repaint just the data zone (header + session rows + indicator) in-place
+  // without clearing the screen. Safe when the session count hasn't changed
+  // (layout row positions are stable). Avoids the eraseDisplayBelow flash
+  // that renderFromScratch produces.
+  const repaintDataZone = (): void => {
+    withSync(() => {
+      term.moveTo(1, headerRow());
+      term.dim.noFormat(`  ${headerLine}`);
+      for (let v = 0; v < viewportSize; v++) {
+        const row = headerRow() + 1 + v;
+        const sessionIdx = scrollOffset + v;
+        if (sessionIdx < visible.length) {
+          term.moveTo(1, row);
+          paintSessionRow(sessionIdx);
+        } else {
+          term.moveTo(1, row).eraseLineAfter();
+        }
+      }
+      paintIndicator();
+      if (selectedIdx === 0) {
+        placeComposerCursor();
+        term.hideCursor(false);
+      }
+    });
+  };
+
   // Bracketed-paste interceptor for the composer (same pattern as
   // screen.ts installBracketedPaste). After term.grabInput() we swap out
   // terminal-kit's own stdin listener with rawStdinHandler, which strips
@@ -797,6 +823,7 @@ export async function pickSession(
     ): Promise<void> => {
       try {
         const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
+        const beforeTotal = total;
         const next = await listSessions(opts.target);
         allSessions = sortSessions(next);
         applyFilter();
@@ -816,7 +843,13 @@ export async function pickSession(
         if (refreshOpts.silent && renderFingerprint() === beforeKey) {
           return;
         }
-        renderFromScratch();
+        if (total === beforeTotal) {
+          // Session count unchanged — repaint in-place so the composer
+          // and screen structure are never cleared.
+          repaintDataZone();
+        } else {
+          renderFromScratch();
+        }
       } catch (err) {
         if (refreshOpts.silent) {
           return;
