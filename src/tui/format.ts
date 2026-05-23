@@ -662,16 +662,6 @@ function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLin
   // Amended is a deliberate user action (the user replaced this prompt),
   // not a failure — dim the header so it doesn't read as an error.
   const stoppedStyle: Style = amended ? "tool-status-cancelled" : "tool-status-fail";
-  if (event.entries.length === 0) {
-    return [
-      {
-        prefix: "▣ ",
-        prefixStyle: stopped ? stoppedStyle : "plan",
-        body: "(empty plan)",
-        bodyStyle: "dim",
-      },
-    ];
-  }
   // Header tracks the plan's overall state: yellow ("plan") while any
   // entry is still pending/in-progress (matches the busy banner + running
   // tool accent), green ("plan-done") once every entry is completed so a
