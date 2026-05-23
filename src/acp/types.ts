@@ -461,6 +461,8 @@ export const SessionListEntry = z.object({
   // future "connect back to origin" callers would dial both.
   importedFromMachine: z.string().optional(),
   importedFromUpstreamSessionId: z.string().optional(),
+  // Set when this session was spawned as a child by a transformer.
+  parentSessionId: z.string().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),

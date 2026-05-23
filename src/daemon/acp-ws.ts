@@ -216,6 +216,113 @@ export function registerAcpWsEndpoint(
         throw Object.assign(new Error(`unsupported route: ${JSON.stringify(route)}`), { code: -32602 });
       });
 
+      // Spawn a child session on behalf of the transformer. Returns the new
+      // session's hydra id so the transformer can await or close it later.
+      connection.onRequest("hydra-acp/spawn_child_session", async (raw) => {
+        const params = (raw ?? {}) as {
+          agentId?: unknown;
+          cwd?: unknown;
+          parentSessionId?: unknown;
+        };
+        const agentId = typeof params.agentId === "string"
+          ? params.agentId
+          : deps.defaultAgent;
+        const cwd = typeof params.cwd === "string"
+          ? params.cwd
+          : undefined;
+        const parentSessionId = typeof params.parentSessionId === "string"
+          ? params.parentSessionId
+          : undefined;
+
+        if (!cwd) {
+          throw Object.assign(new Error("spawn_child_session requires cwd"), { code: -32602 });
+        }
+
+        const child = await deps.manager.create({
+          agentId,
+          cwd,
+          parentSessionId,
+          transformChain: [], // children start with no chain by default
+        });
+        return { childSessionId: child.sessionId };
+      });
+
+      connection.onRequest("hydra-acp/await_child", async (raw) => {
+        const params = (raw ?? {}) as {
+          childSessionId?: unknown;
+          until?: unknown;
+          timeoutMs?: unknown;
+        };
+        const childSessionId = typeof params.childSessionId === "string"
+          ? params.childSessionId
+          : undefined;
+        const until = params.until === "idle" ? "idle" : "turn_complete";
+        const timeoutMs = typeof params.timeoutMs === "number"
+          ? Math.min(params.timeoutMs, 30 * 60_000)
+          : 5 * 60_000;
+
+        if (!childSessionId) {
+          throw Object.assign(new Error("await_child requires childSessionId"), { code: -32602 });
+        }
+        const child = deps.manager.get(childSessionId);
+        if (!child) {
+          throw Object.assign(
+            new Error(`child session ${childSessionId} not found`),
+            { code: JsonRpcErrorCodes.SessionNotFound },
+          );
+        }
+
+        return new Promise((resolve) => {
+          const entries: unknown[] = [];
+          let unsubscribe: (() => void) | undefined;
+
+          const finish = (): void => {
+            clearTimeout(timer);
+            unsubscribe?.();
+            resolve({ entries });
+          };
+
+          // Collect recordable updates; resolve when the stop condition fires.
+          unsubscribe = child.onBroadcast((entry) => {
+            entries.push(entry);
+            if (until === "turn_complete") {
+              const upd = (entry.params as { update?: { sessionUpdate?: string } } | undefined)
+                ?.update;
+              if (upd?.sessionUpdate === "turn_complete") {
+                finish();
+              }
+            }
+          });
+
+          // For "idle", the transformer will also receive session.idle via
+          // transformer/session_event on the child's chain. await_child with
+          // until:"idle" times out if no activity and the child closes naturally.
+
+          const timer = setTimeout(finish, timeoutMs);
+          if (typeof timer.unref === "function") {
+            timer.unref();
+          }
+
+          // Also resolve if the child session closes.
+          child.onClose(() => finish());
+        });
+      });
+
+      connection.onRequest("hydra-acp/close_child_session", async (raw) => {
+        const params = (raw ?? {}) as { childSessionId?: unknown };
+        const childSessionId = typeof params.childSessionId === "string"
+          ? params.childSessionId
+          : undefined;
+        if (!childSessionId) {
+          throw Object.assign(new Error("close_child_session requires childSessionId"), { code: -32602 });
+        }
+        const child = deps.manager.get(childSessionId);
+        if (child) {
+          await child.close({ deleteRecord: false });
+        }
+        return { ok: true };
+      });
+
       // Keep-alive: resets the abandonment timer for an outstanding processing claim.
       connection.onRequest("hydra-acp/keep_alive", async (raw) => {
         const params = (raw ?? {}) as {

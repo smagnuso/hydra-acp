@@ -112,6 +112,9 @@ export const SessionRecord = z.object({
   // it) so the local history.jsonl gets populated from the agent's
   // memory. Cleared after that first resurrect completes.
   pendingHistorySync: z.boolean().optional(),
+  // Set when this session was spawned as a child by a transformer via
+  // hydra-acp/spawn_child_session. Points to the spawning session's id.
+  parentSessionId: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -246,6 +249,7 @@ export function recordFromMemorySession(args: {
   agentModes?: PersistedAgentMode[];
   agentModels?: PersistedAgentModel[];
   pendingHistorySync?: boolean;
+  parentSessionId?: string;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -268,6 +272,7 @@ export function recordFromMemorySession(args: {
     agentModes: args.agentModes,
     agentModels: args.agentModels,
     pendingHistorySync: args.pendingHistorySync,
+    parentSessionId: args.parentSessionId,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

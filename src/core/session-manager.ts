@@ -70,6 +70,8 @@ export interface CreateSessionParams {
   onInstallProgress?: AgentInstallProgressCallback;
   // Resolved transformer chain for this session.
   transformChain?: TransformerRef[];
+  // Set when this session is spawned as a child by a transformer.
+  parentSessionId?: string;
 }
 
 export interface ResurrectParams {
@@ -180,6 +182,35 @@ export class SessionManager {
       model: params.model,
       onInstallProgress: params.onInstallProgress,
     });
+
+    // Run the agent:initialize chain intercept. Transformers that declared
+    // this intercept can inspect and replace agentCapabilities before the
+    // Session is constructed. Actual tool injection is deferred pending Q1
+    // (MCP vs. direct); this just plumbs the intercept point.
+    if (params.transformChain && params.transformChain.length > 0) {
+      let caps: Record<string, unknown> = { ...(fresh.agentCapabilities ?? {}) };
+      for (const t of params.transformChain) {
+        if (!t.intercepts.has("agent:initialize")) {
+          continue;
+        }
+        try {
+          const result = await t.connection.request("transformer/message", {
+            token: `t_${generateRawSessionId()}`,
+            phase: "response",
+            method: "initialize",
+            direction: "agent→daemon",
+            sessionId: "(pre-session)",
+            envelope: caps,
+          }) as { action: string; payload?: unknown };
+          if (result.action === "stop" && result.payload) {
+            caps = result.payload as Record<string, unknown>;
+          }
+        } catch {
+          // Fail-open: transformer error during initialize doesn't block session creation.
+        }
+      }
+      fresh.agentCapabilities = caps as AgentCapabilities;
+    }
     const session = new Session({
       cwd: params.cwd,
       agentId: params.agentId,
@@ -201,6 +232,7 @@ export class SessionManager {
       agentModes: fresh.initialModes,
       agentModels: fresh.initialModels,
       transformChain: params.transformChain,
+      parentSessionId: params.parentSessionId,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -985,6 +1017,7 @@ export class SessionManager {
         agentId: session.agentId,
         currentModel: session.currentModel,
         currentUsage: session.totalUsage,
+        parentSessionId: session.parentSessionId,
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
@@ -1017,6 +1050,7 @@ export class SessionManager {
           : undefined,
         importedFromMachine: r.importedFromMachine,
         importedFromUpstreamSessionId: r.importedFromUpstreamSessionId,
+        parentSessionId: r.parentSessionId,
         updatedAt: used,
         attachedClients: 0,
         status: "cold",
@@ -1464,6 +1498,7 @@ function mergeForPersistence(
     agentCommands,
     agentModes,
     agentModels,
+    parentSessionId: session.parentSessionId ?? existing?.parentSessionId,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }

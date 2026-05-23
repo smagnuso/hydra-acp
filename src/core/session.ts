@@ -153,6 +153,7 @@ export interface SessionInit {
   // How long after the last recordable broadcast before session.idle fires to
   // the transformer chain. 0 disables. Defaults to 30 seconds.
   idleEventTimeoutMs?: number;
+  parentSessionId?: string;
 }
 
 export interface CloseOptions {
@@ -239,6 +240,7 @@ export class Session {
   agentMeta: Record<string, unknown> | undefined;
   agentCapabilities: AgentCapabilities | undefined;
   readonly agentArgs: string[] | undefined;
+  readonly parentSessionId: string | undefined;
   title: string | undefined;
   // Snapshot state delivered to attaching clients via the attach
   // response _meta rather than via history replay (which would be
@@ -384,6 +386,7 @@ export class Session {
     this.agentMeta = init.agentMeta;
     this.agentCapabilities = init.agentCapabilities;
     this.agentArgs = init.agentArgs;
+    this.parentSessionId = init.parentSessionId;
     this.title = init.title;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
