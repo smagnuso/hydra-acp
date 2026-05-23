@@ -27,6 +27,8 @@ export interface DiscoveredSession {
   attachedClients: number;
   updatedAt: string;
   status: "live" | "cold";
+  // Mid-turn flag from the daemon. Drives the picker's busy indicator.
+  busy?: boolean;
 }
 
 export interface DiscoveredUsage {
@@ -79,6 +81,7 @@ export async function listSessions(
     title: s.title,
     importedFromMachine: s.importedFromMachine,
     importedFromUpstreamSessionId: s.importedFromUpstreamSessionId,
+    busy: s.busy,
   }));
 }
 

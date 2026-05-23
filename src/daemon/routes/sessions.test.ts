@@ -253,4 +253,21 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(harness.manager.get(session.sessionId)).toBeUndefined();
     expect(await harness.manager.hasRecord(session.sessionId)).toBe(false);
   });
+
+  it("GET /v1/sessions reports busy: false for an idle live session", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string; status: string; busy?: boolean }>;
+    };
+    const entry = body.sessions.find((s) => s.sessionId === session.sessionId);
+    expect(entry).toBeDefined();
+    expect(entry?.status).toBe("live");
+    expect(entry?.busy).toBe(false);
+  });
 });

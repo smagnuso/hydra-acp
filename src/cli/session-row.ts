@@ -23,14 +23,17 @@ export interface SessionSummary {
   attachedClients: number;
   updatedAt: string;
   status?: "live" | "cold";
+  // Mid-turn flag from the daemon. Renders as a trailing dot in the
+  // STATE cell so the picker can show which live sessions are working
+  // without the user having to attach.
+  busy?: boolean;
 }
 
 export interface Row {
   session: string;
   upstream: string;
-  // Combined live/cold + attached-client count. Cold sessions never
-  // have clients, so a dedicated CLIENTS column wasted width on most
-  // rows; we render `LIVE(N)` / `COLD` in one cell instead.
+  // Live/cold status plus a trailing `•` when a live session is
+  // mid-turn. `LIVE` / `LIVE•` / `COLD`.
   state: string;
   agent: string;
   age: string;
@@ -70,7 +73,7 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: formatUpstreamCell(s.upstreamSessionId, s.importedFromMachine),
-    state: formatState(s.status, s.attachedClients),
+    state: formatState(s.status, s.busy),
     agent: formatAgentCell(s.agentId, s.currentUsage),
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
@@ -97,18 +100,17 @@ export function formatUpstreamCell(
   return "-";
 }
 
-// Combined live/cold + client-count cell. Live sessions always get
-// parenthesized counts (including `LIVE(0)`) so the column reads
-// consistently; cold sessions render as a bare `COLD`. The HEADER row
+// Live/cold state cell. Live sessions render as `LIVE` (or `LIVE•`
+// when mid-turn); cold sessions render as `COLD`. The HEADER row
 // reuses formatRow's plumbing but its `state` cell is literal "STATE".
 function formatState(
   status: "live" | "cold" | undefined,
-  clients: number,
+  busy: boolean | undefined,
 ): string {
   if (status === "cold") {
     return "COLD";
   }
-  return `LIVE(${clients})`;
+  return busy ? "LIVE•" : "LIVE";
 }
 
 export function computeWidths(rows: Row[]): Widths {

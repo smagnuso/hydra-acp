@@ -113,18 +113,18 @@ describe("toRow state column", () => {
     updatedAt: new Date().toISOString(),
   };
 
-  it("renders LIVE(N) for live sessions with attached clients", () => {
-    const r = toRow({ ...base, attachedClients: 2, status: "live" });
-    expect(r.state).toBe("LIVE(2)");
-  });
-
-  it("renders LIVE(0) for live sessions with no clients attached", () => {
+  it("renders LIVE for an idle live session", () => {
     const r = toRow({ ...base, attachedClients: 0, status: "live" });
-    expect(r.state).toBe("LIVE(0)");
+    expect(r.state).toBe("LIVE");
   });
 
-  it("renders COLD for cold sessions", () => {
-    const r = toRow({ ...base, attachedClients: 0, status: "cold" });
+  it("renders LIVE• for a live session that is mid-turn", () => {
+    const r = toRow({ ...base, attachedClients: 1, status: "live", busy: true });
+    expect(r.state).toBe("LIVE•");
+  });
+
+  it("renders COLD for cold sessions regardless of busy flag", () => {
+    const r = toRow({ ...base, attachedClients: 0, status: "cold", busy: true });
     expect(r.state).toBe("COLD");
   });
 });

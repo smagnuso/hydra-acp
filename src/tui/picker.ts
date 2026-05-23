@@ -734,6 +734,8 @@ export async function pickSession(
 
   return await new Promise<PickerResult>((resolve) => {
     let resolved = false;
+    let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+    let autoRefreshInFlight = false;
     const onResize = (): void => {
       if (resolved) {
         return;
@@ -745,6 +747,10 @@ export async function pickSession(
         return;
       }
       resolved = true;
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+      }
       term.off("key", onKey);
       term.off("resize", onResize);
       // Restore terminal-kit's stdin listener and disable bracketed paste.
@@ -767,8 +773,30 @@ export async function pickSession(
     // after kill so the cursor follows the row as it sorts to the cold
     // tier); otherwise selectedIdx stays put (clamped to the new size),
     // which after delete lands on whatever now occupies the old slot.
-    const refresh = async (preferredId?: string): Promise<void> => {
+    // Fingerprint of what would actually be painted. Used by auto-refresh
+    // to skip repaints when the visible frame would be byte-identical to
+    // the current one. We fingerprint the rendered `rows` (post-toRow)
+    // plus selection/scroll/transient state rather than raw session data:
+    // the raw `updatedAt` is the history file mtime, which bumps on
+    // every chunk for a streaming session, while the rendered `age` is
+    // coarse ("3m") and only changes at bucket boundaries. Using the
+    // rendered form means a busy session that's actively producing
+    // output but otherwise unchanged doesn't re-trigger a repaint.
+    const renderFingerprint = (): string => {
+      const cells = rows
+        .map(
+          (r) =>
+            `${r.session}|${r.upstream}|${r.state}|${r.agent}|${r.age}|${r.title}|${r.cwd}`,
+        )
+        .join("\n");
+      return `${selectedIdx}:${scrollOffset}:${transientStatus ?? ""}\n${cells}`;
+    };
+    const refresh = async (
+      preferredId?: string,
+      refreshOpts: { silent?: boolean } = {},
+    ): Promise<void> => {
       try {
+        const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
         const next = await listSessions(opts.target);
         allSessions = sortSessions(next);
         applyFilter();
@@ -785,8 +813,14 @@ export async function pickSession(
           scrollOffset = Math.max(0, visible.length - viewportSize);
         }
         adjustScroll();
+        if (refreshOpts.silent && renderFingerprint() === beforeKey) {
+          return;
+        }
         renderFromScratch();
       } catch (err) {
+        if (refreshOpts.silent) {
+          return;
+        }
         transientStatus = `refresh failed: ${(err as Error).message}`;
         renderFromScratch();
       }
@@ -1343,6 +1377,24 @@ export async function pickSession(
     }
     term.on("key", onKey);
     term.on("resize", onResize);
+    // Low-frequency refresh so busy indicators, new titles, and
+    // appearing/disappearing sessions track without the user mashing `r`.
+    // Skip while a prompt or search is up so we don't trample a partially
+    // typed buffer, and skip while a prior refresh is still pending so
+    // a slow daemon can't pile up overlapping repaints. `silent: true`
+    // makes refresh a no-op when the visible state is unchanged, which
+    // is the common case — keeps the picker quiet between actual events.
+    autoRefreshTimer = setInterval(() => {
+      if (resolved || mode !== "normal" || searchActive || autoRefreshInFlight) {
+        return;
+      }
+      const currentId =
+        selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+      autoRefreshInFlight = true;
+      void refresh(currentId, { silent: true }).finally(() => {
+        autoRefreshInFlight = false;
+      });
+    }, 3000);
   });
 }
 

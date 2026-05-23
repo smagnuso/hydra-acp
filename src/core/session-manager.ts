@@ -945,6 +945,7 @@ export class SessionManager {
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
+        busy: session.turnStartedAt !== undefined,
       });
     }
     const records = await this.store.list().catch(() => []);
@@ -969,6 +970,7 @@ export class SessionManager {
         updatedAt: used,
         attachedClients: 0,
         status: "cold",
+        busy: false,
       });
     }
     entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));

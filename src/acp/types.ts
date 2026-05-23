@@ -457,6 +457,10 @@ export const SessionListEntry = z.object({
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),
+  // True while the session is mid-turn (an agent prompt is in flight).
+  // Always false for cold sessions. Lets pickers render a busy dot
+  // without having to attach.
+  busy: z.boolean().default(false),
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -492,6 +496,7 @@ export function sessionListEntryToWire(
   const hydraMeta: Record<string, unknown> = {
     attachedClients: entry.attachedClients,
     status: entry.status,
+    busy: entry.busy,
   };
   if (entry.agentId !== undefined) {
     hydraMeta.agentId = entry.agentId;
