@@ -178,6 +178,9 @@ export interface HydraMeta {
   cwd?: string;
   name?: string;
   agentArgs?: string[];
+  // Transformer names to attach to the session chain. Falls back to the
+  // daemon's defaultTransformers when absent.
+  transformers?: string[];
   resume?: SessionResumeHints;
   // Caller-requested model id for a fresh session/new. One-shot: the daemon
   // issues session/set_model with this value during bootstrapAgent and then
@@ -257,6 +260,9 @@ export function extractHydraMeta(
   }
   if (Array.isArray(obj.agentArgs) && obj.agentArgs.every((a) => typeof a === "string")) {
     out.agentArgs = obj.agentArgs as string[];
+  }
+  if (Array.isArray(obj.transformers) && obj.transformers.every((t) => typeof t === "string")) {
+    out.transformers = obj.transformers as string[];
   }
   if (obj.resume) {
     const parsed = SessionResumeHints.safeParse(obj.resume);

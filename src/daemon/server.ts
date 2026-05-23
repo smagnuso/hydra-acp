@@ -161,6 +161,7 @@ export async function startDaemon(
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
     defaultModels: config.defaultModels,
+    defaultTransformers: config.defaultTransformers,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,
     npmRegistry: config.npmRegistry,
@@ -199,6 +200,7 @@ export async function startDaemon(
     processRegistry,
     onExtensionVersion: (name, version) => extensions.reportVersion(name, version),
     onTransformerVersion: (name, version) => transformers.reportVersion(name, version),
+    transformers,
   });
 
   await app.listen({ host: config.daemon.host, port: config.daemon.port });

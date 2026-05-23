@@ -8,6 +8,7 @@ import { customAlphabet } from "nanoid";
 const HYDRA_ID_ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const generateHydraId = customAlphabet(HYDRA_ID_ALPHABET, 16);
+const generateChainToken = customAlphabet(HYDRA_ID_ALPHABET, 16);
 
 export const HYDRA_SESSION_PREFIX = "hydra_session_";
 
@@ -27,6 +28,7 @@ export function stripHydraSessionPrefix(id: string): string {
     : id;
 }
 import { AgentInstance } from "./agent-instance.js";
+import type { TransformerRef } from "./transformer-manager.js";
 import {
   SessionStreamBuffer,
   STREAM_READ_MAX_BYTES,
@@ -144,6 +146,7 @@ export interface SessionInit {
   // this, the next prompt would clobber the persisted title.
   firstPromptSeeded?: boolean;
   createdAt?: number;
+  transformChain?: TransformerRef[];
 }
 
 export interface CloseOptions {
@@ -291,6 +294,7 @@ export class Session {
   private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
   private logger: SessionInit["logger"];
+  private transformChain: TransformerRef[];
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
   > = [];
@@ -372,6 +376,7 @@ export class Session {
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
     this.logger = init.logger;
+    this.transformChain = init.transformChain ?? [];
     if (init.firstPromptSeeded) {
       this.firstPromptSeeded = true;
     }
@@ -446,57 +451,8 @@ export class Session {
         captureInternalChunk(this.internalPromptCapture, params);
         return;
       }
-      // available_commands_update is intercepted: cache the agent's
-      // list, persist to meta.json (so resurrect can deliver via _meta),
-      // and re-emit a merged (hydra ∪ agent) version live. The merged
-      // broadcast itself is filtered from history persistence by
-      // recordAndBroadcast — clients learn the current commands either
-      // live or via attach response _meta.
-      const agentCmds = extractAdvertisedCommands(params);
-      if (agentCmds !== null) {
-        this.setAgentAdvertisedCommands(agentCmds);
-        return;
-      }
-      // available_modes_update: same pattern as commands.
-      const agentModes = extractAdvertisedModes(params);
-      if (agentModes !== null) {
-        this.setAgentAdvertisedModes(agentModes);
-        return;
-      }
-      // current_model_update / current_mode_update are similarly
-      // snapshot-shaped: cache, persist, broadcast (but filtered from
-      // history). The broadcast still fires so live clients see the
-      // change immediately; new attaches get it via _meta.
-      if (this.maybeApplyAgentModel(params)) {
-        this.recordAndBroadcast("session/update", params);
-        return;
-      }
-      if (this.maybeApplyAgentMode(params)) {
-        this.recordAndBroadcast("session/update", params);
-        return;
-      }
-      // config_option_update is opencode's non-spec way of carrying the
-      // current model + available model list. Harvest the "model" entry
-      // for our cache so set_model validation has something to compare
-      // against; the broadcast still fires verbatim so opencode-aware
-      // clients render the full picker UI from the original shape.
-      if (this.maybeApplyAgentConfigOption(params)) {
-        this.recordAndBroadcast("session/update", params);
-        return;
-      }
-      // usage_update: snapshot-shaped like model/mode. Merge into
-      // currentUsage, fire usage handlers (SessionManager persists to
-      // meta.json so cold resurrect can rehydrate), then broadcast.
-      // recordAndBroadcast filters usage_update out of history.
-      if (this.maybeApplyAgentUsage(params)) {
-        this.recordAndBroadcast("session/update", params);
-        return;
-      }
-      // Pick up agent-emitted session_info_update so the canonical
-      // title in this Session matches what clients see broadcast.
-      // Forwarded as-is through recordAndBroadcast below.
-      this.maybeApplyAgentSessionInfo(params);
-      this.recordAndBroadcast("session/update", params);
+      // Chain runs first — no state mutation before this resolves.
+      void this.runResponseChain(params);
     });
     agent.connection.onRequest("session/request_permission", async (params) => {
       return this.handlePermissionRequest(params);
@@ -507,6 +463,70 @@ export class Session {
       }
       this.markClosed({ deleteRecord: false });
     });
+  }
+
+  // Runs the response-side transformer chain, then the snapshot interceptors,
+  // then recordAndBroadcast. All state mutation happens after the chain exits.
+  private async runResponseChain(params: unknown): Promise<void> {
+    let envelope = params;
+    for (const t of this.transformChain) {
+      if (!t.intercepts.has("response:session/update")) {
+        continue;
+      }
+      const token = `t_${generateChainToken()}`;
+      let result: { action: string } | undefined;
+      try {
+        result = await t.connection.request("transformer/message", {
+          token,
+          phase: "response",
+          method: "session/update",
+          direction: "agent→client",
+          sessionId: this.sessionId,
+          envelope,
+        }) as { action: string } | undefined;
+      } catch (err) {
+        this.logger?.warn(
+          `transformer ${t.name} error on response:session/update: ${(err as Error).message}`,
+        );
+        continue;
+      }
+      const action = result?.action ?? "continue";
+      if (action === "stop" || action === "processing") {
+        // Phase 2: not yet supported — log and continue.
+        this.logger?.warn(
+          `transformer ${t.name} returned '${action}' on response:session/update — not yet supported in Phase 2, continuing`,
+        );
+      }
+    }
+    // Snapshot interceptors and broadcast run on the post-chain envelope.
+    const agentCmds = extractAdvertisedCommands(envelope);
+    if (agentCmds !== null) {
+      this.setAgentAdvertisedCommands(agentCmds);
+      return;
+    }
+    const agentModes = extractAdvertisedModes(envelope);
+    if (agentModes !== null) {
+      this.setAgentAdvertisedModes(agentModes);
+      return;
+    }
+    if (this.maybeApplyAgentModel(envelope)) {
+      this.recordAndBroadcast("session/update", envelope);
+      return;
+    }
+    if (this.maybeApplyAgentMode(envelope)) {
+      this.recordAndBroadcast("session/update", envelope);
+      return;
+    }
+    if (this.maybeApplyAgentConfigOption(envelope)) {
+      this.recordAndBroadcast("session/update", envelope);
+      return;
+    }
+    if (this.maybeApplyAgentUsage(envelope)) {
+      this.recordAndBroadcast("session/update", envelope);
+      return;
+    }
+    this.maybeApplyAgentSessionInfo(envelope);
+    this.recordAndBroadcast("session/update", envelope);
   }
 
   onAgentChange(
@@ -1438,7 +1458,40 @@ export class Session {
   }
 
   async forwardRequest(method: string, params: unknown): Promise<unknown> {
-    return this.agent.connection.request(method, this.rewriteForAgent(params));
+    let envelope = this.rewriteForAgent(params);
+    for (const t of this.transformChain) {
+      const intercept = `request:${method}`;
+      if (!t.intercepts.has(intercept)) {
+        continue;
+      }
+      const token = `t_${generateChainToken()}`;
+      let result: { action: string } | undefined;
+      try {
+        result = await t.connection.request("transformer/message", {
+          token,
+          phase: "request",
+          method,
+          direction: "client→agent",
+          sessionId: this.sessionId,
+          envelope,
+        }) as { action: string } | undefined;
+      } catch (err) {
+        // Fail-open: transformer error doesn't block the request.
+        this.logger?.warn(
+          `transformer ${t.name} error on ${intercept}: ${(err as Error).message}`,
+        );
+        continue;
+      }
+      const action = result?.action ?? "continue";
+      if (action === "stop" || action === "processing") {
+        // Phase 2: not yet supported — log and continue through the chain.
+        this.logger?.warn(
+          `transformer ${t.name} returned '${action}' on ${intercept} — not yet supported in Phase 2, continuing`,
+        );
+      }
+      // "continue" (or unsupported actions): pass envelope unchanged to next link.
+    }
+    return this.agent.connection.request(method, envelope);
   }
 
   private rewriteForAgent(params: unknown): unknown {

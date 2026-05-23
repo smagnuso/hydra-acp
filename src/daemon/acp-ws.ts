@@ -39,6 +39,7 @@ import {
   type ProcessTokenRegistry,
   type ProcessIdentity,
 } from "./auth.js";
+import type { TransformerManager } from "../core/transformer-manager.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 
 interface ClientState {
@@ -70,6 +71,9 @@ export interface AcpWsDeps {
   // clientInfo.version. Called at most once per connection.
   onExtensionVersion?: (name: string, version: string) => void;
   onTransformerVersion?: (name: string, version: string) => void;
+  // TransformerManager for registering transformer connections after
+  // transformer/initialize completes.
+  transformers?: TransformerManager;
 }
 
 export function registerAcpWsEndpoint(
@@ -143,13 +147,27 @@ export function registerAcpWsEndpoint(
     // to call it, enforcing the kind boundary at the method-registration layer.
     if (processIdentity?.kind === "transformer") {
       connection.onRequest("transformer/initialize", async (raw) => {
-        // Phase 1: accept the handshake and ack. Chain registration comes in
-        // Phase 2 when session traffic starts flowing through transformers.
         const params = (raw ?? {}) as {
+          intercepts?: unknown;
           transformerConfig?: unknown;
         };
-        void params;
+        const intercepts = Array.isArray(params.intercepts)
+          ? (params.intercepts as unknown[]).filter(
+              (v): v is string => typeof v === "string",
+            )
+          : [];
+        if (deps.transformers) {
+          deps.transformers.registerConnection(
+            processIdentity.name,
+            connection,
+            intercepts,
+          );
+        }
         return { ack: true };
+      });
+
+      connection.onClose(() => {
+        deps.transformers?.deregisterConnection(processIdentity.name);
       });
     }
 
@@ -158,6 +176,14 @@ export function registerAcpWsEndpoint(
       const hydraMeta = extractHydraMeta(
         (raw as { _meta?: Record<string, unknown> } | undefined)?._meta,
       );
+      // Resolve transformer chain: prefer names from the client's _meta,
+      // fall back to the daemon's defaultTransformers config.
+      const transformerNames =
+        Array.isArray(hydraMeta.transformers) &&
+        hydraMeta.transformers.every((t): t is string => typeof t === "string")
+          ? (hydraMeta.transformers as string[])
+          : (deps.manager.defaultTransformers ?? []);
+      const transformChain = deps.transformers?.resolveChain(transformerNames) ?? [];
       const session = await deps.manager.create({
         cwd: params.cwd,
         agentId: params.agentId ?? deps.defaultAgent,
@@ -166,6 +192,7 @@ export function registerAcpWsEndpoint(
         agentArgs: hydraMeta.agentArgs,
         model: hydraMeta.model,
         onInstallProgress: makeInstallProgressForwarder(connection),
+        transformChain,
       });
       const client = bindClientToSession(connection, session, state);
       // No conversation history to replay on a fresh session, but

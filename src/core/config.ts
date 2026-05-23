@@ -107,14 +107,11 @@ const ExtensionBody = z.object({
 export type ExtensionBody = z.infer<typeof ExtensionBody>;
 export type ExtensionConfig = ExtensionBody & { name: string };
 
-// Transformers have the same shape as extensions but default to disabled —
-// adding one is a deliberate act given the privilege gap (a transformer can
-// rewrite prompts and swallow tool calls).
 const TransformerBody = z.object({
   command: z.array(z.string()).default([]),
   args: z.array(z.string()).default([]),
   env: z.record(z.string()).default({}),
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
 });
 
 export type TransformerBody = z.infer<typeof TransformerBody>;

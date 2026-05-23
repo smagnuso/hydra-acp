@@ -672,7 +672,7 @@ function printHelp(): void {
       "  hydra-acp extension start|stop|restart <n>|all   Lifecycle on one or all",
       "  hydra-acp extension logs <name> [-f] [-n N]      Tail or follow an extension's log",
       "  hydra-acp transformer list                  List configured transformers and live state",
-      "  hydra-acp transformer add <name> [opts]     Add a transformer to config (disabled by default)",
+      "  hydra-acp transformer add <name> [opts]     Add a transformer to config (--command, --args, --env, --disabled)",
       "  hydra-acp transformer remove <name>         Remove a transformer from config",
       "  hydra-acp transformer start|stop|restart <n>|all  Lifecycle on one or all",
       "  hydra-acp transformer logs <name> [-f] [-n N]     Tail or follow a transformer's log",

@@ -215,7 +215,7 @@ hydra-acp daemon stop                       # stop running daemon
 hydra-acp daemon restart                    # stop then start the daemon
 hydra-acp daemon logs [-f] [-n N]           # tail (default 50) or follow the daemon log
 
-hydra-acp session [list ]                   # list sessions
+hydra-acp session [list]                   # list sessions
 hydra-acp session kill <id>                 # close a live session (keeps the on-disk record so it can be resurrected)
 hydra-acp session remove <id>               # remove a session entirely (live or cold)
 hydra-acp session export <id> [--out <file>|.]
@@ -236,6 +236,12 @@ hydra-acp extension add <name>             # add to config (--command, --args, -
 hydra-acp extension remove <name>          # remove from config
 hydra-acp extension start|stop|restart <n> # lifecycle on a running extension
 hydra-acp extension logs <name> [-f] [-n]  # tail (default 50) or follow an extension's log
+
+hydra-acp transformer [list]               # list configured transformers and live state
+hydra-acp transformer add <name>           # add to config (--command, --args, --env, --enabled; disabled by default)
+hydra-acp transformer remove <name>        # remove from config
+hydra-acp transformer start|stop|restart <n> # lifecycle on a running transformer
+hydra-acp transformer logs <name> [-f] [-n]  # tail (default 50) or follow a transformer's log
 
 hydra-acp agent [list]                     # list agents in the registry
 hydra-acp agent install <id>               # pre-install an agent (else lazy on first use)
@@ -342,7 +348,7 @@ Every config-knob flag has an `HYDRA_ACP_FOO_BAR` env-var equivalent. Flag wins 
 
 `--model` is a one-shot override for the per-agent `defaultModels` entry in `~/.hydra-acp/config.json`. It only applies at fresh session creation — resurrect and `/hydra agent` switch ignore it (resurrected sessions stay on whatever model they were last using).
 
-Action commands (`init`, `daemon`, `session`, `extension`, `agent`, `auth`, `cat`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
+Action commands (`init`, `daemon`, `session`, `extension`, `transformer`, `agent`, `auth`, `cat`, `--help`, `--version`, `--rotate-token`) are not config knobs and are flag-only.
 
 ### Registry id resolution
 
@@ -430,7 +436,7 @@ hydra-acp extension logs hydra-acp-slack --follow
 
 `stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply.
 
-**Trust model**: extensions run with the same privileges as the daemon and receive its full service token. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism.
+**Trust model**: each extension receives its own per-process token scoped to that process's lifetime. The token grants the same read/write access to the daemon's REST and WSS surfaces as a logged-in client. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism. See `cli/examples/client-extension.mjs` for an annotated reference implementation.
 
 #### Optional extensions
 
@@ -485,6 +491,40 @@ hydra-acp extension start hydra-acp-archiver
 See the [package README](https://github.com/smagnuso/hydra-acp-archiver#readme) for backend setup (Drive OAuth, filesystem path).
 
 Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extension logs <name> -f` tails an extension's stdout/stderr if you need to debug.
+
+### Transformers
+
+Transformers are a second kind of daemon-managed process. Where an extension is a *client* — it observes broadcast events and sends prompts — a transformer is *middleware*: it sits inside the daemon's message pipeline and sees every in-flight ACP message before the daemon acts on it, in both directions.
+
+```
+client → daemon → [T1 → T2 → … → Tn] → agent
+client ← daemon ← [Tn ← … ← T1] ← agent
+```
+
+This means a transformer can inspect every prompt before the LLM sees it and every response before it reaches clients or mutates daemon state (model, mode, history). It cannot do this invisibly — the chain is operator-visible and each transformer's intercepts are declared up front.
+
+A transformer is configured in the same way as an extension but under a separate key. ```json
+{
+  "transformers": {
+    "ultrawork": {
+      "command": ["node", "/path/to/ultrawork.mjs"]
+    }
+  },
+  "defaultTransformers": ["ultrawork"]
+}
+```
+
+`defaultTransformers` lists transformer names applied to every new session, **in order** — the array is the pipeline. Each message passes through T1, then T2, then T3 before reaching the agent (or clients on the way back). Order matters when transformers interact: a keyword-expansion transformer should come before a logging transformer so the logger sees the expanded prompt, not the original. Individual sessions can override the chain via `_meta["hydra-acp"].transformers` on `session/new`. The daemon resolves names to their live connections at session-creation time; a transformer that is configured but not yet connected is silently skipped (fail-open).
+
+Each transformer receives:
+- the same env vars as extensions (`HYDRA_ACP_TOKEN`, `HYDRA_ACP_WS_URL`, etc.)
+- a `HYDRA_ACP_TRANSFORMER_NAME` env var with its config key
+
+A transformer process connects using its own token (same mechanism as extensions) and then calls `transformer/initialize` declaring the message kinds it wants to intercept. For each intercepted message the daemon calls `transformer/message` and waits for `{ action: "continue" }`. Future phases will add `stop` (block the message) and `processing` (transformer handles the request itself).
+
+See `cli/examples/transformer-extension.mjs` for a working reference implementation that logs all traffic and always continues.
+
+**Trust model**: transformers receive the same per-process scoped token as extensions, but have structurally more access — they intercept traffic that no client ever sees. `transformer/initialize` and all transformer-specific methods are only callable with a transformer-kind token; an extension process that tries to call them receives `MethodNotFound`. Treat every entry in `transformers` as a higher-trust boundary than `extensions`.
 
 The service token (stored at `~/.hydra-acp/auth-token`, mode 0600) is generated on `hydra-acp init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. The token never leaves `~/.hydra-acp/`.
 
@@ -593,6 +633,20 @@ GET    /v1/agents                 # list known agents (registry + installed)
 POST   /v1/agents/:id/install     # pre-install an agent
 GET    /v1/registry               # current cached registry contents
 POST   /v1/registry/refresh       # force refresh
+
+GET    /v1/extensions             # list configured extensions and live state
+POST   /v1/extensions             # register a new extension (takes effect immediately)
+DELETE /v1/extensions/:name       # unregister and stop an extension
+POST   /v1/extensions/:name/start
+POST   /v1/extensions/:name/stop
+POST   /v1/extensions/:name/restart
+
+GET    /v1/transformers           # list configured transformers and live state
+POST   /v1/transformers           # register a new transformer (takes effect immediately)
+DELETE /v1/transformers/:name     # unregister and stop a transformer
+POST   /v1/transformers/:name/start
+POST   /v1/transformers/:name/stop
+POST   /v1/transformers/:name/restart
 ```
 
 Sessions are also reachable via `session/list` over ACP itself, for clients that prefer the protocol-native path.

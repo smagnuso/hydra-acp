@@ -35,6 +35,7 @@ import type {
   AdvertisedModel,
 } from "./hydra-commands.js";
 import type { AgentCapabilities, SessionListEntry } from "../acp/types.js";
+import type { TransformerRef } from "./transformer-manager.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
 import { HYDRA_VERSION } from "./hydra-version.js";
 import { loadQueue, rewriteQueue } from "./queue-store.js";
@@ -67,6 +68,8 @@ export interface CreateSessionParams {
   // notifications back to the originating client, isolated from any
   // other concurrent install on the same daemon.
   onInstallProgress?: AgentInstallProgressCallback;
+  // Resolved transformer chain for this session.
+  transformChain?: TransformerRef[];
 }
 
 export interface ResurrectParams {
@@ -116,6 +119,9 @@ export interface SessionManagerOptions {
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
   sessionHistoryMaxEntries?: number;
+  // Default transformer names applied to every new session when the client
+  // doesn't supply _meta["hydra-acp"].transformers.
+  defaultTransformers?: string[];
   // Pino-style logger forwarded to each Session so idle-close + explicit
   // close paths leave a trail in daemon.log (the close path used to be
   // completely silent, making it hard to tell agent-killed-by-us apart
@@ -134,6 +140,7 @@ export class SessionManager {
   private histories: HistoryStore;
   private idleTimeoutMs: number;
   private defaultModels: Record<string, string>;
+  readonly defaultTransformers: string[];
   private sessionHistoryMaxEntries: number;
   // Serialize meta.json read-modify-write operations per session id so
   // concurrent snapshot updates (e.g. an agent emitting model + mode
@@ -154,6 +161,7 @@ export class SessionManager {
     this.histories = new HistoryStore({ maxEntries: this.sessionHistoryMaxEntries });
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.defaultModels = options.defaultModels ?? {};
+    this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
   }
@@ -186,6 +194,7 @@ export class SessionManager {
       currentMode: fresh.initialMode,
       agentModes: fresh.initialModes,
       agentModels: fresh.initialModels,
+      transformChain: params.transformChain,
     });
     await this.attachManagerHooks(session);
     return session;
