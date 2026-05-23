@@ -193,21 +193,22 @@ export function registerAcpWsEndpoint(
           throw Object.assign(new Error(`session ${sessionId} not found`), { code: JsonRpcErrorCodes.SessionNotFound });
         }
 
+        // respondsTo discharges an outstanding processing claim regardless of
+        // route. The result is delivered to the original requester.
+        const respondsTo = typeof params.respondsTo === "string"
+          ? params.respondsTo
+          : undefined;
+        if (respondsTo) {
+          session.dischargeClaim(respondsTo, envelope);
+          return { ok: true };
+        }
+
         if (route === "chain") {
           await session.emitToChain(processIdentity.name, method, envelope);
           return { ok: true };
         }
 
         if (route === "daemon") {
-          // Treat as a client-originated notification or request on the session.
-          // For session/update (notification): re-run the response chain from start
-          // with the emitter in originatedBy so it doesn't see its own emission.
-          if (method === "session/update") {
-            await session.emitToChain(processIdentity.name, method, envelope);
-            return { ok: true };
-          }
-          // For other daemon-route methods, forward as a request to the agent.
-          // The transformer acts like a client issuing the request.
           await session.emitToChain(processIdentity.name, method, envelope);
           return { ok: true };
         }
@@ -217,7 +218,20 @@ export function registerAcpWsEndpoint(
 
       // Keep-alive: resets the abandonment timer for an outstanding processing claim.
       connection.onRequest("hydra-acp/keep_alive", async (raw) => {
-        void raw; // Phase 3 Task 14: will use token to reset claim timer
+        const params = (raw ?? {}) as {
+          token?: unknown;
+          sessionId?: unknown;
+          estimatedRemainingMs?: unknown;
+        };
+        const token = typeof params.token === "string" ? params.token : undefined;
+        const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+        const estimatedRemainingMs = typeof params.estimatedRemainingMs === "number"
+          ? params.estimatedRemainingMs
+          : undefined;
+        if (token && sessionId) {
+          const session = deps.manager.get(sessionId);
+          session?.keepAliveClaim(token, estimatedRemainingMs);
+        }
         return { ok: true };
       });
     }

@@ -163,6 +163,17 @@ export interface CloseOptions {
 
 const DEFAULT_HISTORY_MAX_ENTRIES = 1000;
 
+// How long the daemon waits for a transformer that returned "processing" to
+// discharge its claim before synthesizing a stop response.
+const TRANSFORMER_CLAIM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+interface TransformerClaim {
+  resolve: (result: unknown) => void;
+  timer: NodeJS.Timeout;
+  transformerName: string;
+  method: string;
+}
+
 // Cap on the recently-terminal messageId LRU. Bounds memory growth on
 // a long-running session; older entries fall out and resolve to
 // target_not_found, which is the correct behavior for an amend that
@@ -295,6 +306,8 @@ export class Session {
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
+  // Outstanding "processing" claims: token → claim waiting for respondsTo discharge.
+  private pendingClaims = new Map<string, TransformerClaim>();
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
   > = [];
@@ -504,9 +517,29 @@ export class Session {
         return; // daemon never sees this update — no state mutation, no broadcast
       }
       if (action === "processing") {
-        this.logger?.warn(
-          `transformer ${t.name} returned 'processing' on response:session/update — not yet supported, continuing`,
-        );
+        // Park a claim; the transformer will emit a replacement update via
+        // emit_message with respondsTo when it's ready.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            if (this.pendingClaims.delete(token)) {
+              this.broadcastQueueNotification(
+                "hydra-acp/transformer_abandoned_request",
+                { sessionId: this.sessionId, token, transformerName: t.name },
+              );
+              resolve();
+            }
+          }, TRANSFORMER_CLAIM_TIMEOUT_MS);
+          if (typeof timer.unref === "function") {
+            timer.unref();
+          }
+          this.pendingClaims.set(token, {
+            resolve: () => resolve(),
+            timer,
+            transformerName: t.name,
+            method: "session/update",
+          });
+        });
+        return;
       }
       originatedBy.add(t.name);
     }
@@ -1512,14 +1545,73 @@ export class Session {
           defaultStopPayload(method);
       }
       if (action === "processing") {
-        // Phase 3 Task 14: park claim. Not yet implemented — fall through.
-        this.logger?.warn(
-          `transformer ${t.name} returned 'processing' on ${intercept} — not yet supported, continuing`,
-        );
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            if (this.pendingClaims.delete(token)) {
+              this.broadcastQueueNotification(
+                "hydra-acp/transformer_abandoned_request",
+                { sessionId: this.sessionId, token, transformerName: t.name },
+              );
+              resolve(defaultStopPayload(method));
+            }
+          }, TRANSFORMER_CLAIM_TIMEOUT_MS);
+          if (typeof timer.unref === "function") {
+            timer.unref();
+          }
+          this.pendingClaims.set(token, {
+            resolve,
+            timer,
+            transformerName: t.name,
+            method,
+          });
+        });
       }
       originatedBy.add(t.name);
     }
     return this.agent.connection.request(method, envelope);
+  }
+
+  // Called by the WS handler when emit_message carries respondsTo.
+  // Discharges the outstanding claim so the original requester unblocks.
+  dischargeClaim(token: string, result: unknown): boolean {
+    const claim = this.pendingClaims.get(token);
+    if (!claim) {
+      return false;
+    }
+    clearTimeout(claim.timer);
+    this.pendingClaims.delete(token);
+    claim.resolve(result);
+    return true;
+  }
+
+  // Called by the WS handler on hydra-acp/keep_alive.
+  // Resets the abandonment timer for an outstanding processing claim.
+  keepAliveClaim(
+    token: string,
+    estimatedRemainingMs?: number,
+  ): boolean {
+    const claim = this.pendingClaims.get(token);
+    if (!claim) {
+      return false;
+    }
+    clearTimeout(claim.timer);
+    const timeout = typeof estimatedRemainingMs === "number" && estimatedRemainingMs > 0
+      ? Math.min(estimatedRemainingMs * 1.5, 30 * 60 * 1000) // cap at 30 min
+      : TRANSFORMER_CLAIM_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      if (this.pendingClaims.delete(token)) {
+        this.broadcastQueueNotification(
+          "hydra-acp/transformer_abandoned_request",
+          { sessionId: this.sessionId, token, transformerName: claim.transformerName },
+        );
+        claim.resolve(defaultStopPayload(claim.method));
+      }
+    }, timeout);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    claim.timer = timer;
+    return true;
   }
 
   // Called by the WS handler when a transformer emits via route:"chain".
