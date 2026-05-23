@@ -3020,12 +3020,12 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       term(text);
       return;
     case "thought":
-      // Dim + bright-black (gray) — no italic. tmux's default terminfo
+      // Bright-black (gray) — no italic, no dim. tmux's default terminfo
       // (screen-256color) doesn't advertise italic, so many clients
       // render \x1b[3m as standout / reverse video, which looks like
-      // a stray background color stripe on the row. Gray + dim gives
-      // the same "muted secondary text" feel without that trap.
-      term.brightBlack.dim.noFormat(text);
+      // a stray background color stripe on the row. Plain gray reads as
+      // muted secondary text without being so faint it's unreadable.
+      term.brightBlack.noFormat(text);
       return;
     case "tool":
       term.brightBlue.noFormat(text);
