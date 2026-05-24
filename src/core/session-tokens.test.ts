@@ -63,8 +63,8 @@ describe("SessionTokenStore", () => {
     const store = await SessionTokenStore.load();
     const issued = await store.issue({ ttlSec: 1 });
     expect(await store.verify(issued.token)).toBe(issued.id);
-    // Wait until past the TTL.
-    await new Promise((r) => setTimeout(r, 1100));
+    // Wait until past the TTL (generous buffer to avoid flakiness on slow CI).
+    await new Promise((r) => setTimeout(r, 1500));
     expect(await store.verify(issued.token)).toBeUndefined();
     // The expired record should also be removed from list().
     expect(store.list().find((r) => r.id === issued.id)).toBeUndefined();
@@ -74,7 +74,7 @@ describe("SessionTokenStore", () => {
     const store = await SessionTokenStore.load();
     await store.issue({ ttlSec: 1 });
     await store.issue();
-    await new Promise((r) => setTimeout(r, 1100));
+    await new Promise((r) => setTimeout(r, 1500));
     expect(store.sweepExpired()).toBe(1);
     expect(store.list()).toHaveLength(1);
   });

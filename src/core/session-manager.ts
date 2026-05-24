@@ -1020,7 +1020,7 @@ export class SessionManager {
         title: session.title,
         agentId: session.agentId,
         currentModel: session.currentModel,
-        currentUsage: session.totalUsage,
+        currentUsage: session.currentUsage,
         parentSessionId: session.parentSessionId,
         updatedAt: used,
         attachedClients: session.attachedCount,

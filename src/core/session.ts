@@ -252,7 +252,9 @@ export class Session {
   // stale-prone for snapshot-shaped events).
   currentModel: string | undefined;
   currentMode: string | undefined;
-  currentUsage: UsageSnapshot | undefined;
+  // Raw per-agent-life usage. Never read directly outside this class —
+  // always access via the currentUsage getter which adds cumulativeCost.
+  private _currentUsage: UsageSnapshot | undefined;
   updatedAt: number;
   readonly createdAt: number;
 
@@ -356,6 +358,24 @@ export class Session {
   private modeHandlers: Array<(mode: string) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
   private cumulativeCost: number = 0;
+
+  // Total cost across all agent lives. costAmount in the returned snapshot
+  // is cumulativeCost + the current agent's raw amount so every consumer
+  // gets the right figure without knowing about the internal split.
+  // cumulativeCost is stripped from the return value so it never leaks
+  // into persistence paths via session.currentUsage.
+  get currentUsage(): UsageSnapshot | undefined {
+    if (!this._currentUsage && !this.cumulativeCost) {
+      return undefined;
+    }
+    const base = this._currentUsage ?? {};
+    const total = this.cumulativeCost + (base.costAmount ?? 0);
+    return {
+      ...base,
+      costAmount: total || undefined,
+      cumulativeCost: undefined,
+    };
+  }
   // Set by amendPrompt at the start of a cancel-and-resubmit dance.
   // broadcastTurnComplete reads it to attach the _meta.amended marker
   // to the cancelled turn's turn_complete notification, and to fire the
@@ -395,7 +415,7 @@ export class Session {
     this.title = init.title;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
-    this.currentUsage = init.currentUsage;
+    this._currentUsage = init.currentUsage;
     this.cumulativeCost = init.currentUsage?.cumulativeCost ?? 0;
     if (init.agentCommands && init.agentCommands.length > 0) {
       this.agentAdvertisedCommands = [...init.agentCommands];
@@ -508,7 +528,9 @@ export class Session {
     originatedBy = new Set<string>(),
     startIdx = 0,
   ): Promise<void> {
-    let envelope = params;
+    // Apply cumulative cost injection before the transformer chain so
+    // transformers see the same total-cost value that clients receive.
+    let envelope = this.injectCumulativeCost(params);
     for (let i = startIdx; i < this.transformChain.length; i++) {
       const t = this.transformChain[i]!;
       if (originatedBy.has(t.name)) {
@@ -599,7 +621,7 @@ export class Session {
       return;
     }
     if (this.maybeApplyAgentUsage(envelope)) {
-      this.recordAndBroadcast("session/update", this.injectCumulativeCost(envelope));
+      this.recordAndBroadcast("session/update", envelope);
       return;
     }
     this.maybeApplyAgentSessionInfo(envelope);
@@ -823,8 +845,8 @@ export class Session {
         recordedAt,
       });
     }
-    if (this.currentUsage !== undefined || this.cumulativeCost > 0) {
-      const u = this.currentUsage ?? {};
+    if (this.currentUsage !== undefined) {
+      const u = this.currentUsage;
       const update: Record<string, unknown> = {
         sessionUpdate: "usage_update",
       };
@@ -839,8 +861,8 @@ export class Session {
         typeof u.costCurrency === "string"
       ) {
         const cost: Record<string, unknown> = {};
-        if (typeof u.costAmount === "number" || this.cumulativeCost) {
-          cost.amount = this.cumulativeCost + (u.costAmount ?? 0);
+        if (typeof u.costAmount === "number") {
+          cost.amount = u.costAmount;
         }
         if (typeof u.costCurrency === "string") {
           cost.currency = u.costCurrency;
@@ -1972,7 +1994,7 @@ export class Session {
     if (update.sessionUpdate !== "usage_update") {
       return false;
     }
-    const next: UsageSnapshot = { ...(this.currentUsage ?? {}) };
+    const next: UsageSnapshot = { ...(this._currentUsage ?? {}) };
     let changed = false;
     if (typeof update.used === "number" && next.used !== update.used) {
       next.used = update.used;
@@ -1999,7 +2021,7 @@ export class Session {
     if (!changed) {
       return true;
     }
-    this.currentUsage = next;
+    this._currentUsage = next;
     for (const handler of this.usageHandlers) {
       try {
         handler(next);
@@ -2014,16 +2036,16 @@ export class Session {
   // next agent life starts accumulating from $0. Fires usageHandlers so
   // meta.json is updated before the new agent starts emitting.
   private accumulateAndResetCost(): void {
-    const amount = this.currentUsage?.costAmount;
+    const amount = this._currentUsage?.costAmount;
     if (!amount)
       return;
     this.cumulativeCost += amount;
     const next: UsageSnapshot = {
-      ...(this.currentUsage ?? {}),
+      ...(this._currentUsage ?? {}),
       cumulativeCost: this.cumulativeCost,
       costAmount: undefined,
     };
-    this.currentUsage = next;
+    this._currentUsage = next;
     for (const handler of this.usageHandlers) {
       try {
         handler(next);
@@ -2061,16 +2083,9 @@ export class Session {
     };
   }
 
-  // Total cost across all agent lives for this hydra session. Used by
-  // session/list so list rows show the accumulated figure.
+  // Deprecated alias — currentUsage already returns the total.
   get totalUsage(): UsageSnapshot | undefined {
-    if (!this.currentUsage && !this.cumulativeCost)
-      return undefined;
-    const base = this.currentUsage ?? {};
-    return {
-      ...base,
-      costAmount: this.cumulativeCost + (this.currentUsage?.costAmount ?? 0),
-    };
+    return this.currentUsage;
   }
 
   // Update the cached agent command list, fire persist handlers, and
