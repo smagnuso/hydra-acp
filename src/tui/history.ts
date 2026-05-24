@@ -106,3 +106,32 @@ export function buildCombinedHistory(
   const filteredGlobal = global.filter((e) => !sessionSet.has(e));
   return [...filteredGlobal, ...session];
 }
+
+// Append replayed prompts (from a daemon attach replay) into the
+// existing per-session history. Set-based dedup against existing entries
+// AND entries added in this merge so reattaches don't pile up duplicates
+// when the daemon replays the same prompts again. Order: existing first,
+// then new-to-this-merge replayed entries in their replay order.
+export function mergeReplayedEntries(
+  existing: string[],
+  replayed: string[],
+  cap: number = HISTORY_CAP,
+): string[] {
+  if (replayed.length === 0) {
+    return existing;
+  }
+  const seen = new Set(existing);
+  let out = existing;
+  for (const raw of replayed) {
+    const trimmed = raw.replace(/\n+$/, "");
+    if (trimmed.length === 0) {
+      continue;
+    }
+    if (seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    out = appendEntry(out, trimmed, cap);
+  }
+  return out;
+}

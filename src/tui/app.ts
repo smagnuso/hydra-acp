@@ -37,6 +37,7 @@ import {
   appendHistoryLine,
   buildCombinedHistory,
   loadHistory,
+  mergeReplayedEntries,
   saveHistory,
 } from "./history.js";
 import { listSessions, pickMostRecent, type DiscoveredSession } from "./discovery.js";
@@ -1140,6 +1141,12 @@ async function runSession(
     history: buildCombinedHistory(globalHistory, history),
   });
   dispatcherRef = dispatcher;
+  // Gates recording of peer user-text events into prompt history.
+  // Flipped to true after the initial attach-replay drain completes —
+  // before that, replayed user-text events get folded in via a single
+  // set-deduped merge so reattaches don't pile up duplicates of past
+  // prompts the daemon replayed again.
+  let livePeerHistoryRecording = false;
   // Funnel: every place a new prompt becomes part of history goes
   // through here so the per-session list, the global list, the
   // dispatcher view, and both files stay in sync.
@@ -2898,6 +2905,16 @@ async function runSession(
       return;
     }
     if (event.kind === "user-text") {
+      // Fold peer prompts into the local prompt history so up-arrow
+      // walks them. Own prompts were already recorded by enqueuePrompt
+      // before runPrompt fired — appendEntry's consecutive dedup keeps
+      // the own-prompt user-text echo (synthesized from
+      // prompt_queue_removed{started}) from creating a duplicate entry.
+      // Skipped during the initial attach-replay drain; replayed user-
+      // text gets merged via mergeReplayedEntries instead.
+      if (livePeerHistoryRecording) {
+        recordHistoryEntry(event.text);
+      }
       // Render the user prompt first, then anchor the "thinking…" tools
       // block directly below it. The order matters — startToolsBlock
       // appends to the bottom of scrollback, so if we called it before
@@ -3141,6 +3158,17 @@ async function runSession(
   // chunk-by-chunk; one repaint at the end shows the final state.
   const buffered = bufferedEvents;
   bufferedEvents = [];
+  // Capture replayed user-text in attach order so peer prompts from
+  // other clients show up under up-arrow even when this TUI has never
+  // typed in the session. livePeerHistoryRecording is still false here
+  // so the drain itself doesn't double-record; the merge below folds
+  // these in with set-based dedup against existing history.
+  const replayedPromptTexts: string[] = [];
+  for (const event of buffered) {
+    if (event.kind === "user-text" && typeof event.text === "string") {
+      replayedPromptTexts.push(event.text);
+    }
+  }
   screen.pauseRepaint();
   try {
     for (const event of buffered) {
@@ -3149,6 +3177,15 @@ async function runSession(
   } finally {
     screen.resumeRepaint();
   }
+  if (replayedPromptTexts.length > 0) {
+    const merged = mergeReplayedEntries(history, replayedPromptTexts);
+    if (merged !== history) {
+      history = merged;
+      dispatcher.setHistory(buildCombinedHistory(globalHistory, history));
+      saveHistory(historyFile, history).catch(() => undefined);
+    }
+  }
+  livePeerHistoryRecording = true;
 
   // Mid-turn reattach reconcile. History replay incremented pendingTurns
   // for the unmatched prompt_received, but adjustPendingTurns ran before

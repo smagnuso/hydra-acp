@@ -9,6 +9,7 @@ import {
   appendHistoryLine,
   buildCombinedHistory,
   loadHistory,
+  mergeReplayedEntries,
   parseHistory,
   saveHistory,
 } from "./history.js";
@@ -78,6 +79,44 @@ describe("buildCombinedHistory", () => {
 
   it("handles an empty global list", () => {
     expect(buildCombinedHistory([], ["s1"])).toEqual(["s1"]);
+  });
+});
+
+describe("mergeReplayedEntries", () => {
+  it("returns existing unchanged when replayed is empty", () => {
+    const existing = ["a", "b"];
+    expect(mergeReplayedEntries(existing, [])).toBe(existing);
+  });
+
+  it("appends entirely new replayed entries in order", () => {
+    expect(mergeReplayedEntries([], ["a", "b", "c"])).toEqual(["a", "b", "c"]);
+  });
+
+  it("skips replayed entries already in existing history", () => {
+    expect(mergeReplayedEntries(["a", "b"], ["b", "c"])).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("dedupes duplicates within the replayed list", () => {
+    expect(mergeReplayedEntries([], ["x", "x", "y"])).toEqual(["x", "y"]);
+  });
+
+  it("trims trailing newlines and skips empties", () => {
+    expect(mergeReplayedEntries([], ["one\n", "\n\n", "two"])).toEqual([
+      "one",
+      "two",
+    ]);
+  });
+
+  it("enforces the cap", () => {
+    const big = Array.from({ length: HISTORY_CAP }, (_, i) => `e${i}`);
+    const out = mergeReplayedEntries(big, ["fresh"]);
+    expect(out.length).toBe(HISTORY_CAP);
+    expect(out[out.length - 1]).toBe("fresh");
+    expect(out[0]).toBe("e1");
   });
 });
 
