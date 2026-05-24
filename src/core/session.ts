@@ -2033,9 +2033,14 @@ export class Session {
       return true;
     }
     this._currentUsage = next;
+    // Fire handlers with the total (getter) not the raw snapshot so that
+    // meta.json always persists the accumulated costAmount. If we fire with
+    // the raw `next` (no cumulativeCost), a daemon restart would reconstruct
+    // cumulativeCost as 0 + raw instead of the true lifetime total.
+    const total = this.currentUsage ?? next;
     for (const handler of this.usageHandlers) {
       try {
-        handler(next);
+        handler(total);
       } catch {
         void 0;
       }
