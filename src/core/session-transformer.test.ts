@@ -194,7 +194,7 @@ describe("Session transformer chain — response side", () => {
     await flushMicrotasks();
 
     expect(t.requests).toHaveLength(1);
-    expect(stream.sent.some((m) => m.method === "session/update")).toBe(true);
+    expect(stream.sent.some((m) => "method" in m && m.method === "session/update")).toBe(true);
   });
 
   it("stop drops the update — no broadcast to clients", async () => {
@@ -213,9 +213,9 @@ describe("Session transformer chain — response side", () => {
 
     expect(t.requests).toHaveLength(1);
     const updates = stream.sent.filter(
-      (m) => m.method === "session/update" &&
-        (m.params as { update?: { sessionUpdate?: string } })?.update?.sessionUpdate ===
-          "assistant_message_chunk",
+      (m) => "method" in m && m.method === "session/update" &&
+        ("params" in m && (m.params as { update?: { sessionUpdate?: string } })?.update?.sessionUpdate ===
+          "assistant_message_chunk"),
     );
     expect(updates).toHaveLength(0);
   });
@@ -282,7 +282,8 @@ describe("Session transformer chain — response chain additional", () => {
 
     // Before discharge: update not yet broadcast.
     const chunksBefore = stream.sent.filter(
-      (m) => (m.params as { update?: { sessionUpdate?: string } })?.update?.sessionUpdate ===
+      (m) => "params" in m &&
+        (m.params as { update?: { sessionUpdate?: string } })?.update?.sessionUpdate ===
         "assistant_message_chunk",
     );
     expect(chunksBefore).toHaveLength(0);
@@ -290,6 +291,38 @@ describe("Session transformer chain — response chain additional", () => {
     // Discharge resolves the parked chain — snapshot interceptors and broadcast run.
     session.dischargeClaim(capturedToken, undefined);
     await flushMicrotasks();
+  });
+
+  it("response-side processing discharge removes the claim and unblocks the chain", async () => {
+    let capturedToken = "";
+    const t = fakeTransformerConn();
+    (t.conn.request as ReturnType<typeof vi.fn>).mockImplementation(
+      (_m: string, params: unknown) => {
+        capturedToken = (params as { token: string }).token;
+        return Promise.resolve({ action: "processing" });
+      },
+    );
+
+    const { session, mock } = makeSession([makeRef("t1", ["response:session/update"], t.conn)]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "assistant_message_chunk", content: { type: "text", text: "z" } },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(capturedToken).toBeTruthy();
+
+    // Discharge removes the claim — the transformer has taken ownership of
+    // the update and will emit a replacement via the outbox if it wants one.
+    // The original envelope is NOT auto-broadcast on discharge by design.
+    const discharged = session.dischargeClaim(capturedToken, undefined);
+    expect(discharged).toBe(true);
+
+    // Claim is gone — a second discharge returns false.
+    expect(session.dischargeClaim(capturedToken, undefined)).toBe(false);
   });
 
   it("emitToChain response side re-enters runResponseChain after the emitter", async () => {
@@ -331,6 +364,19 @@ describe("Session transformer chain — loop prevention", () => {
     expect(requestMock).toHaveBeenCalled();
   });
 
+  it("emitToChain with unknown emitter name still reaches the agent", async () => {
+    const t1 = fakeTransformerConn({ action: "continue" });
+    const { session, requestMock } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t1.conn),
+    ]);
+    // "ghost" is not in the chain — findIndex returns -1, startIdx becomes 0
+    // but "ghost" is in originatedBy so no transformer matching that name runs.
+    // t1 IS in the chain so it should still be called.
+    await session.emitToChain("ghost", "session/prompt", { sessionId: "sess_test", prompt: [] });
+    expect(t1.requests).toHaveLength(1);
+    expect(requestMock).toHaveBeenCalled();
+  });
+
   it("emitToChain from last transformer in chain goes straight to agent", async () => {
     const t1 = fakeTransformerConn({ action: "continue" });
     const t2 = fakeTransformerConn({ action: "continue" });
@@ -346,6 +392,60 @@ describe("Session transformer chain — loop prevention", () => {
 });
 
 // ── Lifecycle events ──────────────────────────────────────────────────────────
+
+describe("Session transformer chain — lifecycle events — idle rearms", () => {
+  it("idle event timer resets when new recordable activity arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = fakeTransformerConn();
+      const { session, mock } = makeSession(
+        [makeRef("t1", ["lifecycle:session.idle"], t.conn)],
+        100, // 100ms idle event timeout
+      );
+      const { client } = makeClient();
+      await session.attach(client, "none");
+
+      // First burst of activity arms the timer.
+      mock.triggerNotification("session/update", {
+        sessionId: "u1",
+        update: { sessionUpdate: "assistant_message_chunk", content: { type: "text", text: "a" } },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Advance 80ms — close to but not past the 100ms timeout.
+      await vi.advanceTimersByTimeAsync(80);
+      expect(t.notifications.filter((n) =>
+        (n.params as { event: string }).event === "session.idle"
+      )).toHaveLength(0);
+
+      // Second burst of activity should reset the timer.
+      mock.triggerNotification("session/update", {
+        sessionId: "u1",
+        update: { sessionUpdate: "assistant_message_chunk", content: { type: "text", text: "b" } },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Advance another 80ms — would have fired if the timer wasn't reset,
+      // but since it was reset we're still within the new window.
+      await vi.advanceTimersByTimeAsync(80);
+      expect(t.notifications.filter((n) =>
+        (n.params as { event: string }).event === "session.idle"
+      )).toHaveLength(0);
+
+      // Advance the remaining 20ms past the reset window — now it fires.
+      await vi.advanceTimersByTimeAsync(30);
+      expect(t.notifications.some((n) =>
+        (n.params as { event: string }).event === "session.idle"
+      )).toBe(true);
+
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("Session transformer chain — lifecycle events", () => {
   it("session.opened fires on construction for transformers with lifecycle intercept", async () => {
@@ -441,6 +541,44 @@ describe("Session transformer chain — processing claims", () => {
     expect(result).toEqual({ stopReason: "end_turn" });
   });
 
+  it("multiple simultaneous processing claims park and discharge independently", async () => {
+    let token1 = "";
+    let token2 = "";
+    const t = fakeTransformerConn();
+    let callCount = 0;
+    (t.conn.request as ReturnType<typeof vi.fn>).mockImplementation(
+      (_m: string, params: unknown) => {
+        callCount++;
+        if (callCount === 1) token1 = (params as { token: string }).token;
+        else token2 = (params as { token: string }).token;
+        return Promise.resolve({ action: "processing" });
+      },
+    );
+
+    const { session } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t.conn),
+    ]);
+
+    const promise1 = session.forwardRequest("session/prompt", { sessionId: "sess_test", prompt: [] });
+    const promise2 = session.forwardRequest("session/prompt", { sessionId: "sess_test", prompt: [] });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(token1).toBeTruthy();
+    expect(token2).toBeTruthy();
+    expect(token1).not.toBe(token2);
+
+    // Discharge in reverse order.
+    session.dischargeClaim(token2, { stopReason: "end_turn" });
+    const result2 = await promise2;
+    expect(result2).toEqual({ stopReason: "end_turn" });
+
+    session.dischargeClaim(token1, { stopReason: "cancelled" });
+    const result1 = await promise1;
+    expect(result1).toEqual({ stopReason: "cancelled" });
+  });
+
   it("dischargeClaim returns false for an unknown token", () => {
     const { session } = makeSession();
     expect(session.dischargeClaim("unknown_token", {})).toBe(false);
@@ -481,8 +619,8 @@ describe("Session transformer chain — processing claims", () => {
       await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
 
       const result = await promise;
-      // Abandoned session/prompt resolves with the default stop payload.
-      expect(result).toEqual({ stopReason: "stopped" });
+      // Abandoned session/prompt resumes chain and reaches the agent (fail-open).
+      expect(result).toEqual({ stopReason: "end_turn" });
 
       // Claim has been removed — discharge returns false.
       expect(session.dischargeClaim(capturedToken, { stopReason: "end_turn" })).toBe(false);

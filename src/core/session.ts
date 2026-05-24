@@ -179,6 +179,11 @@ interface TransformerClaim {
   timer: NodeJS.Timeout;
   transformerName: string;
   method: string;
+  // Enough state to resume the chain fail-open if the transformer abandons.
+  envelope: unknown;
+  chainIdx: number;           // index of the transformer that claimed processing
+  originatedBy: Set<string>;  // snapshot so resume routing is correct
+  side: "request" | "response";
 }
 
 // Cap on the recently-terminal messageId LRU. Bounds memory growth on
@@ -534,8 +539,9 @@ export class Session {
         return; // daemon never sees this update — no state mutation, no broadcast
       }
       if (action === "processing") {
-        // Park a claim; the transformer will emit a replacement update via
-        // emit_message with respondsTo when it's ready.
+        const claimIdx = i;
+        const claimEnvelope = envelope;
+        const claimOriginatedBy = new Set(originatedBy);
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
             if (this.pendingClaims.delete(token)) {
@@ -543,7 +549,12 @@ export class Session {
                 "hydra-acp/transformer_abandoned_request",
                 { sessionId: this.sessionId, token, transformerName: t.name },
               );
-              resolve();
+              // Fail-open: resume from the next transformer rather than dropping.
+              void this.runResponseChain(
+                claimEnvelope,
+                new Set([...claimOriginatedBy, t.name]),
+                claimIdx + 1,
+              ).then(resolve);
             }
           }, TRANSFORMER_CLAIM_TIMEOUT_MS);
           if (typeof timer.unref === "function") {
@@ -554,6 +565,10 @@ export class Session {
             timer,
             transformerName: t.name,
             method: "session/update",
+            envelope: claimEnvelope,
+            chainIdx: claimIdx,
+            originatedBy: claimOriginatedBy,
+            side: "response",
           });
         });
         return;
@@ -1562,6 +1577,9 @@ export class Session {
           defaultStopPayload(method);
       }
       if (action === "processing") {
+        const claimIdx = i;
+        const claimEnvelope = envelope;
+        const claimOriginatedBy = new Set(originatedBy);
         return new Promise((resolve) => {
           const timer = setTimeout(() => {
             if (this.pendingClaims.delete(token)) {
@@ -1569,7 +1587,15 @@ export class Session {
                 "hydra-acp/transformer_abandoned_request",
                 { sessionId: this.sessionId, token, transformerName: t.name },
               );
-              resolve(defaultStopPayload(method));
+              // Fail-open: resume from the next transformer rather than stopping.
+              void this.forwardRequest(
+                method,
+                claimEnvelope,
+                new Set([...claimOriginatedBy, t.name]),
+                claimIdx + 1,
+              )
+                .then(resolve)
+                .catch(() => resolve(defaultStopPayload(method)));
             }
           }, TRANSFORMER_CLAIM_TIMEOUT_MS);
           if (typeof timer.unref === "function") {
@@ -1580,6 +1606,10 @@ export class Session {
             timer,
             transformerName: t.name,
             method,
+            envelope: claimEnvelope,
+            chainIdx: claimIdx,
+            originatedBy: claimOriginatedBy,
+            side: "request",
           });
         });
       }
@@ -1621,7 +1651,22 @@ export class Session {
           "hydra-acp/transformer_abandoned_request",
           { sessionId: this.sessionId, token, transformerName: claim.transformerName },
         );
-        claim.resolve(defaultStopPayload(claim.method));
+        if (claim.side === "response") {
+          void this.runResponseChain(
+            claim.envelope,
+            new Set([...claim.originatedBy, claim.transformerName]),
+            claim.chainIdx + 1,
+          ).then(() => claim.resolve(undefined));
+        } else {
+          void this.forwardRequest(
+            claim.method,
+            claim.envelope,
+            new Set([...claim.originatedBy, claim.transformerName]),
+            claim.chainIdx + 1,
+          )
+            .then(claim.resolve)
+            .catch(() => claim.resolve(defaultStopPayload(claim.method)));
+        }
       }
     }, timeout);
     if (typeof timer.unref === "function") {
