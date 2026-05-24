@@ -522,7 +522,7 @@ Each transformer receives:
 
 A transformer process connects using its own token (same mechanism as extensions) and then calls `transformer/initialize` declaring the message kinds it wants to intercept. For each intercepted message the daemon calls `transformer/message` and waits for `{ action: "continue" }`. Future phases will add `stop` (block the message) and `processing` (transformer handles the request itself).
 
-See `cli/examples/transformer-observe.mjs` for a working reference implementation that logs all traffic and always continues, and `cli/examples/transformer-edit.mjs` for one that modifies prompts before they reach the agent.
+See `cli/examples/transformer-observe.mjs` for a working reference that logs all traffic and always continues, `cli/examples/transformer-edit.mjs` for one that modifies prompts before they reach the agent, and `cli/examples/transformer-lifecycle.mjs` for one that reacts to session lifecycle events (`session.opened`, `session.idle`, `session.closed`) and optionally emits a follow-up prompt when a session goes quiet.
 
 **Trust model**: transformers receive the same per-process scoped token as extensions, but have structurally more access — they intercept traffic that no client ever sees. `transformer/initialize` and all transformer-specific methods are only callable with a transformer-kind token; an extension process that tries to call them receives `MethodNotFound`. Treat every entry in `transformers` as a higher-trust boundary than `extensions`.
 

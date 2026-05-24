@@ -2185,3 +2185,196 @@ describe("SessionManager.resurrect: pendingHistorySync", () => {
   });
 });
 
+
+describe("SessionManager: parentSessionId", () => {
+  it("surfaces parentSessionId for a live session in list()", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_child" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    await manager.create({
+      agentId: "claude-code",
+      cwd: "/work",
+      parentSessionId: "hydra_session_parent",
+    });
+
+    const entries = await manager.list();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.parentSessionId).toBe("hydra_session_parent");
+  });
+
+  it("surfaces parentSessionId for a cold session in list()", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+
+    await store.write({
+      sessionId: "hydra_session_child",
+      cwd: "/work",
+      agentId: "claude-code",
+      upstreamSessionId: "u_cold_child",
+      parentSessionId: "hydra_session_parent_cold",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("should not spawn"); },
+    );
+
+    const entries = await manager.list();
+    const child = entries.find((e) => e.sessionId === "hydra_session_child");
+    expect(child?.parentSessionId).toBe("hydra_session_parent_cold");
+  });
+});
+
+describe("SessionManager.create: transformChain threading", () => {
+  it("wires the resolved transform chain onto the created session", async () => {
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import("../__tests__/test-utils.js");
+
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_chain" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    const transformerRef = {
+      name: "t1",
+      intercepts: new Set(["request:session/prompt"]),
+      connection: conn,
+    };
+
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: "/work",
+      transformChain: [transformerRef],
+    });
+
+    // The chain should be live on the session.
+    expect((session as unknown as { transformChain: unknown[] }).transformChain).toHaveLength(1);
+    expect(
+      (session as unknown as { transformChain: Array<{ name: string }> }).transformChain[0]!.name,
+    ).toBe("t1");
+  });
+
+  it("session has empty chain when no transformChain is provided", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_no_chain" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    const session = await manager.create({ agentId: "claude-code", cwd: "/work" });
+    expect(
+      (session as unknown as { transformChain: unknown[] }).transformChain,
+    ).toHaveLength(0);
+  });
+});
+
+describe("SessionManager.create: agent:initialize intercept", () => {
+  it("runs agent:initialize chain intercept and passes modified capabilities to the session", async () => {
+    const { makeControlledStream } = await import("../__tests__/test-utils.js");
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    // initialize returns capabilities; session/new returns session id.
+    requestMock
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        agentCapabilities: { promptCapabilities: { image: false } },
+      })
+      .mockResolvedValueOnce({ sessionId: "u_init_intercept" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    const interceptedRequests: unknown[] = [];
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    // Spy on transformer/message calls and return a replaced capabilities object.
+    const connRequestSpy = vi.spyOn(conn, "request").mockImplementation(
+      async (_method: string, params: unknown) => {
+        interceptedRequests.push(params);
+        return {
+          action: "stop",
+          payload: { promptCapabilities: { image: true, injected: true } },
+        };
+      },
+    );
+
+    const transformerRef = {
+      name: "caps-injector",
+      intercepts: new Set(["agent:initialize"]),
+      connection: conn,
+    };
+
+    await manager.create({
+      agentId: "claude-code",
+      cwd: "/work",
+      transformChain: [transformerRef],
+    });
+
+    // The intercept should have received a transformer/message call.
+    expect(connRequestSpy).toHaveBeenCalledWith(
+      "transformer/message",
+      expect.objectContaining({ method: "initialize", phase: "response" }),
+    );
+    // The envelope passed should carry the agent's original capabilities.
+    const call = interceptedRequests[0] as { envelope: Record<string, unknown> };
+    expect(call.envelope).toMatchObject({ promptCapabilities: { image: false } });
+  });
+
+  it("skips the intercept when no transformer declares agent:initialize", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_no_intercept" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    const { makeControlledStream } = await import("../__tests__/test-utils.js");
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    const connRequestSpy = vi.spyOn(conn, "request");
+
+    await manager.create({
+      agentId: "claude-code",
+      cwd: "/work",
+      transformChain: [{
+        name: "prompt-only",
+        intercepts: new Set(["request:session/prompt"]), // no agent:initialize
+        connection: conn,
+      }],
+    });
+
+    expect(connRequestSpy).not.toHaveBeenCalled();
+  });
+});
