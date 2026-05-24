@@ -17,6 +17,12 @@ export interface ReattachResponseFields {
   // on a healthy daemon, but parsed defensively so a malformed response
   // doesn't wipe the cached id.
   clientId?: string;
+  // Epoch-ms of the in-flight turn's start, or undefined if the daemon
+  // considers the session idle. Used by onReconnect to reconcile
+  // pendingTurns: if the daemon is idle but the TUI still has pendingTurns
+  // > 0 (turn_complete was never emitted before the daemon restarted),
+  // snap pendingTurns to 0 so the banner clears.
+  turnStartedAt?: number;
 }
 
 // Pull the fields we care about out of a session/attach response result.
@@ -33,6 +39,16 @@ export function parseReattachResponse(result: unknown): ReattachResponseFields {
   }
   if (typeof r.clientId === "string" && r.clientId.length > 0) {
     out.clientId = r.clientId;
+  }
+  const meta = r._meta;
+  if (meta && typeof meta === "object") {
+    const hydra = (meta as Record<string, unknown>)["hydra-acp"];
+    if (hydra && typeof hydra === "object") {
+      const ts = (hydra as Record<string, unknown>).turnStartedAt;
+      if (typeof ts === "number") {
+        out.turnStartedAt = ts;
+      }
+    }
   }
   return out;
 }

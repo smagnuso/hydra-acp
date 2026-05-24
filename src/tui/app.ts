@@ -3351,6 +3351,12 @@ async function runSession(
         handleSessionUpdate(params);
       }
     }
+    // Reconcile pendingTurns against the daemon's authoritative idle state.
+    // If the daemon restarted mid-turn the turn_complete was never emitted,
+    // so pendingTurns can be > 0 even though the session is now idle.
+    if (fields.turnStartedAt === undefined && pendingTurns > 0) {
+      adjustPendingTurns(-pendingTurns);
+    }
     screen.setBanner({
       status: pendingTurns > 0 ? "busy" : "ready",
       elapsedMs: pendingTurns > 0 ? 0 : undefined,
