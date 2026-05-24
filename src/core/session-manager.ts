@@ -387,9 +387,13 @@ export class SessionManager {
       agentCommands: params.agentCommands,
       agentModes:
         params.agentModes ?? nonEmptyOrUndefined(extractInitialModes(loadResult ?? {})),
+      // Always prefer the fresh list from session/load over the persisted
+      // snapshot — the proxy's available models can change between daemon
+      // restarts (quota resets, rollouts), so meta.json is intentionally
+      // treated as a cold fallback here, not the authoritative source.
       agentModels:
-        params.agentModels ??
-        nonEmptyOrUndefined(extractInitialModels(loadResult ?? {})),
+        nonEmptyOrUndefined(extractInitialModels(loadResult ?? {})) ??
+        params.agentModels,
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
       // or never seeded) should re-derive from the next prompt rather
