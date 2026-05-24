@@ -2,7 +2,7 @@ import * as fsp from "node:fs/promises";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
-import { runLogTail } from "./log-tail.js";
+import { runLogTail, splitNameFromLogTailArgs } from "./log-tail.js";
 import { httpBase } from "./sessions.js";
 
 interface TransformerInfo {
@@ -392,19 +392,17 @@ async function postLifecycleAll(
   }
 }
 
-export async function runTransformersLogs(
-  name: string | undefined,
-  argv: string[],
-): Promise<void> {
+export async function runTransformersLogs(argv: string[]): Promise<void> {
+  const { name, rest } = splitNameFromLogTailArgs(argv);
   if (!name) {
     process.stderr.write(
-      "Usage: hydra-acp transformers logs <name> [--tail N] [--follow]\n",
+      "Usage: hydra-acp transformers log <name> [--tail N] [--follow]\n",
     );
     process.exit(2);
     return;
   }
   const logPath = paths.transformerLogFile(name);
-  await runLogTail(logPath, argv, "No log file (transformer never ran?)");
+  await runLogTail(logPath, rest, "No log file (transformer never ran?)");
 }
 
 async function readRawConfig(): Promise<Record<string, unknown>> {

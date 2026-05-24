@@ -374,8 +374,8 @@ async function main(): Promise<void> {
         await runExtensionsRestart(name);
         return;
       }
-      if (sub === "logs") {
-        await runExtensionsLogs(name, rest);
+      if (sub === "log" || sub === "logs") {
+        await runExtensionsLogs(tail.slice(1));
         return;
       }
       process.stderr.write(`Unknown extension subcommand: ${sub}\n`);
@@ -413,8 +413,8 @@ async function main(): Promise<void> {
         await runTransformersRestart(name);
         return;
       }
-      if (sub === "logs") {
-        await runTransformersLogs(name, rest);
+      if (sub === "log" || sub === "logs") {
+        await runTransformersLogs(tail.slice(1));
         return;
       }
       process.stderr.write(`Unknown transformer subcommand: ${sub}\n`);
@@ -670,12 +670,12 @@ function printHelp(): void {
       "  hydra-acp extension add <name> [opts]       Add an extension to config",
       "  hydra-acp extension remove <name>           Remove an extension from config",
       "  hydra-acp extension start|stop|restart <n>|all   Lifecycle on one or all",
-      "  hydra-acp extension logs <name> [-f] [-n N]      Tail or follow an extension's log",
+      "  hydra-acp extension log <name> [-f] [-n N]       Tail or follow an extension's log",
       "  hydra-acp transformer list                  List configured transformers and live state",
       "  hydra-acp transformer add <name> [opts]     Add a transformer to config (--command, --args, --env, --disabled)",
       "  hydra-acp transformer remove <name>         Remove a transformer from config",
       "  hydra-acp transformer start|stop|restart <n>|all  Lifecycle on one or all",
-      "  hydra-acp transformer logs <name> [-f] [-n N]     Tail or follow a transformer's log",
+      "  hydra-acp transformer log <name> [-f] [-n N]      Tail or follow a transformer's log",
       "  hydra-acp agent [list]                      List agents in the cached registry",
       "  hydra-acp agent refresh                     Force a registry re-fetch",
       "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)",

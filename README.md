@@ -235,13 +235,13 @@ hydra-acp extension [list]                 # list configured extensions and live
 hydra-acp extension add <name>             # add to config (--command, --args, --env, --disabled)
 hydra-acp extension remove <name>          # remove from config
 hydra-acp extension start|stop|restart <n> # lifecycle on a running extension
-hydra-acp extension logs <name> [-f] [-n]  # tail (default 50) or follow an extension's log
+hydra-acp extension log <name> [-f] [-n]   # tail (default 50) or follow an extension's log
 
 hydra-acp transformer [list]               # list configured transformers and live state
 hydra-acp transformer add <name>           # add to config (--command, --args, --env, --enabled; disabled by default)
 hydra-acp transformer remove <name>        # remove from config
 hydra-acp transformer start|stop|restart <n> # lifecycle on a running transformer
-hydra-acp transformer logs <name> [-f] [-n]  # tail (default 50) or follow a transformer's log
+hydra-acp transformer log <name> [-f] [-n] # tail (default 50) or follow a transformer's log
 
 hydra-acp agent [list]                     # list agents in the registry
 hydra-acp agent install <id>               # pre-install an agent (else lazy on first use)
@@ -431,7 +431,7 @@ While the daemon is running you can manage extensions without bouncing it:
 ```text
 hydra-acp extension list
 hydra-acp extension restart hydra-acp-slack
-hydra-acp extension logs hydra-acp-slack --follow
+hydra-acp extension log hydra-acp-slack --follow
 ```
 
 `stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply.
@@ -490,7 +490,7 @@ hydra-acp extension start hydra-acp-archiver
 
 See the [package README](https://github.com/smagnuso/hydra-acp-archiver#readme) for backend setup (Drive OAuth, filesystem path).
 
-Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extension logs <name> -f` tails an extension's stdout/stderr if you need to debug.
+Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extension log <name> -f` tails an extension's stdout/stderr if you need to debug.
 
 ### Transformers
 

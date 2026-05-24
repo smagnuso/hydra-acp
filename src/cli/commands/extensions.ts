@@ -2,7 +2,7 @@ import * as fsp from "node:fs/promises";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
-import { runLogTail } from "./log-tail.js";
+import { runLogTail, splitNameFromLogTailArgs } from "./log-tail.js";
 import { httpBase } from "./sessions.js";
 
 interface ExtensionInfo {
@@ -379,19 +379,17 @@ async function postLifecycleAll(
   }
 }
 
-export async function runExtensionsLogs(
-  name: string | undefined,
-  argv: string[],
-): Promise<void> {
+export async function runExtensionsLogs(argv: string[]): Promise<void> {
+  const { name, rest } = splitNameFromLogTailArgs(argv);
   if (!name) {
     process.stderr.write(
-      "Usage: hydra-acp extensions logs <name> [--tail N] [--follow]\n",
+      "Usage: hydra-acp extensions log <name> [--tail N] [--follow]\n",
     );
     process.exit(2);
     return;
   }
   const logPath = paths.extensionLogFile(name);
-  await runLogTail(logPath, argv, "No log file (extension never ran?)");
+  await runLogTail(logPath, rest, "No log file (extension never ran?)");
 }
 
 function parseAddFlags(argv: string[]): {

@@ -108,6 +108,46 @@ async function printTail(
   return fileSize;
 }
 
+// Splits a `log` subcommand's argv into the target name (first non-flag
+// positional) and the remaining flag tokens, so `-f` and `--tail N` work
+// on either side of the name.
+export function splitNameFromLogTailArgs(args: string[]): {
+  name: string | undefined;
+  rest: string[];
+} {
+  const flagsWithValue = new Set(["--tail", "-n"]);
+  let name: string | undefined;
+  const rest: string[] = [];
+  let i = 0;
+  while (i < args.length) {
+    const tok = args[i];
+    if (tok === undefined) {
+      break;
+    }
+    if (tok.startsWith("-")) {
+      rest.push(tok);
+      if (flagsWithValue.has(tok) && i + 1 < args.length) {
+        const v = args[i + 1];
+        if (v !== undefined) {
+          rest.push(v);
+        }
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (name === undefined) {
+      name = tok;
+      i += 1;
+      continue;
+    }
+    rest.push(tok);
+    i += 1;
+  }
+  return { name, rest };
+}
+
 function parseLogTailFlags(argv: string[]): LogTailOptions {
   let tail = 50;
   let follow = false;
