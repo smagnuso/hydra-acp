@@ -499,17 +499,20 @@ export function registerAcpWsEndpoint(
         const fromDisk = await deps.manager.loadFromDisk(lookupId);
         let resurrectParams = fromDisk;
         if (hydraHints) {
+          // Identity fields come from the hints (they're fresher than disk);
+          // snapshot fields (currentUsage, agentModes, agentModels, etc.) must
+          // flow through from disk so cumulativeCost and other restored state
+          // survive the resurrect.
           resurrectParams = {
+            ...fromDisk,
             hydraSessionId: params.sessionId,
             upstreamSessionId: hydraHints.upstreamSessionId,
             agentId: hydraHints.agentId,
             cwd: hydraHints.cwd,
-            title: hydraHints.title ?? fromDisk?.title,
-            agentArgs: hydraHints.agentArgs ?? fromDisk?.agentArgs,
-            currentModel: fromDisk?.currentModel,
-            currentMode: fromDisk?.currentMode,
-            agentCommands: fromDisk?.agentCommands,
-            createdAt: fromDisk?.createdAt,
+            ...(hydraHints.title !== undefined ? { title: hydraHints.title } : {}),
+            ...(hydraHints.agentArgs !== undefined
+              ? { agentArgs: hydraHints.agentArgs }
+              : {}),
           };
         }
         if (!resurrectParams) {

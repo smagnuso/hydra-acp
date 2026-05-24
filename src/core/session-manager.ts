@@ -1227,6 +1227,7 @@ export class SessionManager {
         currentMode: args.bundle.session.currentMode,
         currentUsage: args.bundle.session.currentUsage,
         agentCommands: args.bundle.session.agentCommands,
+        agentModes: args.bundle.session.agentModes,
         createdAt: args.preservedCreatedAt ?? now,
         // Fallback path for historyMtimeIso (used when the history file
         // is missing). Keep this consistent with the utimes stamp above.

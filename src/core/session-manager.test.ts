@@ -788,6 +788,116 @@ describe("SessionManager: history persistence", () => {
       expect(merged).toContain("create_plan");
       expect(merged).toContain("hydra title");
     });
+
+    it("preserves cumulative cost across resurrect (regression: meta.json overwritten with raw cost after restart)", async () => {
+      const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const sessionId = live.sessionId;
+      mocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 3, currency: "USD" },
+        },
+      });
+      await eventually(
+        () => manager.loadFromDisk(sessionId),
+        (p) =>
+          (p?.currentUsage?.cumulativeCost ?? p?.currentUsage?.costAmount) === 3,
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await manager.loadFromDisk(sessionId);
+      // loadFromDisk folds prior {costAmount} into cumulativeCost so the
+      // resurrected session starts with the full lifetime total in
+      // cumulativeCost and a clean costAmount for the new agent life.
+      expect(resumeParams?.currentUsage?.cumulativeCost).toBe(3);
+      expect(resumeParams?.currentUsage?.costAmount).toBeUndefined();
+
+      const revived = await manager.resurrect(resumeParams!);
+      // The currentUsage getter returns the running total (cumulativeCost +
+      // raw). With no new usage from the resurrected agent yet, that's the
+      // preserved $3.
+      expect(revived.currentUsage?.costAmount).toBe(3);
+      // The getter strips cumulativeCost so it never leaks to consumers /
+      // persistence paths.
+      expect(revived.currentUsage?.cumulativeCost).toBeUndefined();
+
+      // A new agent life now reports $0.50 raw — total must be $3.50, not $0.50.
+      mocks[1]!.triggerNotification("session/update", {
+        sessionId: revived.upstreamSessionId,
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 0.5, currency: "USD" },
+        },
+      });
+      expect(revived.currentUsage?.costAmount).toBe(3.5);
+    });
+
+    it("does not drop currentUsage when resurrectParams is rebuilt with resume-hint identity overrides (regression: src/daemon/acp-ws.ts hydraHints branch)", async () => {
+      const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const sessionId = live.sessionId;
+      mocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 7.5, currency: "USD" },
+        },
+      });
+      await eventually(
+        () => manager.loadFromDisk(sessionId),
+        (p) =>
+          (p?.currentUsage?.cumulativeCost ?? p?.currentUsage?.costAmount) ===
+          7.5,
+      );
+      await live.close({ deleteRecord: false });
+
+      const fromDisk = await manager.loadFromDisk(sessionId);
+
+      // First: prove the bug. Mirror the PRE-FIX shape of acp-ws.ts's
+      // hydraHints branch — a fresh object with selective copies of
+      // fromDisk that *omits* currentUsage. The resurrected session
+      // should have lost the cumulative.
+      const buggyResurrectParams = {
+        hydraSessionId: sessionId,
+        upstreamSessionId: "u_resume_hint_buggy",
+        agentId: "claude-code",
+        cwd: "/w",
+        title: fromDisk?.title,
+        agentArgs: fromDisk?.agentArgs,
+        currentModel: fromDisk?.currentModel,
+        currentMode: fromDisk?.currentMode,
+        agentCommands: fromDisk?.agentCommands,
+        createdAt: fromDisk?.createdAt,
+      };
+      let requestMock = mocks[0]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock
+        .mockResolvedValueOnce({ protocolVersion: 1 })
+        .mockResolvedValueOnce({ sessionId: "u_resume_hint_buggy" });
+      const buggyRevived = await manager.resurrect(buggyResurrectParams);
+      expect(buggyRevived.currentUsage?.costAmount).toBeUndefined();
+      await buggyRevived.close({ deleteRecord: false });
+
+      // Now the fix: ...fromDisk spread first, identity fields override.
+      // Snapshot fields (currentUsage, agentModes, agentModels) flow
+      // through, so cumulativeCost survives the resurrect.
+      const fromDiskAfterBug = await manager.loadFromDisk(sessionId);
+      const fixedResurrectParams = {
+        ...fromDiskAfterBug!,
+        upstreamSessionId: "u_resume_hint_fixed",
+        agentId: "claude-code",
+        cwd: "/w",
+      };
+      requestMock = mocks[0]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock
+        .mockResolvedValueOnce({ protocolVersion: 1 })
+        .mockResolvedValueOnce({ sessionId: "u_resume_hint_fixed" });
+      const fixedRevived = await manager.resurrect(fixedResurrectParams);
+      expect(fixedRevived.currentUsage?.costAmount).toBe(7.5);
+    });
   });
 
   describe("getHistory (used by the REST history endpoint)", () => {
