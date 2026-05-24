@@ -38,6 +38,7 @@ function testConfig(): HydraConfig {
       progressIndicator: true,
       defaultEnterAction: "amend" as const,
       showThoughts: true,
+      promptHistoryMaxEntries: 2_000,
     },
   };
 }

@@ -36,7 +36,6 @@ import {
   appendEntry,
   appendHistoryLine,
   buildCombinedHistory,
-  GLOBAL_HISTORY_CAP,
   loadHistory,
   saveHistory,
 } from "./history.js";
@@ -1131,8 +1130,8 @@ async function runSession(
   // The global file is append-only, so a long-lived install may grow
   // past the cap on disk. Tail it once at load so the in-memory view
   // (and any dispatcher walk we build from it) stays bounded.
-  if (globalHistory.length > GLOBAL_HISTORY_CAP) {
-    globalHistory = globalHistory.slice(globalHistory.length - GLOBAL_HISTORY_CAP);
+  if (globalHistory.length > config.tui.promptHistoryMaxEntries) {
+    globalHistory = globalHistory.slice(globalHistory.length - config.tui.promptHistoryMaxEntries);
   }
   const dispatcher = new InputDispatcher({
     history: buildCombinedHistory(globalHistory, history),
@@ -1149,7 +1148,7 @@ async function runSession(
     const nextSession = appendEntry(history, trimmed);
     const sessionChanged = nextSession !== history;
     history = nextSession;
-    const nextGlobal = appendEntry(globalHistory, trimmed, GLOBAL_HISTORY_CAP);
+    const nextGlobal = appendEntry(globalHistory, trimmed, config.tui.promptHistoryMaxEntries);
     const globalChanged = nextGlobal !== globalHistory;
     globalHistory = nextGlobal;
     dispatcher.setHistory(buildCombinedHistory(globalHistory, history));

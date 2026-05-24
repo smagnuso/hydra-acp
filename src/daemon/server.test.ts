@@ -39,6 +39,7 @@ function testConfig(): HydraConfig {
       progressIndicator: true,
       defaultEnterAction: "amend" as const,
       showThoughts: true,
+      promptHistoryMaxEntries: 2_000,
     },
   };
 }
@@ -1173,6 +1174,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         progressIndicator: true,
         defaultEnterAction: "amend" as const,
         showThoughts: true,
+        promptHistoryMaxEntries: 2_000,
       },
     };
     handle = await startDaemon(cfg, TEST_TOKEN);

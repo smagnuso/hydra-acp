@@ -24,7 +24,7 @@ const DaemonConfig = z.object({
   // Compaction trims to this many on a periodic basis; reads also slice
   // to the tail at this length as a defensive measure against older
   // daemons that may have written unbounded files.
-  sessionHistoryMaxEntries: z.number().int().positive().default(1000),
+  sessionHistoryMaxEntries: z.number().int().positive().default(10_000),
   // Bytes of trailing agent stderr buffered per AgentInstance so the
   // daemon can include it in the diagnostic message when a spawn fails.
   // Bump if your agents emit large tracebacks you want surfaced.
@@ -87,6 +87,12 @@ const TuiConfig = z.object({
   // suppress them — the TUI hotkey ^T toggles this at runtime without
   // persisting back to config.
   showThoughts: z.boolean().default(true),
+  // Cap on entries kept in the cross-session global prompt-history file
+  // (~/.hydra-acp/prompt-history). This is the ^P / ^R recall list
+  // shared across all sessions; it's append-only on disk, so long-lived
+  // installs can grow past this — it's enforced at load time and per
+  // append in memory.
+  promptHistoryMaxEntries: z.number().int().positive().default(2_000),
 });
 
 const ExtensionName = z
@@ -154,6 +160,7 @@ export const HydraConfig = z.object({
     progressIndicator: true,
     defaultEnterAction: "amend",
     showThoughts: true,
+    promptHistoryMaxEntries: 2_000,
   }),
 });
 
