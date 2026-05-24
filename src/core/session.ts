@@ -537,8 +537,11 @@ export class Session {
     originatedBy = new Set<string>(),
     startIdx = 0,
   ): Promise<void> {
-    // Apply cumulative cost injection before the transformer chain so
-    // transformers see the same total-cost value that clients receive.
+    // Transformers and clients see the injected total; maybeApplyAgentUsage
+    // must see the raw params so it stores the agent's raw costAmount in
+    // _currentUsage, not the already-totalled value (which would double-count
+    // on the next injection pass).
+    const rawParams = params;
     let envelope = this.injectCumulativeCost(params);
     for (let i = startIdx; i < this.transformChain.length; i++) {
       const t = this.transformChain[i]!;
@@ -629,7 +632,7 @@ export class Session {
       this.recordAndBroadcast("session/update", envelope);
       return;
     }
-    if (this.maybeApplyAgentUsage(envelope)) {
+    if (this.maybeApplyAgentUsage(rawParams)) {
       this.recordAndBroadcast("session/update", envelope);
       return;
     }
@@ -2280,6 +2283,8 @@ export class Session {
         return this.runAgentCommand(arg);
       case "kill":
         return this.runKillCommand();
+      case "restart":
+        return this.runRestartCommand();
       default: {
         // Listed in HYDRA_COMMANDS but no dispatch case — wired up wrong.
         const err = new Error(
@@ -2511,6 +2516,64 @@ export class Session {
   private async runKillCommand(): Promise<unknown> {
     await this.close({ deleteRecord: false });
     return { stopReason: "end_turn" };
+  }
+
+  // Restart the underlying agent with a fresh session/new, preserving the
+  // conversation history. Unlike /hydra agent, this allows the same agentId
+  // — useful when the proxy has changed available models (e.g. opus became
+  // available after a quota reset) and the resumed session is locked to a
+  // stale model list.
+  private runRestartCommand(): Promise<unknown> {
+    if (!this.spawnReplacementAgent) {
+      throw withCode(
+        new Error("agent restart not configured for this session"),
+        JsonRpcErrorCodes.InternalError,
+      );
+    }
+    const spawnAgent = this.spawnReplacementAgent;
+    const agentId = this.agentId;
+    return this.enqueuePrompt(async () => {
+      const transcript = await this.buildSwitchTranscript(agentId);
+
+      const fresh = await spawnAgent({
+        agentId,
+        cwd: this.cwd,
+        agentArgs: this.agentArgs,
+      });
+      this.accumulateAndResetCost();
+      this.wireAgent(fresh.agent);
+
+      const oldAgent = this.agent;
+      this.agent = fresh.agent;
+      this.upstreamSessionId = fresh.upstreamSessionId;
+      this.agentMeta = fresh.agentMeta;
+      this.agentCapabilities = fresh.agentCapabilities;
+      this.agentAdvertisedCommands = [];
+      this.broadcastMergedCommands();
+      if (this.agentAdvertisedModels.length > 0) {
+        this.setAgentAdvertisedModels([]);
+      }
+      if (this.agentAdvertisedModes.length > 0) {
+        this.setAgentAdvertisedModes([]);
+      }
+      await oldAgent.kill().catch(() => undefined);
+
+      if (transcript) {
+        await this.runInternalPrompt(transcript).catch(() => undefined);
+      }
+
+      this.broadcastAgentSwitch(agentId, agentId);
+
+      const info = { agentId, upstreamSessionId: this.upstreamSessionId };
+      for (const handler of this.agentChangeHandlers) {
+        try {
+          handler(info);
+        } catch {
+          void 0;
+        }
+      }
+      return { stopReason: "end_turn" };
+    });
   }
 
   // Walk the persisted history and produce a labeled transcript suitable

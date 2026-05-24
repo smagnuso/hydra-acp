@@ -34,6 +34,12 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
     description:
       "Close this session (kills the agent; record is kept so it can be resumed later)",
   },
+  {
+    verb: "restart",
+    name: "hydra restart",
+    description:
+      "Restart the agent with a fresh session/new while preserving conversation history (useful when the proxy has changed available models)",
+  },
 ];
 
 const VERB_INDEX = new Map(HYDRA_COMMANDS.map((c) => [c.verb, c]));
