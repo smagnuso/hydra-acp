@@ -419,10 +419,16 @@ export class InputDispatcher {
       case "ctrl-r":
         return this.startHistorySearch();
       case "ctrl-s":
-        // ^s outside search is a no-op — terminal flow-control may also
-        // intercept it (XOFF) on some setups; inside search it walks
-        // forward toward newer matches.
-        return [];
+        // Outside history search, ^S aliases Shift+Enter / Ctrl+Enter
+        // (amend the in-flight turn). The chord exists because some
+        // terminals — notably libvte/gnome-terminal without the kitty
+        // keyboard protocol — don't deliver Shift+Enter reliably, so
+        // ^S gives those users a working alternative.
+        // Caveat: terminals with XON/XOFF flow control enabled
+        // (`stty -ixon` not set) will swallow ^S before it reaches us.
+        // Inside history search, this case never runs — feed() peels
+        // ^S there and routes it to retreatHistorySearch.
+        return this.amend();
       case "ctrl-u":
         this.killLine();
         return [];
@@ -988,22 +994,30 @@ export class InputDispatcher {
     return [{ type: "send", text, planMode, attachments }];
   }
 
-  // Shift+Enter: amend the in-flight turn. Editing a queued slot
-  // delegates to the existing queue-edit / queue-remove path — Shift+Enter
-  // there has no special meaning since the entry is already queued (not
-  // running). With an empty draft and no attachments we emit nothing
-  // (no-op). Otherwise emit an "amend" effect; the app decides whether
-  // to route through amend_prompt or fall through to a regular send.
+  // Shift+Enter (also Ctrl+Enter / ^S): amend the in-flight turn.
+  // While editing a queued slot, this is the "drop and amend" chord:
+  // emit queue-remove for the slot AND amend with the loaded (possibly
+  // edited) text, so the queued prompt becomes the amendment for the
+  // running turn in a single keystroke. Empty buffer + no attachments
+  // on a slot collapses to just queue-remove (matches empty-Enter).
+  // Outside queue editing, an empty draft is a no-op. The app decides
+  // whether to route the amend through amend_prompt or fall through to
+  // a regular send when no turn is in flight.
   private amend(): InputEffect[] {
     const text = this.bufferText();
     if (this.queueIndex >= 0 && this.queueIndex < this.queue.length) {
       const index = this.queueIndex;
+      const planMode = this.planMode;
       const attachments = [...this.attachments];
+      const empty = text.trim().length === 0 && attachments.length === 0;
       this.clearBuffer();
-      if (text.trim().length === 0) {
+      if (empty) {
         return [{ type: "queue-remove", index }];
       }
-      return [{ type: "queue-edit", index, text, attachments }];
+      return [
+        { type: "queue-remove", index },
+        { type: "amend", text, planMode, attachments },
+      ];
     }
     if (text.trim().length === 0 && this.attachments.length === 0) {
       return [];

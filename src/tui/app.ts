@@ -199,7 +199,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^V", "paste image from clipboard"],
   ["^O", "expand / collapse tools block"],
   null,
-  ["^R / ^S", "history reverse / forward search"],
+  ["^R", "history reverse search (^S walks forward once engaged)"],
   ["PgUp / PgDn", "scroll scrollback"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
@@ -1606,11 +1606,11 @@ async function runSession(
       config.tui.defaultEnterAction === "amend"
         ? [
             ["Enter", amendDesc],
-            ["Ctrl+Enter / Shift+Enter", enqueueDesc],
+            ["Ctrl+Enter / Shift+Enter / ^S", enqueueDesc],
           ]
         : [
             ["Enter", enqueueDesc],
-            ["Ctrl+Enter / Shift+Enter", amendDesc],
+            ["Ctrl+Enter / Shift+Enter / ^S", amendDesc],
           ];
     return [...head, ...HELP_ENTRIES_TAIL];
   };

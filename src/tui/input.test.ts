@@ -570,6 +570,67 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual([""]);
   });
 
+  it("Shift+Enter on a loaded queue slot drops it and emits amend with the edited text", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["first", "second"]);
+    feed(d, [k("up"), ch("!")]);
+    expect(d.state().buffer).toEqual(["second!"]);
+    expect(d.state().queueIndex).toBe(1);
+    expect(feed(d, [k("shift-enter")])).toEqual([
+      { type: "queue-remove", index: 1 },
+      { type: "amend", text: "second!", planMode: false, attachments: [] },
+    ]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Shift+Enter on a loaded queue slot with empty text only removes (no amend)", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["queued"]);
+    feed(d, [k("up"), k("ctrl-u")]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(feed(d, [k("shift-enter")])).toEqual([
+      { type: "queue-remove", index: 0 },
+    ]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
+  it("Ctrl+Enter mirrors Shift+Enter on a loaded queue slot", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["queued"]);
+    feed(d, [k("up")]);
+    expect(feed(d, [k("ctrl-enter")])).toEqual([
+      { type: "queue-remove", index: 0 },
+      { type: "amend", text: "queued", planMode: false, attachments: [] },
+    ]);
+  });
+
+  it("^S outside history search emits amend on a normal draft", () => {
+    const d = new InputDispatcher();
+    feed(d, [ch("h"), ch("i")]);
+    expect(feed(d, [k("ctrl-s")])).toEqual([
+      { type: "amend", text: "hi", planMode: false, attachments: [] },
+    ]);
+    expect(d.state().buffer).toEqual([""]);
+  });
+
+  it("^S on an empty draft is a no-op", () => {
+    const d = new InputDispatcher();
+    expect(feed(d, [k("ctrl-s")])).toEqual([]);
+  });
+
+  it("^S on a loaded queue slot drops it and emits amend (alias for Shift+Enter)", () => {
+    const d = new InputDispatcher();
+    d.setQueue(["first", "second"]);
+    feed(d, [k("up")]);
+    expect(d.state().queueIndex).toBe(1);
+    expect(feed(d, [k("ctrl-s")])).toEqual([
+      { type: "queue-remove", index: 1 },
+      { type: "amend", text: "second", planMode: false, attachments: [] },
+    ]);
+    expect(d.state().queueIndex).toBe(-1);
+  });
+
   it("Home jumps to buffer start; pressing again emits scroll-to-top", () => {
     const d = new InputDispatcher();
     feed(d, [ch("a"), k("alt-enter"), ch("b"), ch("c")]);
@@ -874,12 +935,6 @@ describe("InputDispatcher", () => {
     // No wrap at the newest match
     feed(d, [k("ctrl-s")]);
     expect(d.state().buffer).toEqual(["git commit"]);
-  });
-
-  it("Ctrl+S outside history search is a no-op", () => {
-    const d = new InputDispatcher({ history: ["one"] });
-    expect(feed(d, [k("ctrl-s")])).toEqual([]);
-    expect(d.state().buffer).toEqual([""]);
   });
 
   describe("attachments", () => {
