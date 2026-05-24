@@ -789,6 +789,173 @@ describe("SessionManager: history persistence", () => {
       expect(merged).toContain("hydra title");
     });
 
+    it("pushes persisted currentMode back to the agent via session/set_mode on resurrect (regression: plan mode silently reverted to default on daemon restart)", async () => {
+      const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const sessionId = live.sessionId;
+      mocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentMode: "plan",
+        },
+      });
+      await eventually(
+        () => manager.loadFromDisk(sessionId),
+        (p) => p?.currentMode === "plan",
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await manager.loadFromDisk(sessionId);
+      const revived = await manager.resurrect(resumeParams!);
+
+      expect(revived.currentMode).toBe("plan");
+
+      // mocks[1] is the freshly spawned agent for the resurrect. The
+      // default spawner queue answers initialize + session/load; the
+      // set_mode call falls through to the vi.fn() default (undefined),
+      // which is a fine response for a void method.
+      const requestMock = mocks[1]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      const setModeCall = requestMock.mock.calls.find(
+        (c) => c[0] === "session/set_mode",
+      );
+      expect(setModeCall).toBeDefined();
+      expect(setModeCall?.[1]).toMatchObject({
+        sessionId: revived.upstreamSessionId,
+        modeId: "plan",
+      });
+    });
+
+    it("skips session/set_mode on resurrect when the agent already reports the persisted mode", async () => {
+      // Replace the default spawner so the resurrect agent's session/load
+      // returns currentModeId: "plan" — i.e. the agent is already in the
+      // mode we want, so no reapply is needed.
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("claude-code")]),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<
+            typeof vi.fn
+          >;
+          if (callIndex === 0) {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_already_plan" });
+          } else {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({
+                sessionId: "u_already_plan",
+                currentModeId: "plan",
+              });
+          }
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({
+        cwd: "/w",
+        agentId: "claude-code",
+      });
+      const sessionId = live.sessionId;
+      localMocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentMode: "plan",
+        },
+      });
+      await eventually(
+        () => localManager.loadFromDisk(sessionId),
+        (p) => p?.currentMode === "plan",
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      const revived = await localManager.resurrect(resumeParams!);
+      expect(revived.currentMode).toBe("plan");
+
+      const requestMock = localMocks[1]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      const setModeCall = requestMock.mock.calls.find(
+        (c) => c[0] === "session/set_mode",
+      );
+      expect(setModeCall).toBeUndefined();
+    });
+
+    it("skips session/set_mode on resurrect when the persisted mode is not in the agent's advertised modes", async () => {
+      // Resurrect agent advertises a single mode "default" — the
+      // persisted "plan" is unknown to the new agent, so we should not
+      // blindly forward it (would be rejected, or worse, accepted as
+      // garbage). Effective mode falls back to the agent's reported
+      // mode.
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("claude-code")]),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<
+            typeof vi.fn
+          >;
+          if (callIndex === 0) {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_no_plan_mode" });
+          } else {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({
+                sessionId: "u_no_plan_mode",
+                currentModeId: "default",
+                availableModes: [{ id: "default" }],
+              });
+          }
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({
+        cwd: "/w",
+        agentId: "claude-code",
+      });
+      const sessionId = live.sessionId;
+      localMocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentMode: "plan",
+        },
+      });
+      await eventually(
+        () => localManager.loadFromDisk(sessionId),
+        (p) => p?.currentMode === "plan",
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      const revived = await localManager.resurrect(resumeParams!);
+      // Falls back to the agent's reported mode rather than the
+      // unsupported persisted one.
+      expect(revived.currentMode).toBe("default");
+
+      const requestMock = localMocks[1]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      const setModeCall = requestMock.mock.calls.find(
+        (c) => c[0] === "session/set_mode",
+      );
+      expect(setModeCall).toBeUndefined();
+    });
+
     it("preserves cumulative cost across resurrect (regression: meta.json overwritten with raw cost after restart)", async () => {
       const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
       const sessionId = live.sessionId;

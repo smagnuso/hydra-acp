@@ -358,6 +358,30 @@ export class SessionManager {
       agent.connection.drainBuffered("session/update");
     }
 
+    // Push the persisted mode back to the freshly loaded agent so a
+    // session that was in plan mode (or any non-default mode) doesn't
+    // silently revert on restart. The agent boots in its own default
+    // after session/load and would otherwise overwrite our snapshot
+    // via a later current_mode_update.
+    const agentReportedMode = extractInitialCurrentMode(loadResult ?? {});
+    const advertisedModes =
+      params.agentModes ??
+      nonEmptyOrUndefined(extractInitialModes(loadResult ?? {}));
+    this.logger?.info(
+      `resurrect: sessionId=${params.hydraSessionId} persistedMode=${JSON.stringify(params.currentMode)} agentReportedMode=${JSON.stringify(agentReportedMode)} advertisedModes=${JSON.stringify(advertisedModes?.map((m) => m.id))}`,
+    );
+    const effectiveMode = await restoreCurrentMode({
+      agent,
+      upstreamSessionId: params.upstreamSessionId,
+      persistedMode: params.currentMode,
+      agentReportedMode,
+      advertisedModes,
+      logger: this.logger,
+    });
+    this.logger?.info(
+      `resurrect: effectiveMode=${JSON.stringify(effectiveMode)} for sessionId=${params.hydraSessionId}`,
+    );
+
     const session = new Session({
       sessionId: params.hydraSessionId,
       cwd: params.cwd,
@@ -381,12 +405,10 @@ export class SessionManager {
       // session/load response body.
       currentModel:
         params.currentModel ?? extractInitialModel(loadResult ?? {}),
-      currentMode:
-        params.currentMode ?? extractInitialCurrentMode(loadResult ?? {}),
+      currentMode: effectiveMode,
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
-      agentModes:
-        params.agentModes ?? nonEmptyOrUndefined(extractInitialModes(loadResult ?? {})),
+      agentModes: advertisedModes,
       // Always prefer the fresh list from session/load over the persisted
       // snapshot — the proxy's available models can change between daemon
       // restarts (quota resets, rollouts), so meta.json is intentionally
@@ -427,6 +449,15 @@ export class SessionManager {
       mcpServers: [],
       onInstallProgress: params.onInstallProgress,
     });
+    const advertisedModes = params.agentModes ?? fresh.initialModes;
+    const effectiveMode = await restoreCurrentMode({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedMode: params.currentMode,
+      agentReportedMode: fresh.initialMode,
+      advertisedModes,
+      logger: this.logger,
+    });
     const session = new Session({
       sessionId: params.hydraSessionId,
       cwd,
@@ -447,10 +478,10 @@ export class SessionManager {
       // Prefer the stored value (set by a previous current_model_update);
       // fall back to whatever the agent ships in its session/new response.
       currentModel: params.currentModel ?? fresh.initialModel,
-      currentMode: params.currentMode ?? fresh.initialMode,
+      currentMode: effectiveMode,
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
-      agentModes: params.agentModes ?? fresh.initialModes,
+      agentModes: advertisedModes,
       agentModels: params.agentModels ?? fresh.initialModels,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
@@ -1749,6 +1780,68 @@ export function extractInitialCurrentMode(
     }
   }
   return undefined;
+}
+
+// Push a persisted mode back to a freshly loaded/spawned agent so a
+// session that was in plan (or any non-default) mode doesn't silently
+// revert on daemon restart. The agent boots in its own default after
+// session/load and would otherwise emit a current_mode_update that
+// overwrites our snapshot. Returns the mode we should record on the
+// Session — either the persisted one (when we successfully pushed it,
+// or the agent already agrees) or what the agent reported (when we
+// skipped the push because the mode isn't advertised, or the call
+// failed).
+async function restoreCurrentMode(opts: {
+  agent: AgentInstance;
+  upstreamSessionId: string;
+  persistedMode: string | undefined;
+  agentReportedMode: string | undefined;
+  advertisedModes: AdvertisedMode[] | undefined;
+  logger?: AgentLogger;
+}): Promise<string | undefined> {
+  const {
+    agent,
+    upstreamSessionId,
+    persistedMode,
+    agentReportedMode,
+    advertisedModes,
+    logger,
+  } = opts;
+  if (!persistedMode) {
+    return agentReportedMode;
+  }
+  if (persistedMode === agentReportedMode) {
+    return persistedMode;
+  }
+  if (
+    advertisedModes &&
+    advertisedModes.length > 0 &&
+    !advertisedModes.some((m) => m.id === persistedMode)
+  ) {
+    const known = advertisedModes.map((m) => m.id).join(", ");
+    logger?.warn(
+      `resurrect: persisted currentMode=${JSON.stringify(persistedMode)} not in agent's availableModes ([${known}]); skipping session/set_mode, session will use ${JSON.stringify(agentReportedMode)}`,
+    );
+    return agentReportedMode;
+  }
+  try {
+    logger?.info(
+      `resurrect: pushing persisted modeId=${JSON.stringify(persistedMode)} to agent (agentReported=${JSON.stringify(agentReportedMode)})`,
+    );
+    await agent.connection.request("session/set_mode", {
+      sessionId: upstreamSessionId,
+      modeId: persistedMode,
+    });
+    logger?.info(
+      `resurrect: session/set_mode accepted, effectiveMode=${JSON.stringify(persistedMode)}`,
+    );
+    return persistedMode;
+  } catch (err) {
+    logger?.warn(
+      `resurrect: session/set_mode rejected by agent for modeId=${JSON.stringify(persistedMode)} (${(err as Error).message}); session will use ${JSON.stringify(agentReportedMode)}`,
+    );
+    return agentReportedMode;
+  }
 }
 
 function parseModesList(list: unknown): AdvertisedMode[] {

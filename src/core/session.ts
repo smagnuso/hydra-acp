@@ -1982,6 +1982,9 @@ export class Session {
     if (!trimmed || trimmed === this.currentMode) {
       return true;
     }
+    this.logger?.info(
+      `current_mode_update: sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
+    );
     this.currentMode = trimmed;
     for (const handler of this.modeHandlers) {
       try {
@@ -2187,6 +2190,28 @@ export class Session {
 
   onModeChange(handler: (mode: string) => void): void {
     this.modeHandlers.push(handler);
+  }
+
+  // Apply a mode change initiated by a client request (session/set_mode)
+  // when the agent doesn't emit a current_mode_update notification on its
+  // own. Fires modeHandlers so the persistence hook and any other listeners
+  // see the change, identical to the agent-notification path.
+  applyModeChange(modeId: string): void {
+    const trimmed = modeId.trim();
+    if (!trimmed || trimmed === this.currentMode) {
+      return;
+    }
+    this.logger?.info(
+      `applyModeChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
+    );
+    this.currentMode = trimmed;
+    for (const handler of this.modeHandlers) {
+      try {
+        handler(trimmed);
+      } catch {
+        void 0;
+      }
+    }
   }
 
   onUsageChange(handler: (usage: UsageSnapshot) => void): void {

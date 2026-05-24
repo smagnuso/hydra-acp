@@ -903,6 +903,42 @@ export function registerAcpWsEndpoint(
       return decision.session.forwardRequest("session/set_model", rawParams);
     });
 
+    // session/set_mode: forward to the agent then immediately apply the
+    // mode change on the daemon-side Session. The agent does not emit a
+    // current_mode_update notification after session/set_mode, so without
+    // this intercept Session.currentMode would stay stale and meta.json
+    // would never be updated — meaning the mode reverts to "default" on
+    // every daemon restart.
+    connection.onRequest("session/set_mode", async (rawParams) => {
+      const params = rawParams as { sessionId?: unknown; modeId?: unknown } | undefined;
+      const sessionIdField = params?.sessionId;
+      if (typeof sessionIdField === "string") {
+        denyIfReadonly(sessionIdField, "session/set_mode");
+      }
+      if (!params || typeof params.sessionId !== "string") {
+        const err = new Error("session/set_mode requires string sessionId") as Error & { code: number };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        throw err;
+      }
+      if (typeof params.modeId !== "string") {
+        const err = new Error("session/set_mode requires string modeId") as Error & { code: number };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        throw err;
+      }
+      const session = deps.manager.get(params.sessionId);
+      if (!session) {
+        const err = new Error(`session ${params.sessionId} not found`) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      const result = await session.forwardRequest("session/set_mode", rawParams);
+      // Agent doesn't broadcast current_mode_update after set_mode, so
+      // apply the change directly so persistence and attach-response meta
+      // stay accurate.
+      session.applyModeChange(params.modeId);
+      return result;
+    });
+
     connection.setDefaultHandler(async (rawParams, method) => {
       if (
         !method.startsWith("session/") ||
