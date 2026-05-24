@@ -1560,10 +1560,12 @@ export class Session {
   // already present. Fires session.opened on the new transformer so it gets
   // the same lifecycle signal it would have received at session creation.
   addTransformer(ref: TransformerRef): void {
-    if (this.transformChain.some((t) => t.name === ref.name)) {
-      return;
+    const existing = this.transformChain.findIndex((t) => t.name === ref.name);
+    if (existing >= 0) {
+      this.transformChain[existing] = ref;
+    } else {
+      this.transformChain.push(ref);
     }
-    this.transformChain.push(ref);
     if (ref.intercepts.has("lifecycle:session.opened")) {
       void ref.connection
         .notify("transformer/session_event", {

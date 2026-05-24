@@ -523,6 +523,7 @@ export function registerAcpWsEndpoint(
           ...resurrectParams,
           onInstallProgress: makeInstallProgressForwarder(connection),
         });
+        wireDefaultTransformers(session, deps);
       }
       const client = bindClientToSession(
         connection,
@@ -629,6 +630,7 @@ export function registerAcpWsEndpoint(
           `session/prompt auto-resurrecting cold sessionId=${params.sessionId}`,
         );
         session = await deps.manager.resurrect(fromDisk);
+        wireDefaultTransformers(session, deps);
         const client = bindClientToSession(
           connection,
           session,
@@ -821,6 +823,7 @@ export function registerAcpWsEndpoint(
           throw err;
         }
         session = await deps.manager.resurrect(fromDisk);
+        wireDefaultTransformers(session, deps);
       }
       const client = bindClientToSession(connection, session, state);
       const { entries: replay } = await session.attach(client, "pending_only");
@@ -1307,6 +1310,25 @@ function buildInitializeResult(): InitializeResult {
       promptPipelining: false,
     }),
   };
+}
+
+// Wire any connected default transformers into a freshly resurrected
+// session. Resurrect doesn't carry a transformer chain (ResurrectParams
+// has none), so without this the session runs chain-free after a daemon
+// restart until the next session/new.
+function wireDefaultTransformers(
+  session: Session,
+  deps: { manager?: SessionManager; transformers?: TransformerManager },
+): void {
+  if (!deps.transformers || !deps.manager) {
+    return;
+  }
+  for (const name of deps.manager.defaultTransformers) {
+    const ref = deps.transformers.resolveChain([name])[0];
+    if (ref) {
+      session.addTransformer(ref);
+    }
+  }
 }
 
 function bindClientToSession(

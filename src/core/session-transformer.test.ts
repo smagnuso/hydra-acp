@@ -722,14 +722,17 @@ describe("Session.addTransformer — retroactive wiring", () => {
     expect(t.requests).toHaveLength(0);
   });
 
-  it("is a no-op when the transformer is already in the chain", async () => {
-    const t = fakeTransformerConn({ action: "continue" });
-    const ref = makeRef("t1", ["request:session/prompt"], t.conn);
-    const { session, requestMock } = makeSession([ref]);
-    session.addTransformer(ref);
+  it("replaces an existing entry when a transformer with the same name reconnects", async () => {
+    const old = fakeTransformerConn({ action: "continue" });
+    const oldRef = makeRef("t1", ["request:session/prompt"], old.conn);
+    const { session, requestMock } = makeSession([oldRef]);
+    const fresh = fakeTransformerConn({ action: "continue" });
+    const freshRef = makeRef("t1", ["request:session/prompt"], fresh.conn);
+    session.addTransformer(freshRef);
     await session.forwardRequest("session/prompt", { sessionId: "sess_test", prompt: [] });
-    // Called exactly once — not twice (would happen if chain had two entries).
-    expect(t.requests).toHaveLength(1);
+    // Only the new connection is called — old is replaced, not duplicated.
+    expect(old.requests).toHaveLength(0);
+    expect(fresh.requests).toHaveLength(1);
     requestMock.mockResolvedValue({ stopReason: "end_turn" });
   });
 
