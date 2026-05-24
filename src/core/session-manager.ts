@@ -225,6 +225,7 @@ export class SessionManager {
       logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
+      listSessions: () => this.list(),
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: fresh.initialModel,
@@ -371,6 +372,7 @@ export class SessionManager {
       logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
+      listSessions: () => this.list(),
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       // Prefer what we previously stored from a current_model_update; if
@@ -435,6 +437,7 @@ export class SessionManager {
       logger: this.logger,
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
+      listSessions: () => this.list(),
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       // Prefer the stored value (set by a previous current_model_update);

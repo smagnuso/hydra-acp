@@ -154,6 +154,10 @@ export interface SessionInit {
   // the transformer chain. 0 disables. Defaults to 30 seconds.
   idleEventTimeoutMs?: number;
   parentSessionId?: string;
+  // Optional callback used by /sessions to enumerate all daemon sessions.
+  // Provided by SessionManager; omitted in tests that construct Session
+  // directly, in which case /sessions emits a not-available notice.
+  listSessions?: () => Promise<{ sessionId: string; title?: string; cwd: string; agentId?: string; currentModel?: string }[]>;
 }
 
 export interface CloseOptions {
@@ -323,6 +327,7 @@ export class Session {
   // and noisy state churn keep a quiet session alive forever.
   private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
+  private listSessions: SessionInit["listSessions"];
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
   // Outstanding "processing" claims: token → claim waiting for respondsTo discharge.
@@ -429,6 +434,7 @@ export class Session {
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.listSessions = init.listSessions;
     this.logger = init.logger;
     this.transformChain = init.transformChain ?? [];
     if (init.firstPromptSeeded) {
@@ -452,6 +458,9 @@ export class Session {
   private broadcastMergedCommands(): void {
     const merged: AdvertisedCommand[] = [
       ...hydraCommandsAsAdvertised(),
+      { name: "model <model-id>", description: "Switch model; omit arg to list available models" },
+      { name: "sessions", description: "List all sessions" },
+      { name: "help", description: "Show available commands" },
       ...this.agentAdvertisedCommands,
     ];
     this.recordAndBroadcast("session/update", {
@@ -2277,6 +2286,89 @@ export class Session {
     }
   }
 
+  private async handleSessionsCommand(): Promise<unknown> {
+    let text: string;
+    if (!this.listSessions) {
+      text = "_(session listing not available)_";
+    } else {
+      const sessions = await this.listSessions();
+      if (sessions.length === 0) {
+        text = "_(no sessions)_";
+      } else {
+        const lines = sessions.map((s) => {
+          const id = s.sessionId.replace(/^hydra_session_/, "").slice(0, 12);
+          const model = s.currentModel ? ` · ${s.currentModel}` : "";
+          const marker = s.sessionId === this.sessionId ? " ◀" : "";
+          const title = s.title ? `  ${s.title}` : "";
+          return `\`${id}\`  ${s.cwd}${model}${marker}${title}`;
+        });
+        text = `Sessions (${sessions.length}):\n${lines.join("\n")}`;
+      }
+    }
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `\n${text}\n` },
+        _meta: { "hydra-acp": { synthetic: true } },
+      },
+    });
+    return { stopReason: "end_turn" };
+  }
+
+  private handleHelpCommand(): Promise<unknown> {
+    const commands = this.mergedAvailableCommands();
+    const lines = commands.map((c) => {
+      const desc = c.description ? `  ${c.description}` : "";
+      return `\`/${c.name}\`${desc}`;
+    });
+    const text = lines.length > 0
+      ? `Available commands:\n${lines.join("\n")}`
+      : "_(no commands advertised)_";
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `\n${text}\n` },
+        _meta: { "hydra-acp": { synthetic: true } },
+      },
+    });
+    return Promise.resolve({ stopReason: "end_turn" });
+  }
+
+  private async handleModelCommand(text: string): Promise<unknown> {
+    const arg = text.slice("/model".length).trim();
+    if (arg === "") {
+      const models = this.agentAdvertisedModels;
+      const current = this.currentModel;
+      let body: string;
+      if (models.length === 0) {
+        body = current ? `Current model: ${current}` : "_(no models advertised yet)_";
+      } else {
+        const lines = models.map((m) => {
+          const marker = m.modelId === current ? " ◀" : "";
+          const desc = m.name && m.name !== m.modelId ? `  ${m.name}` : "";
+          return `${m.modelId}${marker}${desc}`;
+        });
+        body = lines.join("\n");
+      }
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `\n${body}\n` },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
+    await this.forwardRequest("session/set_model", {
+      sessionId: this.sessionId,
+      modelId: arg,
+    });
+    return { stopReason: "end_turn" };
+  }
+
   // Runs as a normal queued prompt (so it serializes after any in-flight
   // turn). With an arg, sets the title directly. Without one, runs a
   // suppressed sub-prompt to the agent and uses its reply as the title.
@@ -3217,6 +3309,30 @@ export class Session {
       return entry.task();
     }
     this.broadcastPromptReceived(entry);
+    // Intercept daemon built-in slash commands here — after the prompt has
+    // gone through the queue (echo flushed, prompt_received broadcast) but
+    // before forwarding to the agent.
+    const promptText = extractPromptText(entry.prompt).trim();
+    if (
+      promptText === "/model" ||
+      promptText.startsWith("/model ") ||
+      promptText === "/sessions" ||
+      promptText === "/help"
+    ) {
+      let result: unknown;
+      if (promptText === "/sessions") {
+        result = await this.handleSessionsCommand();
+      } else if (promptText === "/help") {
+        result = await this.handleHelpCommand();
+      } else {
+        result = await this.handleModelCommand(promptText);
+      }
+      if (!this.closed) {
+        this.broadcastTurnComplete(entry.clientId, result, entry.messageId, entry.wasAmend);
+      }
+      this.clearAmendIfMatches(entry.messageId);
+      return result;
+    }
     let response: unknown;
     try {
       response = await this.agent.connection.request<unknown>(
