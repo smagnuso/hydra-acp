@@ -60,7 +60,10 @@ import { readClipboard } from "./clipboard.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
-import { parseReattachResponse } from "./reconnect-state.js";
+import {
+  parseReattachResponse,
+  type ReattachResponseFields,
+} from "./reconnect-state.js";
 import {
   mapUpdate,
   normalizeAdvertisedCommands,
@@ -3293,12 +3296,13 @@ async function runSession(
     reconnectReplayBuffer = [];
     let appliedPolicy: string | undefined;
     let attachErr: Error | undefined;
+    let fields: ReattachResponseFields | undefined;
     try {
       const resp = await stream.request(attachReq);
       if (resp.error) {
         throw new Error(resp.error.message);
       }
-      const fields = parseReattachResponse(resp.result);
+      fields = parseReattachResponse(resp.result);
       appliedPolicy = fields.appliedPolicy;
       // Refresh ownClientId from the reattach response. The daemon mints
       // a fresh clientId on every session/attach, including transparent
@@ -3353,7 +3357,9 @@ async function runSession(
     // Reconcile pendingTurns against the daemon's authoritative idle state.
     // If the daemon restarted mid-turn the turn_complete was never emitted,
     // so pendingTurns can be > 0 even though the session is now idle.
-    if (fields.turnStartedAt === undefined && pendingTurns > 0) {
+    // Skip when fields is undefined (attach errored) — we have no
+    // authoritative signal to reconcile against.
+    if (fields && fields.turnStartedAt === undefined && pendingTurns > 0) {
       adjustPendingTurns(-pendingTurns);
     }
     screen.setBanner({
