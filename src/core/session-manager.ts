@@ -731,16 +731,17 @@ export class SessionManager {
               modelId: desired,
             });
             initialModel = desired;
-          } catch {
+          } catch (err) {
             // Bad / unsupported model id in config shouldn't break session
             // creation — fall back to whatever the agent picked itself.
-            // The user-visible signal is just that the header keeps the
-            // old model; misconfigurations surface in daemon logs upstream.
+            this.logger?.warn(
+              `defaultModels[${params.agentId}]=${JSON.stringify(desired)} rejected by agent (${(err as Error).message}); session will use ${JSON.stringify(initialModel)}`,
+            );
           }
         } else {
           const known = initialModels.map((m) => m.modelId).join(", ");
-          process.stderr.write(
-            `hydra-acp: defaultModels[${params.agentId}]=${JSON.stringify(desired)} is not in the agent's availableModels (${known}); skipping session/set_model\n`,
+          this.logger?.warn(
+            `defaultModels[${params.agentId}]=${JSON.stringify(desired)} not in agent's availableModels ([${known}]); skipping session/set_model, session will use ${JSON.stringify(initialModel)}`,
           );
         }
       }

@@ -1849,12 +1849,16 @@ describe("SessionManager: defaultModels", () => {
         },
       });
 
+    const warnMessages: string[] = [];
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => mock.agent,
       undefined,
       // Intentionally a claude-acp-shaped id on an opencode agent.
-      { defaultModels: { opencode: "claude-opus-4-7[1m]" } },
+      {
+        defaultModels: { opencode: "claude-opus-4-7[1m]" },
+        logger: { info: () => {}, warn: (msg) => warnMessages.push(msg) },
+      },
     );
 
     const session = await manager.create({ cwd: "/work", agentId: "opencode" });
@@ -1867,6 +1871,10 @@ describe("SessionManager: defaultModels", () => {
     ]);
     // The session falls through to whatever the agent already picked.
     expect(session.currentModel).toBe("ncp-anthropic/claude-opus-4-7");
+    // A warn was emitted so the operator can see why opus wasn't applied.
+    expect(warnMessages.length).toBe(1);
+    expect(warnMessages[0]).toContain("claude-opus-4-7[1m]");
+    expect(warnMessages[0]).toContain("availableModels");
     // And the advertised list propagates into the in-memory snapshot.
     expect(session.availableModels()).toEqual([
       { modelId: "ncp-anthropic/claude-opus-4-7" },
