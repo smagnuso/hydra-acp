@@ -1534,6 +1534,24 @@ export class Session {
     });
   }
 
+  // Add a transformer to this session's chain retroactively. No-ops if it's
+  // already present. Fires session.opened on the new transformer so it gets
+  // the same lifecycle signal it would have received at session creation.
+  addTransformer(ref: TransformerRef): void {
+    if (this.transformChain.some((t) => t.name === ref.name)) {
+      return;
+    }
+    this.transformChain.push(ref);
+    if (ref.intercepts.has("lifecycle:session.opened")) {
+      void ref.connection
+        .notify("transformer/session_event", {
+          event: "session.opened",
+          sessionId: this.sessionId,
+        })
+        .catch(() => undefined);
+    }
+  }
+
   // Walk the request-side chain then forward to the agent.
   // originatedBy: transformer names already in the lineage — skipped for loop
   //   prevention and to implement resume-routing on re-entry from emit_message.

@@ -162,6 +162,17 @@ export function registerAcpWsEndpoint(
             connection,
             intercepts,
           );
+          // Retroactively wire into live sessions that use this transformer
+          // by default. Covers sessions that opened before the transformer
+          // process was ready (daemon restart, transformer crash+recovery).
+          if (deps.manager?.defaultTransformers.includes(processIdentity.name)) {
+            const ref = deps.transformers.resolveChain([processIdentity.name])[0];
+            if (ref) {
+              for (const session of deps.manager.liveSessions()) {
+                session.addTransformer(ref);
+              }
+            }
+          }
         }
         return { ack: true };
       });

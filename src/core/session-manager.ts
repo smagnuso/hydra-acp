@@ -948,6 +948,10 @@ export class SessionManager {
     return this.sessions.get(sessionId);
   }
 
+  liveSessions(): IterableIterator<Session> {
+    return this.sessions.values();
+  }
+
   // Snapshot of which agent versions are currently in use by live
   // sessions, keyed by agentId. Read by the registry-fetch prune sweep
   // so it can skip install dirs that still back a running process.

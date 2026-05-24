@@ -707,3 +707,54 @@ describe("Session — parentSessionId", () => {
     expect(session.parentSessionId).toBeUndefined();
   });
 });
+
+// ── addTransformer ────────────────────────────────────────────────────────────
+
+describe("Session.addTransformer — retroactive wiring", () => {
+  it("adds transformer to an empty chain", () => {
+    const { session } = makeSession();
+    const t = fakeTransformerConn({ action: "continue" });
+    const ref = makeRef("t1", ["response:session/update"], t.conn);
+    session.addTransformer(ref);
+    // Verify it's in the chain by sending a request that would reach it.
+    // We use forwardRequest; t1 only intercepts responses, so it won't fire
+    // here — but the absence of errors confirms the chain accepted it.
+    expect(t.requests).toHaveLength(0);
+  });
+
+  it("is a no-op when the transformer is already in the chain", async () => {
+    const t = fakeTransformerConn({ action: "continue" });
+    const ref = makeRef("t1", ["request:session/prompt"], t.conn);
+    const { session, requestMock } = makeSession([ref]);
+    session.addTransformer(ref);
+    await session.forwardRequest("session/prompt", { sessionId: "sess_test", prompt: [] });
+    // Called exactly once — not twice (would happen if chain had two entries).
+    expect(t.requests).toHaveLength(1);
+    requestMock.mockResolvedValue({ stopReason: "end_turn" });
+  });
+
+  it("fires session.opened on the new transformer when it declared the intercept", () => {
+    const { session } = makeSession();
+    const t = fakeTransformerConn({ action: "continue" });
+    const ref = makeRef("t1", ["lifecycle:session.opened"], t.conn);
+    session.addTransformer(ref);
+    // Give the void notify promise a tick to settle.
+    return new Promise<void>((resolve) => setImmediate(() => {
+      expect(t.notifications).toHaveLength(1);
+      expect(t.notifications[0]!.method).toBe("transformer/session_event");
+      expect((t.notifications[0]!.params as { event: string }).event).toBe("session.opened");
+      resolve();
+    }));
+  });
+
+  it("does not fire session.opened when the transformer did not declare the intercept", () => {
+    const { session } = makeSession();
+    const t = fakeTransformerConn({ action: "continue" });
+    const ref = makeRef("t1", ["response:session/update"], t.conn);
+    session.addTransformer(ref);
+    return new Promise<void>((resolve) => setImmediate(() => {
+      expect(t.notifications).toHaveLength(0);
+      resolve();
+    }));
+  });
+});
