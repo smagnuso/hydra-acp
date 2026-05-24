@@ -1005,6 +1005,7 @@ async function runSession(
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
   let initialModes: AvailableMode[] | undefined;
+  let knownModels: string[] = [];
   // Snapshot of the daemon-owned prompt queue at attach time. Lets the
   // chip row paint stale-but-correct queue state right after the
   // dispatcher is constructed, without waiting for new
@@ -1064,6 +1065,9 @@ async function runSession(
     if (hydraMeta.availableModes) {
       initialModes = hydraMeta.availableModes;
     }
+    if (hydraMeta.availableModels && hydraMeta.availableModels.length > 0) {
+      knownModels = hydraMeta.availableModels.map((m) => m.modelId);
+    }
     initialQueue = hydraMeta.queue;
   } else {
     const attached = (await conn.request("session/attach", {
@@ -1120,6 +1124,9 @@ async function runSession(
     }
     if (hydraMeta.availableModes) {
       initialModes = hydraMeta.availableModes;
+    }
+    if (hydraMeta.availableModels && hydraMeta.availableModels.length > 0) {
+      knownModels = hydraMeta.availableModels.map((m) => m.modelId);
     }
     initialQueue = hydraMeta.queue;
   }
@@ -2495,13 +2502,23 @@ async function runSession(
       case "/model": {
         const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
         if (arg === "") {
-          screen.appendLines([
-            {
-              prefix: "  ",
-              body: "Usage: /model <model-id>",
-              bodyStyle: "info",
-            },
-          ]);
+          if (knownModels.length > 0) {
+            screen.appendLines(
+              knownModels.map((id) => ({
+                prefix: "  ",
+                body: id,
+                bodyStyle: "info" as const,
+              })),
+            );
+          } else {
+            screen.appendLines([
+              {
+                prefix: "  ",
+                body: "Usage: /model <model-id>",
+                bodyStyle: "info",
+              },
+            ]);
+          }
           return true;
         }
         conn
@@ -3062,6 +3079,9 @@ async function runSession(
       // Sessionbar reflects live state; scrollback still gets the line
       // below for a visible audit trail.
       screen.setSessionbar({ model: event.model });
+      if (event.availableModels && event.availableModels.length > 0) {
+        knownModels = event.availableModels;
+      }
     }
     const formatted = formatEvent(event);
     if (formatted.length > 0) {

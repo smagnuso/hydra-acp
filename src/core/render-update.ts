@@ -80,7 +80,7 @@ export type RenderEvent =
     }
   | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean; amended?: boolean }
   | { kind: "mode-changed"; mode: string }
-  | { kind: "model-changed"; model: string }
+  | { kind: "model-changed"; model: string; availableModels?: string[] }
   | { kind: "turn-complete"; stopReason?: string; amended?: boolean }
   | {
       kind: "usage-update";
@@ -550,7 +550,24 @@ function mapModel(u: UpdateLike): RenderEvent | null {
   if (!model) {
     return null;
   }
-  return { kind: "model-changed", model: sanitizeSingleLine(model) };
+  const raw = u.availableModels;
+  const availableModels: string[] | undefined =
+    Array.isArray(raw)
+      ? (raw as unknown[])
+          .map((m) =>
+            typeof m === "object" && m !== null
+              ? ((m as Record<string, unknown>).modelId as string | undefined)
+              : typeof m === "string"
+              ? m
+              : undefined,
+          )
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+      : undefined;
+  return {
+    kind: "model-changed",
+    model: sanitizeSingleLine(model),
+    ...(availableModels && availableModels.length > 0 ? { availableModels } : {}),
+  };
 }
 
 function mapTurnComplete(u: UpdateLike): RenderEvent {
