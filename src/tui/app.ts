@@ -3493,7 +3493,7 @@ async function resolveSession(
     // picker returned readonly:true.
     opts.readonly = choice.readonly === true;
     // First-launch-on-this-machine for an imported session: route through
-    // the run-vs-view dialog (and on run-local, a cwd dialog). Cancel
+    // the fork-vs-view dialog (and on fork-local, a cwd dialog). Cancel
     // tears down the TUI; back returns here to re-show the picker.
     const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
     const isImportedFirstLaunch =
@@ -3561,7 +3561,7 @@ async function runImportedFirstLaunchFlow(
         },
       };
     }
-    // action === "run-local"
+    // action === "fork-local"
     const cwdResult = await promptForImportCwd(term, chosen);
     if (cwdResult.kind === "cancel") {
       return { kind: "cancel" };

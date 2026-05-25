@@ -43,7 +43,7 @@ describe("actionPromptStep", () => {
   it("Enter resolves to the highlighted choice", () => {
     expect(actionPromptStep(0, { kind: "enter" })).toEqual({
       kind: "resolve",
-      action: "run-local",
+      action: "fork-local",
     });
     expect(actionPromptStep(1, { kind: "enter" })).toEqual({
       kind: "resolve",
@@ -51,10 +51,10 @@ describe("actionPromptStep", () => {
     });
   });
 
-  it("r / v hotkeys jump straight to the matching choice", () => {
-    expect(actionPromptStep(1, { kind: "char", ch: "r" })).toEqual({
+  it("f / v hotkeys jump straight to the matching choice", () => {
+    expect(actionPromptStep(1, { kind: "char", ch: "f" })).toEqual({
       kind: "resolve",
-      action: "run-local",
+      action: "fork-local",
     });
     expect(actionPromptStep(0, { kind: "char", ch: "v" })).toEqual({
       kind: "resolve",

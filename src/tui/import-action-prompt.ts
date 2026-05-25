@@ -20,7 +20,7 @@ import {
   type BoxLayout,
 } from "./prompt-utils.js";
 
-export type ImportAction = "run-local" | "view";
+export type ImportAction = "fork-local" | "view";
 
 export interface ActionChoice {
   key: ImportAction;
@@ -36,10 +36,10 @@ export interface ActionChoice {
 // edit needed to extend the dialog.
 export const ACTION_CHOICES: readonly ActionChoice[] = [
   {
-    key: "run-local",
-    label: "Run locally",
-    hotkey: "r",
-    description: "spawn the agent on this machine with a local cwd",
+    key: "fork-local",
+    label: "Fork locally",
+    hotkey: "f",
+    description: "spawn a local fork — original imported copy stays as-is",
   },
   {
     key: "view",
@@ -140,7 +140,13 @@ export async function promptForImportAction(
   const fromMachine = session.importedFromMachine ?? "another machine";
   const originalCwd = shortenHomePath(session.cwd);
 
-  let selected = 0;
+  // Default to "View transcript" — the non-destructive option. Forking
+  // spawns a new agent, so the safer choice should land under the
+  // cursor when the dialog opens.
+  let selected = ACTION_CHOICES.findIndex((c) => c.key === "view");
+  if (selected < 0) {
+    selected = 0;
+  }
 
   const render = (): BoxLayout => {
     const choiceRows = ACTION_CHOICES.length * 2;
@@ -186,7 +192,7 @@ export async function promptForImportAction(
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.dim.noFormat(" ↑/↓ navigate · Enter select · r/v jump · Esc back");
+    term.dim.noFormat(" ↑/↓ navigate · Enter select · f/v jump · Esc back");
     return layout;
   };
 

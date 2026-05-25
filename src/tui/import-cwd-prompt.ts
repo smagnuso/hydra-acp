@@ -1,6 +1,6 @@
 // Pre-screen modal that asks the user for a local cwd when they pick
-// "Run locally" on an imported session that has never been launched on
-// this machine. Originally a plain stack of text lines under the
+// "Fork locally" on an imported session that has never been launched
+// on this machine. Originally a plain stack of text lines under the
 // picker; now a centered bordered dialog matching
 // promptForImportAction's look.
 //
@@ -52,7 +52,7 @@ export async function promptForImportCwd(
     const contentHeight = 9;
     layout = drawBox(term, {
       contentHeight,
-      title: "Run locally — choose cwd",
+      title: "Fork locally — choose cwd",
     });
     const innerW = layout.contentW;
     const headerRows = [
