@@ -2192,6 +2192,40 @@ export class Session {
     this.modeHandlers.push(handler);
   }
 
+  // Apply a model change initiated by a client request (session/set_model)
+  // when the agent doesn't emit a current_model_update notification, or
+  // emits a non-spec shape (e.g. config_option_update). Fires modelHandlers
+  // (persistence) and broadcasts a synthetic current_model_update so all
+  // attached clients — including the originator — repaint immediately.
+  applyModelChange(modelId: string): void {
+    const trimmed = modelId.trim();
+    if (!trimmed || trimmed === this.currentModel) {
+      return;
+    }
+    this.logger?.info(
+      `applyModelChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
+    );
+    this.currentModel = trimmed;
+    for (const handler of this.modelHandlers) {
+      try {
+        handler(trimmed);
+      } catch {
+        void 0;
+      }
+    }
+    const update: Record<string, unknown> = {
+      sessionUpdate: "current_model_update",
+      currentModel: trimmed,
+    };
+    if (this.agentAdvertisedModels.length > 0) {
+      update.availableModels = [...this.agentAdvertisedModels];
+    }
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update,
+    });
+  }
+
   // Apply a mode change initiated by a client request (session/set_mode)
   // when the agent doesn't emit a current_mode_update notification on its
   // own. Fires modeHandlers so the persistence hook and any other listeners

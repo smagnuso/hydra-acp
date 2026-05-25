@@ -900,7 +900,13 @@ export function registerAcpWsEndpoint(
         return null;
       }
       app.log.info(decision.logMessage);
-      return decision.session.forwardRequest("session/set_model", rawParams);
+      const { modelId } = rawParams as { modelId: string };
+      const result = await decision.session.forwardRequest("session/set_model", rawParams);
+      // Mirror set_mode: apply the change daemon-side so all attached clients
+      // (including the originator) receive a current_model_update immediately,
+      // regardless of whether the agent emits one on its own.
+      decision.session.applyModelChange(modelId);
+      return result;
     });
 
     // session/set_mode: forward to the agent then immediately apply the
