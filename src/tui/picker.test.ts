@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Terminal } from "terminal-kit";
 import {
+  createPickerPrefs,
   filterByHost,
   matchesSearch,
   nextHostFilter,
   pickSession,
+  type PickerPrefs,
   type PickerResult,
 } from "./picker.js";
 import type { DiscoveredSession } from "./discovery.js";
@@ -40,6 +42,7 @@ function makePicker(opts: {
   sessions: DiscoveredSession[];
   cwd?: string;
   currentSessionId?: string;
+  prefs?: PickerPrefs;
 }): KeyDriver {
   let onKey: ((name: string, _matches: unknown, data?: { isCharacter?: boolean }) => void) | null = null;
   // Fake stdin: captures whatever rawStdinHandler is registered via
@@ -94,6 +97,7 @@ function makePicker(opts: {
     ...(opts.currentSessionId !== undefined
       ? { currentSessionId: opts.currentSessionId }
       : {}),
+    ...(opts.prefs !== undefined ? { prefs: opts.prefs } : {}),
   });
 
   return {

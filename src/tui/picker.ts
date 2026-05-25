@@ -65,6 +65,35 @@ export interface PickOptions {
   // When the picker is opened from inside a session (^p), pre-select that
   // session's row so the user can drop straight back in with Enter.
   currentSessionId?: string;
+  // Persistent filter state. Seeded on first picker open from
+  // createPickerPrefs(); pickSession mutates it in place so the next
+  // invocation re-opens with the same `o`/`h` toggles the user left in
+  // place. When omitted, picker uses defaults (cwdOnly off, hostFilter
+  // "__local") and the legacy "auto-bump to __all when current row is
+  // imported" rule still applies.
+  prefs?: PickerPrefs;
+}
+
+// Picker filter state. `filters` is its own nested bag so future
+// non-filter prefs (sort order, view mode, etc.) can sit alongside it
+// without churning the filter call sites.
+export interface PickerFilters {
+  cwdOnly: boolean;
+  // "__local" | "__all" | host name. See `hostFilter` in pickSession
+  // for the cycle order and meaning.
+  hostFilter: string;
+}
+
+// User-tweakable picker state that should outlive a single pickSession
+// invocation. Created once per TUI process and threaded through every
+// picker open so toggles survive entering a session and returning via
+// ^p.
+export interface PickerPrefs {
+  filters: PickerFilters;
+}
+
+export function createPickerPrefs(): PickerPrefs {
+  return { filters: { cwdOnly: false, hostFilter: "__local" } };
 }
 
 // Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
@@ -151,23 +180,32 @@ export async function pickSession(
     });
   };
 
-  // `o` toggles a cwd-only filter that narrows `visible` to sessions whose
-  // cwd matches the current cwd. Composes with search — both are AND'd.
-  let cwdOnly = false;
-
-  // `h` cycles a host filter. "__local" (default) hides every imported
-  // session; "__all" hides nothing; any other value matches the row's
-  // importedFromMachine literally. Cycle order is local → each unique
-  // peer host (alphabetical) → all → back to local. If the picker was
-  // opened from inside an imported session (^p), bump straight to
-  // "__all" so the current row is still findable below.
-  let hostFilter: string = "__local";
-  if (opts.currentSessionId !== undefined) {
+  // All persistent toggles live on `prefs.filters`. We read and write
+  // straight through this object — no shadow locals — so adding a new
+  // filter is one field on PickerFilters plus the per-filter key
+  // handler; no further plumbing required. When the caller didn't pass
+  // a prefs container, fall back to fresh defaults so the picker still
+  // runs (state simply doesn't outlive the call).
+  //
+  //   `o` toggles cwd-only — narrows `visible` to sessions whose cwd
+  //   matches the current cwd. Composes with search (both AND'd).
+  //   `h` cycles host filter. "__local" (default) hides every imported
+  //   session; "__all" hides nothing; any other value matches the row's
+  //   importedFromMachine literally. Cycle order is local → each unique
+  //   peer host (alphabetical) → all → back to local.
+  //
+  // Imported-current-session auto-bump: when the picker was opened from
+  // inside an imported session (^p) AND the user hasn't explicitly
+  // chosen a host filter yet (no prefs passed), bump straight to "__all"
+  // so the current row is still findable. When prefs are passed in,
+  // respect them verbatim — the user's choice wins.
+  const prefs = opts.prefs ?? createPickerPrefs();
+  if (opts.prefs === undefined && opts.currentSessionId !== undefined) {
     const current = opts.sessions.find(
       (s) => s.sessionId === opts.currentSessionId,
     );
     if (current?.importedFromMachine) {
-      hostFilter = "__all";
+      prefs.filters.hostFilter = "__all";
     }
   }
 
@@ -175,10 +213,24 @@ export async function pickSession(
   // changes (kill / delete refetches from the daemon). `allSessions` is the
   // full sorted source; `visible` is the currently displayed slice — the
   // subset of allSessions after the cwd-only / host filter / search
-  // filters compose. Initial `visible` already respects the default
-  // host filter so a fresh picker doesn't flash the unfiltered list.
+  // filters compose.
   let allSessions: DiscoveredSession[] = sortSessions(opts.sessions);
-  let visible: DiscoveredSession[] = filterByHost(allSessions, hostFilter);
+  // Single source of truth for persistent filters from prefs. Both the
+  // initial paint and applyFilter (after a toggle) route through this so
+  // adding a new filter is a one-place change. The transient search
+  // filter composes on top inside applyFilter — not here because
+  // searchActive is always false at picker open.
+  const applyPrefsFilters = (
+    sessions: DiscoveredSession[],
+  ): DiscoveredSession[] => {
+    let base = sessions;
+    if (prefs.filters.cwdOnly) {
+      base = base.filter((s) => s.cwd === opts.cwd);
+    }
+    base = filterByHost(base, prefs.filters.hostFilter);
+    return base;
+  };
+  let visible: DiscoveredSession[] = applyPrefsFilters(allSessions);
   let rows: Row[] = visible.map((s) => toRow(s, Date.now()));
   let widths: Widths = computeWidths(rows);
 
@@ -315,11 +367,7 @@ export async function pickSession(
   // selectable row; out of search mode the cursor/scroll are clamped
   // but not reset (so refresh after a kill doesn't drop context).
   const applyFilter = (): void => {
-    let base = allSessions;
-    if (cwdOnly) {
-      base = base.filter((s) => s.cwd === opts.cwd);
-    }
-    base = filterByHost(base, hostFilter);
+    const base = applyPrefsFilters(allSessions);
     if (searchActive && searchTerm.length > 0) {
       visible = base.filter((s) => matchesSearch(s, searchTerm));
     } else {
@@ -424,14 +472,14 @@ export async function pickSession(
     const above = scrollOffset;
     const below = Math.max(0, visible.length - scrollOffset - viewportSize);
     const parts: string[] = [];
-    if (cwdOnly) {
+    if (prefs.filters.cwdOnly) {
       parts.push("cwd-only");
     }
-    if (hostFilter !== "__all") {
+    if (prefs.filters.hostFilter !== "__all") {
       parts.push(
-        hostFilter === "__local"
+        prefs.filters.hostFilter === "__local"
           ? "host: local"
-          : `host: ${hostFilter}`,
+          : `host: ${prefs.filters.hostFilter}`,
       );
     }
     if (above > 0) {
@@ -1229,7 +1277,7 @@ export async function pickSession(
         if (name === "o" || name === "O") {
           const keepId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
-          cwdOnly = !cwdOnly;
+          prefs.filters.cwdOnly = !prefs.filters.cwdOnly;
           applyFilter();
           if (keepId !== undefined) {
             const idx = visible.findIndex((s) => s.sessionId === keepId);
@@ -1244,7 +1292,10 @@ export async function pickSession(
         if (name === "h" || name === "H") {
           const keepId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
-          hostFilter = nextHostFilter(hostFilter, allSessions);
+          prefs.filters.hostFilter = nextHostFilter(
+            prefs.filters.hostFilter,
+            allSessions,
+          );
           applyFilter();
           if (keepId !== undefined) {
             const idx = visible.findIndex((s) => s.sessionId === keepId);

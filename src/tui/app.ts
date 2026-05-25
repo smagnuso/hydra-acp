@@ -41,7 +41,12 @@ import {
   saveHistory,
 } from "./history.js";
 import { listSessions, pickMostRecent, type DiscoveredSession } from "./discovery.js";
-import { pickSession, type PickerResult } from "./picker.js";
+import {
+  createPickerPrefs,
+  pickSession,
+  type PickerPrefs,
+  type PickerResult,
+} from "./picker.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
 import { formatElapsed, Screen } from "./screen.js";
@@ -242,6 +247,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const viewPrefs: ViewPrefs = {
     showThoughts: config.tui.showThoughts,
   };
+  // Picker filter toggles (cwd-only, host) are mutated in place by the
+  // picker so re-opening via ^p restores the same filtered view the
+  // user had set when they entered the session. Scope is per
+  // TUI-process; nothing on disk.
+  const pickerPrefs = createPickerPrefs();
   // Enter the alternate screen here, BEFORE the picker can paint, so
   // every TUI surface — picker included — lives in the alt buffer. On
   // exit (CSI ? 1049 l) the host terminal restores its main buffer and
@@ -281,7 +291,15 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   let nextOpts: TuiOptions | null = opts;
   try {
     while (nextOpts !== null) {
-      nextOpts = await runSession(term, config, target, nextOpts, exitHint, viewPrefs);
+      nextOpts = await runSession(
+        term,
+        config,
+        target,
+        nextOpts,
+        exitHint,
+        viewPrefs,
+        pickerPrefs,
+      );
     }
   } finally {
     leaveAltScreen();
@@ -316,8 +334,9 @@ async function runSession(
   opts: TuiOptions,
   exitHint: { sessionId?: string; readonly?: boolean },
   viewPrefs: ViewPrefs,
+  pickerPrefs: PickerPrefs,
 ): Promise<TuiOptions | null> {
-  const ctx = await resolveSession(term, config, target, opts);
+  const ctx = await resolveSession(term, config, target, opts, pickerPrefs);
   if (!ctx) {
     // Picker was aborted (Ctrl+C / Esc). Belt-and-suspenders grab
     // release — the picker already does this on every exit path, but
@@ -1722,6 +1741,7 @@ async function runSession(
         config,
         target,
         currentSessionId: resolvedSessionId,
+        prefs: pickerPrefs,
       });
       if (choice.kind === "abort") {
         // Pair with stop({ keepFullscreen: true }) above — we never left
@@ -3433,6 +3453,7 @@ async function resolveSession(
   config: HydraConfig,
   target: RemoteTarget,
   opts: TuiOptions,
+  pickerPrefs: PickerPrefs,
 ): Promise<SessionContext | null> {
   const cwd = opts.cwd ?? process.cwd();
   if (opts.sessionId) {
@@ -3476,6 +3497,7 @@ async function resolveSession(
       sessions,
       config,
       target,
+      prefs: pickerPrefs,
     });
     if (choice.kind === "abort") {
       return null;
