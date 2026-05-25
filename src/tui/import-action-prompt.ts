@@ -280,6 +280,147 @@ function mapKey(
   return null;
 }
 
+export type LaunchOrViewResult = "launch" | "view" | "back" | "cancel";
+
+export async function promptForLaunchOrView(
+  term: Terminal,
+  session: { sessionId: string; title?: string; cwd: string },
+): Promise<LaunchOrViewResult> {
+  const shortId = stripHydraSessionPrefix(session.sessionId);
+  const titleOrCwd = session.title ?? shortenHomePath(session.cwd);
+
+  // Default to "View transcript" — the non-destructive option.
+  let selected = 1;
+
+  const CHOICES: ReadonlyArray<{ label: string; hotkey: string; description: string }> = [
+    { label: "Launch", hotkey: "l", description: "start a new agent session" },
+    { label: "View transcript", hotkey: "v", description: "open read-only, no agent spawn" },
+  ];
+
+  const render = (): void => {
+    const layout = drawBox(term, { contentHeight: 11, title: "Open session" });
+    const innerW = layout.contentW;
+    let row = 0;
+    // Header rows
+    term.moveTo(layout.contentX, layout.contentY + row);
+    term.dim.noFormat(" session: ");
+    term.noFormat(truncate(shortId, innerW - 10));
+    row++;
+    term.moveTo(layout.contentX, layout.contentY + row);
+    term.noFormat(" " + truncate(titleOrCwd, innerW - 2));
+    row++;
+    // blank
+    row++;
+    term.moveTo(layout.contentX, layout.contentY + row);
+    term.noFormat(" What do you want to do?");
+    row += 2;
+    for (let i = 0; i < CHOICES.length; i++) {
+      const choice = CHOICES[i];
+      if (!choice) {
+        continue;
+      }
+      const pointer = i === selected ? "❯" : " ";
+      const label = ` ${pointer} ${choice.label}`;
+      term.moveTo(layout.contentX, layout.contentY + row);
+      if (i === selected) {
+        term.brightWhite.bgBlue.noFormat(padRight(label, innerW));
+      } else {
+        term.noFormat(label);
+      }
+      row++;
+      term.moveTo(layout.contentX, layout.contentY + row);
+      term.dim.noFormat(`     ${choice.description}`);
+      row++;
+    }
+    // blank
+    row++;
+    term.moveTo(layout.contentX, layout.contentY + row);
+    term.dim.noFormat(" ↑/↓ navigate · Enter select · l/v jump · Esc back");
+  };
+
+  render();
+  term.hideCursor();
+
+  return await new Promise<LaunchOrViewResult>((resolve) => {
+    let resolved = false;
+    const cleanup = (): void => {
+      if (resolved)
+        return;
+      resolved = true;
+      term.off("key", onKey);
+      term.off("resize", onResize);
+    };
+    const finish = (value: LaunchOrViewResult): void => {
+      cleanup();
+      resolve(value);
+    };
+    const onResize = (): void => {
+      if (resolved)
+        return;
+      render();
+    };
+    const onKey = (
+      name: string,
+      _matches: unknown,
+      data?: { isCharacter?: boolean },
+    ): void => {
+      if (name === "CTRL_C" || name === "CTRL_D") {
+        finish("cancel");
+        return;
+      }
+      if (name === "ESCAPE") {
+        finish("back");
+        return;
+      }
+      if (name === "ENTER" || name === "KP_ENTER") {
+        finish(selected === 0 ? "launch" : "view");
+        return;
+      }
+      if (name === "UP" || name === "SHIFT_TAB") {
+        if (selected > 0) {
+          selected--;
+          render();
+        }
+        return;
+      }
+      if (name === "DOWN" || name === "TAB") {
+        if (selected < CHOICES.length - 1) {
+          selected++;
+          render();
+        }
+        return;
+      }
+      if (data?.isCharacter) {
+        const lower = name.toLowerCase();
+        if (lower === "l") {
+          finish("launch");
+          return;
+        }
+        if (lower === "v") {
+          finish("view");
+          return;
+        }
+        if (lower === "n") {
+          if (selected < CHOICES.length - 1) {
+            selected++;
+            render();
+          }
+          return;
+        }
+        if (lower === "p") {
+          if (selected > 0) {
+            selected--;
+            render();
+          }
+          return;
+        }
+      }
+    };
+    term.on("key", onKey);
+    term.on("resize", onResize);
+  });
+}
+
 function truncate(s: string, max: number): string {
   if (max <= 1) {
     return "";

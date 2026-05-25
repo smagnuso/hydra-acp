@@ -29,7 +29,9 @@ import {
   listSessions,
   regenSessionTitle,
   renameSession,
+  searchSessions,
   type DiscoveredSession,
+  type SessionHits,
 } from "./discovery.js";
 import { InputDispatcher, type KeyEvent } from "./input.js";
 import {
@@ -38,6 +40,10 @@ import {
   mapKeyName,
   type PromptVisualRow,
 } from "./screen.js";
+import {
+  promptForLaunchOrView,
+  type LaunchOrViewResult,
+} from "./import-action-prompt.js";
 import { withSync } from "./sync.js";
 
 export type PickerResult =
@@ -106,6 +112,9 @@ const ROW_PREFIX_WIDTH = 2;
 // because the picker still has to leave room for the session list.
 const PICKER_COMPOSER_MAX_ROWS = 4;
 
+// Same cap for the find-session query box.
+const FIND_BOX_MAX_ROWS = 4;
+
 // Composer box borders + 1-col inner pad on each side: "│ …slice… │".
 // Subtracted from termWidth to derive the soft-wrap budget so text
 // never collides with the right border.
@@ -125,7 +134,8 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["Enter", "open selected session"],
   ["v", "view-only (open transcript without spawning the agent)"],
   null,
-  ["/", "search sessions"],
+  ["/", "search sessions (metadata)"],
+  ["^f", "find in session history (content + tool inputs)"],
   ["o", "toggle cwd-only filter"],
   ["h", "cycle host filter (local / <peer> / all)"],
   ["r", "refresh from daemon"],
@@ -267,9 +277,32 @@ export async function pickSession(
     | "confirm-delete"
     | "rename"
     | "busy"
-    | "help";
+    | "help"
+    // ^F opens a multiline query input that fully replaces the picker
+    // UI (composer hidden, session table hidden). Enter kicks the
+    // /v1/sessions/search call; the response transitions to
+    // "find-results". Esc/^C from input returns to "normal".
+    | "find-input"
+    // Results view: one selectable session per entry, with the active
+    // snippet shown beneath it. n/p cycles snippets within the focused
+    // session; Up/Down moves between sessions; Enter opens a centered
+    // modal dialog; ^F re-enters the input pre-filled with the current
+    // term so the user can refine.
+    | "find-results";
   let mode: Mode = "normal";
   let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
+  // Find-session state. All transient — cleared when mode returns to
+  // "normal" so a future ^F starts fresh.
+  let findComposer = new InputDispatcher({ history: [] });
+  let findResults: SessionHits[] = [];
+  let findTruncated = false;
+  let findSelectedIdx = 0;
+  let findSnippetIdx = 0;
+  let findError: string | null = null;
+  // True while a search HTTP call is in flight. Blocks input the same
+  // way "busy" does for kill/delete, but with its own indicator so the
+  // user sees "searching…" instead of "working on <id>…".
+  let findInFlight = false;
   // Rename input buffer. Pre-filled with the current title when `t` is
   // pressed on a live row; the user edits in-place (^U clears the line,
   // ^W deletes a word, Backspace pops a char). Enter saves, Esc cancels.
@@ -305,6 +338,14 @@ export async function pickSession(
   let headerLine = "";
   let sessionLines: string[] = [];
   let startRow = 1;
+  // Find-box layout state — recomputed by computeFindBoxLayout() before
+  // each renderFind() or after every keystroke that changes the buffer.
+  let findRoom = 0;
+  let findVisualRows: PromptVisualRow[] = [];
+  let findBoxRows = 1;
+  let findBoxWindowStart = 0;
+  let findBoxCursorVisualRow = 0;
+  let findBoxCursorVisualCol = 0;
 
   const cwdMaxWidth = opts.config.tui.cwdColumnMaxWidth;
   const computeLayout = (): void => {
@@ -383,6 +424,27 @@ export async function pickSession(
     if (scrollOffset + viewportSize > visible.length) {
       scrollOffset = Math.max(0, visible.length - viewportSize);
     }
+    adjustScroll();
+  };
+
+  // Re-select the session that was under the cursor before a filter
+  // toggle, falling back to the top of the new visible list when it's
+  // no longer there. Every filter handler (`o`, `h`, future toggles)
+  // should call this after applyFilter so the cursor lands somewhere
+  // sensible — without it, the cursor stays at whatever row index it
+  // happened to occupy, which after a host cycle can be any random
+  // session.
+  const restoreCursorAfterFilter = (keepId: string | undefined): void => {
+    if (keepId !== undefined) {
+      const idx = visible.findIndex((s) => s.sessionId === keepId);
+      if (idx >= 0) {
+        selectedIdx = idx + 1;
+        adjustScroll();
+        return;
+      }
+    }
+    selectedIdx = visible.length > 0 ? 1 : 0;
+    scrollOffset = 0;
     adjustScroll();
   };
 
@@ -582,6 +644,10 @@ export async function pickSession(
       renderHelp();
       return;
     }
+    if (mode === "find-input" || mode === "find-results") {
+      renderFind();
+      return;
+    }
     withSync(() => {
       term.hideCursor();
       computeLayout();
@@ -627,6 +693,420 @@ export async function pickSession(
       term("\n");
       term.dim.noFormat("  press any key to dismiss")("\n");
     });
+  };
+
+  // Find-session layout — box at top (findBoxRows+2 rows) + blank (1 row) + results.
+  // Mirrors the normal picker's composer-box-above-session-list structure
+  // so the query is always visible while browsing results.
+  //
+  //   row 1              ╭─ Find sessions ─╮
+  //   row 2..findBoxRows+1  │ body rows     │
+  //   row findBoxRows+2  ╰─────────────────╯
+  //   row findBoxRows+3  (blank)
+  //   row findBoxRows+4  ❯ session-id  cold  Title   ← findResultsStartRow()
+  //   ...
+  //   last               indicator
+  const findResultsStartRow = (): number => findBoxRows + 4;
+  const FIND_FOOTER_ROWS = 2;
+  let findScrollOffset = 0;
+  const findViewportSize = (): number => {
+    termHeight = readTermHeight(term);
+    const avail = Math.max(2, termHeight - (findBoxRows + 3) - FIND_FOOTER_ROWS);
+    return Math.max(1, Math.floor(avail / 2));
+  };
+  const adjustFindScroll = (): void => {
+    const v = findViewportSize();
+    if (findSelectedIdx < findScrollOffset) {
+      findScrollOffset = findSelectedIdx;
+    } else if (findSelectedIdx >= findScrollOffset + v) {
+      findScrollOffset = findSelectedIdx - v + 1;
+    }
+    if (findScrollOffset + v > findResults.length) {
+      findScrollOffset = Math.max(0, findResults.length - v);
+    }
+    if (findScrollOffset < 0) {
+      findScrollOffset = 0;
+    }
+  };
+
+  // ── Box paint helpers ──────────────────────────────────────────────
+  // These mirror the composer's paintComposerTopBorder / Body / Bottom
+  // pattern. "focused" toggles brightBlue vs dim for the borders and
+  // determines whether the real terminal cursor is placed inside.
+
+  const paintFindBoxTopBorder = (focused: boolean): void => {
+    termWidth = readTermWidth(term);
+    const inner = Math.max(2, termWidth - 2);
+    const title = "─ Find sessions ";
+    const dashes = "─".repeat(Math.max(1, inner - title.length));
+    if (focused) {
+      term.brightBlue.noFormat(`╭${title}${dashes}╮`);
+    } else {
+      term.dim.noFormat(`╭${title}${dashes}╮`);
+    }
+    term.styleReset();
+  };
+
+  // Recompute findVisualRows, findBoxRows, window/cursor from the dispatcher.
+  const computeFindBoxLayout = (): void => {
+    termWidth = readTermWidth(term);
+    findRoom = Math.max(10, termWidth - BOX_HORIZONTAL_PAD);
+    const state = findComposer.state();
+    findVisualRows = computePromptVisualRows(state.buffer, findRoom);
+    const layout = computePromptLayout(findVisualRows, state, FIND_BOX_MAX_ROWS);
+    findBoxRows = layout.rendered;
+    findBoxWindowStart = layout.windowStart;
+    findBoxCursorVisualRow = layout.cursorVisualRow;
+    findBoxCursorVisualCol = layout.cursorVisualCol;
+  };
+
+  const paintFindBoxBodyRow = (visualIdx: number, focused: boolean): void => {
+    termWidth = readTermWidth(term);
+    const inner = Math.max(2, termWidth - 2);
+    const vr = findVisualRows[visualIdx];
+    let slice = "";
+    if (vr) {
+      slice = (findComposer.state().buffer[vr.bufferIdx] ?? "").slice(
+        vr.startCol,
+        vr.endCol,
+      );
+    }
+    const padWidth = Math.max(0, inner - 1 - slice.length);
+    const pad = " ".repeat(padWidth);
+    if (focused) {
+      term.brightBlue.noFormat("│");
+      term.noFormat(` ${slice}${pad}`);
+      term.brightBlue.noFormat("│");
+    } else {
+      term.dim.noFormat("│");
+      term.noFormat(` ${slice}${pad}`);
+      term.dim.noFormat("│");
+    }
+    term.styleReset();
+  };
+
+  const paintFindBoxBottomBorder = (focused: boolean): void => {
+    termWidth = readTermWidth(term);
+    const inner = Math.max(2, termWidth - 2);
+    const dashes = "─".repeat(inner);
+    if (focused) {
+      term.brightBlue.noFormat(`╰${dashes}╯`);
+    } else {
+      term.dim.noFormat(`╰${dashes}╯`);
+    }
+    term.styleReset();
+  };
+
+  // Column where the real terminal cursor sits inside the box body.
+  // Col 1 = left border │, col 2 = space pad, col 3+ = content.
+  const findBoxCursorCol = (): number => 3 + findBoxCursorVisualCol;
+
+  // Screen row of the cursor line inside the box body.
+  // Row 1 = top border, row 2 = first body row.
+  const findBoxCursorScreenRow = (): number =>
+    2 + (findBoxCursorVisualRow - findBoxWindowStart);
+
+  // Repaint box chrome (top/body rows/bottom) in place, and reposition
+  // the cursor. Used when focus toggles between box and list without
+  // changing the results content.
+  const repaintFindBoxChrome = (): void => {
+    const focused = mode === "find-input";
+    withSync(() => {
+      if (focused) {
+        term.hideCursor();
+      }
+      term.moveTo(1, 1);
+      paintFindBoxTopBorder(focused);
+      for (let v = 0; v < findBoxRows; v++) {
+        term.moveTo(1, 2 + v);
+        paintFindBoxBodyRow(findBoxWindowStart + v, focused);
+      }
+      term.moveTo(1, 2 + findBoxRows);
+      paintFindBoxBottomBorder(focused);
+      if (focused) {
+        term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+        term.hideCursor(false);
+      }
+    });
+  };
+
+  // Targeted repaint of body rows only (selection/cursor change, no height change).
+  const repaintFindBoxBodyRows = (): void => {
+    withSync(() => {
+      term.hideCursor();
+      for (let v = 0; v < findBoxRows; v++) {
+        term.moveTo(1, 2 + v);
+        paintFindBoxBodyRow(findBoxWindowStart + v, true);
+      }
+      term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+      term.hideCursor(false);
+    });
+  };
+
+  const SNIPPET_KIND_GLYPH: Record<string, string> = {
+    user: "user",
+    agent: "agent",
+    thought: "thought",
+    tool: "tool",
+    "tool-input": "tool-input",
+  };
+
+  // Shared data for painting one result row. Extracted so paintFindResultA
+  // and paintFindResultB stay in sync without duplicating field reads.
+  const findResultData = (
+    idx: number,
+    focused: boolean,
+  ): {
+    rowBudget: number;
+    line1: string;
+    line2: string;
+    focusedRow: boolean;
+  } => {
+    const hit = findResults[idx];
+    if (!hit) {
+      return { rowBudget: 20, line1: "", line2: "", focusedRow: false };
+    }
+    const w = readTermWidth(term);
+    const rowBudget = Math.max(20, w - ROW_PREFIX_WIDTH);
+    const shortId = stripHydraSessionPrefix(hit.sessionId);
+    const title = hit.title ?? shortenHomePath(hit.cwd);
+    const counterText =
+      focused && hit.snippets.length > 1
+        ? `  [${findSnippetIdx + 1}/${hit.snippets.length}]`
+        : focused && hit.totalMatches > hit.snippets.length
+          ? `  [${hit.snippets.length} of ${hit.totalMatches}]`
+          : "";
+    const head = `${shortId}  ${hit.status === "live" ? "live" : "cold"}`;
+    const titleBudget = Math.max(5, rowBudget - head.length - counterText.length - 2);
+    const titleSlice = truncateMiddle(title, titleBudget);
+    const line1 = `${head}  ${titleSlice}${counterText}`.padEnd(rowBudget);
+    const snippet = hit.snippets[focused ? findSnippetIdx : 0];
+    const kind = snippet ? (SNIPPET_KIND_GLYPH[snippet.kind] ?? snippet.kind) : "";
+    const prefix = snippet?.toolName ? `${kind} · ${snippet.toolName}` : kind;
+    const snippetBudget = Math.max(10, rowBudget - prefix.length - 6);
+    const text = snippet ? truncateMiddle(snippet.text, snippetBudget) : "";
+    const line2 = snippet ? `    ${prefix}  ${text}` : "    (no snippet)";
+    return { rowBudget, line1, line2: line2.padEnd(rowBudget + ROW_PREFIX_WIDTH), focusedRow: focused };
+  };
+
+  // Paint just the title/id row for one result (no newline). Full-width
+  // padEnd means no eraseLineAfter is needed — stale chars from a wider
+  // previous frame can't survive.
+  const paintFindResultA = (idx: number, focused: boolean): void => {
+    const { line1, focusedRow } = findResultData(idx, focused);
+    if (focusedRow) {
+      term.brightWhite.bgBlue.noFormat(`❯ ${line1}`);
+    } else {
+      term.noFormat(`  ${line1}`);
+    }
+    term.styleReset();
+  };
+
+  // Paint just the snippet row for one result (no newline).
+  const paintFindResultB = (idx: number, focused: boolean): void => {
+    const { line2 } = findResultData(idx, focused);
+    term.dim.noFormat(line2);
+    term.styleReset();
+  };
+
+  const paintFindIndicator = (): void => {
+    if (findInFlight) {
+      term.dim.noFormat("  searching…");
+      term.styleReset();
+      term.eraseLineAfter();
+    } else if (findError !== null) {
+      term.brightRed.noFormat(`  ${findError}`);
+      term.styleReset();
+      term.eraseLineAfter();
+    } else if (mode === "find-input") {
+      if (findResults.length > 0) {
+        term.dim.noFormat("  Enter to search · ↓ browse results · Esc cancel");
+      } else {
+        term.dim.noFormat("  Enter to search · Esc cancel");
+      }
+      term.styleReset();
+      term.eraseLineAfter();
+    } else {
+      const sCount = findResults.length;
+      const truncSuffix = findTruncated ? "  ·  truncated" : "";
+      const countPart =
+        sCount > 0
+          ? `  ${sCount} ${sCount === 1 ? "session" : "sessions"} match${truncSuffix}  ·  `
+          : "  ";
+      term.dim.noFormat(
+        `${countPart}↑ edit query · Up/Down sessions · n/p snippets · Enter open · Esc back`,
+      );
+      term.styleReset();
+      term.eraseLineAfter();
+    }
+  };
+
+  // Full repaint of the find-session screen. Clears once, then lays out
+  // the box (rows 1..findBoxRows+2), blank, and results + indicator below.
+  // Called only on mode entry/exit, search completion, and resize.
+  const renderFind = (): void => {
+    computeFindBoxLayout();
+    const focused = mode === "find-input";
+    const queryText = findComposer.state().buffer.join("\n");
+    withSync(() => {
+      term.hideCursor();
+      term.moveTo(1, 1).eraseDisplayBelow();
+      // Box — always visible regardless of mode.
+      paintFindBoxTopBorder(focused);
+      for (let v = 0; v < findBoxRows; v++) {
+        term.moveTo(1, 2 + v);
+        paintFindBoxBodyRow(findBoxWindowStart + v, focused);
+      }
+      term.moveTo(1, 2 + findBoxRows);
+      paintFindBoxBottomBorder(focused);
+      // Blank separator row is already blank from eraseDisplayBelow.
+      // Results area — show hints when nothing has been searched yet.
+      const sCount = findResults.length;
+      if (sCount === 0) {
+        term.moveTo(1, findResultsStartRow());
+        if (findInFlight) {
+          // indicator handles the in-flight text; nothing extra here
+        } else if (findError === null && queryText.trim().length === 0) {
+          term.dim.noFormat("  type a query in the box above, then press Enter");
+          term.eraseLineAfter();
+        } else if (findError === null) {
+          term.dim.noFormat("  no matches");
+          term.eraseLineAfter();
+        }
+        term.moveTo(1, findResultsStartRow() + 1);
+        paintFindIndicator();
+      } else {
+        adjustFindScroll();
+        const v = findViewportSize();
+        const listFocused = mode !== "find-input";
+        for (let i = 0; i < v; i++) {
+          const idx = findScrollOffset + i;
+          term.moveTo(1, findResultsStartRow() + i * 2);
+          if (idx < sCount) {
+            paintFindResultA(idx, listFocused && idx === findSelectedIdx);
+          } else {
+            term.eraseLineAfter();
+          }
+          term.moveTo(1, findResultsStartRow() + i * 2 + 1);
+          if (idx < sCount) {
+            paintFindResultB(idx, listFocused && idx === findSelectedIdx);
+          } else {
+            term.eraseLineAfter();
+          }
+        }
+        term.moveTo(1, findResultsStartRow() + v * 2);
+        paintFindIndicator();
+      }
+      // Place real cursor in box body when focused; hide it otherwise.
+      if (focused) {
+        term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+        term.hideCursor(false);
+      }
+    });
+  };
+
+  // Targeted repaint helpers — used for incremental updates within
+  // the same deep mode so the full eraseDisplayBelow is avoided.
+
+  // Repaint both rows of one result in place (no layout shift).
+  const repaintFindResult = (idx: number, focused: boolean): void => {
+    const viewportIdx = idx - findScrollOffset;
+    if (viewportIdx < 0 || viewportIdx >= findViewportSize()) {
+      return;
+    }
+    withSync(() => {
+      term.moveTo(1, findResultsStartRow() + viewportIdx * 2);
+      paintFindResultA(idx, focused);
+      term.moveTo(1, findResultsStartRow() + viewportIdx * 2 + 1);
+      paintFindResultB(idx, focused);
+    });
+  };
+
+  // Repaint the indicator row in place.
+  const repaintFindIndicatorRow = (): void => {
+    withSync(() => {
+      term.moveTo(1, findResultsStartRow() + findViewportSize() * 2);
+      paintFindIndicator();
+    });
+  };
+
+  // Repaint the entire results viewport + indicator (scroll changed).
+  const repaintFindViewport = (): void => {
+    withSync(() => {
+      const v = findViewportSize();
+      const sCount = findResults.length;
+      const listFocused = mode !== "find-input";
+      for (let i = 0; i < v; i++) {
+        const idx = findScrollOffset + i;
+        term.moveTo(1, findResultsStartRow() + i * 2);
+        if (idx < sCount) {
+          paintFindResultA(idx, listFocused && idx === findSelectedIdx);
+        } else {
+          term.eraseLineAfter();
+        }
+        term.moveTo(1, findResultsStartRow() + i * 2 + 1);
+        if (idx < sCount) {
+          paintFindResultB(idx, listFocused && idx === findSelectedIdx);
+        } else {
+          term.eraseLineAfter();
+        }
+      }
+      term.moveTo(1, findResultsStartRow() + v * 2);
+      paintFindIndicator();
+    });
+  };
+
+  const findQueryText = (): string => findComposer.state().buffer.join("\n");
+
+  // Kick off the search HTTP call from the input phase. Scopes to the
+  // picker's currently `visible` ids so cwd-only/host/`/` filters
+  // compose with the find scope. While the call is in flight, mode stays
+  // "find-input" but findInFlight blocks input and the indicator says
+  // "searching…"; on success we transition to deep-results.
+  const runFind = async (): Promise<void> => {
+    const query = findQueryText().trim();
+    if (query.length === 0) {
+      return;
+    }
+    if (visible.length === 0) {
+      findError = "no sessions in view to search";
+      renderFind();
+      return;
+    }
+    findInFlight = true;
+    findError = null;
+    renderFind();
+    try {
+      const out = await searchSessions(opts.target, query, {
+        sessionIds: visible.map((s) => s.sessionId),
+      });
+      findResults = out.results;
+      findTruncated = out.truncated;
+      findSelectedIdx = 0;
+      findSnippetIdx = 0;
+      findScrollOffset = 0;
+      // Move focus to the list so the user can navigate immediately.
+      // If there are no matches, stay in deep-input so they can refine.
+      mode = out.results.length > 0 ? "find-results" : "find-input";
+      computeFindBoxLayout();
+    } catch (err) {
+      findError = `search failed: ${(err as Error).message}`;
+    } finally {
+      findInFlight = false;
+      renderFromScratch();
+    }
+  };
+
+  const exitFind = (): void => {
+    mode = "normal";
+    findComposer = new InputDispatcher({ history: [] });
+    findResults = [];
+    findTruncated = false;
+    findSelectedIdx = 0;
+    findSnippetIdx = 0;
+    findScrollOffset = 0;
+    findError = null;
+    renderFromScratch();
   };
 
   // Repaint just the box chrome (top + bottom borders). Used when focus
@@ -1107,10 +1587,253 @@ export async function pickSession(
         }
         return;
       }
+      // Find: input (box focused). Enter submits the search;
+      // ↓ moves focus into the results list if results exist.
+      if (mode === "find-input") {
+        if (findInFlight) {
+          return;
+        }
+        if (name === "ESCAPE" || name === "CTRL_C") {
+          exitFind();
+          return;
+        }
+        if (name === "ENTER" || name === "KP_ENTER") {
+          if (findQueryText().trim().length === 0) {
+            return;
+          }
+          void runFind();
+          return;
+        }
+        // ↓ / ^N / Tab from the box drops focus into the results list,
+        // mirroring how ↓ from the composer drops into the session list.
+        if (
+          (name === "DOWN" || name === "TAB" || name === "CTRL_N") &&
+          findResults.length > 0
+        ) {
+          mode = "find-results";
+          findSelectedIdx = 0;
+          findSnippetIdx = 0;
+          // repaintFindBoxChrome first to dim the box, then hide cursor
+          // at the end — it was visible at the box body position.
+          withSync(() => {
+            repaintFindBoxChrome();
+            repaintFindResult(0, true);
+            repaintFindIndicatorRow();
+            term.hideCursor();
+          });
+          return;
+        }
+        // Route everything else through InputDispatcher.
+        const before = findComposer.state();
+        let event: KeyEvent | null = null;
+        if (data?.isCharacter) {
+          event = { type: "char", ch: name };
+        } else {
+          const mapped = mapKeyName(name);
+          if (mapped !== null)
+            event = { type: "key", name: mapped };
+        }
+        if (event === null) {
+          term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+          return;
+        }
+        findComposer.feed(event);
+        const after = findComposer.state();
+        const unchanged =
+          before.buffer.length === after.buffer.length &&
+          before.buffer.every((l, i) => l === after.buffer[i]) &&
+          before.row === after.row &&
+          before.col === after.col;
+        if (unchanged) {
+          term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+          return;
+        }
+        const prevRows = findBoxRows;
+        computeFindBoxLayout();
+        if (findBoxRows !== prevRows) {
+          renderFind();
+        } else {
+          repaintFindBoxBodyRows();
+        }
+        return;
+      }
+      // Find: results (list focused). ^F / ↑-on-first-result
+      // returns focus to the box; Up/Down navigates the list.
+      if (mode === "find-results") {
+        if (name === "ESCAPE" || name === "CTRL_C") {
+          exitFind();
+          return;
+        }
+        if (name === "CTRL_F") {
+          // Re-focus the box. Results stay visible but unfocused.
+          // repaintFindBoxChrome must run LAST so its cursor placement
+          // isn't overwritten by subsequent moveTo calls.
+          mode = "find-input";
+          repaintFindViewport();
+          repaintFindIndicatorRow();
+          repaintFindBoxChrome();
+          return;
+        }
+        if (name === "ENTER" || name === "KP_ENTER") {
+          const hit = findResults[findSelectedIdx];
+          if (!hit) {
+            return;
+          }
+          // Imported passive sessions skip the modal — they resolve
+          // immediately so app.ts shows the existing fork-vs-view modal.
+          const session = visible.find((s) => s.sessionId === hit.sessionId);
+          const isImportedPassive =
+            !!session?.importedFromMachine && !session.upstreamSessionId;
+          if (isImportedPassive) {
+            cleanup();
+            const result: PickerResult = {
+              kind: "attach",
+              sessionId: hit.sessionId,
+            };
+            if (session.agentId !== undefined) {
+              result.agentId = session.agentId;
+            }
+            resolve(result);
+            return;
+          }
+          // All other sessions: show centered modal, detach picker listeners
+          // for the duration so they don't race with the dialog's onKey.
+          term.off("key", onKey);
+          term.off("resize", onResize);
+          void (async () => {
+            const action: LaunchOrViewResult = await promptForLaunchOrView(term, {
+              sessionId: hit.sessionId,
+              title: hit.title,
+              cwd: hit.cwd,
+            });
+            if (action === "cancel") {
+              cleanup();
+              resolve({ kind: "abort" });
+              return;
+            }
+            if (!resolved) {
+              term.on("key", onKey);
+              term.on("resize", onResize);
+              renderFind();
+            }
+            if (action === "back") {
+              return;
+            }
+            cleanup();
+            const result: PickerResult = {
+              kind: "attach",
+              sessionId: hit.sessionId,
+              readonly: action === "view",
+            };
+            if (session?.agentId !== undefined) {
+              result.agentId = session.agentId;
+            }
+            resolve(result);
+          })();
+          return;
+        }
+        if (data?.isCharacter && (name === "n" || name === "N")) {
+          const hit = findResults[findSelectedIdx];
+          if (!hit || hit.snippets.length <= 1) {
+            return;
+          }
+          findSnippetIdx = (findSnippetIdx + 1) % hit.snippets.length;
+          repaintFindResult(findSelectedIdx, true);
+          return;
+        }
+        if (data?.isCharacter && (name === "p" || name === "P")) {
+          const hit = findResults[findSelectedIdx];
+          if (!hit || hit.snippets.length <= 1) {
+            return;
+          }
+          findSnippetIdx =
+            (findSnippetIdx - 1 + hit.snippets.length) % hit.snippets.length;
+          repaintFindResult(findSelectedIdx, true);
+          return;
+        }
+        const moveDeep = (delta: number): void => {
+          // ↑ on the first result returns focus to the box — same as
+          // ↑ from the first session row returns to the composer.
+          if (delta < 0 && findSelectedIdx === 0) {
+            mode = "find-input";
+            // repaintFindBoxChrome must be LAST so its cursor placement
+            // at the box body row isn't overwritten by subsequent moveTos.
+            withSync(() => {
+              repaintFindResult(0, false);
+              repaintFindIndicatorRow();
+              repaintFindBoxChrome();
+            });
+            return;
+          }
+          const next = Math.min(
+            findResults.length - 1,
+            Math.max(0, findSelectedIdx + delta),
+          );
+          if (next === findSelectedIdx) {
+            return;
+          }
+          const oldIdx = findSelectedIdx;
+          const oldScroll = findScrollOffset;
+          findSelectedIdx = next;
+          findSnippetIdx = 0;
+          adjustFindScroll();
+          if (findScrollOffset !== oldScroll) {
+            repaintFindViewport();
+          } else {
+            withSync(() => {
+              repaintFindResult(oldIdx, false);
+              repaintFindResult(findSelectedIdx, true);
+            });
+            repaintFindIndicatorRow();
+          }
+        };
+        switch (name) {
+          case "UP":
+          case "SHIFT_TAB":
+          case "CTRL_P":
+            moveDeep(-1);
+            return;
+          case "DOWN":
+          case "TAB":
+          case "CTRL_N":
+            moveDeep(1);
+            return;
+          case "PAGE_UP":
+            moveDeep(-findViewportSize());
+            return;
+          case "PAGE_DOWN":
+            moveDeep(findViewportSize());
+            return;
+          case "HOME":
+            moveDeep(-findSelectedIdx);
+            return;
+          case "END":
+            moveDeep(findResults.length);
+            return;
+        }
+        return;
+      }
       // Any keypress dismisses a transient hint so it doesn't bleed
       // into the next action's context. We still fall through and run
       // the key's normal behavior.
       clearTransient();
+      // ^F opens deep-search input from anywhere except other modal
+      // states (rename / confirm / busy / help are already handled
+      // above). When the visible list is empty (filters narrowed to
+      // zero sessions), show a transient hint rather than entering
+      // search with no scope.
+      if (name === "CTRL_F") {
+        if (visible.length === 0) {
+          transientStatus = "no sessions to search";
+          paintIndicator();
+          return;
+        }
+        findComposer = new InputDispatcher({ history: [] });
+        findError = null;
+        mode = "find-input";
+        renderFind();
+        return;
+      }
       // Composer focused: route keys through the InputDispatcher so every
       // readline shortcut works identically to the live composer. The
       // composer eats hotkeys like `/`, `r`, `?`, `k`, etc. — they only
@@ -1279,13 +2002,7 @@ export async function pickSession(
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
           prefs.filters.cwdOnly = !prefs.filters.cwdOnly;
           applyFilter();
-          if (keepId !== undefined) {
-            const idx = visible.findIndex((s) => s.sessionId === keepId);
-            if (idx >= 0) {
-              selectedIdx = idx + 1;
-              adjustScroll();
-            }
-          }
+          restoreCursorAfterFilter(keepId);
           renderFromScratch();
           return;
         }
@@ -1297,13 +2014,7 @@ export async function pickSession(
             allSessions,
           );
           applyFilter();
-          if (keepId !== undefined) {
-            const idx = visible.findIndex((s) => s.sessionId === keepId);
-            if (idx >= 0) {
-              selectedIdx = idx + 1;
-              adjustScroll();
-            }
-          }
+          restoreCursorAfterFilter(keepId);
           renderFromScratch();
           return;
         }

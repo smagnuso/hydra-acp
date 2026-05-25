@@ -4,6 +4,7 @@ import {
   killSession,
   listSessions,
   pickMostRecent,
+  searchSessions,
 } from "./discovery.js";
 import { DEFAULT_DAEMON_PORT } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
@@ -147,5 +148,51 @@ describe("pickMostRecent", () => {
     const older = mk("a", "/x", "2025-01-01", "live");
     const newer = mk("b", "/x", "2025-02-01", "live");
     expect(pickMostRecent([older, newer], "/x")).toBe(newer);
+  });
+});
+
+describe("searchSessions", () => {
+  it("issues GET .../search with q and bearer auth", async () => {
+    const captured: { url: string; auth?: string } = { url: "" };
+    const fetchImpl = (async (input: string, init?: RequestInit) => {
+      captured.url = input as string;
+      const headers = init?.headers as Record<string, string> | undefined;
+      captured.auth = headers?.["Authorization"];
+      return new Response(
+        JSON.stringify({ query: "needle", truncated: false, results: [] }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const out = await searchSessions(target, "needle", {}, fetchImpl);
+    expect(captured.url).toBe(
+      `http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/search?q=needle`,
+    );
+    expect(captured.auth).toBe("Bearer tok");
+    expect(out.results).toEqual([]);
+  });
+
+  it("joins sessionIds with commas in the query string", async () => {
+    const captured: { url: string } = { url: "" };
+    const fetchImpl = (async (input: string) => {
+      captured.url = input as string;
+      return new Response(
+        JSON.stringify({ query: "x", truncated: false, results: [] }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    await searchSessions(
+      target,
+      "x",
+      { sessionIds: ["sess_a", "sess_b", "sess_c"] },
+      fetchImpl,
+    );
+    expect(captured.url).toContain("sessionIds=sess_a%2Csess_b%2Csess_c");
+  });
+
+  it("throws on non-2xx", async () => {
+    const fetchImpl = (async () => new Response("bad", { status: 400 })) as typeof fetch;
+    await expect(searchSessions(target, "x", {}, fetchImpl)).rejects.toThrow(
+      /HTTP 400/,
+    );
   });
 });

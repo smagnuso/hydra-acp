@@ -9,6 +9,13 @@
 // bearer kind.
 
 import type { RemoteTarget } from "../core/remote-target.js";
+import type {
+  SessionSearchResponse,
+  SessionHits,
+  Snippet,
+} from "../core/history-search.js";
+
+export type { SessionSearchResponse, SessionHits, Snippet };
 
 export interface DiscoveredSession {
   sessionId: string;
@@ -155,6 +162,31 @@ export async function regenSessionTitle(
   ) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
+}
+
+// Find-session transcripts on the connected daemon. `sessionIds` scopes
+// the scan to a specific allowlist (the picker passes its currently
+// visible rows so the existing filters compose with the find scope); when
+// omitted, the daemon scans every session it knows about. Server
+// returns 400 for an empty query, which we surface as a thrown error.
+export async function searchSessions(
+  target: RemoteTarget,
+  query: string,
+  opts: { sessionIds?: string[] } = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<SessionSearchResponse> {
+  const url = new URL(`${target.baseUrl}/v1/sessions/search`);
+  url.searchParams.set("q", query);
+  if (opts.sessionIds && opts.sessionIds.length > 0) {
+    url.searchParams.set("sessionIds", opts.sessionIds.join(","));
+  }
+  const response = await fetchImpl(url.toString(), {
+    headers: { Authorization: `Bearer ${target.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+  return (await response.json()) as SessionSearchResponse;
 }
 
 export async function deleteSession(

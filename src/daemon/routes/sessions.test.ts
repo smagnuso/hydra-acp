@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { registerSessionRoutes } from "./sessions.js";
 import { SessionManager } from "../../core/session-manager.js";
 import { Registry, type RegistryAgent } from "../../core/registry.js";
+import { HistoryStore } from "../../core/history-store.js";
 import {
   makeMockAgent,
   makeControlledStream,
@@ -269,5 +270,110 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry).toBeDefined();
     expect(entry?.status).toBe("live");
     expect(entry?.busy).toBe(false);
+  });
+
+  it("GET /v1/sessions/search returns grouped hits", async () => {
+    // Two sessions, distinct prose, plus an Edit tool call so the file
+    // path scan path also runs.
+    const a = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const b = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const history = new HistoryStore();
+    await history.append(a.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "alpha banana split" },
+        },
+      },
+      recordedAt: 1,
+    });
+    await history.append(b.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "tc1",
+          name: "Edit",
+          title: "Edit /repo/src/foo.ts",
+          rawInput: { file_path: "/repo/src/foo.ts" },
+        },
+      },
+      recordedAt: 2,
+    });
+
+    const proseRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/search?q=banana`,
+    );
+    expect(proseRes.status).toBe(200);
+    const proseBody = (await proseRes.json()) as {
+      query: string;
+      truncated: boolean;
+      results: Array<{ sessionId: string; totalMatches: number }>;
+    };
+    expect(proseBody.query).toBe("banana");
+    expect(proseBody.truncated).toBe(false);
+    expect(proseBody.results.map((r) => r.sessionId)).toEqual([a.sessionId]);
+
+    const toolRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/search?q=foo.ts`,
+    );
+    const toolBody = (await toolRes.json()) as {
+      results: Array<{
+        sessionId: string;
+        snippets: Array<{ kind: string; toolName?: string; text: string }>;
+      }>;
+    };
+    expect(toolBody.results.map((r) => r.sessionId)).toEqual([b.sessionId]);
+    const inputSnippet = toolBody.results[0]?.snippets.find(
+      (s) => s.kind === "tool-input",
+    );
+    expect(inputSnippet?.toolName).toBe("Edit");
+    expect(inputSnippet?.text).toContain("foo.ts");
+  });
+
+  it("GET /v1/sessions/search scopes the scan to sessionIds when provided", async () => {
+    const a = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const b = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const history = new HistoryStore();
+    const sameText = {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "needle" },
+        },
+      },
+      recordedAt: 1,
+    };
+    await history.append(a.sessionId, sameText);
+    await history.append(b.sessionId, sameText);
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/search?q=needle&sessionIds=${b.sessionId}`,
+    );
+    const body = (await res.json()) as {
+      results: Array<{ sessionId: string }>;
+    };
+    expect(body.results.map((r) => r.sessionId)).toEqual([b.sessionId]);
+  });
+
+  it("GET /v1/sessions/search returns 400 when q is missing or blank", async () => {
+    const missing = await fetch(`${harness.baseUrl}/v1/sessions/search`);
+    expect(missing.status).toBe(400);
+    const blank = await fetch(`${harness.baseUrl}/v1/sessions/search?q=%20%20`);
+    expect(blank.status).toBe(400);
   });
 });

@@ -7,6 +7,7 @@ import { bundleToMarkdown } from "../../core/transcript.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
 import { isLoopbackHost } from "../../core/remote-url.js";
+import { searchHistories } from "../../core/history-search.js";
 
 export interface SessionRouteDefaults {
   agentId: string;
@@ -42,6 +43,28 @@ export function registerSessionRoutes(
     const query = request.query as { cwd?: string } | undefined;
     const sessions = await manager.list({ cwd: query?.cwd });
     return { sessions };
+  });
+
+  // Substring-search session transcripts. `q` is required; `sessionIds`
+  // optionally scopes the scan to a comma-separated allowlist (the
+  // picker passes its currently-visible rows so `o`/`h`/`/` filters
+  // compose with the find scope). See core/history-search.ts for the
+  // coverage rules (which update kinds and which tool fields are
+  // scanned).
+  app.get("/v1/sessions/search", async (request, reply) => {
+    const query = request.query as
+      | { q?: string; sessionIds?: string }
+      | undefined;
+    const q = query?.q ?? "";
+    if (q.trim().length === 0) {
+      reply.code(400).send({ error: "q is required" });
+      return reply;
+    }
+    const ids = query?.sessionIds
+      ? query.sessionIds.split(",").filter((s) => s.length > 0)
+      : undefined;
+    const out = await searchHistories(manager, q, { sessionIds: ids });
+    return out;
   });
 
   app.post("/v1/sessions", async (request, reply) => {
