@@ -147,17 +147,20 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
 //                          UI with spurious italics.
 //
 // boldReset/codeReset allow callers to substitute a non-full-reset sequence.
-// Thoughts pass "^-" for both so bold and inline code stay within the gray
-// register (bold-off only, no color change) rather than resetting to default fg.
+// codeOpen defaults to "^C" (bright cyan); thoughts pass "^c" (dim cyan) so
+// inline code reads as a muted tint that fits the gray thought aesthetic.
+// Thoughts also pass boldReset "^-" and codeReset "^K" so neither resets the
+// foreground to default — the brightBlack base color holds throughout.
 function applyInlineMarkup(
   text: string,
-  opts?: { boldReset?: string; codeReset?: string },
+  opts?: { codeOpen?: string; boldReset?: string; codeReset?: string },
 ): string {
+  const codeOpen = opts?.codeOpen ?? "^C";
   const boldReset = opts?.boldReset ?? "^:";
   const codeReset = opts?.codeReset ?? "^:";
   let s = text.replace(/\^/g, "^^");
   s = s.replace(/\*\*(.+?)\*\*/g, `^+$1${boldReset}`);
-  s = s.replace(/`([^`]+)`/g, `^C$1${codeReset}`);
+  s = s.replace(/`([^`]+)`/g, `${codeOpen}$1${codeReset}`);
   return s;
 }
 
@@ -348,7 +351,7 @@ export function parseThoughtMarkdown(text: string): FormattedLine[] {
     highlightCode: false,
     prefixStyle: "thought",
     firstPrefix: "· ",
-    inlineOpts: { boldReset: "^-", codeReset: "^-" },
+    inlineOpts: { codeOpen: "^c", boldReset: "^-", codeReset: "^K" },
   });
 }
 
