@@ -56,10 +56,33 @@ export interface CatOptions {
   streamThreshold?: number | undefined;
   streamBufferBytes?: number | undefined;
   streamFileCapBytes?: number | undefined;
+  // --follow: per-burst chunking via cat-chunker, one prompt per burst.
+  // Default (when this is falsy) is one-shot: buffer all of stdin until
+  // EOF, send a single prompt with the whole payload. The one-shot
+  // default eliminates the fragmentation that caused a bounded source
+  // (`cat bigfile | hydra cat`) to surface as N independent prompts.
+  follow?: boolean | undefined;
+  // Refuse to inline more than this many bytes in one-shot mode. The
+  // agent's own context window will reject larger inputs anyway, but
+  // bailing here gives a clearer error than a downstream "prompt too
+  // long". --stream / --follow / splitting the input are the escape
+  // hatches.
+  maxOneShotBytes?: number | undefined;
 }
 
 const DEFAULT_STREAM_THRESHOLD = 32 * 1024;
 const DEFAULT_STREAM_FILE_CAP = 64 * 1024 * 1024;
+const DEFAULT_MAX_ONESHOT_BYTES = 1 * 1024 * 1024;
+
+function humanBytes(n: number): string {
+  if (n >= 1024 * 1024) {
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (n >= 1024) {
+    return `${(n / 1024).toFixed(1)} KB`;
+  }
+  return `${n} bytes`;
+}
 
 export async function runCat(opts: CatOptions): Promise<void> {
   // Match the TUI/shim process title so `killall hydra` reaps cat
@@ -221,9 +244,16 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     }
   });
 
+  // The standing prompt (-p) is the agent's mission — sent once, on the
+  // first turn of the session. Subsequent --follow chunks are bytes-only
+  // so a long-running tail doesn't repeat the instruction N times and
+  // bloat the context. The flag flips only after the request succeeds;
+  // a failed first turn leaves it false so a retry would re-send the
+  // mission.
+  let firstChunkSent = false;
   const sendChunk = async (text: string): Promise<void> => {
     const promptBlocks: Array<Record<string, unknown>> = [];
-    if (opts.prompt) {
+    if (opts.prompt && !firstChunkSent) {
       promptBlocks.push({ type: "text", text: opts.prompt });
     }
     if (text.length > 0) {
@@ -237,6 +267,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
         sessionId,
         prompt: promptBlocks,
       });
+      firstChunkSent = true;
     } catch (err) {
       stderr(`hydra-acp cat: prompt failed: ${(err as Error).message}\n`);
       // Don't finalize — the response failed, so any in-flight text
@@ -320,23 +351,6 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     }
   };
 
-  const chunker = createChunker({
-    // setImmediate fires in the libuv "check" phase, after pending
-    // I/O has been polled and any back-to-back "data" events have
-    // been emitted. That makes it the natural hook for "the writer
-    // has paused, time to flush": if more bytes were sitting in the
-    // pipe buffer, Node would have emitted another "data" event
-    // before this fires, and the chunker would detect that and defer.
-    scheduleFlushCheck: (cb) => {
-      const h = setImmediate(cb);
-      return () => clearImmediate(h);
-    },
-    onChunk: (text) => {
-      chunkQueue.push(text);
-      void drainQueue();
-    },
-  });
-
   // TTY-stdin behaviour splits on whether we have an obvious reason
   // to read from the keyboard:
   //
@@ -403,15 +417,82 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   if (typeof stdin.setEncoding === "function") {
     stdin.setEncoding("utf8");
   }
+
+  // Promote to follow-style burst chunking either when the user asked
+  // for it (`--follow`, e.g. `tail -f | hydra cat --follow`) OR when
+  // they're typing into an attached session at the keyboard
+  // (TTY stdin + --session). The latter is interactive: each line the
+  // user types should fire immediately, not buffer until ^D.
+  const useFollow = opts.follow === true || (stdinIsTty && Boolean(opts.sessionId));
+
+  if (useFollow) {
+    // Per-burst chunking: each quiet gap in stdin (detected by
+    // setImmediate riding the libuv check phase) flushes the buffered
+    // bytes as a new turn. Right for `tail -f` style live streams; the
+    // -p mission is sent only on the first chunk (sendChunk gates that
+    // via firstChunkSent), so subsequent chunks carry only the new
+    // bytes.
+    const chunker = createChunker({
+      scheduleFlushCheck: (cb) => {
+        const h = setImmediate(cb);
+        return () => clearImmediate(h);
+      },
+      onChunk: (text) => {
+        chunkQueue.push(text);
+        void drainQueue();
+      },
+    });
+    stdin.on("data", (data: string | Buffer) => {
+      chunker.feed(typeof data === "string" ? data : data.toString("utf8"));
+    });
+    stdin.on("end", () => {
+      chunker.eof();
+      stdinEnded = true;
+      if (!draining && chunkQueue.length === 0) {
+        void settle(exitCode);
+      }
+    });
+    stdin.on("error", (err: Error) => {
+      stderr(`hydra-acp cat: stdin error: ${err.message}\n`);
+      exitCode = 1;
+      stdinEnded = true;
+      if (!draining && chunkQueue.length === 0) {
+        void settle(exitCode);
+      }
+    });
+    return done;
+  }
+
+  // Default: one-shot. Buffer the entire piped stdin and send it as a
+  // single prompt at EOF. A bounded source (`cat file | hydra cat`) maps
+  // to one turn and one answer. If the buffered size exceeds the inline
+  // cap, refuse with a pointer to --stream / --max-oneshot-bytes /
+  // splitting the input.
+  const cap = opts.maxOneShotBytes ?? DEFAULT_MAX_ONESHOT_BYTES;
+  let oneShotBuffer = "";
+  let oneShotBytes = 0;
   stdin.on("data", (data: string | Buffer) => {
-    chunker.feed(typeof data === "string" ? data : data.toString("utf8"));
+    const s = typeof data === "string" ? data : data.toString("utf8");
+    oneShotBuffer += s;
+    oneShotBytes += Buffer.byteLength(s, "utf8");
   });
   stdin.on("end", () => {
-    chunker.eof();
     stdinEnded = true;
-    if (!draining && chunkQueue.length === 0) {
+    if (oneShotBytes > cap) {
+      stderr(
+        `hydra-acp cat: input is ${humanBytes(oneShotBytes)}, larger than the inline cap (${humanBytes(cap)}). ` +
+          `Pass --stream to send via the daemon's stream surface, ` +
+          `raise the cap with --max-oneshot-bytes <N>, ` +
+          `or split your input.\n`,
+      );
+      exitCode = 2;
       void settle(exitCode);
+      return;
     }
+    if (oneShotBuffer.length > 0) {
+      chunkQueue.push(oneShotBuffer);
+    }
+    void drainQueue();
   });
   stdin.on("error", (err: Error) => {
     stderr(`hydra-acp cat: stdin error: ${err.message}\n`);

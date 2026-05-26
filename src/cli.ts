@@ -244,6 +244,7 @@ async function main(): Promise<void> {
         agentId: agentIdFromFlag,
         detach: flags.detach === true,
         stream: flags.stream === true,
+        follow: flags.follow === true,
       };
       if (cwd !== undefined) {
         catOpts.cwd = cwd;
@@ -262,6 +263,10 @@ async function main(): Promise<void> {
       const streamFileCap = parseNumericFlag(flags, "stream-file-cap");
       if (streamFileCap !== undefined) {
         catOpts.streamFileCapBytes = streamFileCap;
+      }
+      const maxOneShotBytes = parseNumericFlag(flags, "max-oneshot-bytes");
+      if (maxOneShotBytes !== undefined) {
+        catOpts.maxOneShotBytes = maxOneShotBytes;
       }
       suppressUpdateNotice = true;
       await runCat(catOpts);

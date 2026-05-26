@@ -39,6 +39,7 @@ const KNOWN_VALUE_FLAGS = new Set([
   "cwd",
   "env",
   "host",
+  "max-oneshot-bytes",
   "model",
   "name",
   "out",

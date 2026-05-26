@@ -254,42 +254,96 @@ describe("runCatLoop", () => {
     expect(out).toContain("alertdone");
   });
 
-  it("sends the standing prompt as the first text block of every chunk", async () => {
+  it("under --follow, sends the standing prompt only on the first chunk; subsequent chunks are bytes-only", async () => {
     const h = makeHarness();
     const loopPromise = runCatLoop({
       ...h.baseArgs,
-      opts: { prompt: "watch for anomalies" },
+      opts: { prompt: "watch for anomalies", follow: true },
     });
 
-    const sessionId = await performHandshake(h);
+    await performHandshake(h);
 
-    // First chunk → first prompt.
+    // First chunk → first prompt carries the standing -p plus bytes.
     h.fakeStdin.push("line one\n");
     const first = await h.waitForRequest("session/prompt");
     const firstParams = first.params as { prompt: Array<{ text?: string }> };
+    expect(firstParams.prompt).toHaveLength(2);
     expect(firstParams.prompt[0]?.text).toBe("watch for anomalies");
     expect(firstParams.prompt[1]?.text).toBe("line one\n");
 
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
 
     // Wait for the first prompt to fully drain through the loop's
-    // serialization gate before the second chunk goes out, otherwise
-    // we race the test on the second waitForRequest below.
+    // serialization gate before the second chunk goes out.
     await new Promise((r) => setTimeout(r, 10));
 
     h.fakeStdin.push("line two\n");
     h.fakeStdin.end();
 
-    // Drain: second prompt should include the standing prompt again.
+    // The mission was already delivered on chunk 1; chunk 2 carries
+    // bytes only.
     const allPrompts = await waitForPromptCount(h, 2);
     const secondParams = allPrompts[1]!.params as {
       prompt: Array<{ text?: string }>;
     };
-    expect(secondParams.prompt[0]?.text).toBe("watch for anomalies");
-    expect(secondParams.prompt[1]?.text).toBe("line two\n");
+    expect(secondParams.prompt).toHaveLength(1);
+    expect(secondParams.prompt[0]?.text).toBe("line two\n");
 
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
     await loopPromise;
+  });
+
+  it("default one-shot mode: buffers many data events into a single session/prompt at EOF", async () => {
+    const h = makeHarness();
+    const loopPromise = runCatLoop({
+      ...h.baseArgs,
+      opts: { prompt: "summarize" },
+    });
+    await performHandshake(h);
+
+    // Three data events that would have been chunked into separate
+    // turns under the old setImmediate-driven chunker default. Under
+    // one-shot they all land in a single prompt at EOF.
+    h.fakeStdin.push("alpha\n");
+    h.fakeStdin.push("beta\n");
+    h.fakeStdin.push("gamma\n");
+    // Let the data events flush through any internal microtasks before
+    // we close stdin; this is what would have given the old chunker a
+    // chance to flush mid-stream.
+    await new Promise((r) => setTimeout(r, 20));
+    h.fakeStdin.end();
+
+    const prompt = await h.waitForRequest("session/prompt");
+    const params = prompt.params as { prompt: Array<{ text?: string }> };
+    expect(params.prompt).toHaveLength(2);
+    expect(params.prompt[0]?.text).toBe("summarize");
+    expect(params.prompt[1]?.text).toBe("alpha\nbeta\ngamma\n");
+
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+    await loopPromise;
+    expect(countPromptsSent(h)).toBe(1);
+  });
+
+  it("refuses inputs larger than maxOneShotBytes with a pointer to --stream", async () => {
+    const h = makeHarness();
+    const loopPromise = runCatLoop({
+      ...h.baseArgs,
+      // Tiny cap so a small push trips it.
+      opts: { prompt: "go", maxOneShotBytes: 8 },
+    });
+    await performHandshake(h);
+
+    h.fakeStdin.push("this is more than eight bytes\n");
+    h.fakeStdin.end();
+
+    const result = await loopPromise;
+    expect(result.exitCode).toBe(2);
+    // No session/prompt should ever have been sent.
+    expect(countPromptsSent(h)).toBe(0);
+    const err = h.stderr.join("");
+    expect(err).toContain("larger than the inline cap");
+    expect(err).toContain("--stream");
+    expect(err).toContain("--max-oneshot-bytes");
   });
 
   it("emits a trailing newline only when the last write didn't already end in one", async () => {
@@ -369,11 +423,11 @@ describe("runCatLoop", () => {
     expect(detached).toBe(false);
   });
 
-  it("serializes chunks behind the previous turn's session/prompt response", async () => {
+  it("serializes chunks behind the previous turn's session/prompt response (under --follow)", async () => {
     const h = makeHarness();
     const loopPromise = runCatLoop({
       ...h.baseArgs,
-      opts: { prompt: "go" },
+      opts: { prompt: "go", follow: true },
     });
     await performHandshake(h);
 
