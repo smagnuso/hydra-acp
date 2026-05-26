@@ -149,6 +149,14 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["q / Esc / ^C / ^D", "quit picker (detach)"],
 ];
 
+// A unit of focused input. The focus stack in pickSession routes all
+// key/resize events to the topmost layer; push pushes a new one,
+// pop restores the one below (and re-renders it via onResize).
+export interface FocusLayer {
+  onKey(name: string, _matches: unknown, data?: { isCharacter?: boolean }): void;
+  onResize(): void;
+}
+
 export async function pickSession(
   term: Terminal,
   opts: PickOptions,
@@ -269,30 +277,16 @@ export async function pickSession(
   // ignore navigation until the user resolves (y/n/ESC). `pendingAction`
   // pins the row that was targeted when the prompt opened so concurrent
   // refreshes don't drift the action onto a different session.
-  // 'help' replaces the entire screen with a hotkey cheatsheet that any
-  // key dismisses.
   type Mode =
     | "normal"
     | "confirm-kill"
     | "confirm-delete"
     | "rename"
-    | "busy"
-    | "help"
-    // ^F opens a multiline query input that fully replaces the picker
-    // UI (composer hidden, session table hidden). Enter kicks the
-    // /v1/sessions/search call; the response transitions to
-    // "find-results". Esc/^C from input returns to "normal".
-    | "find-input"
-    // Results view: one selectable session per entry, with the active
-    // snippet shown beneath it. n/p cycles snippets within the focused
-    // session; Up/Down moves between sessions; Enter opens a centered
-    // modal dialog; ^F re-enters the input pre-filled with the current
-    // term so the user can refine.
-    | "find-results";
+    | "busy";
   let mode: Mode = "normal";
   let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
-  // Find-session state. All transient — cleared when mode returns to
-  // "normal" so a future ^F starts fresh.
+  // Find-session state. All transient — cleared when exitFind() fires.
+  let findSubMode: "input" | "results" = "input";
   let findComposer = new InputDispatcher({ history: [] });
   let findResults: SessionHits[] = [];
   let findTruncated = false;
@@ -640,14 +634,6 @@ export async function pickSession(
   // of the paint so the user never sees it skitter row-by-row across the
   // frame; the trailing block places it where it belongs.
   const renderFromScratch = (): void => {
-    if (mode === "help") {
-      renderHelp();
-      return;
-    }
-    if (mode === "find-input" || mode === "find-results") {
-      renderFind();
-      return;
-    }
     withSync(() => {
       term.hideCursor();
       computeLayout();
@@ -810,7 +796,7 @@ export async function pickSession(
   // the cursor. Used when focus toggles between box and list without
   // changing the results content.
   const repaintFindBoxChrome = (): void => {
-    const focused = mode === "find-input";
+    const focused = findSubMode === "input";
     withSync(() => {
       if (focused) {
         term.hideCursor();
@@ -918,7 +904,7 @@ export async function pickSession(
       term.brightRed.noFormat(`  ${findError}`);
       term.styleReset();
       term.eraseLineAfter();
-    } else if (mode === "find-input") {
+    } else if (findSubMode === "input") {
       if (findResults.length > 0) {
         term.dim.noFormat("  Enter to search · ↓ browse results · Esc cancel");
       } else {
@@ -946,7 +932,7 @@ export async function pickSession(
   // Called only on mode entry/exit, search completion, and resize.
   const renderFind = (): void => {
     computeFindBoxLayout();
-    const focused = mode === "find-input";
+    const focused = findSubMode === "input";
     const queryText = findComposer.state().buffer.join("\n");
     withSync(() => {
       term.hideCursor();
@@ -978,7 +964,7 @@ export async function pickSession(
       } else {
         adjustFindScroll();
         const v = findViewportSize();
-        const listFocused = mode !== "find-input";
+        const listFocused = findSubMode !== "input";
         for (let i = 0; i < v; i++) {
           const idx = findScrollOffset + i;
           term.moveTo(1, findResultsStartRow() + i * 2);
@@ -1035,7 +1021,7 @@ export async function pickSession(
     withSync(() => {
       const v = findViewportSize();
       const sCount = findResults.length;
-      const listFocused = mode !== "find-input";
+      const listFocused = findSubMode !== "input";
       for (let i = 0; i < v; i++) {
         const idx = findScrollOffset + i;
         term.moveTo(1, findResultsStartRow() + i * 2);
@@ -1087,27 +1073,20 @@ export async function pickSession(
       findScrollOffset = 0;
       // Move focus to the list so the user can navigate immediately.
       // If there are no matches, stay in deep-input so they can refine.
-      mode = out.results.length > 0 ? "find-results" : "find-input";
+      findSubMode = out.results.length > 0 ? "results" : "input";
       computeFindBoxLayout();
     } catch (err) {
       findError = `search failed: ${(err as Error).message}`;
     } finally {
       findInFlight = false;
-      renderFromScratch();
+      renderFind();
     }
   };
 
-  const exitFind = (): void => {
-    mode = "normal";
-    findComposer = new InputDispatcher({ history: [] });
-    findResults = [];
-    findTruncated = false;
-    findSelectedIdx = 0;
-    findSnippetIdx = 0;
-    findScrollOffset = 0;
-    findError = null;
-    renderFromScratch();
-  };
+  // exitFind is forward-declared here and assigned inside the Promise
+  // once popLayer is available. All call sites (findOnKey) are also inside
+  // the Promise so the assignment always precedes the first call.
+  let exitFind: () => void = () => { /* assigned below */ };
 
   // Repaint just the box chrome (top + bottom borders). Used when focus
   // toggles between composer and list so the border color flips without
@@ -1290,23 +1269,59 @@ export async function pickSession(
     let resolved = false;
     let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
     let autoRefreshInFlight = false;
-    const onResize = (): void => {
-      if (resolved) {
-        return;
-      }
-      renderFromScratch();
+
+    // ── Focus stack ────────────────────────────────────────────────────
+    // Each interactive layer (picker, find, modals) is a FocusLayer.
+    // All terminal key/resize events route through the top of the stack.
+    // pop() restores the layer below and calls its onResize so the screen
+    // reflects whatever was behind the layer that just closed.
+    const focusStack: FocusLayer[] = [];
+    const pushLayer = (layer: FocusLayer): void => {
+      focusStack.push(layer);
     };
+    const popLayer = (): void => {
+      focusStack.pop();
+      if (!resolved) {
+        focusStack[focusStack.length - 1]?.onResize();
+      }
+    };
+    const focus = { push: pushLayer, pop: popLayer };
+    exitFind = (): void => {
+      findComposer = new InputDispatcher({ history: [] });
+      findResults = [];
+      findTruncated = false;
+      findSelectedIdx = 0;
+      findSnippetIdx = 0;
+      findScrollOffset = 0;
+      findError = null;
+      findInFlight = false;
+      findSubMode = "input";
+      popLayer(); // restores picker layer → renderFromScratch
+    };
+    const dispatch = (
+      name: string,
+      _matches: unknown,
+      data?: { isCharacter?: boolean },
+    ): void => {
+      focusStack[focusStack.length - 1]?.onKey(name, _matches, data);
+    };
+    const dispatchResize = (): void => {
+      if (resolved) return;
+      focusStack[focusStack.length - 1]?.onResize();
+    };
+
     const cleanup = (): void => {
       if (resolved) {
         return;
       }
       resolved = true;
+      focusStack.length = 0;
       if (autoRefreshTimer) {
         clearInterval(autoRefreshTimer);
         autoRefreshTimer = null;
       }
-      term.off("key", onKey);
-      term.off("resize", onResize);
+      term.off("key", dispatch);
+      term.off("resize", dispatchResize);
       // Restore terminal-kit's stdin listener and disable bracketed paste.
       process.stdout.write("\x1b[?2004l");
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
@@ -1496,6 +1511,247 @@ export async function pickSession(
       paintIndicator();
       return true;
     };
+    const openHelpLayer = (): void => {
+      renderHelp();
+      pushLayer({
+        onKey: (name) => {
+          if (name === "CTRL_C") {
+            cleanup();
+            resolve({ kind: "abort" });
+            return;
+          }
+          popLayer(); // restores picker layer → calls renderFromScratch
+        },
+        onResize: () => renderHelp(),
+      });
+    };
+    const openFindLayer = (): void => {
+      if (visible.length === 0) {
+        transientStatus = "no sessions to search";
+        paintIndicator();
+        return;
+      }
+      findComposer = new InputDispatcher({ history: [] });
+      findResults = [];
+      findTruncated = false;
+      findSelectedIdx = 0;
+      findSnippetIdx = 0;
+      findScrollOffset = 0;
+      findError = null;
+      findInFlight = false;
+      findSubMode = "input";
+      computeFindBoxLayout();
+      renderFind();
+
+      const findOnKey = (
+        name: string,
+        _matches: unknown,
+        data?: { isCharacter?: boolean },
+      ): void => {
+        // Find: input (box focused).
+        if (findSubMode === "input") {
+          if (findInFlight) {
+            return;
+          }
+          if (name === "ESCAPE" || name === "CTRL_C") {
+            exitFind();
+            return;
+          }
+          if (name === "ENTER" || name === "KP_ENTER") {
+            if (findQueryText().trim().length === 0) {
+              return;
+            }
+            void runFind();
+            return;
+          }
+          if (
+            (name === "DOWN" || name === "TAB" || name === "CTRL_N") &&
+            findResults.length > 0
+          ) {
+            findSubMode = "results";
+            findSelectedIdx = 0;
+            findSnippetIdx = 0;
+            withSync(() => {
+              repaintFindBoxChrome();
+              repaintFindResult(0, true);
+              repaintFindIndicatorRow();
+              term.hideCursor();
+            });
+            return;
+          }
+          const before = findComposer.state();
+          let event: KeyEvent | null = null;
+          if (data?.isCharacter) {
+            event = { type: "char", ch: name };
+          } else {
+            const mapped = mapKeyName(name);
+            if (mapped !== null)
+              event = { type: "key", name: mapped };
+          }
+          if (event === null) {
+            term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+            return;
+          }
+          findComposer.feed(event);
+          const after = findComposer.state();
+          const unchanged =
+            before.buffer.length === after.buffer.length &&
+            before.buffer.every((l, i) => l === after.buffer[i]) &&
+            before.row === after.row &&
+            before.col === after.col;
+          if (unchanged) {
+            term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+            return;
+          }
+          const prevRows = findBoxRows;
+          computeFindBoxLayout();
+          if (findBoxRows !== prevRows) {
+            renderFind();
+          } else {
+            repaintFindBoxBodyRows();
+          }
+          return;
+        }
+        // Find: results (list focused).
+        if (findSubMode === "results") {
+          if (name === "ESCAPE" || name === "CTRL_C") {
+            exitFind();
+            return;
+          }
+          if (name === "CTRL_F") {
+            findSubMode = "input";
+            repaintFindViewport();
+            repaintFindIndicatorRow();
+            repaintFindBoxChrome();
+            return;
+          }
+          if (name === "ENTER" || name === "KP_ENTER") {
+            const hit = findResults[findSelectedIdx];
+            if (!hit) {
+              return;
+            }
+            const session = visible.find((s) => s.sessionId === hit.sessionId);
+            const isImportedPassive =
+              !!session?.importedFromMachine && !session.upstreamSessionId;
+            if (isImportedPassive) {
+              cleanup();
+              const result: PickerResult = {
+                kind: "attach",
+                sessionId: hit.sessionId,
+              };
+              if (session.agentId !== undefined) {
+                result.agentId = session.agentId;
+              }
+              resolve(result);
+              return;
+            }
+            void (async () => {
+              const action: LaunchOrViewResult = await promptForLaunchOrView(term, {
+                sessionId: hit.sessionId,
+                title: hit.title,
+                cwd: hit.cwd,
+              }, focus);
+              if (action === "cancel") {
+                cleanup();
+                resolve({ kind: "abort" });
+                return;
+              }
+              // No re-attach needed — focus.pop() inside promptForLaunchOrView restores the find layer
+              if (action === "back") return;
+              cleanup();
+              const result: PickerResult = {
+                kind: "attach",
+                sessionId: hit.sessionId,
+                readonly: action === "view",
+              };
+              if (session?.agentId !== undefined) {
+                result.agentId = session.agentId;
+              }
+              resolve(result);
+            })();
+            return;
+          }
+          if (data?.isCharacter && (name === "n" || name === "N")) {
+            const hit = findResults[findSelectedIdx];
+            if (!hit || hit.snippets.length <= 1) {
+              return;
+            }
+            findSnippetIdx = (findSnippetIdx + 1) % hit.snippets.length;
+            repaintFindResult(findSelectedIdx, true);
+            return;
+          }
+          if (data?.isCharacter && (name === "p" || name === "P")) {
+            const hit = findResults[findSelectedIdx];
+            if (!hit || hit.snippets.length <= 1) {
+              return;
+            }
+            findSnippetIdx =
+              (findSnippetIdx - 1 + hit.snippets.length) % hit.snippets.length;
+            repaintFindResult(findSelectedIdx, true);
+            return;
+          }
+          const moveDeep = (delta: number): void => {
+            if (delta < 0 && findSelectedIdx === 0) {
+              findSubMode = "input";
+              withSync(() => {
+                repaintFindResult(0, false);
+                repaintFindIndicatorRow();
+                repaintFindBoxChrome();
+              });
+              return;
+            }
+            const next = Math.min(
+              findResults.length - 1,
+              Math.max(0, findSelectedIdx + delta),
+            );
+            if (next === findSelectedIdx) {
+              return;
+            }
+            const oldIdx = findSelectedIdx;
+            const oldScroll = findScrollOffset;
+            findSelectedIdx = next;
+            findSnippetIdx = 0;
+            adjustFindScroll();
+            if (findScrollOffset !== oldScroll) {
+              repaintFindViewport();
+            } else {
+              withSync(() => {
+                repaintFindResult(oldIdx, false);
+                repaintFindResult(findSelectedIdx, true);
+              });
+              repaintFindIndicatorRow();
+            }
+          };
+          switch (name) {
+            case "UP":
+            case "SHIFT_TAB":
+            case "CTRL_P":
+              moveDeep(-1);
+              return;
+            case "DOWN":
+            case "TAB":
+            case "CTRL_N":
+              moveDeep(1);
+              return;
+            case "PAGE_UP":
+              moveDeep(-findViewportSize());
+              return;
+            case "PAGE_DOWN":
+              moveDeep(findViewportSize());
+              return;
+            case "HOME":
+              moveDeep(-findSelectedIdx);
+              return;
+            case "END":
+              moveDeep(findResults.length);
+              return;
+          }
+          return;
+        }
+      };
+
+      pushLayer({ onKey: findOnKey, onResize: () => renderFind() });
+    };
     const onKey = (
       name: string,
       _matches: unknown,
@@ -1504,19 +1760,6 @@ export async function pickSession(
       // Drop input while an HTTP action is mid-flight so we don't
       // double-fire a kill/delete or repaint over the in-progress prompt.
       if (mode === "busy") {
-        return;
-      }
-      // Help dialog: any key dismisses and restores the picker. ^c still
-      // aborts the picker entirely so the user can't feel trapped if
-      // they hit help by mistake mid-session.
-      if (mode === "help") {
-        if (name === "CTRL_C") {
-          cleanup();
-          resolve({ kind: "abort" });
-          return;
-        }
-        mode = "normal";
-        renderFromScratch();
         return;
       }
       if (mode === "rename") {
@@ -1587,251 +1830,12 @@ export async function pickSession(
         }
         return;
       }
-      // Find: input (box focused). Enter submits the search;
-      // ↓ moves focus into the results list if results exist.
-      if (mode === "find-input") {
-        if (findInFlight) {
-          return;
-        }
-        if (name === "ESCAPE" || name === "CTRL_C") {
-          exitFind();
-          return;
-        }
-        if (name === "ENTER" || name === "KP_ENTER") {
-          if (findQueryText().trim().length === 0) {
-            return;
-          }
-          void runFind();
-          return;
-        }
-        // ↓ / ^N / Tab from the box drops focus into the results list,
-        // mirroring how ↓ from the composer drops into the session list.
-        if (
-          (name === "DOWN" || name === "TAB" || name === "CTRL_N") &&
-          findResults.length > 0
-        ) {
-          mode = "find-results";
-          findSelectedIdx = 0;
-          findSnippetIdx = 0;
-          // repaintFindBoxChrome first to dim the box, then hide cursor
-          // at the end — it was visible at the box body position.
-          withSync(() => {
-            repaintFindBoxChrome();
-            repaintFindResult(0, true);
-            repaintFindIndicatorRow();
-            term.hideCursor();
-          });
-          return;
-        }
-        // Route everything else through InputDispatcher.
-        const before = findComposer.state();
-        let event: KeyEvent | null = null;
-        if (data?.isCharacter) {
-          event = { type: "char", ch: name };
-        } else {
-          const mapped = mapKeyName(name);
-          if (mapped !== null)
-            event = { type: "key", name: mapped };
-        }
-        if (event === null) {
-          term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
-          return;
-        }
-        findComposer.feed(event);
-        const after = findComposer.state();
-        const unchanged =
-          before.buffer.length === after.buffer.length &&
-          before.buffer.every((l, i) => l === after.buffer[i]) &&
-          before.row === after.row &&
-          before.col === after.col;
-        if (unchanged) {
-          term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
-          return;
-        }
-        const prevRows = findBoxRows;
-        computeFindBoxLayout();
-        if (findBoxRows !== prevRows) {
-          renderFind();
-        } else {
-          repaintFindBoxBodyRows();
-        }
-        return;
-      }
-      // Find: results (list focused). ^F / ↑-on-first-result
-      // returns focus to the box; Up/Down navigates the list.
-      if (mode === "find-results") {
-        if (name === "ESCAPE" || name === "CTRL_C") {
-          exitFind();
-          return;
-        }
-        if (name === "CTRL_F") {
-          // Re-focus the box. Results stay visible but unfocused.
-          // repaintFindBoxChrome must run LAST so its cursor placement
-          // isn't overwritten by subsequent moveTo calls.
-          mode = "find-input";
-          repaintFindViewport();
-          repaintFindIndicatorRow();
-          repaintFindBoxChrome();
-          return;
-        }
-        if (name === "ENTER" || name === "KP_ENTER") {
-          const hit = findResults[findSelectedIdx];
-          if (!hit) {
-            return;
-          }
-          // Imported passive sessions skip the modal — they resolve
-          // immediately so app.ts shows the existing fork-vs-view modal.
-          const session = visible.find((s) => s.sessionId === hit.sessionId);
-          const isImportedPassive =
-            !!session?.importedFromMachine && !session.upstreamSessionId;
-          if (isImportedPassive) {
-            cleanup();
-            const result: PickerResult = {
-              kind: "attach",
-              sessionId: hit.sessionId,
-            };
-            if (session.agentId !== undefined) {
-              result.agentId = session.agentId;
-            }
-            resolve(result);
-            return;
-          }
-          // All other sessions: show centered modal, detach picker listeners
-          // for the duration so they don't race with the dialog's onKey.
-          term.off("key", onKey);
-          term.off("resize", onResize);
-          void (async () => {
-            const action: LaunchOrViewResult = await promptForLaunchOrView(term, {
-              sessionId: hit.sessionId,
-              title: hit.title,
-              cwd: hit.cwd,
-            });
-            if (action === "cancel") {
-              cleanup();
-              resolve({ kind: "abort" });
-              return;
-            }
-            if (!resolved) {
-              term.on("key", onKey);
-              term.on("resize", onResize);
-              renderFind();
-            }
-            if (action === "back") {
-              return;
-            }
-            cleanup();
-            const result: PickerResult = {
-              kind: "attach",
-              sessionId: hit.sessionId,
-              readonly: action === "view",
-            };
-            if (session?.agentId !== undefined) {
-              result.agentId = session.agentId;
-            }
-            resolve(result);
-          })();
-          return;
-        }
-        if (data?.isCharacter && (name === "n" || name === "N")) {
-          const hit = findResults[findSelectedIdx];
-          if (!hit || hit.snippets.length <= 1) {
-            return;
-          }
-          findSnippetIdx = (findSnippetIdx + 1) % hit.snippets.length;
-          repaintFindResult(findSelectedIdx, true);
-          return;
-        }
-        if (data?.isCharacter && (name === "p" || name === "P")) {
-          const hit = findResults[findSelectedIdx];
-          if (!hit || hit.snippets.length <= 1) {
-            return;
-          }
-          findSnippetIdx =
-            (findSnippetIdx - 1 + hit.snippets.length) % hit.snippets.length;
-          repaintFindResult(findSelectedIdx, true);
-          return;
-        }
-        const moveDeep = (delta: number): void => {
-          // ↑ on the first result returns focus to the box — same as
-          // ↑ from the first session row returns to the composer.
-          if (delta < 0 && findSelectedIdx === 0) {
-            mode = "find-input";
-            // repaintFindBoxChrome must be LAST so its cursor placement
-            // at the box body row isn't overwritten by subsequent moveTos.
-            withSync(() => {
-              repaintFindResult(0, false);
-              repaintFindIndicatorRow();
-              repaintFindBoxChrome();
-            });
-            return;
-          }
-          const next = Math.min(
-            findResults.length - 1,
-            Math.max(0, findSelectedIdx + delta),
-          );
-          if (next === findSelectedIdx) {
-            return;
-          }
-          const oldIdx = findSelectedIdx;
-          const oldScroll = findScrollOffset;
-          findSelectedIdx = next;
-          findSnippetIdx = 0;
-          adjustFindScroll();
-          if (findScrollOffset !== oldScroll) {
-            repaintFindViewport();
-          } else {
-            withSync(() => {
-              repaintFindResult(oldIdx, false);
-              repaintFindResult(findSelectedIdx, true);
-            });
-            repaintFindIndicatorRow();
-          }
-        };
-        switch (name) {
-          case "UP":
-          case "SHIFT_TAB":
-          case "CTRL_P":
-            moveDeep(-1);
-            return;
-          case "DOWN":
-          case "TAB":
-          case "CTRL_N":
-            moveDeep(1);
-            return;
-          case "PAGE_UP":
-            moveDeep(-findViewportSize());
-            return;
-          case "PAGE_DOWN":
-            moveDeep(findViewportSize());
-            return;
-          case "HOME":
-            moveDeep(-findSelectedIdx);
-            return;
-          case "END":
-            moveDeep(findResults.length);
-            return;
-        }
-        return;
-      }
       // Any keypress dismisses a transient hint so it doesn't bleed
       // into the next action's context. We still fall through and run
       // the key's normal behavior.
       clearTransient();
-      // ^F opens deep-search input from anywhere except other modal
-      // states (rename / confirm / busy / help are already handled
-      // above). When the visible list is empty (filters narrowed to
-      // zero sessions), show a transient hint rather than entering
-      // search with no scope.
       if (name === "CTRL_F") {
-        if (visible.length === 0) {
-          transientStatus = "no sessions to search";
-          paintIndicator();
-          return;
-        }
-        findComposer = new InputDispatcher({ history: [] });
-        findError = null;
-        mode = "find-input";
-        renderFind();
+        openFindLayer();
         return;
       }
       // Composer focused: route keys through the InputDispatcher so every
@@ -1933,8 +1937,7 @@ export async function pickSession(
       // `?` opens the help overlay outside of search mode (in search,
       // it's a literal character that may appear in a query).
       if (!searchActive && data?.isCharacter && name === "?") {
-        mode = "help";
-        renderHelp();
+        openHelpLayer();
         return;
       }
       // Search mode: chars build the filter, navigation keys still move
@@ -2158,6 +2161,10 @@ export async function pickSession(
           return;
       }
     };
+    pushLayer({
+      onKey: (name, _matches, data) => onKey(name, _matches, data),
+      onResize: () => { if (!resolved) renderFromScratch(); },
+    });
     term.grabInput({});
     // Swap terminal-kit's stdin listener for our bracketed-paste interceptor.
     const tSetup = term as unknown as {
@@ -2170,8 +2177,8 @@ export async function pickSession(
       tSetup.stdin.on("data", rawStdinHandler);
       process.stdout.write("\x1b[?2004h");
     }
-    term.on("key", onKey);
-    term.on("resize", onResize);
+    term.on("key", dispatch);
+    term.on("resize", dispatchResize);
     // Low-frequency refresh so busy indicators, new titles, and
     // appearing/disappearing sessions track without the user mashing `r`.
     // Skip while a prompt or search is up so we don't trample a partially
@@ -2180,7 +2187,7 @@ export async function pickSession(
     // makes refresh a no-op when the visible state is unchanged, which
     // is the common case — keeps the picker quiet between actual events.
     autoRefreshTimer = setInterval(() => {
-      if (resolved || mode !== "normal" || searchActive || autoRefreshInFlight) {
+      if (resolved || focusStack.length > 1 || mode !== "normal" || searchActive || autoRefreshInFlight) {
         return;
       }
       const currentId =

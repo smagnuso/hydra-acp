@@ -285,6 +285,10 @@ export type LaunchOrViewResult = "launch" | "view" | "back" | "cancel";
 export async function promptForLaunchOrView(
   term: Terminal,
   session: { sessionId: string; title?: string; cwd: string },
+  focus: {
+    push: (layer: { onKey: (name: string, _m: unknown, data?: { isCharacter?: boolean }) => void; onResize: () => void }) => void;
+    pop: () => void;
+  },
 ): Promise<LaunchOrViewResult> {
   const shortId = stripHydraSessionPrefix(session.sessionId);
   const titleOrCwd = session.title ?? shortenHomePath(session.cwd);
@@ -344,24 +348,16 @@ export async function promptForLaunchOrView(
   return await new Promise<LaunchOrViewResult>((resolve) => {
     let resolved = false;
     const cleanup = (): void => {
-      if (resolved)
-        return;
       resolved = true;
-      term.off("key", onKey);
-      term.off("resize", onResize);
     };
     const finish = (value: LaunchOrViewResult): void => {
       cleanup();
+      focus.pop();
       resolve(value);
-    };
-    const onResize = (): void => {
-      if (resolved)
-        return;
-      render();
     };
     const onKey = (
       name: string,
-      _matches: unknown,
+      _m: unknown,
       data?: { isCharacter?: boolean },
     ): void => {
       if (name === "CTRL_C" || name === "CTRL_D") {
@@ -416,8 +412,10 @@ export async function promptForLaunchOrView(
         }
       }
     };
-    term.on("key", onKey);
-    term.on("resize", onResize);
+    focus.push({
+      onKey: (name, _m, data) => { if (!resolved) onKey(name, _m, data); },
+      onResize: () => { if (!resolved) render(); },
+    });
   });
 }
 
