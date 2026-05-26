@@ -33,6 +33,8 @@ import {
   SessionStreamBuffer,
   STREAM_READ_MAX_BYTES,
   type StreamReadResult as RawStreamReadResult,
+  type StreamGrepOptions as RawStreamGrepOptions,
+  type StreamGrepResult as RawStreamGrepResult,
 } from "./stream-buffer.js";
 import {
   HYDRA_COMMANDS,
@@ -3030,6 +3032,66 @@ export class Session {
       out.eof = true;
     }
     return out;
+  }
+
+  streamTail(bytes: number): {
+    bytes: string;
+    startCursor: number;
+    endCursor: number;
+    truncated: boolean;
+  } {
+    const buf = this.requireStreamBuffer();
+    const r = buf.tail(bytes);
+    return {
+      bytes: r.bytes.toString("base64"),
+      startCursor: r.startCursor,
+      endCursor: r.endCursor,
+      truncated: r.truncated,
+    };
+  }
+
+  streamHead(bytes: number): {
+    bytes: string;
+    startCursor: number;
+    endCursor: number;
+    truncated: boolean;
+  } {
+    const buf = this.requireStreamBuffer();
+    const r = buf.head(bytes);
+    return {
+      bytes: r.bytes.toString("base64"),
+      startCursor: r.startCursor,
+      endCursor: r.endCursor,
+      truncated: r.truncated,
+    };
+  }
+
+  async streamWaitFor(
+    cursor: number,
+    timeoutMs: number,
+  ): Promise<"data" | "eof" | "timeout"> {
+    const buf = this.requireStreamBuffer();
+    return buf.waitForData(cursor, timeoutMs);
+  }
+
+  streamGrep(opts: RawStreamGrepOptions): RawStreamGrepResult {
+    const buf = this.requireStreamBuffer();
+    return buf.grep(opts);
+  }
+
+  streamInfo(): {
+    writeCursor: number;
+    oldestAvailable: number;
+    capacity: number;
+    closed: boolean;
+  } {
+    const buf = this.requireStreamBuffer();
+    return {
+      writeCursor: buf.writeCursorPos,
+      oldestAvailable: buf.oldestAvailable,
+      capacity: buf.capacity,
+      closed: buf.isClosed,
+    };
   }
 
   private requireStreamBuffer(): SessionStreamBuffer {

@@ -610,6 +610,34 @@ describe("runCatLoop", () => {
   });
 
   describe("--stream", () => {
+    it("sets _meta.hydra-acp.mcpStdin:true on session/new so the daemon mints an MCP token", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "summarize", stream: true, streamThreshold: 1024 },
+      });
+      await h.waitForRequest("initialize");
+      h.respondToRequest("initialize", {
+        protocolVersion: 1,
+        agentCapabilities: {},
+      });
+      const newReq = await h.waitForRequest("session/new");
+      const params = newReq.params as {
+        _meta?: { "hydra-acp"?: { mcpStdin?: boolean } };
+      };
+      expect(params._meta?.["hydra-acp"]?.mcpStdin).toBe(true);
+      h.respondToRequest("session/new", {
+        sessionId: "hydra_session_test",
+        _meta: {},
+      });
+      await new Promise((r) => setTimeout(r, 0));
+      h.fakeStdin.push("short\n");
+      h.fakeStdin.end();
+      await h.waitForRequest("session/prompt");
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      await loopPromise;
+    });
+
     it("INLINE path: small stdin closes below threshold and is sent as one text-block prompt", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
@@ -636,7 +664,7 @@ describe("runCatLoop", () => {
       await loopPromise;
     });
 
-    it("FILE path: stdin above threshold opens a stream, drains head + future bytes, fires one prompt with the file path", async () => {
+    it("MCP path: stdin above threshold opens an in-memory stream, drains head + future bytes, fires one prompt referencing the MCP tools", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
@@ -652,12 +680,11 @@ describe("runCatLoop", () => {
       const openParams = openReq.params as {
         sessionId: string;
         mode: string;
-        fileCapBytes?: number;
       };
-      expect(openParams.mode).toBe("file");
-      expect(openParams.fileCapBytes).toBe(64 * 1024 * 1024);
+      // No /tmp file: stream is in-memory and the agent uses MCP tools.
+      expect(openParams.mode).toBe("memory");
+      expect((openParams as { fileCapBytes?: number }).fileCapBytes).toBeUndefined();
       h.respondToRequest("hydra-acp/stream_open", {
-        filePath: "/tmp/hydra-stdin-hydra_session_test.log",
         capacityBytes: 16 * 1024 * 1024,
       });
 
@@ -670,7 +697,7 @@ describe("runCatLoop", () => {
       expect(writeParams.eof).toBeUndefined();
       h.respondToRequest("hydra-acp/stream_write", { writeCursor: 12 });
 
-      // Kick-off prompt: standing prompt + the file-path note.
+      // Kick-off prompt: standing prompt + the MCP tool note.
       const promptReq = await h.waitForRequest("session/prompt");
       const promptParams = promptReq.params as {
         prompt: Array<{ text?: string }>;
@@ -678,7 +705,9 @@ describe("runCatLoop", () => {
       expect(promptParams.prompt).toHaveLength(1);
       const text = promptParams.prompt[0]?.text ?? "";
       expect(text).toContain("watch");
-      expect(text).toContain("/tmp/hydra-stdin-hydra_session_test.log");
+      expect(text).toContain("hydra_stdin");
+      expect(text).toContain("tail_stdin");
+      expect(text).not.toContain("/tmp/");
 
       // After the prompt resolves, cat should send an eof stream_write.
       h.fakeStdin.end();
@@ -697,7 +726,80 @@ describe("runCatLoop", () => {
       ).toBe(true);
     });
 
-    it("FILE path: subsequent stdin chunks become stream_write calls", async () => {
+    it("auto-approves session/request_permission for mcp__hydra_stdin__* tools", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "watch" },
+      });
+      await performHandshake(h);
+
+      // Simulate the daemon forwarding claude-acp's permission request.
+      h.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: "perm-1",
+        method: "session/request_permission",
+        params: {
+          sessionId: "hydra_session_test",
+          toolCall: {
+            toolCallId: "tc-1",
+            title: "mcp__hydra_stdin__tail_stdin",
+            kind: "other",
+          },
+          options: [
+            { kind: "allow_always", name: "Always allow", optionId: "allow_always" },
+            { kind: "allow_once", name: "Allow", optionId: "allow" },
+            { kind: "reject_once", name: "Reject", optionId: "reject" },
+          ],
+        },
+      });
+
+      const resp = await waitForResponse(h, "perm-1");
+      expect(resp.result).toEqual({
+        outcome: { outcome: "selected", optionId: "allow" },
+      });
+
+      h.fakeStdin.end();
+      await loopPromise.catch(() => undefined);
+    });
+
+    it("rejects session/request_permission for non-hydra_stdin tools", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "watch" },
+      });
+      await performHandshake(h);
+
+      h.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: "perm-2",
+        method: "session/request_permission",
+        params: {
+          sessionId: "hydra_session_test",
+          toolCall: {
+            toolCallId: "tc-2",
+            title: "Bash",
+            kind: "execute",
+          },
+          options: [
+            { kind: "allow_always", name: "Always allow", optionId: "allow_always" },
+            { kind: "allow_once", name: "Allow", optionId: "allow" },
+            { kind: "reject_once", name: "Reject", optionId: "reject" },
+          ],
+        },
+      });
+
+      const resp = await waitForResponse(h, "perm-2");
+      expect(resp.result).toEqual({
+        outcome: { outcome: "selected", optionId: "reject" },
+      });
+
+      h.fakeStdin.end();
+      await loopPromise.catch(() => undefined);
+    });
+
+    it("MCP path: subsequent stdin chunks become stream_write calls", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
@@ -708,7 +810,6 @@ describe("runCatLoop", () => {
       h.fakeStdin.push("aaaaa"); // 5 bytes, just over threshold
       await h.waitForRequest("hydra-acp/stream_open");
       h.respondToRequest("hydra-acp/stream_open", {
-        filePath: "/tmp/p.log",
         capacityBytes: 1024,
       });
 
@@ -765,6 +866,25 @@ function countPromptsSent(h: ReturnType<typeof makeHarness>): number {
   return h.stream.sent.filter(
     (m) => "method" in m && m.method === "session/prompt",
   ).length;
+}
+
+async function waitForResponse(
+  h: ReturnType<typeof makeHarness>,
+  id: string | number,
+  timeoutMs = 1_000,
+): Promise<JsonRpcResponse> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = h.stream.sent.find(
+      (m): m is JsonRpcResponse =>
+        "id" in m && m.id === id && "result" in m,
+    );
+    if (found) {
+      return found;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for response to id=${String(id)}`);
 }
 
 async function waitForPromptCount(

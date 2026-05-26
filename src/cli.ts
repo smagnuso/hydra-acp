@@ -260,10 +260,6 @@ async function main(): Promise<void> {
       if (streamBufferBytes !== undefined) {
         catOpts.streamBufferBytes = streamBufferBytes;
       }
-      const streamFileCap = parseNumericFlag(flags, "stream-file-cap");
-      if (streamFileCap !== undefined) {
-        catOpts.streamFileCapBytes = streamFileCap;
-      }
       const maxOneShotBytes = parseNumericFlag(flags, "max-oneshot-bytes");
       if (maxOneShotBytes !== undefined) {
         catOpts.maxOneShotBytes = maxOneShotBytes;

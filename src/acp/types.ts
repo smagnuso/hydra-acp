@@ -232,6 +232,12 @@ export interface HydraMeta {
   // before it attached without waiting for new prompt_queue_added
   // notifications.
   queue?: PromptQueueEntry[];
+  // Set by `hydra cat --stream` on session/new. The daemon mints a
+  // per-session MCP bearer token, opens an in-memory stdin stream
+  // (no /tmp file), injects an HTTP MCP descriptor into the agent's
+  // mcpServers, and registers the (token → session) pair so the agent
+  // can call tail_stdin / read_stdin / wait_for_more against the ring.
+  mcpStdin?: boolean;
 }
 
 export function extractHydraMeta(
@@ -316,6 +322,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.promptUpdating === "boolean") {
     out.promptUpdating = obj.promptUpdating;
+  }
+  if (typeof obj.mcpStdin === "boolean") {
+    out.mcpStdin = obj.mcpStdin;
   }
   if (typeof obj.promptAmending === "boolean") {
     out.promptAmending = obj.promptAmending;

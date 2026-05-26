@@ -213,3 +213,127 @@ describe("SessionStreamBuffer file projection", () => {
     }
   });
 });
+
+describe("SessionStreamBuffer lazy growth", () => {
+  it("starts at the initial allocation, not the configured cap", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 64 * 1024 * 1024 });
+    expect(buf.allocatedBytes).toBe(1 * 1024 * 1024);
+    expect(buf.capacity).toBe(64 * 1024 * 1024);
+  });
+
+  it("does not grow when small writes fit in the initial allocation", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 64 * 1024 * 1024 });
+    buf.append(Buffer.alloc(1024, 0x61));
+    expect(buf.allocatedBytes).toBe(1 * 1024 * 1024);
+  });
+
+  it("doubles the allocation on demand until the cap is reached", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 8 * 1024 * 1024 });
+    expect(buf.allocatedBytes).toBe(1 * 1024 * 1024);
+    buf.append(Buffer.alloc(1.5 * 1024 * 1024, 0x61));
+    expect(buf.allocatedBytes).toBe(2 * 1024 * 1024);
+    buf.append(Buffer.alloc(3 * 1024 * 1024, 0x62));
+    expect(buf.allocatedBytes).toBe(8 * 1024 * 1024);
+  });
+
+  it("caps at maxCapacityBytes and evicts only after the cap is reached", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 4 * 1024 * 1024 });
+    buf.append(Buffer.alloc(3 * 1024 * 1024, 0x61));
+    expect(buf.allocatedBytes).toBe(4 * 1024 * 1024);
+    expect(buf.oldestAvailable).toBe(0);
+    buf.append(Buffer.alloc(2 * 1024 * 1024, 0x62));
+    expect(buf.allocatedBytes).toBe(4 * 1024 * 1024);
+    expect(buf.oldestAvailable).toBe(1 * 1024 * 1024);
+  });
+
+  it("preserves bytes across growth", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 8 * 1024 * 1024 });
+    buf.append(Buffer.from("hello"));
+    buf.append(Buffer.alloc(2 * 1024 * 1024, 0x61));
+    const r = buf.read(0, 5);
+    expect(r.bytes.toString("utf8")).toBe("hello");
+  });
+
+  it("clamps initial allocation to capacity when cap is smaller than INITIAL", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    expect(buf.allocatedBytes).toBe(1024);
+    expect(buf.capacity).toBe(1024);
+  });
+});
+
+describe("SessionStreamBuffer.grep", () => {
+  it("returns matching lines with absolute cursors and skips a trailing partial line when open", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    buf.append(Buffer.from("alpha\nbeta\nalpha2\npartial"));
+    const r = buf.grep({ pattern: "alpha" });
+    expect(r.matches.map((m) => m.line)).toEqual(["alpha", "alpha2"]);
+    expect(r.matches[0]!.cursor).toBe(0);
+    expect(r.matches[1]!.cursor).toBe("alpha\nbeta\n".length);
+    expect(r.truncated).toBe(false);
+    expect(r.eof).toBeUndefined();
+    expect(r.nextCursor).toBe("alpha\nbeta\nalpha2\n".length);
+  });
+
+  it("treats a trailing line as final when buffer is closed and reports eof", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    buf.append(Buffer.from("alpha\ntrailing-alpha"));
+    buf.close();
+    const r = buf.grep({ pattern: "alpha" });
+    expect(r.matches.map((m) => m.line)).toEqual(["alpha", "trailing-alpha"]);
+    expect(r.eof).toBe(true);
+  });
+
+  it("supports literal substring matching when regex:false", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    buf.append(Buffer.from("a.c\nabc\n"));
+    const r = buf.grep({ pattern: "a.c", regex: false });
+    expect(r.matches.map((m) => m.line)).toEqual(["a.c"]);
+  });
+
+  it("supports caseInsensitive and invert", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    buf.append(Buffer.from("HELLO\nworld\nHELLO\n"));
+    const ci = buf.grep({ pattern: "hello", caseInsensitive: true });
+    expect(ci.matches).toHaveLength(2);
+    const inv = buf.grep({ pattern: "HELLO", invert: true });
+    expect(inv.matches.map((m) => m.line)).toEqual(["world"]);
+  });
+
+  it("truncates at maxMatches and sets nextCursor for resumption", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    buf.append(Buffer.from("x\nx\nx\nx\n"));
+    const r = buf.grep({ pattern: "x", maxMatches: 2 });
+    expect(r.matches).toHaveLength(2);
+    expect(r.truncated).toBe(true);
+    expect(r.nextCursor).toBe(4);
+    const r2 = buf.grep({ pattern: "x", cursor: r.nextCursor });
+    expect(r2.matches).toHaveLength(2);
+  });
+
+  it("reports gap when cursor is older than oldestAvailable", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 8 });
+    buf.append(Buffer.from("aaaaaa\n")); // 7 bytes
+    buf.append(Buffer.from("bbbbb\n")); // 6 more — total 13, oldest=5
+    const r = buf.grep({ pattern: ".+", cursor: 0 });
+    expect(r.gap).toBe(5);
+  });
+
+  it("includes context_before / context_after lines", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    buf.append(Buffer.from("L0\nL1\nMATCH\nL3\nL4\n"));
+    const r = buf.grep({
+      pattern: "MATCH",
+      contextBefore: 2,
+      contextAfter: 2,
+    });
+    expect(r.matches).toHaveLength(1);
+    expect(r.matches[0]!.before?.map((b) => b.line)).toEqual(["L0", "L1"]);
+    expect(r.matches[0]!.after?.map((a) => a.line)).toEqual(["L3", "L4"]);
+  });
+
+  it("throws on an invalid regex pattern", () => {
+    const buf = new SessionStreamBuffer({ capacityBytes: 1024 });
+    buf.append(Buffer.from("abc\n"));
+    expect(() => buf.grep({ pattern: "[" })).toThrow();
+  });
+});

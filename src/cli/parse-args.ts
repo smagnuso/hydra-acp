@@ -46,7 +46,6 @@ const KNOWN_VALUE_FLAGS = new Set([
   "prompt",
   "session",
   "stream-bytes",
-  "stream-file-cap",
   "stream-threshold",
   "tail",
 ]);

@@ -49,13 +49,12 @@ export interface CatOptions {
   // resolveLocalTarget(config).
   target?: RemoteTarget | undefined;
   // --stream: buffer the first streamThreshold bytes, then switch to a
-  // pull surface (file projection in v1; HTTP MCP in Stage 2) so the
-  // agent can decide what to read instead of receiving every byte
-  // inlined as text blocks.
+  // pull surface (per-session in-memory MCP server with tail_stdin /
+  // read_stdin / wait_for_more tools) so the agent can decide what to
+  // read instead of receiving every byte inlined as text blocks.
   stream?: boolean | undefined;
   streamThreshold?: number | undefined;
   streamBufferBytes?: number | undefined;
-  streamFileCapBytes?: number | undefined;
   // --follow: per-burst chunking via cat-chunker, one prompt per burst.
   // Default (when this is falsy) is one-shot: buffer all of stdin until
   // EOF, send a single prompt with the whole payload. The one-shot
@@ -71,7 +70,6 @@ export interface CatOptions {
 }
 
 const DEFAULT_STREAM_THRESHOLD = 32 * 1024;
-const DEFAULT_STREAM_FILE_CAP = 64 * 1024 * 1024;
 const DEFAULT_MAX_ONESHOT_BYTES = 1 * 1024 * 1024;
 
 function humanBytes(n: number): string {
@@ -82,6 +80,73 @@ function humanBytes(n: number): string {
     return `${(n / 1024).toFixed(1)} KB`;
   }
   return `${n} bytes`;
+}
+
+// claude-acp prefixes MCP tools with `mcp__<serverName>__<toolName>`. We
+// inject the server as `hydra_stdin` in acp-ws.ts, so any tool call
+// whose title (the agent-facing identifier in the permission request)
+// starts with this prefix is one of our read-the-pipe tools.
+const HYDRA_STDIN_TOOL_PREFIX = "mcp__hydra_stdin__";
+
+function isHydraStdinPermissionRequest(params: unknown): boolean {
+  if (!params || typeof params !== "object") {
+    return false;
+  }
+  const toolCall = (params as { toolCall?: unknown }).toolCall;
+  if (!toolCall || typeof toolCall !== "object") {
+    return false;
+  }
+  const title = (toolCall as { title?: unknown }).title;
+  if (typeof title === "string" && title.startsWith(HYDRA_STDIN_TOOL_PREFIX)) {
+    return true;
+  }
+  // Some agents may surface the raw name on `toolCall.rawInput.tool_name`
+  // or expose a top-level `toolName`; check both for forward-compat.
+  const toolName = (toolCall as { toolName?: unknown }).toolName;
+  if (typeof toolName === "string" && toolName.startsWith(HYDRA_STDIN_TOOL_PREFIX)) {
+    return true;
+  }
+  return false;
+}
+
+interface PermissionOption {
+  kind?: string;
+  optionId?: string;
+}
+
+function pickOptionId(
+  params: unknown,
+  preferredKinds: ReadonlyArray<string>,
+): string {
+  const options =
+    params && typeof params === "object"
+      ? ((params as { options?: unknown }).options as unknown[] | undefined)
+      : undefined;
+  if (Array.isArray(options)) {
+    for (const kind of preferredKinds) {
+      const match = options.find(
+        (o): o is PermissionOption =>
+          typeof o === "object" &&
+          o !== null &&
+          (o as { kind?: unknown }).kind === kind &&
+          typeof (o as { optionId?: unknown }).optionId === "string",
+      );
+      if (match?.optionId !== undefined) {
+        return match.optionId;
+      }
+    }
+  }
+  return preferredKinds[0] ?? "allow";
+}
+
+function approvePermission(params: unknown): { outcome: { outcome: "selected"; optionId: string } } {
+  const optionId = pickOptionId(params, ["allow_once", "allow_always"]);
+  return { outcome: { outcome: "selected", optionId } };
+}
+
+function rejectPermission(params: unknown): { outcome: { outcome: "selected"; optionId: string } } {
+  const optionId = pickOptionId(params, ["reject_once", "reject_always"]);
+  return { outcome: { outcome: "selected", optionId } };
 }
 
 export async function runCat(opts: CatOptions): Promise<void> {
@@ -170,6 +235,25 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   // tries to send doesn't dangle.
   conn.setDefaultHandler(async () => {
     return { error: { code: -32601, message: "method not implemented" } };
+  });
+
+  // ...with one exception: when --stream is on, the agent will call
+  // `hydra_stdin/*` MCP tools to read the piped bytes, and claude-acp
+  // gates those behind session/request_permission. There's no human at
+  // the keyboard to click "Allow", and the standing prompt has already
+  // explicitly directed the agent to use those tools — denying them
+  // would just produce another "I need permission to read stdin"
+  // dead-end. So we auto-allow tool calls whose toolCall.title is in
+  // the `mcp__hydra_stdin__*` namespace and reject everything else.
+  // The optionId we pick from `params.options` defaults to "allow"
+  // (allow_once) so we don't pollute the agent's persisted permission
+  // rules; if "allow" isn't offered we fall back to whatever
+  // `allow_once`-kinded option is present.
+  conn.onRequest("session/request_permission", async (params) => {
+    if (!isHydraStdinPermissionRequest(params)) {
+      return rejectPermission(params);
+    }
+    return approvePermission(params);
   });
 
   try {
@@ -567,19 +651,16 @@ function runStreamingPath(args: StreamingPathArgs): void {
 
   const switchToFile = async (): Promise<void> => {
     mode = "file";
-    let open: { filePath?: string; capacityBytes: number };
+    let open: { capacityBytes: number };
     try {
       const openParams: Record<string, unknown> = {
         sessionId,
-        mode: "file",
+        mode: "memory",
       };
       if (opts.streamBufferBytes !== undefined) {
         openParams.capacityBytes = opts.streamBufferBytes;
       }
-      openParams.fileCapBytes =
-        opts.streamFileCapBytes ?? DEFAULT_STREAM_FILE_CAP;
       open = (await conn.request("hydra-acp/stream_open", openParams)) as {
-        filePath?: string;
         capacityBytes: number;
       };
     } catch (err) {
@@ -588,29 +669,16 @@ function runStreamingPath(args: StreamingPathArgs): void {
       );
       return;
     }
-    const filePath = open.filePath;
-    if (filePath === undefined) {
-      args.onPromptFailed(
-        new Error("daemon did not return a filePath for stream mode"),
-      );
-      return;
-    }
-    // Drain the head buffer into the stream BEFORE firing the kick-off
-    // prompt — that way when the agent races to read the file it sees
-    // at minimum what cat had already buffered locally.
+    // Drain the head buffer into the ring BEFORE firing the kick-off
+    // prompt — that way when the agent calls tail_stdin / read_stdin
+    // it sees at minimum what cat had already buffered locally.
     if (headBuffer.length > 0) {
       writeToStream(headBuffer, false);
       headBuffer = Buffer.alloc(0);
     }
-    // Ensure the head bytes are on disk before the prompt arrives at the
-    // agent. await the chain rather than racing it.
     await writeChain.catch(() => undefined);
 
-    const promptText = buildStreamPromptText(
-      opts.prompt,
-      filePath,
-      opts.streamFileCapBytes ?? DEFAULT_STREAM_FILE_CAP,
-    );
+    const promptText = buildStreamPromptText(opts.prompt, open.capacityBytes);
     // Fire the kick-off prompt without awaiting — its response (turn
     // completion) is what triggers settle below. We need to keep
     // pumping stdin into the stream while the agent works.
@@ -674,22 +742,39 @@ function runStreamingPath(args: StreamingPathArgs): void {
 
 function buildStreamPromptText(
   standing: string | undefined,
-  filePath: string,
-  fileCapBytes: number,
+  ringCapacityBytes: number,
 ): string {
   const capHuman =
-    fileCapBytes >= 1024 * 1024
-      ? `${(fileCapBytes / (1024 * 1024)).toFixed(0)} MB`
-      : `${(fileCapBytes / 1024).toFixed(0)} KB`;
-  const note =
-    `Stdin is being streamed to ${filePath}. ` +
-    `The file is being appended to live; use whatever shell tools fit ` +
-    `(\`tail -f\`, \`head\`, \`grep\`, \`wc -l\`, etc.). ` +
-    `Soft cap ${capHuman} — if more is written past that, older bytes are dropped.`;
+    ringCapacityBytes >= 1024 * 1024
+      ? `${(ringCapacityBytes / (1024 * 1024)).toFixed(0)} MB`
+      : `${(ringCapacityBytes / 1024).toFixed(0)} KB`;
+  const toolNote =
+    `The user has piped data into this session. The bytes are NOT in your prompt; ` +
+    `they live in the \`hydra_stdin\` MCP server and you read them via its tools:\n` +
+    `- \`stdin_info()\` — current writeCursor / oldestAvailable / capacity / closed. Cheap; call first to see how much data is there.\n` +
+    `- \`grep_stdin({pattern, regex?, case_insensitive?, context_before?, context_after?, cursor?})\` — server-side line filter; returns matching lines as decoded strings (not base64). Prefer this for "find lines that mention X" questions on multi-MB inputs.\n` +
+    `- \`head_stdin({bytes})\` — first N bytes (good for headers / preamble / file signatures).\n` +
+    `- \`tail_stdin({bytes})\` — most recent N bytes (good for log endings / recent errors).\n` +
+    `- \`read_stdin({cursor, max_bytes, wait_ms})\` — windowed read at an absolute byte cursor; iterate to sweep the whole stream.\n` +
+    `- \`wait_for_more({cursor, timeout_ms})\` — block for new bytes past a cursor (only useful for live tails).\n\n` +
+    `Byte payloads (head/tail/read) come back base64-encoded — decode before reading them as text. ` +
+    `\`grep_stdin\` returns plain strings. ` +
+    `The ring holds the most recent ~${capHuman}; older bytes are evicted, and the byte tools report the gap when that happens. ` +
+    `Per-call cap is 64 KiB for byte tools; loop \`read_stdin\` (advancing the cursor by \`nextCursor\`) when you need more.`;
   if (standing && standing.length > 0) {
-    return `${standing}\n\n${note}`;
+    return (
+      `${toolNote}\n\n` +
+      `Use those tools NOW to answer the user's question — do not ask whether to check stdin; just check it. ` +
+      `Pick the right tool for the question (grep_stdin for finding specific lines, head for preamble / file type, ` +
+      `tail for recent events, read_stdin + cursor sweep for whole-stream scans), then answer.\n\n` +
+      `User's question:\n${standing}`
+    );
   }
-  return note;
+  return (
+    `${toolNote}\n\n` +
+    `Use those tools to inspect the piped input and report what's there. ` +
+    `Start with \`stdin_info()\` to see the size, then \`head_stdin\` and/or \`tail_stdin\` to look at the bytes.`
+  );
 }
 
 async function openOrAttachSession(
@@ -716,6 +801,13 @@ async function openOrAttachSession(
   }
   if (opts.model) {
     hydraMeta.model = opts.model;
+  }
+  if (opts.stream) {
+    // Tell the daemon to mint a per-session MCP token, open the stdin
+    // ring in-memory, and inject `hydra_stdin` into the agent's
+    // mcpServers so it has tail_stdin / read_stdin / wait_for_more /
+    // stdin_info available for this turn.
+    hydraMeta.mcpStdin = true;
   }
   const cwd = opts.cwd ?? process.cwd();
   const params: Record<string, unknown> = { cwd };

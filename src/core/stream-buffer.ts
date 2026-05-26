@@ -12,7 +12,11 @@
 
 import * as fsp from "node:fs/promises";
 
-const DEFAULT_CAPACITY_BYTES = 16 * 1024 * 1024;
+const DEFAULT_CAPACITY_BYTES = 64 * 1024 * 1024;
+// Initial allocation. Grows by doubling until it hits the configured
+// cap. Bounded so a session that pipes 100 bytes doesn't pay 64 MiB of
+// daemon RAM up front.
+const INITIAL_CAPACITY_BYTES = 1 * 1024 * 1024;
 // Hard cap on a single read's byte count. Server-enforced even when the
 // caller asks for more; one tool call shouldn't blow out the model's
 // context.
@@ -20,6 +24,12 @@ export const STREAM_READ_MAX_BYTES = 64 * 1024;
 // Hard cap on long-poll wait. Avoids holding a connection forever if
 // a misbehaving client passes Number.MAX_SAFE_INTEGER.
 export const STREAM_WAIT_MAX_MS = 60_000;
+
+export const STREAM_GREP_DEFAULT_MATCHES = 100;
+export const STREAM_GREP_MAX_MATCHES = 1000;
+export const STREAM_GREP_DEFAULT_BYTES = 64 * 1024;
+export const STREAM_GREP_MAX_BYTES = 256 * 1024;
+export const STREAM_GREP_MAX_CONTEXT = 20;
 
 export interface StreamReadResult {
   bytes: Buffer;
@@ -36,6 +46,41 @@ export interface StreamTailResult {
 }
 
 export type WaitOutcome = "data" | "eof" | "timeout";
+
+export interface StreamGrepLine {
+  cursor: number;
+  line: string;
+}
+
+export interface StreamGrepMatch extends StreamGrepLine {
+  before?: StreamGrepLine[];
+  after?: StreamGrepLine[];
+}
+
+export interface StreamGrepResult {
+  matches: StreamGrepMatch[];
+  truncated: boolean;
+  nextCursor: number;
+  gap?: number;
+  scannedBytes: number;
+  eof?: boolean;
+}
+
+export interface StreamGrepOptions {
+  pattern: string;
+  regex?: boolean;
+  caseInsensitive?: boolean;
+  invert?: boolean;
+  maxMatches?: number;
+  maxBytes?: number;
+  contextBefore?: number;
+  contextAfter?: number;
+  cursor?: number;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 interface Waiter {
   resolve: (outcome: WaitOutcome) => void;
@@ -62,9 +107,16 @@ export interface StreamBufferOptions {
 
 export class SessionStreamBuffer {
   private storage: Buffer;
-  private capacityBytes: number;
+  // The configured cap. Eviction begins once writeCursor exceeds this.
+  private maxCapacityBytes: number;
+  // The size of the currently-allocated `storage`. Starts at
+  // INITIAL_CAPACITY_BYTES (clamped to maxCapacityBytes) and doubles on
+  // demand. Once it reaches maxCapacityBytes the ring behaves like a
+  // fixed-size buffer; before then, writeCursor < currentCapacityBytes
+  // always, so no wrap-around math is in play.
+  private currentCapacityBytes: number;
   // Absolute monotonic byte offset of the next byte to be written. Also
-  // the count of bytes ever appended. `writeCursor - capacityBytes`
+  // the count of bytes ever appended. `writeCursor - currentCapacityBytes`
   // (clamped at 0) is the oldest still-resident byte's cursor.
   private writeCursor = 0;
   private closed = false;
@@ -80,11 +132,15 @@ export class SessionStreamBuffer {
   private fileWriteChain: Promise<unknown> = Promise.resolve();
 
   constructor(opts: StreamBufferOptions = {}) {
-    this.capacityBytes = opts.capacityBytes ?? DEFAULT_CAPACITY_BYTES;
-    if (this.capacityBytes <= 0) {
+    this.maxCapacityBytes = opts.capacityBytes ?? DEFAULT_CAPACITY_BYTES;
+    if (this.maxCapacityBytes <= 0) {
       throw new Error("capacityBytes must be > 0");
     }
-    this.storage = Buffer.alloc(this.capacityBytes);
+    this.currentCapacityBytes = Math.min(
+      INITIAL_CAPACITY_BYTES,
+      this.maxCapacityBytes,
+    );
+    this.storage = Buffer.alloc(this.currentCapacityBytes);
     this.filePath = opts.filePath;
     this.fileCapBytes = opts.fileCapBytes ?? Number.POSITIVE_INFINITY;
     this.onFileCapReached = opts.onFileCapReached;
@@ -92,7 +148,13 @@ export class SessionStreamBuffer {
   }
 
   get capacity(): number {
-    return this.capacityBytes;
+    return this.maxCapacityBytes;
+  }
+
+  // Currently-allocated storage size (for observability / tests). May be
+  // anywhere between INITIAL_CAPACITY_BYTES and capacity.
+  get allocatedBytes(): number {
+    return this.currentCapacityBytes;
   }
 
   get writeCursorPos(): number {
@@ -100,7 +162,7 @@ export class SessionStreamBuffer {
   }
 
   get oldestAvailable(): number {
-    return Math.max(0, this.writeCursor - this.capacityBytes);
+    return Math.max(0, this.writeCursor - this.currentCapacityBytes);
   }
 
   get isClosed(): boolean {
@@ -253,6 +315,145 @@ export class SessionStreamBuffer {
     });
   }
 
+  // Scan the resident region line-by-line, returning lines that match
+  // `pattern`. Server-side filtering so the agent doesn't have to pull
+  // and decode 64 KiB base64 windows just to grep a multi-MB log.
+  //
+  // Lines are split on `\n` (LF). A trailing partial line (no LF) is
+  // skipped when the buffer is still open — its bytes might be the
+  // start of a longer line that's still being written — but is treated
+  // as a final full line once the buffer is closed.
+  //
+  // Caps: max 1000 matches and 256 KiB of output bytes per call. The
+  // agent should re-call with `cursor = nextCursor` to resume when
+  // `truncated:true`.
+  grep(opts: StreamGrepOptions): StreamGrepResult {
+    const oldest = this.oldestAvailable;
+    const requested = opts.cursor;
+    let start = requested ?? oldest;
+    let gap = 0;
+    if (requested !== undefined && requested < oldest) {
+      gap = oldest - requested;
+      start = oldest;
+    }
+    if (start > this.writeCursor) {
+      start = this.writeCursor;
+    }
+    const slice = this.sliceFromRing(start, this.writeCursor - start);
+    const useRegex = opts.regex ?? true;
+    const flags = opts.caseInsensitive === true ? "i" : "";
+    const re = useRegex
+      ? new RegExp(opts.pattern, flags)
+      : new RegExp(escapeRegex(opts.pattern), flags);
+    const invert = opts.invert ?? false;
+    const maxMatches = Math.max(
+      1,
+      Math.min(
+        opts.maxMatches ?? STREAM_GREP_DEFAULT_MATCHES,
+        STREAM_GREP_MAX_MATCHES,
+      ),
+    );
+    const maxBytes = Math.max(
+      1,
+      Math.min(opts.maxBytes ?? STREAM_GREP_DEFAULT_BYTES, STREAM_GREP_MAX_BYTES),
+    );
+    const contextBefore = Math.max(
+      0,
+      Math.min(opts.contextBefore ?? 0, STREAM_GREP_MAX_CONTEXT),
+    );
+    const contextAfter = Math.max(
+      0,
+      Math.min(opts.contextAfter ?? 0, STREAM_GREP_MAX_CONTEXT),
+    );
+
+    const matches: StreamGrepMatch[] = [];
+    const beforeRing: StreamGrepLine[] = [];
+    const pendingAfter: Array<{ match: StreamGrepMatch; remaining: number }> =
+      [];
+    let bytesUsed = 0;
+    let truncated = false;
+    let lineStartByte = 0;
+    let resumeFromLineStart = 0;
+
+    const processLine = (lineCursor: number, lineText: string): boolean => {
+      for (const pa of pendingAfter) {
+        if (pa.remaining > 0) {
+          if (pa.match.after === undefined) {
+            pa.match.after = [];
+          }
+          pa.match.after.push({ cursor: lineCursor, line: lineText });
+          pa.remaining--;
+          bytesUsed += lineText.length;
+        }
+      }
+      while (pendingAfter.length > 0 && pendingAfter[0]!.remaining === 0) {
+        pendingAfter.shift();
+      }
+      const matched = re.test(lineText) !== invert;
+      if (matched && matches.length < maxMatches) {
+        const m: StreamGrepMatch = { cursor: lineCursor, line: lineText };
+        if (contextBefore > 0 && beforeRing.length > 0) {
+          m.before = beforeRing.slice();
+          for (const b of m.before) {
+            bytesUsed += b.line.length;
+          }
+        }
+        bytesUsed += lineText.length;
+        matches.push(m);
+        if (contextAfter > 0) {
+          pendingAfter.push({ match: m, remaining: contextAfter });
+        }
+      }
+      if (contextBefore > 0) {
+        beforeRing.push({ cursor: lineCursor, line: lineText });
+        while (beforeRing.length > contextBefore) {
+          beforeRing.shift();
+        }
+      }
+      const hitMaxMatches =
+        matches.length >= maxMatches && pendingAfter.length === 0;
+      const hitMaxBytes = bytesUsed >= maxBytes;
+      return hitMaxMatches || hitMaxBytes;
+    };
+
+    for (let i = 0; i < slice.length; i++) {
+      if (slice[i] !== 0x0a) {
+        continue;
+      }
+      const lineText = slice.subarray(lineStartByte, i).toString("utf8");
+      const lineCursor = start + lineStartByte;
+      lineStartByte = i + 1;
+      resumeFromLineStart = lineStartByte;
+      if (processLine(lineCursor, lineText)) {
+        truncated = true;
+        break;
+      }
+    }
+    if (!truncated && lineStartByte < slice.length && this.closed) {
+      const lineText = slice.subarray(lineStartByte).toString("utf8");
+      const lineCursor = start + lineStartByte;
+      if (processLine(lineCursor, lineText)) {
+        truncated = true;
+      }
+      resumeFromLineStart = slice.length;
+    }
+
+    const nextCursor = Math.min(start + resumeFromLineStart, this.writeCursor);
+    const result: StreamGrepResult = {
+      matches,
+      truncated,
+      nextCursor,
+      scannedBytes: resumeFromLineStart,
+    };
+    if (gap > 0) {
+      result.gap = gap;
+    }
+    if (this.closed && nextCursor >= this.writeCursor) {
+      result.eof = true;
+    }
+    return result;
+  }
+
   private wakeWaiters(outcome: WaitOutcome): void {
     if (this.waiters.length === 0) {
       return;
@@ -264,17 +465,45 @@ export class SessionStreamBuffer {
     }
   }
 
+  // Grow `storage` if needed to fit `additionalBytes` more bytes without
+  // wrapping. Caps at maxCapacityBytes; once we're at the cap, callers
+  // fall back to ring-wrap behavior. Doubles each grow so we amortize.
+  // Only called before we've ever wrapped (writeCursor < currentCapacity
+  // always holds while we're growing), so the existing bytes live at
+  // storage[0..writeCursor] and we can just copy them flat.
+  private growIfNeeded(additionalBytes: number): void {
+    if (this.currentCapacityBytes >= this.maxCapacityBytes) {
+      return;
+    }
+    const needed = this.writeCursor + additionalBytes;
+    if (needed <= this.currentCapacityBytes) {
+      return;
+    }
+    let next = this.currentCapacityBytes;
+    while (next < needed && next < this.maxCapacityBytes) {
+      next = Math.min(this.maxCapacityBytes, next * 2);
+    }
+    if (next === this.currentCapacityBytes) {
+      return;
+    }
+    const newStorage = Buffer.alloc(next);
+    this.storage.copy(newStorage, 0, 0, this.writeCursor);
+    this.storage = newStorage;
+    this.currentCapacityBytes = next;
+  }
+
   private writeRing(chunk: Buffer): void {
     const len = chunk.length;
-    if (len >= this.capacityBytes) {
-      // Chunk larger than the entire buffer — only the tail capacityBytes
-      // are retained. Skip the prefix entirely.
-      const tailStart = len - this.capacityBytes;
+    this.growIfNeeded(len);
+    if (len >= this.currentCapacityBytes) {
+      // Chunk larger than the entire buffer — only the tail
+      // currentCapacityBytes are retained. Skip the prefix entirely.
+      const tailStart = len - this.currentCapacityBytes;
       chunk.copy(this.storage, 0, tailStart, len);
       return;
     }
-    const offset = this.writeCursor % this.capacityBytes;
-    const tailRoom = this.capacityBytes - offset;
+    const offset = this.writeCursor % this.currentCapacityBytes;
+    const tailRoom = this.currentCapacityBytes - offset;
     if (len <= tailRoom) {
       chunk.copy(this.storage, offset, 0, len);
     } else {
@@ -288,8 +517,8 @@ export class SessionStreamBuffer {
       return Buffer.alloc(0);
     }
     const out = Buffer.alloc(length);
-    const offset = fromCursor % this.capacityBytes;
-    const tailLen = Math.min(length, this.capacityBytes - offset);
+    const offset = fromCursor % this.currentCapacityBytes;
+    const tailLen = Math.min(length, this.currentCapacityBytes - offset);
     this.storage.copy(out, 0, offset, offset + tailLen);
     if (tailLen < length) {
       this.storage.copy(out, tailLen, 0, length - tailLen);

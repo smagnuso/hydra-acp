@@ -37,6 +37,8 @@ import { registerTransformerRoutes } from "./routes/transformers.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
+import { StdinMcpRegistry } from "./mcp/stdin-registry.js";
+import { registerStdinMcpRoutes } from "./mcp/stdin-server.js";
 
 declare module "fastify" {
   interface FastifyContextConfig {
@@ -196,6 +198,23 @@ export async function startDaemon(
     store: sessionTokenStore,
     rateLimiter: authRateLimiter,
   });
+  const stdinMcpRegistry = new StdinMcpRegistry();
+  registerStdinMcpRoutes(app, stdinMcpRegistry);
+  // Captured lazily by the session/new handler. The bound port isn't
+  // known until app.listen() completes below, so we defer composition
+  // until request time.
+  let daemonOriginCached: string | undefined;
+  const getDaemonOrigin = (): string => {
+    if (daemonOriginCached !== undefined) {
+      return daemonOriginCached;
+    }
+    const addr = app.server.address();
+    const port =
+      addr && typeof addr === "object" ? addr.port : config.daemon.port;
+    const scheme = config.daemon.tls ? "https" : "http";
+    daemonOriginCached = `${scheme}://${config.daemon.host}:${port}`;
+    return daemonOriginCached;
+  };
   registerAcpWsEndpoint(app, {
     validator,
     manager,
@@ -205,6 +224,8 @@ export async function startDaemon(
     onTransformerVersion: (name, version) => transformers.reportVersion(name, version),
     transformers,
     extensionCommands,
+    stdinMcpRegistry,
+    getDaemonOrigin,
   });
 
   await app.listen({ host: config.daemon.host, port: config.daemon.port });

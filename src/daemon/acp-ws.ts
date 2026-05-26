@@ -45,6 +45,8 @@ import type {
   ExtensionCommandSpec,
 } from "../core/extension-commands.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
+import { randomBytes } from "node:crypto";
+import type { StdinMcpRegistry } from "./mcp/stdin-registry.js";
 
 interface ClientState {
   clientId: string;
@@ -83,6 +85,14 @@ export interface AcpWsDeps {
   // Session.handleSlashCommand can later route "/hydra <name> <verb>"
   // calls back to the originating extension/transformer.
   extensionCommands?: ExtensionCommandRegistry;
+  // Registry of per-session MCP bearer tokens for in-memory stdin
+  // streaming (`hydra cat --stream`). Set when the session/new request
+  // carries `_meta.hydra-acp.mcpStdin: true`.
+  stdinMcpRegistry?: StdinMcpRegistry;
+  // Lazy getter for the daemon's externally-reachable origin (scheme +
+  // host + port). Lazy because the bound port isn't known until after
+  // `app.listen` returns, which happens after this registration runs.
+  getDaemonOrigin?: () => string;
 }
 
 export function registerAcpWsEndpoint(
@@ -419,16 +429,69 @@ export function registerAcpWsEndpoint(
           ? (hydraMeta.transformers as string[])
           : (deps.manager.defaultTransformers ?? []);
       const transformChain = deps.transformers?.resolveChain(transformerNames) ?? [];
-      const session = await deps.manager.create({
-        cwd: params.cwd,
-        agentId: params.agentId ?? deps.defaultAgent,
-        mcpServers: params.mcpServers,
-        title: hydraMeta.name,
-        agentArgs: hydraMeta.agentArgs,
-        model: hydraMeta.model,
-        onInstallProgress: makeInstallProgressForwarder(connection),
-        transformChain,
-      });
+      // If the client requested in-memory stdin streaming, mint a bearer
+      // token now and inject an HTTP MCP descriptor into the agent's
+      // mcpServers so the agent sees a `hydra_stdin` server with the
+      // tail/read/wait/info tools.
+      //
+      // We must RESERVE the token in the registry BEFORE manager.create
+      // returns: claude-acp eagerly initializes MCP servers during
+      // session/new (inside manager.create), so the agent's first
+      // request to /mcp/stdin lands while we're still awaiting the
+      // session. The route handler awaits the reservation's
+      // sessionReady promise, which we resolve via complete() once the
+      // session object exists.
+      let stdinToken: string | undefined;
+      let stdinReservation: { complete: (s: Session) => void; abandon: (e?: Error) => void } | undefined;
+      let augmentedMcpServers = params.mcpServers;
+      if (
+        hydraMeta.mcpStdin === true &&
+        deps.stdinMcpRegistry !== undefined &&
+        deps.getDaemonOrigin !== undefined
+      ) {
+        stdinToken = randomBytes(32).toString("hex");
+        stdinReservation = deps.stdinMcpRegistry.reserve(stdinToken);
+        const url = `${deps.getDaemonOrigin()}/mcp/stdin`;
+        const descriptor = {
+          name: "hydra_stdin",
+          type: "http",
+          url,
+          headers: [
+            { name: "Authorization", value: `Bearer ${stdinToken}` },
+          ],
+        };
+        augmentedMcpServers = [...(params.mcpServers ?? []), descriptor];
+      }
+      let session: Session;
+      try {
+        session = await deps.manager.create({
+          cwd: params.cwd,
+          agentId: params.agentId ?? deps.defaultAgent,
+          mcpServers: augmentedMcpServers,
+          title: hydraMeta.name,
+          agentArgs: hydraMeta.agentArgs,
+          model: hydraMeta.model,
+          onInstallProgress: makeInstallProgressForwarder(connection),
+          transformChain,
+        });
+      } catch (err) {
+        if (stdinReservation !== undefined) {
+          stdinReservation.abandon(err instanceof Error ? err : undefined);
+        }
+        throw err;
+      }
+      if (
+        stdinToken !== undefined &&
+        stdinReservation !== undefined &&
+        deps.stdinMcpRegistry !== undefined
+      ) {
+        const token = stdinToken;
+        const registry = deps.stdinMcpRegistry;
+        stdinReservation.complete(session);
+        session.onClose(() => {
+          void registry.unbind(token);
+        });
+      }
       const client = bindClientToSession(connection, session, state);
       // No conversation history to replay on a fresh session, but
       // buildStateSnapshotReplay() still emits synthetic state snapshots
