@@ -145,51 +145,101 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
 //   *italic* / _italic_  — `*` and `_` are too common in code/paths/
 //                          shell args, false-positives would litter the
 //                          UI with spurious italics.
-function applyInlineMarkup(text: string): string {
+//
+// boldReset/codeReset allow callers to substitute a non-full-reset sequence.
+// Thoughts pass "^-" for both so bold and inline code stay within the gray
+// register (bold-off only, no color change) rather than resetting to default fg.
+function applyInlineMarkup(
+  text: string,
+  opts?: { boldReset?: string; codeReset?: string },
+): string {
+  const boldReset = opts?.boldReset ?? "^:";
+  const codeReset = opts?.codeReset ?? "^:";
   let s = text.replace(/\^/g, "^^");
-  s = s.replace(/\*\*(.+?)\*\*/g, "^+$1^:");
-  s = s.replace(/`([^`]+)`/g, "^C$1^:");
+  s = s.replace(/\*\*(.+?)\*\*/g, `^+$1${boldReset}`);
+  s = s.replace(/`([^`]+)`/g, `^C$1${codeReset}`);
   return s;
 }
 
-// Block-level markdown → FormattedLines. Mirrors the regex-based approach
-// in @hydra-acp/browser's markdown.ts: each newline-separated line is
-// classified once and emitted with a matching style. Streamed agent text
-// is fed through this on every chunk and the resulting lines are upserted
-// as a single keyed block (so re-parsing is idempotent and the block
-// mutates in place as more content arrives). Inline marks for bold + code
-// are applied to plain prose / list items (see applyInlineMarkup); they
-// are intentionally NOT applied inside code fences (literal display) or
-// headings (already styled at the block level).
-export function parseAgentMarkdown(text: string): FormattedLine[] {
+interface ParseMarkdownOpts {
+  // bodyStyle for prose, list items, and headings. Code fences in agent mode
+  // use "code" with syntax highlighting; in thought mode they use this style
+  // so the hide-thoughts filter (which keys on bodyStyle) catches them.
+  proseStyle: Style;
+  // When true, code fences get syntax highlighting and bodyStyle "code".
+  // When false, fence lines are escaped and emitted with proseStyle.
+  highlightCode: boolean;
+  // Applied to every emitted line's prefixStyle field.
+  prefixStyle?: Style;
+  // Prefix for the first non-blank line. All other lines use "  ".
+  firstPrefix?: string;
+  // Passed to applyInlineMarkup for prose and list items.
+  inlineOpts?: { boldReset?: string; codeReset?: string };
+}
+
+// Block-level markdown → FormattedLines. Each newline-separated line is
+// classified once and emitted with a matching style. Inline marks for bold +
+// code are applied to prose and list items (see applyInlineMarkup); they are
+// intentionally NOT applied inside code fences or headings.
+//
+// Streamed text is fed through this on every chunk and the resulting lines are
+// upserted as a single keyed block (idempotent; the block mutates in place as
+// more content arrives). Mirrors the regex-based approach in
+// @hydra-acp/browser's markdown.ts.
+function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
+  const {
+    proseStyle,
+    highlightCode,
+    prefixStyle,
+    firstPrefix = "  ",
+    inlineOpts,
+  } = opts;
   const out: FormattedLine[] = [];
   const lines = text.split("\n");
   let inCode = false;
   let codeLang = "";
   let codeBuffer: string[] = [];
+  let firstNonBlank = firstPrefix !== "  ";
+  const line = (body: string, bodyStyle: Style, prefix = "  "): void => {
+    const entry: FormattedLine = { prefix, body, bodyStyle };
+    if (prefixStyle !== undefined)
+      entry.prefixStyle = prefixStyle;
+    out.push(entry);
+  };
+  const nextPrefix = (): string => {
+    if (!firstNonBlank)
+      return "  ";
+    firstNonBlank = false;
+    return firstPrefix;
+  };
   const flushCode = (): void => {
-    if (codeBuffer.length === 0) {
+    if (codeBuffer.length === 0)
       return;
-    }
-    const highlighted = highlightFencedBlock(codeLang, codeBuffer);
-    for (const piece of highlighted) {
-      const entry: FormattedLine = {
-        prefix: "  ",
-        body: piece.body,
-        bodyStyle: "code",
-        fillRow: true,
-      };
-      if (piece.ansi) {
-        entry.ansi = true;
+    if (highlightCode) {
+      const highlighted = highlightFencedBlock(codeLang, codeBuffer);
+      for (const piece of highlighted) {
+        const entry: FormattedLine = {
+          prefix: "  ",
+          body: piece.body,
+          bodyStyle: "code",
+          fillRow: true,
+        };
+        if (prefixStyle !== undefined)
+          entry.prefixStyle = prefixStyle;
+        if (piece.ansi)
+          entry.ansi = true;
+        out.push(entry);
       }
-      out.push(entry);
+    } else {
+      for (const cl of codeBuffer)
+        line(cl.replace(/\^/g, "^^"), proseStyle);
     }
     codeBuffer = [];
     codeLang = "";
   };
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const fence = line.match(/^\s*```\s*(\w*)\s*$/);
+    const l = lines[i]!;
+    const fence = l.match(/^\s*```\s*(\w*)\s*$/);
     if (fence) {
       if (!inCode) {
         inCode = true;
@@ -198,25 +248,25 @@ export function parseAgentMarkdown(text: string): FormattedLine[] {
         flushCode();
         inCode = false;
       }
-      // Don't render the ``` fence line itself — the styled bg of the
-      // following code lines is the visual cue that we're in a block.
+      // Don't render the ``` fence line itself.
       continue;
     }
     if (inCode) {
-      codeBuffer.push(line);
+      codeBuffer.push(l);
       continue;
     }
-    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    const heading = l.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const level = heading[1]!.length;
-      const text = heading[2] ?? "";
-      const style: Style =
-        level === 1 ? "heading-1" : level === 2 ? "heading-2" : "heading-3";
-      out.push({
-        prefix: "  ",
-        body: text,
-        bodyStyle: style,
-      });
+      const headingText = heading[2] ?? "";
+      const headingStyle: Style = highlightCode
+        ? level === 1
+          ? "heading-1"
+          : level === 2
+            ? "heading-2"
+            : "heading-3"
+        : proseStyle;
+      line(headingText, headingStyle, nextPrefix());
       continue;
     }
     // Pipe table: a header row, an `|---|---|` separator on the very next
@@ -226,58 +276,80 @@ export function parseAgentMarkdown(text: string): FormattedLine[] {
     // as plain text.
     const next = lines[i + 1];
     if (
-      line.includes("|") &&
+      l.includes("|") &&
       next !== undefined &&
       isTableSeparatorLine(next) &&
-      parseTableRow(line).length === parseTableRow(next).length
+      parseTableRow(l).length === parseTableRow(next).length
     ) {
-      const header = parseTableRow(line);
+      const header = parseTableRow(l);
       const body: string[][] = [];
       let j = i + 2;
       while (j < lines.length && lines[j]!.includes("|")) {
         body.push(parseTableRow(lines[j]!));
         j++;
       }
-      out.push(...formatTable(header, body));
+      const tableLines = formatTable(header, body);
+      for (const tl of tableLines) {
+        if (prefixStyle !== undefined)
+          tl.prefixStyle = prefixStyle;
+        out.push(tl);
+      }
       i = j - 1;
       continue;
     }
-    const bullet = line.match(/^(\s*)[-*+]\s+(.*)$/);
+    const bullet = l.match(/^(\s*)[-*+]\s+(.*)$/);
     if (bullet) {
       const indent = bullet[1] ?? "";
       const item = bullet[2] ?? "";
-      out.push({
-        prefix: "  ",
-        body: `${indent}• ${applyInlineMarkup(item)}`,
-        bodyStyle: "agent",
-      });
+      line(
+        `${indent}• ${applyInlineMarkup(item, inlineOpts)}`,
+        proseStyle,
+        nextPrefix(),
+      );
       continue;
     }
-    const ordered = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+    const ordered = l.match(/^(\s*)(\d+)\.\s+(.*)$/);
     if (ordered) {
       const indent = ordered[1] ?? "";
       const num = ordered[2] ?? "";
       const item = ordered[3] ?? "";
-      out.push({
-        prefix: "  ",
-        body: `${indent}${num}. ${applyInlineMarkup(item)}`,
-        bodyStyle: "agent",
-      });
+      line(
+        `${indent}${num}. ${applyInlineMarkup(item, inlineOpts)}`,
+        proseStyle,
+        nextPrefix(),
+      );
       continue;
     }
-    out.push({
-      prefix: "  ",
-      body: applyInlineMarkup(line),
-      bodyStyle: "agent",
-    });
+    const isBlank = l.trim() === "";
+    line(
+      applyInlineMarkup(l, inlineOpts),
+      proseStyle,
+      isBlank ? "  " : nextPrefix(),
+    );
   }
-  // Mid-stream: the closing fence hasn't arrived yet but we still need
-  // the in-progress code visible. Flush the buffer with whatever language
-  // hint was captured (or none) so the user sees content as it streams.
-  if (inCode) {
+  // Mid-stream: flush in-progress fence so content is visible before the
+  // closing ``` arrives.
+  if (inCode)
     flushCode();
-  }
   return out;
+}
+
+export function parseAgentMarkdown(text: string): FormattedLine[] {
+  return parseMarkdown(text, { proseStyle: "agent", highlightCode: true });
+}
+
+// Thoughts use proseStyle "thought" throughout so the ^T hide-thoughts filter
+// (which keys on bodyStyle) catches every line. The "· " gutter appears on
+// the first non-blank line; both inline resets use "^-" (bold-off only) so
+// bold and code spans stay in the same gray register without a hue shift.
+export function parseThoughtMarkdown(text: string): FormattedLine[] {
+  return parseMarkdown(text, {
+    proseStyle: "thought",
+    highlightCode: false,
+    prefixStyle: "thought",
+    firstPrefix: "· ",
+    inlineOpts: { boldReset: "^-", codeReset: "^-" },
+  });
 }
 
 // Split a `| a | b | c |` row into trimmed cells. Outer pipes are

@@ -83,6 +83,7 @@ import {
   formatExitPlanMode,
   formatToolLine,
   parseAgentMarkdown,
+  parseThoughtMarkdown,
   type ExitPlanState,
   type FormattedLine,
   type ToolLineState,
@@ -2730,6 +2731,41 @@ async function runSession(
     agentBuffer = "";
   };
 
+  // Parallel buffered-rerender for thought blocks. Same pattern as agent
+  // text: chunks accumulate, whole buffer is re-parsed on each chunk,
+  // result upserted as one keyed block. bodyStyle "thought" is preserved
+  // on every line so the ^T hide-thoughts filter keeps working.
+  let thoughtBuffer = "";
+  let thoughtKey: string | null = null;
+  let thoughtSeq = 0;
+
+  const renderThoughtBlock = (): void => {
+    if (thoughtKey === null)
+      return;
+    const lines = parseThoughtMarkdown(thoughtBuffer);
+    if (lines.length === 0)
+      return;
+    screen.upsertLines(thoughtKey, lines);
+  };
+
+  const appendThought = (text: string): void => {
+    if (text.length === 0)
+      return;
+    if (thoughtKey === null) {
+      screen.ensureSeparator();
+      thoughtKey = `thought:${thoughtSeq}`;
+      thoughtSeq += 1;
+      thoughtBuffer = "";
+    }
+    thoughtBuffer += text;
+    renderThoughtBlock();
+  };
+
+  const closeThought = (): void => {
+    thoughtKey = null;
+    thoughtBuffer = "";
+  };
+
   const renderToolsBlock = (): void => {
     if (toolsBlockStartedAt === null) {
       return;
@@ -2941,6 +2977,7 @@ async function runSession(
       // emitting user-text the block would land above the prompt and the
       // chronology would read backwards.
       closeAgentText();
+      closeThought();
       // The previous turn's tools block may still be live: that happens
       // when hydra dispatches the next prompt (queued or peer) before
       // the previous turn's local synthetic turn-complete fires. Freeze
@@ -2994,22 +3031,23 @@ async function runSession(
       return;
     }
     if (event.kind === "agent-text") {
+      closeThought();
       appendAgentText(event.text);
       return;
     }
     if (event.kind === "agent-thought") {
-      // Thoughts get the streaming-line treatment — short, dim, italic,
-      // no markdown. Closing the agent block first ensures the next
-      // text chunk starts a fresh block below the thought. We always
-      // append to scrollback even when thoughts are hidden — the
-      // Screen's setHideThoughts() filters at draw time, so toggling
-      // back on reveals the lines that streamed in while hidden.
+      // Thoughts are buffered and re-parsed through parseThoughtMarkdown on
+      // each chunk — same pattern as agent text — so markdown (bold, code)
+      // renders correctly. We always upsert even when thoughts are hidden;
+      // setHideThoughts() filters at draw time so toggling ^T reveals lines
+      // that streamed in while hidden.
       closeAgentText();
-      screen.appendStreaming(event.text, "· ", "thought", "thought");
+      appendThought(event.text);
       return;
     }
     if (event.kind === "exit-plan-mode") {
       closeAgentText();
+      closeThought();
       const existing = exitPlanStates.get(event.toolCallId);
       const merged: ExitPlanState = {
         plan: event.plan ?? existing?.plan ?? "",
@@ -3030,6 +3068,7 @@ async function runSession(
     }
     if (event.kind === "tool-call") {
       closeAgentText();
+      closeThought();
       recordToolCall(event.toolCallId, event.title, event.status, undefined);
       renderToolsBlock();
       return;
@@ -3039,6 +3078,7 @@ async function runSession(
       // or checked off; render it as a single mutating block so the
       // scrollback doesn't accumulate one copy per update.
       closeAgentText();
+      closeThought();
       lastPlanEvent = event;
       const lines = formatEvent(event);
       if (lines.length > 0) {
@@ -3048,6 +3088,7 @@ async function runSession(
     }
     if (event.kind === "tool-call-update") {
       closeAgentText();
+      closeThought();
       recordToolCall(
         event.toolCallId,
         event.title,
@@ -3081,6 +3122,7 @@ async function runSession(
       // it would splice into the previous turn's plan, possibly far up in
       // (or off the top of) scrollback.
       closeAgentText();
+      closeThought();
       // Substitute "amended" for the stopReason when the daemon flagged
       // this turn as cancel-due-to-amend. Downstream renderers (plan
       // stopped-state, tools block header, "turn ended" warning) display
@@ -3255,6 +3297,7 @@ async function runSession(
       resolve({ outcome: { outcome: "cancelled" } });
     }
     closeAgentText();
+    closeThought();
   };
 
   // Force-finalize an in-flight tools block as recovery-failed. Used when

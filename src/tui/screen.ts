@@ -3124,12 +3124,9 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       term(text);
       return;
     case "thought":
-      // Bright-black (gray) — no italic, no dim. tmux's default terminfo
-      // (screen-256color) doesn't advertise italic, so many clients
-      // render \x1b[3m as standout / reverse video, which looks like
-      // a stray background color stripe on the row. Plain gray reads as
-      // muted secondary text without being so faint it's unreadable.
-      term.brightBlack.noFormat(text);
+      // Bright-black (gray). noFormat removed so caret markup (^+bold^-,
+      // ^Ccode^K) is interpreted; applyInlineMarkup escapes literal ^ → ^^.
+      term.brightBlack(text);
       return;
     case "tool":
       term.brightBlue.noFormat(text);
