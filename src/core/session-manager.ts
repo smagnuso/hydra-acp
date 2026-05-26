@@ -36,6 +36,7 @@ import type {
 } from "./hydra-commands.js";
 import type { AgentCapabilities, SessionListEntry } from "../acp/types.js";
 import type { TransformerRef } from "./transformer-manager.js";
+import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
 import { HYDRA_VERSION } from "./hydra-version.js";
 import { loadQueue, rewriteQueue } from "./queue-store.js";
@@ -135,6 +136,10 @@ export interface SessionManagerOptions {
   // npm registry URL forwarded to planSpawn for npm-distributed agents.
   // Overrides the user's global .npmrc so installs hit the intended registry.
   npmRegistry?: string;
+  // Process-name → registered command list. Daemon shares a single
+  // registry across all sessions so an extension only has to register
+  // once at connect time and every live session can dispatch to it.
+  extensionCommands?: ExtensionCommandRegistry;
 }
 
 export class SessionManager {
@@ -154,6 +159,7 @@ export class SessionManager {
   private metaWriteQueues = new Map<string, Promise<unknown>>();
   private logger?: AgentLogger;
   private npmRegistry?: string;
+  private extensionCommands?: ExtensionCommandRegistry;
 
   constructor(
     private registry: Registry,
@@ -171,6 +177,7 @@ export class SessionManager {
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
+    this.extensionCommands = options.extensionCommands;
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -234,6 +241,7 @@ export class SessionManager {
       agentModels: fresh.initialModels,
       transformChain: params.transformChain,
       parentSessionId: params.parentSessionId,
+      extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -458,6 +466,7 @@ export class SessionManager {
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
         : undefined,
+      extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
     return session;
@@ -534,6 +543,7 @@ export class SessionManager {
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
         : undefined,
+      extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
     // Fire and forget — the seed runs through enqueuePrompt inside

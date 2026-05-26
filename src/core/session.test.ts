@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Session, type AttachedClient } from "./session.js";
 import { HistoryStore } from "./history-store.js";
+import { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import {
   makeControlledStream,
@@ -3335,6 +3336,207 @@ describe("Session", () => {
       await expect(bobPromise).resolves.toMatchObject({
         stopReason: "cancelled",
       });
+    });
+  });
+
+  describe("extension slash-command dispatch", () => {
+    function makeSessionWithRegistry(registry: ExtensionCommandRegistry) {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "hydra_session_ext",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_ext",
+        historyStore: new HistoryStore(),
+        extensionCommands: registry,
+      });
+      return { session, mock };
+    }
+
+    function makeFakeExtensionConnection(): {
+      connection: JsonRpcConnection;
+      request: ReturnType<typeof vi.fn>;
+    } {
+      const request = vi.fn();
+      const connection = { request } as unknown as JsonRpcConnection;
+      return { connection, request };
+    }
+
+    it("advertises registered verbs via mergedAvailableCommands", () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection } = makeFakeExtensionConnection();
+      registry.register("hydra-acp-budgeter", connection, [
+        {
+          verb: "reset",
+          description: "Reset accumulated cost",
+        },
+      ]);
+      const names = session.mergedAvailableCommands().map((c) => c.name);
+      expect(names).toContain("hydra hydra-acp-budgeter reset");
+    });
+
+    it("registry changes re-broadcast available_commands_update to attached clients", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      const baseline = stream.sent.length;
+
+      const { connection } = makeFakeExtensionConnection();
+      registry.register("hydra-acp-budgeter", connection, [{ verb: "reset" }]);
+      await new Promise((r) => setImmediate(r));
+
+      const broadcast = stream.sent
+        .slice(baseline)
+        .find(
+          (m) =>
+            "method" in m &&
+            m.method === "session/update" &&
+            (m.params as { update?: { sessionUpdate?: string } } | undefined)
+              ?.update?.sessionUpdate === "available_commands_update",
+        );
+      expect(broadcast).toBeDefined();
+      const cmds = (
+        broadcast?.params as {
+          update: { availableCommands: Array<{ name: string }> };
+        }
+      ).update.availableCommands.map((c) => c.name);
+      expect(cmds).toContain("hydra hydra-acp-budgeter reset");
+    });
+
+    it("dispatches /hydra <ext> <verb> to the registered connection and emits the reply", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request } = makeFakeExtensionConnection();
+      request.mockResolvedValue({ text: "spend reset" });
+      registry.register("hydra-acp-budgeter", connection, [{ verb: "reset" }]);
+
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+
+      const result = await session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra hydra-acp-budgeter reset" }],
+      });
+      expect(result).toEqual({ stopReason: "end_turn" });
+
+      expect(request).toHaveBeenCalledWith("hydra-acp/extension_command", {
+        sessionId: "hydra_session_ext",
+        verb: "reset",
+        args: "",
+      });
+
+      const chunk = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string; content?: { text?: string } } } | undefined)
+            ?.update?.sessionUpdate === "agent_message_chunk",
+      );
+      expect(chunk).toBeDefined();
+      const text = (chunk?.params as {
+        update: { content: { text: string } };
+      }).update.content.text;
+      expect(text).toContain("spend reset");
+    });
+
+    it("passes verb args through to the extension", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request } = makeFakeExtensionConnection();
+      request.mockResolvedValue({ text: "" });
+      registry.register("hydra-acp-budgeter", connection, [
+        { verb: "set", argsHint: "<limit>" },
+      ]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      await session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra hydra-acp-budgeter set hard 50" }],
+      });
+
+      expect(request).toHaveBeenCalledWith("hydra-acp/extension_command", {
+        sessionId: "hydra_session_ext",
+        verb: "set",
+        args: "hard 50",
+      });
+    });
+
+    it("emits an error chunk when the verb isn't registered", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request } = makeFakeExtensionConnection();
+      registry.register("hydra-acp-budgeter", connection, [{ verb: "reset" }]);
+
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      await session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra hydra-acp-budgeter delete-everything" }],
+      });
+      expect(request).not.toHaveBeenCalled();
+      const chunk = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "agent_message_chunk",
+      );
+      const text = (chunk?.params as {
+        update: { content: { text: string } };
+      }).update.content.text;
+      expect(text).toContain("unknown verb");
+      expect(text).toContain("delete-everything");
+    });
+
+    it("surfaces extension errors as a synthetic agent chunk rather than throwing", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request } = makeFakeExtensionConnection();
+      request.mockRejectedValue(new Error("disk full"));
+      registry.register("hydra-acp-budgeter", connection, [{ verb: "reset" }]);
+
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      const result = await session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra hydra-acp-budgeter reset" }],
+      });
+      expect(result).toEqual({ stopReason: "end_turn" });
+      const chunk = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "agent_message_chunk",
+      );
+      const text = (chunk?.params as {
+        update: { content: { text: string } };
+      }).update.content.text;
+      expect(text).toContain("disk full");
+    });
+
+    it("falls back to built-in hydra verbs even if an extension registers a colliding name", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request } = makeFakeExtensionConnection();
+      // An extension that somehow registers under the literal name "title"
+      // must NOT shadow the built-in /hydra title verb.
+      registry.register("title", connection, [{ verb: "reset" }]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      const promise = session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra title my title" }],
+      });
+      // Built-in title-set path resolves end_turn; the extension is untouched.
+      await expect(promise).resolves.toMatchObject({ stopReason: "end_turn" });
+      expect(request).not.toHaveBeenCalled();
+      expect(session.title).toBe("my title");
     });
   });
 });

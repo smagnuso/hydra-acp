@@ -40,6 +40,10 @@ import {
   type ProcessIdentity,
 } from "./auth.js";
 import type { TransformerManager } from "../core/transformer-manager.js";
+import type {
+  ExtensionCommandRegistry,
+  ExtensionCommandSpec,
+} from "../core/extension-commands.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 
 interface ClientState {
@@ -74,6 +78,11 @@ export interface AcpWsDeps {
   // TransformerManager for registering transformer connections after
   // transformer/initialize completes.
   transformers?: TransformerManager;
+  // Daemon-wide registry of process-name → registered command list.
+  // The hydra-acp/register_commands handler binds the connection here so
+  // Session.handleSlashCommand can later route "/hydra <name> <verb>"
+  // calls back to the originating extension/transformer.
+  extensionCommands?: ExtensionCommandRegistry;
 }
 
 export function registerAcpWsEndpoint(
@@ -141,6 +150,49 @@ export function registerAcpWsEndpoint(
       }
       return buildInitializeResult();
     });
+
+    // Extensions and transformers register slash-command verbs they handle
+    // via this method. Once registered, "/hydra <process-name> <verb>"
+    // typed in any session routes to this connection as a
+    // hydra-acp/extension_command request. Registrations drop on
+    // disconnect — Session sees the entry vanish from the registry.
+    // Re-calling overwrites the prior registration for this name.
+    if (processIdentity && deps.extensionCommands) {
+      const registry = deps.extensionCommands;
+      connection.onRequest("hydra-acp/register_commands", async (raw) => {
+        const params = (raw ?? {}) as { commands?: unknown };
+        const commands = Array.isArray(params.commands)
+          ? (params.commands
+              .map((c): ExtensionCommandSpec | undefined => {
+                if (!c || typeof c !== "object") {
+                  return undefined;
+                }
+                const obj = c as {
+                  verb?: unknown;
+                  argsHint?: unknown;
+                  description?: unknown;
+                };
+                if (typeof obj.verb !== "string" || obj.verb.length === 0) {
+                  return undefined;
+                }
+                const spec: ExtensionCommandSpec = { verb: obj.verb };
+                if (typeof obj.argsHint === "string") {
+                  spec.argsHint = obj.argsHint;
+                }
+                if (typeof obj.description === "string") {
+                  spec.description = obj.description;
+                }
+                return spec;
+              })
+              .filter((s): s is ExtensionCommandSpec => s !== undefined))
+          : [];
+        registry.register(processIdentity.name, connection, commands);
+        return { ok: true, registered: commands.length };
+      });
+      connection.onClose(() => {
+        registry.clear(processIdentity.name);
+      });
+    }
 
     // transformer/initialize is only registered for transformer connections.
     // Extension and client connections receive MethodNotFound if they attempt

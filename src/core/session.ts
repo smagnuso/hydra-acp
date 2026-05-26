@@ -41,6 +41,7 @@ import {
   type AdvertisedMode,
   type AdvertisedModel,
 } from "./hydra-commands.js";
+import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import {
@@ -158,6 +159,11 @@ export interface SessionInit {
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
   listSessions?: () => Promise<{ sessionId: string; title?: string; cwd: string; agentId?: string; currentModel?: string }[]>;
+  // Registry of commands that running extensions/transformers have
+  // registered via hydra-acp/register_commands. Read by
+  // handleSlashCommand (to dispatch "/hydra <name> <verb>") and by
+  // mergedAvailableCommands (to advertise the entries to clients).
+  extensionCommands?: ExtensionCommandRegistry;
 }
 
 export interface CloseOptions {
@@ -330,6 +336,8 @@ export class Session {
   private listSessions: SessionInit["listSessions"];
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
+  private extensionCommands: ExtensionCommandRegistry | undefined;
+  private extensionCommandsUnsub: (() => void) | undefined;
   // Outstanding "processing" claims: token → claim waiting for respondsTo discharge.
   private pendingClaims = new Map<string, TransformerClaim>();
   private agentChangeHandlers: Array<
@@ -437,6 +445,14 @@ export class Session {
     this.listSessions = init.listSessions;
     this.logger = init.logger;
     this.transformChain = init.transformChain ?? [];
+    this.extensionCommands = init.extensionCommands;
+    if (this.extensionCommands) {
+      this.extensionCommandsUnsub = this.extensionCommands.onChange(() => {
+        if (!this.closed) {
+          this.broadcastMergedCommands();
+        }
+      });
+    }
     if (init.firstPromptSeeded) {
       this.firstPromptSeeded = true;
     }
@@ -456,18 +472,11 @@ export class Session {
   }
 
   private broadcastMergedCommands(): void {
-    const merged: AdvertisedCommand[] = [
-      ...hydraCommandsAsAdvertised(),
-      { name: "model <model-id>", description: "Switch model; omit arg to list available models" },
-      { name: "sessions", description: "List all sessions" },
-      { name: "help", description: "Show available commands" },
-      ...this.agentAdvertisedCommands,
-    ];
     this.recordAndBroadcast("session/update", {
       sessionId: this.upstreamSessionId,
       update: {
         sessionUpdate: "available_commands_update",
-        availableCommands: merged,
+        availableCommands: this.mergedAvailableCommands(),
       },
     });
   }
@@ -2261,11 +2270,31 @@ export class Session {
     this.usageHandlers.push(handler);
   }
 
-  // Returns a freshly merged command list (hydra ∪ agent) for callers
-  // that need a snapshot — notably acp-ws.ts's buildResponseMeta when
-  // assembling the attach response.
+  // Returns a freshly merged command list (hydra ∪ extension ∪ agent) for
+  // callers that need a snapshot — notably acp-ws.ts's buildResponseMeta
+  // when assembling the attach response. Order: built-in hydra verbs,
+  // top-level daemon verbs (/model, /sessions, /help), extension-registered
+  // entries, then whatever the agent advertised.
   mergedAvailableCommands(): AdvertisedCommand[] {
-    return [...hydraCommandsAsAdvertised(), ...this.agentAdvertisedCommands];
+    const out: AdvertisedCommand[] = [
+      ...hydraCommandsAsAdvertised(),
+      { name: "model <model-id>", description: "Switch model; omit arg to list available models" },
+      { name: "sessions", description: "List all sessions" },
+      { name: "help", description: "Show available commands" },
+    ];
+    if (this.extensionCommands) {
+      for (const { name, command } of this.extensionCommands.list()) {
+        const head = `hydra ${name} ${command.verb}`;
+        const display = command.argsHint ? `${head} ${command.argsHint}` : head;
+        const entry: AdvertisedCommand = { name: display };
+        if (command.description) {
+          entry.description = command.description;
+        }
+        out.push(entry);
+      }
+    }
+    out.push(...this.agentAdvertisedCommands);
+    return out;
   }
 
   // The agent's own advertised commands (not merged with hydra verbs).
@@ -2326,42 +2355,125 @@ export class Session {
   // caller's promise resolves like a normal turn. To add a verb: append
   // an entry to HYDRA_COMMANDS (drives validation + client advertising)
   // and a dispatch case in the switch below.
+  //
+  // Extensions/transformers can also bind verbs via the
+  // ExtensionCommandRegistry: "/hydra <process-name> <verb> [args]" routes
+  // to that process's WS connection. Built-in hydra verbs win on name
+  // collision so an extension can never shadow them.
   private async handleSlashCommand(text: string): Promise<unknown> {
     const rest = text.slice("/hydra".length).trim();
     const match = rest.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-    const verb = match?.[1] ?? "";
-    const arg = (match?.[2] ?? "").trim();
-    if (verb === "") {
+    const first = match?.[1] ?? "";
+    const remainder = (match?.[2] ?? "").trim();
+    if (first === "") {
       // "/hydra" alone: no-op, return success so the user's
       // composer doesn't show an error.
       return { stopReason: "end_turn" };
     }
-    if (!HYDRA_COMMANDS.some((c) => c.verb === verb)) {
-      const known = HYDRA_COMMANDS.map((c) => c.verb).join(", ");
-      const err = new Error(
-        `unknown /hydra verb: ${verb} (known: ${known})`,
-      ) as Error & { code: number };
-      err.code = JsonRpcErrorCodes.InvalidParams;
-      throw err;
-    }
-    switch (verb) {
-      case "title":
-        return this.runTitleCommand(arg);
-      case "agent":
-        return this.runAgentCommand(arg);
-      case "kill":
-        return this.runKillCommand();
-      case "restart":
-        return this.runRestartCommand();
-      default: {
-        // Listed in HYDRA_COMMANDS but no dispatch case — wired up wrong.
-        const err = new Error(
-          `no dispatcher for /hydra verb ${verb}`,
-        ) as Error & { code: number };
-        err.code = JsonRpcErrorCodes.InternalError;
-        throw err;
+    if (HYDRA_COMMANDS.some((c) => c.verb === first)) {
+      switch (first) {
+        case "title":
+          return this.runTitleCommand(remainder);
+        case "agent":
+          return this.runAgentCommand(remainder);
+        case "kill":
+          return this.runKillCommand();
+        case "restart":
+          return this.runRestartCommand();
+        default: {
+          // Listed in HYDRA_COMMANDS but no dispatch case — wired up wrong.
+          const err = new Error(
+            `no dispatcher for /hydra verb ${first}`,
+          ) as Error & { code: number };
+          err.code = JsonRpcErrorCodes.InternalError;
+          throw err;
+        }
       }
     }
+    if (this.extensionCommands?.has(first)) {
+      return this.runExtensionCommand(first, remainder);
+    }
+    const known = HYDRA_COMMANDS.map((c) => c.verb);
+    if (this.extensionCommands) {
+      const seen = new Set<string>();
+      for (const { name } of this.extensionCommands.list()) {
+        if (!seen.has(name)) {
+          known.push(name);
+          seen.add(name);
+        }
+      }
+    }
+    const err = new Error(
+      `unknown /hydra verb: ${first} (known: ${known.join(", ")})`,
+    ) as Error & { code: number };
+    err.code = JsonRpcErrorCodes.InvalidParams;
+    throw err;
+  }
+
+  // "/hydra <name> <verb> [args]" — name matches a registered extension
+  // or transformer. We split the remainder into verb + args, validate the
+  // verb against what the process advertised, and forward as a
+  // hydra-acp/extension_command request on the process's WS connection.
+  // The reply's text (if any) is broadcast as a synthetic
+  // agent_message_chunk so it appears in the conversation alongside the
+  // user's invocation.
+  private runExtensionCommand(name: string, remainder: string): Promise<unknown> {
+    return this.enqueuePrompt(async () => {
+      const entry = this.extensionCommands?.get(name);
+      if (!entry) {
+        return this.emitExtensionReply(
+          `extension "${name}" is no longer connected`,
+        );
+      }
+      const m = remainder.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+      const verb = m?.[1] ?? "";
+      const args = (m?.[2] ?? "").trim();
+      if (verb === "") {
+        const verbs = entry.commands.map((c) => c.verb).join(", ");
+        return this.emitExtensionReply(
+          `/hydra ${name} requires a verb (known: ${verbs || "(none)"})`,
+        );
+      }
+      if (!entry.commands.some((c) => c.verb === verb)) {
+        const verbs = entry.commands.map((c) => c.verb).join(", ");
+        return this.emitExtensionReply(
+          `unknown verb "${verb}" for ${name} (known: ${verbs || "(none)"})`,
+        );
+      }
+      let reply: unknown;
+      try {
+        reply = await entry.connection.request("hydra-acp/extension_command", {
+          sessionId: this.sessionId,
+          verb,
+          args,
+        });
+      } catch (err) {
+        return this.emitExtensionReply(
+          `${name} ${verb}: ${(err as Error).message}`,
+        );
+      }
+      const text =
+        reply && typeof reply === "object" &&
+        typeof (reply as { text?: unknown }).text === "string"
+          ? ((reply as { text: string }).text)
+          : "";
+      if (text.length > 0) {
+        return this.emitExtensionReply(text);
+      }
+      return { stopReason: "end_turn" };
+    });
+  }
+
+  private emitExtensionReply(text: string): unknown {
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `\n${text}\n` },
+        _meta: { "hydra-acp": { synthetic: true } },
+      },
+    });
+    return { stopReason: "end_turn" };
   }
 
   private async handleSessionsCommand(): Promise<unknown> {
@@ -2937,6 +3049,10 @@ export class Session {
     }
     this.closed = true;
     this.cancelIdleTimer();
+    if (this.extensionCommandsUnsub) {
+      this.extensionCommandsUnsub();
+      this.extensionCommandsUnsub = undefined;
+    }
     // If a user-prompt turn is currently in-flight, synthesize a
     // turn_complete before clearing clients. This writes a proper close
     // record to history so clients that replay after a restart don't see

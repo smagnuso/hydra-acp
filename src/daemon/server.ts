@@ -11,6 +11,7 @@ import { AgentInstance } from "../core/agent-instance.js";
 import { SessionManager, type AgentSpawner } from "../core/session-manager.js";
 import { ExtensionManager } from "../core/extensions.js";
 import { TransformerManager } from "../core/transformer-manager.js";
+import { ExtensionCommandRegistry } from "../core/extension-commands.js";
 import { paths } from "../core/paths.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
 import { setNpmInstallLogger } from "../core/npm-install.js";
@@ -158,6 +159,7 @@ export async function startDaemon(
       stderrTailBytes: config.daemon.agentStderrTailBytes,
       logger: agentLogger,
     });
+  const extensionCommands = new ExtensionCommandRegistry();
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
     defaultModels: config.defaultModels,
@@ -165,6 +167,7 @@ export async function startDaemon(
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,
     npmRegistry: config.npmRegistry,
+    extensionCommands,
   });
 
   const extensions = new ExtensionManager(extensionList(config), undefined, {
@@ -201,6 +204,7 @@ export async function startDaemon(
     onExtensionVersion: (name, version) => extensions.reportVersion(name, version),
     onTransformerVersion: (name, version) => transformers.reportVersion(name, version),
     transformers,
+    extensionCommands,
   });
 
   await app.listen({ host: config.daemon.host, port: config.daemon.port });
