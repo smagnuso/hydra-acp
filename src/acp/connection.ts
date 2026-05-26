@@ -71,8 +71,11 @@ export class JsonRpcConnection {
   // us, and if we flushed it through wireAgent's session/update handler
   // every entry would be re-appended to history.jsonl, doubling the log
   // each time the session was woken up.
-  drainBuffered(method: string): void {
+  drainBuffered(method: string): number {
+    const buf = this.bufferedNotifications.get(method);
+    const count = buf?.length ?? 0;
     this.bufferedNotifications.delete(method);
+    return count;
   }
 
   onClose(handler: (err?: Error) => void): void {

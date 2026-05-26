@@ -1887,6 +1887,9 @@ export class Session {
     if (!trimmed || trimmed === this.currentModel) {
       return true;
     }
+    this.logger?.info(
+      `live current_model_update: sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
+    );
     this.currentModel = trimmed;
     for (const handler of this.modelHandlers) {
       try {
@@ -1941,6 +1944,9 @@ export class Session {
       if (typeof cv === "string") {
         const trimmed = cv.trim();
         if (trimmed && trimmed !== this.currentModel) {
+          this.logger?.info(
+            `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
+          );
           this.currentModel = trimmed;
           for (const handler of this.modelHandlers) {
             try {
@@ -2149,6 +2155,9 @@ export class Session {
   }
 
   private setAgentAdvertisedModels(models: AdvertisedModel[]): void {
+    this.logger?.info(
+      `setAgentAdvertisedModels: sessionId=${this.sessionId} currentModel=${JSON.stringify(this.currentModel)} newList=[${models.map((m) => m.modelId).join(",")}]`,
+    );
     if (sameAdvertisedModels(this.agentAdvertisedModels, models)) {
       // No structural change — skip the persistence fan-out but still
       // rebroadcast so a racing mid-session attach gets the snapshot
@@ -2414,11 +2423,19 @@ export class Session {
       if (models.length === 0) {
         body = current ? `Current model: ${current}` : "_(no models advertised yet)_";
       } else {
+        const inList = current ? models.some((m) => m.modelId === current) : true;
         const lines = models.map((m) => {
           const marker = m.modelId === current ? " ◀" : "";
           const desc = m.name && m.name !== m.modelId ? `  ${m.name}` : "";
           return `${m.modelId}${marker}${desc}`;
         });
+        // Current model is valid but not in the advertised list (e.g. an
+        // alias like "opus[1m]" that the agent normalizes to a canonical
+        // id in its availableModels). Show it at the top so the user
+        // can see what they're on.
+        if (!inList && current) {
+          lines.unshift(`${current} ◀`);
+        }
         body = lines.join("\n");
       }
       this.recordAndBroadcast("session/update", {

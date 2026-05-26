@@ -320,12 +320,14 @@ export class SessionManager {
 
     let loadResult: Record<string, unknown> | undefined;
     try {
+      const loadMeta = buildSessionLoadMeta(params.agentId, params.currentModel);
       loadResult = await agent.connection.request<Record<string, unknown>>(
         "session/load",
         {
           sessionId: params.upstreamSessionId,
           cwd: params.cwd,
           mcpServers: [],
+          ...(loadMeta && { _meta: loadMeta }),
         },
       );
     } catch (err) {
@@ -355,7 +357,10 @@ export class SessionManager {
         () => undefined,
       );
     } else {
-      agent.connection.drainBuffered("session/update");
+      const drain1Count = agent.connection.drainBuffered("session/update");
+      this.logger?.info(
+        `resurrect: drain1 dropped ${drain1Count} buffered session/update(s) for sessionId=${params.hydraSessionId}`,
+      );
     }
 
     // Push the persisted mode back to the freshly loaded agent so a
@@ -382,6 +387,42 @@ export class SessionManager {
       `resurrect: effectiveMode=${JSON.stringify(effectiveMode)} for sessionId=${params.hydraSessionId}`,
     );
 
+    const agentReportedModel = extractInitialModel(loadResult ?? {});
+    const advertisedModels =
+      nonEmptyOrUndefined(extractInitialModels(loadResult ?? {})) ??
+      params.agentModels;
+    this.logger?.info(
+      `resurrect: sessionId=${params.hydraSessionId} persistedModel=${JSON.stringify(params.currentModel)} agentReportedModel=${JSON.stringify(agentReportedModel)} advertisedModels=${JSON.stringify(advertisedModels?.map((m) => m.modelId))}`,
+    );
+
+    // The set_mode call above may have prompted the agent to emit fresh
+    // session/update notifications. Drop them before wireAgent so they
+    // don't overwrite the mode we just set.
+    if (params.pendingHistorySync !== true) {
+      const drain2Count = agent.connection.drainBuffered("session/update");
+      this.logger?.info(
+        `resurrect: drain2 (post-mode-restore) dropped ${drain2Count} buffered session/update(s) for sessionId=${params.hydraSessionId}`,
+      );
+    }
+
+    // If the agent didn't come back on the right model (codex-acp has no
+    // _meta extension, opencode and claude-acp with _meta both agree),
+    // push the persisted model back via set_model. Falls back to whatever
+    // the agent reported if the call fails.
+    const effectiveModel = await restoreCurrentModel({
+      agent,
+      upstreamSessionId: params.upstreamSessionId,
+      persistedModel: params.currentModel,
+      agentReportedModel,
+      logger: this.logger,
+    });
+    if (params.pendingHistorySync !== true) {
+      const drain3Count = agent.connection.drainBuffered("session/update");
+      this.logger?.info(
+        `resurrect: drain3 (post-model-restore) dropped ${drain3Count} buffered session/update(s) for sessionId=${params.hydraSessionId}`,
+      );
+    }
+
     const session = new Session({
       sessionId: params.hydraSessionId,
       cwd: params.cwd,
@@ -399,12 +440,7 @@ export class SessionManager {
       listSessions: () => this.list(),
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
-      // Prefer what we previously stored from a current_model_update; if
-      // we never captured one (e.g. old opencode sessions on disk before
-      // this fix), fall back to the model the agent ships in its
-      // session/load response body.
-      currentModel:
-        params.currentModel ?? extractInitialModel(loadResult ?? {}),
+      currentModel: effectiveModel,
       currentMode: effectiveMode,
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
@@ -413,9 +449,7 @@ export class SessionManager {
       // snapshot — the proxy's available models can change between daemon
       // restarts (quota resets, rollouts), so meta.json is intentionally
       // treated as a cold fallback here, not the authoritative source.
-      agentModels:
-        nonEmptyOrUndefined(extractInitialModels(loadResult ?? {})) ??
-        params.agentModels,
+      agentModels: advertisedModels,
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
       // or never seeded) should re-derive from the next prompt rather
@@ -448,6 +482,10 @@ export class SessionManager {
       agentArgs: params.agentArgs,
       mcpServers: [],
       onInstallProgress: params.onInstallProgress,
+      // Pass the persisted model so bootstrapAgent calls session/set_model
+      // during session/new — the only context where the agent reliably
+      // honours the switch.
+      model: params.currentModel,
     });
     const advertisedModes = params.agentModes ?? fresh.initialModes;
     const effectiveMode = await restoreCurrentMode({
@@ -458,6 +496,17 @@ export class SessionManager {
       advertisedModes,
       logger: this.logger,
     });
+    const advertisedModels = params.agentModels ?? fresh.initialModels;
+    const effectiveModel = await restoreCurrentModel({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedModel: params.currentModel,
+      agentReportedModel: fresh.initialModel,
+      logger: this.logger,
+    });
+    // Drop any buffered session/update notifications that arrived during
+    // the restore calls — same race as doResurrect.
+    fresh.agent.connection.drainBuffered("session/update");
     const session = new Session({
       sessionId: params.hydraSessionId,
       cwd,
@@ -475,14 +524,12 @@ export class SessionManager {
       listSessions: () => this.list(),
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
-      // Prefer the stored value (set by a previous current_model_update);
-      // fall back to whatever the agent ships in its session/new response.
-      currentModel: params.currentModel ?? fresh.initialModel,
+      currentModel: effectiveModel,
       currentMode: effectiveMode,
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
-      agentModels: params.agentModels ?? fresh.initialModels,
+      agentModels: advertisedModels,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
@@ -1582,6 +1629,29 @@ function persistedUsageToSnapshot(
   return usage ? { ...usage } : undefined;
 }
 
+// Build the _meta payload for session/load, injecting agent-specific hints
+// needed to restore session state that the agent would otherwise lose.
+//
+// Per-agent notes:
+//   claude-acp: SDK resume path uses --session-id/--replay-user-messages, not
+//     --resume, so it doesn't read the persisted model from session state. Pass
+//     it explicitly via _meta.claudeCode.options.model.
+//   opencode: persists and restores model from its own session state — no
+//     injection needed.
+//   codex-acp: same bug as claude-acp (native binary, standard ACP LoadSessionRequest,
+//     no _meta extension found). Proper fix: add modelId to ACP session/load spec.
+//     TODO: inject here once codex-acp supports a _meta extension or ACP adds modelId.
+function buildSessionLoadMeta(
+  agentId: string,
+  model: string | undefined,
+): Record<string, unknown> | undefined {
+  if (!model)
+    return undefined;
+  if (agentId === "claude-acp")
+    return { claudeCode: { options: { model } } };
+  return undefined;
+}
+
 // Pull a "current model id" from a session/new or session/load response.
 // Agents are inconsistent about how they expose this:
 //   - opencode: `result.models.currentModelId` (or `result._meta.opencode.modelId`)
@@ -1841,6 +1911,56 @@ async function restoreCurrentMode(opts: {
       `resurrect: session/set_mode rejected by agent for modeId=${JSON.stringify(persistedMode)} (${(err as Error).message}); session will use ${JSON.stringify(agentReportedMode)}`,
     );
     return agentReportedMode;
+  }
+}
+
+// Push a persisted model back to a freshly loaded agent so a session
+// that was on opus[1m] (or any non-default model) doesn't silently
+// revert to the agent's default on daemon restart. The agent boots in
+// its own default after session/load and would otherwise emit a
+// current_model_update that overwrites our snapshot. Returns the model
+// we should record on the Session — either the persisted one (when we
+// successfully pushed it, or the agent already agrees) or what the
+// agent reported (when the call failed).
+//
+// Unlike restoreCurrentMode, we do NOT skip when the id is absent from
+// the advertised list. The persisted model came from an actual
+// current_model_update the agent emitted in a prior session — the
+// agent confirmed it works. Hydra aliases like "opus[1m]" are valid
+// but may not appear in the advertised list (which uses canonical ids
+// like "claude-opus-4-7"). Let the agent be the authority; if it
+// rejects, we fall back.
+async function restoreCurrentModel(opts: {
+  agent: AgentInstance;
+  upstreamSessionId: string;
+  persistedModel: string | undefined;
+  agentReportedModel: string | undefined;
+  logger?: AgentLogger;
+}): Promise<string | undefined> {
+  const { agent, upstreamSessionId, persistedModel, agentReportedModel, logger } = opts;
+  if (!persistedModel) {
+    return agentReportedModel;
+  }
+  if (persistedModel === agentReportedModel) {
+    return persistedModel;
+  }
+  try {
+    logger?.info(
+      `resurrect: pushing persisted modelId=${JSON.stringify(persistedModel)} to agent (agentReported=${JSON.stringify(agentReportedModel)})`,
+    );
+    await agent.connection.request("session/set_model", {
+      sessionId: upstreamSessionId,
+      modelId: persistedModel,
+    });
+    logger?.info(
+      `resurrect: session/set_model accepted, effectiveModel=${JSON.stringify(persistedModel)}`,
+    );
+    return persistedModel;
+  } catch (err) {
+    logger?.warn(
+      `resurrect: session/set_model rejected by agent for modelId=${JSON.stringify(persistedModel)} (${(err as Error).message}); session will use ${JSON.stringify(agentReportedModel)}`,
+    );
+    return agentReportedModel;
   }
 }
 

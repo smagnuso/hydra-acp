@@ -956,6 +956,219 @@ describe("SessionManager: history persistence", () => {
       expect(setModeCall).toBeUndefined();
     });
 
+    it("passes persisted model via _meta to session/load on resurrect (regression: opus[1m] silently reverted to sonnet on daemon restart)", async () => {
+      // doResurrect passes _meta.claudeCode.options.model in the session/load
+      // call so the agent initializes claude with --model <id> at resume time —
+      // equivalent to `claude --resume --model opus`. The session model is then
+      // whatever the agent reports back (which should now be opus).
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("claude-acp")]),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-acp", cwd: "/work" });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          if (callIndex === 0) {
+            // create(): initialize + session/new
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_orig" });
+          } else {
+            // resurrect's session/load agent: reports opus[1m] (agent honored _meta)
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_orig", currentModelId: "opus[1m]" });
+          }
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({ cwd: "/w", agentId: "claude-acp" });
+      const sessionId = live.sessionId;
+      localMocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: { sessionUpdate: "current_model_update", currentModel: "opus[1m]" },
+      });
+      await eventually(
+        () => localManager.loadFromDisk(sessionId),
+        (p) => p?.currentModel === "opus[1m]",
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      const revived = await localManager.resurrect(resumeParams!);
+
+      // The session/load call must include _meta with the persisted model.
+      const loadAgentMock = localMocks[1]!.agent.connection.request as ReturnType<typeof vi.fn>;
+      const loadCall = loadAgentMock.mock.calls.find((c) => c[0] === "session/load");
+      expect(loadCall?.[1]).toMatchObject({
+        _meta: { claudeCode: { options: { model: "opus[1m]" } } },
+      });
+      // Session uses whatever model the agent reported after session/load.
+      expect(revived.currentModel).toBe("opus[1m]");
+    });
+
+    it("skips session/set_model on resurrect when the agent already reports the persisted model", async () => {
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("claude-code")]),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<
+            typeof vi.fn
+          >;
+          if (callIndex === 0) {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_already_opus" });
+          } else {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({
+                sessionId: "u_already_opus",
+                currentModelId: "opus[1m]",
+              });
+          }
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({
+        cwd: "/w",
+        agentId: "claude-code",
+      });
+      const sessionId = live.sessionId;
+      localMocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: {
+          sessionUpdate: "current_model_update",
+          currentModel: "opus[1m]",
+        },
+      });
+      await eventually(
+        () => localManager.loadFromDisk(sessionId),
+        (p) => p?.currentModel === "opus[1m]",
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      const revived = await localManager.resurrect(resumeParams!);
+      expect(revived.currentModel).toBe("opus[1m]");
+
+      const requestMock = localMocks[1]!.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      const setModelCall = requestMock.mock.calls.find(
+        (c) => c[0] === "session/set_model",
+      );
+      expect(setModelCall).toBeUndefined();
+    });
+
+    it("falls back to agent-reported model when both _meta and set_model are rejected", async () => {
+      // Agent reports a different model from session/load AND rejects set_model.
+      // doResurrect should fall back to whatever the agent actually reported.
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("claude-code")]),
+        () => {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          if (callIndex === 0) {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_orig" });
+          } else {
+            // session/load reports wrong model; set_model then rejects
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_orig", currentModelId: "sonnet" })
+              .mockImplementationOnce((method: string) => {
+                if (method === "session/set_model")
+                  return Promise.reject(new Error("unknown model"));
+                return Promise.resolve({});
+              });
+          }
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({ cwd: "/w", agentId: "claude-code" });
+      const sessionId = live.sessionId;
+      localMocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: { sessionUpdate: "current_model_update", currentModel: "opus[1m]" },
+      });
+      await eventually(
+        () => localManager.loadFromDisk(sessionId),
+        (p) => p?.currentModel === "opus[1m]",
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      const revived = await localManager.resurrect(resumeParams!);
+      // Both _meta and set_model failed — session uses what the agent reported.
+      expect(revived.currentModel).toBe("sonnet");
+    });
+
+    it("restores persisted model via set_model when agent reports wrong model on session/load (codex-acp path)", async () => {
+      // codex-acp has no _meta extension, so it boots its default model after
+      // session/load. doResurrect calls set_model as a fallback to push the
+      // persisted model back. When set_model succeeds the session uses the
+      // persisted model, not the agent's default.
+      const localMocks: MockAgentControls[] = [];
+      let callIndex = 0;
+      const localManager = new SessionManager(
+        fakeRegistry([fakeRegistryAgent("codex-acp")]),
+        () => {
+          const m = makeMockAgent({ agentId: "codex-acp", cwd: "/work" });
+          localMocks.push(m);
+          const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          if (callIndex === 0) {
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_codex" });
+          } else {
+            // session/load: agent boots default (gpt-5.4/medium) ignoring model
+            requestMock
+              .mockResolvedValueOnce({ protocolVersion: 1 })
+              .mockResolvedValueOnce({ sessionId: "u_codex", currentModelId: "gpt-5.4/medium" });
+            // set_model accepts the persisted model
+          }
+          callIndex += 1;
+          return m.agent;
+        },
+      );
+
+      const live = await localManager.create({ cwd: "/w", agentId: "codex-acp" });
+      const sessionId = live.sessionId;
+      localMocks[0]!.triggerNotification("session/update", {
+        sessionId: live.upstreamSessionId,
+        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+      });
+      await eventually(
+        () => localManager.loadFromDisk(sessionId),
+        (p) => p?.currentModel === "gpt-5",
+      );
+      await live.close({ deleteRecord: false });
+
+      const resumeParams = await localManager.loadFromDisk(sessionId);
+      const revived = await localManager.resurrect(resumeParams!);
+      // set_model succeeded — session uses the persisted model.
+      expect(revived.currentModel).toBe("gpt-5");
+
+      const requestMock = localMocks[1]!.agent.connection.request as ReturnType<typeof vi.fn>;
+      const setModelCall = requestMock.mock.calls.find((c) => c[0] === "session/set_model");
+      expect(setModelCall?.[1]).toMatchObject({ modelId: "gpt-5" });
+    });
+
     it("preserves cumulative cost across resurrect (regression: meta.json overwritten with raw cost after restart)", async () => {
       const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
       const sessionId = live.sessionId;
@@ -2001,18 +2214,55 @@ describe("SessionManager: defaultModels", () => {
     expect(requestMock.mock.calls.length).toBe(2);
   });
 
-  it("does not apply defaultModel on the resurrect/session-load path", async () => {
-    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
-    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
-    requestMock
-      .mockResolvedValueOnce({ protocolVersion: 1 })
-      .mockResolvedValueOnce({ sessionId: "u_loaded" });
+  it("passes persisted model (not defaultModels config) to session/load _meta on resurrect for claude-acp", async () => {
+    // _meta.claudeCode.options.model must use the persisted model — not defaultModels[agentId].
+    const mocks: ReturnType<typeof makeMockAgent>[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-acp")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-acp", cwd: "/work" });
+        mocks.push(m);
+        const req = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        req
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u_loaded" });
+        return m.agent;
+      },
+      undefined,
+      { defaultModels: { "claude-acp": "sonnet" } },
+    );
 
+    await manager.resurrect({
+      hydraSessionId: "sess_hyd",
+      upstreamSessionId: "u_loaded",
+      agentId: "claude-acp",
+      cwd: "/work",
+      currentModel: "opus[1m]",
+    });
+
+    const req = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    const loadCall = req.mock.calls.find((c) => c[0] === "session/load");
+    expect(loadCall?.[1]).toMatchObject({
+      _meta: { claudeCode: { options: { model: "opus[1m]" } } },
+    });
+    expect(loadCall?.[1]._meta?.claudeCode?.options?.model).not.toBe("sonnet");
+  });
+
+  it("does not inject _meta.claudeCode into session/load for non-claude-acp agents", async () => {
+    // opencode and other agents restore model from their own session state;
+    // injecting _meta.claudeCode would be noise (and potentially harmful).
+    const mocks: ReturnType<typeof makeMockAgent>[] = [];
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
-      () => mock.agent,
-      undefined,
-      { defaultModels: { opencode: "openai/gpt-5-codex" } },
+      () => {
+        const m = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+        mocks.push(m);
+        const req = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        req
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u_loaded" });
+        return m.agent;
+      },
     );
 
     await manager.resurrect({
@@ -2023,8 +2273,9 @@ describe("SessionManager: defaultModels", () => {
       currentModel: "ncp-anthropic/claude-opus-4-7",
     });
 
-    expect(requestMock.mock.calls[1]?.[0]).toBe("session/load");
-    expect(requestMock.mock.calls.length).toBe(2);
+    const req = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    const loadCall = req.mock.calls.find((c) => c[0] === "session/load");
+    expect(loadCall?.[1]._meta).toBeUndefined();
   });
 
   it("prefers params.model over defaultModels[agentId] on create", async () => {
