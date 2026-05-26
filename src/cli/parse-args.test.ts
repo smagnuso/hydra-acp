@@ -5,6 +5,7 @@ import {
   flagBool,
   envKeyForFlag,
   resolveOption,
+  validateKnownFlags,
 } from "./parse-args.js";
 
 describe("parseArgs", () => {
@@ -180,6 +181,44 @@ describe("resolveOption", () => {
   it("treats boolean-true flags as unset (only string flags carry values)", () => {
     process.env.HYDRA_ACP_NAME = "from-env";
     expect(resolveOption({ name: true }, "name")).toBe("from-env");
+  });
+});
+
+describe("validateKnownFlags", () => {
+  it("returns undefined for an empty flag map", () => {
+    expect(validateKnownFlags({})).toBeUndefined();
+  });
+
+  it("accepts known boolean flags", () => {
+    expect(
+      validateKnownFlags({ help: true, version: true, reattach: true }),
+    ).toBeUndefined();
+  });
+
+  it("accepts known value-taking flags", () => {
+    expect(
+      validateKnownFlags({ session: "sess_abc", agent: "claude" }),
+    ).toBeUndefined();
+  });
+
+  it("accepts downstream-only flags consumed by sub-parsers", () => {
+    // extension/transformer add and log tail flags must validate at the
+    // top level too, since parseArgs sees them before dispatch.
+    expect(
+      validateKnownFlags({
+        command: "foo",
+        args: "a,b",
+        env: "K=V",
+        disabled: true,
+        tail: "20",
+        follow: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("returns the name of an unknown flag", () => {
+    expect(validateKnownFlags({ foo: true })).toBe("foo");
+    expect(validateKnownFlags({ help: true, foo: "bar" })).toBe("foo");
   });
 });
 

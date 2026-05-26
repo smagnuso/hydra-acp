@@ -2,7 +2,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { parseArgs, resolveOption } from "./cli/parse-args.js";
+import {
+  parseArgs,
+  resolveOption,
+  validateKnownFlags,
+} from "./cli/parse-args.js";
 import {
   readSessionInput,
   resolveSessionFlag,
@@ -84,6 +88,7 @@ async function main(): Promise<void> {
     const agentArgs = afterLaunch.slice(1);
 
     const { flags } = parseArgs(beforeLaunch);
+    rejectUnknownFlags(flags);
     if (flags.reattach === true) {
       process.stderr.write(
         "hydra-acp launch: --reattach is not valid here. Pass --session <id-or-url> to attach to a specific session.\n",
@@ -128,6 +133,7 @@ async function main(): Promise<void> {
   }
 
   const { positional, flags } = parseArgs(argv);
+  rejectUnknownFlags(flags);
 
   if (flags.version === true || positional[0] === "--version") {
     process.stdout.write(`hydra-acp ${readVersion()}\n`);
@@ -562,6 +568,18 @@ function parseNumericFlag(
     }
   }
   return undefined;
+}
+
+function rejectUnknownFlags(
+  flags: Record<string, string | boolean>,
+): void {
+  const unknown = validateKnownFlags(flags);
+  if (unknown === undefined) {
+    return;
+  }
+  process.stderr.write(`hydra-acp: unknown flag: --${unknown}\n\n`);
+  printHelp();
+  process.exit(2);
 }
 
 function readShortPrompt(argv: string[]): string | undefined {

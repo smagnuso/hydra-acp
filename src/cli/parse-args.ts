@@ -11,6 +11,9 @@ export interface ParsedArgs {
 const KNOWN_BOOLEAN_FLAGS = new Set([
   "all",
   "detach",
+  "disabled",
+  "follow",
+  "force",
   "foreground",
   "help",
   "info",
@@ -23,6 +26,40 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "stream",
   "version",
 ]);
+
+// Flags that take a value. Together with KNOWN_BOOLEAN_FLAGS this is the
+// full set of `--name` tokens the top-level CLI accepts. Includes flags
+// consumed by downstream parsers (extension/transformer add, log tail) —
+// the top-level parseArgs still sees them in its flags map and we don't
+// want validateKnownFlags to reject them.
+const KNOWN_VALUE_FLAGS = new Set([
+  "agent",
+  "args",
+  "command",
+  "cwd",
+  "env",
+  "host",
+  "model",
+  "name",
+  "out",
+  "prompt",
+  "session",
+  "stream-bytes",
+  "stream-file-cap",
+  "stream-threshold",
+  "tail",
+]);
+
+export function validateKnownFlags(
+  flags: Record<string, string | boolean>,
+): string | undefined {
+  for (const key of Object.keys(flags)) {
+    if (!KNOWN_BOOLEAN_FLAGS.has(key) && !KNOWN_VALUE_FLAGS.has(key)) {
+      return key;
+    }
+  }
+  return undefined;
+}
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const positional: string[] = [];
