@@ -52,3 +52,58 @@ export function parseReattachResponse(result: unknown): ReattachResponseFields {
   }
   return out;
 }
+
+// True when the drift-reconcile snap inside the turn-complete handler
+// should fire. The snap exists for genuine drift (e.g. a daemon restart
+// dropped a turn_complete and left pendingTurns stuck above 0). It must
+// NOT fire while applying replayed historical turn_completes during an
+// attach drain — there pendingTurns being above 0 means the most recent
+// prompt_received in history hasn't been paired yet, which is correct
+// state, not drift. The other inputs distinguish a real turn boundary
+// (no queued prompt, no own prompt awaiting, no in-flight head) from a
+// boundary where some local signal already says we're mid-turn.
+export function shouldDriftSnap(args: {
+  pendingTurns: number;
+  queueSize: number;
+  ownTurnInFlight: boolean;
+  hasInFlightHead: boolean;
+  replayDraining: boolean;
+}): boolean {
+  return (
+    !args.replayDraining &&
+    args.pendingTurns > 0 &&
+    args.queueSize === 0 &&
+    !args.ownTurnInFlight &&
+    !args.hasInFlightHead
+  );
+}
+
+// Result of reconciling local pendingTurns/banner state against the
+// daemon's authoritative turnStartedAt after an attach (initial or
+// reconnect). Both directions of disagreement get a fix:
+//   - daemon busy, local idle  → bump pendingTurns up, banner busy
+//   - daemon idle, local busy  → snap pendingTurns to 0, banner ready
+// busySince is populated whenever the result banner is "busy" so the
+// elapsed counter can tick from the real turn start rather than from
+// attach time.
+export interface AttachReconcile {
+  pendingTurnsDelta: number;
+  banner: "busy" | "ready";
+  busySince?: number;
+}
+
+export function computeAttachReconcile(args: {
+  daemonTurnStartedAt: number | undefined;
+  pendingTurns: number;
+}): AttachReconcile {
+  if (args.daemonTurnStartedAt !== undefined) {
+    const delta = args.pendingTurns === 0 ? 1 : 0;
+    return {
+      pendingTurnsDelta: delta,
+      banner: "busy",
+      busySince: args.daemonTurnStartedAt,
+    };
+  }
+  const delta = args.pendingTurns > 0 ? -args.pendingTurns : 0;
+  return { pendingTurnsDelta: delta, banner: "ready" };
+}

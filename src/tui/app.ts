@@ -73,7 +73,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
 import {
+  computeAttachReconcile,
   parseReattachResponse,
+  shouldDriftSnap,
   type ReattachResponseFields,
 } from "./reconnect-state.js";
 import {
@@ -429,6 +431,13 @@ async function runSession(
   // streaming in during a long turn keep painting after we've left the
   // alternate screen, scrambling the host shell on detach.
   let teardownStarted = false;
+  // True while applyRenderEvent is processing a replay buffer (initial
+  // attach drain or onReconnect after_message drain). The drift-reconcile
+  // snap inside the turn-complete branch reads this — it must NOT fire
+  // while replaying historical turn_completes, because there pendingTurns
+  // above 0 represents the still-open turn at the head of history, not
+  // local drift. See shouldDriftSnap in reconnect-state.ts.
+  let replayDraining = false;
   const appendRender = (event: RenderEvent | null): void => {
     if (!event) {
       return;
@@ -3264,10 +3273,13 @@ async function runSession(
       // fire-and-forget history append can race a SIGTERM). Snap to 0 so
       // the banner returns to ready instead of staying stuck on "busy".
       if (
-        pendingTurns > 0 &&
-        queueCache.size === 0 &&
-        turnInFlight === null &&
-        currentHeadMessageId === undefined
+        shouldDriftSnap({
+          pendingTurns,
+          queueSize: queueCache.size,
+          ownTurnInFlight: turnInFlight !== null,
+          hasInFlightHead: currentHeadMessageId !== undefined,
+          replayDraining,
+        })
       ) {
         adjustPendingTurns(-pendingTurns);
       }
@@ -3292,11 +3304,13 @@ async function runSession(
     }
   }
   screen.pauseRepaint();
+  replayDraining = true;
   try {
     for (const event of buffered) {
       applyRenderEvent(event);
     }
   } finally {
+    replayDraining = false;
     screen.resumeRepaint();
   }
   if (replayedPromptTexts.length > 0) {
@@ -3510,22 +3524,55 @@ async function runSession(
       // Either incremental replay landed cleanly, or we never had a
       // messageId to anchor on (first reconnect of a fresh session) and
       // the daemon returned no replay. Flush whatever showed up.
-      for (const params of buffered) {
-        handleSessionUpdate(params);
+      replayDraining = true;
+      try {
+        for (const params of buffered) {
+          handleSessionUpdate(params);
+        }
+      } finally {
+        replayDraining = false;
       }
     }
-    // Reconcile pendingTurns against the daemon's authoritative idle state.
-    // If the daemon restarted mid-turn the turn_complete was never emitted,
-    // so pendingTurns can be > 0 even though the session is now idle.
-    // Skip when fields is undefined (attach errored) — we have no
-    // authoritative signal to reconcile against.
-    if (fields && fields.turnStartedAt === undefined && pendingTurns > 0) {
-      adjustPendingTurns(-pendingTurns);
+    // Reconcile pendingTurns against the daemon's authoritative state.
+    // The daemon's turnStartedAt is the source of truth: if it's defined
+    // we're mid-turn (even when local accounting missed the prompt_received
+    // — e.g. own-originator path where session/prompt rejected during the
+    // disconnect and runPrompt's finally cleared pendingTurns); if it's
+    // undefined we're idle (even when local accounting has stale +1s left
+    // over from a daemon-restart-dropped turn_complete). Skip when fields
+    // is undefined (attach errored) — we have no authoritative signal.
+    if (fields) {
+      const reconcile = computeAttachReconcile({
+        daemonTurnStartedAt: fields.turnStartedAt,
+        pendingTurns,
+      });
+      if (reconcile.pendingTurnsDelta !== 0) {
+        adjustPendingTurns(reconcile.pendingTurnsDelta);
+      }
+      if (reconcile.banner === "busy" && reconcile.busySince !== undefined) {
+        sessionBusySince = reconcile.busySince;
+        screen.setBanner({
+          status: "busy",
+          elapsedMs: Date.now() - reconcile.busySince,
+        });
+        if (sessionElapsedTimer === null) {
+          sessionElapsedTimer = setInterval(() => {
+            if (sessionBusySince === null || screenRef === null) {
+              return;
+            }
+            screenRef.setBanner({ elapsedMs: Date.now() - sessionBusySince });
+            renderToolsBlock();
+          }, 1_000);
+        }
+      } else {
+        screen.setBanner({ status: "ready", elapsedMs: undefined });
+      }
+    } else {
+      screen.setBanner({
+        status: pendingTurns > 0 ? "busy" : "ready",
+        elapsedMs: pendingTurns > 0 ? 0 : undefined,
+      });
     }
-    screen.setBanner({
-      status: pendingTurns > 0 ? "busy" : "ready",
-      elapsedMs: pendingTurns > 0 ? 0 : undefined,
-    });
   };
 
   // With ResilientWsStream this only fires once we've exhausted reconnect

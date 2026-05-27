@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseReattachResponse } from "./reconnect-state.js";
+import {
+  computeAttachReconcile,
+  parseReattachResponse,
+  shouldDriftSnap,
+} from "./reconnect-state.js";
 
 describe("parseReattachResponse", () => {
   it("extracts both fields from a well-formed response", () => {
@@ -72,5 +76,99 @@ describe("parseReattachResponse", () => {
     });
     expect(result.clientId).toBe(newClientId);
     expect(result.clientId).not.toBe(oldClientId);
+  });
+});
+
+describe("shouldDriftSnap", () => {
+  const baseline = {
+    pendingTurns: 1,
+    queueSize: 0,
+    ownTurnInFlight: false,
+    hasInFlightHead: false,
+    replayDraining: false,
+  } as const;
+
+  it("snaps when local accounting says busy but no live signal agrees", () => {
+    expect(shouldDriftSnap(baseline)).toBe(true);
+  });
+
+  it("does not snap when pendingTurns is already 0", () => {
+    expect(shouldDriftSnap({ ...baseline, pendingTurns: 0 })).toBe(false);
+  });
+
+  it("does not snap when a queued prompt is waiting", () => {
+    expect(shouldDriftSnap({ ...baseline, queueSize: 1 })).toBe(false);
+  });
+
+  it("does not snap when this TUI has its own prompt in flight", () => {
+    expect(shouldDriftSnap({ ...baseline, ownTurnInFlight: true })).toBe(false);
+  });
+
+  it("does not snap when an in-flight head messageId is tracked", () => {
+    expect(shouldDriftSnap({ ...baseline, hasInFlightHead: true })).toBe(false);
+  });
+
+  // Regression: before this gate, replaying a historical turn_complete
+  // during the attach drain snapped pendingTurns to 0 even though the
+  // most recent prompt_received in history hadn't been paired yet. The
+  // banner stayed "ready" through the entire still-open turn. See
+  // session hydra_session_TMBdL4qgzQrSisPG, 2026-05-27.
+  it("regression: never snaps while replay-draining", () => {
+    expect(shouldDriftSnap({ ...baseline, replayDraining: true })).toBe(false);
+    // All four other conditions met, only the replay flag flipped.
+    expect(
+      shouldDriftSnap({
+        pendingTurns: 1,
+        queueSize: 0,
+        ownTurnInFlight: false,
+        hasInFlightHead: false,
+        replayDraining: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("computeAttachReconcile", () => {
+  it("daemon busy + local idle → bumps pendingTurns and goes busy", () => {
+    const ts = 1_700_000_000_000;
+    expect(
+      computeAttachReconcile({ daemonTurnStartedAt: ts, pendingTurns: 0 }),
+    ).toEqual({ pendingTurnsDelta: 1, banner: "busy", busySince: ts });
+  });
+
+  it("daemon busy + local busy → keeps pendingTurns, seeds busySince", () => {
+    const ts = 1_700_000_000_000;
+    expect(
+      computeAttachReconcile({ daemonTurnStartedAt: ts, pendingTurns: 2 }),
+    ).toEqual({ pendingTurnsDelta: 0, banner: "busy", busySince: ts });
+  });
+
+  it("daemon idle + local busy → snaps pendingTurns down, goes ready", () => {
+    expect(
+      computeAttachReconcile({ daemonTurnStartedAt: undefined, pendingTurns: 3 }),
+    ).toEqual({ pendingTurnsDelta: -3, banner: "ready" });
+  });
+
+  it("daemon idle + local idle → no change, ready", () => {
+    expect(
+      computeAttachReconcile({ daemonTurnStartedAt: undefined, pendingTurns: 0 }),
+    ).toEqual({ pendingTurnsDelta: 0, banner: "ready" });
+  });
+
+  // Regression: a WS disconnect mid-turn rejects the originator's
+  // in-flight session/prompt request, runPrompt's finally drives
+  // pendingTurns back to 0, and the post-reconnect reconcile used to
+  // ignore the daemon's still-defined turnStartedAt — leaving the banner
+  // on "ready" through the agent's continued streaming. See session
+  // hydra_session_qVcKQN67lY6fuNXk, 2026-05-27.
+  it("regression: WS-drop bumps pendingTurns back when daemon is still busy", () => {
+    const ts = 1_700_000_123_456;
+    const result = computeAttachReconcile({
+      daemonTurnStartedAt: ts,
+      pendingTurns: 0,
+    });
+    expect(result.pendingTurnsDelta).toBe(1);
+    expect(result.banner).toBe("busy");
+    expect(result.busySince).toBe(ts);
   });
 });
