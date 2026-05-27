@@ -77,6 +77,21 @@ describe("renderMarkdownForCat — ansi mode", () => {
     expect(out).toContain("Title");
   });
 
+  it("styles inline code inside a heading and restores the heading style after", () => {
+    // heading-1 emits `^Ccli/^+^Y` for inline code; after translateMarkup
+    // the bright-cyan opener and the bold+bright-yellow restorer survive
+    // the pipe so the rest of the heading body keeps its style.
+    const out = renderMarkdownForCat("# pre `cli/` post", "ansi");
+    expect(out).toContain("\x1b[96mcli/\x1b[1m\x1b[93m");
+    expect(out).toContain("pre ");
+    expect(out).toContain(" post");
+  });
+
+  it("strips heading inline markup in plain mode", () => {
+    const out = renderMarkdownForCat("# pre `cli/` post", "plain");
+    expect(out).toBe("pre cli/ post\n");
+  });
+
   it("emits highlighted code lines with ANSI from cli-highlight", () => {
     const out = renderMarkdownForCat(
       "```js\nconst x = 1;\n```\n",

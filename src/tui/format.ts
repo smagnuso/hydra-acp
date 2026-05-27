@@ -164,6 +164,28 @@ function applyInlineMarkup(
   return s;
 }
 
+// Per-heading inline-markup opts. Headings render via the markup-interpreting
+// writer (no .noFormat) so inline code / bold inside them gets styled, but
+// `^:` reset would drop the outer bold+color too; each closer re-emits the
+// heading's base attrs so the rest of the heading keeps its style. heading-2
+// uses `^Y` (bright yellow) as the code opener because the default `^C`
+// would match the heading's brightCyan and disappear visually.
+function headingInlineOptsFor(style: Style): {
+  codeOpen: string;
+  boldReset: string;
+  codeReset: string;
+} {
+  switch (style) {
+    case "heading-1":
+      return { codeOpen: "^C", boldReset: "^+^Y", codeReset: "^+^Y" };
+    case "heading-2":
+      return { codeOpen: "^Y", boldReset: "^+^C", codeReset: "^+^C" };
+    case "heading-3":
+    default:
+      return { codeOpen: "^C", boldReset: "^:^+", codeReset: "^:^+" };
+  }
+}
+
 interface ParseMarkdownOpts {
   // bodyStyle for prose, list items, and headings. Code fences in agent mode
   // use "code" with syntax highlighting; in thought mode they use this style
@@ -269,7 +291,17 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
             ? "heading-2"
             : "heading-3"
         : proseStyle;
-      line(headingText, headingStyle, nextPrefix());
+      // Inline marks render with closers that restore the heading's base
+      // style (bold + color) — `^:` would also kill the outer chain, so
+      // each level emits its own restore sequence after the inline span.
+      const headingInlineOpts = highlightCode
+        ? headingInlineOptsFor(headingStyle)
+        : inlineOpts;
+      line(
+        applyInlineMarkup(headingText, headingInlineOpts),
+        headingStyle,
+        nextPrefix(),
+      );
       continue;
     }
     // Pipe table: a header row, an `|---|---|` separator on the very next
@@ -385,25 +417,14 @@ function isTableSeparatorLine(line: string): boolean {
   return cells.every((c) => /^:?-+:?$/.test(c));
 }
 
-// Visible terminal width of a cell. Two flavors:
-//   - asLiteral=true:  cell renders verbatim (heading-3 header rows
-//                      go through term.bold.noFormat, no markup is
-//                      interpreted). Measure the string as-is.
-//   - asLiteral=false: cell renders through applyInlineMarkup +
-//                      term(text), so **bold** -> ^+bold^: (4
-//                      zero-width markup chars + the inner text)
-//                      and `code` -> ^Ccode^: (likewise). Measure
-//                      what the user sees by stripping those
-//                      markers. Italic *…* / _…_ stay intact —
-//                      applyInlineMarkup leaves them literal, so
-//                      they contribute to visible width.
-// Uses string-width so wide glyphs (CJK, emoji) count as 2 cols and
-// code-point oddities (combining marks, ZWJ sequences) reflect their
-// on-screen footprint rather than .length.
-function cellVisibleWidth(cell: string, asLiteral: boolean): number {
-  if (asLiteral) {
-    return stringWidth(cell);
-  }
+// Visible terminal width of a cell after applyInlineMarkup runs against it
+// — both header and body cells go through term(text) with markup
+// interpretation, so **bold** -> ^+bold^… and `code` -> ^Ccode^… are
+// zero-width markers. Italic *…* / _…_ stay intact, so they contribute
+// to visible width. Uses string-width so wide glyphs (CJK, emoji) count
+// as 2 cols and code-point oddities (combining marks, ZWJ sequences)
+// reflect their on-screen footprint rather than .length.
+function cellVisibleWidth(cell: string): number {
   const visible = cell
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/`([^`]+)`/g, "$1");
@@ -411,23 +432,22 @@ function cellVisibleWidth(cell: string, asLiteral: boolean): number {
 }
 
 // Emit a header row (heading-3), a dim `─┼─` rule, then one row per body
-// entry. Column widths are the max of (a) the header cell measured
-// literally — heading-3 lines render via term.bold.noFormat with no
-// markup interpretation, so any `**bold**` / `` `code` `` markers in
-// the header take real columns — and (b) each body cell measured
-// with applyInlineMarkup's markers stripped, since body cells are
-// interpreted by term(text). string-width is used throughout so wide
-// glyphs (→ in ambiguous-wide terminals, emoji, CJK) align correctly.
+// entry. Column widths are derived from each cell measured with
+// applyInlineMarkup's markers stripped — both the header (heading-3,
+// markup-interpreting writer) and body cells (agent) go through that
+// pass, so `**bold**` / `` `code` `` markers in either are zero-width.
+// string-width is used throughout so wide glyphs (→ in ambiguous-wide
+// terminals, emoji, CJK) align correctly.
 function formatTable(header: string[], body: string[][]): FormattedLine[] {
   const cols = header.length;
   const widths: number[] = new Array(cols).fill(0);
   for (let c = 0; c < cols; c++) {
-    widths[c] = cellVisibleWidth(header[c] ?? "", true);
+    widths[c] = cellVisibleWidth(header[c] ?? "");
   }
   for (const row of body) {
     for (let c = 0; c < cols; c++) {
       const cell = row[c] ?? "";
-      const w = cellVisibleWidth(cell, false);
+      const w = cellVisibleWidth(cell);
       if (w > widths[c]!) {
         widths[c] = w;
       }
@@ -436,14 +456,14 @@ function formatTable(header: string[], body: string[][]): FormattedLine[] {
   const renderRow = (
     cells: string[],
     style: Style,
-    applyMarkup: boolean,
+    inlineOpts?: { codeOpen?: string; boldReset?: string; codeReset?: string },
   ): FormattedLine => {
     const padded: string[] = [];
     for (let c = 0; c < cols; c++) {
       const cell = cells[c] ?? "";
       const w = widths[c]!;
-      const visible = cellVisibleWidth(cell, !applyMarkup);
-      const rendered = applyMarkup ? applyInlineMarkup(cell) : cell;
+      const visible = cellVisibleWidth(cell);
+      const rendered = applyInlineMarkup(cell, inlineOpts);
       padded.push(rendered + " ".repeat(Math.max(0, w - visible)));
     }
     return {
@@ -453,7 +473,7 @@ function formatTable(header: string[], body: string[][]): FormattedLine[] {
     };
   };
   const out: FormattedLine[] = [];
-  out.push(renderRow(header, "heading-3", false));
+  out.push(renderRow(header, "heading-3", headingInlineOptsFor("heading-3")));
   const rules: string[] = [];
   for (let c = 0; c < cols; c++) {
     rules.push("─".repeat(widths[c]!));
@@ -464,7 +484,7 @@ function formatTable(header: string[], body: string[][]): FormattedLine[] {
     bodyStyle: "dim",
   });
   for (const row of body) {
-    out.push(renderRow(row, "agent", true));
+    out.push(renderRow(row, "agent"));
   }
   return out;
 }

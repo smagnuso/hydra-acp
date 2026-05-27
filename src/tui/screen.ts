@@ -2759,12 +2759,12 @@ export class Screen {
     }
     const prefix = line.prefix ?? "";
     const room = Math.max(1, width - prefix.length);
-    // Only the "agent" bodyStyle is routed through term-kit's markup-
-    // interpreting writer (see writeStyled); every other style emits
-    // text via .noFormat, so caret sequences are literal there and the
-    // wrap budget must include them. Keeping stripMarkup off by default
+    // The "agent" and "heading-*" bodyStyles are routed through term-kit's
+    // markup-interpreting writer (see writeStyled); every other style emits
+    // text via .noFormat, so caret sequences are literal there and the wrap
+    // budget must include them. Keeping stripMarkup off by default
     // preserves existing cwd/title/spec behavior.
-    const stripMarkup = line.bodyStyle === "agent";
+    const stripMarkup = bodyStyleUsesMarkup(line.bodyStyle);
     const chunks = line.ansi
       ? wrapAnsiBody(line.body, room)
       : wrap(line.body, room, { stripMarkup });
@@ -2831,10 +2831,11 @@ export class Screen {
     // wrap-ansi, so we don't truncate further — that would re-introduce
     // the char-counting bug the ansi path exists to avoid. Width for
     // fillRow padding is measured with string-width so escape bytes
-    // don't shrink the apparent line. For "agent" bodyStyle, opt into
-    // markup-aware truncate so a `^Cfoo^:` span isn't counted as 5 cols
-    // and isn't cut between '^' and the style char.
-    const stripMarkup = line.bodyStyle === "agent";
+    // don't shrink the apparent line. For bodyStyles that emit caret
+    // markup ("agent", "heading-*"), opt into markup-aware truncate so a
+    // `^Cfoo^:` span isn't counted as 5 cols and isn't cut between '^'
+    // and the style char.
+    const stripMarkup = bodyStyleUsesMarkup(line.bodyStyle);
     const bodyText = line.ansi
       ? line.body
       : truncate(line.body, remaining, { stripMarkup });
@@ -3084,17 +3085,31 @@ function writeBodyWithHighlight(
   }
 }
 
+// Body styles that route through terminal-kit's markup-interpreting writer
+// in writeStyled. Wrap/truncate must subtract their caret markers when
+// computing visible width, or `^Cfoo^:` (7 JS chars) inflates the budget
+// by 4 and a long span near the right edge wraps too early.
+function bodyStyleUsesMarkup(style: Style | undefined): boolean {
+  return (
+    style === "agent" ||
+    style === "heading-1" ||
+    style === "heading-2" ||
+    style === "heading-3"
+  );
+}
+
 function writeStyled(term: Terminal, text: string, style: Style | undefined): void {
   if (text.length === 0) {
     return;
   }
-  // The "agent" style is the only one that opts INTO terminal-kit's
-  // format processing — parseAgentMarkdown deliberately produces
-  // `^+bold^:` / `^Cinline^:` markup that should be interpreted. Every
-  // other style renders literal text (user input, code blocks, headings,
-  // tool labels, etc.), so we route through `.noFormat` to keep stray
-  // carets typed/emitted by the user from being eaten as markup
-  // commands.
+  // "agent" and "heading-1/2/3" opt INTO terminal-kit's format processing —
+  // parseAgentMarkdown produces `^+bold^:` / `^Cinline^:` markup that
+  // should be interpreted (headings emit per-level closers via
+  // headingInlineOptsFor so the outer bold + color restore after each
+  // inline span). Every other style renders literal text (user input,
+  // code blocks, tool labels, etc.), so we route through `.noFormat` to
+  // keep stray carets typed/emitted by the user from being eaten as
+  // markup commands.
   switch (style) {
     case "user":
       // Subtle dim-gray band — bold + default foreground (white on dark
@@ -3178,13 +3193,17 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       }).bgColorGrayscale.brightCyan.noFormat(28, text);
       return;
     case "heading-1":
-      term.bold.brightYellow.noFormat(text);
+      // noFormat dropped so caret markup emitted by applyInlineMarkup is
+      // interpreted; each heading level's headingInlineOptsFor (format.ts)
+      // closes inline spans with the heading's base attrs so bold + color
+      // are restored after the span.
+      term.bold.brightYellow(text);
       return;
     case "heading-2":
-      term.bold.brightCyan.noFormat(text);
+      term.bold.brightCyan(text);
       return;
     case "heading-3":
-      term.bold.noFormat(text);
+      term.bold(text);
       return;
     case "search-highlight":
       // Bright yellow background with black foreground. The combination

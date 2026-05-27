@@ -222,17 +222,36 @@ describe("parseAgentMarkdown", () => {
     expect(lines[3]?.body).toContain("^Ccode cell^:");
   });
 
-  it("does NOT apply inline markup to header cells (heading-3 writes literally)", () => {
-    // applyInlineMarkup is suppressed for the header so heading-3
-    // lines (rendered through term.bold.noFormat) don't leak literal
-    // `^+` / `^:` into the user's terminal.
+  it("applies inline markup inside headings with level-specific restore closers", () => {
+    // heading-1: bold + brightYellow, code opens with ^C and closes with
+    // ^+^Y so bold + brightYellow restore after the span. heading-2 swaps
+    // the code opener to ^Y (the default ^C would clash with brightCyan)
+    // and restores via ^+^C. heading-3 has no outer color, so closers
+    // fully reset and re-bold via ^:^+.
+    const h1 = parseAgentMarkdown("# pre `cli/` post");
+    expect(h1[0]?.bodyStyle).toBe("heading-1");
+    expect(h1[0]?.body).toBe("pre ^Ccli/^+^Y post");
+
+    const h2 = parseAgentMarkdown("## **bold** mid");
+    expect(h2[0]?.bodyStyle).toBe("heading-2");
+    expect(h2[0]?.body).toBe("^+bold^+^C mid");
+
+    const h3 = parseAgentMarkdown("### `x` y");
+    expect(h3[0]?.bodyStyle).toBe("heading-3");
+    expect(h3[0]?.body).toBe("^Cx^:^+ y");
+  });
+
+  it("applies inline markup to header cells using heading-3 closers", () => {
+    // heading-3 cells now route through the markup-interpreting writer
+    // (term.bold without .noFormat), so applyInlineMarkup is run on the
+    // header. heading-3 has no outer color, so the closer is `^:^+`:
+    // reset everything then re-bold for the rest of the header.
     const lines = parseAgentMarkdown(
       "| **bold header** | b |\n|---|---|\n| x | y |",
     );
     expect(lines[0]?.bodyStyle).toBe("heading-3");
-    expect(lines[0]?.body).not.toContain("^+");
-    expect(lines[0]?.body).not.toContain("^:");
-    expect(lines[0]?.body).toContain("**bold header**");
+    expect(lines[0]?.body).toContain("^+bold header^:^+");
+    expect(lines[0]?.body).not.toContain("**bold header**");
     const widths = lines.map(visibleWidth);
     expect(new Set(widths).size).toBe(1);
   });

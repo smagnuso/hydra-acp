@@ -397,8 +397,8 @@ Configure in `~/.hydra-acp/config.json`:
 {
   "extensions": {
     "hydra-acp-slack": {},
-    "hydra-acp-web-ui": {
-      "command": ["hydra-acp-web-ui"],
+    "hydra-acp-browser": {
+      "command": ["hydra-acp-browser"],
       "args": ["--port", "9999"],
       "env": { "UI_THEME": "dark" }
     }

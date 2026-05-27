@@ -62,8 +62,15 @@ function renderLine(line: FormattedLine, mode: CatRenderMode): string {
 // step. The thought-mode variants (`^c`, `^-`, `^K`) shouldn't appear here
 // — parseAgentMarkdown only emits agent-style markup — but the fallback
 // regex strips them defensively if a stray one ever leaks through.
+//
+// Heading inline-markup (headingInlineOptsFor in format.ts) closes spans
+// with `^+^Y` / `^+^C` / `^:^+` to restore the heading's outer bold + color
+// inline; ANSI mode translates each of these so the restoration survives
+// the pipe. Otherwise an inner `^:` reset (heading-3) would leave the
+// rest of the heading body unstyled.
 const ANSI_BOLD = "\x1b[1m";
 const ANSI_CODE = "\x1b[96m";
+const ANSI_BRIGHT_YELLOW = "\x1b[93m";
 const ANSI_RESET = "\x1b[0m";
 // NUL as a sentinel for stashed literal carets. sanitizeWireText in
 // core/render-update.ts strips C0 controls (NUL included) from incoming
@@ -76,9 +83,10 @@ function translateMarkup(text: string, mode: CatRenderMode): string {
     s = s
       .replace(/\^\+/g, ANSI_BOLD)
       .replace(/\^C/g, ANSI_CODE)
+      .replace(/\^Y/g, ANSI_BRIGHT_YELLOW)
       .replace(/\^:/g, ANSI_RESET);
   }
-  s = s.replace(/\^[+\-:CcK]/g, "");
+  s = s.replace(/\^[+\-:CcKY]/g, "");
   s = s.replace(/\x00/g, "^");
   return s;
 }
