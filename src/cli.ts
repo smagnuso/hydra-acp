@@ -162,7 +162,23 @@ async function main(): Promise<void> {
     return;
   }
 
-  const subcommand = positional[0];
+  // `hydra -p "..."` and `hydra --prompt "..."` (no subcommand) are
+  // shorthand for `hydra cat -p "..."`. -p slips into positional[]
+  // because the global parser doesn't model short flags, so positional[0]
+  // ends up as a flag-looking token; we override `subcommand` to "cat" in
+  // that case so the dispatch lands in the cat branch and reads -p /
+  // --prompt itself. Explicit subcommands ("hydra tui -p ...") still win
+  // — the -p is ignored as today.
+  const inlinePromptPresent =
+    readShortPrompt(argv) !== undefined ||
+    typeof flags.prompt === "string";
+  const rawSubcommand = positional[0];
+  const subcommand =
+    rawSubcommand !== undefined && !rawSubcommand.startsWith("-")
+      ? rawSubcommand
+      : inlinePromptPresent
+        ? "cat"
+        : rawSubcommand;
   const name = resolveOption(flags, "name");
   const agentIdFromFlag = resolveOption(flags, "agent");
   const model = resolveOption(flags, "model");
@@ -663,6 +679,7 @@ function printHelp(): void {
       "Usage:",
       "  hydra-acp [--session <id-or-url>] [--reattach] [opts]",
       "                                     Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case).",
+      "                                     With -p / --prompt and no subcommand, auto-dispatch to cat.",
       "  hydra-acp tui   [same flags]       Force TUI explicitly.",
       "  hydra-acp shim  [same flags]       Force shim explicitly (non-interactive; password prompts not allowed).",
       "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--agent <id>] [--model <id>] [--name <label>]",
