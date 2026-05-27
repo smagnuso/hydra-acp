@@ -2545,16 +2545,16 @@ export class Session {
       } else {
         const inList = current ? models.some((m) => m.modelId === current) : true;
         const lines = models.map((m) => {
-          const marker = m.modelId === current ? " ◀" : "";
+          const marker = m.modelId === current ? "▶ " : "  ";
           const desc = m.name && m.name !== m.modelId ? `  ${m.name}` : "";
-          return `${m.modelId}${marker}${desc}`;
+          return `${marker}${m.modelId}${desc}`;
         });
         // Current model is valid but not in the advertised list (e.g. an
         // alias like "opus[1m]" that the agent normalizes to a canonical
         // id in its availableModels). Show it at the top so the user
         // can see what they're on.
         if (!inList && current) {
-          lines.unshift(`${current} ◀`);
+          lines.unshift(`▶ ${current}`);
         }
         body = lines.join("\n");
       }
