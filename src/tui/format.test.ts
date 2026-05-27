@@ -1,6 +1,9 @@
+import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import stringWidth from "string-width";
 import {
+  buildUnifiedDiff,
+  formatEditDiffBlock,
   formatEvent,
   formatExitPlanMode,
   formatToolLine,
@@ -395,6 +398,95 @@ describe("formatToolLine", () => {
     });
     expect(lines).toHaveLength(2);
     expect(lines[1]?.body).toBe("line one line two line three");
+  });
+
+});
+
+describe("formatEditDiffBlock", () => {
+  it("in 'edit' mode emits just the dim path header", () => {
+    const lines = formatEditDiffBlock(
+      { path: "/repo/src/foo.ts", oldText: "x", newText: "y" },
+      "edit",
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      body: "▸ Edited /repo/src/foo.ts",
+      bodyStyle: "dim",
+    });
+  });
+
+  it("in 'diff' mode emits the header followed by a highlighted diff body", () => {
+    const lines = formatEditDiffBlock(
+      {
+        path: "/repo/src/foo.ts",
+        oldText: "old line\n",
+        newText: "new line\n",
+      },
+      "diff",
+    );
+    // 1 path header + 2 diff lines (1 removed, 1 added)
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatchObject({
+      body: "▸ Edited /repo/src/foo.ts",
+      bodyStyle: "dim",
+    });
+    expect(lines[1]?.bodyStyle).toBe("code");
+    expect(lines[1]?.ansi).toBe(true);
+    expect(lines[2]?.bodyStyle).toBe("code");
+    expect(lines[2]?.ansi).toBe(true);
+  });
+
+  it("omits the header when path is absent", () => {
+    const lines = formatEditDiffBlock(
+      { oldText: "a\n", newText: "b\n" },
+      "diff",
+    );
+    expect(lines).toHaveLength(2);
+    expect(lines[0]?.bodyStyle).toBe("code");
+  });
+
+  it("returns no lines when 'diff' mode has nothing to show", () => {
+    expect(
+      formatEditDiffBlock({ oldText: "", newText: "" }, "diff"),
+    ).toEqual([]);
+  });
+
+  it("contracts a home-prefixed path to ~ in the header", () => {
+    const home = homedir();
+    const lines = formatEditDiffBlock(
+      { path: `${home}/dev/proj/foo.ts`, oldText: "x", newText: "y" },
+      "edit",
+    );
+    expect(lines[0]?.body).toBe("▸ Edited ~/dev/proj/foo.ts");
+  });
+});
+
+describe("buildUnifiedDiff", () => {
+  it("renders inserts and deletes around an unchanged context line", () => {
+    const out = buildUnifiedDiff({
+      oldText: "a\nb\nc\n",
+      newText: "a\nB\nc\n",
+    });
+    expect(out).toBe("  a\n- b\n+ B\n  c");
+  });
+
+  it("treats a full-file write (empty oldText) as all-inserts", () => {
+    const out = buildUnifiedDiff({
+      oldText: "",
+      newText: "one\ntwo\n",
+    });
+    expect(out).toBe("+ one\n+ two");
+  });
+
+  it("truncates very large diffs with a … N more footer", () => {
+    const newLines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
+    const out = buildUnifiedDiff({
+      oldText: "",
+      newText: newLines.join("\n"),
+    });
+    const rendered = out.split("\n");
+    expect(rendered.length).toBe(40);
+    expect(rendered[rendered.length - 1]).toMatch(/^… \d+ more lines$/);
   });
 });
 

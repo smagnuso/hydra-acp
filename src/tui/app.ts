@@ -84,9 +84,11 @@ import {
   sanitizeSingleLine,
   type AvailableCommand,
   type AvailableMode,
+  type EditDiff,
   type RenderEvent,
 } from "../core/render-update.js";
 import {
+  formatEditDiffBlock,
   formatEvent,
   formatExitPlanMode,
   formatToolLine,
@@ -2481,6 +2483,7 @@ async function runSession(
         toolsBlockEndedAt = null;
         toolsBlockStopReason = null;
         toolsExpanded = false;
+        pendingEditMarks = [];
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -2927,6 +2930,7 @@ async function runSession(
     title: string | undefined,
     status: string | undefined,
     errorText: string | undefined,
+    editDiff: EditDiff | undefined,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -2947,6 +2951,9 @@ async function runSession(
     if (errorText !== undefined) {
       state.errorText = errorText;
     }
+    if (editDiff !== undefined) {
+      state.editDiff = editDiff;
+    }
     toolStates.set(id, state);
     if (wasNew) {
       // The block is normally anchored by startToolsBlock on the user-text
@@ -2959,6 +2966,72 @@ async function runSession(
       }
       toolCallOrder.push(id);
     }
+  };
+
+  // Edit-mode marks pending a flush. In "edit" mode the marks duplicate
+  // the still-visible tools-block rows when no agent prose follows, so
+  // we hold them until an agent-text/thought event arrives (which would
+  // otherwise scroll the tools block up out of view) and only then drop
+  // them. Unflushed entries are discarded at turn-end. "diff" mode
+  // bypasses this buffer entirely — the diff body is informative even
+  // when it sits right under the tool row.
+  let pendingEditMarks: { toolCallId: string; diff: EditDiff }[] = [];
+
+  // Drop a separate scrollback block under the tools block when the user
+  // has opted in via `tui.showFileUpdates`. Keyed by toolCallId so a
+  // re-render against the same id amends in place.
+  //
+  // Only fires once a tool reaches status="completed" — failed/rejected/
+  // cancelled edits leave no trace in scrollback. The diff payload is
+  // pulled from ToolLineState, where recordToolCall stashes whatever
+  // arrived via the initial tool_call's rawInput, so a completion update
+  // with no content[] of its own still finds it.
+  const maybeRenderEditDiff = (toolCallId: string): void => {
+    const mode = config.tui.showFileUpdates;
+    if (mode === "none") {
+      return;
+    }
+    const state = toolStates.get(toolCallId);
+    if (!state?.editDiff || state.status !== "completed") {
+      return;
+    }
+    if (mode === "diff") {
+      const lines = formatEditDiffBlock(state.editDiff, "diff");
+      if (lines.length > 0) {
+        screen.upsertLines(`editdiff:${toolCallId}`, lines);
+      }
+      return;
+    }
+    pendingEditMarks.push({ toolCallId, diff: state.editDiff });
+  };
+
+  // Push any pending edit-mode marks to scrollback, deduping consecutive
+  // same-path entries within the batch. Called when the agent emits
+  // prose (agent-text / agent-thought) so the marks land above the new
+  // utterance — and never called at all on tool-only turns, which is
+  // exactly the case where the marks would be redundant. The dedup is
+  // batch-local on purpose: an utterance between two same-path edits
+  // breaks the visual continuity, so the second edit is a fresh mark
+  // worth showing.
+  const flushPendingEditMarks = (): void => {
+    if (pendingEditMarks.length === 0) {
+      return;
+    }
+    let lastPath: string | null = null;
+    for (const { toolCallId, diff } of pendingEditMarks) {
+      if (diff.path && diff.path === lastPath) {
+        continue;
+      }
+      const lines = formatEditDiffBlock(diff, "edit");
+      if (lines.length === 0) {
+        continue;
+      }
+      screen.upsertLines(`editdiff:${toolCallId}`, lines);
+      if (diff.path) {
+        lastPath = diff.path;
+      }
+    }
+    pendingEditMarks = [];
   };
 
   applyRenderEvent = (event: RenderEvent): void => {
@@ -3074,6 +3147,7 @@ async function runSession(
       toolCallOrder.length = 0;
       toolsExpanded = false;
       toolsBlockEndedAt = null;
+      pendingEditMarks = [];
       startToolsBlock();
       // Force an immediate paint past the content-repaint throttle. The
       // user-text event is the user's "I just sent this" signal — they
@@ -3086,6 +3160,7 @@ async function runSession(
     }
     if (event.kind === "agent-text") {
       closeThought();
+      flushPendingEditMarks();
       appendAgentText(event.text);
       return;
     }
@@ -3096,6 +3171,13 @@ async function runSession(
       // setHideThoughts() filters at draw time so toggling ^T reveals lines
       // that streamed in while hidden.
       closeAgentText();
+      // Hidden thoughts don't visually break the tools block above, so
+      // they don't qualify as an "utterance" for edit-mark flush purposes.
+      // Toggling ^T while thoughts are queued won't retroactively flush —
+      // acceptable since the marks are a UX nicety, not load-bearing.
+      if (viewPrefs.showThoughts) {
+        flushPendingEditMarks();
+      }
       appendThought(event.text);
       return;
     }
@@ -3123,8 +3205,15 @@ async function runSession(
     if (event.kind === "tool-call") {
       closeAgentText();
       closeThought();
-      recordToolCall(event.toolCallId, event.title, event.status, undefined);
+      recordToolCall(
+        event.toolCallId,
+        event.title,
+        event.status,
+        undefined,
+        event.editDiff,
+      );
       renderToolsBlock();
+      maybeRenderEditDiff(event.toolCallId);
       return;
     }
     if (event.kind === "plan") {
@@ -3148,11 +3237,13 @@ async function runSession(
         event.title,
         event.status,
         event.errorText,
+        event.editDiff,
       );
       if (event.upstreamInterrupted) {
         upstreamInterruptedSeen = true;
       }
       renderToolsBlock();
+      maybeRenderEditDiff(event.toolCallId);
       return;
     }
     if (event.kind === "model-changed") {
@@ -3264,6 +3355,7 @@ async function runSession(
       toolsBlockStopReason = null;
       toolsExpanded = false;
       upstreamInterruptedSeen = false;
+      pendingEditMarks = [];
       screen.ensureSeparator();
       // Drift reconcile. At a real turn boundary with no queued prompt,
       // no own prompt awaiting (turnInFlight), and no in-flight head id,
@@ -3395,6 +3487,7 @@ async function runSession(
     toolsBlockEndedAt = null;
     toolsBlockStopReason = null;
     toolsExpanded = false;
+    pendingEditMarks = [];
   };
 
   // Disconnect signal arrives the moment the underlying WS drops and a

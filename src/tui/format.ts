@@ -5,7 +5,13 @@
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
 import stringWidth from "string-width";
-import { sanitizeSingleLine, type RenderEvent } from "../core/render-update.js";
+import { shortenHomePath } from "../core/paths.js";
+import {
+  sanitizeSingleLine,
+  sanitizeWireText,
+  type EditDiff,
+  type RenderEvent,
+} from "../core/render-update.js";
 
 export type Style =
   | "user"
@@ -602,6 +608,13 @@ export interface ToolLineState {
   // an indented continuation line under the tool row so the user sees
   // *why* the tool failed instead of just a red ✗.
   errorText?: string;
+  // In-memory record of the edit payload for this tool call (Edit /
+  // Write / str_replace). Not consumed by formatToolLine — the scrollback
+  // diff block is rendered separately by app.ts. Held here so the diff
+  // from an initial `tool_call` (rawInput) survives until the later
+  // `tool_call_update` that flips status to "completed", which is when
+  // we actually drop the block into scrollback.
+  editDiff?: EditDiff;
 }
 
 // One tool call → one or more FormattedLines. The primary row is the
@@ -637,6 +650,135 @@ export function formatToolLine(state: ToolLineState): FormattedLine[] {
     });
   }
   return lines;
+}
+
+// Max body lines we paint per diff so a 500-line Write doesn't carpet
+// scrollback. Hunks past the cap are summarized with a dim trailer.
+const EDIT_DIFF_MAX_LINES = 40;
+
+// Mode for formatEditDiffBlock — mirrors the `tui.showFileUpdates`
+// config values that map to a non-empty block ("none" short-circuits
+// upstream in app.ts before we get here).
+export type FileUpdateMode = "edit" | "diff";
+
+// Render an EditDiff as a standalone scrollback block. In "edit" mode
+// the block is just a dim one-line mark identifying the file; in "diff"
+// mode the same mark is followed by a ```diff fenced body run through
+// parseAgentMarkdown so +/-/@@ lines pick up cli-highlight's coloring.
+// Called by app.ts and upserted by toolCallId so a later
+// tool_call_update can amend the block in place.
+export function formatEditDiffBlock(
+  diff: EditDiff,
+  mode: FileUpdateMode,
+): FormattedLine[] {
+  const lines: FormattedLine[] = [];
+  if (diff.path) {
+    lines.push({
+      prefix: "  ",
+      body: `▸ Edited ${sanitizeSingleLine(shortenHomePath(diff.path))}`,
+      bodyStyle: "dim",
+    });
+  }
+  if (mode === "edit") {
+    return lines;
+  }
+  const body = buildUnifiedDiff(diff);
+  if (body.length === 0) {
+    return lines;
+  }
+  const fenced = "```diff\n" + body + "\n```";
+  lines.push(...parseAgentMarkdown(fenced));
+  return lines;
+}
+
+// Build a unified-diff body for the given edit. Computes an LCS-based
+// line-level diff so context lines flow between +/- chunks rather than
+// painting every old line as removed and every new line as added.
+// Truncates with a "… N more" footer past EDIT_DIFF_MAX_LINES.
+export function buildUnifiedDiff(diff: EditDiff): string {
+  const oldLines = sanitizeWireText(diff.oldText).split("\n");
+  const newLines = sanitizeWireText(diff.newText).split("\n");
+  // Drop a trailing empty line that came from a final \n in the source,
+  // so a 3-line edit doesn't render as 4 lines with an empty tail.
+  if (oldLines.length > 0 && oldLines[oldLines.length - 1] === "") {
+    oldLines.pop();
+  }
+  if (newLines.length > 0 && newLines[newLines.length - 1] === "") {
+    newLines.pop();
+  }
+  const ops = diffLines(oldLines, newLines);
+  const rendered: string[] = [];
+  // Budget includes the trailer when we truncate, so the rendered diff
+  // never exceeds EDIT_DIFF_MAX_LINES total lines in scrollback.
+  for (let idx = 0; idx < ops.length; idx++) {
+    const op = ops[idx]!;
+    const wouldTruncate =
+      rendered.length >= EDIT_DIFF_MAX_LINES - 1 && idx < ops.length - 1;
+    if (wouldTruncate) {
+      const remaining = ops.length - idx;
+      rendered.push(`… ${remaining} more line${remaining === 1 ? "" : "s"}`);
+      break;
+    }
+    if (op.op === "=") {
+      rendered.push(`  ${op.text}`);
+    } else if (op.op === "-") {
+      rendered.push(`- ${op.text}`);
+    } else {
+      rendered.push(`+ ${op.text}`);
+    }
+  }
+  return rendered.join("\n");
+}
+
+interface DiffOp {
+  op: "=" | "-" | "+";
+  text: string;
+}
+
+// LCS-based line diff. O(n*m) time/space — fine for the small hunks edit
+// tools emit (old_string / new_string slices, not whole files). Write
+// tools land here too, but their diff is "every new line is +", which
+// the table reduces to a single column of inserts in linear time.
+function diffLines(a: string[], b: string[]): DiffOp[] {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () =>
+    new Array(n + 1).fill(0) as number[],
+  );
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (a[i] === b[j]) {
+        dp[i]![j] = dp[i + 1]![j + 1]! + 1;
+      } else {
+        dp[i]![j] = Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+      }
+    }
+  }
+  const out: DiffOp[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) {
+      out.push({ op: "=", text: a[i]! });
+      i++;
+      j++;
+    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
+      out.push({ op: "-", text: a[i]! });
+      i++;
+    } else {
+      out.push({ op: "+", text: b[j]! });
+      j++;
+    }
+  }
+  while (i < m) {
+    out.push({ op: "-", text: a[i]! });
+    i++;
+  }
+  while (j < n) {
+    out.push({ op: "+", text: b[j]! });
+    j++;
+  }
+  return out;
 }
 
 function toolStatusIcon(status: string): string {

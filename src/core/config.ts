@@ -100,6 +100,21 @@ const TuiConfig = z.object({
   // installs can grow past this — it's enforced at load time and per
   // append in memory.
   promptHistoryMaxEntries: z.number().int().positive().default(2_000),
+  // How edit-style tool calls (Edit, Write, str_replace) render in
+  // scrollback, *in addition to* the normal tool row inside the tools
+  // block.
+  //   "none" — nothing extra; the collapsed tool row is the only signal.
+  //   "edit" (default) — a one-line scrollback mark naming the file
+  //     that was touched, so the user can scroll back and see which
+  //     files moved without expanding the tools block. Suppressed on
+  //     tool-only turns (no agent prose) since the marks would only
+  //     duplicate the still-visible tool rows.
+  //   "diff" — same mark plus a syntax-highlighted unified diff body,
+  //     Claude Code's Update(file) look.
+  // The diff payload is extracted from the ACP wire (content[]
+  // type:"diff" entries, falling back to rawInput shapes), so any agent
+  // that emits one of those shapes gets the treatment.
+  showFileUpdates: z.enum(["none", "edit", "diff"]).default("edit"),
 });
 
 const ExtensionName = z
@@ -168,6 +183,7 @@ export const HydraConfig = z.object({
     defaultEnterAction: "amend",
     showThoughts: true,
     promptHistoryMaxEntries: 2_000,
+    showFileUpdates: "edit",
   }),
 });
 

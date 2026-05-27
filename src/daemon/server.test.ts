@@ -41,6 +41,7 @@ function testConfig(): HydraConfig {
       defaultEnterAction: "amend" as const,
       showThoughts: true,
       promptHistoryMaxEntries: 2_000,
+      showFileUpdates: "none" as const,
     },
   };
 }
@@ -1177,6 +1178,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         defaultEnterAction: "amend" as const,
         showThoughts: true,
         promptHistoryMaxEntries: 2_000,
+        showFileUpdates: "none" as const,
       },
     };
     handle = await startDaemon(cfg, TEST_TOKEN);

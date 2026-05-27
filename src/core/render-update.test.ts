@@ -238,6 +238,120 @@ describe("mapUpdate", () => {
     });
   });
 
+  it("extracts editDiff from content[] type:\"diff\" on tool_call", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc1",
+        title: "Edit",
+        content: [
+          {
+            type: "diff",
+            path: "/repo/src/foo.ts",
+            oldText: "old line\n",
+            newText: "new line\n",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "tool-call",
+      toolCallId: "tc1",
+      title: "Edit",
+      editDiff: {
+        path: "/repo/src/foo.ts",
+        oldText: "old line\n",
+        newText: "new line\n",
+      },
+    });
+  });
+
+  it("falls back to rawInput.{old_string,new_string,file_path} for Claude's Edit tool", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc1",
+        title: "Edit",
+        rawInput: {
+          file_path: "/repo/src/foo.ts",
+          old_string: "before",
+          new_string: "after",
+        },
+      }),
+    ).toEqual({
+      kind: "tool-call",
+      toolCallId: "tc1",
+      title: "Edit",
+      editDiff: {
+        path: "/repo/src/foo.ts",
+        oldText: "before",
+        newText: "after",
+      },
+    });
+  });
+
+  it("treats Write's rawInput.{path,content} as a full-file insert (oldText empty)", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc1",
+        title: "Write",
+        rawInput: {
+          file_path: "/repo/new.ts",
+          content: "export const x = 1;\n",
+        },
+      }),
+    ).toEqual({
+      kind: "tool-call",
+      toolCallId: "tc1",
+      title: "Write",
+      editDiff: {
+        path: "/repo/new.ts",
+        oldText: "",
+        newText: "export const x = 1;\n",
+      },
+    });
+  });
+
+  it("makes a tool_call_update meaningful when only an editDiff is present", () => {
+    // claude-acp emits the canonical content[] diff on the
+    // tool_call_update (status remains in_progress until a separate
+    // terminal update). Without the diff-aware path the update would be
+    // dropped as intermediate noise.
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        content: [
+          {
+            type: "diff",
+            path: "/repo/src/foo.ts",
+            oldText: "a",
+            newText: "b",
+          },
+        ],
+      }),
+    ).toEqual({
+      kind: "tool-call-update",
+      toolCallId: "tc1",
+      editDiff: { path: "/repo/src/foo.ts", oldText: "a", newText: "b" },
+    });
+  });
+
+  it("omits editDiff for non-edit tool calls", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: "tc1",
+        title: "Read",
+        rawInput: { file_path: "/repo/src/foo.ts" },
+      }),
+    ).toEqual({
+      kind: "tool-call",
+      toolCallId: "tc1",
+      title: "Read",
+    });
+  });
+
   it("suppresses intermediate tool_call_update with no title and non-terminal status", () => {
     // Agents fan out a stream of "updated" pings during a tool call;
     // those would clutter the scrollback with one line per chunk if we

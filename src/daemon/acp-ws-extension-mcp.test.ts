@@ -41,6 +41,7 @@ function testConfig(): HydraConfig {
       defaultEnterAction: "amend" as const,
       showThoughts: true,
       promptHistoryMaxEntries: 2_000,
+      showFileUpdates: "none" as const,
     },
   };
 }

@@ -34,6 +34,17 @@ export function sanitizeSingleLine(text: string): string {
     .trim();
 }
 
+// Wire payload for an edit-style tool call. Extracted from `content[]`
+// type:"diff" entries (canonical ACP carrier) with rawInput fallback for
+// Claude's Edit/Write tools. Surfaced on tool-call events so the format
+// layer can render a unified diff beneath the tool row when the user
+// opts in via `tui.showEditDiff`.
+export interface EditDiff {
+  path?: string;
+  oldText: string;
+  newText: string;
+}
+
 export type RenderEvent =
   | { kind: "agent-text"; text: string }
   | { kind: "agent-thought"; text: string }
@@ -49,12 +60,14 @@ export type RenderEvent =
       title: string;
       status?: string;
       rawKind?: string;
+      editDiff?: EditDiff;
     }
   | {
       kind: "tool-call-update";
       toolCallId: string;
       title?: string;
       status?: string;
+      editDiff?: EditDiff;
       // Best-effort error text extracted from a `failed` update. Pulled
       // from the first text payload in `content[]`, falling back to a
       // string `rawOutput.error`. Surfaced inline under the tool row.
@@ -343,6 +356,66 @@ export function isExitPlanModeTool(name: string | undefined): boolean {
   return normalised === "exitplanmode";
 }
 
+// Pull an EditDiff out of a tool_call / tool_call_update payload. Looks
+// in this order:
+//   1. content[] entry with type:"diff" carrying { path, oldText, newText }
+//      — canonical ACP carrier
+//   2. rawInput.{file_path, old_string, new_string} — Claude's Edit tool
+//   3. rawInput.{path, content} — Claude's Write tool (full-file write
+//      treated as oldText:"")
+// Returns null when none of those shapes are present so the format
+// layer keeps the row single-line for non-edit tools.
+export function extractEditDiff(u: UpdateLike): EditDiff | null {
+  const content = u.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      const b = block as Record<string, unknown>;
+      if (b.type !== "diff") {
+        continue;
+      }
+      const oldText = typeof b.oldText === "string" ? b.oldText : undefined;
+      const newText = typeof b.newText === "string" ? b.newText : undefined;
+      if (oldText === undefined && newText === undefined) {
+        continue;
+      }
+      const path = typeof b.path === "string" ? b.path : undefined;
+      return {
+        ...(path !== undefined ? { path } : {}),
+        oldText: oldText ?? "",
+        newText: newText ?? "",
+      };
+    }
+  }
+  const rawInput = u.rawInput;
+  if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
+    const r = rawInput as Record<string, unknown>;
+    const filePath =
+      typeof r.file_path === "string"
+        ? r.file_path
+        : typeof r.path === "string"
+          ? r.path
+          : undefined;
+    if (typeof r.old_string === "string" && typeof r.new_string === "string") {
+      return {
+        ...(filePath !== undefined ? { path: filePath } : {}),
+        oldText: r.old_string,
+        newText: r.new_string,
+      };
+    }
+    if (typeof r.content === "string") {
+      return {
+        ...(filePath !== undefined ? { path: filePath } : {}),
+        oldText: "",
+        newText: r.content,
+      };
+    }
+  }
+  return null;
+}
+
 function readExitPlanMarkdown(u: UpdateLike): string | null {
   const rawInput = u.rawInput;
   if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
@@ -389,6 +462,10 @@ function mapToolCall(u: UpdateLike): RenderEvent | null {
   if (rawKind !== undefined) {
     event.rawKind = rawKind;
   }
+  const diff = extractEditDiff(u);
+  if (diff !== null) {
+    event.editDiff = diff;
+  }
   return event;
 }
 
@@ -405,8 +482,10 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
   // they're a fan-out artifact, not user-visible signal. Render only
   // updates that change the title or land on a terminal status; the
   // initial tool_call line already shows "[pending]".
+  const diff = extractEditDiff(u);
   const meaningful =
     title !== undefined ||
+    diff !== null ||
     status === "completed" ||
     status === "failed" ||
     status === "rejected" ||
@@ -432,6 +511,9 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
   }
   if (status !== undefined) {
     event.status = status;
+  }
+  if (diff !== null) {
+    event.editDiff = diff;
   }
   if (status === "failed") {
     const errorText = extractToolFailureText(u);
