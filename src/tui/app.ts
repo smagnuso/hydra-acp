@@ -2758,7 +2758,11 @@ async function runSession(
     if (agentKey === null) {
       return;
     }
-    const lines = parseAgentMarkdown(agentBuffer);
+    const w = screen.width();
+    const lines = parseAgentMarkdown(
+      agentBuffer,
+      w > 0 ? { maxWidth: w } : undefined,
+    );
     if (lines.length === 0) {
       return;
     }

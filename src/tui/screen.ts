@@ -814,6 +814,15 @@ export class Screen {
     }
   }
 
+  // Current terminal column count. Markdown rendering (parseAgentMarkdown,
+  // tables in particular) consults this so a too-wide block lays out
+  // narrowly enough that the screen-layer wrap is a no-op. Returns 0 if the
+  // terminal hasn't reported a width yet, in which case callers should fall
+  // back to natural-width formatting.
+  width(): number {
+    return this.term.width || 0;
+  }
+
   appendLines(lines: FormattedLine[]): void {
     if (lines.length === 0) {
       return;

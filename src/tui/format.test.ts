@@ -315,6 +315,94 @@ describe("parseAgentMarkdown", () => {
       `expected all rows equal width, got widths ${widths.join(",")}`,
     ).toBe(1);
   });
+
+  // When maxWidth is omitted, formatTable keeps its old "natural width"
+  // behavior — column widths come from the widest cell, no wrapping. A row
+  // of `header + separator + body` should still be the count of source rows.
+  it("leaves a narrow table unchanged when no maxWidth is given", () => {
+    const lines = parseAgentMarkdown(
+      "| a | b |\n|---|---|\n| short | a_much_longer_value |",
+    );
+    expect(lines).toHaveLength(3);
+    expect(lines[2]?.body).toBe("short │ a_much_longer_value");
+  });
+
+  // The whole point of the new clamp: when maxWidth is too small for the
+  // natural table, columns shrink and long cells split across multiple
+  // physical rows — and the `│` separators stay aligned across every
+  // physical row of a single source row.
+  it("wraps wide table cells when maxWidth is set", () => {
+    const table = [
+      "| Op | Behavior |",
+      "|---|---|",
+      "| createBuffer | Validation error fires at the creation call, captured by the current error scope. |",
+    ].join("\n");
+    const lines = parseAgentMarkdown(table, { maxWidth: 40 });
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[1]?.bodyStyle).toBe("dim");
+    // Body has multiple physical rows for the single source row.
+    const bodyLines = lines.slice(2);
+    expect(bodyLines.length).toBeGreaterThan(1);
+    for (const l of bodyLines) {
+      expect(l.bodyStyle).toBe("agent");
+    }
+    // Every emitted line — header, separator, body — has the same visible
+    // width (i.e. │ separators line up across the whole block).
+    const widths = lines.map(visibleWidth);
+    expect(
+      new Set(widths).size,
+      `expected all rows equal width, got widths ${widths.join(",")}`,
+    ).toBe(1);
+  });
+
+  // Markup spans must stay intact across wrap — splitting a `**…**` mid-span
+  // would emit "**Resource" on one line and "creation**" on another, neither
+  // of which would render bold. The tokenizer keeps the span as a single
+  // word so the wrap respects that boundary.
+  it("keeps **bold** spans atomic across wrap", () => {
+    const table = [
+      "| Kind | Note |",
+      "|---|---|",
+      "| **Resource creation** | does X and Y |",
+    ].join("\n");
+    const lines = parseAgentMarkdown(table, { maxWidth: 28 });
+    // Find the line that holds the bold span; it should carry the converted
+    // `^+Resource creation^:` markup, not a half-broken `**Resource` literal.
+    const boldLine = lines.find((l) => l.body.includes("Resource creation"));
+    expect(boldLine?.body).toContain("^+Resource creation^:");
+    expect(boldLine?.body).not.toContain("**Resource");
+    expect(boldLine?.body).not.toContain("creation**");
+  });
+
+  // Regression: the 3-column table from session hydra_session_qVcKQN67lY6fuNXk
+  // — natural column widths summed to ~350 chars, far over a typical 120-col
+  // terminal. Without clamp, the screen-layer wrap chops each row mid-content
+  // and the divider drifts onto its own line. With clamp, each physical row
+  // is exactly maxWidth chars wide (including the prefix) and `│` aligns.
+  it("renders the qVcKQN67lY6fuNXk validation-rules table cleanly at width 120", () => {
+    const table = [
+      "| Operation kind | Per-spec behavior | What the bridge should do |",
+      "|---|---|---|",
+      "| **Resource creation** (`createBuffer`, `createBindGroup`, `createPipeline`, …) | Validation error fires at the creation call, captured by the current error scope. | Raise on device at creation. (`sendUncaught(target)` does this.) |",
+      "| **Encoder operations** (`setVertexBuffer`, `clearBuffer`, `drawIndirect`, …) | NO validation error fires at encode time. Errors accumulate on the encoder. ONE error eventually surfaces at `finish()` (for encode-time sync errors) or `submit()` (for resource-state errors like destroyed). | Use `setFirstError` on the encoder. Never call `device->raiseError` from an encoder lambda. Never produce a `Throwable` error that would route there. |",
+      "| **Queue operations** (`writeBuffer`, `writeTexture`, `submit`) | Validation error fires at the call. | Raise on device. |",
+    ].join("\n");
+    const lines = parseAgentMarkdown(table, { maxWidth: 120 });
+    const widths = lines.map(visibleWidth);
+    // Every emitted row is the same visible width — the screen layer's
+    // mid-row wrap (which produced the broken layout the user reported)
+    // never fires because every row already fits inside maxWidth.
+    expect(
+      new Set(widths).size,
+      `expected all rows equal width, got widths ${widths.join(",")}`,
+    ).toBe(1);
+    expect(widths[0]).toBeLessThanOrEqual(120);
+    // Header (1) + separator (1) + 3 body rows that each wrapped to
+    // multiple physical rows.
+    expect(lines.length).toBeGreaterThan(5);
+    expect(lines[0]?.bodyStyle).toBe("heading-3");
+    expect(lines[1]?.bodyStyle).toBe("dim");
+  });
 });
 
 describe("formatEvent — user-text with attachments", () => {

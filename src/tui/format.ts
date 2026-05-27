@@ -206,6 +206,12 @@ interface ParseMarkdownOpts {
   firstPrefix?: string;
   // Passed to applyInlineMarkup for prose and list items.
   inlineOpts?: { codeOpen?: string; boldReset?: string; codeReset?: string };
+  // Total terminal width available for the rendered block (including the
+  // prefix). When set, pipe tables clamp column widths to fit and word-wrap
+  // cells across multiple physical rows; without it tables stay natural-width
+  // and the screen layer mid-row wraps them, producing the broken layout we
+  // had pre-clamp. Other block kinds ignore it — they're already single-line.
+  maxWidth?: number;
 }
 
 // Block-level markdown → FormattedLines. Each newline-separated line is
@@ -224,6 +230,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     prefixStyle,
     firstPrefix = "  ",
     inlineOpts,
+    maxWidth,
   } = opts;
   const out: FormattedLine[] = [];
   const lines = text.split("\n");
@@ -329,7 +336,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
         body.push(parseTableRow(lines[j]!));
         j++;
       }
-      const tableLines = formatTable(header, body);
+      const tableLines = formatTable(header, body, maxWidth);
       for (const tl of tableLines) {
         if (prefixStyle !== undefined)
           tl.prefixStyle = prefixStyle;
@@ -375,8 +382,15 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
   return out;
 }
 
-export function parseAgentMarkdown(text: string): FormattedLine[] {
-  return parseMarkdown(text, { proseStyle: "agent", highlightCode: true });
+export function parseAgentMarkdown(
+  text: string,
+  opts?: { maxWidth?: number },
+): FormattedLine[] {
+  return parseMarkdown(text, {
+    proseStyle: "agent",
+    highlightCode: true,
+    maxWidth: opts?.maxWidth,
+  });
 }
 
 // Thoughts use proseStyle "thought" throughout so the ^T hide-thoughts filter
@@ -437,49 +451,293 @@ function cellVisibleWidth(cell: string): number {
   return stringWidth(visible);
 }
 
+// Per-column minimum content width when shrinking a table to fit. Below this
+// every cell is so chopped that word-wrap stops being useful — we let
+// over-wide tables overflow the terminal instead.
+const TABLE_MIN_COL = 6;
+// Prefix added to every emitted row in the table block — kept in sync with
+// the literal "  " passed in renderRow's FormattedLine.prefix.
+const TABLE_PREFIX_WIDTH = 2;
+// Visible width of the `" │ "` separator between adjacent columns.
+const TABLE_SEP_WIDTH = 3;
+
+// Atom for word-wrap inside a cell. Whitespace runs and word runs alternate;
+// `**…**` / `` `…` `` markup spans (which may contain spaces) stay inside a
+// single word atom so applyInlineMarkup downstream sees a balanced span and
+// the markup never gets split mid-line.
+interface CellAtom {
+  text: string;
+  isWS: boolean;
+  width: number;
+}
+
+function tokenizeCell(cell: string): CellAtom[] {
+  const atoms: CellAtom[] = [];
+  let i = 0;
+  while (i < cell.length) {
+    const ch = cell[i]!;
+    if (ch === " " || ch === "\t") {
+      let j = i;
+      while (j < cell.length && (cell[j] === " " || cell[j] === "\t")) {
+        j++;
+      }
+      const text = cell.slice(i, j);
+      atoms.push({ text, isWS: true, width: stringWidth(text) });
+      i = j;
+      continue;
+    }
+    let word = "";
+    let j = i;
+    while (j < cell.length) {
+      const c = cell[j]!;
+      if (c === " " || c === "\t") {
+        break;
+      }
+      if (cell[j] === "*" && cell[j + 1] === "*") {
+        const close = cell.indexOf("**", j + 2);
+        if (close === -1) {
+          word += "**";
+          j += 2;
+        } else {
+          word += cell.slice(j, close + 2);
+          j = close + 2;
+        }
+        continue;
+      }
+      if (c === "`") {
+        const close = cell.indexOf("`", j + 1);
+        if (close === -1) {
+          word += "`";
+          j += 1;
+        } else {
+          word += cell.slice(j, close + 1);
+          j = close + 1;
+        }
+        continue;
+      }
+      word += c;
+      j += 1;
+    }
+    atoms.push({ text: word, isWS: false, width: cellVisibleWidth(word) });
+    i = j;
+  }
+  return atoms;
+}
+
+// Character-grained break for atoms wider than the column. Splits by visible
+// width per code point so wide glyphs (CJK, emoji) don't sneak past the
+// boundary. Used only for atoms with no markdown markers — atoms containing
+// `**…**` / `` `…` `` slip through unchanged (and overflow) so a balanced
+// markup span never gets severed.
+function hardBreak(text: string, width: number): string[] {
+  const out: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  for (const ch of text) {
+    const w = stringWidth(ch);
+    if (currentWidth > 0 && currentWidth + w > width) {
+      out.push(current);
+      current = ch;
+      currentWidth = w;
+    } else {
+      current += ch;
+      currentWidth += w;
+    }
+  }
+  if (current.length > 0) {
+    out.push(current);
+  }
+  return out;
+}
+
+// Greedy word-wrap on tokenized cell atoms. Returns one source-text slice per
+// physical row; applyInlineMarkup runs later. A non-WS atom wider than the
+// column hard-breaks by character (when plain) so column alignment holds;
+// atoms that contain markdown markup overflow rather than risk splitting a
+// `**…**` / `` `…` `` span mid-render.
+function wrapCellAtoms(atoms: CellAtom[], width: number): string[] {
+  if (width <= 0) {
+    return atoms.length === 0 ? [""] : [atoms.map((a) => a.text).join("")];
+  }
+  const lines: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  const flush = (): void => {
+    lines.push(current.replace(/[ \t]+$/, ""));
+    current = "";
+    currentWidth = 0;
+  };
+  for (const atom of atoms) {
+    if (atom.isWS) {
+      if (currentWidth === 0) {
+        continue;
+      }
+      current += atom.text;
+      currentWidth += atom.width;
+      continue;
+    }
+    if (atom.width > width) {
+      if (currentWidth > 0) {
+        flush();
+      }
+      const hasMarkup =
+        atom.text.includes("**") || atom.text.includes("`");
+      if (hasMarkup) {
+        lines.push(atom.text);
+      } else {
+        const fragments = hardBreak(atom.text, width);
+        for (let k = 0; k < fragments.length - 1; k++) {
+          lines.push(fragments[k]!);
+        }
+        const last = fragments[fragments.length - 1] ?? "";
+        current = last;
+        currentWidth = stringWidth(last);
+      }
+      continue;
+    }
+    if (currentWidth === 0) {
+      current = atom.text;
+      currentWidth = atom.width;
+      continue;
+    }
+    if (currentWidth + atom.width > width) {
+      flush();
+      current = atom.text;
+      currentWidth = atom.width;
+    } else {
+      current += atom.text;
+      currentWidth += atom.width;
+    }
+  }
+  if (current.length > 0 || lines.length === 0) {
+    flush();
+  }
+  return lines;
+}
+
+// Distribute `budget` columns across `natural` widths. Columns under
+// TABLE_MIN_COL keep their natural width; the rest shrink proportionally but
+// never below TABLE_MIN_COL. Leftover budget after rounding is handed out to
+// the columns with the largest unsatisfied need.
+function distributeColumnWidths(
+  natural: number[],
+  budget: number,
+): number[] {
+  const cols = natural.length;
+  const total = natural.reduce((a, b) => a + b, 0);
+  if (total <= budget) {
+    return natural.slice();
+  }
+  const widths = natural.map((n) => Math.min(n, TABLE_MIN_COL));
+  let used = widths.reduce((a, b) => a + b, 0);
+  if (used >= budget) {
+    return widths;
+  }
+  const remaining = budget - used;
+  const shrinkable = natural
+    .map((n, i) => ({ i, slack: Math.max(0, n - widths[i]!) }))
+    .filter((e) => e.slack > 0);
+  const shrinkableTotal = shrinkable.reduce((a, b) => a + b.slack, 0);
+  if (shrinkableTotal === 0) {
+    return widths;
+  }
+  for (const e of shrinkable) {
+    const add = Math.floor((remaining * e.slack) / shrinkableTotal);
+    widths[e.i] = widths[e.i]! + Math.min(add, e.slack);
+  }
+  used = widths.reduce((a, b) => a + b, 0);
+  let leftover = budget - used;
+  while (leftover > 0) {
+    let bestIdx = -1;
+    let bestDeficit = 0;
+    for (let i = 0; i < cols; i++) {
+      const deficit = natural[i]! - widths[i]!;
+      if (deficit > bestDeficit) {
+        bestDeficit = deficit;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) {
+      break;
+    }
+    widths[bestIdx] = widths[bestIdx]! + 1;
+    leftover--;
+  }
+  return widths;
+}
+
 // Emit a header row (heading-3), a dim `─┼─` rule, then one row per body
-// entry. Column widths are derived from each cell measured with
-// applyInlineMarkup's markers stripped — both the header (heading-3,
-// markup-interpreting writer) and body cells (agent) go through that
-// pass, so `**bold**` / `` `code` `` markers in either are zero-width.
-// string-width is used throughout so wide glyphs (→ in ambiguous-wide
-// terminals, emoji, CJK) align correctly.
-function formatTable(header: string[], body: string[][]): FormattedLine[] {
+// entry. Column widths come from cellVisibleWidth (markdown markers stripped,
+// wide glyphs counted via string-width). When maxWidth is set and the
+// natural table exceeds it, columns shrink (down to TABLE_MIN_COL) and cells
+// word-wrap across multiple physical rows with aligned `│` separators —
+// without it, the screen layer's mid-row wrap chops cells and the divider
+// row drifts onto its own line.
+function formatTable(
+  header: string[],
+  body: string[][],
+  maxWidth?: number,
+): FormattedLine[] {
   const cols = header.length;
-  const widths: number[] = new Array(cols).fill(0);
+  const natural: number[] = new Array(cols).fill(0);
   for (let c = 0; c < cols; c++) {
-    widths[c] = cellVisibleWidth(header[c] ?? "");
+    natural[c] = cellVisibleWidth(header[c] ?? "");
   }
   for (const row of body) {
     for (let c = 0; c < cols; c++) {
       const cell = row[c] ?? "";
       const w = cellVisibleWidth(cell);
-      if (w > widths[c]!) {
-        widths[c] = w;
+      if (w > natural[c]!) {
+        natural[c] = w;
       }
     }
+  }
+  let widths = natural.slice();
+  if (maxWidth !== undefined) {
+    const budget = Math.max(
+      cols * TABLE_MIN_COL,
+      maxWidth - TABLE_PREFIX_WIDTH - (cols - 1) * TABLE_SEP_WIDTH,
+    );
+    widths = distributeColumnWidths(natural, budget);
   }
   const renderRow = (
     cells: string[],
     style: Style,
     inlineOpts?: { codeOpen?: string; boldReset?: string; codeReset?: string },
-  ): FormattedLine => {
-    const padded: string[] = [];
+  ): FormattedLine[] => {
+    const wrapped: string[][] = [];
+    let rowHeight = 1;
     for (let c = 0; c < cols; c++) {
       const cell = cells[c] ?? "";
       const w = widths[c]!;
-      const visible = cellVisibleWidth(cell);
-      const rendered = applyInlineMarkup(cell, inlineOpts);
-      padded.push(rendered + " ".repeat(Math.max(0, w - visible)));
+      const lines = wrapCellAtoms(tokenizeCell(cell), w);
+      wrapped.push(lines);
+      if (lines.length > rowHeight) {
+        rowHeight = lines.length;
+      }
     }
-    return {
-      prefix: "  ",
-      body: padded.join(" │ "),
-      bodyStyle: style,
-    };
+    const out: FormattedLine[] = [];
+    for (let r = 0; r < rowHeight; r++) {
+      const padded: string[] = [];
+      for (let c = 0; c < cols; c++) {
+        const cellLine = wrapped[c]![r] ?? "";
+        const w = widths[c]!;
+        const visible = cellVisibleWidth(cellLine);
+        const rendered = applyInlineMarkup(cellLine, inlineOpts);
+        padded.push(rendered + " ".repeat(Math.max(0, w - visible)));
+      }
+      out.push({
+        prefix: "  ",
+        body: padded.join(" │ "),
+        bodyStyle: style,
+      });
+    }
+    return out;
   };
   const out: FormattedLine[] = [];
-  out.push(renderRow(header, "heading-3", headingInlineOptsFor("heading-3")));
+  out.push(
+    ...renderRow(header, "heading-3", headingInlineOptsFor("heading-3")),
+  );
   const rules: string[] = [];
   for (let c = 0; c < cols; c++) {
     rules.push("─".repeat(widths[c]!));
@@ -490,7 +748,7 @@ function formatTable(header: string[], body: string[][]): FormattedLine[] {
     bodyStyle: "dim",
   });
   for (const row of body) {
-    out.push(renderRow(row, "agent"));
+    out.push(...renderRow(row, "agent"));
   }
   return out;
 }
