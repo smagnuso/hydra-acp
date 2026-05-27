@@ -472,6 +472,12 @@ export const SessionListEntry = z.object({
   importedFromUpstreamSessionId: z.string().optional(),
   // Set when this session was spawned as a child by a transformer.
   parentSessionId: z.string().optional(),
+  // clientInfo from the process that issued session/new. Lets list views
+  // hide cat-style ancillary sessions by default while letting an
+  // override flag surface them.
+  originatingClient: z
+    .object({ name: z.string(), version: z.string().optional() })
+    .optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),

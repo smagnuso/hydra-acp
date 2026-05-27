@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocket } from "ws";
 import { JsonRpcConnection } from "../../acp/connection.js";
 import { wsToMessageStream } from "../../acp/ws-stream.js";
@@ -13,7 +16,10 @@ import {
   HYDRA_META_KEY,
   extractHydraMeta,
 } from "../../acp/types.js";
-import { HYDRA_VERSION } from "../../core/hydra-version.js";
+import {
+  HYDRA_CAT_CLIENT_NAME,
+  HYDRA_VERSION,
+} from "../../core/hydra-version.js";
 import { createChunker } from "./cat-chunker.js";
 import {
   buildTitleFromArgv,
@@ -151,6 +157,40 @@ export async function runCat(opts: CatOptions): Promise<void> {
     return;
   }
 
+  // Sandbox new sessions in an empty temp dir by default so the agent's
+  // Read / Glob / Grep / Bash-ls have nothing local to peek at — the only
+  // input we expose is whatever the user piped (inline or via the MCP
+  // stdin tools). The permission handler in runCatLoop also rejects
+  // every non-`mcp__hydra_stdin__*` tool call, but cwd is a stronger
+  // defense: if any agent path ever skips the permission gate (Read
+  // inside cwd in standalone Claude Code is normally auto-allowed),
+  // there's still nothing here to read. Override with --cwd <path>
+  // (or HYDRA_ACP_CWD) when the user explicitly wants the project dir
+  // exposed (e.g. "find docs in the codebase that match this error").
+  // --session preserves the existing session's cwd; we don't touch it.
+  // No-pipe runs (`hydra cat -p "..."` with no stdin) skip the sandbox:
+  // the user is asking about their project, not about piped data.
+  if (
+    !opts.sessionId &&
+    opts.cwd === undefined &&
+    process.stdin.isTTY !== true
+  ) {
+    const sandbox = mkdtempSync(join(tmpdir(), "hydra-cat-"));
+    opts.cwd = sandbox;
+    if (!opts.detach) {
+      // Best-effort cleanup on normal exit. --detach leaves the dir
+      // intact since the daemon-resident agent may still be using it
+      // (and /tmp gets GC'd on reboot anyway).
+      process.on("exit", () => {
+        try {
+          rmSync(sandbox, { recursive: true, force: true });
+        } catch {
+          // Swallow — nothing useful to do at this point.
+        }
+      });
+    }
+  }
+
   const config = await loadConfig();
   const target = opts.target ?? (await resolveLocalTarget(config));
   if (target.isLocal && !opts.target) {
@@ -256,7 +296,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
       },
-      clientInfo: { name: "hydra-acp-cat", version: HYDRA_VERSION },
+      clientInfo: { name: HYDRA_CAT_CLIENT_NAME, version: HYDRA_VERSION },
     });
   } catch {
     // initialize is best-effort on the daemon side; proceed.
@@ -770,7 +810,7 @@ async function openOrAttachSession(
     const attached = (await conn.request("session/attach", {
       sessionId: opts.sessionId,
       historyPolicy: "pending_only",
-      clientInfo: { name: "hydra-acp-cat", version: HYDRA_VERSION },
+      clientInfo: { name: HYDRA_CAT_CLIENT_NAME, version: HYDRA_VERSION },
     })) as { sessionId: string };
     return attached.sessionId;
   }

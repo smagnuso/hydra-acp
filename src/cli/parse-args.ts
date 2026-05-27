@@ -16,6 +16,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "force",
   "foreground",
   "help",
+  "include-cat",
   "info",
   "json",
   "new",

@@ -36,6 +36,10 @@ export interface DiscoveredSession {
   status: "live" | "cold";
   // Mid-turn flag from the daemon. Drives the picker's busy indicator.
   busy?: boolean;
+  // clientInfo from the process that issued session/new. Picker and
+  // `sessions list` filter on the `name` to hide cat-style ancillary
+  // sessions by default.
+  originatingClient?: { name: string; version?: string };
 }
 
 export interface DiscoveredUsage {
@@ -89,6 +93,7 @@ export async function listSessions(
     importedFromMachine: s.importedFromMachine,
     importedFromUpstreamSessionId: s.importedFromUpstreamSessionId,
     busy: s.busy,
+    originatingClient: s.originatingClient,
   }));
 }
 

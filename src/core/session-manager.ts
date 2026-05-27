@@ -73,6 +73,10 @@ export interface CreateSessionParams {
   transformChain?: TransformerRef[];
   // Set when this session is spawned as a child by a transformer.
   parentSessionId?: string;
+  // clientInfo from the WS connection's initialize. acp-ws.ts captures
+  // it from `session/new` and threads it here; persisted to meta.json so
+  // list views can hide cat-style ancillary sessions by default.
+  originatingClient?: { name: string; version?: string };
 }
 
 export interface ResurrectParams {
@@ -105,6 +109,10 @@ export interface ResurrectParams {
   // populated from the agent's memory. Cleared on the disk record
   // after the resurrect completes.
   pendingHistorySync?: boolean;
+  // Propagated from meta.json so resurrected sessions keep their
+  // origin (and stay hidden from the default `sessions list` view if
+  // they were originally cat-spawned).
+  originatingClient?: { name: string; version?: string };
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -241,6 +249,7 @@ export class SessionManager {
       agentModels: fresh.initialModels,
       transformChain: params.transformChain,
       parentSessionId: params.parentSessionId,
+      originatingClient: params.originatingClient,
       extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
@@ -466,6 +475,7 @@ export class SessionManager {
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
         : undefined,
+      originatingClient: params.originatingClient,
       extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
@@ -543,6 +553,7 @@ export class SessionManager {
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
         : undefined,
+      originatingClient: params.originatingClient,
       extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
@@ -1002,6 +1013,7 @@ export class SessionManager {
       agentModels: record.agentModels,
       createdAt: record.createdAt,
       pendingHistorySync: record.pendingHistorySync,
+      originatingClient: record.originatingClient,
     };
   }
 
@@ -1118,6 +1130,7 @@ export class SessionManager {
         currentModel: session.currentModel,
         currentUsage: session.currentUsage,
         parentSessionId: session.parentSessionId,
+        originatingClient: session.originatingClient,
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
@@ -1151,6 +1164,7 @@ export class SessionManager {
         importedFromMachine: r.importedFromMachine,
         importedFromUpstreamSessionId: r.importedFromUpstreamSessionId,
         parentSessionId: r.parentSessionId,
+        originatingClient: r.originatingClient,
         updatedAt: used,
         attachedClients: 0,
         status: "cold",
@@ -1600,6 +1614,8 @@ function mergeForPersistence(
     agentModes,
     agentModels,
     parentSessionId: session.parentSessionId ?? existing?.parentSessionId,
+    originatingClient:
+      session.originatingClient ?? existing?.originatingClient,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }

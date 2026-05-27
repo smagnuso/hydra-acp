@@ -157,6 +157,10 @@ export interface SessionInit {
   // the transformer chain. 0 disables. Defaults to 30 seconds.
   idleEventTimeoutMs?: number;
   parentSessionId?: string;
+  // clientInfo from the process that issued session/new. SessionManager
+  // captures it from the WS connection's `initialize` and persists it on
+  // meta.json so list views can hide cat-style ancillary sessions.
+  originatingClient?: { name: string; version?: string };
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
@@ -258,6 +262,7 @@ export class Session {
   agentCapabilities: AgentCapabilities | undefined;
   readonly agentArgs: string[] | undefined;
   readonly parentSessionId: string | undefined;
+  readonly originatingClient: { name: string; version?: string } | undefined;
   title: string | undefined;
   // Snapshot state delivered to attaching clients via the attach
   // response _meta rather than via history replay (which would be
@@ -427,6 +432,7 @@ export class Session {
     this.agentCapabilities = init.agentCapabilities;
     this.agentArgs = init.agentArgs;
     this.parentSessionId = init.parentSessionId;
+    this.originatingClient = init.originatingClient;
     this.title = init.title;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;

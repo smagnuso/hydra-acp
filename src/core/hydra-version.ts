@@ -43,3 +43,8 @@ function resolveVersion(): string {
 }
 
 export const HYDRA_VERSION: string = resolveVersion();
+
+// clientInfo.name reported by `hydra cat` on initialize. Hoisted out so
+// the list-view filters in the picker and `sessions list` reference the
+// same string the client sends.
+export const HYDRA_CAT_CLIENT_NAME = "hydra-acp-cat";

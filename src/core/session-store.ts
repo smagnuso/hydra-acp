@@ -65,6 +65,17 @@ export const PersistedUsage = z.object({
 });
 export type PersistedUsage = z.infer<typeof PersistedUsage>;
 
+// Identity of the process that issued the session/new request, captured
+// from `clientInfo` on its initialize call. Used by list views to filter
+// out short-lived ancillary sessions (e.g. `hydra cat`) by default.
+export const PersistedOriginatingClient = z.object({
+  name: z.string(),
+  version: z.string().optional(),
+});
+export type PersistedOriginatingClient = z.infer<
+  typeof PersistedOriginatingClient
+>;
+
 export const SessionRecord = z.object({
   version: z.literal(1),
   sessionId: z.string(),
@@ -115,6 +126,10 @@ export const SessionRecord = z.object({
   // Set when this session was spawned as a child by a transformer via
   // hydra-acp/spawn_child_session. Points to the spawning session's id.
   parentSessionId: z.string().optional(),
+  // clientInfo from the process that issued session/new. Picker and
+  // `sessions list` use this to hide cat-style ancillary sessions by
+  // default; carried in meta.json so cold sessions filter the same way.
+  originatingClient: PersistedOriginatingClient.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -250,6 +265,7 @@ export function recordFromMemorySession(args: {
   agentModels?: PersistedAgentModel[];
   pendingHistorySync?: boolean;
   parentSessionId?: string;
+  originatingClient?: PersistedOriginatingClient;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -273,6 +289,7 @@ export function recordFromMemorySession(args: {
     agentModels: args.agentModels,
     pendingHistorySync: args.pendingHistorySync,
     parentSessionId: args.parentSessionId,
+    originatingClient: args.originatingClient,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

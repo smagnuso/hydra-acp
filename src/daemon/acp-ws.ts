@@ -51,6 +51,10 @@ import type { StdinMcpRegistry } from "./mcp/stdin-registry.js";
 interface ClientState {
   clientId: string;
   processIdentity: ProcessIdentity | undefined;
+  // clientInfo from the connection's initialize call. Threaded into
+  // manager.create on session/new so the originating process is
+  // persisted with the session (used by list-view filters).
+  clientInfo?: { name: string; version?: string };
   attached: Map<
     string,
     {
@@ -148,6 +152,19 @@ export function registerAcpWsEndpoint(
 
     connection.onRequest("initialize", async (raw) => {
       const params = InitializeParams.parse(raw ?? {});
+      // Capture clientInfo so a later session/new on this connection can
+      // tag the session with its originating process. Hydra-internal CLI
+      // commands (and clients like hydra-acp-cat) set clientInfo.name on
+      // initialize; the picker / `sessions list` use it to hide
+      // ancillary sessions by default.
+      if (params.clientInfo?.name) {
+        state.clientInfo = {
+          name: params.clientInfo.name,
+          ...(params.clientInfo.version !== undefined
+            ? { version: params.clientInfo.version }
+            : {}),
+        };
+      }
       // If the connecting process reported a version and the daemon knows its
       // identity, push the version back to the appropriate manager.
       const version = params.clientInfo?.version;
@@ -473,6 +490,7 @@ export function registerAcpWsEndpoint(
           model: hydraMeta.model,
           onInstallProgress: makeInstallProgressForwarder(connection),
           transformChain,
+          originatingClient: state.clientInfo,
         });
       } catch (err) {
         if (stdinReservation !== undefined) {

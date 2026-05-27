@@ -21,6 +21,7 @@ import {
 } from "../cli/session-row.js";
 import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
+import { HYDRA_CAT_CLIENT_NAME } from "../core/hydra-version.js";
 import type { HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 import {
@@ -88,6 +89,11 @@ export interface PickerFilters {
   // "__local" | "__all" | host name. See `hostFilter` in pickSession
   // for the cycle order and meaning.
   hostFilter: string;
+  // When false (default), sessions tagged with originatingClient.name
+  // == HYDRA_CAT_CLIENT_NAME are hidden — they're usually one-shot
+  // `hydra cat` invocations that clutter the picker. Toggle with `i`
+  // (matches the CLI's --include-cat). `c` is taken by "create new".
+  showCat: boolean;
 }
 
 // User-tweakable picker state that should outlive a single pickSession
@@ -99,7 +105,9 @@ export interface PickerPrefs {
 }
 
 export function createPickerPrefs(): PickerPrefs {
-  return { filters: { cwdOnly: false, hostFilter: "__local" } };
+  return {
+    filters: { cwdOnly: false, hostFilter: "__local", showCat: false },
+  };
 }
 
 // Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
@@ -138,6 +146,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["^f", "find in session history (content + tool inputs)"],
   ["o", "toggle cwd-only filter"],
   ["h", "cycle host filter (local / <peer> / all)"],
+  ["i", "toggle include-cat filter"],
   ["r", "refresh from daemon"],
   null,
   ["k", "kill the selected live session"],
@@ -244,6 +253,11 @@ export async function pickSession(
     let base = sessions;
     if (prefs.filters.cwdOnly) {
       base = base.filter((s) => s.cwd === opts.cwd);
+    }
+    if (!prefs.filters.showCat) {
+      base = base.filter(
+        (s) => s.originatingClient?.name !== HYDRA_CAT_CLIENT_NAME,
+      );
     }
     base = filterByHost(base, prefs.filters.hostFilter);
     return base;
@@ -537,6 +551,9 @@ export async function pickSession(
           ? "host: local"
           : `host: ${prefs.filters.hostFilter}`,
       );
+    }
+    if (prefs.filters.showCat) {
+      parts.push("+cat");
     }
     if (above > 0) {
       parts.push(`↑ ${above} above`);
@@ -2016,6 +2033,15 @@ export async function pickSession(
             prefs.filters.hostFilter,
             allSessions,
           );
+          applyFilter();
+          restoreCursorAfterFilter(keepId);
+          renderFromScratch();
+          return;
+        }
+        if (name === "i" || name === "I") {
+          const keepId =
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+          prefs.filters.showCat = !prefs.filters.showCat;
           applyFilter();
           restoreCursorAfterFilter(keepId);
           renderFromScratch();

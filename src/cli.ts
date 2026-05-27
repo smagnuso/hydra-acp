@@ -302,6 +302,7 @@ async function main(): Promise<void> {
           all: flags.all === true,
           json: flags.json === true,
           host: typeof flags.host === "string" ? flags.host : undefined,
+          includeCat: flags["include-cat"] === true,
         });
         return;
       }
@@ -667,9 +668,10 @@ function printHelp(): void {
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
-      "  hydra-acp session [list] [--all] [--json] [--host=<host>]",
+      "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-cat]",
       "                                     List sessions (live + 20 most-recent cold; --all for everything; --json emits JSON for scripts).",
       "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer.",
+      "                                     --include-cat surfaces sessions spawned by `hydra cat` (hidden by default).",
       "  hydra-acp session kill <id>        Demote a live session to cold (keeps the on-disk record)",
       "  hydra-acp session remove <id>      Remove a session entirely (live or cold)",
       "  hydra-acp session export <id> [--out <file>|.]",

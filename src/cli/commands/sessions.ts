@@ -6,6 +6,7 @@ import { resolveLocalTarget } from "../../core/remote-target.js";
 import { formatHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
 import { stripHydraSessionPrefix } from "../../core/session.js";
 import { listSessions, pickMostRecent } from "../../tui/discovery.js";
+import { HYDRA_CAT_CLIENT_NAME } from "../../core/hydra-version.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import {
@@ -17,7 +18,12 @@ import {
 } from "../session-row.js";
 
 export async function runSessionsList(
-  opts: { all?: boolean; json?: boolean; host?: string } = {},
+  opts: {
+    all?: boolean;
+    json?: boolean;
+    host?: string;
+    includeCat?: boolean;
+  } = {},
 ): Promise<void> {
   const config = await loadConfig();
   const serviceToken = await loadServiceToken();
@@ -48,8 +54,17 @@ export async function runSessionsList(
       updatedAt: string;
       status?: "live" | "cold";
       importedFromMachine?: string;
+      originatingClient?: { name: string; version?: string };
     }>;
   };
+  // `hydra cat` registers `originatingClient.name = HYDRA_CAT_CLIENT_NAME`
+  // on its initialize call. These sessions are usually one-shot and
+  // would clutter the list; drop them unless --include-cat is passed.
+  const sessionsAfterCatFilter = opts.includeCat
+    ? body.sessions
+    : body.sessions.filter(
+        (s) => s.originatingClient?.name !== HYDRA_CAT_CLIENT_NAME,
+      );
   // Host filter:
   //   "local" — sessions created here OR imported and bound to a local
   //             agent (upstreamSessionId set). The "I'm working on this
@@ -62,12 +77,12 @@ export async function runSessionsList(
   // view as humans.
   const host = opts.host ?? "local";
   const hostFiltered = host === "all"
-    ? body.sessions
+    ? sessionsAfterCatFilter
     : host === "local"
-      ? body.sessions.filter(
+      ? sessionsAfterCatFilter.filter(
           (s) => !s.importedFromMachine || !!s.upstreamSessionId,
         )
-      : body.sessions.filter(
+      : sessionsAfterCatFilter.filter(
           (s) =>
             s.importedFromMachine === host && !s.upstreamSessionId,
         );

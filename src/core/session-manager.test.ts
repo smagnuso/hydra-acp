@@ -2771,6 +2771,66 @@ describe("SessionManager: parentSessionId", () => {
   });
 });
 
+describe("SessionManager: originatingClient", () => {
+  it("surfaces originatingClient for a live session in list() and persists it", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_origin" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    const session = await manager.create({
+      agentId: "claude-code",
+      cwd: "/work",
+      originatingClient: { name: "hydra-acp-cat", version: "9.9.9" },
+    });
+
+    const entries = await manager.list();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.originatingClient).toEqual({
+      name: "hydra-acp-cat",
+      version: "9.9.9",
+    });
+
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    const record = await store.read(session.sessionId);
+    expect(record?.originatingClient).toEqual({
+      name: "hydra-acp-cat",
+      version: "9.9.9",
+    });
+  });
+
+  it("surfaces originatingClient for a cold session in list()", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+
+    await store.write({
+      sessionId: "hydra_session_cat_cold",
+      cwd: "/work",
+      agentId: "claude-code",
+      upstreamSessionId: "u_cold_cat",
+      originatingClient: { name: "hydra-acp-cat" },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("should not spawn"); },
+    );
+
+    const entries = await manager.list();
+    const cat = entries.find((e) => e.sessionId === "hydra_session_cat_cold");
+    expect(cat?.originatingClient).toEqual({ name: "hydra-acp-cat" });
+  });
+});
+
 describe("SessionManager.create: transformChain threading", () => {
   it("wires the resolved transform chain onto the created session", async () => {
     const { JsonRpcConnection } = await import("../acp/connection.js");
