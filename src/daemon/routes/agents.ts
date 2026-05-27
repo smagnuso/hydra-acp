@@ -1,5 +1,9 @@
 import type { FastifyInstance } from "fastify";
-import { planSpawn, type Registry } from "../../core/registry.js";
+import {
+  agentInstallState,
+  planSpawn,
+  type Registry,
+} from "../../core/registry.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 
@@ -11,15 +15,20 @@ export function registerAgentRoutes(
 ): void {
   app.get("/v1/agents", async () => {
     const doc = await registry.load();
-    return {
-      version: doc.version,
-      agents: doc.agents.map((a) => ({
+    const agents = await Promise.all(
+      doc.agents.map(async (a) => ({
         id: a.id,
         name: a.name,
         version: a.version,
         description: a.description,
         distributions: Object.keys(a.distribution),
+        installed: await agentInstallState(a),
       })),
+    );
+    return {
+      version: doc.version,
+      fetchedAt: registry.lastFetchedAt(),
+      agents,
     };
   });
 

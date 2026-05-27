@@ -8,13 +8,18 @@ interface AgentSummary {
   version: string;
   description?: string;
   distributions: string[];
+  installed: "yes" | "no" | "lazy";
 }
 
 export async function runAgentsList(): Promise<void> {
   const config = await loadConfig();
   const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  let body: { version: string; agents: AgentSummary[] };
+  let body: {
+    version: string;
+    fetchedAt?: number;
+    agents: AgentSummary[];
+  };
   try {
     const r = await fetch(`${baseUrl}/v1/agents`, {
       headers: { Authorization: `Bearer ${serviceToken}` },
@@ -23,7 +28,7 @@ export async function runAgentsList(): Promise<void> {
       process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
       process.exit(1);
     }
-    body = (await r.json()) as { version: string; agents: AgentSummary[] };
+    body = (await r.json()) as typeof body;
   } catch (err) {
     process.stderr.write(
       `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
@@ -42,6 +47,7 @@ export async function runAgentsList(): Promise<void> {
     name: a.name,
     version: a.version,
     distributions: a.distributions.join(","),
+    installed: a.installed,
     description: a.description ?? "",
   }));
   const header = {
@@ -49,6 +55,7 @@ export async function runAgentsList(): Promise<void> {
     name: "NAME",
     version: "VERSION",
     distributions: "DIST",
+    installed: "INSTALLED",
     description: "DESCRIPTION",
   };
   const widths = {
@@ -56,6 +63,7 @@ export async function runAgentsList(): Promise<void> {
     name: maxLen(header.name, rows.map((r) => r.name)),
     version: maxLen(header.version, rows.map((r) => r.version)),
     distributions: maxLen(header.distributions, rows.map((r) => r.distributions)),
+    installed: maxLen(header.installed, rows.map((r) => r.installed)),
   };
   const fmt = (r: typeof header): string =>
     [
@@ -63,13 +71,44 @@ export async function runAgentsList(): Promise<void> {
       r.name.padEnd(widths.name),
       r.version.padEnd(widths.version),
       r.distributions.padEnd(widths.distributions),
+      r.installed.padEnd(widths.installed),
       r.description,
     ].join("  ");
   process.stdout.write(fmt(header) + "\n");
   for (const r of rows) {
     process.stdout.write(fmt(r) + "\n");
   }
-  process.stdout.write(`\nRegistry version: ${body.version}\n`);
+  const syncSuffix =
+    body.fetchedAt !== undefined
+      ? ` (synced ${formatAge(Date.now() - body.fetchedAt)} ago)`
+      : "";
+  process.stdout.write(
+    `\nRegistry version: ${body.version}${syncSuffix}\n`,
+  );
+}
+
+// Round-and-bucket: "just now" for <60s, then a single
+// minute/hour/day unit. Mirrors how `git log --relative-date`
+// summarizes age — precise enough to spot a stale cache, terse
+// enough to fit on the trailer line.
+export function formatAge(ms: number): string {
+  if (ms < 0) {
+    return "just now";
+  }
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) {
+    return "just now";
+  }
+  const min = Math.floor(sec / 60);
+  if (min < 60) {
+    return `${min} minute${min === 1 ? "" : "s"}`;
+  }
+  const hour = Math.floor(min / 60);
+  if (hour < 24) {
+    return `${hour} hour${hour === 1 ? "" : "s"}`;
+  }
+  const day = Math.floor(hour / 24);
+  return `${day} day${day === 1 ? "" : "s"}`;
 }
 
 interface SyncedSession {

@@ -17,7 +17,10 @@ function npxPackageBasename(a: RegistryAgent): string | undefined {
   return atIdx <= 0 ? afterSlash : afterSlash.slice(0, atIdx);
 }
 
-function fakeRegistry(agents: RegistryAgent[]): Registry {
+function fakeRegistry(
+  agents: RegistryAgent[],
+  opts: { fetchedAt?: number } = {},
+): Registry {
   return {
     async getAgent(id: string) {
       return (
@@ -31,6 +34,9 @@ function fakeRegistry(agents: RegistryAgent[]): Registry {
     async refresh() {
       return { version: "0", agents };
     },
+    lastFetchedAt() {
+      return opts.fetchedAt;
+    },
   } as unknown as Registry;
 }
 
@@ -39,12 +45,15 @@ interface Harness {
   baseUrl: string;
 }
 
-async function buildHarness(agents: RegistryAgent[]): Promise<Harness> {
-  const manager = new SessionManager(fakeRegistry(agents), () =>
+async function buildHarness(
+  agents: RegistryAgent[],
+  opts: { fetchedAt?: number } = {},
+): Promise<Harness> {
+  const manager = new SessionManager(fakeRegistry(agents, opts), () =>
     makeMockAgent({ agentId: "x", cwd: "/w" }).agent,
   );
   const app = Fastify();
-  registerAgentRoutes(app, fakeRegistry(agents), manager);
+  registerAgentRoutes(app, fakeRegistry(agents, opts), manager);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address() as AddressInfo;
   return { app, baseUrl: `http://127.0.0.1:${addr.port}` };
@@ -124,6 +133,38 @@ describe("agent routes: install", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { agentId: string };
     expect(body.agentId).toBe("claude-code");
+  });
+
+  it("lists agents with installed state and fetchedAt", async () => {
+    const fetchedAt = Date.now() - 5 * 60_000;
+    harness = await buildHarness(
+      [
+        {
+          id: "claude-code",
+          name: "claude-code",
+          version: "1.2.3",
+          distribution: { npx: { package: "claude-code" } },
+        },
+        {
+          id: "uvx-only",
+          name: "uvx-only",
+          distribution: { uvx: { package: "uvx-only" } },
+        },
+      ],
+      { fetchedAt },
+    );
+    const res = await fetch(`${harness.baseUrl}/v1/agents`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      version: string;
+      fetchedAt: number;
+      agents: { id: string; installed: string }[];
+    };
+    expect(body.fetchedAt).toBe(fetchedAt);
+    const claude = body.agents.find((a) => a.id === "claude-code");
+    const uvx = body.agents.find((a) => a.id === "uvx-only");
+    expect(claude?.installed).toBe("no");
+    expect(uvx?.installed).toBe("lazy");
   });
 
   it("reports uvx agents as not pre-installable", async () => {

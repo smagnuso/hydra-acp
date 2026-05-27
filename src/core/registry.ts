@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { z } from "zod";
 import { paths } from "./paths.js";
 import type { HydraConfig } from "./config.js";
@@ -139,6 +140,14 @@ export class Registry {
     return fresh.data;
   }
 
+  // Epoch ms of the last successful registry fetch (in-memory or
+  // disk). Returns undefined before load()/refresh() has populated the
+  // cache. Used by `/v1/agents` to surface "synced N minutes ago" in
+  // the CLI without exposing the full cache shape.
+  lastFetchedAt(): number | undefined {
+    return this.cache?.fetchedAt;
+  }
+
   async getAgent(id: string): Promise<RegistryAgent | undefined> {
     const doc = await this.load();
     const exact = doc.agents.find((a) => a.id === id);
@@ -251,6 +260,60 @@ function npxPackageBasename(agent: RegistryAgent): string | undefined {
   const afterSlash = lastSlash === -1 ? pkg : pkg.slice(lastSlash + 1);
   const atIdx = afterSlash.lastIndexOf("@");
   return atIdx <= 0 ? afterSlash : afterSlash.slice(0, atIdx);
+}
+
+// "yes" → an install dir for this agent's current version is on disk
+// for this platform. "no" → npx/binary agent that hasn't been
+// pre-installed yet. "lazy" → uvx-only; nothing to pre-install
+// because uvx resolves on first run.
+export type AgentInstallState = "yes" | "no" | "lazy";
+
+export async function agentInstallState(
+  agent: RegistryAgent,
+): Promise<AgentInstallState> {
+  const platformKey = currentPlatformKey();
+  if (!platformKey) {
+    return "no";
+  }
+  const version = agent.version ?? "current";
+  if (agent.distribution.binary) {
+    const target = pickBinaryTarget(agent.distribution.binary, platformKey);
+    if (target?.cmd) {
+      const cmdPath = path.resolve(
+        paths.agentInstallDir(agent.id, platformKey, version),
+        target.cmd,
+      );
+      if (await fileExists(cmdPath)) {
+        return "yes";
+      }
+    }
+  }
+  if (agent.distribution.npx) {
+    const npx = agent.distribution.npx;
+    const bin = npx.bin ?? npxPackageBasename(agent) ?? npx.package;
+    const installDir = paths.agentNpmInstallDir(agent.id, platformKey, version);
+    const binPath = path.join(installDir, "node_modules", ".bin", bin);
+    if (await fileExists(binPath)) {
+      return "yes";
+    }
+  }
+  if (
+    !agent.distribution.npx &&
+    !agent.distribution.binary &&
+    agent.distribution.uvx
+  ) {
+    return "lazy";
+  }
+  return "no";
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Caller-supplied args replace the registry's args entirely. When the caller

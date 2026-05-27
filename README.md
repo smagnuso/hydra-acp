@@ -135,7 +135,7 @@ journalctl -u nginx --since "1 hour ago" | hydra-acp cat -p "anything alarming?"
 
 # Treat hydra as the filter in a unix pipeline — output is plain text,
 # so tee / grep / jq downstream just work.
-git log --since="last monday" --pretty=full | hydra-acp cat -p "draft release notes, one bullet per user-visible change" | tee RELEASE_NOTES.md
+git log --since="last monday" --pretty=full | hydra-acp cat -p "draft release notes, one bullet per user-visible change, grouped by version" | tee RELEASE_NOTES.md
 
 # Watch a live log and only speak up when something's wrong. --detach
 # keeps the session in the daemon, so you can follow it on your phone

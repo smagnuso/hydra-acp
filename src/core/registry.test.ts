@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { homedir } from "node:os";
 import {
+  agentInstallState,
   Registry,
   planSpawn,
   type AgentInstallProgress,
@@ -87,6 +88,43 @@ function seedCache(registry: Registry, fixture: typeof FIXTURE): void {
     data: doc as never,
   };
 }
+
+describe("Registry.lastFetchedAt", () => {
+  it("returns undefined before load() populates the cache", () => {
+    const registry = new Registry(fakeConfig());
+    expect(registry.lastFetchedAt()).toBeUndefined();
+  });
+
+  it("returns the cache fetchedAt once seeded", () => {
+    const registry = new Registry(fakeConfig());
+    seedCache(registry, FIXTURE);
+    const at = registry.lastFetchedAt();
+    expect(at).toBeTypeOf("number");
+    expect(Date.now() - at!).toBeLessThan(1000);
+  });
+});
+
+describe("agentInstallState", () => {
+  it("returns 'lazy' for uvx-only agents", async () => {
+    const agent: RegistryAgent = {
+      id: "uvx-only",
+      name: "Uvx Only",
+      distribution: { uvx: { package: "uvx-only" } },
+    };
+    expect(await agentInstallState(agent)).toBe("lazy");
+  });
+
+  it("returns 'no' for an npx agent that has not been pre-installed", async () => {
+    const agent: RegistryAgent = {
+      id: "claude-acp",
+      name: "Claude",
+      distribution: {
+        npx: { package: "@agentclientprotocol/claude-agent-acp@0.33.1" },
+      },
+    };
+    expect(await agentInstallState(agent)).toBe("no");
+  });
+});
 
 describe("Registry.getAgent fallback", () => {
   it("matches by exact id first", async () => {
