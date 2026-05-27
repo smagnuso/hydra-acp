@@ -808,6 +808,17 @@ function highlightFencedBlock(
   } catch {
     return lines.map((body) => ({ body, ansi: false }));
   }
+  // chalk closes color spans with `\x1b[39m` (reset fg to terminal
+  // default). That works when the surrounding context is the terminal
+  // default — but our "code" body sits on a `bgColorGrayscale(28).white`
+  // base, so the close drops the rest of the line to whatever the user's
+  // default foreground is (blue / gray / etc. depending on theme) instead
+  // of back to our explicit white. Rewrite every fg-close to an explicit
+  // "set fg to white" so closes always restore the base we set in
+  // screen.ts. Side-effect: nested chalk closes also land at white, which
+  // matches the behavior cli-highlight already had (it concatenates spans
+  // without re-emitting parents).
+  highlighted = highlighted.replace(/\x1b\[39m/g, "\x1b[37m");
   const out = highlighted.split("\n");
   // Defensive: highlight.js should preserve newline count, but if it
   // didn't, prefer the source line count to keep wrap math sane.

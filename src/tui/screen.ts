@@ -3193,13 +3193,16 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       term.dim.noFormat(text);
       return;
     case "code":
-      // Tinted dark-blue band for fenced code blocks. Different hue from
-      // the user-text band so the two never get confused at a glance.
+      // Dark grayscale band with a plain-white default foreground so
+      // code reads like an editor block (and `diff` fences let context
+      // lines stand neutral while +/- pick up cli-highlight's red/green
+      // overlay). Different hue from the user-text band so the two never
+      // get confused at a glance.
       (term as unknown as {
         bgColorGrayscale: {
-          brightCyan: { noFormat: (g: number, t: string) => void };
+          white: { noFormat: (g: number, t: string) => void };
         };
-      }).bgColorGrayscale.brightCyan.noFormat(28, text);
+      }).bgColorGrayscale.white.noFormat(28, text);
       return;
     case "heading-1":
       // noFormat dropped so caret markup emitted by applyInlineMarkup is
