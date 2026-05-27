@@ -177,7 +177,7 @@ interface ParseMarkdownOpts {
   // Prefix for the first non-blank line. All other lines use "  ".
   firstPrefix?: string;
   // Passed to applyInlineMarkup for prose and list items.
-  inlineOpts?: { boldReset?: string; codeReset?: string };
+  inlineOpts?: { codeOpen?: string; boldReset?: string; codeReset?: string };
 }
 
 // Block-level markdown → FormattedLines. Each newline-separated line is

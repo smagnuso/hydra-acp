@@ -3399,7 +3399,7 @@ describe("Session", () => {
         );
       expect(broadcast).toBeDefined();
       const cmds = (
-        broadcast?.params as {
+        (broadcast as JsonRpcNotification | undefined)?.params as {
           update: { availableCommands: Array<{ name: string }> };
         }
       ).update.availableCommands.map((c) => c.name);
@@ -3436,9 +3436,11 @@ describe("Session", () => {
             ?.update?.sessionUpdate === "agent_message_chunk",
       );
       expect(chunk).toBeDefined();
-      const text = (chunk?.params as {
-        update: { content: { text: string } };
-      }).update.content.text;
+      const text = (
+        (chunk as JsonRpcNotification | undefined)?.params as {
+          update: { content: { text: string } };
+        }
+      ).update.content.text;
       expect(text).toContain("spend reset");
     });
 
@@ -3485,9 +3487,11 @@ describe("Session", () => {
           (m.params as { update?: { sessionUpdate?: string } } | undefined)
             ?.update?.sessionUpdate === "agent_message_chunk",
       );
-      const text = (chunk?.params as {
-        update: { content: { text: string } };
-      }).update.content.text;
+      const text = (
+        (chunk as JsonRpcNotification | undefined)?.params as {
+          update: { content: { text: string } };
+        }
+      ).update.content.text;
       expect(text).toContain("unknown verb");
       expect(text).toContain("delete-everything");
     });
@@ -3513,9 +3517,11 @@ describe("Session", () => {
           (m.params as { update?: { sessionUpdate?: string } } | undefined)
             ?.update?.sessionUpdate === "agent_message_chunk",
       );
-      const text = (chunk?.params as {
-        update: { content: { text: string } };
-      }).update.content.text;
+      const text = (
+        (chunk as JsonRpcNotification | undefined)?.params as {
+          update: { content: { text: string } };
+        }
+      ).update.content.text;
       expect(text).toContain("disk full");
     });
 
