@@ -1,6 +1,6 @@
 // Pull an allow-flavored optionId out of an ACP
 // `session/request_permission` params payload, used by code paths that
-// auto-approve without showing a UI (cat's hydra_stdin auto-allow, and
+// auto-approve without showing a UI (cat's hydra-acp-stdin auto-allow, and
 // the --dangerously-skip-permissions paths in tui / shim / cat). Tries
 // preferredKinds in order, then falls back to the first option present,
 // then to the first preferred kind name itself. Returning a kind name

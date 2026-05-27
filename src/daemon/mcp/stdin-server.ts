@@ -1,13 +1,15 @@
 // HTTP route + MCP server factory for piped-stdin sessions.
 //
-// The agent connects to /mcp/stdin with `Authorization: Bearer <token>`
+// The agent connects to /mcp/hydra-acp-stdin with `Authorization: Bearer <token>`
 // where the token was minted at session/new time and embedded in the
 // `mcpServers` entry handed to the agent. We look the token up in the
-// StdinMcpRegistry to recover the session, then lazily build an
+// shared McpTokenRegistry to recover the session, then lazily build an
 // McpServer + StreamableHTTPServerTransport pair on the first request
 // and reuse them for the session's lifetime so the agent's MCP state
 // (initialize, list tools, in-flight long-polls) survives across
-// requests.
+// requests. Cleanup runs via a disposer registered with the token
+// registry — when the session ends, the transport + server close and
+// the lazy-cache entry drops.
 //
 // We bypass the daemon's bearer-token middleware via `skipAuth: true`
 // because the daemon's tokens belong to a different trust domain — this
@@ -20,39 +22,31 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Session } from "../../core/session.js";
 import type { StreamGrepOptions as RawStreamGrepOptions } from "../../core/stream-buffer.js";
-import type { StdinMcpRegistry } from "./stdin-registry.js";
+import { extractBearer } from "./bearer.js";
+import type { McpTokenRegistry } from "./token-registry.js";
 
-const BEARER_PREFIX = "Bearer ";
-
-function extractBearer(req: FastifyRequest): string | undefined {
-  const header = req.headers.authorization;
-  if (typeof header !== "string") {
-    return undefined;
-  }
-  if (!header.startsWith(BEARER_PREFIX)) {
-    return undefined;
-  }
-  const token = header.slice(BEARER_PREFIX.length).trim();
-  return token.length > 0 ? token : undefined;
+interface BuiltPair {
+  server: McpServer;
+  transport: StreamableHTTPServerTransport;
 }
 
 function buildMcpServer(session: Session): McpServer {
   const server = new McpServer(
-    { name: "hydra-stdin", version: "1.0.0" },
+    { name: "hydra-acp-stdin", version: "1.0.0" },
     {
       instructions:
         "Piped input from `hydra cat --stream` is exposed here as a byte stream. " +
-        "Use `tail_stdin` for the latest N bytes (good for finding the end of a log), " +
-        "`head_stdin` for the first N bytes (good for headers/preamble), " +
-        "`read_stdin` for windowed reads against an absolute byte cursor, " +
+        "Use `tail` for the latest N bytes (good for finding the end of a log), " +
+        "`head` for the first N bytes (good for headers/preamble), " +
+        "`read` for windowed reads against an absolute byte cursor, " +
         "`wait_for_more` to block until new bytes arrive past a cursor, and " +
-        "`stdin_info` for the current cursors/capacity/closed status. " +
+        "`info` for the current cursors/capacity/closed status. " +
         "Byte payloads come back base64-encoded.",
     },
   );
 
   server.registerTool(
-    "tail_stdin",
+    "tail",
     {
       description:
         "Return the most recent `bytes` bytes of piped stdin (capped server-side, default 64 KiB max). `truncated:true` means older bytes existed but have been evicted from the ring.",
@@ -79,7 +73,7 @@ function buildMcpServer(session: Session): McpServer {
   );
 
   server.registerTool(
-    "head_stdin",
+    "head",
     {
       description:
         "Return the first `bytes` bytes of piped stdin (capped server-side, default 64 KiB max). `truncated:true` means the head has already been evicted from the ring and the returned bytes start at the oldest still-resident cursor.",
@@ -106,7 +100,7 @@ function buildMcpServer(session: Session): McpServer {
   );
 
   server.registerTool(
-    "read_stdin",
+    "read",
     {
       description:
         "Read up to `max_bytes` bytes starting at absolute byte `cursor`. Returns `{bytes, nextCursor, gap?, eof?}` — `gap` is the number of bytes silently skipped because the ring had evicted them; `eof:true` means the producer closed and there is nothing left to read.",
@@ -185,10 +179,10 @@ function buildMcpServer(session: Session): McpServer {
   );
 
   server.registerTool(
-    "grep_stdin",
+    "grep",
     {
       description:
-        "Scan piped stdin line-by-line and return lines matching `pattern`. Prefer this over `read_stdin` when the question is 'find lines that mention X' — it filters server-side so you don't pull and decode 64 KiB base64 windows. Returns `{matches: [{cursor, line, before?, after?}], truncated, nextCursor, gap?, scannedBytes, eof?}`. Lines come back as decoded UTF-8 strings (not base64). When `truncated:true`, re-call with `cursor: nextCursor` to resume.",
+        "Scan piped stdin line-by-line and return lines matching `pattern`. Prefer this over `read` when the question is 'find lines that mention X' — it filters server-side so you don't pull and decode 64 KiB base64 windows. Returns `{matches: [{cursor, line, before?, after?}], truncated, nextCursor, gap?, scannedBytes, eof?}`. Lines come back as decoded UTF-8 strings (not base64). When `truncated:true`, re-call with `cursor: nextCursor` to resume.",
       inputSchema: {
         pattern: z
           .string()
@@ -278,7 +272,7 @@ function buildMcpServer(session: Session): McpServer {
   );
 
   server.registerTool(
-    "stdin_info",
+    "info",
     {
       description:
         "Report cursor / capacity / closed state of the stdin ring. Cheap; safe to call repeatedly.",
@@ -301,83 +295,103 @@ function buildMcpServer(session: Session): McpServer {
   return server;
 }
 
-async function ensureTransport(
-  token: string,
-  session: Session,
-  registry: StdinMcpRegistry,
-): Promise<StreamableHTTPServerTransport> {
-  const existing = registry.lookup(token);
-  if (existing?.transport !== undefined) {
-    return existing.transport;
-  }
-  const server = buildMcpServer(session);
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-  await server.connect(transport);
-  registry.attachTransport(token, server, transport);
-  return transport;
-}
-
 // Bound on how long to wait for a reservation's session to be completed.
 // Covers the window where the token has been embedded in the agent's
 // mcpServers but manager.create() hasn't returned yet. Agent spawn +
 // initialize is well under a second in practice; 10s is conservative.
 const SESSION_READY_TIMEOUT_MS = 10_000;
 
-async function handle(
-  req: FastifyRequest,
-  reply: FastifyReply,
-  registry: StdinMcpRegistry,
-): Promise<void> {
-  const token = extractBearer(req);
-  if (token === undefined) {
-    reply.code(401).send({ error: "missing bearer token" });
-    return;
-  }
-  const ep = registry.lookup(token);
-  if (ep === undefined) {
-    reply.code(404).send({ error: "unknown stdin token" });
-    return;
-  }
-  let session: Session;
-  if (ep.session !== undefined) {
-    session = ep.session;
-  } else {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<undefined>((resolve) => {
-      timer = setTimeout(() => resolve(undefined), SESSION_READY_TIMEOUT_MS);
-    });
-    const resolved = await Promise.race([
-      ep.sessionReady.catch(() => undefined),
-      timeout,
-    ]);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-    if (resolved === undefined) {
-      reply.code(503).send({ error: "session not ready" });
-      return;
-    }
-    session = resolved;
-  }
-  const transport = await ensureTransport(token, session, registry);
-  reply.hijack();
-  await transport.handleRequest(req.raw, reply.raw, req.body);
-}
-
 export function registerStdinMcpRoutes(
   app: FastifyInstance,
-  registry: StdinMcpRegistry,
+  tokenRegistry: McpTokenRegistry,
 ): void {
+  // Per-registration lazy build cache. Lives for the lifetime of the
+  // route registration (i.e. the daemon process). Tests get a fresh cache
+  // per harness because they re-register.
+  const builtPerToken = new Map<string, BuiltPair>();
+
+  async function ensureTransport(
+    token: string,
+    session: Session,
+  ): Promise<StreamableHTTPServerTransport> {
+    const existing = builtPerToken.get(token);
+    if (existing !== undefined) {
+      return existing.transport;
+    }
+    const server = buildMcpServer(session);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
+    await server.connect(transport);
+    const pair: BuiltPair = { server, transport };
+    builtPerToken.set(token, pair);
+    // Tear down on session end. Closing an already-closed transport or
+    // server is harmless (the SDK swallows it), but we still wrap in
+    // try/catch so a single failure doesn't leak the cache entry.
+    tokenRegistry.addDisposer(token, async () => {
+      builtPerToken.delete(token);
+      try {
+        await transport.close();
+      } catch {
+        // intentional
+      }
+      try {
+        await server.close();
+      } catch {
+        // intentional
+      }
+    });
+    return transport;
+  }
+
+  async function handle(
+    req: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> {
+    const token = extractBearer(req);
+    if (token === undefined) {
+      reply.code(401).send({ error: "missing bearer token" });
+      return;
+    }
+    const entry = tokenRegistry.lookup(token);
+    if (entry === undefined) {
+      reply.code(404).send({ error: "unknown stdin token" });
+      return;
+    }
+    let session: Session;
+    if (entry.session !== undefined) {
+      session = entry.session;
+    } else {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), SESSION_READY_TIMEOUT_MS);
+      });
+      const resolved = await Promise.race([
+        entry.sessionReady.catch(() => undefined),
+        timeout,
+      ]);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      if (resolved === undefined) {
+        reply.code(503).send({ error: "session not ready" });
+        return;
+      }
+      session = resolved;
+    }
+    const transport = await ensureTransport(token, session);
+    reply.hijack();
+    await transport.handleRequest(req.raw, reply.raw, req.body);
+  }
+
   const opts = { config: { skipAuth: true } };
-  app.post("/mcp/stdin", opts, async (req, reply) => {
-    await handle(req, reply, registry);
+  app.post("/mcp/hydra-acp-stdin", opts, async (req, reply) => {
+    await handle(req, reply);
   });
-  app.get("/mcp/stdin", opts, async (req, reply) => {
-    await handle(req, reply, registry);
+  app.get("/mcp/hydra-acp-stdin", opts, async (req, reply) => {
+    await handle(req, reply);
   });
-  app.delete("/mcp/stdin", opts, async (req, reply) => {
-    await handle(req, reply, registry);
+  app.delete("/mcp/hydra-acp-stdin", opts, async (req, reply) => {
+    await handle(req, reply);
   });
 }

@@ -702,8 +702,8 @@ describe("runCatLoop", () => {
       expect(promptParams.prompt).toHaveLength(1);
       const text = promptParams.prompt[0]?.text ?? "";
       expect(text).toContain("watch");
-      expect(text).toContain("hydra_stdin");
-      expect(text).toContain("tail_stdin");
+      expect(text).toContain("hydra-acp-stdin");
+      expect(text).toContain("tail");
       expect(text).not.toContain("/tmp/");
 
       // After the prompt resolves, cat should send an eof stream_write.
@@ -723,7 +723,7 @@ describe("runCatLoop", () => {
       ).toBe(true);
     });
 
-    it("auto-approves session/request_permission for mcp__hydra_stdin__* tools", async () => {
+    it("auto-approves session/request_permission for mcp__hydra-acp-stdin__* tools", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
@@ -742,7 +742,7 @@ describe("runCatLoop", () => {
           sessionId: "hydra_session_test",
           toolCall: {
             toolCallId: "tc-1",
-            title: "mcp__hydra_stdin__tail_stdin",
+            title: "mcp__hydra-acp-stdin__tail",
             kind: "other",
           },
           options: [
@@ -762,7 +762,7 @@ describe("runCatLoop", () => {
       await loopPromise.catch(() => undefined);
     });
 
-    it("rejects session/request_permission for non-hydra_stdin tools", async () => {
+    it("rejects session/request_permission for non-hydra-acp-stdin tools", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
@@ -798,7 +798,7 @@ describe("runCatLoop", () => {
       await loopPromise.catch(() => undefined);
     });
 
-    it("--dangerously-skip-permissions approves non-hydra_stdin tools too", async () => {
+    it("--dangerously-skip-permissions approves non-hydra-acp-stdin tools too", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,

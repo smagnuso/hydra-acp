@@ -37,8 +37,10 @@ import { registerTransformerRoutes } from "./routes/transformers.js";
 import { registerConfigRoutes } from "./routes/config.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
-import { StdinMcpRegistry } from "./mcp/stdin-registry.js";
+import { McpTokenRegistry } from "./mcp/token-registry.js";
 import { registerStdinMcpRoutes } from "./mcp/stdin-server.js";
+import { ExtensionMcpRegistry } from "../core/extension-mcp.js";
+import { registerExtensionMcpRoutes } from "./mcp/extension-route.js";
 
 declare module "fastify" {
   interface FastifyContextConfig {
@@ -52,6 +54,11 @@ export interface DaemonHandle {
   registry: Registry;
   extensions: ExtensionManager;
   transformers: TransformerManager;
+  // Exposed for integration tests + future programmatic consumers; the
+  // daemon-internal lookup paths don't go through these handles.
+  mcpTokenRegistry: McpTokenRegistry;
+  extensionMcp: ExtensionMcpRegistry;
+  processRegistry: ProcessTokenRegistry;
   shutdown: () => Promise<void>;
 }
 
@@ -198,8 +205,10 @@ export async function startDaemon(
     store: sessionTokenStore,
     rateLimiter: authRateLimiter,
   });
-  const stdinMcpRegistry = new StdinMcpRegistry();
-  registerStdinMcpRoutes(app, stdinMcpRegistry);
+  const mcpTokenRegistry = new McpTokenRegistry();
+  const extensionMcp = new ExtensionMcpRegistry();
+  registerStdinMcpRoutes(app, mcpTokenRegistry);
+  registerExtensionMcpRoutes(app, mcpTokenRegistry, extensionMcp);
   // Captured lazily by the session/new handler. The bound port isn't
   // known until app.listen() completes below, so we defer composition
   // until request time.
@@ -224,7 +233,8 @@ export async function startDaemon(
     onTransformerVersion: (name, version) => transformers.reportVersion(name, version),
     transformers,
     extensionCommands,
-    stdinMcpRegistry,
+    mcpTokenRegistry,
+    extensionMcp,
     getDaemonOrigin,
   });
 
@@ -297,7 +307,17 @@ export async function startDaemon(
     }
   };
 
-  return { app, manager, registry, extensions, transformers, shutdown };
+  return {
+    app,
+    manager,
+    registry,
+    extensions,
+    transformers,
+    mcpTokenRegistry,
+    extensionMcp,
+    processRegistry,
+    shutdown,
+  };
 }
 
 async function buildLogStream(level: string) {

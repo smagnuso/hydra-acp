@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { Session } from "../../core/session.js";
 import { makeMockAgent } from "../../__tests__/test-utils.js";
-import { StdinMcpRegistry } from "./stdin-registry.js";
+import { McpTokenRegistry } from "./token-registry.js";
 import { registerStdinMcpRoutes } from "./stdin-server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -22,12 +22,12 @@ function makeStreamSession(): Session {
 
 interface Harness {
   app: FastifyInstance;
-  registry: StdinMcpRegistry;
+  registry: McpTokenRegistry;
   baseUrl: string;
 }
 
 async function makeHarness(): Promise<Harness> {
-  const registry = new StdinMcpRegistry();
+  const registry = new McpTokenRegistry();
   const app = Fastify({ logger: false });
   registerStdinMcpRoutes(app, registry);
   await app.listen({ host: "127.0.0.1", port: 0 });
@@ -50,7 +50,7 @@ describe("stdin-server route — auth", () => {
   });
 
   it("returns 401 with no Authorization header", async () => {
-    const r = await fetch(`${h!.baseUrl}/mcp/stdin`, {
+    const r = await fetch(`${h!.baseUrl}/mcp/hydra-acp-stdin`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
@@ -59,7 +59,7 @@ describe("stdin-server route — auth", () => {
   });
 
   it("returns 401 when the header isn't a Bearer scheme", async () => {
-    const r = await fetch(`${h!.baseUrl}/mcp/stdin`, {
+    const r = await fetch(`${h!.baseUrl}/mcp/hydra-acp-stdin`, {
       method: "POST",
       headers: {
         Authorization: "Basic abcdef",
@@ -71,7 +71,7 @@ describe("stdin-server route — auth", () => {
   });
 
   it("returns 404 for an unknown bearer token", async () => {
-    const r = await fetch(`${h!.baseUrl}/mcp/stdin`, {
+    const r = await fetch(`${h!.baseUrl}/mcp/hydra-acp-stdin`, {
       method: "POST",
       headers: {
         Authorization: "Bearer no-such-token",
@@ -80,46 +80,6 @@ describe("stdin-server route — auth", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
     });
     expect(r.status).toBe(404);
-  });
-});
-
-describe("stdin-server route — registry lifecycle", () => {
-  it("bind throws on duplicate token", () => {
-    const session = makeStreamSession();
-    const registry = new StdinMcpRegistry();
-    registry.bind("tok", session);
-    expect(() => registry.bind("tok", session)).toThrow();
-  });
-
-  it("unbind drops the entry and is idempotent", async () => {
-    const session = makeStreamSession();
-    const registry = new StdinMcpRegistry();
-    registry.bind("tok", session);
-    expect(registry.lookup("tok")).toBeDefined();
-    await registry.unbind("tok");
-    expect(registry.lookup("tok")).toBeUndefined();
-    await registry.unbind("tok");
-  });
-
-  it("reserve creates an entry whose session is undefined until complete()", async () => {
-    const registry = new StdinMcpRegistry();
-    const { complete } = registry.reserve("tok");
-    const ep = registry.lookup("tok");
-    expect(ep).toBeDefined();
-    expect(ep!.session).toBeUndefined();
-    const session = makeStreamSession();
-    complete(session);
-    expect(ep!.session).toBe(session);
-    await expect(ep!.sessionReady).resolves.toBe(session);
-  });
-
-  it("abandon() removes the entry and rejects sessionReady", async () => {
-    const registry = new StdinMcpRegistry();
-    const { abandon } = registry.reserve("tok");
-    const ep = registry.lookup("tok");
-    abandon(new Error("create failed"));
-    expect(registry.lookup("tok")).toBeUndefined();
-    await expect(ep!.sessionReady).rejects.toThrow(/create failed/);
   });
 });
 
@@ -143,7 +103,7 @@ describe("stdin-server route — reservation race", () => {
 
     // Fire the request first. The handler should find the reservation,
     // see session === undefined, and await sessionReady.
-    const pending = fetch(`${h!.baseUrl}/mcp/stdin`, {
+    const pending = fetch(`${h!.baseUrl}/mcp/hydra-acp-stdin`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -184,7 +144,7 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     session = makeStreamSession();
     h.registry.bind(token, session);
     const transport = new StreamableHTTPClientTransport(
-      new URL(`${h.baseUrl}/mcp/stdin`),
+      new URL(`${h.baseUrl}/mcp/hydra-acp-stdin`),
       {
         requestInit: {
           headers: { Authorization: `Bearer ${token}` },
@@ -210,21 +170,14 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     const r = await client!.listTools();
     const names = r.tools.map((t) => t.name).sort();
     expect(names).toEqual(
-      [
-        "grep_stdin",
-        "head_stdin",
-        "read_stdin",
-        "stdin_info",
-        "tail_stdin",
-        "wait_for_more",
-      ].sort(),
+      ["grep", "head", "info", "read", "tail", "wait_for_more"].sort(),
     );
   });
 
-  it("tail_stdin returns base64-encoded trailing bytes", async () => {
+  it("tail returns base64-encoded trailing bytes", async () => {
     session.streamWrite(Buffer.from("hello world").toString("base64"));
     const r = await client!.callTool({
-      name: "tail_stdin",
+      name: "tail",
       arguments: { bytes: 5 },
     });
     const sc = r.structuredContent as {
@@ -238,20 +191,20 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc.truncated).toBe(false);
   });
 
-  it("head_stdin returns base64-encoded leading bytes", async () => {
+  it("head returns base64-encoded leading bytes", async () => {
     session.streamWrite(Buffer.from("hello world").toString("base64"));
     const r = await client!.callTool({
-      name: "head_stdin",
+      name: "head",
       arguments: { bytes: 5 },
     });
     const sc = r.structuredContent as { bytes: string };
     expect(Buffer.from(sc.bytes, "base64").toString("utf8")).toBe("hello");
   });
 
-  it("read_stdin with cursor returns a windowed slice", async () => {
+  it("read with cursor returns a windowed slice", async () => {
     session.streamWrite(Buffer.from("0123456789").toString("base64"));
     const r = await client!.callTool({
-      name: "read_stdin",
+      name: "read",
       arguments: { cursor: 3, max_bytes: 4 },
     });
     const sc = r.structuredContent as {
@@ -262,9 +215,9 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc.nextCursor).toBe(7);
   });
 
-  it("stdin_info reports cursors and closed=false until close", async () => {
+  it("info reports cursors and closed=false until close", async () => {
     session.streamWrite(Buffer.from("abc").toString("base64"));
-    const r1 = await client!.callTool({ name: "stdin_info", arguments: {} });
+    const r1 = await client!.callTool({ name: "info", arguments: {} });
     const sc1 = r1.structuredContent as {
       writeCursor: number;
       closed: boolean;
@@ -273,7 +226,7 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc1.closed).toBe(false);
 
     session.streamWrite("", true);
-    const r2 = await client!.callTool({ name: "stdin_info", arguments: {} });
+    const r2 = await client!.callTool({ name: "info", arguments: {} });
     const sc2 = r2.structuredContent as { closed: boolean };
     expect(sc2.closed).toBe(true);
   });
@@ -321,11 +274,11 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc.outcome).toBe("timeout");
   });
 
-  it("grep_stdin returns matching lines with absolute cursors", async () => {
+  it("grep returns matching lines with absolute cursors", async () => {
     const body = "alpha 720p\nbeta 1080p\ngamma 720p\ndelta 480p\n";
     session.streamWrite(Buffer.from(body).toString("base64"));
     const r = await client!.callTool({
-      name: "grep_stdin",
+      name: "grep",
       arguments: { pattern: "720p" },
     });
     const sc = r.structuredContent as {
@@ -341,11 +294,11 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc.matches[1]!.cursor).toBe("alpha 720p\nbeta 1080p\n".length);
   });
 
-  it("grep_stdin honors regex:false for literal matching", async () => {
+  it("grep honors regex:false for literal matching", async () => {
     const body = "a.c\nabc\nadc\n";
     session.streamWrite(Buffer.from(body).toString("base64"));
     const r = await client!.callTool({
-      name: "grep_stdin",
+      name: "grep",
       arguments: { pattern: "a.c", regex: false },
     });
     const sc = r.structuredContent as {
@@ -354,11 +307,11 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc.matches.map((m) => m.line)).toEqual(["a.c"]);
   });
 
-  it("grep_stdin truncates at max_matches and reports nextCursor", async () => {
+  it("grep truncates at max_matches and reports nextCursor", async () => {
     const body = "hit\nhit\nhit\nhit\nhit\n";
     session.streamWrite(Buffer.from(body).toString("base64"));
     const r = await client!.callTool({
-      name: "grep_stdin",
+      name: "grep",
       arguments: { pattern: "hit", max_matches: 2 },
     });
     const sc = r.structuredContent as {
@@ -371,11 +324,11 @@ describe("stdin-server route — MCP tools end-to-end", () => {
     expect(sc.nextCursor).toBe("hit\nhit\n".length);
   });
 
-  it("grep_stdin returns context_before / context_after lines", async () => {
+  it("grep returns context_before / context_after lines", async () => {
     const body = "L0\nL1\nMATCH\nL3\nL4\n";
     session.streamWrite(Buffer.from(body).toString("base64"));
     const r = await client!.callTool({
-      name: "grep_stdin",
+      name: "grep",
       arguments: {
         pattern: "MATCH",
         context_before: 1,

@@ -44,9 +44,13 @@ import type {
   ExtensionCommandRegistry,
   ExtensionCommandSpec,
 } from "../core/extension-commands.js";
+import type {
+  ExtensionMcpRegistry,
+  ExtensionMcpToolSpec,
+} from "../core/extension-mcp.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import { randomBytes } from "node:crypto";
-import type { StdinMcpRegistry } from "./mcp/stdin-registry.js";
+import type { McpTokenRegistry } from "./mcp/token-registry.js";
 
 interface ClientState {
   clientId: string;
@@ -89,10 +93,14 @@ export interface AcpWsDeps {
   // Session.handleSlashCommand can later route "/hydra <name> <verb>"
   // calls back to the originating extension/transformer.
   extensionCommands?: ExtensionCommandRegistry;
-  // Registry of per-session MCP bearer tokens for in-memory stdin
-  // streaming (`hydra cat --stream`). Set when the session/new request
-  // carries `_meta.hydra-acp.mcpStdin: true`.
-  stdinMcpRegistry?: StdinMcpRegistry;
+  // Shared per-session MCP bearer-token registry. Used by stdin streaming
+  // (`hydra cat --stream`, when `_meta.hydra-acp.mcpStdin: true`) and the
+  // extension MCP plug-point.
+  mcpTokenRegistry?: McpTokenRegistry;
+  // Daemon-wide registry of extension-contributed MCP servers. The
+  // hydra-acp/register_mcp_tools handler binds the registration here so
+  // /mcp/<extension-name> resolves to the right connection.
+  extensionMcp?: ExtensionMcpRegistry;
   // Lazy getter for the daemon's externally-reachable origin (scheme +
   // host + port). Lazy because the bound port isn't known until after
   // `app.listen` returns, which happens after this registration runs.
@@ -218,6 +226,78 @@ export function registerAcpWsEndpoint(
       });
       connection.onClose(() => {
         registry.clear(processIdentity.name);
+      });
+    }
+
+    // Extensions and transformers register MCP tools they handle via this
+    // method. Once registered, /mcp/<process-name> routes inbound MCP
+    // requests back to this connection as hydra-acp/invoke_mcp_tool.
+    // Registrations drop on disconnect — the route's onChange listener
+    // evicts any cached transports built against the old spec. Re-calling
+    // overwrites the prior tools/instructions for this name.
+    if (processIdentity && deps.extensionMcp) {
+      const mcpRegistry = deps.extensionMcp;
+      connection.onRequest("hydra-acp/register_mcp_tools", async (raw) => {
+        const params = (raw ?? {}) as {
+          instructions?: unknown;
+          tools?: unknown;
+        };
+        const instructions =
+          typeof params.instructions === "string"
+            ? params.instructions
+            : undefined;
+        const tools = Array.isArray(params.tools)
+          ? (params.tools
+              .map((t): ExtensionMcpToolSpec | undefined => {
+                if (!t || typeof t !== "object") {
+                  return undefined;
+                }
+                const obj = t as {
+                  name?: unknown;
+                  description?: unknown;
+                  inputSchema?: unknown;
+                  outputSchema?: unknown;
+                };
+                if (typeof obj.name !== "string" || obj.name.length === 0) {
+                  return undefined;
+                }
+                if (typeof obj.description !== "string") {
+                  return undefined;
+                }
+                if (
+                  obj.inputSchema === null ||
+                  typeof obj.inputSchema !== "object"
+                ) {
+                  return undefined;
+                }
+                const spec: ExtensionMcpToolSpec = {
+                  name: obj.name,
+                  description: obj.description,
+                  inputSchema: obj.inputSchema as object,
+                };
+                if (
+                  obj.outputSchema !== null &&
+                  typeof obj.outputSchema === "object"
+                ) {
+                  spec.outputSchema = obj.outputSchema as object;
+                }
+                return spec;
+              })
+              .filter((s): s is ExtensionMcpToolSpec => s !== undefined))
+          : [];
+        if (tools.length === 0) {
+          throw new Error("register_mcp_tools requires at least one tool");
+        }
+        mcpRegistry.register(
+          processIdentity.name,
+          connection,
+          instructions,
+          tools,
+        );
+        return { ok: true, registered: tools.length };
+      });
+      connection.onClose(() => {
+        mcpRegistry.clear(processIdentity.name);
       });
     }
 
@@ -448,13 +528,13 @@ export function registerAcpWsEndpoint(
       const transformChain = deps.transformers?.resolveChain(transformerNames) ?? [];
       // If the client requested in-memory stdin streaming, mint a bearer
       // token now and inject an HTTP MCP descriptor into the agent's
-      // mcpServers so the agent sees a `hydra_stdin` server with the
+      // mcpServers so the agent sees a `hydra-acp-stdin` server with the
       // tail/read/wait/info tools.
       //
       // We must RESERVE the token in the registry BEFORE manager.create
       // returns: claude-acp eagerly initializes MCP servers during
       // session/new (inside manager.create), so the agent's first
-      // request to /mcp/stdin lands while we're still awaiting the
+      // request to /mcp/hydra-acp-stdin lands while we're still awaiting the
       // session. The route handler awaits the reservation's
       // sessionReady promise, which we resolve via complete() once the
       // session object exists.
@@ -463,14 +543,14 @@ export function registerAcpWsEndpoint(
       let augmentedMcpServers = params.mcpServers;
       if (
         hydraMeta.mcpStdin === true &&
-        deps.stdinMcpRegistry !== undefined &&
+        deps.mcpTokenRegistry !== undefined &&
         deps.getDaemonOrigin !== undefined
       ) {
         stdinToken = randomBytes(32).toString("hex");
-        stdinReservation = deps.stdinMcpRegistry.reserve(stdinToken);
-        const url = `${deps.getDaemonOrigin()}/mcp/stdin`;
+        stdinReservation = deps.mcpTokenRegistry.reserve(stdinToken);
+        const url = `${deps.getDaemonOrigin()}/mcp/hydra-acp-stdin`;
         const descriptor = {
-          name: "hydra_stdin",
+          name: "hydra-acp-stdin",
           type: "http",
           url,
           headers: [
@@ -478,6 +558,41 @@ export function registerAcpWsEndpoint(
           ],
         };
         augmentedMcpServers = [...(params.mcpServers ?? []), descriptor];
+      }
+      // Mint one per-session token covering every currently-registered
+      // extension MCP server, and append one descriptor per extension.
+      // Same reserve→complete/abandon pattern as stdin: claude-acp eagerly
+      // initializes mcpServers during session/new, so the agent's first
+      // /mcp/<extname> request can land before manager.create returns.
+      // Late-registered extensions are invisible to this session — same
+      // posture as register_commands today.
+      let extMcpToken: string | undefined;
+      let extMcpReservation:
+        | { complete: (s: Session) => void; abandon: (e?: Error) => void }
+        | undefined;
+      if (
+        deps.extensionMcp !== undefined &&
+        deps.mcpTokenRegistry !== undefined &&
+        deps.getDaemonOrigin !== undefined
+      ) {
+        const extNames = deps.extensionMcp.list();
+        if (extNames.length > 0) {
+          extMcpToken = randomBytes(32).toString("hex");
+          extMcpReservation = deps.mcpTokenRegistry.reserve(extMcpToken);
+          const origin = deps.getDaemonOrigin();
+          const descriptors = extNames.map((name) => ({
+            name,
+            type: "http",
+            url: `${origin}/mcp/${name}`,
+            headers: [
+              { name: "Authorization", value: `Bearer ${extMcpToken}` },
+            ],
+          }));
+          augmentedMcpServers = [
+            ...(augmentedMcpServers ?? []),
+            ...descriptors,
+          ];
+        }
       }
       let session: Session;
       try {
@@ -496,16 +611,31 @@ export function registerAcpWsEndpoint(
         if (stdinReservation !== undefined) {
           stdinReservation.abandon(err instanceof Error ? err : undefined);
         }
+        if (extMcpReservation !== undefined) {
+          extMcpReservation.abandon(err instanceof Error ? err : undefined);
+        }
         throw err;
       }
       if (
         stdinToken !== undefined &&
         stdinReservation !== undefined &&
-        deps.stdinMcpRegistry !== undefined
+        deps.mcpTokenRegistry !== undefined
       ) {
         const token = stdinToken;
-        const registry = deps.stdinMcpRegistry;
+        const registry = deps.mcpTokenRegistry;
         stdinReservation.complete(session);
+        session.onClose(() => {
+          void registry.unbind(token);
+        });
+      }
+      if (
+        extMcpToken !== undefined &&
+        extMcpReservation !== undefined &&
+        deps.mcpTokenRegistry !== undefined
+      ) {
+        const token = extMcpToken;
+        const registry = deps.mcpTokenRegistry;
+        extMcpReservation.complete(session);
         session.onClose(() => {
           void registry.unbind(token);
         });
@@ -902,7 +1032,7 @@ export function registerAcpWsEndpoint(
       }
       if ((params.mode ?? "memory") === "file") {
         openOpts.filePathFor = (sid) =>
-          path.join(os.tmpdir(), `hydra-stdin-${sid}.log`);
+          path.join(os.tmpdir(), `hydra-acp-stdin-${sid}.log`);
       }
       return session.openStream(openOpts);
     });

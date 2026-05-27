@@ -71,7 +71,7 @@ export interface CatOptions {
   // --follow restores the per-burst behavior, useful for `tail -f`.
   follow?: boolean | undefined;
   // Approve every session/request_permission instead of just the
-  // hydra_stdin tool family. Wire bypass for the user — agent is free
+  // hydra-acp-stdin tool family. Wire bypass for the user — agent is free
   // to do anything its tools allow. The CLI prints a stderr warning at
   // startup so it's never silent.
   dangerouslySkipPermissions?: boolean | undefined;
@@ -80,10 +80,10 @@ export interface CatOptions {
 const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
 
 // claude-acp prefixes MCP tools with `mcp__<serverName>__<toolName>`. We
-// inject the server as `hydra_stdin` in acp-ws.ts, so any tool call
+// inject the server as `hydra-acp-stdin` in acp-ws.ts, so any tool call
 // whose title (the agent-facing identifier in the permission request)
 // starts with this prefix is one of our read-the-pipe tools.
-const HYDRA_STDIN_TOOL_PREFIX = "mcp__hydra_stdin__";
+const HYDRA_STDIN_TOOL_PREFIX = "mcp__hydra-acp-stdin__";
 
 function deriveTitleFromPrompt(prompt: string | undefined): string | undefined {
   if (!prompt) {
@@ -144,7 +144,7 @@ export async function runCat(opts: CatOptions): Promise<void> {
   // Read / Glob / Grep / Bash-ls have nothing local to peek at — the only
   // input we expose is whatever the user piped (inline or via the MCP
   // stdin tools). The permission handler in runCatLoop also rejects
-  // every non-`mcp__hydra_stdin__*` tool call, but cwd is a stronger
+  // every non-`mcp__hydra-acp-stdin__*` tool call, but cwd is a stronger
   // defense: if any agent path ever skips the permission gate (Read
   // inside cwd in standalone Claude Code is normally auto-allowed),
   // there's still nothing here to read. Override with --cwd <path>
@@ -254,20 +254,20 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   });
 
   // ...with one exception: when --stream is on, the agent will call
-  // `hydra_stdin/*` MCP tools to read the piped bytes, and claude-acp
+  // `hydra-acp-stdin/*` MCP tools to read the piped bytes, and claude-acp
   // gates those behind session/request_permission. There's no human at
   // the keyboard to click "Allow", and the standing prompt has already
   // explicitly directed the agent to use those tools — denying them
   // would just produce another "I need permission to read stdin"
   // dead-end. So we auto-allow tool calls whose toolCall.title is in
-  // the `mcp__hydra_stdin__*` namespace and reject everything else.
+  // the `mcp__hydra-acp-stdin__*` namespace and reject everything else.
   // The optionId we pick from `params.options` defaults to "allow"
   // (allow_once) so we don't pollute the agent's persisted permission
   // rules; if "allow" isn't offered we fall back to whatever
   // `allow_once`-kinded option is present.
   conn.onRequest("session/request_permission", async (params) => {
     // --dangerously-skip-permissions: approve anything the agent asks
-    // for, not just hydra_stdin tools. The startup warning in cli.ts
+    // for, not just hydra-acp-stdin tools. The startup warning in cli.ts
     // already told the user they opted into this.
     if (opts.dangerouslySkipPermissions) {
       return buildApproveResponse(params);
@@ -757,30 +757,30 @@ function buildStreamPromptText(
       : `${(ringCapacityBytes / 1024).toFixed(0)} KB`;
   const toolNote =
     `The user has piped data into this session. The bytes are NOT in your prompt; ` +
-    `they live in the \`hydra_stdin\` MCP server and you read them via its tools:\n` +
-    `- \`stdin_info()\` — current writeCursor / oldestAvailable / capacity / closed. Cheap; call first to see how much data is there.\n` +
-    `- \`grep_stdin({pattern, regex?, case_insensitive?, context_before?, context_after?, cursor?})\` — server-side line filter; returns matching lines as decoded strings (not base64). Prefer this for "find lines that mention X" questions on multi-MB inputs.\n` +
-    `- \`head_stdin({bytes})\` — first N bytes (good for headers / preamble / file signatures).\n` +
-    `- \`tail_stdin({bytes})\` — most recent N bytes (good for log endings / recent errors).\n` +
-    `- \`read_stdin({cursor, max_bytes, wait_ms})\` — windowed read at an absolute byte cursor; iterate to sweep the whole stream.\n` +
+    `they live in the \`hydra-acp-stdin\` MCP server and you read them via its tools:\n` +
+    `- \`info()\` — current writeCursor / oldestAvailable / capacity / closed. Cheap; call first to see how much data is there.\n` +
+    `- \`grep({pattern, regex?, case_insensitive?, context_before?, context_after?, cursor?})\` — server-side line filter; returns matching lines as decoded strings (not base64). Prefer this for "find lines that mention X" questions on multi-MB inputs.\n` +
+    `- \`head({bytes})\` — first N bytes (good for headers / preamble / file signatures).\n` +
+    `- \`tail({bytes})\` — most recent N bytes (good for log endings / recent errors).\n` +
+    `- \`read({cursor, max_bytes, wait_ms})\` — windowed read at an absolute byte cursor; iterate to sweep the whole stream.\n` +
     `- \`wait_for_more({cursor, timeout_ms})\` — block for new bytes past a cursor (only useful for live tails).\n\n` +
     `Byte payloads (head/tail/read) come back base64-encoded — decode before reading them as text. ` +
-    `\`grep_stdin\` returns plain strings. ` +
+    `\`grep\` returns plain strings. ` +
     `The ring holds the most recent ~${capHuman}; older bytes are evicted, and the byte tools report the gap when that happens. ` +
-    `Per-call cap is 64 KiB for byte tools; loop \`read_stdin\` (advancing the cursor by \`nextCursor\`) when you need more.`;
+    `Per-call cap is 64 KiB for byte tools; loop \`read\` (advancing the cursor by \`nextCursor\`) when you need more.`;
   if (standing && standing.length > 0) {
     return (
       `${toolNote}\n\n` +
       `Use those tools NOW to answer the user's question — do not ask whether to check stdin; just check it. ` +
-      `Pick the right tool for the question (grep_stdin for finding specific lines, head for preamble / file type, ` +
-      `tail for recent events, read_stdin + cursor sweep for whole-stream scans), then answer.\n\n` +
+      `Pick the right tool for the question (grep for finding specific lines, head for preamble / file type, ` +
+      `tail for recent events, read + cursor sweep for whole-stream scans), then answer.\n\n` +
       `User's question:\n${standing}`
     );
   }
   return (
     `${toolNote}\n\n` +
     `Use those tools to inspect the piped input and report what's there. ` +
-    `Start with \`stdin_info()\` to see the size, then \`head_stdin\` and/or \`tail_stdin\` to look at the bytes.`
+    `Start with \`info()\` to see the size, then \`head\` and/or \`tail\` to look at the bytes.`
   );
 }
 
@@ -817,9 +817,9 @@ async function openOrAttachSession(
   }
   if (useAutoStream) {
     // Tell the daemon to mint a per-session MCP token, open the stdin
-    // ring in-memory, and inject `hydra_stdin` into the agent's
-    // mcpServers so it has tail_stdin / read_stdin / wait_for_more /
-    // stdin_info / head_stdin / grep_stdin available for this turn.
+    // ring in-memory, and inject `hydra-acp-stdin` into the agent's
+    // mcpServers so it has tail / read / wait_for_more / info / head /
+    // grep available for this turn.
     hydraMeta.mcpStdin = true;
   }
   const cwd = opts.cwd ?? process.cwd();
