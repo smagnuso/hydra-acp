@@ -18,6 +18,7 @@ function testConfig(): HydraConfig {
       sessionIdleTimeoutSeconds: 30,
       sessionHistoryMaxEntries: 1000,
       agentStderrTailBytes: 4096,
+      agentSyncIntervalMinutes: 0,
     },
     registry: {
       url: "http://127.0.0.1:65535/never-reached",
@@ -1146,6 +1147,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         sessionIdleTimeoutSeconds: 30,
         sessionHistoryMaxEntries: 1000,
         agentStderrTailBytes: 4096,
+        agentSyncIntervalMinutes: 0,
       },
       registry: {
         url: "http://127.0.0.1:65535/never-reached",

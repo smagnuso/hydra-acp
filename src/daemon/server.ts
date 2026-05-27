@@ -19,6 +19,7 @@ import {
   pruneStaleAgentVersions,
   setAgentPruneLogger,
 } from "../core/agent-prune.js";
+import { startAgentSyncScheduler } from "../core/agent-sync-scheduler.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import { SessionTokenStore } from "../core/session-tokens.js";
 import {
@@ -281,7 +282,26 @@ export async function startDaemon(
     );
   });
 
+  // Background poll: walk every installed agent on a staggered
+  // schedule and run syncFromAgent so sessions created outside hydra
+  // (or by other tools) show up in `sessions list` without the user
+  // having to remember `hydra agent sync <id>`. Disabled when the
+  // interval is 0.
+  const intervalMs = config.daemon.agentSyncIntervalMinutes * 60 * 1_000;
+  const stopAgentSync =
+    intervalMs > 0
+      ? startAgentSyncScheduler({
+          registry,
+          manager,
+          intervalMs,
+          logger: agentLogger,
+        })
+      : undefined;
+
   const shutdown = async (): Promise<void> => {
+    if (stopAgentSync) {
+      stopAgentSync();
+    }
     clearInterval(sweepInterval);
     await sessionTokenStore.flush();
     await extensions.stop();

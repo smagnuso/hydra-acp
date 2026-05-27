@@ -36,6 +36,12 @@ const DaemonConfig = z.object({
   // `--host` flag on `share` overrides this; omitting both falls
   // back to `daemon.host`, then to "127.0.0.1" with a stderr warning.
   publicHost: z.string().optional(),
+  // How often (minutes) the daemon runs `agent sync` against every
+  // installed (non-uvx) agent in the background, picking up sessions
+  // created outside hydra so the picker can resurrect them. Spawns
+  // are staggered across the window — N agents on a 60-minute interval
+  // mean one agent spawn every 60/N minutes. Set 0 to disable entirely.
+  agentSyncIntervalMinutes: z.number().nonnegative().default(60),
 });
 
 const RegistryConfig = z.object({
