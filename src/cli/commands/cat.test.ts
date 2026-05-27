@@ -293,7 +293,7 @@ describe("runCatLoop", () => {
     await loopPromise;
   });
 
-  it("default one-shot mode: buffers many data events into a single session/prompt at EOF", async () => {
+  it("default piped mode: buffers many data events into a single session/prompt at EOF (auto-stream INLINE path)", async () => {
     const h = makeHarness();
     const loopPromise = runCatLoop({
       ...h.baseArgs,
@@ -324,26 +324,47 @@ describe("runCatLoop", () => {
     expect(countPromptsSent(h)).toBe(1);
   });
 
-  it("refuses inputs larger than maxOneShotBytes with a pointer to --stream", async () => {
+  it("piped non-TTY stdin auto-promotes to MCP streaming (no --stream flag needed)", async () => {
     const h = makeHarness();
     const loopPromise = runCatLoop({
       ...h.baseArgs,
-      // Tiny cap so a small push trips it.
-      opts: { prompt: "go", maxOneShotBytes: 8 },
+      // Tiny threshold so a small push trips MCP-mode; no `stream:true`,
+      // no `--follow`, no `--session` — the auto-stream default fires.
+      opts: { prompt: "watch", streamThreshold: 4 },
     });
-    await performHandshake(h);
+    await h.waitForRequest("initialize");
+    h.respondToRequest("initialize", {
+      protocolVersion: 1,
+      agentCapabilities: {},
+    });
+    const newReq = await h.waitForRequest("session/new");
+    const params = newReq.params as {
+      _meta?: { "hydra-acp"?: { mcpStdin?: boolean } };
+    };
+    expect(params._meta?.["hydra-acp"]?.mcpStdin).toBe(true);
+    h.respondToRequest("session/new", {
+      sessionId: "hydra_session_test",
+      _meta: {},
+    });
+    await new Promise((r) => setTimeout(r, 0));
 
-    h.fakeStdin.push("this is more than eight bytes\n");
+    h.fakeStdin.push("hello world");
+    const openReq = await h.waitForRequest("hydra-acp/stream_open");
+    expect((openReq.params as { mode: string }).mode).toBe("memory");
+    h.respondToRequest("hydra-acp/stream_open", {
+      capacityBytes: 1024 * 1024,
+    });
+    const w = await h.waitForRequest("hydra-acp/stream_write");
+    expect(
+      Buffer.from((w.params as { chunk: string }).chunk, "base64").toString("utf8"),
+    ).toBe("hello world");
+    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+
+    await h.waitForRequest("session/prompt");
     h.fakeStdin.end();
-
-    const result = await loopPromise;
-    expect(result.exitCode).toBe(2);
-    // No session/prompt should ever have been sent.
-    expect(countPromptsSent(h)).toBe(0);
-    const err = h.stderr.join("");
-    expect(err).toContain("larger than the inline cap");
-    expect(err).toContain("--stream");
-    expect(err).toContain("--max-oneshot-bytes");
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+    await loopPromise;
   });
 
   it("emits a trailing newline only when the last write didn't already end in one", async () => {
@@ -398,10 +419,11 @@ describe("runCatLoop", () => {
       opts: { prompt: "go" },
     });
     await performHandshake(h);
+    h.fakeStdin.push("x\n");
     h.fakeStdin.end();
-    await loopPromise.catch(() => undefined);
-    // The settle() path on no-chunks-sent goes straight to detach without
-    // any prompt, so we wait for session/detach to appear.
+    await h.waitForRequest("session/prompt");
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+    await loopPromise;
     const detached = h.stream.sent.some(
       (m) => "method" in m && m.method === "session/detach",
     );
@@ -415,7 +437,10 @@ describe("runCatLoop", () => {
       opts: { prompt: "go", detach: true },
     });
     await performHandshake(h);
+    h.fakeStdin.push("x\n");
     h.fakeStdin.end();
+    await h.waitForRequest("session/prompt");
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
     await loopPromise;
     const detached = h.stream.sent.some(
       (m) => "method" in m && m.method === "session/detach",
@@ -609,40 +634,12 @@ describe("runCatLoop", () => {
     await loopPromise;
   });
 
-  describe("--stream", () => {
-    it("sets _meta.hydra-acp.mcpStdin:true on session/new so the daemon mints an MCP token", async () => {
-      const h = makeHarness();
-      const loopPromise = runCatLoop({
-        ...h.baseArgs,
-        opts: { prompt: "summarize", stream: true, streamThreshold: 1024 },
-      });
-      await h.waitForRequest("initialize");
-      h.respondToRequest("initialize", {
-        protocolVersion: 1,
-        agentCapabilities: {},
-      });
-      const newReq = await h.waitForRequest("session/new");
-      const params = newReq.params as {
-        _meta?: { "hydra-acp"?: { mcpStdin?: boolean } };
-      };
-      expect(params._meta?.["hydra-acp"]?.mcpStdin).toBe(true);
-      h.respondToRequest("session/new", {
-        sessionId: "hydra_session_test",
-        _meta: {},
-      });
-      await new Promise((r) => setTimeout(r, 0));
-      h.fakeStdin.push("short\n");
-      h.fakeStdin.end();
-      await h.waitForRequest("session/prompt");
-      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
-      await loopPromise;
-    });
-
+  describe("auto-stream", () => {
     it("INLINE path: small stdin closes below threshold and is sent as one text-block prompt", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        opts: { prompt: "summarize", stream: true, streamThreshold: 1024 },
+        opts: { prompt: "summarize", streamThreshold: 1024 },
       });
       await performHandshake(h);
 
@@ -668,7 +665,7 @@ describe("runCatLoop", () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        opts: { prompt: "watch", stream: true, streamThreshold: 8 },
+        opts: { prompt: "watch", streamThreshold: 8 },
       });
       await performHandshake(h);
 
@@ -730,7 +727,9 @@ describe("runCatLoop", () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        opts: { prompt: "watch" },
+        // --follow so stdin.end() with no data just settles, leaving the
+        // permission handler the only thing exercised by this test.
+        opts: { prompt: "watch", follow: true },
       });
       await performHandshake(h);
 
@@ -767,7 +766,7 @@ describe("runCatLoop", () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        opts: { prompt: "watch" },
+        opts: { prompt: "watch", follow: true },
       });
       await performHandshake(h);
 
@@ -803,7 +802,7 @@ describe("runCatLoop", () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        opts: { prompt: "watch", stream: true, streamThreshold: 4 },
+        opts: { prompt: "watch", streamThreshold: 4 },
       });
       await performHandshake(h);
 

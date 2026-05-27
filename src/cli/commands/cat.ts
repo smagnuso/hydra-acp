@@ -48,39 +48,21 @@ export interface CatOptions {
   // invocations leave this undefined and fall through to
   // resolveLocalTarget(config).
   target?: RemoteTarget | undefined;
-  // --stream: buffer the first streamThreshold bytes, then switch to a
-  // pull surface (per-session in-memory MCP server with tail_stdin /
-  // read_stdin / wait_for_more tools) so the agent can decide what to
-  // read instead of receiving every byte inlined as text blocks.
-  stream?: boolean | undefined;
+  // Threshold (bytes) at which piped stdin promotes from one inline
+  // text-block prompt to the daemon's in-memory MCP stdin surface. Small
+  // inputs stay inline; larger inputs let the agent pull via
+  // head_stdin / tail_stdin / grep_stdin / read_stdin tools rather than
+  // bloating the prompt.
   streamThreshold?: number | undefined;
   streamBufferBytes?: number | undefined;
   // --follow: per-burst chunking via cat-chunker, one prompt per burst.
-  // Default (when this is falsy) is one-shot: buffer all of stdin until
-  // EOF, send a single prompt with the whole payload. The one-shot
-  // default eliminates the fragmentation that caused a bounded source
-  // (`cat bigfile | hydra cat`) to surface as N independent prompts.
+  // Default (when this is falsy) for piped non-TTY stdin is auto-stream
+  // (one prompt; bytes via MCP tools for inputs above the threshold).
+  // --follow restores the per-burst behavior, useful for `tail -f`.
   follow?: boolean | undefined;
-  // Refuse to inline more than this many bytes in one-shot mode. The
-  // agent's own context window will reject larger inputs anyway, but
-  // bailing here gives a clearer error than a downstream "prompt too
-  // long". --stream / --follow / splitting the input are the escape
-  // hatches.
-  maxOneShotBytes?: number | undefined;
 }
 
-const DEFAULT_STREAM_THRESHOLD = 32 * 1024;
-const DEFAULT_MAX_ONESHOT_BYTES = 1 * 1024 * 1024;
-
-function humanBytes(n: number): string {
-  if (n >= 1024 * 1024) {
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  if (n >= 1024) {
-    return `${(n / 1024).toFixed(1)} KB`;
-  }
-  return `${n} bytes`;
-}
+const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
 
 // claude-acp prefixes MCP tools with `mcp__<serverName>__<toolName>`. We
 // inject the server as `hydra_stdin` in acp-ws.ts, so any tool call
@@ -230,6 +212,17 @@ export interface CatLoopArgs {
 export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   const { conn, opts, stdin, stdinIsTty, stdout, stderr } = args;
 
+  // Piped (non-TTY) stdin to a fresh session with no --follow auto-uses
+  // the daemon-hosted MCP stdin surface: small inputs flow as one inline
+  // prompt, large inputs fall through to head/tail/grep/read tools. This
+  // is the default because the agent's context window can't accept
+  // arbitrarily large piped inputs as text blocks, and forcing the user
+  // to opt-in via a flag just produced confusing "prompt too long"
+  // failures. --follow restores per-burst chunking; --session attaches
+  // to an existing session and uses a simple buffer-then-send.
+  const useAutoStream =
+    !stdinIsTty && opts.sessionId === undefined && opts.follow !== true;
+
   // We never accept a request from the daemon in cat mode (no FS, no
   // terminal, no permission UI). Refuse politely so anything the daemon
   // tries to send doesn't dangle.
@@ -269,7 +262,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     // initialize is best-effort on the daemon side; proceed.
   }
 
-  const sessionId = await openOrAttachSession(conn, opts);
+  const sessionId = await openOrAttachSession(conn, opts, useAutoStream);
 
   // Wire session/update → stdout. We render agent_message_chunk text
   // straight (no prefix, no styling) so consumers piping cat into grep
@@ -456,12 +449,12 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     return done;
   }
 
-  // --stream mode: buffer the head, decide between INLINE (small) and
+  // Auto-stream: buffer the head, decide between INLINE (small) and
   // FILE (everything else) at threshold-cross or EOF, then either send
-  // one inline prompt or open a stream and let the agent pull from the
-  // file projection. Falls back to the chunker path below when --stream
-  // is not set.
-  if (opts.stream && !stdinIsTty) {
+  // one inline prompt or open the daemon's in-memory MCP stdin surface
+  // and let the agent pull via head/tail/grep/read tools. Gated above
+  // as `useAutoStream` — non-TTY piped stdin, no --follow, no --session.
+  if (useAutoStream) {
     if (typeof stdin.setEncoding === "function") {
       stdin.setEncoding("utf8");
     }
@@ -547,32 +540,17 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     return done;
   }
 
-  // Default: one-shot. Buffer the entire piped stdin and send it as a
-  // single prompt at EOF. A bounded source (`cat file | hydra cat`) maps
-  // to one turn and one answer. If the buffered size exceeds the inline
-  // cap, refuse with a pointer to --stream / --max-oneshot-bytes /
-  // splitting the input.
-  const cap = opts.maxOneShotBytes ?? DEFAULT_MAX_ONESHOT_BYTES;
+  // Remaining path: non-TTY stdin attached to an existing session (no
+  // --follow). Buffer everything until EOF and send a single prompt —
+  // we can't auto-promote to MCP-stream here because mcpStdin is set at
+  // session/new time and the existing session may have a totally
+  // different MCP configuration.
   let oneShotBuffer = "";
-  let oneShotBytes = 0;
   stdin.on("data", (data: string | Buffer) => {
-    const s = typeof data === "string" ? data : data.toString("utf8");
-    oneShotBuffer += s;
-    oneShotBytes += Buffer.byteLength(s, "utf8");
+    oneShotBuffer += typeof data === "string" ? data : data.toString("utf8");
   });
   stdin.on("end", () => {
     stdinEnded = true;
-    if (oneShotBytes > cap) {
-      stderr(
-        `hydra-acp cat: input is ${humanBytes(oneShotBytes)}, larger than the inline cap (${humanBytes(cap)}). ` +
-          `Pass --stream to send via the daemon's stream surface, ` +
-          `raise the cap with --max-oneshot-bytes <N>, ` +
-          `or split your input.\n`,
-      );
-      exitCode = 2;
-      void settle(exitCode);
-      return;
-    }
     if (oneShotBuffer.length > 0) {
       chunkQueue.push(oneShotBuffer);
     }
@@ -780,6 +758,7 @@ function buildStreamPromptText(
 async function openOrAttachSession(
   conn: JsonRpcConnection,
   opts: CatOptions,
+  useAutoStream: boolean,
 ): Promise<string> {
   if (opts.sessionId) {
     // "pending_only" replays just the in-flight turn (if any) plus
@@ -802,11 +781,11 @@ async function openOrAttachSession(
   if (opts.model) {
     hydraMeta.model = opts.model;
   }
-  if (opts.stream) {
+  if (useAutoStream) {
     // Tell the daemon to mint a per-session MCP token, open the stdin
     // ring in-memory, and inject `hydra_stdin` into the agent's
     // mcpServers so it has tail_stdin / read_stdin / wait_for_more /
-    // stdin_info available for this turn.
+    // stdin_info / head_stdin / grep_stdin available for this turn.
     hydraMeta.mcpStdin = true;
   }
   const cwd = opts.cwd ?? process.cwd();

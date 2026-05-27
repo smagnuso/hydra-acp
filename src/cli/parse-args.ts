@@ -23,7 +23,6 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "readonly",
   "replace",
   "rotate-token",
-  "stream",
   "version",
 ]);
 
@@ -39,7 +38,6 @@ const KNOWN_VALUE_FLAGS = new Set([
   "cwd",
   "env",
   "host",
-  "max-oneshot-bytes",
   "model",
   "name",
   "out",

@@ -243,7 +243,6 @@ async function main(): Promise<void> {
         model,
         agentId: agentIdFromFlag,
         detach: flags.detach === true,
-        stream: flags.stream === true,
         follow: flags.follow === true,
       };
       if (cwd !== undefined) {
@@ -259,10 +258,6 @@ async function main(): Promise<void> {
       const streamBufferBytes = parseNumericFlag(flags, "stream-bytes");
       if (streamBufferBytes !== undefined) {
         catOpts.streamBufferBytes = streamBufferBytes;
-      }
-      const maxOneShotBytes = parseNumericFlag(flags, "max-oneshot-bytes");
-      if (maxOneShotBytes !== undefined) {
-        catOpts.maxOneShotBytes = maxOneShotBytes;
       }
       suppressUpdateNotice = true;
       await runCat(catOpts);
