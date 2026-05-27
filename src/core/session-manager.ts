@@ -11,6 +11,7 @@ import {
   HYDRA_SESSION_PREFIX,
   Session,
   extractPromptText,
+  findMessageIdIndex,
   firstLine,
   parseModelsList,
   type UsageSnapshot,
@@ -28,7 +29,7 @@ import {
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { paths } from "./paths.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
-import type { Bundle } from "./bundle.js";
+import { encodeBundle, type Bundle } from "./bundle.js";
 import type {
   AdvertisedCommand,
   AdvertisedMode,
@@ -113,6 +114,10 @@ export interface ResurrectParams {
   // origin (and stay hidden from the default `sessions list` view if
   // they were originally cat-spawned).
   originatingClient?: { name: string; version?: string };
+  // Local-fork breadcrumbs from meta.json. Read-only on the resurrected
+  // Session; surfaced in list views so future UI can show "branched from <id>".
+  forkedFromSessionId?: string;
+  forkedFromMessageId?: string;
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -476,6 +481,8 @@ export class SessionManager {
         ? new Date(params.createdAt).getTime()
         : undefined,
       originatingClient: params.originatingClient,
+      forkedFromSessionId: params.forkedFromSessionId,
+      forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
@@ -554,6 +561,8 @@ export class SessionManager {
         ? new Date(params.createdAt).getTime()
         : undefined,
       originatingClient: params.originatingClient,
+      forkedFromSessionId: params.forkedFromSessionId,
+      forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
     });
     await this.attachManagerHooks(session);
@@ -1014,6 +1023,8 @@ export class SessionManager {
       createdAt: record.createdAt,
       pendingHistorySync: record.pendingHistorySync,
       originatingClient: record.originatingClient,
+      forkedFromSessionId: record.forkedFromSessionId,
+      forkedFromMessageId: record.forkedFromMessageId,
     };
   }
 
@@ -1130,6 +1141,8 @@ export class SessionManager {
         currentModel: session.currentModel,
         currentUsage: session.currentUsage,
         parentSessionId: session.parentSessionId,
+        forkedFromSessionId: session.forkedFromSessionId,
+        forkedFromMessageId: session.forkedFromMessageId,
         originatingClient: session.originatingClient,
         updatedAt: used,
         attachedClients: session.attachedCount,
@@ -1164,6 +1177,8 @@ export class SessionManager {
         importedFromMachine: r.importedFromMachine,
         importedFromUpstreamSessionId: r.importedFromUpstreamSessionId,
         parentSessionId: r.parentSessionId,
+        forkedFromSessionId: r.forkedFromSessionId,
+        forkedFromMessageId: r.forkedFromMessageId,
         originatingClient: r.originatingClient,
         updatedAt: used,
         attachedClients: 0,
@@ -1275,10 +1290,138 @@ export class SessionManager {
     };
   }
 
-  // Write the imported bundle's history.jsonl, prompt-history (if
-  // present), and meta.json. upstreamSessionId is left empty as the
+  // Branch an existing local session into a new one that shares context
+  // up to the chosen turn boundary and diverges from there. Composes the
+  // import pipeline: synthesizes a Bundle from the source's record and
+  // sliced history, mints a fresh lineageId, then writes the new record
+  // via writeImportedRecord with forked* breadcrumbs instead of
+  // imported*. The fork carries upstreamSessionId="" so the first attach
+  // triggers seedFromImport — same wire shape as an imported session.
+  //
+  // forkAt defaults to the messageId of the source's most recent
+  // turn_complete; explicit forkAt must reference a session/update
+  // entry that's present in the source's history.jsonl. Cutting at a
+  // completed turn excludes any in-flight prompt by construction
+  // (history.jsonl is appended serially per session), so no locking
+  // against the live source is needed.
+  //
+  // agentId defaults to the source's agent. Overriding to a different
+  // agent scrubs agent-specific state from the fork (model, mode,
+  // usage, agent-emitted commands/modes/models) so the new agent boots
+  // clean — title and conversation transcript are agent-agnostic and
+  // are kept.
+  async forkSession(
+    sourceSessionId: string,
+    opts: { forkAt?: string; cwd?: string; agentId?: string } = {},
+  ): Promise<{
+    sessionId: string;
+    forkedFromSessionId: string;
+    forkedAt: string;
+  }> {
+    const sourceRecord = await this.store.read(sourceSessionId);
+    if (!sourceRecord) {
+      const err = new Error(`source session not found: ${sourceSessionId}`) as Error & {
+        code: number;
+      };
+      err.code = JsonRpcErrorCodes.SessionNotFound;
+      throw err;
+    }
+
+    const targetAgentId = opts.agentId ?? sourceRecord.agentId;
+    const crossAgent = targetAgentId !== sourceRecord.agentId;
+    if (crossAgent) {
+      const def = await this.registry.getAgent(targetAgentId);
+      if (!def) {
+        const err = new Error(
+          `agent ${targetAgentId} not found in registry`,
+        ) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.AgentNotInstalled;
+        throw err;
+      }
+    }
+
+    const sourceHistory = await this.histories.load(sourceSessionId).catch(() => []);
+
+    let cutoffIndex: number;
+    let forkedAt: string;
+    if (opts.forkAt !== undefined) {
+      cutoffIndex = findMessageIdIndex(sourceHistory, opts.forkAt);
+      if (cutoffIndex < 0) {
+        const err = new Error(
+          `forkAt messageId not found in source history: ${opts.forkAt}`,
+        ) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        throw err;
+      }
+      forkedAt = opts.forkAt;
+    } else {
+      const found = findLastTurnComplete(sourceHistory);
+      if (!found) {
+        const err = new Error(
+          `source session ${sourceSessionId} has no completed turns to fork from`,
+        ) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        throw err;
+      }
+      cutoffIndex = found.index;
+      forkedAt = found.messageId;
+    }
+
+    const slicedHistory = sourceHistory.slice(0, cutoffIndex + 1);
+    const promptHistory = await loadPromptHistorySafely(sourceSessionId);
+
+    // Build a record snapshot for encodeBundle. Fresh lineageId so the
+    // fork is a new conversation lineage (sharing source's lineageId
+    // would deadlock importBundle's dedup against the source itself).
+    // For cross-agent forks, omit agent-specific state so the new agent
+    // boots clean — title and history survive.
+    const recordForBundle: SessionRecord & { lineageId: string } = {
+      ...sourceRecord,
+      lineageId: generateLineageId(),
+      agentId: targetAgentId,
+      ...(crossAgent
+        ? {
+            currentModel: undefined,
+            currentMode: undefined,
+            currentUsage: undefined,
+            agentCommands: undefined,
+            agentModes: undefined,
+            agentModels: undefined,
+          }
+        : {}),
+    };
+
+    const bundle = encodeBundle({
+      record: recordForBundle,
+      history: slicedHistory,
+      promptHistory: promptHistory.length > 0 ? promptHistory : undefined,
+      hydraVersion: HYDRA_VERSION,
+      machine: os.hostname(),
+    });
+
+    const newId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
+    await this.writeImportedRecord({
+      sessionId: newId,
+      bundle,
+      cwd: opts.cwd,
+      forkedFromSessionId: sourceSessionId,
+      forkedFromMessageId: forkedAt,
+    });
+    return {
+      sessionId: newId,
+      forkedFromSessionId: sourceSessionId,
+      forkedAt,
+    };
+  }
+
+  // Write the imported (or forked) bundle's history.jsonl, prompt-history
+  // (if present), and meta.json. upstreamSessionId is left empty as the
   // marker that the first attach should bootstrap a fresh agent and
-  // run seedFromImport rather than calling session/load.
+  // run seedFromImport rather than calling session/load. When
+  // forkedFromSessionId is set, the record is marked as a local fork
+  // (forked* fields populated) instead of a cross-machine import
+  // (imported* fields populated) — both share the seed-on-first-attach
+  // wire shape but trace differently in list views.
   private async writeImportedRecord(args: {
     sessionId: string;
     bundle: Bundle;
@@ -1288,6 +1431,11 @@ export class SessionManager {
     // exist locally — the caller (CLI / HTTP route) validates the
     // override before passing it in.
     cwd?: string;
+    // Local-fork breadcrumbs. When both are set, the record is written
+    // with forked* fields populated; the imported* family is left
+    // unset so meta.json doesn't lie about the origin.
+    forkedFromSessionId?: string;
+    forkedFromMessageId?: string;
   }): Promise<void> {
     // zod's z.unknown() makes params optional in the inferred type, but
     // HistoryStore writes whatever JSON shape it was handed; the on-disk
@@ -1314,14 +1462,22 @@ export class SessionManager {
       ).catch(() => undefined);
     }
     const now = new Date().toISOString();
+    const isFork = args.forkedFromSessionId !== undefined;
     await this.enqueueMetaWrite(args.sessionId, async () => {
       await this.store.write({
         sessionId: args.sessionId,
         lineageId: args.bundle.session.lineageId,
         upstreamSessionId: "",
-        importedFromSessionId: args.bundle.session.sessionId,
-        importedFromUpstreamSessionId: args.bundle.session.upstreamSessionId,
-        importedFromMachine: args.bundle.exportedFrom.machine,
+        ...(isFork
+          ? {
+              forkedFromSessionId: args.forkedFromSessionId,
+              forkedFromMessageId: args.forkedFromMessageId,
+            }
+          : {
+              importedFromSessionId: args.bundle.session.sessionId,
+              importedFromUpstreamSessionId: args.bundle.session.upstreamSessionId,
+              importedFromMachine: args.bundle.exportedFrom.machine,
+            }),
         agentId: args.bundle.session.agentId,
         cwd: args.cwd ?? args.bundle.session.cwd,
         title: args.bundle.session.title,
@@ -1623,6 +1779,10 @@ function mergeForPersistence(
     agentModes,
     agentModels,
     parentSessionId: session.parentSessionId ?? existing?.parentSessionId,
+    forkedFromSessionId:
+      session.forkedFromSessionId ?? existing?.forkedFromSessionId,
+    forkedFromMessageId:
+      session.forkedFromMessageId ?? existing?.forkedFromMessageId,
     originatingClient:
       session.originatingClient ?? existing?.originatingClient,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
@@ -2025,6 +2185,31 @@ function parseModesList(list: unknown): AdvertisedMode[] {
     out.push(mode);
   }
   return out;
+}
+
+// Walk history in reverse for the most recent turn_complete session/update
+// and return its index + messageId. Returns undefined when no completed
+// turn exists (empty history, or only a user prompt with no agent
+// response yet). Used by forkSession to default forkAt to the latest
+// terminal turn boundary.
+function findLastTurnComplete(
+  history: HistoryStoreEntry[],
+): { index: number; messageId: string } | undefined {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const entry = history[i];
+    if (!entry || entry.method !== "session/update") {
+      continue;
+    }
+    const update = (entry.params as { update?: { sessionUpdate?: unknown; messageId?: unknown } } | undefined)?.update;
+    if (update?.sessionUpdate !== "turn_complete") {
+      continue;
+    }
+    if (typeof update.messageId !== "string" || update.messageId.length === 0) {
+      continue;
+    }
+    return { index: i, messageId: update.messageId };
+  }
+  return undefined;
 }
 
 async function loadPromptHistorySafely(sessionId: string): Promise<string[]> {

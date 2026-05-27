@@ -472,6 +472,11 @@ export const SessionListEntry = z.object({
   importedFromUpstreamSessionId: z.string().optional(),
   // Set when this session was spawned as a child by a transformer.
   parentSessionId: z.string().optional(),
+  // Local-fork breadcrumbs set by hydra-acp/fork_session. Distinct from
+  // the imported* family above: a fork is a local branch off another
+  // local session, an import is a cross-machine takeover.
+  forkedFromSessionId: z.string().optional(),
+  forkedFromMessageId: z.string().optional(),
   // clientInfo from the process that issued session/new. Lets list views
   // hide cat-style ancillary sessions by default while letting an
   // override flag surface them.

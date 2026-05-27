@@ -377,3 +377,175 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(blank.status).toBe(400);
   });
 });
+
+describe("session routes: POST /v1/sessions/:id/fork", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  // Seed a "source" session on disk by importing a bundle that already
+  // has at least one completed turn — that's the minimum forkSession
+  // needs to compute a default forkAt.
+  async function seedSource(): Promise<string> {
+    const bundle = {
+      version: 1 as const,
+      exportedAt: "2026-05-13T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_src",
+        lineageId: "lin_route_fork",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-05-13T00:00:00.000Z",
+        updatedAt: "2026-05-13T00:00:00.000Z",
+      },
+      history: [
+        {
+          method: "session/update",
+          params: {
+            sessionId: "u_src",
+            update: {
+              sessionUpdate: "turn_complete",
+              messageId: "m_only",
+              stopReason: "end_turn",
+            },
+          },
+          recordedAt: 1,
+        },
+      ],
+    };
+    const imported = await harness.manager.importBundle(bundle);
+    return imported.sessionId;
+  }
+
+  it("returns 201 with the new session id, breadcrumb, and forkedAt", async () => {
+    const sourceId = await seedSource();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${sourceId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as {
+      sessionId: string;
+      forkedFromSessionId: string;
+      forkedAt: string;
+    };
+    expect(body.sessionId).toMatch(/^hydra_session_/);
+    expect(body.sessionId).not.toBe(sourceId);
+    expect(body.forkedFromSessionId).toBe(sourceId);
+    expect(body.forkedAt).toBe("m_only");
+  });
+
+  it("returns 404 for unknown source session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_ghost/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 400 when forkAt is empty string", async () => {
+    const sourceId = await seedSource();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${sourceId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ forkAt: "" }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when forkAt messageId does not exist", async () => {
+    const sourceId = await seedSource();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${sourceId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ forkAt: "m_missing" }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when agentId is unknown to the registry", async () => {
+    const sourceId = await seedSource();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${sourceId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: "no-such-agent" }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("GET /v1/sessions surfaces forkedFromSessionId and forkedFromMessageId on the new fork", async () => {
+    const sourceId = await seedSource();
+    const forkRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/${sourceId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(forkRes.status).toBe(201);
+    const forkBody = (await forkRes.json()) as { sessionId: string };
+
+    const listRes = await fetch(`${harness.baseUrl}/v1/sessions`);
+    expect(listRes.status).toBe(200);
+    const listBody = (await listRes.json()) as {
+      sessions: Array<{
+        sessionId: string;
+        forkedFromSessionId?: string;
+        forkedFromMessageId?: string;
+      }>;
+    };
+    const fork = listBody.sessions.find((s) => s.sessionId === forkBody.sessionId);
+    expect(fork).toBeDefined();
+    expect(fork!.forkedFromSessionId).toBe(sourceId);
+    expect(fork!.forkedFromMessageId).toBe("m_only");
+  });
+
+  it("expands ~ in cwd override", async () => {
+    const sourceId = await seedSource();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${sourceId}/fork`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: "~/forked" }),
+      },
+    );
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { sessionId: string };
+    // Look up the new record's cwd via GET /v1/sessions and assert it
+    // doesn't start with "~".
+    const listRes = await fetch(`${harness.baseUrl}/v1/sessions`);
+    const listBody = (await listRes.json()) as {
+      sessions: Array<{ sessionId: string; cwd: string }>;
+    };
+    const fork = listBody.sessions.find((s) => s.sessionId === body.sessionId);
+    expect(fork).toBeDefined();
+    expect(fork!.cwd.startsWith("~")).toBe(false);
+  });
+});

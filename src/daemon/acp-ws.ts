@@ -417,6 +417,35 @@ export function registerAcpWsEndpoint(
         return { childSessionId: child.sessionId };
       });
 
+      // Branch a local session into a new one that shares context up to
+      // the chosen turn boundary. forkAt defaults to the latest
+      // turn_complete; agentId defaults to the source's agent; cwd
+      // defaults to the source's cwd. The new session is written with
+      // upstreamSessionId="" so its first attach triggers seedFromImport
+      // (same wire shape as an imported session).
+      connection.onRequest("hydra-acp/fork_session", async (raw) => {
+        const params = (raw ?? {}) as {
+          sessionId?: unknown;
+          forkAt?: unknown;
+          cwd?: unknown;
+          agentId?: unknown;
+        };
+        if (typeof params.sessionId !== "string") {
+          throw Object.assign(
+            new Error("fork_session requires sessionId"),
+            { code: JsonRpcErrorCodes.InvalidParams },
+          );
+        }
+        const forkAt = typeof params.forkAt === "string" ? params.forkAt : undefined;
+        const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+        const agentId = typeof params.agentId === "string" ? params.agentId : undefined;
+        return await deps.manager.forkSession(params.sessionId, {
+          ...(forkAt !== undefined ? { forkAt } : {}),
+          ...(cwd !== undefined ? { cwd } : {}),
+          ...(agentId !== undefined ? { agentId } : {}),
+        });
+      });
+
       connection.onRequest("hydra-acp/await_child", async (raw) => {
         const params = (raw ?? {}) as {
           childSessionId?: unknown;

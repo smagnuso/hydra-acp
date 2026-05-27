@@ -232,6 +232,62 @@ export function registerSessionRoutes(
   // replace:true, the existing local session is overwritten in-place
   // (its local id is preserved); any live in-memory copy is closed so
   // the next attach triggers the import-reseed path.
+  // Branch an existing local session. Source can be live or cold. The
+  // new session is minted with a fresh local sessionId + lineageId and
+  // marked with forkedFromSessionId so list views can trace ancestry.
+  // forkAt defaults to the source's most recent turn_complete; cwd
+  // and agentId default to the source's. The new session carries
+  // upstreamSessionId="" so its first attach triggers seedFromImport.
+  app.post("/v1/sessions/:id/fork", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const body = (request.body ?? {}) as {
+      forkAt?: unknown;
+      cwd?: unknown;
+      agentId?: unknown;
+    };
+    const opts: { forkAt?: string; cwd?: string; agentId?: string } = {};
+    if (body.forkAt !== undefined) {
+      if (typeof body.forkAt !== "string" || body.forkAt.length === 0) {
+        reply.code(400).send({ error: "forkAt must be a non-empty string" });
+        return;
+      }
+      opts.forkAt = body.forkAt;
+    }
+    if (body.cwd !== undefined) {
+      if (typeof body.cwd !== "string" || body.cwd.length === 0) {
+        reply.code(400).send({ error: "cwd must be a non-empty string" });
+        return;
+      }
+      opts.cwd = expandHome(body.cwd);
+    }
+    if (body.agentId !== undefined) {
+      if (typeof body.agentId !== "string" || body.agentId.length === 0) {
+        reply.code(400).send({ error: "agentId must be a non-empty string" });
+        return;
+      }
+      opts.agentId = body.agentId;
+    }
+    try {
+      const result = await manager.forkSession(id, opts);
+      reply.code(201).send(result);
+    } catch (err) {
+      const e = err as Error & { code?: number };
+      if (e.code === JsonRpcErrorCodes.SessionNotFound) {
+        reply.code(404).send({ error: e.message });
+        return;
+      }
+      if (
+        e.code === JsonRpcErrorCodes.InvalidParams ||
+        e.code === JsonRpcErrorCodes.AgentNotInstalled
+      ) {
+        reply.code(400).send({ error: e.message });
+        return;
+      }
+      reply.code(500).send({ error: e.message });
+    }
+  });
+
   app.post("/v1/sessions/import", async (request, reply) => {
     const body = (request.body ?? {}) as {
       bundle?: unknown;

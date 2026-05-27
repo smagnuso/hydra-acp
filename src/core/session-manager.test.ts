@@ -2974,3 +2974,407 @@ describe("SessionManager.create: agent:initialize intercept", () => {
     expect(connRequestSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("SessionManager.forkSession", () => {
+  // Build a synthetic history with N completed turns. Each turn produces
+  // a single session/update with sessionUpdate=turn_complete and a stable
+  // messageId so the slicer has something to anchor on.
+  function turnComplete(messageId: string, t = 0): {
+    method: string;
+    params: unknown;
+    recordedAt: number;
+  } {
+    return {
+      method: "session/update",
+      params: {
+        sessionId: "u_x",
+        update: { sessionUpdate: "turn_complete", messageId, stopReason: "end_turn" },
+      },
+      recordedAt: t,
+    };
+  }
+
+  function userMessage(text: string, t = 0): {
+    method: string;
+    params: unknown;
+    recordedAt: number;
+  } {
+    return {
+      method: "session/update",
+      params: {
+        sessionId: "u_x",
+        update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } },
+      },
+      recordedAt: t,
+    };
+  }
+
+  function bundleWith(opts: {
+    lineageId: string;
+    sessionId?: string;
+    agentId?: string;
+    cwd?: string;
+    title?: string;
+    history: Array<{ method: string; params: unknown; recordedAt: number }>;
+    promptHistory?: string[];
+    currentModel?: string;
+    currentMode?: string;
+  }) {
+    return {
+      version: 1 as const,
+      exportedAt: "2026-05-13T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: opts.sessionId ?? "hydra_session_src",
+        lineageId: opts.lineageId,
+        agentId: opts.agentId ?? "claude-code",
+        cwd: opts.cwd ?? "/work",
+        ...(opts.title !== undefined ? { title: opts.title } : {}),
+        ...(opts.currentModel !== undefined ? { currentModel: opts.currentModel } : {}),
+        ...(opts.currentMode !== undefined ? { currentMode: opts.currentMode } : {}),
+        createdAt: "2026-05-13T00:00:00.000Z",
+        updatedAt: "2026-05-13T00:00:00.000Z",
+      },
+      history: opts.history,
+      ...(opts.promptHistory ? { promptHistory: opts.promptHistory } : {}),
+    };
+  }
+
+  function noSpawnManager(agents = ["claude-code"]): SessionManager {
+    return new SessionManager(
+      fakeRegistry(agents.map((id) => fakeRegistryAgent(id))),
+      () => {
+        throw new Error("spawner should not be called from forkSession");
+      },
+    );
+  }
+
+  async function readMeta(sessionId: string): Promise<Record<string, unknown>> {
+    const metaPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      sessionId,
+      "meta.json",
+    );
+    return JSON.parse(await fs.readFile(metaPath, "utf8"));
+  }
+
+  async function readHistory(sessionId: string): Promise<
+    Array<{ method: string; params: unknown; recordedAt: number }>
+  > {
+    const histPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      sessionId,
+      "history.jsonl",
+    );
+    const raw = await fs.readFile(histPath, "utf8");
+    return raw
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+  }
+
+  it("forks at last turn_complete by default", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_default",
+        history: [turnComplete("m_one", 1), turnComplete("m_two", 2)],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId);
+    expect(fork.forkedAt).toBe("m_two");
+    expect(fork.forkedFromSessionId).toBe(source.sessionId);
+    const history = await readHistory(fork.sessionId);
+    expect(history.length).toBe(2);
+  });
+
+  it("forks at a specific messageId, truncating later turns", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_explicit",
+        history: [
+          turnComplete("m_one", 1),
+          turnComplete("m_two", 2),
+          turnComplete("m_three", 3),
+        ],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId, { forkAt: "m_one" });
+    expect(fork.forkedAt).toBe("m_one");
+    const history = await readHistory(fork.sessionId);
+    expect(history.length).toBe(1);
+    const update = (history[0]!.params as { update: { messageId: string } }).update;
+    expect(update.messageId).toBe("m_one");
+  });
+
+  it("mints a fresh lineageId for the fork", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_orig",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId);
+    const sourceMeta = await readMeta(source.sessionId);
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(typeof forkMeta.lineageId).toBe("string");
+    expect(forkMeta.lineageId).not.toBe(sourceMeta.lineageId);
+  });
+
+  it("persists forkedFromSessionId and forkedFromMessageId", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_bread",
+        history: [turnComplete("m_only")],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId);
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.forkedFromSessionId).toBe(source.sessionId);
+    expect(forkMeta.forkedFromMessageId).toBe("m_only");
+    expect(forkMeta.importedFromSessionId).toBeUndefined();
+    expect(forkMeta.importedFromMachine).toBeUndefined();
+  });
+
+  it("errors on unknown source sessionId", async () => {
+    const manager = noSpawnManager();
+    await expect(
+      manager.forkSession("hydra_session_ghost"),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.SessionNotFound });
+  });
+
+  it("errors when source has no completed turns", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_empty",
+        history: [userMessage("hello, only user input")],
+      }),
+    );
+    await expect(
+      manager.forkSession(source.sessionId),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("errors on unknown forkAt", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_badforkat",
+        history: [turnComplete("m_present")],
+      }),
+    );
+    await expect(
+      manager.forkSession(source.sessionId, { forkAt: "m_missing" }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("inherits the source cwd by default and honours cwd override", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_cwd",
+        cwd: "/orig/cwd",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const inherited = await manager.forkSession(source.sessionId);
+    const inheritedMeta = await readMeta(inherited.sessionId);
+    expect(inheritedMeta.cwd).toBe("/orig/cwd");
+
+    const overridden = await manager.forkSession(source.sessionId, {
+      cwd: "/new/cwd",
+    });
+    const overriddenMeta = await readMeta(overridden.sessionId);
+    expect(overriddenMeta.cwd).toBe("/new/cwd");
+  });
+
+  it("cross-agent fork scrubs agent-specific state", async () => {
+    const manager = noSpawnManager(["claude-code", "codex"]);
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_xagent",
+        agentId: "claude-code",
+        title: "shared title",
+        currentModel: "claude-sonnet-4-6",
+        currentMode: "default",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId, { agentId: "codex" });
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.agentId).toBe("codex");
+    expect(forkMeta.title).toBe("shared title");
+    expect(forkMeta.currentModel).toBeUndefined();
+    expect(forkMeta.currentMode).toBeUndefined();
+    expect(forkMeta.currentUsage).toBeUndefined();
+    expect(forkMeta.agentCommands).toBeUndefined();
+    expect(forkMeta.agentModes).toBeUndefined();
+    expect(forkMeta.agentModels).toBeUndefined();
+  });
+
+  it("same-agent override behaves like default (model/mode preserved)", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_sameagent",
+        agentId: "claude-code",
+        currentModel: "claude-sonnet-4-6",
+        currentMode: "default",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId, {
+      agentId: "claude-code",
+    });
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.currentModel).toBe("claude-sonnet-4-6");
+    expect(forkMeta.currentMode).toBe("default");
+  });
+
+  it("errors on unknown agentId", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_unknownagent",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    await expect(
+      manager.forkSession(source.sessionId, { agentId: "no-such-agent" }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.AgentNotInstalled });
+  });
+
+  it("sliced history bytes match the source prefix exactly", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_bytes",
+        history: [
+          turnComplete("m_one", 1),
+          turnComplete("m_two", 2),
+          turnComplete("m_three", 3),
+        ],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId, { forkAt: "m_two" });
+    const forkHist = await readHistory(fork.sessionId);
+    const sourceHist = await readHistory(source.sessionId);
+    expect(forkHist).toEqual(sourceHist.slice(0, 2));
+  });
+
+  it("fork is independent of source — later source appends don't affect fork", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_indep",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId);
+    const beforeAppend = await readHistory(fork.sessionId);
+    // Append a fresh entry to the source's history on disk. The fork's
+    // history file lives in a separate directory, so this should never
+    // leak through.
+    const sourceHistPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      source.sessionId,
+      "history.jsonl",
+    );
+    await fs.appendFile(
+      sourceHistPath,
+      JSON.stringify(turnComplete("m_after_fork", 10)) + "\n",
+    );
+    const afterAppend = await readHistory(fork.sessionId);
+    expect(afterAppend).toEqual(beforeAppend);
+  });
+
+  it("prompt history is carried forward to the fork", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_prompts",
+        history: [turnComplete("m_one")],
+        promptHistory: ["first prompt", "second prompt"],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId);
+    const forkPromptPath = path.join(
+      process.env.HYDRA_ACP_HOME!,
+      "sessions",
+      fork.sessionId,
+      "prompt-history",
+    );
+    const raw = await fs.readFile(forkPromptPath, "utf8");
+    const lines = raw
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as string);
+    expect(lines).toEqual(["first prompt", "second prompt"]);
+  });
+
+  it("cross-agent fork preserves title and history (positive scrub check)", async () => {
+    const manager = noSpawnManager(["claude-code", "codex"]);
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_xagent_keep",
+        agentId: "claude-code",
+        title: "research thread",
+        currentModel: "claude-sonnet-4-6",
+        history: [turnComplete("m_one", 1), turnComplete("m_two", 2)],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId, { agentId: "codex" });
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.title).toBe("research thread");
+    expect(forkMeta.currentModel).toBeUndefined();
+    const forkHist = await readHistory(fork.sessionId);
+    expect(forkHist.length).toBe(2);
+  });
+
+  it("forking a fork chains forkedFromSessionId one level back", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_chain",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const fork1 = await manager.forkSession(source.sessionId);
+    const fork2 = await manager.forkSession(fork1.sessionId);
+    const fork1Meta = await readMeta(fork1.sessionId);
+    const fork2Meta = await readMeta(fork2.sessionId);
+    expect(fork1Meta.forkedFromSessionId).toBe(source.sessionId);
+    expect(fork2Meta.forkedFromSessionId).toBe(fork1.sessionId);
+    // Each fork carries a distinct lineageId.
+    expect(fork2Meta.lineageId).not.toBe(fork1Meta.lineageId);
+    expect(fork1Meta.lineageId).not.toBe("lin_chain");
+  });
+
+  it("forking an imported session sets forked* and clears imported*", async () => {
+    const manager = noSpawnManager();
+    // Source was itself imported from another machine.
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_from_remote",
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const sourceMeta = await readMeta(source.sessionId);
+    expect(sourceMeta.importedFromMachine).toBe("h");
+    const fork = await manager.forkSession(source.sessionId);
+    const forkMeta = await readMeta(fork.sessionId);
+    // Fork is local, not imported — even though the source row carries
+    // import breadcrumbs and the synthesized bundle still passes through
+    // writeImportedRecord, the isFork branch must suppress imported*.
+    expect(forkMeta.importedFromMachine).toBeUndefined();
+    expect(forkMeta.importedFromSessionId).toBeUndefined();
+    expect(forkMeta.forkedFromSessionId).toBe(source.sessionId);
+  });
+});

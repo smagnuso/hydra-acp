@@ -41,7 +41,12 @@ import {
   mergeReplayedEntries,
   saveHistory,
 } from "./history.js";
-import { listSessions, pickMostRecent, type DiscoveredSession } from "./discovery.js";
+import {
+  forkSession,
+  listSessions,
+  pickMostRecent,
+  type DiscoveredSession,
+} from "./discovery.js";
 import {
   createPickerPrefs,
   pickSession,
@@ -1765,6 +1770,34 @@ async function runSession(
       }
       if (choice.kind === "new") {
         resolvedChoice = { choice, sessions };
+        break;
+      }
+      if (choice.kind === "fork") {
+        const decided = await runForkFlow(term, target, choice, sessions);
+        if (decided.kind === "cancel") {
+          screen.start({ skipFullscreen: true });
+          screen.resumeRepaint();
+          return;
+        }
+        if (decided.kind === "back") {
+          continue;
+        }
+        // Synthesize an attach pick targeting the fresh fork id so the
+        // existing attach plumbing below switches us into the new
+        // session.
+        const synthetic: PickerResult = {
+          kind: "attach",
+          sessionId: decided.ctx.sessionId,
+          ...(decided.ctx.agentId ? { agentId: decided.ctx.agentId } : {}),
+        };
+        resolvedChoice = { choice: synthetic, sessions };
+        attachOverrides = {
+          readonly: false,
+          cwd: decided.ctx.cwd,
+        };
+        if (decided.ctx.importAttachHint !== undefined) {
+          attachOverrides.importAttachHint = decided.ctx.importAttachHint;
+        }
         break;
       }
       // attach: route imported-first-launch picks through the action /
@@ -3578,6 +3611,16 @@ async function resolveSession(
       }
       return newCtx(opts, cwd, config);
     }
+    if (choice.kind === "fork") {
+      const decided = await runForkFlow(term, target, choice, sessions);
+      if (decided.kind === "cancel") {
+        return null;
+      }
+      if (decided.kind === "back") {
+        continue;
+      }
+      return decided.ctx;
+    }
     // Propagate the picker's view-only choice (set by `v`) onto opts so
     // the WS attach payload picks it up. The runtime opts is the same
     // object referenced by the attach call later in runSession — without
@@ -3672,6 +3715,66 @@ async function runImportedFirstLaunchFlow(
       },
     };
   }
+}
+
+// Picker's `f` keystroke landed here. If the source was imported from
+// another machine and has never been launched locally, ask the user for
+// a local cwd (the source's recorded cwd may not exist here) — same
+// dialog runImportedFirstLaunchFlow uses for the launch path. Otherwise
+// inherit the source's cwd. Then POST /v1/sessions/:id/fork and route
+// the caller to attach against the new session id.
+async function runForkFlow(
+  term: termkit.Terminal,
+  target: RemoteTarget,
+  choice: PickerResult & { kind: "fork" },
+  sessions: DiscoveredSession[],
+): Promise<ImportedFirstLaunchDecision> {
+  const source = sessions.find((s) => s.sessionId === choice.sourceSessionId);
+  const isForeignNeverLaunched =
+    !!choice.sourceImportedFromMachine && !choice.sourceUpstreamSessionId;
+  let cwd = choice.sourceCwd;
+  if (isForeignNeverLaunched) {
+    if (!source) {
+      // Source row vanished between picker close and lookup — re-show
+      // the picker so the user can pick again.
+      return { kind: "back" };
+    }
+    const cwdResult = await promptForImportCwd(term, source);
+    if (cwdResult.kind === "cancel") {
+      return { kind: "cancel" };
+    }
+    if (cwdResult.kind === "back") {
+      return { kind: "back" };
+    }
+    cwd = cwdResult.path;
+  }
+  let result;
+  try {
+    result = await forkSession(
+      target,
+      choice.sourceSessionId,
+      isForeignNeverLaunched ? { cwd } : {},
+    );
+  } catch (err) {
+    term.red(`\nfork failed: ${(err as Error).message}\n`);
+    return { kind: "cancel" };
+  }
+  return {
+    kind: "ctx",
+    ctx: {
+      sessionId: result.sessionId,
+      agentId: choice.sourceAgentId ?? "",
+      cwd,
+      // For foreign-never-launched forks, the daemon stamped the chosen
+      // cwd onto meta.json via the POST body, but the very first attach
+      // still goes through the import-reseed path (upstreamSessionId=""),
+      // and importAttachHint is what makes attachManagerHooks persist
+      // the local cwd over the bundle's recorded one.
+      ...(isForeignNeverLaunched
+        ? { importAttachHint: { agentId: choice.sourceAgentId ?? "", cwd } }
+        : {}),
+    },
+  };
 }
 
 function newCtx(

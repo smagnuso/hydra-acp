@@ -126,6 +126,12 @@ export const SessionRecord = z.object({
   // Set when this session was spawned as a child by a transformer via
   // hydra-acp/spawn_child_session. Points to the spawning session's id.
   parentSessionId: z.string().optional(),
+  // Set when this session was created by hydra-acp/fork_session.
+  // forkedFromSessionId points to the local source session; forkedFromMessageId
+  // is the resolved forkAt — the messageId of the turn_complete the slice
+  // ended at. Kept so future UI can show "branched from turn N of session X".
+  forkedFromSessionId: z.string().optional(),
+  forkedFromMessageId: z.string().optional(),
   // clientInfo from the process that issued session/new. Picker and
   // `sessions list` use this to hide cat-style ancillary sessions by
   // default; carried in meta.json so cold sessions filter the same way.
@@ -265,6 +271,8 @@ export function recordFromMemorySession(args: {
   agentModels?: PersistedAgentModel[];
   pendingHistorySync?: boolean;
   parentSessionId?: string;
+  forkedFromSessionId?: string;
+  forkedFromMessageId?: string;
   originatingClient?: PersistedOriginatingClient;
   createdAt?: string;
   updatedAt?: string;
@@ -289,6 +297,8 @@ export function recordFromMemorySession(args: {
     agentModels: args.agentModels,
     pendingHistorySync: args.pendingHistorySync,
     parentSessionId: args.parentSessionId,
+    forkedFromSessionId: args.forkedFromSessionId,
+    forkedFromMessageId: args.forkedFromMessageId,
     originatingClient: args.originatingClient,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,

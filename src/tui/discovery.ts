@@ -31,6 +31,11 @@ export interface DiscoveredSession {
   // look like they appeared out of nowhere.
   importedFromMachine?: string;
   importedFromUpstreamSessionId?: string;
+  // Set when this session was created by hydra-acp/fork_session.
+  // forkedFromSessionId points to the local source session; forkedFromMessageId
+  // is the messageId of the turn_complete the slice ended at.
+  forkedFromSessionId?: string;
+  forkedFromMessageId?: string;
   attachedClients: number;
   updatedAt: string;
   status: "live" | "cold";
@@ -92,6 +97,8 @@ export async function listSessions(
     title: s.title,
     importedFromMachine: s.importedFromMachine,
     importedFromUpstreamSessionId: s.importedFromUpstreamSessionId,
+    forkedFromSessionId: s.forkedFromSessionId,
+    forkedFromMessageId: s.forkedFromMessageId,
     busy: s.busy,
     originatingClient: s.originatingClient,
   }));
@@ -100,6 +107,50 @@ export async function listSessions(
 // Demote a live session to cold (POST .../kill). A 404 is tolerated so
 // callers don't have to special-case races where the session was already
 // removed by another client.
+// Branch an existing session into a new one. Daemon mints a fresh
+// sessionId + lineageId, seeds history through forkAt (default = last
+// turn_complete), and returns the new id. First attach to the new
+// session triggers seedFromImport so the agent absorbs the transcript.
+export async function forkSession(
+  target: RemoteTarget,
+  id: string,
+  opts: { forkAt?: string; cwd?: string; agentId?: string } = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<{
+  sessionId: string;
+  forkedFromSessionId: string;
+  forkedAt: string;
+}> {
+  const response = await fetchImpl(
+    `${target.baseUrl}/v1/sessions/${id}/fork`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(opts),
+    },
+  );
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (typeof body.error === "string") {
+        detail = `: ${body.error}`;
+      }
+    } catch {
+      void 0;
+    }
+    throw new Error(`fork failed (HTTP ${response.status})${detail}`);
+  }
+  return (await response.json()) as {
+    sessionId: string;
+    forkedFromSessionId: string;
+    forkedAt: string;
+  };
+}
+
 export async function killSession(
   target: RemoteTarget,
   id: string,

@@ -157,6 +157,11 @@ export interface SessionInit {
   // the transformer chain. 0 disables. Defaults to 30 seconds.
   idleEventTimeoutMs?: number;
   parentSessionId?: string;
+  // Local-fork breadcrumbs set when this session was created by
+  // hydra-acp/fork_session. Read-only on the live Session; persisted on
+  // meta.json so list views can show "branched from <id>".
+  forkedFromSessionId?: string;
+  forkedFromMessageId?: string;
   // clientInfo from the process that issued session/new. SessionManager
   // captures it from the WS connection's `initialize` and persists it on
   // meta.json so list views can hide cat-style ancillary sessions.
@@ -262,6 +267,8 @@ export class Session {
   agentCapabilities: AgentCapabilities | undefined;
   readonly agentArgs: string[] | undefined;
   readonly parentSessionId: string | undefined;
+  readonly forkedFromSessionId: string | undefined;
+  readonly forkedFromMessageId: string | undefined;
   readonly originatingClient: { name: string; version?: string } | undefined;
   title: string | undefined;
   // Snapshot state delivered to attaching clients via the attach
@@ -439,6 +446,8 @@ export class Session {
     this.agentCapabilities = init.agentCapabilities;
     this.agentArgs = init.agentArgs;
     this.parentSessionId = init.parentSessionId;
+    this.forkedFromSessionId = init.forkedFromSessionId;
+    this.forkedFromMessageId = init.forkedFromMessageId;
     this.originatingClient = init.originatingClient;
     this.title = init.title;
     this.currentModel = init.currentModel;
@@ -3963,8 +3972,9 @@ function ensureMessageIdOnUpdate(method: string, params: unknown): unknown {
 
 // Walk a history snapshot and find the index of the entry whose
 // session/update.messageId matches `target`. Returns -1 if not found.
-// Used by attach() to compute the after_message replay slice.
-function findMessageIdIndex(
+// Used by attach() to compute the after_message replay slice, and by
+// SessionManager.forkSession to slice history at a turn boundary.
+export function findMessageIdIndex(
   history: CachedNotification[],
   target: string,
 ): number {

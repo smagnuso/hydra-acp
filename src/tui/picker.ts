@@ -58,6 +58,19 @@ export type PickerResult =
       // keystroke; Enter leaves it undefined / false.
       readonly?: boolean;
     }
+  | {
+      // Picker's `f` keystroke. Outer flow runs the (optional) cwd
+      // prompt, calls the daemon's fork endpoint, then attaches to the
+      // returned new session id. Picker forwards the source's metadata
+      // verbatim so the outer flow can decide whether to prompt
+      // (foreign-imported-never-launched → yes) or skip (local source).
+      kind: "fork";
+      sourceSessionId: string;
+      sourceAgentId?: string;
+      sourceCwd: string;
+      sourceImportedFromMachine?: string;
+      sourceUpstreamSessionId?: string;
+    }
   | { kind: "new"; prompt?: string }
   | { kind: "abort" };
 
@@ -2069,6 +2082,29 @@ export async function pickSession(
           };
           if (session.agentId !== undefined) {
             result.agentId = session.agentId;
+          }
+          resolve(result);
+          return;
+        }
+        if ((name === "f" || name === "F") && selectedIdx > 0) {
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          cleanup();
+          const result: PickerResult = {
+            kind: "fork",
+            sourceSessionId: session.sessionId,
+            sourceCwd: session.cwd,
+          };
+          if (session.agentId !== undefined) {
+            result.sourceAgentId = session.agentId;
+          }
+          if (session.importedFromMachine !== undefined) {
+            result.sourceImportedFromMachine = session.importedFromMachine;
+          }
+          if (session.upstreamSessionId !== undefined) {
+            result.sourceUpstreamSessionId = session.upstreamSessionId;
           }
           resolve(result);
           return;
