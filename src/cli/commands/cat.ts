@@ -85,6 +85,20 @@ const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
 // starts with this prefix is one of our read-the-pipe tools.
 const HYDRA_STDIN_TOOL_PREFIX = "mcp__hydra_stdin__";
 
+function deriveTitleFromPrompt(prompt: string | undefined): string | undefined {
+  if (!prompt) {
+    return undefined;
+  }
+  for (const raw of prompt.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    return line.length > 80 ? `${line.slice(0, 80)}…` : line;
+  }
+  return undefined;
+}
+
 function isHydraStdinPermissionRequest(params: unknown): boolean {
   if (!params || typeof params !== "object") {
     return false;
@@ -792,6 +806,11 @@ async function openOrAttachSession(
   const hydraMeta: Record<string, unknown> = {};
   if (opts.name) {
     hydraMeta.name = opts.name;
+  } else {
+    const derived = deriveTitleFromPrompt(opts.prompt);
+    if (derived) {
+      hydraMeta.name = derived;
+    }
   }
   if (opts.model) {
     hydraMeta.model = opts.model;
