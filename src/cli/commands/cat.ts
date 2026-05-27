@@ -25,6 +25,7 @@ import {
   buildRejectResponse,
 } from "../../acp/permission-pick.js";
 import { createChunker } from "./cat-chunker.js";
+import { renderMarkdownForCat, type CatRenderMode } from "./cat-render.js";
 import {
   buildTitleFromArgv,
   setHydraProcessTitle,
@@ -75,6 +76,11 @@ export interface CatOptions {
   // to do anything its tools allow. The CLI prints a stderr warning at
   // startup so it's never silent.
   dangerouslySkipPermissions?: boolean | undefined;
+  // --raw: bypass markdown post-processing and emit agent_message_chunk
+  // text verbatim, the way cat behaved before the renderer landed. Keeps
+  // streaming behavior intact for callers that want progressive output
+  // or that prefer to consume the original markdown unmodified.
+  raw?: boolean | undefined;
 }
 
 const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
@@ -190,6 +196,7 @@ export async function runCat(opts: CatOptions): Promise<void> {
     opts,
     stdin: process.stdin,
     stdinIsTty: process.stdin.isTTY === true,
+    stdoutIsTty: process.stdout.isTTY === true,
     stdout: (chunk) => process.stdout.write(chunk),
     stderr: (chunk) => {
       process.stderr.write(chunk);
@@ -224,6 +231,10 @@ export interface CatLoopArgs {
   // standing prompt once and exit"; if false, it wires up stdin
   // listeners and waits for "end".
   stdinIsTty: boolean;
+  // Picks the render mode: ANSI escapes when stdout is a TTY, stripped
+  // markdown when it's piped. Tests inject false to assert against
+  // plain bytes.
+  stdoutIsTty: boolean;
   stdout: (chunk: string) => void;
   stderr: (chunk: string) => void;
 }
@@ -233,7 +244,9 @@ export interface CatLoopArgs {
 // what got written to stdout. The real runCat() wires it to process.*
 // and a WS connection.
 export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
-  const { conn, opts, stdin, stdinIsTty, stdout, stderr } = args;
+  const { conn, opts, stdin, stdinIsTty, stdoutIsTty, stdout, stderr } = args;
+  const renderMode: CatRenderMode = stdoutIsTty ? "ansi" : "plain";
+  const rawMode = opts.raw === true;
 
   // Piped (non-TTY) stdin to a fresh session with no --follow auto-uses
   // the daemon-hosted MCP stdin surface: small inputs flow as one inline
@@ -293,16 +306,27 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
 
   const sessionId = await openOrAttachSession(conn, opts, useAutoStream);
 
-  // Wire session/update → stdout. We render agent_message_chunk text
-  // straight (no prefix, no styling) so consumers piping cat into grep
-  // / jq / tee get only the agent's prose. Tool calls, plans, mode
-  // changes, etc. are intentionally not surfaced — they belong to the
-  // TUI / Slack thread / browser, not to the unix-pipe consumer.
-  // mapUpdate's sanitizeWireText strips ANSI escapes and C0 controls
-  // from the text before we ever see it, so stdout stays free of any
-  // terminal-control sequences even when piped into a TTY.
+  // Wire session/update → stdout. Two modes:
+  //   - Default: agent_message_chunk text is buffered until the block
+  //     closes (a non-text event such as a tool call, plan update, mode
+  //     change, or turn-complete). The full block is then rendered
+  //     through cat-render — ANSI-styled on a TTY, stripped-to-plain on a
+  //     pipe — and emitted with a blank-line separator before the next
+  //     block. Boundary events themselves stay invisible, matching the
+  //     pre-renderer contract that tool calls / plans / thoughts belong
+  //     to the TUI / Slack / browser, not to a unix-pipe consumer. The
+  //     boundary flush mirrors the TUI's closeAgentText() in
+  //     tui/app.ts:2741, so "I'll check…" / <tool> / "Found it." renders
+  //     as two paragraphs in cat just like it does in the TUI.
+  //   - --raw: chunks pass through immediately, unmodified, matching the
+  //     pre-renderer behavior; boundary events still produce no output.
+  // sanitizeWireText in mapUpdate strips ANSI escapes and C0 controls
+  // from incoming text before either path sees it, so the only ANSI that
+  // ever reaches stdout is what cat-render emits.
   let turnHadOutput = false;
   let lastCharWasNewline = true;
+  let blockBuffer = "";
+  let blocksEmitted = 0;
 
   const writeStdout = (text: string): void => {
     if (text.length === 0) {
@@ -310,6 +334,25 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     }
     stdout(text);
     lastCharWasNewline = text.charCodeAt(text.length - 1) === 10;
+    turnHadOutput = true;
+  };
+
+  // Render the accumulated block buffer (if any), prefixing with a blank
+  // line when a previous block has already been emitted, so consecutive
+  // blocks read as paragraphs rather than running together. Raw mode
+  // never buffers, so this is a no-op there.
+  const flushBlock = (): void => {
+    if (rawMode || blockBuffer.length === 0) {
+      return;
+    }
+    const rendered = renderMarkdownForCat(blockBuffer, renderMode);
+    blockBuffer = "";
+    if (rendered.length === 0) {
+      return;
+    }
+    const separator = blocksEmitted > 0 ? "\n" : "";
+    writeStdout(separator + rendered);
+    blocksEmitted += 1;
   };
 
   // Flush the trailing newline for whichever turn just finished and
@@ -325,6 +368,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   //      daemon DOES broadcast turn_complete to us, and we still want
   //      a clean line break before the next chunk of text streams in.
   const finalizeTurn = (): void => {
+    flushBlock();
     if (turnHadOutput && !lastCharWasNewline) {
       writeStdout("\n");
     }
@@ -338,15 +382,41 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
       return;
     }
     if (event.kind === "agent-text") {
-      turnHadOutput = true;
-      writeStdout(event.text);
-    } else if (event.kind === "turn-complete") {
+      if (rawMode) {
+        writeStdout(event.text);
+      } else {
+        blockBuffer += event.text;
+      }
+      return;
+    }
+    if (event.kind === "turn-complete") {
       // Peer-driven turn ending. Our own turns finish via the
       // session/prompt response; this branch only fires when someone
       // else's session/prompt was the originator (e.g. we attached
       // via --session and a TUI / Slack client is driving the
       // conversation).
       finalizeTurn();
+      return;
+    }
+    // Block-boundary events. We don't surface these in cat output —
+    // tools / thoughts / plan updates belong to the TUI / Slack /
+    // browser — but we DO use them as separators so a mid-turn tool
+    // call splits the agent's prose into distinct paragraphs (same
+    // behavior as the TUI's closeAgentText). model-changed, usage,
+    // session-info etc. are header/metadata and intentionally do not
+    // flush a block.
+    switch (event.kind) {
+      case "agent-thought":
+      case "tool-call":
+      case "tool-call-update":
+      case "exit-plan-mode":
+      case "plan":
+      case "mode-changed":
+      case "user-text":
+        flushBlock();
+        return;
+      default:
+        return;
     }
   });
 
@@ -408,6 +478,14 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
       return;
     }
     settled = true;
+    // Flush any buffered block before tearing down. Cheap when the
+    // buffer is empty (the common case for sendChunk-driven flow, which
+    // already finalized on the prompt response), critical for the
+    // auto-stream FILE path — that path fires session/prompt directly
+    // and resolves via onEof without going through sendChunk's
+    // finalizeTurn(), so without this every >1MB pipe would lose the
+    // agent's answer.
+    finalizeTurn();
     // Fire session/detach without awaiting the response. The daemon
     // will detach us anyway when the WS drops; the explicit detach is
     // a politeness so the daemon's log shows a clean teardown.
@@ -424,10 +502,12 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
       stderr(`hydra-acp cat: ${err.message}\n`);
       exitCode = 1;
     }
-    // Connection is already gone; can't send session/detach. Just
-    // resolve.
+    // Connection is already gone; can't send session/detach. Mirror
+    // settle()'s buffer flush so a daemon-side drop mid-answer still
+    // shows whatever the agent already streamed.
     if (!settled) {
       settled = true;
+      finalizeTurn();
       resolveDone({ exitCode });
     }
   });

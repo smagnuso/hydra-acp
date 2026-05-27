@@ -284,6 +284,7 @@ async function main(): Promise<void> {
         agentId: agentIdFromFlag,
         detach: flags.detach === true,
         follow: flags.follow === true,
+        raw: flags.raw === true,
         dangerouslySkipPermissions,
       };
       if (cwd !== undefined) {
@@ -682,7 +683,7 @@ function printHelp(): void {
       "                                     With -p / --prompt and no subcommand, auto-dispatch to cat.",
       "  hydra-acp tui   [same flags]       Force TUI explicitly.",
       "  hydra-acp shim  [same flags]       Force shim explicitly (non-interactive; password prompts not allowed).",
-      "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--agent <id>] [--model <id>] [--name <label>]",
+      "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--agent <id>] [--model <id>] [--name <label>]",
       "                                     Pipe-friendly headless mode. Reads stdin and sends it",
       "                                     as a prompt to a fresh session, streams the agent's",
       "                                     response to stdout, exits when stdin closes. A bounded",
@@ -691,6 +692,11 @@ function printHelp(): void {
       "                                     chunked by the natural pauses in the writer. -p is an",
       "                                     optional standing instruction prepended to every chunk;",
       "                                     if stdin already contains the question, -p is not needed.",
+      "                                     By default, agent markdown is post-processed: ANSI-styled",
+      "                                     on a TTY, stripped to plain text on a pipe, tables laid",
+      "                                     out in both modes. Tool calls / thoughts split paragraphs",
+      "                                     but otherwise stay hidden. --raw bypasses the renderer",
+      "                                     and emits chunks immediately, the way cat used to behave.",
       "                                     With --session, attach to an existing session instead",
       "                                     of creating a new one. With --detach, the session",
       "                                     survives in the daemon for slack/browser/notifier",

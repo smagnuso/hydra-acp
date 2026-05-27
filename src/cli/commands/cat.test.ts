@@ -134,6 +134,7 @@ function makeHarness() {
     conn,
     stdin: fakeStdin,
     stdinIsTty: false,
+    stdoutIsTty: false,
     stdout: (chunk) => stdout.push(chunk),
     stderr: (chunk) => stderr.push(chunk),
   };
@@ -254,6 +255,110 @@ describe("runCatLoop", () => {
     expect(out).toContain("alertdone");
   });
 
+  it("default (non-TTY stdout): buffers chunks and emits plain-stripped markdown at turn end", async () => {
+    const h = makeHarness();
+    const loopPromise = runCatLoop({
+      ...h.baseArgs,
+      opts: { prompt: "go" },
+    });
+    const sessionId = await performHandshake(h);
+    h.fakeStdin.push("x\n");
+    h.fakeStdin.end();
+
+    await h.waitForRequest("session/prompt");
+    // Three chunks that straddle inline markup boundaries — proves the
+    // loop buffers and renders the whole utterance, not chunk-by-chunk.
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Use **bo" },
+    });
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "ld** and `cod" },
+    });
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "e` here.\n" },
+    });
+    // No stdout writes yet — we're buffering until turn-complete.
+    expect(h.stdout.join("")).toBe("");
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+    await loopPromise;
+
+    const out = h.stdout.join("");
+    // Plain mode strips ** and ` markers and emits prose.
+    expect(out).toContain("Use bold and code here.");
+    expect(out).not.toContain("**");
+    expect(out).not.toContain("`");
+  });
+
+  it("default mode: a mid-turn tool-call notification flushes the buffered block and the next text starts a new paragraph", async () => {
+    const h = makeHarness();
+    const loopPromise = runCatLoop({
+      ...h.baseArgs,
+      opts: { prompt: "go" },
+    });
+    const sessionId = await performHandshake(h);
+    h.fakeStdin.push("x\n");
+    h.fakeStdin.end();
+
+    await h.waitForRequest("session/prompt");
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "I'll check the file." },
+    });
+    // Boundary event: produces no output of its own, but flushes the
+    // buffered block so the next agent-text starts as a fresh paragraph.
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc1",
+      title: "Read",
+      kind: "execute",
+    });
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Found it: see line 42." },
+    });
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+    await loopPromise;
+
+    const out = h.stdout.join("");
+    // Two paragraphs separated by a blank line. No tool-call surface.
+    expect(out).toBe("I'll check the file.\n\nFound it: see line 42.\n");
+    expect(out).not.toContain("Read");
+    expect(out).not.toContain("tc1");
+  });
+
+  it("--raw: emits agent chunks immediately, leaves markdown markers intact, and stays silent for boundary events", async () => {
+    const h = makeHarness();
+    const loopPromise = runCatLoop({
+      ...h.baseArgs,
+      opts: { prompt: "go", raw: true },
+    });
+    const sessionId = await performHandshake(h);
+    h.fakeStdin.push("x\n");
+    h.fakeStdin.end();
+
+    await h.waitForRequest("session/prompt");
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Use **bold** and `code`.\n" },
+    });
+    // Streaming intent — once the chunk lands, stdout has it immediately.
+    expect(h.stdout.join("")).toContain("**bold**");
+    expect(h.stdout.join("")).toContain("`code`");
+    // Boundary event in raw mode is still invisible (no tool call output).
+    h.emitSessionUpdate(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc1",
+      title: "Read",
+      kind: "execute",
+    });
+    expect(h.stdout.join("")).not.toContain("Read");
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+    await loopPromise;
+  });
+
   it("under --follow, sends the standing prompt only on the first chunk; subsequent chunks are bytes-only", async () => {
     const h = makeHarness();
     const loopPromise = runCatLoop({
@@ -365,6 +470,52 @@ describe("runCatLoop", () => {
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
     h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
     await loopPromise;
+  });
+
+  // Regression: the FILE path fires session/prompt without going through
+  // sendChunk, so the prompt response doesn't drive finalizeTurn(). That
+  // used to leave buffered agent text in blockBuffer forever — a >1MB
+  // file piped in returned no output. settle() now flushes the buffer
+  // on its way out, so the answer lands on stdout.
+  it("FILE auto-stream path: agent text emitted during the kick-off prompt is flushed before the loop resolves", async () => {
+    const h = makeHarness();
+    const loopPromise = runCatLoop({
+      ...h.baseArgs,
+      opts: { prompt: "watch", streamThreshold: 4 },
+    });
+    await h.waitForRequest("initialize");
+    h.respondToRequest("initialize", {
+      protocolVersion: 1,
+      agentCapabilities: {},
+    });
+    await h.waitForRequest("session/new");
+    h.respondToRequest("session/new", {
+      sessionId: "hydra_session_test",
+      _meta: {},
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    h.fakeStdin.push("hello world");
+    await h.waitForRequest("hydra-acp/stream_open");
+    h.respondToRequest("hydra-acp/stream_open", {
+      capacityBytes: 1024 * 1024,
+    });
+    await h.waitForRequest("hydra-acp/stream_write");
+    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+
+    await h.waitForRequest("session/prompt");
+    // The agent answers via session/update before we respond to the
+    // prompt — same ordering the daemon produces.
+    h.emitSessionUpdate("hydra_session_test", {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "resolution was 1920x1080" },
+    });
+    h.fakeStdin.end();
+    h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+    await loopPromise;
+
+    expect(h.stdout.join("")).toContain("resolution was 1920x1080");
   });
 
   it("emits a trailing newline only when the last write didn't already end in one", async () => {
