@@ -96,6 +96,22 @@ describe("SessionTokenStore", () => {
     expect(raw).toContain(`"hash":`);
   });
 
+  it("tolerates a 0-byte tokens file by starting fresh", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(tokensFilePath(), "");
+    const store = await SessionTokenStore.load();
+    expect(store.list()).toEqual([]);
+    const issued = await store.issue();
+    expect(await store.verify(issued.token)).toBe(issued.id);
+  });
+
+  it("tolerates a corrupt tokens file by starting fresh", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(tokensFilePath(), "{not json");
+    const store = await SessionTokenStore.load();
+    expect(store.list()).toEqual([]);
+  });
+
   it("writes the tokens file with mode 0600", async () => {
     const store = await SessionTokenStore.load();
     await store.issue();

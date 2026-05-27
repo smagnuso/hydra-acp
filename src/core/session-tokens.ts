@@ -1,7 +1,7 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { paths } from "./paths.js";
+import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
 
 // Stored at ~/.hydra-acp/session-tokens.json (mode 0600). The plaintext
 // token is never persisted — only sha256(token). Tokens are 32 bytes of
@@ -77,17 +77,11 @@ export class SessionTokenStore {
 
   static async load(): Promise<SessionTokenStore> {
     let records: SessionTokenRecord[] = [];
-    try {
-      const raw = await fs.readFile(tokensFilePath(), "utf8");
-      const parsed = JSON.parse(raw) as { records?: SessionTokenRecord[] };
-      if (parsed && Array.isArray(parsed.records)) {
-        records = parsed.records.filter(isRecord);
-      }
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code !== "ENOENT") {
-        throw err;
-      }
+    const parsed = await readJsonSafe<{ records?: SessionTokenRecord[] }>(
+      tokensFilePath(),
+    );
+    if (parsed && Array.isArray(parsed.records)) {
+      records = parsed.records.filter(isRecord);
     }
     const store = new SessionTokenStore(records);
     const removed = store.sweepExpired(new Date());
@@ -223,14 +217,11 @@ export class SessionTokenStore {
       await this.writeInflight;
     }
     const records = Array.from(this.records.values());
-    const payload = JSON.stringify({ records }, null, 2) + "\n";
-    this.writeInflight = (async () => {
-      await fs.mkdir(paths.home(), { recursive: true });
-      await fs.writeFile(tokensFilePath(), payload, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-    })();
+    this.writeInflight = writeJsonAtomic(
+      tokensFilePath(),
+      { records },
+      { mode: 0o600 },
+    );
     try {
       await this.writeInflight;
     } finally {

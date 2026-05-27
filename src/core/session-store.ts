@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { customAlphabet } from "nanoid";
 import { z } from "zod";
 import { paths } from "./paths.js";
+import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
 
 // Mirror the alphabet/length used for session ids (see session.ts). Plain
 // alphanumeric, length 16 → ~95 bits — collisions across a personal
@@ -152,31 +153,22 @@ function assertSafeId(id: string): void {
 export class SessionStore {
   async write(record: Omit<SessionRecord, "version">): Promise<void> {
     assertSafeId(record.sessionId);
-    await fs.mkdir(paths.sessionDir(record.sessionId), { recursive: true });
     const full: SessionRecord = { version: 1, ...record };
-    await fs.writeFile(
-      paths.sessionFile(record.sessionId),
-      JSON.stringify(full, null, 2) + "\n",
-      { encoding: "utf8", mode: 0o600 },
-    );
+    await writeJsonAtomic(paths.sessionFile(record.sessionId), full, {
+      mode: 0o600,
+    });
   }
 
   async read(sessionId: string): Promise<SessionRecord | undefined> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return undefined;
     }
-    let raw: string;
-    try {
-      raw = await fs.readFile(paths.sessionFile(sessionId), "utf8");
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === "ENOENT") {
-        return undefined;
-      }
-      throw err;
+    const parsed = await readJsonSafe(paths.sessionFile(sessionId));
+    if (parsed === undefined) {
+      return undefined;
     }
     try {
-      return SessionRecord.parse(JSON.parse(raw));
+      return SessionRecord.parse(parsed);
     } catch {
       return undefined;
     }

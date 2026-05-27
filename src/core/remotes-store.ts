@@ -10,9 +10,8 @@
 // in-place so the disk stays tidy. The daemon's
 // SessionTokenStore.sweepExpired() does the server-side equivalent.
 
-import * as fs from "node:fs/promises";
-import * as fsSync from "node:fs";
 import { paths } from "./paths.js";
+import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
 
 export interface RemoteCredential {
   // The password-issued session token returned by /v1/auth/login.
@@ -133,23 +132,8 @@ function splitKey(key: string): { host: string; port: number } | null {
 }
 
 async function readFile(): Promise<RemotesFile> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(paths.remotes(), "utf8");
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
-      return { version: 1, entries: {} };
-    }
-    throw err;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    // Corrupted file: start fresh rather than crash the CLI. The
-    // user can always re-login. Mirroring the strategy in
-    // session-tokens.ts.
+  const parsed = await readJsonSafe(paths.remotes());
+  if (parsed === undefined) {
     return { version: 1, entries: {} };
   }
   return normalise(parsed);
@@ -186,21 +170,5 @@ function normalise(raw: unknown): RemotesFile {
 }
 
 async function writeFile(data: RemotesFile): Promise<void> {
-  const dir = paths.home();
-  await fs.mkdir(dir, { recursive: true });
-  // Write-then-rename for atomicity; honour 0600 on the temp file so
-  // there's no transient world-readable window.
-  const tmp = paths.remotes() + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await fs.rename(tmp, paths.remotes());
-  // Defensive: a previous (pre-atomic) write may have left a file
-  // with looser perms. Re-chmod the final path to be sure.
-  try {
-    fsSync.chmodSync(paths.remotes(), 0o600);
-  } catch {
-    void 0;
-  }
+  await writeJsonAtomic(paths.remotes(), data, { mode: 0o600 });
 }

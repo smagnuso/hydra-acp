@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { z } from "zod";
 import { paths } from "./paths.js";
 import type { HydraConfig } from "./config.js";
+import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
 import {
   currentPlatformKey,
   ensureBinary,
@@ -182,27 +183,19 @@ export class Registry {
   }
 
   private async readDiskCache(): Promise<CachedRegistry | undefined> {
-    let text: string;
-    try {
-      text = await fs.readFile(paths.registryCache(), "utf8");
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === "ENOENT") {
-        return undefined;
-      }
-      // Permission/IO problems are operator-level — surface them instead
-      // of pretending the cache is just missing, which would mask a
-      // misconfigured HYDRA_ACP_HOME.
-      throw err;
+    // Anything that isn't a fully-valid cache — missing, empty,
+    // truncated mid-write, hand-edited, or schema-drifted — should NOT
+    // wedge the daemon. Treat any failure as "no cache" and let load()
+    // re-fetch instead. readJsonSafe surfaces only genuine IO errors
+    // (permission, etc.), which we deliberately re-throw because those
+    // signal a misconfigured HYDRA_ACP_HOME.
+    const parsed = await readJsonSafe<{ fetchedAt?: unknown; data?: unknown }>(
+      paths.registryCache(),
+    );
+    if (!parsed || typeof parsed.fetchedAt !== "number" || parsed.data === undefined) {
+      return undefined;
     }
-    // Anything past this point — truncation mid-write, hand-edited file,
-    // schema drift from a future version — should NOT wedge the daemon.
-    // Treat the cache as missing and let load() re-fetch instead.
     try {
-      const parsed = JSON.parse(text) as { fetchedAt?: unknown; data?: unknown };
-      if (typeof parsed.fetchedAt !== "number" || parsed.data === undefined) {
-        return undefined;
-      }
       const data = RegistryDocument.parse(parsed.data);
       return { fetchedAt: parsed.fetchedAt, raw: parsed.data, data };
     } catch {
@@ -210,34 +203,12 @@ export class Registry {
     }
   }
 
-  // Atomic write: dump to a sibling temp path, then rename onto the
-  // target. POSIX rename is atomic within a filesystem, so readers
-  // either see the old file or the fully-written new file — never a
-  // truncated middle. This also makes simultaneous writers safe
-  // without a lock file: the loser of the rename race just gets its
-  // version replaced by the winner's.
   private async writeDiskCache(cache: CachedRegistry): Promise<void> {
-    await fs.mkdir(paths.home(), { recursive: true });
-    const final = paths.registryCache();
-    const tmp = `${final}.tmp-${process.pid}-${randSuffix()}`;
-    const body =
-      JSON.stringify(
-        { fetchedAt: cache.fetchedAt, data: cache.raw },
-        null,
-        2,
-      ) + "\n";
-    try {
-      await fs.writeFile(tmp, body, "utf8");
-      await fs.rename(tmp, final);
-    } catch (err) {
-      await fs.unlink(tmp).catch(() => undefined);
-      throw err;
-    }
+    await writeJsonAtomic(paths.registryCache(), {
+      fetchedAt: cache.fetchedAt,
+      data: cache.raw,
+    });
   }
-}
-
-function randSuffix(): string {
-  return Math.random().toString(36).slice(2, 10);
 }
 
 export interface SpawnPlan {

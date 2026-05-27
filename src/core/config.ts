@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import { paths } from "./paths.js";
 import { writeServiceToken } from "./service-token.js";
+import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
 
 const REGISTRY_URL_DEFAULT =
   "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -187,19 +188,11 @@ export function transformerList(config: HydraConfig): TransformerConfig[] {
 }
 
 // Read config.json from disk and return its parsed object, or `{}` if
-// the file is missing. Throws on parse errors or other IO errors.
+// the file is missing, empty, or corrupted. Genuine IO errors
+// (permission, etc.) still throw.
 async function readConfigFile(): Promise<Record<string, unknown>> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(paths.config(), "utf8");
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
-      return {};
-    }
-    throw err;
-  }
-  return JSON.parse(raw) as Record<string, unknown>;
+  const parsed = await readJsonSafe<Record<string, unknown>>(paths.config());
+  return parsed ?? {};
 }
 
 // One-shot heal for installs predating the auth-token split: if
@@ -244,10 +237,7 @@ export async function migrateLegacyAuthToken(): Promise<void> {
   if (Object.keys(daemon!).length === 0) {
     delete raw.daemon;
   }
-  await fs.writeFile(paths.config(), JSON.stringify(raw, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  await writeJsonAtomic(paths.config(), raw, { mode: 0o600 });
   process.stderr.write(
     `hydra-acp: migrated auth token from ${paths.config()} to ${paths.authToken()}.\n`,
   );
@@ -261,11 +251,7 @@ export async function loadConfig(): Promise<HydraConfig> {
 }
 
 export async function writeConfig(config: HydraConfig): Promise<void> {
-  await fs.mkdir(paths.home(), { recursive: true });
-  await fs.writeFile(paths.config(), JSON.stringify(config, null, 2) + "\n", {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  await writeJsonAtomic(paths.config(), config, { mode: 0o600 });
 }
 
 export function defaultConfig(): HydraConfig {
