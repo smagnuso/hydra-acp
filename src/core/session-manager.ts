@@ -1494,6 +1494,15 @@ export class SessionManager {
     await Promise.allSettled(pending);
   }
 
+  // Wait for every pending history.jsonl write to settle. markClosed
+  // broadcasts turn_complete(interrupted) for the in-flight turn via a
+  // fire-and-forget store.append; without flushing, a SIGTERM can exit
+  // before that append hits disk, leaving an unmatched prompt_received
+  // in history that leaks pendingTurns on every client that replays it.
+  async flushHistoryWrites(): Promise<void> {
+    await this.histories.flushAll();
+  }
+
   // Startup hook: scan persisted sessions for non-empty queue files,
   // apply the TTL, resurrect anything with surviving entries, and
   // replay them through the normal queue path. Called from the daemon

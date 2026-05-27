@@ -3337,6 +3337,262 @@ describe("Session", () => {
         stopReason: "cancelled",
       });
     });
+
+    it("close() while a turn is in flight does not promote the next queued entry — no spurious prompt_received / turn_complete(interrupted) pair", async () => {
+      const { session, mock } = makeSession("hydra_session_Q13", "u_Q13");
+      const { client: alice, stream: aliceStream } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // alice's upstream session/prompt hangs until we manually reject it,
+      // standing in for the agent.kill() tear-down that rejects the in-flight
+      // request from underneath drainQueue.
+      let rejectAlice: ((err: Error) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () =>
+          new Promise<unknown>((_, rej) => {
+            rejectAlice = rej;
+          }),
+      );
+
+      const alicePromise = session
+        .prompt(alice.clientId, {
+          sessionId: "hydra_session_Q13",
+          prompt: [{ type: "text", text: "head (will be killed)" }],
+        })
+        .catch((err: unknown) => ({ rejected: err }));
+      await new Promise((r) => setImmediate(r));
+      const bobPromise = session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q13",
+        prompt: [{ type: "text", text: "queued behind the head" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Start close(). close() flips `closing` synchronously, then awaits
+      // agent.kill() (mock resolves immediately). Rejecting the in-flight
+      // upstream gives drainQueue a chance to try to iterate to bob's
+      // entry — with the closing-gate fix, it must bail out instead.
+      const closePromise = session.close({});
+      rejectAlice!(new Error("agent killed"));
+      await closePromise;
+      await new Promise((r) => setImmediate(r));
+
+      const wireOf = (
+        s: ReturnType<typeof makeClient>["stream"],
+      ): JsonRpcNotification[] =>
+        s.sent.filter(
+          (m): m is JsonRpcNotification =>
+            "method" in m && m.method === "session/update",
+        );
+
+      // bob's queued prompt must NOT have a prompt_received broadcast — on
+      // any client. (alice's head DOES, because runQueueEntry got that far
+      // before kill rejected it.)
+      const bobPromptReceived = [aliceStream, bobStream]
+        .flatMap(wireOf)
+        .find(
+          (m) =>
+            (m.params as { update?: { sessionUpdate?: string; prompt?: Array<{ text?: string }> } })
+              .update?.sessionUpdate === "prompt_received" &&
+            (m.params as { update: { prompt?: Array<{ text?: string }> } }).update
+              .prompt?.[0]?.text === "queued behind the head",
+        );
+      expect(bobPromptReceived).toBeUndefined();
+
+      // Only the head sees a terminal turn_complete (error from the
+      // upstream rejection). No synthesized turn_complete(interrupted)
+      // for bob's prompt — that's the bug this guards against.
+      const turnCompletes = wireOf(bobStream).filter(
+        (m) =>
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete",
+      );
+      expect(turnCompletes).toHaveLength(1);
+      expect(
+        (turnCompletes[0]!.params as { update: { stopReason?: string } }).update
+          .stopReason,
+      ).toBe("error");
+
+      // bob's queued chip is removed with reason=abandoned (markClosed's
+      // sweep), not started. Look up bob's entry by the messageId that
+      // queue_added carried.
+      const bobAdded = bobStream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "hydra-acp/prompt_queue_added" &&
+          ((m.params as { originator?: { clientId?: string } }).originator
+            ?.clientId === bob.clientId),
+      );
+      const bobMid = (bobAdded!.params as { messageId: string }).messageId;
+      const bobRemoved = bobStream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "hydra-acp/prompt_queue_removed" &&
+          (m.params as { messageId?: string }).messageId === bobMid,
+      );
+      expect(bobRemoved).toBeDefined();
+      expect((bobRemoved!.params as { reason: string }).reason).toBe(
+        "abandoned",
+      );
+
+      await expect(bobPromise).resolves.toMatchObject({
+        stopReason: "cancelled",
+      });
+      await expect(alicePromise).resolves.toMatchObject({
+        rejected: expect.objectContaining({ message: "agent killed" }),
+      });
+
+      // And the agent only ever saw alice's session/prompt — bob's never
+      // reached the upstream.
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(1);
+    });
+
+    it("close() with a hanging upstream synthesizes exactly one turn_complete(interrupted) for the in-flight head (no dedup-suppression)", async () => {
+      const { session, mock } = makeSession("hydra_session_Q14", "u_Q14");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      // Upstream never settles — only markClosed will terminate the head.
+      // This is the path where the recentlyTerminal dedup MUST NOT suppress
+      // the synthesized broadcast (no prior turn_complete was emitted).
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_Q14",
+        prompt: [{ type: "text", text: "head (hangs)" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await session.close({});
+      await new Promise((r) => setImmediate(r));
+
+      const turnCompletes = bobStream.sent.filter(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete",
+      );
+      expect(turnCompletes).toHaveLength(1);
+      expect(
+        (turnCompletes[0]!.params as { update: { stopReason?: string } }).update
+          .stopReason,
+      ).toBe("interrupted");
+    });
+
+    it("agent exit while a queued entry sits behind an in-flight head does not promote the queued entry", async () => {
+      const { session, mock } = makeSession("hydra_session_Q15", "u_Q15");
+      const { client: alice, stream: aliceStream } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      let rejectAlice: ((err: Error) => void) | undefined;
+      requestMock.mockImplementationOnce(
+        () =>
+          new Promise<unknown>((_, rej) => {
+            rejectAlice = rej;
+          }),
+      );
+
+      const alicePromise = session
+        .prompt(alice.clientId, {
+          sessionId: "hydra_session_Q15",
+          prompt: [{ type: "text", text: "head" }],
+        })
+        .catch((err: unknown) => ({ rejected: err }));
+      await new Promise((r) => setImmediate(r));
+      const bobPromise = session.prompt(bob.clientId, {
+        sessionId: "hydra_session_Q15",
+        prompt: [{ type: "text", text: "queued" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Agent exits (e.g. crash or external SIGTERM). The onExit handler
+      // calls markClosed directly — same race surface as close() but via
+      // a different entry point. Reject the in-flight upstream in the
+      // same tick so drainQueue gets a chance to iterate.
+      mock.triggerExit(0, null);
+      rejectAlice!(new Error("agent exited"));
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      const wireOf = (
+        s: ReturnType<typeof makeClient>["stream"],
+      ): JsonRpcNotification[] =>
+        s.sent.filter(
+          (m): m is JsonRpcNotification =>
+            "method" in m && m.method === "session/update",
+        );
+
+      const bobPromptReceived = [aliceStream, bobStream]
+        .flatMap(wireOf)
+        .find(
+          (m) =>
+            (m.params as { update?: { sessionUpdate?: string } }).update
+              ?.sessionUpdate === "prompt_received" &&
+            (m.params as { update: { prompt?: Array<{ text?: string }> } })
+              .update.prompt?.[0]?.text === "queued",
+        );
+      expect(bobPromptReceived).toBeUndefined();
+
+      // At most one turn_complete on bob's stream — for alice's head.
+      // (Whether it's error or interrupted depends on microtask order,
+      // but it must be exactly one, not duplicated.)
+      const turnCompletes = wireOf(bobStream).filter(
+        (m) =>
+          (m.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete",
+      );
+      expect(turnCompletes).toHaveLength(1);
+
+      // bob's chip was abandoned, not started.
+      const bobAdded = bobStream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "hydra-acp/prompt_queue_added" &&
+          ((m.params as { originator?: { clientId?: string } }).originator
+            ?.clientId === bob.clientId),
+      );
+      const bobMid = (bobAdded!.params as { messageId: string }).messageId;
+      const bobRemoved = bobStream.sent.find(
+        (m): m is JsonRpcNotification =>
+          "method" in m &&
+          m.method === "hydra-acp/prompt_queue_removed" &&
+          (m.params as { messageId?: string }).messageId === bobMid,
+      );
+      expect(bobRemoved).toBeDefined();
+      expect((bobRemoved!.params as { reason: string }).reason).toBe(
+        "abandoned",
+      );
+
+      await expect(bobPromise).resolves.toMatchObject({
+        stopReason: "cancelled",
+      });
+      await expect(alicePromise).resolves.toMatchObject({
+        rejected: expect.objectContaining({ message: "agent exited" }),
+      });
+
+      const sessionPromptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
+      );
+      expect(sessionPromptCalls).toHaveLength(1);
+    });
   });
 
   describe("extension slash-command dispatch", () => {

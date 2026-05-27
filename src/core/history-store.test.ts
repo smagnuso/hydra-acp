@@ -132,6 +132,30 @@ describe("HistoryStore", () => {
     expect(loaded[loaded.length - 1]?.recordedAt).toBe(1499);
   });
 
+  it("flushAll awaits every in-flight append before resolving", async () => {
+    const store = new HistoryStore();
+    store.append("hydra_session_abc", {
+      method: "session/update",
+      params: { sessionId: "hydra_session_abc", update: { foo: 1 } },
+      recordedAt: 100,
+    });
+    store.append("hydra_session_def", {
+      method: "session/update",
+      params: { sessionId: "hydra_session_def", update: { foo: 2 } },
+      recordedAt: 200,
+    });
+    await store.flushAll();
+    const a = await store.load("hydra_session_abc");
+    const b = await store.load("hydra_session_def");
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+  });
+
+  it("flushAll is a no-op when there is no pending work", async () => {
+    const store = new HistoryStore();
+    await expect(store.flushAll()).resolves.toBeUndefined();
+  });
+
   it("respects a custom maxEntries cap on load", async () => {
     const store = new HistoryStore({ maxEntries: 50 });
     await fs.mkdir(paths.sessionDir("hydra_session_abc"), { recursive: true });

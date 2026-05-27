@@ -155,6 +155,20 @@ export class HistoryStore {
     return out;
   }
 
+  // Wait for every pending append/rewrite/compact across all sessions to
+  // settle. Daemon shutdown calls this after closing sessions so the final
+  // turn_complete(interrupted) emitted by markClosed reaches disk before
+  // the process exits — without this, history-replay attaches after a
+  // restart see an unmatched prompt_received and leak pendingTurns on
+  // every client.
+  async flushAll(): Promise<void> {
+    const pending = [...this.writeQueues.values()];
+    if (pending.length === 0) {
+      return;
+    }
+    await Promise.allSettled(pending);
+  }
+
   async delete(sessionId: string): Promise<void> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return;

@@ -311,6 +311,12 @@ export async function startDaemon(
     // final regenTitle/persistTitle from idle-close has a chance to
     // hit disk before the daemon exits.
     await manager.flushMetaWrites();
+    // Same for history.jsonl — markClosed emits a turn_complete
+    // (interrupted) for the in-flight turn via fire-and-forget append.
+    // Without this flush, a SIGTERM can race ahead of that write and
+    // leave an unmatched prompt_received that leaks pendingTurns on
+    // every client that later replays the session.
+    await manager.flushHistoryWrites();
     setBinaryInstallLogger(null);
     setNpmInstallLogger(null);
     setAgentPruneLogger(null);

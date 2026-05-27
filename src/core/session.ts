@@ -291,6 +291,13 @@ export class Session {
   // enqueue) and leave the file out of sync with in-memory state.
   private queueWriteChain: Promise<unknown> = Promise.resolve();
   private closed = false;
+  // Set true at the start of close() / markClosed before any await yields.
+  // drainQueue checks this between iterations and bails out, so a queued
+  // entry can't be promoted to currentEntry (with its prompt_received and
+  // synthesized turn_complete(interrupted)) while the session is tearing
+  // down. markClosed sweeps the remaining queue with the normal abandoned
+  // / cancelled handling.
+  private closing = false;
   private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
   private titleHandlers: Array<(title: string) => void> = [];
   // Subscribers notified after every entry that's actually persisted to
@@ -1784,6 +1791,7 @@ export class Session {
     if (this.closed) {
       return;
     }
+    this.closing = true;
     this.logger?.info(
       `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false} regenTitle=${opts.regenTitle ?? false}`,
     );
@@ -3115,6 +3123,7 @@ export class Session {
     if (this.closed) {
       return;
     }
+    this.closing = true;
     this.closed = true;
     this.cancelIdleTimer();
     if (this.extensionCommandsUnsub) {
@@ -3124,18 +3133,24 @@ export class Session {
     // If a user-prompt turn is currently in-flight, synthesize a
     // turn_complete before clearing clients. This writes a proper close
     // record to history so clients that replay after a restart don't see
-    // an open turn and get stuck in "busy" state. runQueueEntry's own
-    // broadcastTurnComplete is guarded by !this.closed and won't double-
-    // fire even if agent.kill() causes the upstream request to reject.
-    if (this.currentEntry?.kind === "user") {
+    // an open turn and get stuck in "busy" state. Skip if the entry's
+    // turn has already terminated — runQueueEntry's catch broadcasts
+    // turn_complete(error) on agent.kill()-driven rejection and runs in
+    // a microtask that can settle BEFORE close()'s `await agent.kill()`
+    // continuation. Without this dedup, the same prompt gets both
+    // (error) and (interrupted) on the wire.
+    if (
+      this.currentEntry?.kind === "user" &&
+      !this.recentlyTerminal.has(this.currentEntry.messageId)
+    ) {
       this.broadcastTurnComplete(
         this.currentEntry.clientId,
         { stopReason: "interrupted" },
         this.currentEntry.messageId,
         this.currentEntry.wasAmend,
       );
-      this.currentEntry = undefined;
     }
+    this.currentEntry = undefined;
     // Drain any still-queued entries. Broadcast prompt_queue_removed
     // (abandoned) for user-visible ones so attached clients can drop
     // their chips, and resolve every entry's promise with cancelled so
@@ -3570,6 +3585,17 @@ export class Session {
     await new Promise<void>((r) => setImmediate(r));
     try {
       while (this.promptQueue.length > 0) {
+        // Session is tearing down (close() called, agent exited, idle
+        // close fired). Bail before promoting the next entry — markClosed
+        // will sweep the remaining queue with abandoned/cancelled. Without
+        // this, close()'s await on agent.kill() lets drainQueue pick up
+        // the head, broadcast prompt_received, and then markClosed (when
+        // close() resumes) synthesizes a turn_complete(interrupted) for
+        // a turn that was never actually started — the prompt looks alive
+        // for one ms and dead the next on any replaying client.
+        if (this.closing) {
+          break;
+        }
         const next = this.promptQueue.shift();
         if (!next) {
           break;

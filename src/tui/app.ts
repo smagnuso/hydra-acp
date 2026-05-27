@@ -3223,6 +3223,21 @@ async function runSession(
       toolsExpanded = false;
       upstreamInterruptedSeen = false;
       screen.ensureSeparator();
+      // Drift reconcile. At a real turn boundary with no queued prompt,
+      // no own prompt awaiting (turnInFlight), and no in-flight head id,
+      // pendingTurns MUST be 0. Anything higher is accumulated desync —
+      // typically a turn_complete that never reached us (e.g. lost during
+      // a daemon restart while a turn was in flight; markClosed's
+      // fire-and-forget history append can race a SIGTERM). Snap to 0 so
+      // the banner returns to ready instead of staying stuck on "busy".
+      if (
+        pendingTurns > 0 &&
+        queueCache.size === 0 &&
+        turnInFlight === null &&
+        currentHeadMessageId === undefined
+      ) {
+        adjustPendingTurns(-pendingTurns);
+      }
     }
   };
 
