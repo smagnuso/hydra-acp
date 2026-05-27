@@ -71,6 +71,8 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
                             │
                     hydra-acp daemon                ← daemon (the body)
                             │
+                    T1 → T2 → … → Tn                ← transformers (per-session middleware)
+                            │
               ┌─────────────┼─────────────┐
               │             │             │
        ACP agent A      ACP agent B   ACP agent C   ← agents (the feet)
