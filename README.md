@@ -93,62 +93,58 @@ Existing ACP clients are stdio-based: they `spawn(command)` a process and exchan
 
 Clients that adopt the streamable-http-websocket-transport RFD natively can connect to the daemon's `/acp` endpoint directly without the shim.
 
-### Surviving daemon restarts (resurrection)
+### Cat mode
 
-The shim and daemon together implement a "resume hint" pattern that lets editor sessions survive a daemon restart without the editor noticing:
+`hydra-acp cat` is a pipe-friendly headless verb: it feeds stdin to a fresh
+session as the user prompt and streams the agent's text reply to stdout. No
+TUI, no JSON-RPC for the caller, no terminal control sequences in the
+output — just text in, text out, exit code 0 on a clean turn. Hydra ends up
+usable as a unix filter, with the agent as the program in the middle of the
+pipeline.
 
-1. **The daemon's `session/new` and `session/attach` responses include a `_meta` block**, with hydra-specific data namespaced under `_meta["hydra-acp"]` (per the ACP [Extensibility](https://agentclientprotocol.com/protocol/extensibility) convention). The underlying agent's own `_meta` keys, if any, are passed through unchanged alongside `hydra-acp`.
-2. **The shim caches that namespaced data in a `SessionTracker`** as messages flow through, keyed by the hydra sessionId the editor knows.
-3. **The shim's WS connection is wrapped in a `ResilientWsStream`** that reconnects with exponential backoff (200ms → 5s, capped, max 60 attempts) and buffers outbound messages from the editor while disconnected.
-4. **After each successful reconnect, the shim replays a `session/attach`** for every cached session, including the resume hints under `_meta["hydra-acp"].resume`.
-5. **If the daemon already knows the session** (e.g., the daemon never died, just a network blip), it ignores the resume hint and does a normal attach.
-6. **If the daemon doesn't know the session**, it resurrects: spawns a fresh agent of `agentId` in `cwd`, runs `initialize`, calls ACP `session/load { sessionId: upstreamSessionId }` against the agent, and registers a new hydra `Session` *with the same hydra sessionId the shim claimed*. The editor sees nothing.
+A few properties keep it well-behaved:
 
-The resurrection is serialized per hydra sessionId, so two shims racing to reattach to the same session don't both spawn fresh agents.
+- **Sandboxed cwd by default.** Piped invocations get a fresh empty tempdir as
+  the agent's `cwd`, and the permission handler rejects every tool call that
+  isn't one of the `hydra-acp-stdin` MCP tools (head / tail / grep / read on
+  the piped bytes). The agent has nothing to look at except the data you
+  piped in. Override with `--cwd <path>` when you want it poking at the
+  project (e.g. "find docs in the codebase that mention this error").
+- **Smart about size.** Small inputs are inlined into the prompt. Large inputs
+  (default >1 MiB) get the daemon's in-memory `hydra-acp-stdin` MCP server:
+  bytes flow into a ring buffer and the agent pulls them on demand via
+  `head`, `tail`, `grep`, `read`, and `info`. A multi-gigabyte log isn't a
+  context-window problem; it's a fixed-size buffer the agent samples.
+- **`--follow` for live streams.** Pipe `tail -f` into `--follow` and each quiet
+  burst on stdin is sent as a new turn. The standing prompt (`-p`) is sent
+  only on the first turn; later turns carry just the new bytes.
+- **`--detach` to share the session.** By default the session lives as long as
+  the cat process; on stdin EOF it dies. With `--detach` it stays in the
+  daemon, `hydra-acp session` lists it, and the slack / browser / notifier
+  extensions can ride on it. Useful for kicking off a long-running watch
+  from a shell script and following it on your phone.
 
-**What this requires:** the underlying agent must support `loadSession` and persist its own session state to disk between processes (e.g., claude-code-acp does, in `~/.claude/sessions/`). For agents that don't support load, resurrection fails on the daemon side and the shim surfaces an error to the editor.
+A few examples:
 
-**What gets lost across restart:** the daemon's in-memory streaming history and in-flight tool calls. The agent's persisted state — past completed turns, conversation context — is recovered via `session/load`. The agent will need to re-issue any tool call that was mid-stream when the daemon died.
+```sh
+# One-shot question, no stdin.
+hydra-acp -p "tools to convert a HEIC photo to JPEG on linux?"
 
-**In-flight permission prompts:** the shim tracks open `session/request_permission` requests it has forwarded to the editor. On any reconnect (which always implies the previous daemon-side promise is gone), the shim emits a `session/update` notification with `sessionUpdate: "permission_resolved"` toward the editor for each pending request, carrying the original `toolCallId` plus `outcome: { kind: "cancelled", reason: "daemon-disconnected" }` and `resolvedBy: { clientId: "hydra-acp" }`. Editors that handle `permission_resolved` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533) will dismiss their in-flight permission UI. Any response the editor still sends afterward is silently dropped by the new daemon (unknown request id).
+# Analyze a big log without copy-pasting it into a chat window.
+journalctl -u nginx --since "1 hour ago" | hydra-acp cat -p "anything alarming?"
 
-### Wire shape of `_meta`
+# Treat hydra as the filter in a unix pipeline — output is plain text,
+# so tee / grep / jq downstream just work.
+git log --since="last monday" --pretty=full | hydra-acp cat -p "draft release notes, one bullet per user-visible change" | tee RELEASE_NOTES.md
 
-A hydra `session/new` response looks like:
-
-```json
-{
-  "sessionId": "hydra_session_abc123",
-  "_meta": {
-    "agent-vendor": { "sequence": 7 },
-    "hydra-acp": {
-      "upstreamSessionId": "u_xyz",
-      "agentId": "claude-code",
-      "cwd": "/path/to/project"
-    }
-  }
-}
+# Watch a live log and only speak up when something's wrong. --detach
+# keeps the session in the daemon, so you can follow it on your phone
+# via the slack extension after closing the shell.
+tail -F /var/log/app.log | hydra-acp cat --follow --detach -p "if a line looks like an error or stack trace, summarize it. otherwise stay silent."
 ```
 
-The `agent-vendor` key (illustrative) is whatever the underlying agent put in *its* `_meta` block — hydra forwards that through unchanged. Only the `hydra-acp` namespace is hydra's. The same shape applies to `session/attach` responses.
-
-For resurrection, the shim sends `session/attach` with a resume hint nested in the same namespace:
-
-```json
-{
-  "sessionId": "hydra_session_abc123",
-  "historyPolicy": "pending_only",
-  "_meta": {
-    "hydra-acp": {
-      "resume": {
-        "upstreamSessionId": "u_xyz",
-        "agentId": "claude-code",
-        "cwd": "/path/to/project"
-      }
-    }
-  }
-}
-```
+Sessions created by `cat` are normal hydra sessions, so `hydra-acp session`,
+`session export`, `/hydra title`, and the rest of the surface all work on them.
 
 ## Install
 
