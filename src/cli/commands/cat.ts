@@ -20,6 +20,10 @@ import {
   HYDRA_CAT_CLIENT_NAME,
   HYDRA_VERSION,
 } from "../../core/hydra-version.js";
+import {
+  buildApproveResponse,
+  buildRejectResponse,
+} from "../../acp/permission-pick.js";
 import { createChunker } from "./cat-chunker.js";
 import {
   buildTitleFromArgv,
@@ -66,6 +70,11 @@ export interface CatOptions {
   // (one prompt; bytes via MCP tools for inputs above the threshold).
   // --follow restores the per-burst behavior, useful for `tail -f`.
   follow?: boolean | undefined;
+  // Approve every session/request_permission instead of just the
+  // hydra_stdin tool family. Wire bypass for the user — agent is free
+  // to do anything its tools allow. The CLI prints a stderr warning at
+  // startup so it's never silent.
+  dangerouslySkipPermissions?: boolean | undefined;
 }
 
 const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
@@ -95,46 +104,6 @@ function isHydraStdinPermissionRequest(params: unknown): boolean {
     return true;
   }
   return false;
-}
-
-interface PermissionOption {
-  kind?: string;
-  optionId?: string;
-}
-
-function pickOptionId(
-  params: unknown,
-  preferredKinds: ReadonlyArray<string>,
-): string {
-  const options =
-    params && typeof params === "object"
-      ? ((params as { options?: unknown }).options as unknown[] | undefined)
-      : undefined;
-  if (Array.isArray(options)) {
-    for (const kind of preferredKinds) {
-      const match = options.find(
-        (o): o is PermissionOption =>
-          typeof o === "object" &&
-          o !== null &&
-          (o as { kind?: unknown }).kind === kind &&
-          typeof (o as { optionId?: unknown }).optionId === "string",
-      );
-      if (match?.optionId !== undefined) {
-        return match.optionId;
-      }
-    }
-  }
-  return preferredKinds[0] ?? "allow";
-}
-
-function approvePermission(params: unknown): { outcome: { outcome: "selected"; optionId: string } } {
-  const optionId = pickOptionId(params, ["allow_once", "allow_always"]);
-  return { outcome: { outcome: "selected", optionId } };
-}
-
-function rejectPermission(params: unknown): { outcome: { outcome: "selected"; optionId: string } } {
-  const optionId = pickOptionId(params, ["reject_once", "reject_always"]);
-  return { outcome: { outcome: "selected", optionId } };
 }
 
 export async function runCat(opts: CatOptions): Promise<void> {
@@ -283,10 +252,16 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   // rules; if "allow" isn't offered we fall back to whatever
   // `allow_once`-kinded option is present.
   conn.onRequest("session/request_permission", async (params) => {
-    if (!isHydraStdinPermissionRequest(params)) {
-      return rejectPermission(params);
+    // --dangerously-skip-permissions: approve anything the agent asks
+    // for, not just hydra_stdin tools. The startup warning in cli.ts
+    // already told the user they opted into this.
+    if (opts.dangerouslySkipPermissions) {
+      return buildApproveResponse(params);
     }
-    return approvePermission(params);
+    if (!isHydraStdinPermissionRequest(params)) {
+      return buildRejectResponse(params);
+    }
+    return buildApproveResponse(params);
   });
 
   try {

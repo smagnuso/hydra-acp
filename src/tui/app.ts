@@ -28,6 +28,7 @@ import { invokedBinName } from "../core/bin-name.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
+import { buildApproveResponse } from "../acp/permission-pick.js";
 import {
   formatUpdateNoticeLine,
   getPendingUpdate,
@@ -131,6 +132,11 @@ export interface TuiOptions {
     agentId: string;
     cwd: string;
   };
+  // Auto-approve every session/request_permission instead of showing
+  // the modal. Wire bypass for the user; the CLI prints a stderr
+  // warning at startup so it's never silent. Useful for unattended
+  // demos and trusted local agents, not for shared environments.
+  dangerouslySkipPermissions?: boolean;
 }
 
 // Shared view-only preferences that persist across the runSession loop
@@ -934,6 +940,12 @@ async function runSession(
       // Detaching — punt the decision back to the daemon so it can route
       // to a peer or treat us as gone, instead of stranding the agent.
       return { outcome: { outcome: "cancelled" } };
+    }
+    // --dangerously-skip-permissions: approve everything without the
+    // modal. Prefer allow_once so we don't pollute the agent's persisted
+    // permission rules.
+    if (opts.dangerouslySkipPermissions) {
+      return buildApproveResponse(params);
     }
     const p = (params ?? {}) as {
       toolCall?: { name?: string; title?: string; toolCallId?: string };

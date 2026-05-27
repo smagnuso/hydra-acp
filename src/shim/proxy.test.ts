@@ -52,6 +52,44 @@ describe("wireShim forwarding", () => {
     expect(upstream.sent).toEqual([]);
   });
 
+  it("--dangerously-skip-permissions answers session/request_permission upstream and does NOT forward to downstream", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({
+      opts: { dangerouslySkipPermissions: true },
+      upstream,
+      downstream,
+      tracker,
+    });
+
+    upstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session/request_permission",
+      params: {
+        sessionId: "sess_h",
+        toolCall: { toolCallId: "tc-7", name: "Bash" },
+        options: [
+          { kind: "allow_always", name: "Always", optionId: "allow_always" },
+          { kind: "allow_once", name: "Allow", optionId: "allow_once" },
+          { kind: "reject_once", name: "Reject", optionId: "reject_once" },
+        ],
+      },
+    });
+
+    await new Promise((r) => setImmediate(r));
+
+    expect(downstream.sent).toEqual([]);
+    expect(upstream.sent).toHaveLength(1);
+    expect(upstream.sent[0]).toEqual({
+      jsonrpc: "2.0",
+      id: 7,
+      result: { outcome: { outcome: "selected", optionId: "allow_once" } },
+    });
+  });
+
   it("rewrites session/new with agentId in launcher mode", async () => {
     const upstream = makeControlledStream();
     const downstream = makeControlledStream();

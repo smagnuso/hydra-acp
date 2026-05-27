@@ -76,6 +76,21 @@ import {
 // scrollback.
 let suppressUpdateNotice = false;
 
+// One-time stderr banner so the user can't miss that they're running
+// with the safety gate off. Printed by warnIfDangerouslySkipping at
+// each entry point. Once we've printed it the flag stays read-only for
+// the rest of the process — we never auto-clear it across re-dispatch.
+let dangerousNoticePrinted = false;
+function warnIfDangerouslySkipping(active: boolean): void {
+  if (!active || dangerousNoticePrinted) {
+    return;
+  }
+  dangerousNoticePrinted = true;
+  process.stderr.write(
+    "hydra-acp: --dangerously-skip-permissions is set — all tool permission requests will be auto-approved.\n",
+  );
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
@@ -116,11 +131,14 @@ async function main(): Promise<void> {
     const name = resolveOption(flags, "name");
     const model = resolveOption(flags, "model");
     suppressUpdateNotice = true;
+    const dangerous = flags["dangerously-skip-permissions"] === true;
+    warnIfDangerouslySkipping(dangerous);
     const shimOpts: Parameters<typeof runShim>[0] = {
       agentId,
       agentArgs,
       name,
       model,
+      dangerouslySkipPermissions: dangerous,
     };
     if (resolved?.sessionId !== undefined) {
       shimOpts.sessionId = resolved.sessionId;
@@ -148,6 +166,9 @@ async function main(): Promise<void> {
   const name = resolveOption(flags, "name");
   const agentIdFromFlag = resolveOption(flags, "agent");
   const model = resolveOption(flags, "model");
+  const dangerouslySkipPermissions =
+    flags["dangerously-skip-permissions"] === true;
+  warnIfDangerouslySkipping(dangerouslySkipPermissions);
   // `--session <value>` (or HYDRA_ACP_SESSION env var) accepts either a
   // bare session id or a hydra:// URL pointing at any daemon. URL
   // resolution may hit a password prompt; that's gated below based on
@@ -192,6 +213,7 @@ async function main(): Promise<void> {
         name,
         model,
         target: sessionTarget,
+        dangerouslySkipPermissions,
       });
       return;
     }
@@ -200,6 +222,7 @@ async function main(): Promise<void> {
       name,
       model,
       agentId: agentIdFromFlag,
+      dangerouslySkipPermissions,
     };
     if (sessionId !== undefined) {
       shimOpts.sessionId = sessionId;
@@ -218,6 +241,7 @@ async function main(): Promise<void> {
         name,
         model,
         agentId: agentIdFromFlag,
+        dangerouslySkipPermissions,
       };
       if (sessionId !== undefined) {
         shimOpts.sessionId = sessionId;
@@ -244,6 +268,7 @@ async function main(): Promise<void> {
         agentId: agentIdFromFlag,
         detach: flags.detach === true,
         follow: flags.follow === true,
+        dangerouslySkipPermissions,
       };
       if (cwd !== undefined) {
         catOpts.cwd = cwd;
@@ -479,6 +504,7 @@ async function main(): Promise<void> {
         name,
         model,
         target: sessionTarget,
+        dangerouslySkipPermissions,
       });
       return;
     default:
@@ -494,6 +520,7 @@ interface TuiBaseOpts {
   name?: string | undefined;
   model?: string | undefined;
   target?: ResolvedSession["target"] | undefined;
+  dangerouslySkipPermissions?: boolean | undefined;
 }
 
 async function dispatchTui(
@@ -539,6 +566,9 @@ async function dispatchTui(
   }
   if (base.target !== undefined) {
     tuiOpts.target = base.target;
+  }
+  if (base.dangerouslySkipPermissions === true) {
+    tuiOpts.dangerouslySkipPermissions = true;
   }
   await runTui(tuiOpts);
 }
@@ -662,6 +692,7 @@ function printHelp(): void {
       "  --reattach                         Pick the most-recent session for the current cwd.",
       "  --new                              Force a fresh session.",
       "  --readonly                         Open a session as a transcript viewer (requires --session).",
+      "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat).",
       "  HYDRA_ACP_SESSION                  Env var equivalent of --session (flag wins).",
       "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
       "  hydra-acp daemon [status]          Show daemon pid/version (default when no subcommand)",

@@ -10,6 +10,7 @@ export interface ParsedArgs {
 // omitted so the parser slurps the next token as their value.
 const KNOWN_BOOLEAN_FLAGS = new Set([
   "all",
+  "dangerously-skip-permissions",
   "detach",
   "disabled",
   "follow",

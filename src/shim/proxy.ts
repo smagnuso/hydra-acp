@@ -13,6 +13,7 @@ import {
 import { ResilientWsStream } from "./resilient-ws.js";
 import { SessionTracker, type ResumeContext } from "./session-tracker.js";
 import type { MessageStream } from "../acp/framing.js";
+import { buildApproveResponse } from "../acp/permission-pick.js";
 import {
   buildTitleFromArgv,
   setHydraProcessTitle,
@@ -29,6 +30,10 @@ export interface ShimOptions {
   // rather than the local one. Local invocations leave this
   // undefined and fall through to resolveLocalTarget(config).
   target?: RemoteTarget;
+  // Approve every session/request_permission from the daemon without
+  // forwarding it to the downstream editor. The CLI prints a stderr
+  // warning at startup so it's never silent.
+  dangerouslySkipPermissions?: boolean;
 }
 
 export async function runShim(opts: ShimOptions): Promise<void> {
@@ -115,6 +120,21 @@ export function wireShim({
 }: WireShimArgs): void {
   upstream.onMessage((msg) => {
     tracker.observeFromServer(msg);
+    // --dangerously-skip-permissions: when the daemon asks us to
+    // approve a tool call, reply directly to upstream with an "allow"
+    // option and DON'T forward to downstream — the editor would just
+    // see a permission UI for a decision we've already made.
+    if (
+      opts.dangerouslySkipPermissions === true &&
+      isPermissionRequest(msg)
+    ) {
+      void upstream.send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: buildApproveResponse(msg.params),
+      });
+      return;
+    }
     // Daemon-side `session/update`/`permission_resolved` (sibling answered
     // first). Forward the notification AND synthesize a JSON-RPC response
     // so local clients (agent-shell, hydra-tui) that only register an
@@ -332,6 +352,15 @@ function isSessionNewRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
     "id" in msg &&
     msg.id !== undefined &&
     msg.method === "session/new"
+  );
+}
+
+function isPermissionRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
+  return (
+    "method" in msg &&
+    "id" in msg &&
+    msg.id !== undefined &&
+    msg.method === "session/request_permission"
   );
 }
 

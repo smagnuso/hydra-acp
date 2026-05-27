@@ -798,6 +798,42 @@ describe("runCatLoop", () => {
       await loopPromise.catch(() => undefined);
     });
 
+    it("--dangerously-skip-permissions approves non-hydra_stdin tools too", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "watch", follow: true, dangerouslySkipPermissions: true },
+      });
+      await performHandshake(h);
+
+      h.stream.emitMessage({
+        jsonrpc: "2.0",
+        id: "perm-skip",
+        method: "session/request_permission",
+        params: {
+          sessionId: "hydra_session_test",
+          toolCall: {
+            toolCallId: "tc-skip",
+            title: "Bash",
+            kind: "execute",
+          },
+          options: [
+            { kind: "allow_always", name: "Always allow", optionId: "allow_always" },
+            { kind: "allow_once", name: "Allow", optionId: "allow" },
+            { kind: "reject_once", name: "Reject", optionId: "reject" },
+          ],
+        },
+      });
+
+      const resp = await waitForResponse(h, "perm-skip");
+      expect(resp.result).toEqual({
+        outcome: { outcome: "selected", optionId: "allow" },
+      });
+
+      h.fakeStdin.end();
+      await loopPromise.catch(() => undefined);
+    });
+
     it("MCP path: subsequent stdin chunks become stream_write calls", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
