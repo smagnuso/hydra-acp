@@ -5,6 +5,7 @@ import {
   PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
+import { SessionSynopsis } from "./snapshot.js";
 import type { HistoryEntry } from "./history-store.js";
 
 // On-disk shape of a history entry as it appears in history.jsonl. The
@@ -33,6 +34,11 @@ const BundleSession = z.object({
   agentId: z.string(),
   cwd: z.string(),
   title: z.string().optional(),
+  // Structured snapshot. Carried across export/import so a sync'd
+  // session on another machine surfaces the same synopsis in its
+  // picker / list / info views without re-asking the agent.
+  synopsis: SessionSynopsis.optional(),
+  summarizedThroughEntry: z.number().int().nonnegative().optional(),
   currentModel: z.string().optional(),
   currentMode: z.string().optional(),
   currentUsage: PersistedUsage.optional(),
@@ -90,6 +96,12 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
       agentId: params.record.agentId,
       cwd: params.record.cwd,
       ...(params.record.title !== undefined ? { title: params.record.title } : {}),
+      ...(params.record.synopsis !== undefined
+        ? { synopsis: params.record.synopsis }
+        : {}),
+      ...(params.record.summarizedThroughEntry !== undefined
+        ? { summarizedThroughEntry: params.record.summarizedThroughEntry }
+        : {}),
       ...(params.record.currentModel !== undefined
         ? { currentModel: params.record.currentModel }
         : {}),

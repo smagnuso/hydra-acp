@@ -100,7 +100,16 @@ export function registerSessionRoutes(
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const session = manager.get(id);
     if (session) {
-      await session.close({ deleteRecord: false });
+      // Same posture as closeAll on shutdown: ask the agent for a final
+      // title + synopsis before kill so the cold record carries the
+      // freshest digest. 8s timeout matches the shutdown path — kill
+      // should be snappy, but a few seconds of regen is the difference
+      // between a useful cold record and a featureless one.
+      await session.close({
+        deleteRecord: false,
+        regenSnapshot: true,
+        regenSnapshotTimeoutMs: 8_000,
+      });
       reply.code(204).send();
       return;
     }

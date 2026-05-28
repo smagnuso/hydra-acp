@@ -26,6 +26,7 @@ import {
   type PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
+import type { SessionSynopsis } from "./snapshot.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { paths } from "./paths.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
@@ -86,6 +87,10 @@ export interface ResurrectParams {
   agentId: string;
   cwd: string;
   title?: string;
+  // Persisted synopsis + offset, restored onto the live Session so
+  // subsequent regens can no-op when history hasn't grown.
+  synopsis?: SessionSynopsis;
+  summarizedThroughEntry?: number;
   agentArgs?: string[];
   // Per-request callback for agent install progress. See
   // CreateSessionParams.onInstallProgress. Not persisted — populated
@@ -131,6 +136,12 @@ export interface SessionManagerOptions {
   // first prompt. Resurrect paths (session/load) skip this — those
   // sessions already carry a user-chosen model from the prior incarnation.
   defaultModels?: Record<string, string>;
+  // Per-agent cheap-model override used during snapshot regen
+  // (idle-close, daemon shutdown, picker T, /hydra title no-arg).
+  // runInternalPromptWithModel ephemerally swaps to this model for the
+  // synthesis turn, then swaps back. Defaults to {} → no swap, regen
+  // runs on whatever model the session is on.
+  synopsisModels?: Record<string, string>;
   // Cap on entries kept in each session's on-disk history.jsonl. Forwarded
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
@@ -163,6 +174,7 @@ export class SessionManager {
   private histories: HistoryStore;
   private idleTimeoutMs: number;
   private defaultModels: Record<string, string>;
+  private synopsisModels: Record<string, string>;
   readonly defaultTransformers: string[];
   private idleEventTimeoutMs: number;
   private sessionHistoryMaxEntries: number;
@@ -187,6 +199,7 @@ export class SessionManager {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
     this.defaultModels = options.defaultModels ?? {};
+    this.synopsisModels = options.synopsisModels ?? {};
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
@@ -252,6 +265,7 @@ export class SessionManager {
       currentMode: fresh.initialMode,
       agentModes: fresh.initialModes,
       agentModels: fresh.initialModels,
+      synopsisModel: this.synopsisModels[params.agentId],
       transformChain: params.transformChain,
       parentSessionId: params.parentSessionId,
       originatingClient: params.originatingClient,
@@ -472,6 +486,9 @@ export class SessionManager {
       // restarts (quota resets, rollouts), so meta.json is intentionally
       // treated as a cold fallback here, not the authoritative source.
       agentModels: advertisedModels,
+      synopsis: params.synopsis,
+      summarizedThroughEntry: params.summarizedThroughEntry,
+      synopsisModel: this.synopsisModels[params.agentId],
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
       // or never seeded) should re-derive from the next prompt rather
@@ -556,6 +573,9 @@ export class SessionManager {
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
       agentModels: advertisedModels,
+      synopsis: params.synopsis,
+      summarizedThroughEntry: params.summarizedThroughEntry,
+      synopsisModel: this.synopsisModels[params.agentId],
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
@@ -898,6 +918,13 @@ export class SessionManager {
     session.onTitleChange((title) => {
       void this.persistTitle(session.sessionId, title).catch(() => undefined);
     });
+    session.onSynopsisChange(({ synopsis, summarizedThroughEntry }) => {
+      void this.persistSynopsis(
+        session.sessionId,
+        synopsis,
+        summarizedThroughEntry,
+      ).catch(() => undefined);
+    });
     session.onAgentChange(({ agentId, upstreamSessionId }) => {
       void this.persistAgentChange(session.sessionId, agentId, upstreamSessionId).catch(
         () => undefined,
@@ -1003,6 +1030,8 @@ export class SessionManager {
       agentId: record.agentId,
       cwd: record.cwd,
       title,
+      synopsis: record.synopsis,
+      summarizedThroughEntry: record.summarizedThroughEntry,
       agentArgs: record.agentArgs,
       currentModel: record.currentModel,
       currentMode: record.currentMode,
@@ -1481,6 +1510,8 @@ export class SessionManager {
         agentId: args.bundle.session.agentId,
         cwd: args.cwd ?? args.bundle.session.cwd,
         title: args.bundle.session.title,
+        synopsis: args.bundle.session.synopsis,
+        summarizedThroughEntry: args.bundle.session.summarizedThroughEntry,
         currentModel: args.bundle.session.currentModel,
         currentMode: args.bundle.session.currentMode,
         currentUsage: args.bundle.session.currentUsage,
@@ -1542,6 +1573,29 @@ export class SessionManager {
       await this.store.write({
         ...record,
         title,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  }
+
+  // Persist a synopsis update from Session.setSynopsis. The synopsis and
+  // its summarizedThroughEntry offset write together so an interrupted
+  // daemon never persists a synopsis without the offset that bounds when
+  // it should next be regenerated.
+  private async persistSynopsis(
+    sessionId: string,
+    synopsis: SessionSynopsis,
+    summarizedThroughEntry: number,
+  ): Promise<void> {
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      await this.store.write({
+        ...record,
+        synopsis,
+        summarizedThroughEntry,
         updatedAt: new Date().toISOString(),
       });
     });
@@ -1635,7 +1689,20 @@ export class SessionManager {
 
   async closeAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
-    await Promise.allSettled(sessions.map((s) => s.close()));
+    // Fire a snapshot regen on each session before kill so the cold record
+    // captures the agent's freshest view of title + synopsis. Session.close
+    // short-circuits via its own firstPromptSeeded check, so sessions that
+    // never received a prompt skip the regen and just die. Parallel via
+    // Promise.allSettled, bounded by the 8s per-session timeout.
+    await Promise.allSettled(
+      sessions.map((s) =>
+        s.close({
+          deleteRecord: false,
+          regenSnapshot: true,
+          regenSnapshotTimeoutMs: 8_000,
+        }),
+      ),
+    );
     this.sessions.clear();
   }
 

@@ -173,6 +173,7 @@ export async function startDaemon(
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
     defaultModels: config.defaultModels,
+    synopsisModels: config.synopsisModels,
     defaultTransformers: config.defaultTransformers,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,

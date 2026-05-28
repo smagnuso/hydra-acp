@@ -4,6 +4,7 @@ import { customAlphabet } from "nanoid";
 import { z } from "zod";
 import { paths } from "./paths.js";
 import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
+import { SessionSynopsis } from "./snapshot.js";
 
 // Mirror the alphabet/length used for session ids (see session.ts). Plain
 // alphanumeric, length 16 → ~95 bits — collisions across a personal
@@ -107,6 +108,16 @@ export const SessionRecord = z.object({
   agentId: z.string(),
   cwd: z.string(),
   title: z.string().optional(),
+  // Structured digest of the conversation, produced by the agent in the
+  // same `runInternalPrompt` turn that regenerates the title. Persisted
+  // here so picker / list_recent / archive bundles surface it without
+  // re-asking the agent. Regenerated on idle-close, daemon shutdown,
+  // picker T, and /hydra title with no arg — every regen caller checks
+  // `summarizedThroughEntry` first and no-ops if history hasn't grown.
+  synopsis: SessionSynopsis.optional(),
+  // history.length at the last successful snapshot regen. Idempotency
+  // guard: if current history length <= this value, regen is a no-op.
+  summarizedThroughEntry: z.number().int().nonnegative().optional(),
   agentArgs: z.array(z.string()).optional(),
   // Snapshot of "what is currently true about this session" carried in
   // meta.json so a late-attaching or cold-resurrected client can be
@@ -254,6 +265,8 @@ export function recordFromMemorySession(args: {
   agentId: string;
   cwd: string;
   title?: string;
+  synopsis?: SessionSynopsis;
+  summarizedThroughEntry?: number;
   agentArgs?: string[];
   currentModel?: string;
   currentMode?: string;
@@ -280,6 +293,8 @@ export function recordFromMemorySession(args: {
     agentId: args.agentId,
     cwd: args.cwd,
     title: args.title,
+    synopsis: args.synopsis,
+    summarizedThroughEntry: args.summarizedThroughEntry,
     agentArgs: args.agentArgs,
     currentModel: args.currentModel,
     currentMode: args.currentMode,

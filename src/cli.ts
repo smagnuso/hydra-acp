@@ -29,6 +29,7 @@ import {
   runSessionsShare,
   runSessionsTranscript,
 } from "./cli/commands/sessions.js";
+import { runSessionsInfo } from "./cli/commands/sessions-info.js";
 import {
   runExtensionsAdd,
   runExtensionsList,
@@ -345,6 +346,13 @@ async function main(): Promise<void> {
           json: flags.json === true,
           host: typeof flags.host === "string" ? flags.host : undefined,
           includeCat: flags["include-cat"] === true,
+        });
+        return;
+      }
+      if (sub === "info") {
+        await runSessionsInfo(positional[2], {
+          verbose: flags.verbose === true,
+          json: flags.json === true,
         });
         return;
       }

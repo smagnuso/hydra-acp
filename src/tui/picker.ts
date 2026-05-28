@@ -165,7 +165,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["k", "kill the selected live session"],
   ["d", "delete the selected cold session"],
   ["t", "retitle the selected session"],
-  ["T", "regenerate title via agent (live session)"],
+  ["T", "regenerate title + synopsis via agent (live session)"],
   null,
   ["?", "toggle this help"],
   ["q / Esc / ^C / ^D", "quit picker (detach)"],

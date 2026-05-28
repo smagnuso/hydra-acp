@@ -20,7 +20,7 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
     verb: "title",
     name: "hydra title",
     description:
-      "Regenerate the session title via the agent (or set manually with an arg)",
+      "Regenerate the session title + synopsis via the agent (or set title manually with an arg)",
   },
   {
     verb: "agent",

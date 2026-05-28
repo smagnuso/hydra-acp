@@ -157,6 +157,16 @@ export const HydraConfig = z.object({
   // raw model id strings the agent expects (claude-acp: "claude-opus-4-7",
   // opencode: "openai/gpt-5-codex" or "ncp-anthropic/claude-opus-4-7", …).
   defaultModels: z.record(z.string(), z.string()).default({}),
+  // Per-agent cheap-model override used during snapshot regen (the
+  // single agent turn that produces title + synopsis at idle-close,
+  // daemon shutdown, picker T, or `/hydra title` with no arg). When
+  // set, the daemon ephemerally swaps to this model for the synthesis
+  // turn and swaps back — clients never see the model flicker, and
+  // the persisted "current model" stays the user's actual choice. Keys
+  // are agent ids; values are model ids the agent advertises. Agents
+  // not in the table → no swap, regen runs on the session's current
+  // model.
+  synopsisModels: z.record(z.string(), z.string()).default({}),
   // Where new sessions land when POST /v1/sessions omits cwd. Stored as
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.

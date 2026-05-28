@@ -1616,13 +1616,20 @@ describe("Session", () => {
       const requestMock = mock.agent.connection.request as ReturnType<
         typeof vi.fn
       >;
-      // Agent will emit chunks and eventually resolve.
+      // Agent replies with a JSON snapshot (title + synopsis). The
+      // daemon parses it via tryParseSnapshot and applies the title.
       requestMock.mockImplementation(async () => {
         mock.triggerNotification("session/update", {
           sessionId: "u_HR",
           update: {
             sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "Refactor auth flow" },
+            content: {
+              type: "text",
+              text: JSON.stringify({
+                title: "Refactor auth flow",
+                synopsis: { goal: "rework login" },
+              }),
+            },
           },
         });
         return { stopReason: "end_turn" };
