@@ -1,5 +1,7 @@
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
+import { paths } from "../../core/paths.js";
+import { runLogTail } from "./log-tail.js";
 import { httpBase } from "./sessions.js";
 
 interface AgentSummary {
@@ -254,6 +256,21 @@ export async function runAgentsSync(agentId: string | undefined): Promise<void> 
   process.stdout.write(
     `\nSynced ${body.synced.length} session(s); skipped ${body.skipped} already tracked.\n`,
   );
+}
+
+export async function runAgentsLogs(
+  agentId: string | undefined,
+  rest: string[],
+): Promise<void> {
+  if (!agentId) {
+    process.stderr.write(
+      "Usage: hydra-acp agent log <id> [--tail N] [--follow]\n",
+    );
+    process.exit(2);
+    return;
+  }
+  const logPath = paths.agentLogFile(agentId);
+  await runLogTail(logPath, rest, "No log file (agent never ran?)");
 }
 
 export async function runAgentsRefresh(): Promise<void> {

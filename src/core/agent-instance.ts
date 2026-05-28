@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { ndjsonStreamFromStdio } from "../acp/framing.js";
 import { JsonRpcConnection } from "../acp/connection.js";
+import { paths } from "./paths.js";
 import type { SpawnPlan } from "./registry.js";
 
 export interface AgentInstanceOptions {
@@ -39,6 +42,7 @@ export class AgentInstance {
   private stderrTail = "";
   private stderrTailBytes: number;
   private logger?: AgentLogger;
+  private fileLog?: fs.WriteStream;
   private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
 
   private constructor(opts: AgentInstanceOptions, child: ChildProcess) {
@@ -48,6 +52,10 @@ export class AgentInstance {
     this.child = child;
     this.stderrTailBytes = opts.stderrTailBytes ?? DEFAULT_STDERR_TAIL_BYTES;
     this.logger = opts.logger;
+    this.fileLog = openAgentLog(opts.agentId);
+    this.writeLog(
+      `--- spawn pid=${child.pid} version=${opts.plan.version} cwd=${opts.cwd} cmd=${opts.plan.command} args=${JSON.stringify(opts.plan.args)} time=${new Date().toISOString()} ---\n`,
+    );
 
     if (!child.stdout || !child.stdin) {
       throw new Error("agent subprocess missing stdio");
@@ -58,6 +66,7 @@ export class AgentInstance {
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => {
       this.stderrTail = (this.stderrTail + chunk).slice(-this.stderrTailBytes);
+      this.writeLog(chunk);
       // The daemon's stderr is redirected to /dev/null, so route agent
       // stderr through the pino logger instead — otherwise debugging an
       // agent that's misbehaving is impossible.
@@ -78,11 +87,19 @@ export class AgentInstance {
     // the connection so the pending request rejects with context.
     child.on("error", (err) => {
       const msg = this.formatFailure(err.message);
+      this.writeLog(
+        `--- spawn error: ${err.message} time=${new Date().toISOString()} ---\n`,
+      );
       this.connection.fail(new Error(msg));
     });
 
     child.on("exit", (code, signal) => {
       this.exited = true;
+      this.writeLog(
+        `--- exit code=${code} signal=${signal} ${this.killed ? "(after kill) " : ""}time=${new Date().toISOString()} ---\n`,
+      );
+      this.fileLog?.end();
+      this.fileLog = undefined;
       if (this.killed) {
         // Intentional shutdown (session close, idle timeout, agent
         // switch). Logged at info so the close path leaves a trail.
@@ -100,6 +117,17 @@ export class AgentInstance {
         handler(code, signal);
       }
     });
+  }
+
+  private writeLog(line: string): void {
+    if (!this.fileLog) {
+      return;
+    }
+    try {
+      this.fileLog.write(line);
+    } catch {
+      void 0;
+    }
   }
 
   private formatFailure(reason: string): string {
@@ -142,10 +170,25 @@ export class AgentInstance {
       return;
     }
     this.killed = true;
+    this.writeLog(
+      `--- kill requested signal=${signal} time=${new Date().toISOString()} ---\n`,
+    );
     this.logger?.info(
       `agent ${this.agentId} pid=${this.child.pid} kill requested signal=${signal}`,
     );
     await this.connection.close().catch(() => undefined);
     this.child.kill(signal);
+  }
+}
+
+function openAgentLog(agentId: string): fs.WriteStream | undefined {
+  try {
+    const logPath = paths.agentLogFile(agentId);
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    const stream = fs.createWriteStream(logPath, { flags: "a" });
+    stream.on("error", () => undefined);
+    return stream;
+  } catch {
+    return undefined;
   }
 }

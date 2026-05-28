@@ -50,6 +50,12 @@ export const paths = {
   currentLogFile: () => path.join(hydraHome(), "current.log"),
   registryCache: () => path.join(hydraHome(), "registry.json"),
   agentsDir: () => path.join(hydraHome(), "agents"),
+  // Per-agent diagnostic log written by AgentInstance: spawn/exit
+  // milestones plus every line the agent emits on stderr. Mirrors the
+  // role extensionLogFile / transformerLogFile play for those
+  // subsystems; tailed by `hydra-acp agent log <id>`.
+  agentLogFile: (id: string) =>
+    path.join(hydraHome(), "agents", "logs", `${id}.log`),
   // <platformKey>/<agentId>/<version>/ — platform at the top so a Hydra
   // home shared between machines (NFS, rsync'd dotfiles) keeps each
   // machine's binaries cleanly separated. `ls agents/` immediately

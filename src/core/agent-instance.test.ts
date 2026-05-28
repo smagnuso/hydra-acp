@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { AgentInstance } from "./agent-instance.js";
+import { paths } from "./paths.js";
 import type { SpawnPlan } from "./registry.js";
 
 function nodeScript(script: string): SpawnPlan {
@@ -110,6 +112,23 @@ describe("AgentInstance: spawn-level failures", () => {
     } else {
       expect(err.message).toMatch(/closed|exited|EPIPE/i);
     }
+  });
+
+  it("writes spawn header, stderr lines, and exit footer to the per-agent log file", async () => {
+    const agent = AgentInstance.spawn({
+      agentId: "log-writer",
+      cwd: process.cwd(),
+      plan: nodeScript(
+        "process.stderr.write('metatron-style-line\\n'); process.exit(7);",
+      ),
+    });
+    await settled(agent.connection.request("initialize", {}));
+    // Streams flush on 'end'; give the writer a tick.
+    await new Promise((r) => setTimeout(r, 50));
+    const contents = await fs.readFile(paths.agentLogFile("log-writer"), "utf8");
+    expect(contents).toMatch(/--- spawn pid=\d+ /);
+    expect(contents).toContain("metatron-style-line");
+    expect(contents).toMatch(/--- exit code=7 signal=null/);
   });
 
   it("kill() closes the connection without surfacing an exit-before-responding error", async () => {
