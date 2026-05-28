@@ -68,15 +68,32 @@ export type KeyEvent =
   | { type: "attachment-paths"; paths: string[] };
 
 export type InputEffect =
-  | { type: "send"; text: string; planMode: boolean; attachments: Attachment[] }
+  // `text` is the wire form (paste placeholders expanded to their original
+  // text); `displayText` is the as-typed form (placeholders intact). Equal
+  // when no large pastes are in the buffer. History recording uses
+  // displayText so up-arrow recall stays compact; the daemon gets text.
+  | {
+      type: "send";
+      text: string;
+      displayText: string;
+      planMode: boolean;
+      attachments: Attachment[];
+    }
   // Amend the in-flight turn — interrupt and replace via
   // hydra-acp/amend_prompt. App falls through to "send" if no turn is
   // running or the daemon doesn't advertise the capability.
-  | { type: "amend"; text: string; planMode: boolean; attachments: Attachment[] }
+  | {
+      type: "amend";
+      text: string;
+      displayText: string;
+      planMode: boolean;
+      attachments: Attachment[];
+    }
   | {
       type: "queue-edit";
       index: number;
       text: string;
+      displayText: string;
       attachments: Attachment[];
     }
   | { type: "queue-remove"; index: number }
@@ -128,6 +145,25 @@ export interface InputState {
 export interface InputOptions {
   history?: string[];
   planMode?: boolean;
+  // Defaults to true. Set false in inputs that aren't prompts destined
+  // for the agent (e.g. the picker's find/search box) — a placeholder
+  // would silently break the search query.
+  collapsePastes?: boolean;
+}
+
+// Pastes with more than this many lines get collapsed to a placeholder
+// in the visible buffer; the original text is stored and expanded back
+// on submit.
+export const PASTE_LINE_THRESHOLD = 10;
+
+// Matches the placeholder anywhere in a line. The same shape is used
+// (anchored) for atomic deletion / cursor jumps over the token.
+const PASTE_TOKEN_RE = /\[pasted #(\d+) \+\d+ lines\]/g;
+const PASTE_TOKEN_LEFT_RE = /\[pasted #(\d+) \+\d+ lines\]$/;
+const PASTE_TOKEN_RIGHT_RE = /^\[pasted #(\d+) \+\d+ lines\]/;
+
+function formatPasteToken(id: number, lineCount: number): string {
+  return `[pasted #${id} +${lineCount} lines]`;
 }
 
 export class InputDispatcher {
@@ -177,10 +213,25 @@ export class InputDispatcher {
   // queue slots (which may carry their own attachments — though we
   // don't surface that yet) shouldn't blend with the current draft's.
   private savedAttachments: Attachment[] | null = null;
+  // Map of paste id → original text for placeholder tokens currently in
+  // the buffer (or recoverable via history walks within this session).
+  // Persists across sends — never cleared by clearBuffer/setBuffer, so
+  // up-arrow recall of a placeholder can still reanimate on resubmit.
+  private pastes = new Map<number, string>();
+  private nextPasteId = 1;
+  private collapsePastes: boolean;
 
   constructor(opts: InputOptions = {}) {
     this.history = [...(opts.history ?? [])];
     this.planMode = opts.planMode ?? false;
+    this.collapsePastes = opts.collapsePastes ?? true;
+  }
+
+  // Buffer text with paste placeholders expanded back to their original
+  // content. Used by callers that bypass the send/amend effects (e.g.
+  // picker.ts reads composer text directly).
+  expandedText(): string {
+    return this.expandPastes(this.bufferText());
   }
 
   state(): InputState {
@@ -314,7 +365,14 @@ export class InputDispatcher {
       return [];
     }
     if (event.type === "paste") {
-      this.insertText(event.text);
+      const lineCount = event.text.split("\n").length;
+      if (this.collapsePastes && lineCount > PASTE_LINE_THRESHOLD) {
+        const id = this.nextPasteId++;
+        this.pastes.set(id, event.text);
+        this.insertText(formatPasteToken(id, lineCount));
+      } else {
+        this.insertText(event.text);
+      }
       return [];
     }
     if (event.type === "attachment-paths") {
@@ -466,6 +524,17 @@ export class InputDispatcher {
     return this.buffer.join("\n");
   }
 
+  // Substitute every [pasted #N +M lines] token with its stored original
+  // text. Unknown ids (orphaned placeholders from outside this process)
+  // are left as the literal token string — the safe fallback.
+  private expandPastes(text: string): string {
+    return text.replace(PASTE_TOKEN_RE, (match, idStr: string) => {
+      const id = parseInt(idStr, 10);
+      const stored = this.pastes.get(id);
+      return stored !== undefined ? stored : match;
+    });
+  }
+
   private bufferIsEmpty(): boolean {
     return this.buffer.length === 1 && this.buffer[0] === "";
   }
@@ -527,6 +596,16 @@ export class InputDispatcher {
   private backspace(): void {
     if (this.col > 0) {
       const line = this.currentLine();
+      const before = line.slice(0, this.col);
+      const m = before.match(PASTE_TOKEN_LEFT_RE);
+      if (m !== null) {
+        this.pastes.delete(parseInt(m[1]!, 10));
+        this.setCurrentLine(
+          line.slice(0, this.col - m[0].length) + line.slice(this.col),
+        );
+        this.col -= m[0].length;
+        return;
+      }
       this.setCurrentLine(line.slice(0, this.col - 1) + line.slice(this.col));
       this.col -= 1;
       return;
@@ -545,6 +624,15 @@ export class InputDispatcher {
   private deleteForward(): void {
     const line = this.currentLine();
     if (this.col < line.length) {
+      const after = line.slice(this.col);
+      const m = after.match(PASTE_TOKEN_RIGHT_RE);
+      if (m !== null) {
+        this.pastes.delete(parseInt(m[1]!, 10));
+        this.setCurrentLine(
+          line.slice(0, this.col) + line.slice(this.col + m[0].length),
+        );
+        return;
+      }
       this.setCurrentLine(line.slice(0, this.col) + line.slice(this.col + 1));
       return;
     }
@@ -622,6 +710,18 @@ export class InputDispatcher {
       this.backspace();
       return;
     }
+    const before = line.slice(0, this.col);
+    const m = before.match(PASTE_TOKEN_LEFT_RE);
+    if (m !== null) {
+      // Kill the whole placeholder as one word. The map entry stays
+      // alive so a subsequent ^Y yanks a working token, not a literal
+      // string that would be sent verbatim.
+      this.killBuffer = m[0];
+      const i = this.col - m[0].length;
+      this.setCurrentLine(line.slice(0, i) + line.slice(this.col));
+      this.col = i;
+      return;
+    }
     let i = this.col;
     while (i > 0 && /\s/.test(line[i - 1] ?? "")) {
       i -= 1;
@@ -646,6 +746,12 @@ export class InputDispatcher {
 
   private moveLeft(): void {
     if (this.col > 0) {
+      const before = this.currentLine().slice(0, this.col);
+      const m = before.match(PASTE_TOKEN_LEFT_RE);
+      if (m !== null) {
+        this.col -= m[0].length;
+        return;
+      }
       this.col -= 1;
       return;
     }
@@ -656,7 +762,14 @@ export class InputDispatcher {
   }
 
   private moveRight(): void {
-    if (this.col < this.currentLine().length) {
+    const line = this.currentLine();
+    if (this.col < line.length) {
+      const after = line.slice(this.col);
+      const m = after.match(PASTE_TOKEN_RIGHT_RE);
+      if (m !== null) {
+        this.col += m[0].length;
+        return;
+      }
       this.col += 1;
       return;
     }
@@ -676,9 +789,18 @@ export class InputDispatcher {
       return;
     }
     const line = this.currentLine();
+    // Skip trailing whitespace first so a placeholder ending just before
+    // a space still gets jumped over atomically (mirrors moveWordForward
+    // skipping leading whitespace).
     let i = this.col;
     while (i > 0 && /\s/.test(line[i - 1] ?? "")) {
       i -= 1;
+    }
+    const before = line.slice(0, i);
+    const m = before.match(PASTE_TOKEN_LEFT_RE);
+    if (m !== null) {
+      this.col = i - m[0].length;
+      return;
     }
     while (i > 0 && !/\s/.test(line[i - 1] ?? "")) {
       i -= 1;
@@ -696,9 +818,17 @@ export class InputDispatcher {
       this.col = 0;
       return;
     }
+    // Walk past leading whitespace first so alt-f from before a placeholder
+    // still lands at its end (and not on the space between cursor and `[`).
     let i = this.col;
     while (i < line.length && /\s/.test(line[i] ?? "")) {
       i += 1;
+    }
+    const after = line.slice(i);
+    const m = after.match(PASTE_TOKEN_RIGHT_RE);
+    if (m !== null) {
+      this.col = i + m[0].length;
+      return;
     }
     while (i < line.length && !/\s/.test(line[i] ?? "")) {
       i += 1;
@@ -971,7 +1101,8 @@ export class InputDispatcher {
   }
 
   private send(): InputEffect[] {
-    const text = this.bufferText();
+    const displayText = this.bufferText();
+    const text = this.expandPastes(displayText);
     // Submitting while editing a queued slot routes the change back into
     // the queue (edit or remove) instead of starting a new turn. Empty
     // text with attachments still counts as a removal — an attachment-
@@ -983,7 +1114,7 @@ export class InputDispatcher {
       if (text.trim().length === 0) {
         return [{ type: "queue-remove", index }];
       }
-      return [{ type: "queue-edit", index, text, attachments }];
+      return [{ type: "queue-edit", index, text, displayText, attachments }];
     }
     if (text.trim().length === 0 && this.attachments.length === 0) {
       return [];
@@ -991,7 +1122,7 @@ export class InputDispatcher {
     const planMode = this.planMode;
     const attachments = [...this.attachments];
     this.clearBuffer();
-    return [{ type: "send", text, planMode, attachments }];
+    return [{ type: "send", text, displayText, planMode, attachments }];
   }
 
   // Shift+Enter (also Ctrl+Enter / ^S): amend the in-flight turn.
@@ -1004,7 +1135,8 @@ export class InputDispatcher {
   // whether to route the amend through amend_prompt or fall through to
   // a regular send when no turn is in flight.
   private amend(): InputEffect[] {
-    const text = this.bufferText();
+    const displayText = this.bufferText();
+    const text = this.expandPastes(displayText);
     if (this.queueIndex >= 0 && this.queueIndex < this.queue.length) {
       const index = this.queueIndex;
       const planMode = this.planMode;
@@ -1016,7 +1148,7 @@ export class InputDispatcher {
       }
       return [
         { type: "queue-remove", index },
-        { type: "amend", text, planMode, attachments },
+        { type: "amend", text, displayText, planMode, attachments },
       ];
     }
     if (text.trim().length === 0 && this.attachments.length === 0) {
@@ -1025,7 +1157,7 @@ export class InputDispatcher {
     const planMode = this.planMode;
     const attachments = [...this.attachments];
     this.clearBuffer();
-    return [{ type: "amend", text, planMode, attachments }];
+    return [{ type: "amend", text, displayText, planMode, attachments }];
   }
 
   // Home: jump to the very start of the prompt buffer. If we're already

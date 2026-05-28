@@ -314,7 +314,10 @@ export async function pickSession(
   let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
   // Find-session state. All transient — cleared when exitFind() fires.
   let findSubMode: "input" | "results" = "input";
-  let findComposer = new InputDispatcher({ history: [] });
+  let findComposer = new InputDispatcher({
+    history: [],
+    collapsePastes: false,
+  });
   let findResults: SessionHits[] = [];
   let findTruncated = false;
   let findSelectedIdx = 0;
@@ -1317,7 +1320,10 @@ export async function pickSession(
     };
     const focus = { push: pushLayer, pop: popLayer };
     exitFind = (): void => {
-      findComposer = new InputDispatcher({ history: [] });
+      findComposer = new InputDispatcher({
+        history: [],
+        collapsePastes: false,
+      });
       findResults = [];
       findTruncated = false;
       findSelectedIdx = 0;
@@ -1880,7 +1886,7 @@ export async function pickSession(
         }
         if (name === "ENTER" || name === "KP_ENTER") {
           cleanup();
-          const text = composer.state().buffer.join("\n");
+          const text = composer.expandedText();
           if (text.trim().length === 0) {
             resolve({ kind: "new" });
           } else {

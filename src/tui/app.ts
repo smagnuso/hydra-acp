@@ -780,7 +780,7 @@ async function runSession(
         echo.flushed = true;
         appendRender({
           kind: "user-text",
-          text: echo.text,
+          text: echo.displayText,
           attachments: echo.attachments,
         });
         // applyRenderEvent's user-text handler clears currentTurnEcho
@@ -1185,8 +1185,13 @@ async function runSession(
   if (globalHistory.length > config.tui.promptHistoryMaxEntries) {
     globalHistory = globalHistory.slice(globalHistory.length - config.tui.promptHistoryMaxEntries);
   }
+  // Parallel to `history` but stores the placeholder form of prompts
+  // composed in this process. Used only to build the dispatcher's
+  // up-arrow walk so large pastes stay collapsed across submits. Disk
+  // files always get the expanded form.
+  let displayHistory = [...history];
   const dispatcher = new InputDispatcher({
-    history: buildCombinedHistory(globalHistory, history),
+    history: buildCombinedHistory(globalHistory, displayHistory),
   });
   dispatcherRef = dispatcher;
   // Gates recording of peer user-text events into prompt history.
@@ -1198,18 +1203,27 @@ async function runSession(
   // Funnel: every place a new prompt becomes part of history goes
   // through here so the per-session list, the global list, the
   // dispatcher view, and both files stay in sync.
-  const recordHistoryEntry = (entry: string): void => {
+  // `entry` is the wire form (paste placeholders expanded) — what disk
+  // and the daemon see. `displayEntry` is the as-typed form with paste
+  // placeholders intact; it feeds the dispatcher's up-arrow walk so
+  // recall stays compact in this session. Equal when no large pastes.
+  const recordHistoryEntry = (entry: string, displayEntry?: string): void => {
     const trimmed = entry.replace(/\n+$/, "");
     if (trimmed.length === 0) {
       return;
     }
+    const trimmedDisplay = (displayEntry ?? entry).replace(/\n+$/, "");
     const nextSession = appendEntry(history, trimmed);
     const sessionChanged = nextSession !== history;
     history = nextSession;
+    // displayHistory mirrors per-session writes one-for-one. appendEntry
+    // de-dupes against the consecutive previous entry; passing the
+    // display form keeps the two arrays index-aligned.
+    displayHistory = appendEntry(displayHistory, trimmedDisplay);
     const nextGlobal = appendEntry(globalHistory, trimmed, config.tui.promptHistoryMaxEntries);
     const globalChanged = nextGlobal !== globalHistory;
     globalHistory = nextGlobal;
-    dispatcher.setHistory(buildCombinedHistory(globalHistory, history));
+    dispatcher.setHistory(buildCombinedHistory(globalHistory, displayHistory));
     if (sessionChanged) {
       saveHistory(historyFile, history).catch(() => undefined);
     }
@@ -1935,16 +1949,16 @@ async function runSession(
         // config; the swap happens here so the input layer stays a pure
         // state machine.
         if (config.tui.defaultEnterAction === "amend") {
-          amendPrompt(effect.text, effect.attachments);
+          amendPrompt(effect.text, effect.attachments, effect.displayText);
         } else {
-          enqueuePrompt(effect.text, effect.attachments);
+          enqueuePrompt(effect.text, effect.attachments, effect.displayText);
         }
         return;
       case "amend":
         if (config.tui.defaultEnterAction === "amend") {
-          enqueuePrompt(effect.text, effect.attachments);
+          enqueuePrompt(effect.text, effect.attachments, effect.displayText);
         } else {
-          amendPrompt(effect.text, effect.attachments);
+          amendPrompt(effect.text, effect.attachments, effect.displayText);
         }
         return;
       case "queue-edit": {
@@ -2244,7 +2258,12 @@ async function runSession(
   // scrollback as if it had started, even though the chip area shows it
   // as queued.
   interface PendingEcho {
+    // Wire form (paste placeholders expanded) — what the daemon sees.
     text: string;
+    // As-typed form with paste placeholders intact — used to render the
+    // scrollback echo so a large paste stays compact. Falls back to
+    // `text` when no placeholders were involved.
+    displayText: string;
     attachments: Attachment[];
     messageId?: string;
     // True once the prompt actually started processing and we flushed
@@ -2326,6 +2345,7 @@ async function runSession(
   const enqueuePrompt = (
     text: string,
     attachments: Attachment[],
+    displayText?: string,
   ): void => {
     // Sending a prompt always snaps the view to the bottom — the user
     // wants to see their own input and the agent's reply.
@@ -2333,8 +2353,8 @@ async function runSession(
     if (handleBuiltinCommand(text)) {
       return;
     }
-    recordHistoryEntry(text);
-    void runPrompt(text, attachments);
+    recordHistoryEntry(text, displayText);
+    void runPrompt(text, attachments, displayText);
   };
 
   // Shift+Enter route. Three cases:
@@ -2346,14 +2366,18 @@ async function runSession(
   //      as targetMessageId. On target_completed, surface a "send
   //      anyway?" affordance instead of silently submitting; the user
   //      can re-press Shift+Enter or Enter to confirm.
-  const amendPrompt = (text: string, attachments: Attachment[]): void => {
+  const amendPrompt = (
+    text: string,
+    attachments: Attachment[],
+    displayText?: string,
+  ): void => {
     screen.scrollToBottom();
     if (handleBuiltinCommand(text)) {
       return;
     }
-    recordHistoryEntry(text);
+    recordHistoryEntry(text, displayText);
     if (!daemonSupportsAmend || currentHeadMessageId === undefined) {
-      void runPrompt(text, attachments);
+      void runPrompt(text, attachments, displayText);
       return;
     }
     const target = currentHeadMessageId;
@@ -2369,7 +2393,12 @@ async function runSession(
     // amendment's messageId. Without this, the user's input would be
     // invisible: amend_prompt doesn't drive runPrompt, and the daemon
     // broadcasts prompt_received for M2 excluding the originator (us).
-    const echo: PendingEcho = { text, attachments, flushed: false };
+    const echo: PendingEcho = {
+      text,
+      displayText: displayText ?? text,
+      attachments,
+      flushed: false,
+    };
     pendingEchoes.push(echo);
     const popEcho = (): void => {
       const idx = pendingEchoes.indexOf(echo);
@@ -2600,6 +2629,7 @@ async function runSession(
   const runPrompt = async (
     text: string,
     attachments: Attachment[],
+    displayText?: string,
   ): Promise<void> => {
     const userBlocks: Array<Record<string, unknown>> = [];
     if (text.length > 0) {
@@ -2613,7 +2643,12 @@ async function runSession(
     // Stash the user-text echo for later flush. Hold a reference so
     // we can splice this entry out on error even if other prompts
     // have been pushed behind it in the meantime.
-    const echo: PendingEcho = { text, attachments, flushed: false };
+    const echo: PendingEcho = {
+      text,
+      displayText: displayText ?? text,
+      attachments,
+      flushed: false,
+    };
     pendingEchoes.push(echo);
 
     let cancelled = false;
@@ -3413,7 +3448,12 @@ async function runSession(
     const merged = mergeReplayedEntries(history, replayedPromptTexts);
     if (merged !== history) {
       history = merged;
-      dispatcher.setHistory(buildCombinedHistory(globalHistory, history));
+      // Replayed prompts arrive expanded (the daemon stores wire form).
+      // Mirror them into displayHistory so the dispatcher walk sees the
+      // same set of entries — they show as full text on recall, which is
+      // the best we can do without paste-id context from another process.
+      displayHistory = mergeReplayedEntries(displayHistory, replayedPromptTexts);
+      dispatcher.setHistory(buildCombinedHistory(globalHistory, displayHistory));
       saveHistory(historyFile, history).catch(() => undefined);
     }
   }

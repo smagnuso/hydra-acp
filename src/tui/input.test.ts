@@ -37,7 +37,13 @@ describe("InputDispatcher", () => {
     feed(d, [ch("h"), ch("i")]);
     const effects = feed(d, [k("enter")]);
     expect(effects).toEqual([
-      { type: "send", text: "hi", planMode: false, attachments: [] },
+      {
+        type: "send",
+        text: "hi",
+        displayText: "hi",
+        planMode: false,
+        attachments: [],
+      },
     ]);
     expect(d.state().buffer).toEqual([""]);
   });
@@ -53,7 +59,13 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["a", "b"]);
     const out = feed(d, [k("enter")]);
     expect(out).toEqual([
-      { type: "send", text: "a\nb", planMode: false, attachments: [] },
+      {
+        type: "send",
+        text: "a\nb",
+        displayText: "a\nb",
+        planMode: false,
+        attachments: [],
+      },
     ]);
   });
 
@@ -93,7 +105,13 @@ describe("InputDispatcher", () => {
     const d = new InputDispatcher({ planMode: true });
     feed(d, [ch("x")]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "x", planMode: true, attachments: [] },
+      {
+        type: "send",
+        text: "x",
+        displayText: "x",
+        planMode: true,
+        attachments: [],
+      },
     ]);
   });
 
@@ -168,7 +186,13 @@ describe("InputDispatcher", () => {
     feed(d, [ch("h"), ch("i")]);
     d.setTurnRunning(true);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "hi", planMode: false, attachments: [] },
+      {
+        type: "send",
+        text: "hi",
+        displayText: "hi",
+        planMode: false,
+        attachments: [],
+      },
     ]);
     expect(d.state().buffer).toEqual([""]);
   });
@@ -500,7 +524,13 @@ describe("InputDispatcher", () => {
     feed(d, [ch("!")]);
     expect(d.state().buffer).toEqual(["second!"]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "queue-edit", index: 1, text: "second!", attachments: [] },
+      {
+        type: "queue-edit",
+        index: 1,
+        text: "second!",
+        displayText: "second!",
+        attachments: [],
+      },
     ]);
     expect(d.state().buffer).toEqual([""]);
     expect(d.state().queueIndex).toBe(-1);
@@ -578,7 +608,13 @@ describe("InputDispatcher", () => {
     expect(d.state().queueIndex).toBe(1);
     expect(feed(d, [k("shift-enter")])).toEqual([
       { type: "queue-remove", index: 1 },
-      { type: "amend", text: "second!", planMode: false, attachments: [] },
+      {
+        type: "amend",
+        text: "second!",
+        displayText: "second!",
+        planMode: false,
+        attachments: [],
+      },
     ]);
     expect(d.state().buffer).toEqual([""]);
     expect(d.state().queueIndex).toBe(-1);
@@ -601,7 +637,13 @@ describe("InputDispatcher", () => {
     feed(d, [k("up")]);
     expect(feed(d, [k("ctrl-enter")])).toEqual([
       { type: "queue-remove", index: 0 },
-      { type: "amend", text: "queued", planMode: false, attachments: [] },
+      {
+        type: "amend",
+        text: "queued",
+        displayText: "queued",
+        planMode: false,
+        attachments: [],
+      },
     ]);
   });
 
@@ -609,7 +651,13 @@ describe("InputDispatcher", () => {
     const d = new InputDispatcher();
     feed(d, [ch("h"), ch("i")]);
     expect(feed(d, [k("ctrl-s")])).toEqual([
-      { type: "amend", text: "hi", planMode: false, attachments: [] },
+      {
+        type: "amend",
+        text: "hi",
+        displayText: "hi",
+        planMode: false,
+        attachments: [],
+      },
     ]);
     expect(d.state().buffer).toEqual([""]);
   });
@@ -626,7 +674,13 @@ describe("InputDispatcher", () => {
     expect(d.state().queueIndex).toBe(1);
     expect(feed(d, [k("ctrl-s")])).toEqual([
       { type: "queue-remove", index: 1 },
-      { type: "amend", text: "second", planMode: false, attachments: [] },
+      {
+        type: "amend",
+        text: "second",
+        displayText: "second",
+        planMode: false,
+        attachments: [],
+      },
     ]);
     expect(d.state().queueIndex).toBe(-1);
   });
@@ -756,7 +810,13 @@ describe("InputDispatcher", () => {
     feed(d, [k("ctrl-r")]);
     expect(d.state().buffer).toEqual(["git push"]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "git push", planMode: false, attachments: [] },
+      {
+        type: "send",
+        text: "git push",
+        displayText: "git push",
+        planMode: false,
+        attachments: [],
+      },
     ]);
   });
 
@@ -900,7 +960,13 @@ describe("InputDispatcher", () => {
     feed(d, [k("ctrl-r")]);
     expect(d.state().buffer).toEqual(["git push"]);
     expect(feed(d, [k("enter")])).toEqual([
-      { type: "send", text: "git push", planMode: false, attachments: [] },
+      {
+        type: "send",
+        text: "git push",
+        displayText: "git push",
+        planMode: false,
+        attachments: [],
+      },
     ]);
   });
 
@@ -983,6 +1049,7 @@ describe("InputDispatcher", () => {
         {
           type: "send",
           text: "hi",
+          displayText: "hi",
           planMode: false,
           attachments: [att("a.png")],
         },
@@ -998,6 +1065,7 @@ describe("InputDispatcher", () => {
         {
           type: "send",
           text: "",
+          displayText: "",
           planMode: false,
           attachments: [att("a.png")],
         },
@@ -1016,6 +1084,7 @@ describe("InputDispatcher", () => {
           type: "queue-edit",
           index: 0,
           text: "queued!",
+          displayText: "queued!",
           attachments: [att("a.png")],
         },
       ]);
@@ -1058,6 +1127,191 @@ describe("InputDispatcher", () => {
       expect(out).toEqual([]);
       expect(d.state().buffer).toEqual(["h"]);
       expect(d.state().attachments).toEqual([]);
+    });
+  });
+
+  describe("large-paste collapse", () => {
+    function paste(d: InputDispatcher, text: string): InputEffect[] {
+      return d.feed({ type: "paste", text });
+    }
+
+    function lines(n: number, prefix = "line"): string {
+      return Array.from({ length: n }, (_, i) => `${prefix} ${i + 1}`).join(
+        "\n",
+      );
+    }
+
+    it("inserts a verbatim paste at the 10-line boundary", () => {
+      const d = new InputDispatcher();
+      const text = lines(10);
+      paste(d, text);
+      expect(d.state().buffer).toEqual(text.split("\n"));
+    });
+
+    it("collapses an 11-line paste into a [pasted #N +M lines] token", () => {
+      const d = new InputDispatcher();
+      const text = lines(11);
+      paste(d, text);
+      expect(d.state().buffer).toEqual(["[pasted #1 +11 lines]"]);
+    });
+
+    it("send emits expanded text and the placeholder displayText", () => {
+      const d = new InputDispatcher();
+      paste(d, lines(12));
+      const out = feed(d, [k("enter")]);
+      expect(out).toEqual([
+        {
+          type: "send",
+          text: lines(12),
+          displayText: "[pasted #1 +12 lines]",
+          planMode: false,
+          attachments: [],
+        },
+      ]);
+    });
+
+    it("expands two placeholders independently in one prompt", () => {
+      const d = new InputDispatcher();
+      paste(d, lines(11, "a"));
+      feed(d, [ch(" ")]);
+      paste(d, lines(13, "b"));
+      const out = feed(d, [k("enter")]);
+      expect(out).toEqual([
+        {
+          type: "send",
+          text: `${lines(11, "a")} ${lines(13, "b")}`,
+          displayText: "[pasted #1 +11 lines] [pasted #2 +13 lines]",
+          planMode: false,
+          attachments: [],
+        },
+      ]);
+    });
+
+    it("up-arrow recall of a placeholder reanimates on resubmit", () => {
+      const d = new InputDispatcher();
+      paste(d, lines(15));
+      const first = feed(d, [k("enter")])[0];
+      expect(first?.type).toBe("send");
+      // Mimic the app: after send, the displayText form lands in history.
+      d.setHistory([(first as { displayText: string }).displayText]);
+      feed(d, [k("up")]);
+      expect(d.state().buffer).toEqual(["[pasted #1 +15 lines]"]);
+      const second = feed(d, [k("enter")]);
+      expect(second).toEqual([
+        {
+          type: "send",
+          text: lines(15),
+          displayText: "[pasted #1 +15 lines]",
+          planMode: false,
+          attachments: [],
+        },
+      ]);
+    });
+
+    it("backspace at trailing ] removes the whole placeholder atomically", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h"), ch("i"), ch(" ")]);
+      paste(d, lines(11));
+      // Cursor is at end of the placeholder.
+      feed(d, [k("backspace")]);
+      expect(d.state().buffer).toEqual(["hi "]);
+      // Submit now sees no placeholder — text equals displayText.
+      const out = feed(d, [k("enter")]);
+      expect(out).toEqual([
+        {
+          type: "send",
+          text: "hi ",
+          displayText: "hi ",
+          planMode: false,
+          attachments: [],
+        },
+      ]);
+    });
+
+    it("delete-forward at leading [ removes the whole placeholder", () => {
+      const d = new InputDispatcher();
+      paste(d, lines(11));
+      feed(d, [ch(" "), ch("z")]);
+      feed(d, [k("home")]);
+      feed(d, [k("delete")]);
+      expect(d.state().buffer).toEqual([" z"]);
+    });
+
+    it("left arrow at trailing ] jumps over the placeholder in one step", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("x")]);
+      paste(d, lines(11));
+      feed(d, [k("left")]);
+      // Cursor lands just before the `[`.
+      expect(d.state().col).toBe(1);
+    });
+
+    it("right arrow at leading [ jumps over the placeholder in one step", () => {
+      const d = new InputDispatcher();
+      paste(d, lines(11));
+      feed(d, [k("home")]);
+      feed(d, [k("right")]);
+      expect(d.state().col).toBe("[pasted #1 +11 lines]".length);
+    });
+
+    it("alt-b / alt-f treat the placeholder as a single word", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("a"), ch(" ")]);
+      paste(d, lines(11));
+      feed(d, [ch(" "), ch("b")]);
+      // Cursor at end. alt-b first skips over "b", then over space,
+      // then over the placeholder atomically.
+      feed(d, [k("alt-b")]);
+      expect(d.state().col).toBe("a [pasted #1 +11 lines] ".length);
+      feed(d, [k("alt-b")]);
+      expect(d.state().col).toBe(2);
+      feed(d, [k("alt-f")]);
+      expect(d.state().col).toBe("a [pasted #1 +11 lines]".length);
+    });
+
+    it("^W kills the placeholder atomically and ^Y yanks it back working", () => {
+      const d = new InputDispatcher();
+      paste(d, lines(11));
+      feed(d, [k("ctrl-w")]);
+      expect(d.state().buffer).toEqual([""]);
+      feed(d, [k("ctrl-y")]);
+      expect(d.state().buffer).toEqual(["[pasted #1 +11 lines]"]);
+      const out = feed(d, [k("enter")]);
+      expect(out).toEqual([
+        {
+          type: "send",
+          text: lines(11),
+          displayText: "[pasted #1 +11 lines]",
+          planMode: false,
+          attachments: [],
+        },
+      ]);
+    });
+
+    it("inside reverse history search, paste is treated as query text", () => {
+      const d = new InputDispatcher({ history: [lines(11)] });
+      feed(d, [k("ctrl-r")]);
+      paste(d, lines(11));
+      // No history entry includes the literal 11-line paste as a
+      // substring (history was a different separator? both equal here).
+      // What we care about: no placeholder ends up in the buffer, and
+      // the search-query state machine accepts the paste as input.
+      expect(
+        d.state().buffer.some((row) => row.includes("[pasted #")),
+      ).toBe(false);
+    });
+
+    it("collapsePastes:false disables the threshold entirely", () => {
+      const d = new InputDispatcher({ collapsePastes: false });
+      const text = lines(50);
+      paste(d, text);
+      expect(d.state().buffer).toEqual(text.split("\n"));
+    });
+
+    it("expandedText() exposes the wire form for callers that bypass send", () => {
+      const d = new InputDispatcher();
+      paste(d, lines(11));
+      expect(d.expandedText()).toBe(lines(11));
     });
   });
 });
