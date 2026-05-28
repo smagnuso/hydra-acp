@@ -1880,7 +1880,14 @@ export async function pickSession(
       // composer eats hotkeys like `/`, `r`, `?`, `k`, etc. — they only
       // fire when the user has moved focus down into the session list.
       if (selectedIdx === 0 && !searchActive) {
-        if (name === "ESCAPE" || name === "CTRL_C" || name === "CTRL_D") {
+        // ESCAPE has no dispatcher-side meaning in the picker composer
+        // (no in-flight turn to cancel), so it stays a top-level abort.
+        // ^c / ^d are intentionally NOT intercepted here — they go
+        // through the dispatcher below so they edit the buffer first
+        // (^c peels: clear buffer / attachments; ^d deletes forward)
+        // and only detach the picker when the dispatcher emits its
+        // `exit` effect (i.e. there's nothing left to peel).
+        if (name === "ESCAPE") {
           cleanup();
           resolve({ kind: "abort" });
           return;
@@ -1944,13 +1951,28 @@ export async function pickSession(
           placeComposerCursor();
           return;
         }
-        composer.feed(event);
+        const effects = composer.feed(event);
         const after = composer.state();
         const unchanged =
           before.buffer.length === after.buffer.length &&
           before.buffer.every((line, i) => line === after.buffer[i]) &&
           before.row === after.row &&
           before.col === after.col;
+        // Dispatcher told us to exit (e.g. ^c with no text left to clear,
+        // or ^d on a fully empty buffer), or ^d at end-of-buffer where
+        // deleteForward had nothing to remove — either way, detach. The
+        // ^d widening is intentional: the dispatcher only emits exit on
+        // a fully empty buffer, but in the picker we want the next ^d
+        // after the last forward-delete to detach without making the
+        // user clear what's behind the cursor too.
+        if (
+          effects.some((e) => e.type === "exit") ||
+          (unchanged && name === "CTRL_D")
+        ) {
+          cleanup();
+          resolve({ kind: "abort" });
+          return;
+        }
         if (unchanged) {
           placeComposerCursor();
           return;
