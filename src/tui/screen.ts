@@ -1992,6 +1992,12 @@ export class Screen {
       if (title) {
         this.term(" · ").bold.noFormat(truncate(title, titleRoom));
       }
+      // Clear the gap between end-of-left-content and start-of-usage
+      // before moving over. paintRow doesn't pre-clear the row, so a
+      // previous frame's longer title (or a prior session's title)
+      // would leak its trailing characters into this frame's gap.
+      // Same fix drawBanner() uses for its right slot.
+      this.term.eraseLineAfter();
       if (usage) {
         // Land the final char at col w-1, not w: paintRow's trailing
         // eraseLineAfter sits at col w with "pending wrap" set, and on
