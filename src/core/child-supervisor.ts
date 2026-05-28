@@ -1,0 +1,587 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
+import type { ProcessTokenRegistry } from "../daemon/auth.js";
+
+// Shared lifecycle for daemon-supervised child processes (extensions and
+// transformers). Each kind passes a SupervisorAdapter for the bits that
+// differ — paths, env-var name for the child's configured name, token-
+// registry role, log/error wording.
+
+export interface BaseChildConfig {
+  name: string;
+  command: string[];
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface BaseChildContext {
+  daemonUrl: string;
+  daemonHost: string;
+  daemonPort: number;
+  serviceToken: string;
+  daemonWsUrl: string;
+  hydraHome: string;
+}
+
+export type BaseChildStatus =
+  | "running"
+  | "stopped"
+  | "restarting"
+  | "disabled";
+
+export interface BaseChildInfo {
+  name: string;
+  status: BaseChildStatus;
+  pid: number | undefined;
+  enabled: boolean;
+  restartCount: number;
+  startedAt: number | undefined;
+  lastExitCode: number | undefined;
+  logPath: string;
+  version: string | undefined;
+}
+
+export interface SupervisorAdapter {
+  kind: "extension" | "transformer";
+  nameEnvVar: string;
+  tokenRole: "extension" | "transformer";
+  paths: {
+    dir: () => string;
+    logFile: (name: string) => string;
+    pidFile: (name: string) => string;
+  };
+}
+
+const RESTART_BASE_MS = 1_000;
+const RESTART_CAP_MS = 60_000;
+const STOP_GRACE_MS = 3_000;
+
+interface ChildEntry<TConfig extends BaseChildConfig> {
+  config: TConfig;
+  child: ChildProcess | undefined;
+  logStream: fs.WriteStream | undefined;
+  restartTimer: NodeJS.Timeout | undefined;
+  pid: number | undefined;
+  startedAt: number | undefined;
+  restartCount: number;
+  lastExitCode: number | undefined;
+  manuallyStopped: boolean;
+  exitWaiters: Array<() => void>;
+  version: string | undefined;
+  // Per-process token minted at spawn time. Undefined when no registry is
+  // configured (backwards compat path).
+  processToken: string | undefined;
+}
+
+export interface ChildSupervisorOptions {
+  tokenRegistry?: ProcessTokenRegistry;
+}
+
+export class ChildSupervisor<TConfig extends BaseChildConfig> {
+  protected entries = new Map<string, ChildEntry<TConfig>>();
+  private stopping = false;
+  private context: BaseChildContext | undefined;
+  private tokenRegistry: ProcessTokenRegistry | undefined;
+  private adapter: SupervisorAdapter;
+
+  constructor(
+    configs: TConfig[],
+    adapter: SupervisorAdapter,
+    context?: BaseChildContext,
+    options: ChildSupervisorOptions = {},
+  ) {
+    this.adapter = adapter;
+    this.context = context;
+    this.tokenRegistry = options.tokenRegistry;
+    for (const cfg of configs) {
+      this.entries.set(cfg.name, this.makeEntry(cfg));
+    }
+  }
+
+  setContext(context: BaseChildContext): void {
+    this.context = context;
+  }
+
+  // Called by the WS handler after a process connects and calls initialize
+  // with clientInfo.version. Stored on the entry and surfaced in list().
+  reportVersion(name: string, version: string): void {
+    const entry = this.entries.get(name);
+    if (entry) {
+      entry.version = version;
+    }
+  }
+
+  async start(): Promise<void> {
+    if (!this.context) {
+      throw new Error(
+        `${this.managerName()}: setContext must be called before start`,
+      );
+    }
+    await fsp.mkdir(this.adapter.paths.dir(), { recursive: true });
+    await this.reapOrphans();
+    for (const entry of this.entries.values()) {
+      if (!entry.config.enabled) {
+        continue;
+      }
+      this.spawn(entry, 0);
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true;
+    const tasks: Array<Promise<void>> = [];
+    for (const entry of this.entries.values()) {
+      if (entry.restartTimer) {
+        clearTimeout(entry.restartTimer);
+        entry.restartTimer = undefined;
+      }
+      const child = entry.child;
+      if (!child) {
+        continue;
+      }
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        void 0;
+      }
+      tasks.push(
+        new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          const timer = setTimeout(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              void 0;
+            }
+            resolve();
+          }, STOP_GRACE_MS);
+          child.on("exit", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        }),
+      );
+    }
+    await Promise.allSettled(tasks);
+    for (const entry of this.entries.values()) {
+      try {
+        entry.logStream?.end();
+      } catch {
+        void 0;
+      }
+      entry.child = undefined;
+      entry.logStream = undefined;
+      entry.pid = undefined;
+    }
+  }
+
+  list(): BaseChildInfo[] {
+    return [...this.entries.values()].map((entry) => this.infoFor(entry));
+  }
+
+  get(name: string): BaseChildInfo | undefined {
+    const entry = this.entries.get(name);
+    return entry ? this.infoFor(entry) : undefined;
+  }
+
+  has(name: string): boolean {
+    return this.entries.has(name);
+  }
+
+  async startByName(name: string): Promise<BaseChildInfo> {
+    const entry = this.entries.get(name);
+    if (!entry) {
+      throw withCode(
+        new Error(`unknown ${this.adapter.kind}: ${name}`),
+        "NOT_FOUND",
+      );
+    }
+    if (entry.child) {
+      throw withCode(
+        new Error(`${this.adapter.kind} ${name} already running`),
+        "CONFLICT",
+      );
+    }
+    if (entry.restartTimer) {
+      clearTimeout(entry.restartTimer);
+      entry.restartTimer = undefined;
+    }
+    entry.manuallyStopped = false;
+    entry.restartCount = 0;
+    this.spawn(entry, 0);
+    return this.infoFor(entry);
+  }
+
+  async stopByName(name: string): Promise<BaseChildInfo> {
+    const entry = this.entries.get(name);
+    if (!entry) {
+      throw withCode(
+        new Error(`unknown ${this.adapter.kind}: ${name}`),
+        "NOT_FOUND",
+      );
+    }
+    entry.manuallyStopped = true;
+    if (entry.restartTimer) {
+      clearTimeout(entry.restartTimer);
+      entry.restartTimer = undefined;
+    }
+    const child = entry.child;
+    if (!child) {
+      return this.infoFor(entry);
+    }
+    await this.terminate(entry, child);
+    return this.infoFor(entry);
+  }
+
+  async restartByName(name: string): Promise<BaseChildInfo> {
+    await this.stopByName(name);
+    return this.startByName(name);
+  }
+
+  // Register a new child and (if enabled) start it. Used by the POST
+  // route endpoints so `<kind>s add` can take effect without a daemon
+  // restart.
+  register(config: TConfig): BaseChildInfo {
+    if (this.entries.has(config.name)) {
+      throw withCode(
+        new Error(`${this.adapter.kind} ${config.name} already exists`),
+        "CONFLICT",
+      );
+    }
+    if (!this.context) {
+      throw new Error(
+        `${this.managerName()}: setContext must be called before register`,
+      );
+    }
+    const entry = this.makeEntry(config);
+    this.entries.set(config.name, entry);
+    if (config.enabled) {
+      this.spawn(entry, 0);
+    }
+    return this.infoFor(entry);
+  }
+
+  async unregister(name: string): Promise<void> {
+    const entry = this.entries.get(name);
+    if (!entry) {
+      throw withCode(
+        new Error(`unknown ${this.adapter.kind}: ${name}`),
+        "NOT_FOUND",
+      );
+    }
+    entry.manuallyStopped = true;
+    if (entry.restartTimer) {
+      clearTimeout(entry.restartTimer);
+      entry.restartTimer = undefined;
+    }
+    const child = entry.child;
+    if (child) {
+      await this.terminate(entry, child);
+    }
+    try {
+      entry.logStream?.end();
+    } catch {
+      void 0;
+    }
+    this.entries.delete(name);
+  }
+
+  private async terminate(
+    entry: ChildEntry<TConfig>,
+    child: ChildProcess,
+  ): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+    const exited = new Promise<void>((resolve) => {
+      entry.exitWaiters.push(resolve);
+    });
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      void 0;
+    }
+    const killTimer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        void 0;
+      }
+    }, STOP_GRACE_MS);
+    if (typeof killTimer.unref === "function") {
+      killTimer.unref();
+    }
+    try {
+      await exited;
+    } finally {
+      clearTimeout(killTimer);
+    }
+  }
+
+  protected infoFor(entry: ChildEntry<TConfig>): BaseChildInfo {
+    let status: BaseChildStatus;
+    if (entry.child) {
+      status = "running";
+    } else if (entry.restartTimer) {
+      status = "restarting";
+    } else if (!entry.config.enabled) {
+      status = "disabled";
+    } else {
+      status = "stopped";
+    }
+    return {
+      name: entry.config.name,
+      status,
+      pid: entry.pid,
+      enabled: entry.config.enabled,
+      restartCount: entry.restartCount,
+      startedAt: entry.startedAt,
+      lastExitCode: entry.lastExitCode,
+      logPath: this.adapter.paths.logFile(entry.config.name),
+      version: entry.version,
+    };
+  }
+
+  private makeEntry(config: TConfig): ChildEntry<TConfig> {
+    return {
+      config,
+      child: undefined,
+      logStream: undefined,
+      restartTimer: undefined,
+      pid: undefined,
+      startedAt: undefined,
+      restartCount: 0,
+      lastExitCode: undefined,
+      manuallyStopped: false,
+      exitWaiters: [],
+      version: undefined,
+      processToken: undefined,
+    };
+  }
+
+  private async reapOrphans(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(this.adapter.paths.dir());
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "ENOENT") {
+        return;
+      }
+      throw err;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".pid")) {
+        continue;
+      }
+      const pidPath = path.join(this.adapter.paths.dir(), entry);
+      let pid: number | undefined;
+      try {
+        const raw = await fsp.readFile(pidPath, "utf8");
+        const parsed = Number.parseInt(raw.trim(), 10);
+        if (Number.isInteger(parsed) && parsed > 0) {
+          pid = parsed;
+        }
+      } catch {
+        void 0;
+      }
+      if (typeof pid === "number" && isAlive(pid)) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          void 0;
+        }
+        const deadline = Date.now() + STOP_GRACE_MS;
+        while (Date.now() < deadline && isAlive(pid)) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        if (isAlive(pid)) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            void 0;
+          }
+        }
+      }
+      await fsp.unlink(pidPath).catch(() => undefined);
+    }
+  }
+
+  private spawn(entry: ChildEntry<TConfig>, attempt: number): void {
+    if (this.stopping || entry.manuallyStopped) {
+      return;
+    }
+    const ctx = this.context;
+    if (!ctx) {
+      throw new Error(`${this.managerName()}.spawn called before setContext`);
+    }
+    const cfg = entry.config;
+    const command = cfg.command.length > 0 ? cfg.command : [cfg.name];
+
+    const logStream = fs.createWriteStream(
+      this.adapter.paths.logFile(cfg.name),
+      { flags: "a" },
+    );
+    logStream.write(
+      `[hydra-acp] ${new Date().toISOString()} starting ${this.adapter.kind} ${cfg.name} (attempt ${attempt + 1})\n`,
+    );
+
+    // Mint a per-process token when a registry is available; fall back to the
+    // shared service token so existing setups without a registry still work.
+    const processToken =
+      this.tokenRegistry?.mint(cfg.name, this.adapter.tokenRole) ??
+      ctx.serviceToken;
+    entry.processToken = processToken;
+    // Clear stale version from a previous run so we don't show the old
+    // version while the process is starting up.
+    entry.version = undefined;
+
+    const env = {
+      ...process.env,
+      HYDRA_ACP_DAEMON_URL: ctx.daemonUrl,
+      HYDRA_ACP_DAEMON_HOST: ctx.daemonHost,
+      HYDRA_ACP_DAEMON_PORT: String(ctx.daemonPort),
+      HYDRA_ACP_TOKEN: processToken,
+      HYDRA_ACP_WS_URL: ctx.daemonWsUrl,
+      HYDRA_ACP_HOME: ctx.hydraHome,
+      [this.adapter.nameEnvVar]: cfg.name,
+      ...cfg.env,
+    };
+
+    const [cmd, ...baseArgs] = command;
+    if (cmd === undefined) {
+      logStream.write(
+        `[hydra-acp] ${this.adapter.kind} ${cfg.name} has empty command\n`,
+      );
+      logStream.end();
+      return;
+    }
+    const args = [...baseArgs, ...cfg.args];
+
+    let child: ChildProcess;
+    try {
+      child = spawn(cmd, args, {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+      });
+    } catch (err) {
+      logStream.write(
+        `[hydra-acp] failed to spawn ${cfg.name}: ${(err as Error).message}\n`,
+      );
+      logStream.end();
+      this.scheduleRestart(entry, attempt);
+      return;
+    }
+
+    if (child.stdout) {
+      child.stdout.pipe(logStream, { end: false });
+    }
+    if (child.stderr) {
+      child.stderr.pipe(logStream, { end: false });
+    }
+
+    if (typeof child.pid === "number") {
+      try {
+        fs.writeFileSync(
+          this.adapter.paths.pidFile(cfg.name),
+          `${child.pid}\n`,
+          { encoding: "utf8", mode: 0o600 },
+        );
+      } catch (err) {
+        logStream.write(
+          `[hydra-acp] failed to write pid file for ${cfg.name}: ${(err as Error).message}\n`,
+        );
+      }
+    }
+
+    entry.child = child;
+    entry.logStream = logStream;
+    entry.pid = typeof child.pid === "number" ? child.pid : undefined;
+    entry.startedAt = Date.now();
+    entry.lastExitCode = undefined;
+
+    child.on("error", (err) => {
+      logStream.write(
+        `[hydra-acp] ${this.adapter.kind} ${cfg.name} error: ${err.message}\n`,
+      );
+    });
+
+    child.on("exit", (code, signal) => {
+      try {
+        fs.unlinkSync(this.adapter.paths.pidFile(cfg.name));
+      } catch {
+        void 0;
+      }
+      logStream.write(
+        `[hydra-acp] ${this.adapter.kind} ${cfg.name} exited code=${code ?? "null"} signal=${signal ?? "null"}\n`,
+      );
+      entry.child = undefined;
+      entry.pid = undefined;
+      entry.lastExitCode = typeof code === "number" ? code : undefined;
+      // Revoke the per-process token so it can't be reused between restarts.
+      if (entry.processToken) {
+        this.tokenRegistry?.revoke(cfg.name);
+        entry.processToken = undefined;
+      }
+      const waiters = entry.exitWaiters.splice(0);
+      for (const resolve of waiters) {
+        resolve();
+      }
+      if (this.stopping || entry.manuallyStopped) {
+        try {
+          logStream.end();
+        } catch {
+          void 0;
+        }
+        entry.logStream = undefined;
+        return;
+      }
+      entry.restartCount += 1;
+      this.scheduleRestart(entry, attempt + 1);
+    });
+  }
+
+  private scheduleRestart(entry: ChildEntry<TConfig>, attempt: number): void {
+    if (this.stopping || entry.manuallyStopped) {
+      return;
+    }
+    const delay = Math.min(
+      RESTART_BASE_MS * 2 ** Math.min(attempt, 10),
+      RESTART_CAP_MS,
+    );
+    entry.restartTimer = setTimeout(() => {
+      entry.restartTimer = undefined;
+      this.spawn(entry, attempt);
+    }, delay);
+    if (typeof entry.restartTimer.unref === "function") {
+      entry.restartTimer.unref();
+    }
+  }
+
+  private managerName(): string {
+    return this.adapter.kind === "extension"
+      ? "ExtensionManager"
+      : "TransformerManager";
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function withCode(err: Error, code: string): Error & { code: string } {
+  (err as Error & { code: string }).code = code;
+  return err as Error & { code: string };
+}
