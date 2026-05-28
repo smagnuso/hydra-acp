@@ -1699,7 +1699,12 @@ export class SessionManager {
         s.close({
           deleteRecord: false,
           regenSnapshot: true,
-          regenSnapshotTimeoutMs: 8_000,
+          // 30s upper bound on daemon shutdown latency. Sessions run
+          // in parallel (Promise.allSettled below), so total shutdown
+          // is bounded by the slowest single session's regen — and
+          // 8s was empirically too tight for deep-history sessions on
+          // any model. With Haiku, 30s is comfortable headroom.
+          regenSnapshotTimeoutMs: 30_000,
         }),
       ),
     );

@@ -60,6 +60,12 @@ export const JsonRpcErrorCodes = {
   PermissionDenied: -32011,
   AlreadyAttached: -32012,
   StreamNotEnabled: -32013,
+  // Session is mid-close (regen running, agent about to be killed).
+  // Attach succeeds (read-only view of what was already there) but
+  // mutating operations like session/prompt and slash commands are
+  // rejected — accepting a new turn whose result we'd discard within
+  // seconds would just lose the user's input silently.
+  SessionClosing: -32014,
 } as const;
 
 export const InitializeParams = z.object({

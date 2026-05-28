@@ -39,10 +39,17 @@ const MAX_TITLE_LEN = 200;
 
 // The synthesis prompt sent to the agent at idle-close / shutdown /
 // picker T / `/hydra title` no-arg. Asks for a single JSON object with
-// both title and synopsis. Output guidance is deliberately verbose —
-// modern models follow "no prose, no markdown, no code fences" pretty
-// reliably, but the JSON-extraction fallback in tryParseSnapshot
-// handles the preamble/fence cases when they slip through.
+// title and the *qualitative* synopsis fields only — files_touched and
+// tools_used are computed locally from history.jsonl (see
+// history-aggregate.ts) and merged in after, so the agent doesn't have
+// to enumerate them. That shrinks the output and removes a hallucination
+// risk: the agent can't claim it touched a file it didn't, because we
+// don't ask.
+//
+// Output guidance is deliberately verbose — modern models follow "no
+// prose, no markdown, no code fences" pretty reliably, but the JSON-
+// extraction fallback in tryParseSnapshot handles the preamble/fence
+// cases when they slip through.
 export const SNAPSHOT_PROMPT =
   "Reply with ONLY a JSON object with exactly these keys, no prose, no markdown, no code fences:\n" +
   "{\n" +
@@ -50,8 +57,6 @@ export const SNAPSHOT_PROMPT =
   '  "synopsis": {\n' +
   '    "goal": "the user\'s original ask",\n' +
   '    "outcome": "what was concluded or shipped",\n' +
-  '    "files_touched": ["file paths edited or read"],\n' +
-  '    "tools_used": ["tool names"],\n' +
   '    "rejected_approaches": ["things tried and abandoned"],\n' +
   '    "open_threads": ["work started but not finished"]\n' +
   "  }\n" +

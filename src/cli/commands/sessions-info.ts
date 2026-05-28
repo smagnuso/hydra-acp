@@ -15,6 +15,13 @@ import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import type { HistoryEntry } from "../../core/history-store.js";
+import {
+  countTurns,
+  extractFilesTouchedDetailed,
+  extractToolHistogram,
+  type FileCount as AggFileCount,
+  type ToolCount as AggToolCount,
+} from "../../core/history-aggregate.js";
 import { httpBase } from "./sessions.js";
 
 export interface SessionsInfoOptions {
@@ -58,18 +65,8 @@ interface SessionSynopsisShape {
   open_threads?: string[];
 }
 
-interface ToolCount {
-  name: string;
-  count: number;
-}
-
-interface FileCount {
-  path: string;
-  count: number;
-  // Per-tool breakdown (which tools touched this file, how often).
-  // Surfaced only by --verbose / --json; the summary view collapses to count.
-  byTool: ToolCount[];
-}
+type ToolCount = AggToolCount;
+type FileCount = AggFileCount;
 
 // Default rendering caps. --verbose disables both.
 const DEFAULT_TOP_TOOLS = 10;
@@ -141,61 +138,9 @@ export function aggregate(
   const r = bundle.session;
   const history = bundle.history;
 
-  let turns = 0;
-  const toolCounts = new Map<string, number>();
-  const fileTouches = new Map<string, Map<string, number>>();
-
-  for (const entry of history) {
-    const params = entry.params as
-      | {
-          update?: {
-            sessionUpdate?: string;
-            name?: unknown;
-            title?: unknown;
-            rawInput?: unknown;
-            locations?: unknown;
-          };
-        }
-      | undefined;
-    const update = params?.update;
-    const kind = update?.sessionUpdate;
-    if (kind === "prompt_received") {
-      turns += 1;
-      continue;
-    }
-    if (kind === "tool_call") {
-      // claude-acp and codex-acp emit the human-readable tool name in
-      // `title`; the spec-shaped path uses `name`. Mirror render-update.ts:441
-      // by trying both in order before falling back to "(unnamed)".
-      const toolName =
-        (typeof update?.name === "string" && update.name) ||
-        (typeof update?.title === "string" && update.title) ||
-        "(unnamed)";
-      toolCounts.set(toolName, (toolCounts.get(toolName) ?? 0) + 1);
-      for (const p of extractPaths(update?.rawInput, update?.locations)) {
-        let byTool = fileTouches.get(p);
-        if (!byTool) {
-          byTool = new Map();
-          fileTouches.set(p, byTool);
-        }
-        byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
-      }
-    }
-  }
-
-  const tools = [...toolCounts.entries()]
-    .map(([name, count]): ToolCount => ({ name, count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-
-  const files = [...fileTouches.entries()]
-    .map(([path, byTool]): FileCount => {
-      const perTool = [...byTool.entries()]
-        .map(([name, count]): ToolCount => ({ name, count }))
-        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-      const total = perTool.reduce((s, t) => s + t.count, 0);
-      return { path, count: total, byTool: perTool };
-    })
-    .sort((a, b) => b.count - a.count || a.path.localeCompare(b.path));
+  const turns = countTurns(history);
+  const tools: ToolCount[] = extractToolHistogram(history);
+  const files: FileCount[] = extractFilesTouchedDetailed(history);
 
   const usage = r.currentUsage;
   const createdMs = Date.parse(r.createdAt);
@@ -232,52 +177,6 @@ export function aggregate(
 }
 
 // Extract file path candidates from a tool_call's rawInput plus its
-// optional locations[] sidecar. Covers Edit/Read/Write/Glob (file_path
-// or path), plus any tool that emits a locations array of { path }.
-// Tool-specific schemas vary, so this is a best-effort scan — we'd
-// rather over-include a Bash command's `--file` arg than miss real
-// edits. Bash commands themselves aren't decomposed; we just look for
-// `file_path` / `path` keys.
-function extractPaths(
-  rawInput: unknown,
-  locations: unknown,
-): Set<string> {
-  const out = new Set<string>();
-  if (rawInput && typeof rawInput === "object") {
-    const obj = rawInput as Record<string, unknown>;
-    if (typeof obj.file_path === "string") {
-      out.add(obj.file_path);
-    } else if (typeof obj.path === "string") {
-      out.add(obj.path);
-    }
-    // Edit's `edits` array carries individual diffs, all on the same
-    // file_path at the top level. MultiEdit-style tools surface per-edit
-    // file_path inside the items.
-    const edits = obj.edits;
-    if (Array.isArray(edits)) {
-      for (const e of edits) {
-        if (e && typeof e === "object") {
-          const fp = (e as { file_path?: unknown }).file_path;
-          if (typeof fp === "string") {
-            out.add(fp);
-          }
-        }
-      }
-    }
-  }
-  if (Array.isArray(locations)) {
-    for (const loc of locations) {
-      if (loc && typeof loc === "object") {
-        const p = (loc as { path?: unknown }).path;
-        if (typeof p === "string") {
-          out.add(p);
-        }
-      }
-    }
-  }
-  return out;
-}
-
 function formatSummary(d: SessionInfoData, verbose: boolean): string {
   const lines: string[] = [];
   const pad = (label: string): string => label.padEnd(14);

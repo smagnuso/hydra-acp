@@ -100,17 +100,24 @@ export function registerSessionRoutes(
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const session = manager.get(id);
     if (session) {
-      // Same posture as closeAll on shutdown: ask the agent for a final
-      // title + synopsis before kill so the cold record carries the
-      // freshest digest. 8s timeout matches the shutdown path — kill
-      // should be snappy, but a few seconds of regen is the difference
-      // between a useful cold record and a featureless one.
-      await session.close({
-        deleteRecord: false,
-        regenSnapshot: true,
-        regenSnapshotTimeoutMs: 8_000,
-      });
-      reply.code(204).send();
+      // Fire-and-forget: ask the agent for a final title + synopsis
+      // before kill so the cold record carries the freshest digest, but
+      // don't make the caller wait on it. The picker's k key calls this
+      // endpoint and would otherwise block navigation while the regen
+      // completes. Returning 202 immediately lets the UI move on; the
+      // close (and synopsis persist) finish in the background.
+      //
+      // 60s upper bound for the synthesis turn — deep-history sessions
+      // on slow models (Opus) can take well over 15s. With Haiku as the
+      // configured synopsisModel this typically finishes in 2-3s.
+      void session
+        .close({
+          deleteRecord: false,
+          regenSnapshot: true,
+          regenSnapshotTimeoutMs: 180_000,
+        })
+        .catch(() => undefined);
+      reply.code(202).send();
       return;
     }
     const exists = await manager.hasRecord(id);

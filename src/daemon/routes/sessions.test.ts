@@ -85,7 +85,20 @@ describe("session routes: termination broadcasts session_closed", () => {
       `${harness.baseUrl}/v1/sessions/${session.sessionId}/kill`,
       { method: "POST" },
     );
-    expect(res.status).toBe(204);
+    // Kill is fire-and-forget so the picker doesn't block on the
+    // close-time snapshot regen — endpoint returns 202 immediately and
+    // the close continues in the background.
+    expect(res.status).toBe(202);
+
+    // Poll briefly for the close to complete. Mock agent has no real
+    // regen turn so this finishes within a few ms; cap at 2s as a safety.
+    const deadline = Date.now() + 2_000;
+    while (
+      Date.now() < deadline &&
+      harness.manager.get(session.sessionId) !== undefined
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
 
     const closeMsg = stream.sent.find(
       (m) => "method" in m && m.method === "hydra-acp/session_closed",

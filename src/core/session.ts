@@ -49,6 +49,10 @@ import {
   tryParseSnapshot,
   type SessionSynopsis,
 } from "./snapshot.js";
+import {
+  extractFilesTouched,
+  extractToolsUsed,
+} from "./history-aggregate.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import {
@@ -331,6 +335,10 @@ export class Session {
   // down. markClosed sweeps the remaining queue with the normal abandoned
   // / cancelled handling.
   private closing = false;
+  // Shared close() promise. Set on first close() entry, cleared after
+  // markClosed runs. Subsequent close() calls return this same promise
+  // so kill paths can race without double-firing the regen and agent.kill.
+  private closeInFlight: Promise<void> | undefined;
   private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
   private titleHandlers: Array<(title: string) => void> = [];
   private synopsisHandlers: Array<
@@ -701,7 +709,17 @@ export class Session {
       return;
     }
     if (this.maybeApplyAgentConfigOption(envelope)) {
-      this.recordAndBroadcast("session/update", envelope);
+      // Same mute behavior as maybeApplyAgentModel: clients (and the
+      // session's history.jsonl) shouldn't see the synopsis-swap model
+      // flicker. claude-acp emits config_option_update for model
+      // changes, so the mute has to short-circuit BOTH the persist
+      // (handled inside maybeApplyAgentConfigOption) AND the broadcast/
+      // record (handled here). Without this, the swap notifications
+      // land in history.jsonl and the agent reads them on resurrect,
+      // reporting whatever model the last config_option_update set.
+      if (!this.modelSwapMuted) {
+        this.recordAndBroadcast("session/update", envelope);
+      }
       return;
     }
     if (this.maybeApplyAgentUsage(rawParams)) {
@@ -1024,6 +1042,19 @@ export class Session {
         JsonRpcErrorCodes.SessionNotFound,
       );
     }
+    // Reject prompts on a session that's mid-close. close() runs the
+    // snapshot regen (up to 180s) before killing the agent — during
+    // that window the session is still in the live map, attach still
+    // works, but accepting a new turn whose result drainQueue's
+    // closing-guard would just discard would lose the user's input
+    // silently. Better to surface a clear error code so the client
+    // can show the user the session is going away.
+    if (this.closing) {
+      throw withCode(
+        new Error("session is closing; new prompts cannot be accepted"),
+        JsonRpcErrorCodes.SessionClosing,
+      );
+    }
     // Slash commands (e.g. "/hydra title", "/hydra title some name")
     // are intercepted before any broadcasting or first-prompt seeding.
     // They never reach the agent as a normal turn — hydra dispatches
@@ -1041,7 +1072,14 @@ export class Session {
     // prompt_received (fires later, when the entry leaves the queue
     // head — see deviation note on broadcastPromptReceived).
     const messageId = generateMessageId();
+    // Title heuristic runs first — it needs to see firstPromptSeeded=false
+    // to actually fire. If it can extract a first line it'll set both the
+    // title AND the flag. If it can't (image-only / attachment-only / no
+    // extractable text), the title stays empty but we still need the flag
+    // set so the close-time snapshot regen gate doesn't skip the session
+    // as "had no prompt." Promotion to true is unconditional here.
     this.maybeSeedTitleFromPrompt(params);
+    this.firstPromptSeeded = true;
     return this.enqueueUserPrompt(client, params, messageId);
   }
 
@@ -1839,17 +1877,46 @@ export class Session {
     if (this.closed) {
       return;
     }
+    // Reentrancy guard: if a close is already in progress (e.g. picker
+    // `k` racing with an attached-client disconnect, or two callers
+    // hitting kill in parallel), return the in-flight promise instead
+    // of starting a second close. Without this, both calls fire agent
+    // regen + agent.kill in parallel — wastes tokens and causes the
+    // second regen to reject with "connection closed" when the first
+    // kill lands.
+    if (this.closeInFlight) {
+      return this.closeInFlight;
+    }
     this.closing = true;
+    this.closeInFlight = this.doClose(opts);
+    return this.closeInFlight;
+  }
+
+  private async doClose(opts: CloseOptions): Promise<void> {
     this.logger?.info(
       `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false} regenSnapshot=${opts.regenSnapshot ?? false}`,
     );
     this.cancelIdleTimer();
-    if (opts.regenSnapshot && this.firstPromptSeeded) {
-      const timeoutMs = opts.regenSnapshotTimeoutMs ?? 15_000;
-      await Promise.race([
-        this.runSnapshotRegen().catch(() => undefined),
-        new Promise<void>((r) => setTimeout(r, timeoutMs).unref?.()),
-      ]);
+    if (opts.regenSnapshot) {
+      if (this.firstPromptSeeded) {
+        const timeoutMs = opts.regenSnapshotTimeoutMs ?? 15_000;
+        this.logger?.info(
+          `session ${this.sessionId} regenSnapshot firing (timeoutMs=${timeoutMs})`,
+        );
+        await Promise.race([
+          this.runSnapshotRegen().catch((err) => {
+            this.logger?.warn(
+              `session ${this.sessionId} runSnapshotRegen threw: ${(err as Error).message}`,
+            );
+            return undefined;
+          }),
+          new Promise<void>((r) => setTimeout(r, timeoutMs).unref?.()),
+        ]);
+      } else {
+        this.logger?.info(
+          `session ${this.sessionId} regenSnapshot skipped (firstPromptSeeded=false; no conversation to summarize)`,
+        );
+      }
     }
     await this.agent.kill().catch(() => undefined);
     this.markClosed({ deleteRecord: opts.deleteRecord ?? false });
@@ -2058,9 +2125,18 @@ export class Session {
         const trimmed = cv.trim();
         if (trimmed && trimmed !== this.currentModel) {
           this.logger?.info(
-            `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
+            `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)} (muted=${this.modelSwapMuted})`,
           );
           this.currentModel = trimmed;
+          // Skip modelHandlers (persistence) while a synopsis-model
+          // swap is in flight. Same reasoning as maybeApplyAgentModel:
+          // we never want the cheap synopsis model to land in meta.json.
+          // claude-acp emits this notification shape for model changes
+          // (not current_model_update), so this mute must mirror the
+          // mute on maybeApplyAgentModel above.
+          if (this.modelSwapMuted) {
+            return true;
+          }
           for (const handler of this.modelHandlers) {
             try {
               handler(trimmed);
@@ -2715,20 +2791,51 @@ export class Session {
       );
       return { stopReason: "end_turn" };
     }
+    // Compute the deterministic synopsis fields locally — no LLM
+    // needed. files_touched and tools_used come straight from history;
+    // the agent only fills in the qualitative fields (goal, outcome,
+    // rejected_approaches, open_threads) plus the title.
+    const filesTouched = extractFilesTouched(history);
+    const toolsUsed = extractToolsUsed(history);
+    this.logger?.info(
+      `runSnapshotRegen: starting sessionId=${this.sessionId} historyLen=${historyLen} summarizedThrough=${this.summarizedThroughEntry ?? "none"} synopsisModel=${JSON.stringify(this.synopsisModel ?? null)} localFiles=${filesTouched.length} localTools=${toolsUsed.length}`,
+    );
     const collected = await this.runInternalPromptWithModel(
       SNAPSHOT_PROMPT,
       this.synopsisModel,
     );
     const parsed = tryParseSnapshot(collected);
-    if (parsed?.title) {
+    if (!parsed) {
+      const preview = collected.replace(/\s+/g, " ").trim().slice(0, 400);
+      this.logger?.warn(
+        `runSnapshotRegen: parse failed sessionId=${this.sessionId} replyLen=${collected.length} preview=${JSON.stringify(preview)}`,
+      );
+      // Even on parse failure, persist a synopsis that at least carries
+      // the deterministic fields. The qualitative fields stay absent;
+      // next regen will retry them. Better than null on this session.
+      this.setSynopsis(
+        { files_touched: filesTouched, tools_used: toolsUsed },
+        historyLen,
+      );
+      return { stopReason: "end_turn" };
+    }
+    if (parsed.title) {
       this.setTitle(parsed.title);
     }
-    if (parsed?.synopsis) {
-      // Record the offset against the history length we observed at the
-      // start of this regen. setSynopsis persists both atomically so
-      // the next regen check sees a consistent snapshot.
-      this.setSynopsis(parsed.synopsis, historyLen);
-    }
+    // Merge: LLM-supplied qualitative fields + locally-computed
+    // files_touched / tools_used. Any local-domain fields the agent
+    // sneaked into its reply (it shouldn't — we don't ask for them — but
+    // models can be over-eager) are overridden by the trustworthy
+    // local values.
+    const merged = {
+      ...(parsed.synopsis ?? {}),
+      files_touched: filesTouched,
+      tools_used: toolsUsed,
+    };
+    this.setSynopsis(merged, historyLen);
+    this.logger?.info(
+      `runSnapshotRegen: done sessionId=${this.sessionId} title=${parsed.title ? "set" : "unchanged"} synopsisFields=${Object.keys(parsed.synopsis ?? {}).join(",")}`,
+    );
     return { stopReason: "end_turn" };
   }
 
@@ -2775,6 +2882,17 @@ export class Session {
     text: string,
     modelOverride: string | undefined,
   ): Promise<string> {
+    // Defensive guard against parallel internal prompts entering the
+    // mute path. runInternalPrompt has its own "already in flight" check,
+    // but if a second caller reached us first AND modelOverride differs
+    // from currentModel, we'd flip modelSwapMuted=true, send a
+    // set_model, hit runInternalPrompt's guard, throw, and the finally
+    // would flip modelSwapMuted=false mid-flight on the first call.
+    // Checking up front means the second call returns BEFORE touching
+    // any shared state.
+    if (this.internalPromptCapture) {
+      throw new Error("internal prompt already in flight");
+    }
     if (!modelOverride || modelOverride === this.currentModel) {
       return this.runInternalPrompt(text);
     }
@@ -2790,6 +2908,7 @@ export class Session {
     const originalModel = this.currentModel;
     this.modelSwapMuted = true;
     try {
+      const swapStart = Date.now();
       try {
         await this.agent.connection.request("session/set_model", {
           sessionId: this.upstreamSessionId,
@@ -2801,12 +2920,25 @@ export class Session {
         );
         return this.runInternalPrompt(text);
       }
+      this.logger?.info(
+        `synopsis model swap → ${JSON.stringify(modelOverride)} took ${Date.now() - swapStart}ms; sending synthesis prompt`,
+      );
+      const promptStart = Date.now();
       const result = await this.runInternalPrompt(text);
+      this.logger?.info(
+        `synopsis prompt resolved in ${Date.now() - promptStart}ms (replyChars=${result.length})`,
+      );
       if (originalModel) {
+        const restoreStart = Date.now();
         await this.agent.connection
           .request("session/set_model", {
             sessionId: this.upstreamSessionId,
             modelId: originalModel,
+          })
+          .then(() => {
+            this.logger?.info(
+              `synopsis model restore → ${JSON.stringify(originalModel)} took ${Date.now() - restoreStart}ms`,
+            );
           })
           .catch((err) => {
             this.logger?.warn(
@@ -2817,6 +2949,18 @@ export class Session {
       return result;
     } finally {
       this.modelSwapMuted = false;
+      // Belt-and-suspenders: if the regen timed out / errored and we
+      // never reached the swap-back set_model, the agent's still on
+      // haiku (or dead). But in-memory this.currentModel reflects the
+      // muted swap-set value — meaning any UI that reads it after the
+      // regen would show "haiku" until the session goes cold. The
+      // persisted record (the source of truth) still has the user's
+      // original. Snap in-memory state back to match so picker /
+      // attached-client views don't show the transient swap value.
+      // If the swap-back DID succeed, this is a no-op.
+      if (originalModel !== undefined) {
+        this.currentModel = originalModel;
+      }
     }
   }
 
@@ -2914,7 +3058,12 @@ export class Session {
     await this.close({
       deleteRecord: false,
       regenSnapshot: true,
-      regenSnapshotTimeoutMs: 8_000,
+      // 60s upper bound for deep-history synthesis on slow models. With
+      // synopsisModels[agentId] set to Haiku this typically finishes in
+      // 2-3s. /hydra kill goes through the slash-command dispatcher
+      // which awaits, so this does add up to 60s of latency if the
+      // synthesis is slow — set synopsisModels to bound it.
+      regenSnapshotTimeoutMs: 180_000,
     });
     return { stopReason: "end_turn" };
   }
