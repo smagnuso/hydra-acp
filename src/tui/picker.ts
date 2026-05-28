@@ -163,7 +163,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["r", "refresh from daemon"],
   null,
   ["k", "kill the selected live session"],
-  ["d", "delete the selected cold session"],
+  ["d", "delete the selected session (kills first if live)"],
   ["t", "retitle the selected session"],
   ["T", "regenerate title + synopsis via agent (live session)"],
   null,
@@ -316,9 +316,8 @@ export async function pickSession(
   // pressed on a live row; the user edits in-place (^U clears the line,
   // ^W deletes a word, Backspace pops a char). Enter saves, Esc cancels.
   let renameBuffer = "";
-  // Transient one-line hint shown in the indicator slot (e.g. "live —
-  // press k first" when 'd' was used on a live row). Cleared on the next
-  // key press so it never lingers.
+  // Transient one-line hint shown in the indicator slot. Cleared on the
+  // next key press so it never lingers.
   let transientStatus: string | null = null;
 
   // Composer pane at the top of the picker. Reuses the live composer's
@@ -583,7 +582,15 @@ export async function pickSession(
       if (mode === "confirm-kill" && pendingAction) {
         term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
       } else if (mode === "confirm-delete" && pendingAction) {
-        term.brightRed.noFormat(`  delete ${shortId(pendingAction.sessionId)}? [y/N]`);
+        if (pendingAction.status === "live") {
+          term.brightRed.noFormat(
+            `  kill + delete ${shortId(pendingAction.sessionId)}? [y/N]`,
+          );
+        } else {
+          term.brightRed.noFormat(
+            `  delete ${shortId(pendingAction.sessionId)}? [y/N]`,
+          );
+        }
       } else if (mode === "busy" && pendingAction) {
         term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
       } else if (mode === "rename" && pendingAction) {
@@ -2149,11 +2156,6 @@ export async function pickSession(
         if ((name === "d" || name === "D") && selectedIdx > 0) {
           const session = visible[selectedIdx - 1];
           if (!session) {
-            return;
-          }
-          if (session.status === "live") {
-            transientStatus = "session is live — press k to kill it first";
-            paintIndicator();
             return;
           }
           pendingAction = {
