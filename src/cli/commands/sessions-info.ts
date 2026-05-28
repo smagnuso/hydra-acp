@@ -72,6 +72,11 @@ type FileCount = AggFileCount;
 const DEFAULT_TOP_TOOLS = 10;
 const DEFAULT_TOP_FILES = 15;
 
+// Tool names that mutate a file's contents. Used to filter the default
+// "Files edited" view; --verbose still shows every file touched
+// (including pure reads, globs, etc.).
+const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+
 export async function runSessionsInfo(
   id: string | undefined,
   opts: SessionsInfoOptions = {},
@@ -263,11 +268,26 @@ function formatSummary(d: SessionInfoData, verbose: boolean): string {
     }
   }
 
-  // Files touched.
-  if (d.files.length > 0) {
+  // Files touched / edited.
+  // Default view filters to files with at least one edit-tool call and
+  // shows just the edit count; --verbose shows every file with the full
+  // per-tool breakdown (reads included).
+  const filesForRender: FileCount[] = verbose
+    ? d.files
+    : d.files
+        .map((f) => {
+          const byTool = f.byTool.filter((t) => EDIT_TOOLS.has(t.name));
+          const count = byTool.reduce((s, t) => s + t.count, 0);
+          return { path: f.path, count, byTool };
+        })
+        .filter((f) => f.count > 0);
+  if (filesForRender.length > 0) {
     lines.push("");
-    lines.push(`Files touched (${d.files.length}):`);
-    const shown = verbose ? d.files : d.files.slice(0, DEFAULT_TOP_FILES);
+    const label = verbose ? "Files touched" : "Files edited";
+    lines.push(`${label} (${filesForRender.length}):`);
+    const shown = verbose
+      ? filesForRender
+      : filesForRender.slice(0, DEFAULT_TOP_FILES);
     const pathWidth = Math.max(...shown.map((f) => f.path.length), 4);
     for (const f of shown) {
       if (verbose) {
@@ -279,8 +299,8 @@ function formatSummary(d: SessionInfoData, verbose: boolean): string {
         lines.push(`  ${f.path.padEnd(pathWidth)}  ${f.count}`);
       }
     }
-    if (!verbose && d.files.length > DEFAULT_TOP_FILES) {
-      lines.push(`  ... ${d.files.length - DEFAULT_TOP_FILES} more (use --verbose to see all)`);
+    if (!verbose && filesForRender.length > DEFAULT_TOP_FILES) {
+      lines.push(`  ... ${filesForRender.length - DEFAULT_TOP_FILES} more (use --verbose to see all)`);
     }
   }
 
