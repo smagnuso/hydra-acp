@@ -98,7 +98,7 @@ describe("extractToolHistogram", () => {
     ]);
   });
 
-  it("ignores tool_call_update (already-issued tool calls)", () => {
+  it("ignores orphan tool_call_update events with no parent tool_call", () => {
     expect(
       extractToolHistogram([
         toolCall("Read"),
@@ -107,7 +107,7 @@ describe("extractToolHistogram", () => {
           params: {
             update: {
               sessionUpdate: "tool_call_update",
-              toolCallId: "tc1",
+              toolCallId: "tc-orphan",
               status: "completed",
             },
           },
@@ -115,6 +115,36 @@ describe("extractToolHistogram", () => {
         },
       ]),
     ).toEqual([{ name: "Read", count: 1 }]);
+  });
+
+  it("counts a tool_call only once even when followed by tool_call_update", () => {
+    expect(
+      extractToolHistogram([
+        {
+          method: "session/update",
+          params: {
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: "tc-1",
+              title: "Edit",
+              rawInput: {},
+            },
+          },
+          recordedAt: 1,
+        },
+        {
+          method: "session/update",
+          params: {
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "tc-1",
+              status: "completed",
+            },
+          },
+          recordedAt: 2,
+        },
+      ]),
+    ).toEqual([{ name: "Edit", count: 1 }]);
   });
 
   it("uses title fallback when name is absent (claude-acp shape)", () => {
@@ -235,6 +265,92 @@ describe("extractFilesTouchedDetailed", () => {
     expect(
       extractFilesTouchedDetailed([toolCall("Bash", { command: "ls" })]),
     ).toEqual([]);
+  });
+
+  it("merges tool_call_update file_path into parent tool_call (claude-acp shape)", () => {
+    // claude-acp emits the initial tool_call with rawInput:{} and then
+    // sends the actual file_path in a follow-up tool_call_update with
+    // the same toolCallId.
+    const result = extractFilesTouchedDetailed([
+      {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "tc-edit-1",
+            title: "Edit",
+            rawInput: {},
+            locations: [],
+          },
+        },
+        recordedAt: 1,
+      },
+      {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tc-edit-1",
+            rawInput: { file_path: "src/foo.ts", old_string: "a", new_string: "b" },
+            locations: [{ path: "src/foo.ts" }],
+          },
+        },
+        recordedAt: 2,
+      },
+    ]);
+    expect(result).toEqual([
+      {
+        path: "src/foo.ts",
+        count: 1,
+        byTool: [{ name: "Edit", count: 1 }],
+      },
+    ]);
+  });
+
+  it("counts each toolCallId once even with multiple updates carrying the same path", () => {
+    const result = extractFilesTouchedDetailed([
+      {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "tc-1",
+            title: "Edit",
+            rawInput: {},
+          },
+        },
+        recordedAt: 1,
+      },
+      {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tc-1",
+            rawInput: { file_path: "src/a.ts" },
+          },
+        },
+        recordedAt: 2,
+      },
+      {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tc-1",
+            locations: [{ path: "src/a.ts" }],
+          },
+        },
+        recordedAt: 3,
+      },
+    ]);
+    expect(result).toEqual([
+      {
+        path: "src/a.ts",
+        count: 1,
+        byTool: [{ name: "Edit", count: 1 }],
+      },
+    ]);
   });
 });
 

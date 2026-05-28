@@ -22,6 +22,7 @@ type HistoryEntryLike = {
 
 interface ToolCallUpdate {
   sessionUpdate?: string;
+  toolCallId?: unknown;
   name?: unknown;
   title?: unknown;
   rawInput?: unknown;
@@ -37,11 +38,17 @@ export interface ToolCount {
   count: number;
 }
 
+// One aggregated tool invocation. Built by collectToolCalls walking
+// both tool_call and tool_call_update events for the same toolCallId.
+interface AggregatedCall {
+  toolName: string;
+  paths: Set<string>;
+}
+
 export function extractToolHistogram(history: HistoryEntryLike[]): ToolCount[] {
   const counts = new Map<string, number>();
-  for (const update of iterToolCalls(history)) {
-    const toolName = readToolName(update);
-    counts.set(toolName, (counts.get(toolName) ?? 0) + 1);
+  for (const call of collectToolCalls(history).values()) {
+    counts.set(call.toolName, (counts.get(call.toolName) ?? 0) + 1);
   }
   return [...counts.entries()]
     .map(([name, count]): ToolCount => ({ name, count }))
@@ -67,15 +74,14 @@ export function extractFilesTouchedDetailed(
 ): FileCount[] {
   // path → tool → count
   const fileTouches = new Map<string, Map<string, number>>();
-  for (const update of iterToolCalls(history)) {
-    const toolName = readToolName(update);
-    for (const p of extractPaths(update.rawInput, update.locations)) {
+  for (const call of collectToolCalls(history).values()) {
+    for (const p of call.paths) {
       let byTool = fileTouches.get(p);
       if (byTool === undefined) {
         byTool = new Map();
         fileTouches.set(p, byTool);
       }
-      byTool.set(toolName, (byTool.get(toolName) ?? 0) + 1);
+      byTool.set(call.toolName, (byTool.get(call.toolName) ?? 0) + 1);
     }
   }
   return [...fileTouches.entries()]
@@ -112,22 +118,63 @@ export function countTurns(history: HistoryEntryLike[]): number {
   return n;
 }
 
-// Walk history entries and yield each tool_call update payload. Skips
-// non-update entries and entries whose sessionUpdate isn't tool_call.
-// Excludes tool_call_update — those are status/output updates on an
-// already-issued call, double-counting them would inflate every metric.
-function* iterToolCalls(
+// Walk history entries and build one AggregatedCall per toolCallId,
+// merging rawInput/locations from any tool_call_update payloads into
+// the parent tool_call's record. claude-acp emits the initial tool_call
+// with empty rawInput and only sends the file path in a follow-up
+// tool_call_update; without merging, file paths would be invisible.
+//
+// A tool_call_update without a preceding tool_call (orphan status
+// update, e.g. a completed-only emission) is ignored: we don't
+// fabricate an unnamed tool call from a status notification.
+function collectToolCalls(
   history: HistoryEntryLike[],
-): IterableIterator<ToolCallUpdate> {
+): Map<string, AggregatedCall> {
+  const calls = new Map<string, AggregatedCall>();
+  let synthIdx = 0;
   for (const entry of history) {
     const params = entry.params as
       | { update?: ToolCallUpdate }
       | undefined;
     const update = params?.update;
-    if (update?.sessionUpdate === "tool_call") {
-      yield update;
+    if (!update) {
+      continue;
+    }
+    const kind = update.sessionUpdate;
+    if (kind !== "tool_call" && kind !== "tool_call_update") {
+      continue;
+    }
+    if (kind === "tool_call") {
+      const id =
+        typeof update.toolCallId === "string" && update.toolCallId.length > 0
+          ? update.toolCallId
+          : `__synth_${synthIdx++}`;
+      let rec = calls.get(id);
+      if (rec === undefined) {
+        rec = { toolName: readToolName(update), paths: new Set<string>() };
+        calls.set(id, rec);
+      } else {
+        rec.toolName = readToolName(update);
+      }
+      for (const p of extractPaths(update.rawInput, update.locations)) {
+        rec.paths.add(p);
+      }
+      continue;
+    }
+    // tool_call_update — refine an existing entry. Orphans (no parent
+    // tool_call for this toolCallId) get dropped.
+    if (typeof update.toolCallId !== "string" || update.toolCallId.length === 0) {
+      continue;
+    }
+    const rec = calls.get(update.toolCallId);
+    if (rec === undefined) {
+      continue;
+    }
+    for (const p of extractPaths(update.rawInput, update.locations)) {
+      rec.paths.add(p);
     }
   }
+  return calls;
 }
 
 function readToolName(update: ToolCallUpdate): string {
