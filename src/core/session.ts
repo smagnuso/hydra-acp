@@ -183,16 +183,6 @@ export interface SessionInit {
 
 export interface CloseOptions {
   deleteRecord?: boolean;
-  // After tearing the agent down, schedule a background synopsis via the
-  // SessionManager's synopsis coordinator. Default true; the only path
-  // that opts out is explicit destroy (DELETE /v1/sessions/:id), which
-  // wipes the record so a synopsis would be wasted work.
-  //
-  // Note: this flag is informational here — Session.close itself doesn't
-  // schedule; SessionManager's onClose hook reads firstPromptSeeded to
-  // decide. Kept on CloseOptions in case future callers want a per-call
-  // opt-out independent of deleteRecord.
-  regenSnapshot?: boolean;
 }
 
 const DEFAULT_HISTORY_MAX_ENTRIES = 1000;
@@ -1007,13 +997,12 @@ export class Session {
         JsonRpcErrorCodes.SessionNotFound,
       );
     }
-    // Reject prompts on a session that's mid-close. close() runs the
-    // snapshot regen (up to 180s) before killing the agent — during
-    // that window the session is still in the live map, attach still
-    // works, but accepting a new turn whose result drainQueue's
-    // closing-guard would just discard would lose the user's input
-    // silently. Better to surface a clear error code so the client
-    // can show the user the session is going away.
+    // Reject prompts on a session that's mid-close. The window is short
+    // now (just the agent.kill() await before markClosed sweeps the
+    // queue), but during it the session is still in the live map and a
+    // new turn would silently be discarded by drainQueue's closing-guard.
+    // Surface a clear error code so the client can show the user the
+    // session is going away.
     if (this.closing) {
       throw withCode(
         new Error("session is closing; new prompts cannot be accepted"),
@@ -1859,7 +1848,7 @@ export class Session {
 
   private async doClose(opts: CloseOptions): Promise<void> {
     this.logger?.info(
-      `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false} regenSnapshot=${opts.regenSnapshot ?? false}`,
+      `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false}`,
     );
     this.cancelIdleTimer();
     await this.agent.kill().catch(() => undefined);
@@ -2770,7 +2759,7 @@ export class Session {
     // Agent dies immediately. The cold record's synopsis is regenerated
     // out-of-band by the synopsis coordinator (scheduled via the
     // SessionManager onClose hook) — no LLM call blocks the kill.
-    await this.close({ deleteRecord: false, regenSnapshot: true });
+    await this.close({ deleteRecord: false });
     return { stopReason: "end_turn" };
   }
 
@@ -3317,10 +3306,11 @@ export class Session {
     }
     // A session that never received a prompt has no conversation to
     // preserve; drop the record entirely instead of leaving an empty
-    // cold session cluttering the picker. Otherwise persist as cold,
-    // asking the agent for one last title summary on the way out.
+    // cold session cluttering the picker. Otherwise persist as cold —
+    // the SessionManager.onClose hook will schedule a background
+    // synopsis via the synopsis coordinator.
     const opts: CloseOptions = this.firstPromptSeeded
-      ? { deleteRecord: false, regenSnapshot: true }
+      ? { deleteRecord: false }
       : { deleteRecord: true };
     const idleSec = Math.round(idle / 1000);
     this.logger?.info(

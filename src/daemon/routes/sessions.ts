@@ -104,9 +104,7 @@ export function registerSessionRoutes(
       // regenerated out-of-band by the synopsis coordinator (scheduled
       // by SessionManager's onClose hook). 202 returns to the caller as
       // soon as the close starts; the actual agent teardown takes <1s.
-      void session
-        .close({ deleteRecord: false, regenSnapshot: true })
-        .catch(() => undefined);
+      void session.close({ deleteRecord: false }).catch(() => undefined);
       reply.code(202).send();
       return;
     }

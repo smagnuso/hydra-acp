@@ -1724,12 +1724,7 @@ export class SessionManager {
     // flushSynopsis, so the cold records still pick up their final
     // synopsis but it doesn't block per-session kill.
     await Promise.allSettled(
-      sessions.map((s) =>
-        s.close({
-          deleteRecord: false,
-          regenSnapshot: true,
-        }),
-      ),
+      sessions.map((s) => s.close({ deleteRecord: false })),
     );
     this.sessions.clear();
   }
