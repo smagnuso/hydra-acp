@@ -960,11 +960,22 @@ export function formatEditDiffBlock(
   return lines;
 }
 
+export interface BuildUnifiedDiffOptions {
+  // Cap rendered lines (including the truncation trailer). Defaults to
+  // EDIT_DIFF_MAX_LINES for the TUI scrollback path; callers like
+  // `hydra session diff` pass Infinity to render the full body.
+  maxLines?: number;
+}
+
 // Build a unified-diff body for the given edit. Computes an LCS-based
 // line-level diff so context lines flow between +/- chunks rather than
 // painting every old line as removed and every new line as added.
-// Truncates with a "… N more" footer past EDIT_DIFF_MAX_LINES.
-export function buildUnifiedDiff(diff: EditDiff): string {
+// Truncates with a "… N more" footer past the configured cap.
+export function buildUnifiedDiff(
+  diff: EditDiff,
+  opts: BuildUnifiedDiffOptions = {},
+): string {
+  const maxLines = opts.maxLines ?? EDIT_DIFF_MAX_LINES;
   const oldLines = sanitizeWireText(diff.oldText).split("\n");
   const newLines = sanitizeWireText(diff.newText).split("\n");
   // Drop a trailing empty line that came from a final \n in the source,
@@ -977,12 +988,10 @@ export function buildUnifiedDiff(diff: EditDiff): string {
   }
   const ops = diffLines(oldLines, newLines);
   const rendered: string[] = [];
-  // Budget includes the trailer when we truncate, so the rendered diff
-  // never exceeds EDIT_DIFF_MAX_LINES total lines in scrollback.
   for (let idx = 0; idx < ops.length; idx++) {
     const op = ops[idx]!;
     const wouldTruncate =
-      rendered.length >= EDIT_DIFF_MAX_LINES - 1 && idx < ops.length - 1;
+      rendered.length >= maxLines - 1 && idx < ops.length - 1;
     if (wouldTruncate) {
       const remaining = ops.length - idx;
       rendered.push(`… ${remaining} more line${remaining === 1 ? "" : "s"}`);

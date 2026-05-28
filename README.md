@@ -214,6 +214,14 @@ hydra-acp daemon restart                    # stop then start the daemon
 hydra-acp daemon logs [-f] [-n N]           # tail (default 50) or follow the daemon log
 
 hydra-acp session [list]                   # list sessions
+hydra-acp session info <id> [--verbose] [--json]
+                                            # aggregate one session: turn count, tool histogram,
+                                            # files touched, cost/duration, synopsis
+hydra-acp session diff <id> [--json] [--no-color] [--no-pager]
+                                            # git-diff-shaped view of every file the session
+                                            # edited, reconstructed from history (no git, no fs).
+                                            # Pages through $HYDRA_ACP_PAGER → $PAGER → less on a TTY
+                                            # (LESS=FRX default); --no-pager bypasses.
 hydra-acp session kill <id>                 # close a live session (keeps the on-disk record so it can be resurrected)
 hydra-acp session remove <id>               # remove a session entirely (live or cold)
 hydra-acp session export <id> [--out <file>|.]

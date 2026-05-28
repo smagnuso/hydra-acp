@@ -464,9 +464,19 @@ describe("pickSession composer", () => {
     });
   });
 
-  it("Ctrl+C aborts the picker while composer is focused", async () => {
+  it("Ctrl+C peels a non-empty composer buffer and only aborts once it's empty", async () => {
     const drv = makePicker({ sessions });
     drv.type("about to abort");
+    // First ^c: the dispatcher clears the buffer (peel) instead of exiting.
+    drv.press("CTRL_C");
+    // Second ^c on the now-empty buffer emits the exit effect, which the
+    // picker translates to an abort.
+    drv.press("CTRL_C");
+    await expect(drv.resolveOnce).resolves.toEqual({ kind: "abort" });
+  });
+
+  it("Ctrl+C aborts immediately when the composer is already empty", async () => {
+    const drv = makePicker({ sessions });
     drv.press("CTRL_C");
     await expect(drv.resolveOnce).resolves.toEqual({ kind: "abort" });
   });
