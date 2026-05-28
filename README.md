@@ -214,9 +214,11 @@ hydra-acp daemon restart                    # stop then start the daemon
 hydra-acp daemon logs [-f] [-n N]           # tail (default 50) or follow the daemon log
 
 hydra-acp session [list]                   # list sessions
-hydra-acp session info <id> [--verbose] [--json]
+hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]
                                             # aggregate one session: turn count, tool histogram,
-                                            # files touched, cost/duration, synopsis
+                                            # files touched, cost/duration, synopsis.
+                                            # --diff appends the session diff under the summary
+                                            # and pages the whole thing on a TTY; honors --fold.
 hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]
                                             # git-diff-shaped view of every file the session
                                             # edited, reconstructed from history (no git, no fs).

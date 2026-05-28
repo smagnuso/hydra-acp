@@ -12,6 +12,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "all",
   "dangerously-skip-permissions",
   "detach",
+  "diff",
   "disabled",
   "fold",
   "follow",

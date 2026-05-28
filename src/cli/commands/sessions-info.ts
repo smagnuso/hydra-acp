@@ -22,11 +22,25 @@ import {
   type FileCount as AggFileCount,
   type ToolCount as AggToolCount,
 } from "../../core/history-aggregate.js";
+import {
+  aggregateFileEdits,
+  foldHunks,
+  type FileEditAggregate,
+} from "../../core/history-edits.js";
+import { openPager } from "../pager.js";
+import { renderDiff } from "./sessions-diff.js";
 import { httpBase } from "./sessions.js";
 
 export interface SessionsInfoOptions {
   verbose?: boolean;
   json?: boolean;
+  // Append a git-diff-shaped view of every file the session edited.
+  // On a TTY the combined summary+diff output is paged. Inherits the
+  // diff command's --fold / --no-color / --no-pager surface.
+  diff?: boolean;
+  fold?: boolean;
+  noColor?: boolean;
+  noPager?: boolean;
 }
 
 interface SessionInfoData {
@@ -82,7 +96,9 @@ export async function runSessionsInfo(
   opts: SessionsInfoOptions = {},
 ): Promise<void> {
   if (!id) {
-    process.stderr.write("Usage: hydra-acp sessions info <session-id> [--verbose] [--json]\n");
+    process.stderr.write(
+      "Usage: hydra-acp sessions info <session-id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]\n",
+    );
     process.exit(2);
   }
   const config = await loadConfig();
@@ -129,8 +145,37 @@ export async function runSessionsInfo(
   }
 
   const data = aggregate(bundle, liveStatus ?? "cold");
+  // --diff opt-in: append a git-diff-shaped view of every file the
+  // session edited beneath the summary. Same aggregation/fold/render
+  // pipeline `hydra session diff` uses, against the same bundle we
+  // already loaded.
+  const includeDiff = opts.diff === true;
+  let diffFiles: FileEditAggregate[] | null = null;
+  if (includeDiff) {
+    const rawFiles = aggregateFileEdits(bundle.history);
+    diffFiles =
+      opts.fold === true
+        ? rawFiles.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }))
+        : rawFiles;
+  }
   if (opts.json) {
-    process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+    const payload: Record<string, unknown> = { ...data };
+    if (diffFiles !== null) {
+      payload.diff = diffFiles;
+    }
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    return;
+  }
+  // Page the combined output when --diff is set (mirrors session diff);
+  // plain info stays unpaged since it's short.
+  const onTTY = process.stdout.isTTY === true;
+  const useColor = !opts.noColor && onTTY;
+  if (includeDiff) {
+    const pager = openPager({ disabled: opts.noPager === true });
+    pager.stream.write(formatSummary(data, opts.verbose === true));
+    pager.stream.write("\n");
+    pager.stream.write(renderDiff(diffFiles ?? [], useColor));
+    await pager.flush();
     return;
   }
   process.stdout.write(formatSummary(data, opts.verbose === true));
