@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
-import { TransformerManager } from "./transformer-manager.js";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { TransformerManager, type TransformerContext } from "./transformer-manager.js";
+import { DEFAULT_DAEMON_PORT } from "./config.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 
 function fakeConnection(): JsonRpcConnection {
@@ -85,5 +86,50 @@ describe("TransformerManager — connection registry", () => {
     expect(m.list()[0]!.version).toBeUndefined();
     m.reportVersion("t1", "1.2.3");
     expect(m.list()[0]!.version).toBe("1.2.3");
+  });
+});
+
+describe("TransformerManager — circuit breaker", () => {
+  let manager: TransformerManager | undefined;
+
+  afterEach(async () => {
+    if (manager) {
+      await manager.stop();
+      manager = undefined;
+    }
+  });
+
+  function makeContext(home: string): TransformerContext {
+    return {
+      daemonUrl: `http://127.0.0.1:${DEFAULT_DAEMON_PORT}`,
+      daemonHost: "127.0.0.1",
+      daemonPort: DEFAULT_DAEMON_PORT,
+      serviceToken: "hydra_token_test",
+      daemonWsUrl: `ws://127.0.0.1:${DEFAULT_DAEMON_PORT}/acp`,
+      hydraHome: home,
+    };
+  }
+
+  it("trips on the fatal exit code through the transformer subclass too", async () => {
+    const home = process.env.HYDRA_ACP_HOME!;
+    manager = new TransformerManager(
+      [
+        {
+          name: "boom",
+          command: ["node", "-e", "process.exit(78)"],
+          args: [],
+          env: {},
+          enabled: true,
+        },
+      ],
+      makeContext(home),
+      { restartBaseMs: 25 },
+    );
+    await manager.start();
+
+    await expect
+      .poll(() => manager?.list()[0]?.status, { timeout: 2_000 })
+      .toBe("failed");
+    expect(manager.list()[0]!.failureReason).toContain("transformers start boom");
   });
 });

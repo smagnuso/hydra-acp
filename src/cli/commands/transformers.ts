@@ -15,6 +15,7 @@ interface TransformerInfo {
   lastExitCode: number | null;
   logPath: string;
   version: string | null;
+  failureReason: string | null;
 }
 
 export async function runTransformersList(): Promise<void> {
@@ -87,6 +88,11 @@ export async function runTransformersList(): Promise<void> {
   process.stdout.write(fmt(header) + "\n");
   for (const r of rows) {
     process.stdout.write(fmt(r) + "\n");
+  }
+  for (const t of body.transformers) {
+    if (t.failureReason) {
+      process.stdout.write(`  ↳ ${t.name}: ${t.failureReason}\n`);
+    }
   }
 }
 

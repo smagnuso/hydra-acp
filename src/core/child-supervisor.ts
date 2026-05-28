@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { ProcessTokenRegistry } from "../daemon/auth.js";
+import { RestartBreaker, type BreakerOptions } from "./restart-breaker.js";
 
 // Shared lifecycle for daemon-supervised child processes (extensions and
 // transformers). Each kind passes a SupervisorAdapter for the bits that
@@ -30,7 +31,8 @@ export type BaseChildStatus =
   | "running"
   | "stopped"
   | "restarting"
-  | "disabled";
+  | "disabled"
+  | "failed";
 
 export interface BaseChildInfo {
   name: string;
@@ -42,6 +44,7 @@ export interface BaseChildInfo {
   lastExitCode: number | undefined;
   logPath: string;
   version: string | undefined;
+  failureReason: string | undefined;
 }
 
 export interface SupervisorAdapter {
@@ -55,8 +58,8 @@ export interface SupervisorAdapter {
   };
 }
 
-const RESTART_BASE_MS = 1_000;
-const RESTART_CAP_MS = 60_000;
+const DEFAULT_RESTART_BASE_MS = 1_000;
+const DEFAULT_RESTART_CAP_MS = 60_000;
 const STOP_GRACE_MS = 3_000;
 
 interface ChildEntry<TConfig extends BaseChildConfig> {
@@ -74,10 +77,17 @@ interface ChildEntry<TConfig extends BaseChildConfig> {
   // Per-process token minted at spawn time. Undefined when no registry is
   // configured (backwards compat path).
   processToken: string | undefined;
+  breaker: RestartBreaker;
+  failureReason: string | undefined;
 }
 
 export interface ChildSupervisorOptions {
   tokenRegistry?: ProcessTokenRegistry;
+  breakerOptions?: BreakerOptions;
+  // Test-only knobs to tighten the restart cadence; production callers
+  // should leave these alone.
+  restartBaseMs?: number;
+  restartCapMs?: number;
 }
 
 export class ChildSupervisor<TConfig extends BaseChildConfig> {
@@ -85,6 +95,9 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
   private stopping = false;
   private context: BaseChildContext | undefined;
   private tokenRegistry: ProcessTokenRegistry | undefined;
+  private breakerOptions: BreakerOptions | undefined;
+  private restartBaseMs: number;
+  private restartCapMs: number;
   private adapter: SupervisorAdapter;
 
   constructor(
@@ -96,6 +109,9 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     this.adapter = adapter;
     this.context = context;
     this.tokenRegistry = options.tokenRegistry;
+    this.breakerOptions = options.breakerOptions;
+    this.restartBaseMs = options.restartBaseMs ?? DEFAULT_RESTART_BASE_MS;
+    this.restartCapMs = options.restartCapMs ?? DEFAULT_RESTART_CAP_MS;
     for (const cfg of configs) {
       this.entries.set(cfg.name, this.makeEntry(cfg));
     }
@@ -214,6 +230,8 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     }
     entry.manuallyStopped = false;
     entry.restartCount = 0;
+    entry.breaker.reset();
+    entry.failureReason = undefined;
     this.spawn(entry, 0);
     return this.infoFor(entry);
   }
@@ -326,7 +344,9 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
 
   protected infoFor(entry: ChildEntry<TConfig>): BaseChildInfo {
     let status: BaseChildStatus;
-    if (entry.child) {
+    if (entry.failureReason !== undefined) {
+      status = "failed";
+    } else if (entry.child) {
       status = "running";
     } else if (entry.restartTimer) {
       status = "restarting";
@@ -345,6 +365,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       lastExitCode: entry.lastExitCode,
       logPath: this.adapter.paths.logFile(entry.config.name),
       version: entry.version,
+      failureReason: entry.failureReason,
     };
   }
 
@@ -362,6 +383,8 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       exitWaiters: [],
       version: undefined,
       processToken: undefined,
+      breaker: new RestartBreaker(this.breakerOptions),
+      failureReason: undefined,
     };
   }
 
@@ -544,6 +567,24 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
         return;
       }
       entry.restartCount += 1;
+      const decision = entry.breaker.recordExit(
+        code,
+        cfg.name,
+        this.adapter.kind,
+      );
+      if (typeof decision === "object") {
+        entry.failureReason = decision.tripped;
+        logStream.write(
+          `[hydra-acp] ${this.adapter.kind} ${cfg.name} circuit breaker tripped: ${decision.tripped}\n`,
+        );
+        try {
+          logStream.end();
+        } catch {
+          void 0;
+        }
+        entry.logStream = undefined;
+        return;
+      }
       this.scheduleRestart(entry, attempt + 1);
     });
   }
@@ -553,8 +594,8 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       return;
     }
     const delay = Math.min(
-      RESTART_BASE_MS * 2 ** Math.min(attempt, 10),
-      RESTART_CAP_MS,
+      this.restartBaseMs * 2 ** Math.min(attempt, 10),
+      this.restartCapMs,
     );
     entry.restartTimer = setTimeout(() => {
       entry.restartTimer = undefined;

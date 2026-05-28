@@ -358,4 +358,80 @@ describe("ExtensionManager", () => {
       });
     });
   });
+
+  describe("circuit breaker", () => {
+    it("trips immediately when the child exits with the fatal code", async () => {
+      const cfg: ExtensionConfig = {
+        name: "fatal",
+        command: ["node", "-e", "process.exit(78)"],
+        args: [],
+        env: {},
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome), {
+        restartBaseMs: 25,
+      });
+      await manager.start();
+
+      await expect
+        .poll(() => manager?.list()[0]?.status, { timeout: 2_000 })
+        .toBe("failed");
+      const info = manager.list()[0]!;
+      expect(info.failureReason).toContain("code 78");
+      expect(info.failureReason).toContain("extensions start fatal");
+      expect(info.pid).toBeUndefined();
+    });
+
+    it("trips after exceeding maxFailuresInWindow non-fatal exits", async () => {
+      const cfg: ExtensionConfig = {
+        name: "flap",
+        command: ["node", "-e", "process.exit(1)"],
+        args: [],
+        env: {},
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome), {
+        restartBaseMs: 25,
+        restartCapMs: 50,
+        breakerOptions: { windowMs: 5_000, maxFailuresInWindow: 2 },
+      });
+      await manager.start();
+
+      await expect
+        .poll(() => manager?.list()[0]?.status, { timeout: 3_000 })
+        .toBe("failed");
+      const info = manager.list()[0]!;
+      expect(info.failureReason).toContain("crash loop");
+      expect(info.restartCount).toBeGreaterThanOrEqual(3);
+    });
+
+    it("startByName() un-trips a failed extension and gives it another shot", async () => {
+      const cfg: ExtensionConfig = {
+        name: "redo",
+        command: ["node", "-e", "process.exit(78)"],
+        args: [],
+        env: {},
+        enabled: true,
+      };
+      manager = new ExtensionManager([cfg], makeContext(tmpHome), {
+        restartBaseMs: 25,
+      });
+      await manager.start();
+      await expect
+        .poll(() => manager?.list()[0]?.status, { timeout: 2_000 })
+        .toBe("failed");
+
+      await manager.startByName("redo");
+      // It will trip again (same exit code), but the act of starting should
+      // first clear the failureReason and restartCount.
+      const right_after = manager.list()[0]!;
+      expect(right_after.failureReason).toBeUndefined();
+      expect(right_after.restartCount).toBe(0);
+
+      // And tripping again, with fresh history, still works.
+      await expect
+        .poll(() => manager?.list()[0]?.status, { timeout: 2_000 })
+        .toBe("failed");
+    });
+  });
 });

@@ -15,6 +15,7 @@ interface ExtensionInfo {
   lastExitCode: number | null;
   logPath: string;
   version: string | null;
+  failureReason: string | null;
 }
 
 export async function runExtensionsList(): Promise<void> {
@@ -83,6 +84,11 @@ export async function runExtensionsList(): Promise<void> {
   process.stdout.write(fmt(header) + "\n");
   for (const r of rows) {
     process.stdout.write(fmt(r) + "\n");
+  }
+  for (const e of body.extensions) {
+    if (e.failureReason) {
+      process.stdout.write(`  ↳ ${e.name}: ${e.failureReason}\n`);
+    }
   }
 }
 
