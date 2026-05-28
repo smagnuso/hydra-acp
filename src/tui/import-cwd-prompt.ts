@@ -14,8 +14,13 @@ import type { Terminal } from "terminal-kit";
 import * as os from "node:os";
 import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
-import { validateLocalCwd } from "../core/cwd.js";
+import {
+  completeLocalPath,
+  pickInitialLocalCwd,
+  validateLocalCwd,
+} from "../core/cwd.js";
 import type { DiscoveredSession } from "./discovery.js";
+import { longestCommonPrefix } from "./completion.js";
 import {
   drawBox,
   resetTerminalModes,
@@ -36,7 +41,10 @@ export async function promptForImportCwd(
   session: DiscoveredSession,
   opts: PromptOptions = {},
 ): Promise<CwdPromptResult> {
-  const defaultCwd = opts.defaultCwd ?? os.homedir();
+  const defaultCwd =
+    opts.defaultCwd ??
+    (await pickInitialLocalCwd(session.cwd)) ??
+    os.homedir();
   resetTerminalModes();
 
   const shortId = stripHydraSessionPrefix(session.sessionId);
@@ -79,12 +87,12 @@ export async function promptForImportCwd(
     } else {
       term.moveTo(layout.contentX, layout.contentY + row);
       term.dim.noFormat(
-        " Enter accept · Esc back · ^U clear · ^W kill word",
+        " Enter accept · Tab complete · Esc back · ^U clear",
       );
     }
   };
 
-  const inputRow = (): number => 7;
+  const inputRow = (): number => 6;
 
   const paintInputRow = (rowOffset?: number): void => {
     if (!layout) {
@@ -120,7 +128,7 @@ export async function promptForImportCwd(
       term.red.noFormat(` ${truncate(errorLine, layout.contentW - 2)}`);
     } else {
       term.dim.noFormat(
-        " Enter accept · Esc back · ^U clear · ^W kill word",
+        " Enter accept · Tab complete · Esc back · ^U clear",
       );
     }
   };
@@ -180,6 +188,32 @@ export async function promptForImportCwd(
       }
       if (name === "CTRL_C" || name === "CTRL_D") {
         finish({ kind: "cancel" });
+        return;
+      }
+      if (name === "TAB") {
+        busy = true;
+        void completeLocalPath(buffer).then((result) => {
+          busy = false;
+          if (result.matches.length === 0) {
+            return;
+          }
+          let next: string;
+          if (result.matches.length === 1) {
+            next = result.prefix + result.matches[0]!;
+          } else {
+            const lcp = longestCommonPrefix(result.matches);
+            if (lcp.length <= result.basePrefix.length) {
+              return;
+            }
+            next = result.prefix + lcp;
+          }
+          if (next === buffer) {
+            return;
+          }
+          buffer = next;
+          errorLine = null;
+          repaintInput();
+        });
         return;
       }
       if (name === "BACKSPACE") {
