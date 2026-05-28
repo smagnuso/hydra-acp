@@ -12,7 +12,13 @@
 // as optional (zod's z.unknown() permits undefined) while the runtime
 // HistoryEntry has params required. Same field, different optionality
 // — accepting both lets callers pass either without casts.
-type HistoryEntryLike = { params?: unknown };
+type HistoryEntryLike = {
+  method?: unknown;
+  params?: unknown;
+  // Permit additional fields (recordedAt, messageId, etc.) so callers
+  // that hold full HistoryEntry records can pass them without casts.
+  [key: string]: unknown;
+};
 
 interface ToolCallUpdate {
   sessionUpdate?: string;

@@ -61,7 +61,6 @@ function fakeConfig(): HydraConfig {
     },
     defaultAgent: "claude-acp",
     defaultModels: {},
-    synopsisModels: {},
     defaultCwd: homedir(),
     sessionListColdLimit: 20,
     extensions: {},

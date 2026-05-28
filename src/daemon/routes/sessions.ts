@@ -100,22 +100,12 @@ export function registerSessionRoutes(
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const session = manager.get(id);
     if (session) {
-      // Fire-and-forget: ask the agent for a final title + synopsis
-      // before kill so the cold record carries the freshest digest, but
-      // don't make the caller wait on it. The picker's k key calls this
-      // endpoint and would otherwise block navigation while the regen
-      // completes. Returning 202 immediately lets the UI move on; the
-      // close (and synopsis persist) finish in the background.
-      //
-      // 60s upper bound for the synthesis turn — deep-history sessions
-      // on slow models (Opus) can take well over 15s. With Haiku as the
-      // configured synopsisModel this typically finishes in 2-3s.
+      // Fire-and-forget kill. Agent dies immediately; the synopsis is
+      // regenerated out-of-band by the synopsis coordinator (scheduled
+      // by SessionManager's onClose hook). 202 returns to the caller as
+      // soon as the close starts; the actual agent teardown takes <1s.
       void session
-        .close({
-          deleteRecord: false,
-          regenSnapshot: true,
-          regenSnapshotTimeoutMs: 180_000,
-        })
+        .close({ deleteRecord: false, regenSnapshot: true })
         .catch(() => undefined);
       reply.code(202).send();
       return;
@@ -144,16 +134,16 @@ export function registerSessionRoutes(
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const body = (request.body ?? {}) as { title?: unknown; regen?: unknown };
     if (body.regen === true) {
-      const session = manager.get(id);
-      if (!session) {
-        reply.code(409).send({ error: "regen requires a live session" });
+      // Picker T and /hydra title (no arg) both land here. The synopsis
+      // coordinator handles live and cold sessions uniformly: live agents
+      // are kept alive; the ephemeral synopsis agent runs in parallel
+      // from the cold record + history.jsonl. Return 202 immediately.
+      const exists = manager.get(id) !== undefined || (await manager.hasRecord(id));
+      if (!exists) {
+        reply.code(404).send({ error: "session not found" });
         return;
       }
-      void session.retitleFromAgent().catch((err) => {
-        app.log.warn(
-          `title regen failed for ${id}: ${(err as Error).message}`,
-        );
-      });
+      manager.scheduleSynopsis(id);
       reply.code(202).send();
       return;
     }

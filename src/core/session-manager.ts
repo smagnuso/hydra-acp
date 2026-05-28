@@ -27,6 +27,7 @@ import {
   type SessionRecord,
 } from "./session-store.js";
 import type { SessionSynopsis } from "./snapshot.js";
+import { SynopsisCoordinator } from "./synopsis-coordinator.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { paths } from "./paths.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
@@ -136,12 +137,13 @@ export interface SessionManagerOptions {
   // first prompt. Resurrect paths (session/load) skip this — those
   // sessions already carry a user-chosen model from the prior incarnation.
   defaultModels?: Record<string, string>;
-  // Per-agent cheap-model override used during snapshot regen
-  // (idle-close, daemon shutdown, picker T, /hydra title no-arg).
-  // runInternalPromptWithModel ephemerally swaps to this model for the
-  // synthesis turn, then swaps back. Defaults to {} → no swap, regen
-  // runs on whatever model the session is on.
-  synopsisModels?: Record<string, string>;
+  // Optional override: every background synopsis runs on this agent
+  // instead of the session's source agent. Forwarded to the synopsis
+  // coordinator. Unset → coordinator uses each session's own agentId.
+  synopsisAgent?: string;
+  // Optional override: model id passed to session/set_model on the
+  // ephemeral synopsis agent. Unset → agent picks its default.
+  synopsisModel?: string;
   // Cap on entries kept in each session's on-disk history.jsonl. Forwarded
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
@@ -174,7 +176,8 @@ export class SessionManager {
   private histories: HistoryStore;
   private idleTimeoutMs: number;
   private defaultModels: Record<string, string>;
-  private synopsisModels: Record<string, string>;
+  private synopsisAgent?: string;
+  private synopsisModel?: string;
   readonly defaultTransformers: string[];
   private idleEventTimeoutMs: number;
   private sessionHistoryMaxEntries: number;
@@ -185,6 +188,10 @@ export class SessionManager {
   private logger?: AgentLogger;
   private npmRegistry?: string;
   private extensionCommands?: ExtensionCommandRegistry;
+  // Background queue for ephemeral-agent synopsis generation. Runs
+  // out-of-band so session close is instant; persists synopsis/title
+  // via the same enqueueMetaWrite path the in-session handlers used.
+  private synopsisCoordinator: SynopsisCoordinator;
 
   constructor(
     private registry: Registry,
@@ -199,11 +206,24 @@ export class SessionManager {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
     this.defaultModels = options.defaultModels ?? {};
-    this.synopsisModels = options.synopsisModels ?? {};
+    this.synopsisAgent = options.synopsisAgent;
+    this.synopsisModel = options.synopsisModel;
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
     this.extensionCommands = options.extensionCommands;
+    this.synopsisCoordinator = new SynopsisCoordinator({
+      registry: this.registry,
+      store: this.store,
+      histories: this.histories,
+      synopsisAgent: this.synopsisAgent,
+      synopsisModel: this.synopsisModel,
+      persistTitle: (id, title) => this.persistTitle(id, title),
+      persistSynopsis: (id, synopsis, through) =>
+        this.persistSynopsis(id, synopsis, through),
+      logger: this.logger,
+      npmRegistry: this.npmRegistry,
+    });
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -265,11 +285,11 @@ export class SessionManager {
       currentMode: fresh.initialMode,
       agentModes: fresh.initialModes,
       agentModels: fresh.initialModels,
-      synopsisModel: this.synopsisModels[params.agentId],
       transformChain: params.transformChain,
       parentSessionId: params.parentSessionId,
       originatingClient: params.originatingClient,
       extensionCommands: this.extensionCommands,
+      scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
     });
     await this.attachManagerHooks(session);
     return session;
@@ -486,9 +506,6 @@ export class SessionManager {
       // restarts (quota resets, rollouts), so meta.json is intentionally
       // treated as a cold fallback here, not the authoritative source.
       agentModels: advertisedModels,
-      synopsis: params.synopsis,
-      summarizedThroughEntry: params.summarizedThroughEntry,
-      synopsisModel: this.synopsisModels[params.agentId],
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
       // or never seeded) should re-derive from the next prompt rather
@@ -501,6 +518,7 @@ export class SessionManager {
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
+      scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
     });
     await this.attachManagerHooks(session);
     return session;
@@ -573,9 +591,6 @@ export class SessionManager {
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
       agentModels: advertisedModels,
-      synopsis: params.synopsis,
-      summarizedThroughEntry: params.summarizedThroughEntry,
-      synopsisModel: this.synopsisModels[params.agentId],
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
@@ -584,6 +599,7 @@ export class SessionManager {
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
+      scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
     });
     await this.attachManagerHooks(session);
     // Fire and forget — the seed runs through enqueuePrompt inside
@@ -913,17 +929,20 @@ export class SessionManager {
         // an idle-close (deleteRecord: false) keeps both so the next
         // resurrect can replay; an explicit destroy drops both.
         void this.histories.delete(session.sessionId).catch(() => undefined);
+        return;
+      }
+      // Out-of-band synopsis generation. By the time the coordinator
+      // picks this up, agent is dead and Session is destroyed; the
+      // coordinator reads the cold record + history.jsonl, spawns a
+      // fresh ephemeral agent, and writes synopsis directly via
+      // persistSynopsis. firstPromptSeeded is the gate — a session
+      // that never received a prompt has nothing to summarize.
+      if (session.firstPromptSeeded) {
+        this.synopsisCoordinator.schedule(session.sessionId);
       }
     });
     session.onTitleChange((title) => {
       void this.persistTitle(session.sessionId, title).catch(() => undefined);
-    });
-    session.onSynopsisChange(({ synopsis, summarizedThroughEntry }) => {
-      void this.persistSynopsis(
-        session.sessionId,
-        synopsis,
-        summarizedThroughEntry,
-      ).catch(() => undefined);
     });
     session.onAgentChange(({ agentId, upstreamSessionId }) => {
       void this.persistAgentChange(session.sessionId, agentId, upstreamSessionId).catch(
@@ -1689,26 +1708,41 @@ export class SessionManager {
 
   async closeAll(): Promise<void> {
     const sessions = [...this.sessions.values()];
-    // Fire a snapshot regen on each session before kill so the cold record
-    // captures the agent's freshest view of title + synopsis. Session.close
-    // short-circuits via its own firstPromptSeeded check, so sessions that
-    // never received a prompt skip the regen and just die. Parallel via
-    // Promise.allSettled, bounded by the 8s per-session timeout.
+    // Agents die immediately. Synopsis regen runs out-of-band via the
+    // synopsis coordinator (scheduled by the onClose hook). Daemon
+    // shutdown then awaits the coordinator separately via
+    // flushSynopsis, so the cold records still pick up their final
+    // synopsis but it doesn't block per-session kill.
     await Promise.allSettled(
       sessions.map((s) =>
         s.close({
           deleteRecord: false,
           regenSnapshot: true,
-          // 30s upper bound on daemon shutdown latency. Sessions run
-          // in parallel (Promise.allSettled below), so total shutdown
-          // is bounded by the slowest single session's regen — and
-          // 8s was empirically too tight for deep-history sessions on
-          // any model. With Haiku, 30s is comfortable headroom.
-          regenSnapshotTimeoutMs: 30_000,
         }),
       ),
     );
     this.sessions.clear();
+  }
+
+  // Daemon shutdown calls this after closeAll to let in-flight background
+  // synopsis jobs settle (and queued ones drain) before flushMetaWrites
+  // runs. Bounded by timeoutMs so a hung ephemeral agent doesn't stall
+  // exit.
+  async flushSynopsis(timeoutMs: number): Promise<void> {
+    await this.synopsisCoordinator.flush(timeoutMs);
+  }
+
+  // Stop accepting new synopsis jobs and await any still in flight. Used
+  // by server shutdown after flushSynopsis so the process exit doesn't
+  // race the ephemeral agents.
+  async shutdownSynopsis(): Promise<void> {
+    await this.synopsisCoordinator.shutdown();
+  }
+
+  // Public entry point for picker T and /hydra title with no arg —
+  // schedule a synopsis on the named session (live or cold).
+  scheduleSynopsis(sessionId: string): void {
+    this.synopsisCoordinator.schedule(sessionId);
   }
 
   // Wait for every pending meta.json write to settle. Daemon shutdown
@@ -1842,6 +1876,12 @@ function mergeForPersistence(
     agentId: session.agentId,
     cwd: session.cwd,
     title: session.title,
+    // Preserve synopsis + summarizedThroughEntry from the on-disk
+    // record. The live Session no longer carries these (they're owned by
+    // the synopsis coordinator now), so without this read-through every
+    // attach/persist cycle would clobber the most recent synopsis.
+    synopsis: existing?.synopsis,
+    summarizedThroughEntry: existing?.summarizedThroughEntry,
     agentArgs: session.agentArgs,
     currentModel: session.currentModel ?? existing?.currentModel,
     currentMode: session.currentMode ?? existing?.currentMode,

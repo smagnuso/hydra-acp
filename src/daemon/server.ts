@@ -173,7 +173,8 @@ export async function startDaemon(
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,
     defaultModels: config.defaultModels,
-    synopsisModels: config.synopsisModels,
+    synopsisAgent: config.synopsisAgent,
+    synopsisModel: config.synopsisModel,
     defaultTransformers: config.defaultTransformers,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,
@@ -308,9 +309,16 @@ export async function startDaemon(
     await extensions.stop();
     await transformers.stop();
     await manager.closeAll();
+    // Wait for any in-flight background synopsis to land (and queued
+    // ones to drain). The 30s cap bounds total shutdown latency; queued
+    // jobs that didn't get to run before the cap are dropped by
+    // shutdownSynopsis. Smoke testing showed ephemeral synopsis on
+    // Haiku finishes in 2-3s even for deep histories.
+    await manager.flushSynopsis(30_000);
+    await manager.shutdownSynopsis();
     // Drain pending meta.json writes after closing sessions so any
-    // final regenTitle/persistTitle from idle-close has a chance to
-    // hit disk before the daemon exits.
+    // final persistTitle/persistSynopsis call has a chance to hit disk
+    // before the daemon exits.
     await manager.flushMetaWrites();
     // Same for history.jsonl — markClosed emits a turn_complete
     // (interrupted) for the in-flight turn via fire-and-forget append.

@@ -225,7 +225,11 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(elapsed).toBeLessThan(1000);
   });
 
-  it("PATCH /v1/sessions/:id with { regen: true } 409s on a cold session", async () => {
+  it("PATCH /v1/sessions/:id with { regen: true } accepts cold sessions (schedules background synopsis)", async () => {
+    // Phase 2.5: cold sessions are no longer rejected. The synopsis
+    // coordinator reads history.jsonl + meta.json from disk and spawns
+    // an ephemeral agent to generate the synopsis — no live session
+    // required.
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -238,7 +242,7 @@ describe("session routes: termination broadcasts session_closed", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ regen: true }),
     });
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(202);
   });
 
   it("DELETE /v1/sessions/:id notifies attached clients and removes the record", async () => {

@@ -1,0 +1,230 @@
+// Ephemeral synopsis agent. Spawns a fresh agent subprocess with a blank
+// slate — no MCP servers, no transformers, no prior conversation — feeds
+// it the rendered transcript of a session, and returns the parsed
+// snapshot JSON.
+//
+// Why not reuse the live session's agent? In-session synopsis generation
+// (the Phase 2 approach) routinely fails on deep histories:
+//   - the agent's own context window collides with the prompt;
+//     claude-acp auto-compacts mid-turn and resumes as if doing work,
+//     producing prose instead of JSON.
+//   - the optional model swap (to a cheaper model) leaks into the
+//     agent's per-turn model attribution and survives the swap-back.
+//   - the synopsis turn blocks session close, making kill look frozen.
+//
+// The ephemeral path sidesteps all of that: no context to collide with,
+// no internal session state to leak into, runs after close so kill is
+// instant.
+
+import { AgentInstance, type AgentLogger } from "./agent-instance.js";
+import type { SpawnPlan } from "./registry.js";
+import { ACP_PROTOCOL_VERSION } from "../acp/types.js";
+import { HYDRA_VERSION } from "./hydra-version.js";
+import {
+  SNAPSHOT_PROMPT,
+  tryParseSnapshot,
+  type SnapshotParseResult,
+} from "./snapshot.js";
+import { renderTranscript } from "./history-transcript.js";
+
+export interface GenerateSynopsisOpts {
+  agentId: string;
+  cwd: string;
+  plan: SpawnPlan;
+  history: Array<{ method?: unknown; params?: unknown }>;
+  // From config.synopsisModel. When unset (or unknown to the agent's
+  // advertised list), the run uses whatever model the agent picks
+  // itself on session/new — typically the agent's default.
+  modelId?: string;
+  logger?: AgentLogger;
+  // Hard upper bound on the whole call (spawn + prompt + kill). Defaults
+  // to 120 seconds; ephemeral runs with no prior context should resolve
+  // in well under 30s even on long transcripts.
+  timeoutMs?: number;
+  // Cap on the rendered transcript size fed to the agent. Anything older
+  // than the tail-fitting window is dropped (see renderTranscript).
+  maxTranscriptChars?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+export async function generateSynopsis(
+  opts: GenerateSynopsisOpts,
+): Promise<SnapshotParseResult | undefined> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  let agent: AgentInstance | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
+  try {
+    const work = (async (): Promise<SnapshotParseResult | undefined> => {
+      agent = AgentInstance.spawn({
+        agentId: opts.agentId,
+        cwd: opts.cwd,
+        plan: opts.plan,
+        logger: opts.logger,
+      });
+      const initResult = await agent.connection.request<Record<string, unknown>>(
+        "initialize",
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {},
+          clientInfo: { name: "hydra-synopsis", version: HYDRA_VERSION },
+        },
+      );
+      void initResult;
+      const newResult = await agent.connection.request<Record<string, unknown>>(
+        "session/new",
+        {
+          cwd: opts.cwd,
+          mcpServers: [],
+        },
+      );
+      const upstreamSessionId = newResult.sessionId;
+      if (typeof upstreamSessionId !== "string") {
+        opts.logger?.warn(
+          `synopsis: agent ${opts.agentId} returned non-string sessionId from session/new`,
+        );
+        return undefined;
+      }
+      if (opts.modelId) {
+        const advertised = collectAdvertisedModelIds(newResult);
+        if (advertised.size === 0 || advertised.has(opts.modelId)) {
+          try {
+            await agent.connection.request("session/set_model", {
+              sessionId: upstreamSessionId,
+              modelId: opts.modelId,
+            });
+          } catch (err) {
+            opts.logger?.warn(
+              `synopsis: agent ${opts.agentId} rejected set_model ${JSON.stringify(opts.modelId)}: ${(err as Error).message}; continuing on default`,
+            );
+          }
+        } else {
+          opts.logger?.warn(
+            `synopsis: model ${JSON.stringify(opts.modelId)} not advertised by agent ${opts.agentId} (have [${[...advertised].join(", ")}]); continuing on default`,
+          );
+        }
+      }
+      const chunks: string[] = [];
+      agent.connection.onNotification("session/update", (params) => {
+        const text = extractChunkText(params);
+        if (text.length > 0) {
+          chunks.push(text);
+        }
+      });
+      const transcript = renderTranscript(opts.history, {
+        maxChars: opts.maxTranscriptChars,
+      });
+      const promptText =
+        transcript.length > 0
+          ? `${transcript}\n\n${SNAPSHOT_PROMPT}`
+          : SNAPSHOT_PROMPT;
+      await agent.connection.request<unknown>("session/prompt", {
+        sessionId: upstreamSessionId,
+        prompt: [{ type: "text", text: promptText }],
+      });
+      const reply = chunks.join("");
+      const parsed = tryParseSnapshot(reply);
+      if (!parsed) {
+        opts.logger?.warn(
+          `synopsis: agent ${opts.agentId} reply did not parse as snapshot JSON (replyLen=${reply.length} preview=${JSON.stringify(reply.slice(0, 200))})`,
+        );
+      }
+      return parsed;
+    })();
+
+    return await new Promise<SnapshotParseResult | undefined>(
+      (resolve, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          opts.logger?.warn(
+            `synopsis: agent ${opts.agentId} timed out after ${timeoutMs}ms`,
+          );
+          resolve(undefined);
+        }, timeoutMs);
+        timer.unref?.();
+        work.then(
+          (v) => {
+            if (timer) {
+              clearTimeout(timer);
+            }
+            if (!timedOut) {
+              resolve(v);
+            }
+          },
+          (err) => {
+            if (timer) {
+              clearTimeout(timer);
+            }
+            if (!timedOut) {
+              reject(err);
+            }
+          },
+        );
+      },
+    );
+  } catch (err) {
+    opts.logger?.warn(
+      `synopsis: agent ${opts.agentId} failed: ${(err as Error).message}`,
+    );
+    return undefined;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    if (agent) {
+      await agent.kill().catch(() => undefined);
+    }
+  }
+}
+
+function extractChunkText(params: unknown): string {
+  if (!params || typeof params !== "object") {
+    return "";
+  }
+  const update = (params as { update?: unknown }).update;
+  if (!update || typeof update !== "object") {
+    return "";
+  }
+  const u = update as { sessionUpdate?: unknown; content?: unknown };
+  if (u.sessionUpdate !== "agent_message_chunk") {
+    return "";
+  }
+  const content = u.content as { text?: unknown } | undefined;
+  if (content && typeof content.text === "string") {
+    return content.text;
+  }
+  return "";
+}
+
+// Collect every modelId the agent advertised in session/new. Agents
+// disagree on shape; we accept the common ones and fall back to "trust
+// the caller" (empty set) so the swap proceeds optimistically.
+function collectAdvertisedModelIds(
+  result: Record<string, unknown>,
+): Set<string> {
+  const out = new Set<string>();
+  collectFromAvailable(out, result.availableModels);
+  const models = result.models;
+  if (models && typeof models === "object" && !Array.isArray(models)) {
+    collectFromAvailable(out, (models as Record<string, unknown>).availableModels);
+  }
+  return out;
+}
+
+function collectFromAvailable(out: Set<string>, raw: unknown): void {
+  if (!Array.isArray(raw)) {
+    return;
+  }
+  for (const m of raw) {
+    if (m && typeof m === "object") {
+      const id =
+        (m as { modelId?: unknown }).modelId ??
+        (m as { value?: unknown }).value ??
+        (m as { id?: unknown }).id;
+      if (typeof id === "string" && id.length > 0) {
+        out.add(id);
+      }
+    }
+  }
+}

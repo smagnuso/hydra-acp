@@ -26,7 +26,6 @@ function testConfig(): HydraConfig {
     },
     defaultAgent: "claude-acp",
     defaultModels: {},
-    synopsisModels: {},
     defaultCwd: os.homedir(),
     sessionListColdLimit: 20,
     extensions: {},
@@ -1157,7 +1156,6 @@ describe("startDaemon — extensions REST lifecycle", () => {
       },
       defaultAgent: "claude-acp",
       defaultModels: {},
-      synopsisModels: {},
       defaultCwd: os.homedir(),
       sessionListColdLimit: 20,
       extensions: {

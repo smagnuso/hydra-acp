@@ -157,16 +157,17 @@ export const HydraConfig = z.object({
   // raw model id strings the agent expects (claude-acp: "claude-opus-4-7",
   // opencode: "openai/gpt-5-codex" or "ncp-anthropic/claude-opus-4-7", …).
   defaultModels: z.record(z.string(), z.string()).default({}),
-  // Per-agent cheap-model override used during snapshot regen (the
-  // single agent turn that produces title + synopsis at idle-close,
-  // daemon shutdown, picker T, or `/hydra title` with no arg). When
-  // set, the daemon ephemerally swaps to this model for the synthesis
-  // turn and swaps back — clients never see the model flicker, and
-  // the persisted "current model" stays the user's actual choice. Keys
-  // are agent ids; values are model ids the agent advertises. Agents
-  // not in the table → no swap, regen runs on the session's current
-  // model.
-  synopsisModels: z.record(z.string(), z.string()).default({}),
+  // Optional override: the agent used to produce session synopses
+  // (title + structured digest) at close / picker T / `/hydra title`.
+  // When set, every background synopsis spawns an ephemeral copy of
+  // this agent, independent of what the session was created with.
+  // Useful when one agent is cheaper / more reliable at structured
+  // JSON output than the dev agent. Unset → fall back to the
+  // session's own agentId.
+  synopsisAgent: z.string().optional(),
+  // Optional override: model id passed to session/set_model on the
+  // ephemeral synopsis agent. Unset → the agent uses its default.
+  synopsisModel: z.string().optional(),
   // Where new sessions land when POST /v1/sessions omits cwd. Stored as
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.

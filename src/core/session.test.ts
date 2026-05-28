@@ -1607,58 +1607,43 @@ describe("Session", () => {
       expect(promptCalls.length).toBe(0);
     });
 
-    it("/hydra title (no arg) regenerates via a suppressed sub-prompt", async () => {
-      const { session, mock } = makeSession("hydra_session_HR", "u_HR");
+    it("/hydra title (no arg) schedules an out-of-band synopsis", async () => {
+      // The live session no longer asks its own agent to summarize —
+      // synopsis generation runs in a fresh ephemeral agent process
+      // owned by the SessionManager's coordinator. The slash command
+      // just fires the schedule hook and returns end_turn; the new
+      // title (if any) lands on the cold record asynchronously.
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const scheduleSynopsis = vi.fn();
+      const session = new Session({
+        sessionId: "hydra_session_HR",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_HR",
+        historyStore: new HistoryStore(),
+        scheduleSynopsis,
+      });
       const { client: alice } = makeClient();
-      const { client: bob, stream: bobStream } = makeClient();
       session.attach(alice, "full");
-      session.attach(bob, "full");
       const requestMock = mock.agent.connection.request as ReturnType<
         typeof vi.fn
       >;
-      // Agent replies with a JSON snapshot (title + synopsis). The
-      // daemon parses it via tryParseSnapshot and applies the title.
-      requestMock.mockImplementation(async () => {
-        mock.triggerNotification("session/update", {
-          sessionId: "u_HR",
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: {
-              type: "text",
-              text: JSON.stringify({
-                title: "Refactor auth flow",
-                synopsis: { goal: "rework login" },
-              }),
-            },
-          },
-        });
-        return { stopReason: "end_turn" };
-      });
 
       await session.prompt(alice.clientId, {
         prompt: [{ type: "text", text: "/hydra title" }],
       });
 
-      expect(session.title).toBe("Refactor auth flow");
-      // The sub-prompt's agent_message_chunk was suppressed — bob never
-      // sees it.
-      const chunkLeak = bobStream.sent.find(
-        (m) =>
-          "method" in m &&
-          m.method === "session/update" &&
-          (m.params as { update?: { sessionUpdate?: string } } | undefined)
-            ?.update?.sessionUpdate === "agent_message_chunk",
+      expect(scheduleSynopsis).toHaveBeenCalledTimes(1);
+      // Title didn't change synchronously — the coordinator writes it
+      // later via persistTitle on the cold record.
+      expect(session.title).toBeUndefined();
+      // The live agent's session/prompt was never called for this — no
+      // in-session synopsis turn.
+      const promptCalls = requestMock.mock.calls.filter(
+        ([method]) => method === "session/prompt",
       );
-      expect(chunkLeak).toBeUndefined();
-      // session_info_update did go out.
-      const sessionInfo = bobStream.sent.find(
-        (m) =>
-          "method" in m &&
-          m.method === "session/update" &&
-          (m.params as { update?: { sessionUpdate?: string } } | undefined)
-            ?.update?.sessionUpdate === "session_info_update",
-      );
-      expect(sessionInfo).toBeDefined();
+      expect(promptCalls.length).toBe(0);
     });
 
     it("/hydra agent swaps the agent, broadcasts info+banner, and feeds transcript to new agent", async () => {

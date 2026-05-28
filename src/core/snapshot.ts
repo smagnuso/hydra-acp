@@ -37,7 +37,7 @@ export type SessionSynopsis = z.infer<typeof SessionSynopsis>;
 // renders truncate anyway; this is a safety bound on what we persist.
 const MAX_TITLE_LEN = 200;
 
-// The synthesis prompt sent to the agent at idle-close / shutdown /
+// The synopsis prompt sent to the agent at idle-close / shutdown /
 // picker T / `/hydra title` no-arg. Asks for a single JSON object with
 // title and the *qualitative* synopsis fields only — files_touched and
 // tools_used are computed locally from history.jsonl (see
