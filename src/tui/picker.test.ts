@@ -6,6 +6,7 @@ import {
   matchesSearch,
   nextHostFilter,
   pickSession,
+  sortSessions,
   type PickerPrefs,
   type PickerResult,
 } from "./picker.js";
@@ -278,6 +279,103 @@ describe("filterByHost", () => {
       }),
     ];
     expect(filterByHost(items, "__all")).toEqual(items);
+  });
+});
+
+describe("sortSessions", () => {
+  const cwd = "/home/me/work/project";
+
+  it("floats busy sessions above non-busy live sessions", () => {
+    const live = session({
+      sessionId: "hydra-live",
+      status: "live",
+      cwd,
+      updatedAt: "2026-05-20T12:00:00Z",
+    });
+    const busy = session({
+      sessionId: "hydra-busy",
+      status: "live",
+      busy: true,
+      cwd,
+      updatedAt: "2026-05-20T11:00:00Z",
+    });
+    const cold = session({
+      sessionId: "hydra-cold",
+      status: "cold",
+      cwd,
+      updatedAt: "2026-05-20T13:00:00Z",
+    });
+    const out = sortSessions([live, cold, busy], cwd);
+    expect(out.map((s) => s.sessionId)).toEqual([
+      "hydra-busy",
+      "hydra-live",
+      "hydra-cold",
+    ]);
+  });
+
+  it("prefers busy + cwd match over busy in a different cwd", () => {
+    const busyHere = session({
+      sessionId: "hydra-here",
+      status: "live",
+      busy: true,
+      cwd,
+      updatedAt: "2026-05-20T11:00:00Z",
+    });
+    const busyElsewhere = session({
+      sessionId: "hydra-elsewhere",
+      status: "live",
+      busy: true,
+      cwd: "/other/place",
+      updatedAt: "2026-05-20T12:00:00Z",
+    });
+    const out = sortSessions([busyElsewhere, busyHere], cwd);
+    expect(out.map((s) => s.sessionId)).toEqual([
+      "hydra-here",
+      "hydra-elsewhere",
+    ]);
+  });
+
+  it("ranks busy elsewhere above non-busy in current cwd", () => {
+    const liveHere = session({
+      sessionId: "hydra-here",
+      status: "live",
+      cwd,
+      updatedAt: "2026-05-20T12:00:00Z",
+    });
+    const busyElsewhere = session({
+      sessionId: "hydra-elsewhere",
+      status: "live",
+      busy: true,
+      cwd: "/other/place",
+      updatedAt: "2026-05-20T11:00:00Z",
+    });
+    const out = sortSessions([liveHere, busyElsewhere], cwd);
+    expect(out.map((s) => s.sessionId)).toEqual([
+      "hydra-elsewhere",
+      "hydra-here",
+    ]);
+  });
+
+  it("sorts by updatedAt within the same tier", () => {
+    const older = session({
+      sessionId: "hydra-older",
+      status: "live",
+      busy: true,
+      cwd,
+      updatedAt: "2026-05-20T10:00:00Z",
+    });
+    const newer = session({
+      sessionId: "hydra-newer",
+      status: "live",
+      busy: true,
+      cwd,
+      updatedAt: "2026-05-20T12:00:00Z",
+    });
+    const out = sortSessions([older, newer], cwd);
+    expect(out.map((s) => s.sessionId)).toEqual([
+      "hydra-newer",
+      "hydra-older",
+    ]);
   });
 });
 

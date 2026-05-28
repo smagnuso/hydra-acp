@@ -204,21 +204,6 @@ export async function pickSession(
   process.stdout.write("\x1b[?1006l");
   process.stdout.write("\x1b[?1l");
   process.stdout.write("\x1b>");
-  const sortSessions = (sessions: DiscoveredSession[]): DiscoveredSession[] => {
-    const score = (s: DiscoveredSession): number => {
-      if (s.status !== "live") {
-        return 0;
-      }
-      return s.cwd === opts.cwd ? 2 : 1;
-    };
-    return [...sessions].sort((a, b) => {
-      const tier = score(b) - score(a);
-      if (tier !== 0) {
-        return tier;
-      }
-      return b.updatedAt.slice(0, 16).localeCompare(a.updatedAt.slice(0, 16));
-    });
-  };
 
   // All persistent toggles live on `prefs.filters`. We read and write
   // straight through this object — no shadow locals — so adding a new
@@ -254,7 +239,7 @@ export async function pickSession(
   // full sorted source; `visible` is the currently displayed slice — the
   // subset of allSessions after the cwd-only / host filter / search
   // filters compose.
-  let allSessions: DiscoveredSession[] = sortSessions(opts.sessions);
+  let allSessions: DiscoveredSession[] = sortSessions(opts.sessions, opts.cwd);
   // Single source of truth for persistent filters from prefs. Both the
   // initial paint and applyFilter (after a toggle) route through this so
   // adding a new filter is a one-place change. The transient search
@@ -1404,10 +1389,19 @@ export async function pickSession(
         const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
         const beforeTotal = total;
         const next = await listSessions(opts.target);
-        allSessions = sortSessions(next);
+        // Snapshot the session the cursor is on right now — after the
+        // HTTP wait, not before — so callers that don't pin a specific
+        // id (auto-refresh, `r`) still follow the user's CURRENT
+        // selection through a resort. If they pressed UP/DOWN during
+        // the await, this captures where they are now, not where they
+        // were three seconds ago.
+        const followId =
+          preferredId ??
+          (selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined);
+        allSessions = sortSessions(next, opts.cwd);
         applyFilter();
-        if (preferredId !== undefined) {
-          const idx = visible.findIndex((s) => s.sessionId === preferredId);
+        if (followId !== undefined) {
+          const idx = visible.findIndex((s) => s.sessionId === followId);
           if (idx >= 0) {
             selectedIdx = idx + 1;
           }
@@ -2283,6 +2277,35 @@ function formatComposerTitle(cwd: string, maxWidth: number): string {
   const prefix = "Create new session in ";
   const budget = Math.max(1, maxWidth - prefix.length);
   return prefix + truncateMiddle(shortenHomePath(cwd), budget);
+}
+
+// Order sessions for the picker. Tiers (highest first):
+//   4: live + busy + cwd matches the picker's cwd
+//   3: live + busy
+//   2: live + cwd matches
+//   1: live
+//   0: cold
+// Within a tier, newer updatedAt wins — but compared at minute precision
+// so a streaming session's per-chunk mtime churn doesn't keep flipping
+// the sort order between auto-refreshes.
+export function sortSessions(
+  sessions: DiscoveredSession[],
+  cwd: string,
+): DiscoveredSession[] {
+  const score = (s: DiscoveredSession): number => {
+    if (s.status !== "live") {
+      return 0;
+    }
+    const base = s.cwd === cwd ? 2 : 1;
+    return s.busy ? base + 2 : base;
+  };
+  return [...sessions].sort((a, b) => {
+    const tier = score(b) - score(a);
+    if (tier !== 0) {
+      return tier;
+    }
+    return b.updatedAt.slice(0, 16).localeCompare(a.updatedAt.slice(0, 16));
+  });
 }
 
 // Apply the picker's host filter to a session list. Sentinel values:
