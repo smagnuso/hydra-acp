@@ -217,11 +217,13 @@ hydra-acp session [list]                   # list sessions
 hydra-acp session info <id> [--verbose] [--json]
                                             # aggregate one session: turn count, tool histogram,
                                             # files touched, cost/duration, synopsis
-hydra-acp session diff <id> [--json] [--no-color] [--no-pager]
+hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]
                                             # git-diff-shaped view of every file the session
                                             # edited, reconstructed from history (no git, no fs).
                                             # Pages through $HYDRA_ACP_PAGER → $PAGER → less on a TTY
                                             # (LESS=FRX default); --no-pager bypasses.
+                                            # --fold collapses sequential hunks that rewrite the
+                                            # same region (agent thrash) into one net-effect hunk.
 hydra-acp session kill <id>                 # close a live session (keeps the on-disk record so it can be resurrected)
 hydra-acp session remove <id>               # remove a session entirely (live or cold)
 hydra-acp session export <id> [--out <file>|.]

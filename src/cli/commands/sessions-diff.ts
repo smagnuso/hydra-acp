@@ -24,6 +24,7 @@ import { loadServiceToken } from "../../core/service-token.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import {
   aggregateFileEdits,
+  foldHunks,
   type FileEditAggregate,
 } from "../../core/history-edits.js";
 import { buildUnifiedDiff } from "../../tui/format.js";
@@ -34,6 +35,11 @@ export interface SessionsDiffOptions {
   json?: boolean;
   noColor?: boolean;
   noPager?: boolean;
+  // Compose pairs of hunks where laterHunk.oldText === earlierHunk.newText,
+  // collapsing agent thrash ("rewrote the same block 4 times") into one
+  // net-effect hunk. Opt-in because the intermediate hunks are
+  // sometimes exactly what the reader wants to see.
+  fold?: boolean;
 }
 
 export async function runSessionsDiff(
@@ -76,7 +82,11 @@ export async function runSessionsDiff(
     process.exit(1);
   }
 
-  const files = aggregateFileEdits(bundle.history);
+  const rawFiles = aggregateFileEdits(bundle.history);
+  const files: FileEditAggregate[] =
+    opts.fold === true
+      ? rawFiles.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }))
+      : rawFiles;
   if (opts.json) {
     process.stdout.write(JSON.stringify(files, null, 2) + "\n");
     return;
@@ -103,12 +113,66 @@ export function renderDiff(
   // Sort by path so output order is deterministic across runs.
   const ordered = [...files].sort((a, b) => a.path.localeCompare(b.path));
   for (const f of ordered) {
-    out.push(formatFile(f, useColor));
+    const block = formatFile(f, useColor);
+    if (block !== null) {
+      out.push(block);
+    }
+  }
+  if (out.length === 0) {
+    return "No file edits found in this session.\n";
   }
   return out.join("");
 }
 
-function formatFile(f: FileEditAggregate, useColor: boolean): string {
+// Pre-render every hunk and keep only the ones that produce a
+// visible change. A no-op hunk (oldText === newText, or differing
+// only by ANSI/control chars / trailing whitespace that `buildUnifiedDiff`
+// normalises away) reads as 7 lines of context with no +/- markers,
+// which looks like garbage in the output. Drop those. If every hunk
+// on a file ends up empty, drop the file block too.
+interface PreparedHunk {
+  body: string;
+  oldCount: number;
+  newCount: number;
+}
+
+function prepareVisibleHunks(f: FileEditAggregate): PreparedHunk[] {
+  const out: PreparedHunk[] = [];
+  for (const hunk of f.hunks) {
+    const body = buildUnifiedDiff(hunk, { maxLines: Infinity });
+    if (!hasVisibleChange(body)) {
+      continue;
+    }
+    out.push({
+      body,
+      oldCount: countSnippetLines(hunk.oldText),
+      newCount: countSnippetLines(hunk.newText),
+    });
+  }
+  return out;
+}
+
+// A hunk has a visible change iff buildUnifiedDiff emitted at least
+// one line starting with "+ " or "- ". An all-context body (every
+// line begins with "  ") means the LCS aligned everything, i.e.
+// nothing actually changed at the line level.
+function hasVisibleChange(body: string): boolean {
+  if (body.length === 0) {
+    return false;
+  }
+  for (const line of body.split("\n")) {
+    if (line.startsWith("+ ") || line.startsWith("- ")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function formatFile(f: FileEditAggregate, useColor: boolean): string | null {
+  const prepared = prepareVisibleHunks(f);
+  if (prepared.length === 0) {
+    return null;
+  }
   const lines: string[] = [];
   lines.push(`diff --hydra a/${f.path} b/${f.path}`);
   if (f.created) {
@@ -128,20 +192,18 @@ function formatFile(f: FileEditAggregate, useColor: boolean): string {
   // After the closing @@ we tag the hunk with "edit N of M" when the
   // file has multiple hunks, using git's "function context" tail
   // convention so the marker is still a valid unified-diff header.
-  const total = f.hunks.length;
-  f.hunks.forEach((hunk, idx) => {
-    const body = buildUnifiedDiff(hunk, { maxLines: Infinity });
-    const oldCount = countSnippetLines(hunk.oldText);
-    const newCount = countSnippetLines(hunk.newText);
-    const oldStart = oldCount === 0 ? 0 : 1;
-    const newStart = newCount === 0 ? 0 : 1;
+  // N / M are the post-filter counts, so a file that started with
+  // 16 edits but only had 5 visible changes reads "edit 1 of 5" …
+  // "edit 5 of 5" rather than skipping numbers.
+  const total = prepared.length;
+  prepared.forEach((hunk, idx) => {
+    const oldStart = hunk.oldCount === 0 ? 0 : 1;
+    const newStart = hunk.newCount === 0 ? 0 : 1;
     const tail = total > 1 ? ` edit ${idx + 1} of ${total}` : "";
     lines.push(
-      `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${tail}`,
+      `@@ -${oldStart},${hunk.oldCount} +${newStart},${hunk.newCount} @@${tail}`,
     );
-    if (body.length > 0) {
-      lines.push(body);
-    }
+    lines.push(hunk.body);
   });
   const text = lines.join("\n") + "\n\n";
   if (!useColor) {

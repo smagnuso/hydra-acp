@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { aggregateFileEdits } from "./history-edits.js";
+import { aggregateFileEdits, foldHunks } from "./history-edits.js";
 
 let nextId = 0;
 function newId(): string {
@@ -228,5 +228,73 @@ describe("aggregateFileEdits", () => {
     ]);
     expect(result[0]!.created).toBe(true);
     expect(result[0]!.hunks).toHaveLength(2);
+  });
+});
+
+describe("foldHunks", () => {
+  it("returns input unchanged when no hunks chain", () => {
+    const hunks = [
+      { oldText: "a", newText: "A" },
+      { oldText: "b", newText: "B" },
+    ];
+    expect(foldHunks(hunks)).toEqual(hunks);
+  });
+
+  it("composes a two-hunk chain into one net-effect hunk", () => {
+    expect(
+      foldHunks([
+        { oldText: "A", newText: "B" },
+        { oldText: "B", newText: "C" },
+      ]),
+    ).toEqual([{ oldText: "A", newText: "C" }]);
+  });
+
+  it("composes a three-hunk chain", () => {
+    expect(
+      foldHunks([
+        { oldText: "A", newText: "B" },
+        { oldText: "B", newText: "C" },
+        { oldText: "C", newText: "D" },
+      ]),
+    ).toEqual([{ oldText: "A", newText: "D" }]);
+  });
+
+  it("preserves unrelated hunks alongside a folded chain", () => {
+    expect(
+      foldHunks([
+        { oldText: "A", newText: "B" },
+        { oldText: "x", newText: "X" },
+        { oldText: "B", newText: "C" },
+      ]),
+    ).toEqual([
+      { oldText: "A", newText: "C" },
+      { oldText: "x", newText: "X" },
+    ]);
+  });
+
+  it("treats a Write-then-Edit (created file) as foldable to a single create", () => {
+    expect(
+      foldHunks([
+        { oldText: "", newText: "v1" },
+        { oldText: "v1", newText: "v2" },
+      ]),
+    ).toEqual([{ oldText: "", newText: "v2" }]);
+  });
+
+  it("folds against the most recent matching newText when two earlier hunks tie", () => {
+    expect(
+      foldHunks([
+        { oldText: "A1", newText: "X" },
+        { oldText: "A2", newText: "X" },
+        { oldText: "X", newText: "Y" },
+      ]),
+    ).toEqual([
+      { oldText: "A1", newText: "X" },
+      { oldText: "A2", newText: "Y" },
+    ]);
+  });
+
+  it("returns [] for an empty list", () => {
+    expect(foldHunks([])).toEqual([]);
   });
 });

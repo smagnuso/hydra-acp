@@ -113,6 +113,40 @@ export function aggregateFileEdits(
   return out;
 }
 
+// Fold sequential edits to the same region into one composed hunk.
+// When a later hunk's oldText equals an earlier hunk's newText, the
+// later edit is rewriting exactly what the earlier one put down — we
+// can compose them to (earliest.oldText, latest.newText) without
+// reading any source file. Useful for hiding agent thrash ("rewrote
+// the same block 4 times"), but lossy: a session that legitimately
+// touched the same region in multiple distinct steps gets collapsed
+// to a single net-effect view. Opt-in via --fold.
+//
+// Matching is most-recent-wins. If two earlier hunks both happen to
+// have the same newText (rare but possible), we fold against the
+// later one so the chain reflects the most recent state of that
+// region. Hunks that don't compose are left in place, preserving
+// order with the folded-into hunks.
+export function foldHunks(hunks: FileHunk[]): FileHunk[] {
+  const out: FileHunk[] = [];
+  for (const next of hunks) {
+    let matchedIdx = -1;
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (out[i]!.newText === next.oldText) {
+        matchedIdx = i;
+        break;
+      }
+    }
+    if (matchedIdx === -1) {
+      out.push(next);
+      continue;
+    }
+    const earlier = out[matchedIdx]!;
+    out.splice(matchedIdx, 1, { oldText: earlier.oldText, newText: next.newText });
+  }
+  return out;
+}
+
 function mergeEdit(
   byPath: Map<string, { hunks: FileHunk[]; created: boolean }>,
   edit: RawEdit,

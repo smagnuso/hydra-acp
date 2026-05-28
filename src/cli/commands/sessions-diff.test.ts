@@ -68,4 +68,80 @@ describe("renderDiff", () => {
     expect(aIdx).toBeGreaterThanOrEqual(0);
     expect(zIdx).toBeGreaterThan(aIdx);
   });
+
+  it("drops hunks whose old/new texts are identical (no visible change)", () => {
+    const files: FileEditAggregate[] = [
+      {
+        path: "/a.ts",
+        created: false,
+        hunks: [
+          { oldText: "real-old", newText: "real-new" },
+          { oldText: "same-line", newText: "same-line" },
+        ],
+      },
+    ];
+    const out = renderDiff(files, false);
+    // The real edit survives; the no-op doesn't, so we end up with one
+    // hunk total and no "edit N of M" tail.
+    expect(out).toContain("@@ -1,1 +1,1 @@\n");
+    expect(out).not.toContain("edit 1 of 2");
+    expect(out).not.toContain("edit 2 of 2");
+    expect(out).toContain("- real-old");
+    expect(out).toContain("+ real-new");
+    expect(out).not.toContain("same-line");
+  });
+
+  it("drops hunks differing only by a trailing newline", () => {
+    const files: FileEditAggregate[] = [
+      {
+        path: "/a.ts",
+        created: false,
+        hunks: [{ oldText: "foo\nbar\n", newText: "foo\nbar" }],
+      },
+    ];
+    expect(renderDiff(files, false)).toBe(
+      "No file edits found in this session.\n",
+    );
+  });
+
+  it("drops a file entirely when every hunk is a no-op", () => {
+    const files: FileEditAggregate[] = [
+      {
+        path: "/noop.ts",
+        created: false,
+        hunks: [
+          { oldText: "x", newText: "x" },
+          { oldText: "y", newText: "y" },
+        ],
+      },
+      {
+        path: "/real.ts",
+        created: false,
+        hunks: [{ oldText: "a", newText: "A" }],
+      },
+    ];
+    const out = renderDiff(files, false);
+    expect(out).not.toContain("/noop.ts");
+    expect(out).toContain("/real.ts");
+  });
+
+  it("renumbers surviving hunks so edit N of M reflects the visible count", () => {
+    const files: FileEditAggregate[] = [
+      {
+        path: "/a.ts",
+        created: false,
+        hunks: [
+          { oldText: "a", newText: "A" },
+          { oldText: "noop", newText: "noop" },
+          { oldText: "b", newText: "B" },
+          { oldText: "c", newText: "C" },
+        ],
+      },
+    ];
+    const out = renderDiff(files, false);
+    expect(out).toContain("edit 1 of 3");
+    expect(out).toContain("edit 2 of 3");
+    expect(out).toContain("edit 3 of 3");
+    expect(out).not.toContain("of 4");
+  });
 });

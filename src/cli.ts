@@ -362,6 +362,7 @@ async function main(): Promise<void> {
           json: flags.json === true,
           noColor: flags["no-color"] === true,
           noPager: flags["no-pager"] === true,
+          fold: flags.fold === true,
         });
         return;
       }
@@ -743,8 +744,8 @@ function printHelp(): void {
       "                                     List sessions (live + 20 most-recent cold; --all for everything; --json emits JSON for scripts).",
       "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer.",
       "                                     --include-cat surfaces sessions spawned by `hydra cat` (hidden by default).",
-      "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager]",
-      "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses.",
+      "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]",
+      "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses. --fold collapses sequential hunks that rewrite the same region into one net-effect hunk.",
       "  hydra-acp session kill <id>        Demote a live session to cold (keeps the on-disk record)",
       "  hydra-acp session remove <id>      Remove a session entirely (live or cold)",
       "  hydra-acp session export <id> [--out <file>|.]",
