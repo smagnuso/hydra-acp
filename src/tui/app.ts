@@ -2512,8 +2512,7 @@ async function runSession(
         toolsBlockEndedAt = null;
         toolsBlockStopReason = null;
         toolsExpanded = false;
-        pendingEditMarks = [];
-        turnHadUtterance = false;
+        lastEditMarkPath = null;
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -3008,21 +3007,15 @@ async function runSession(
     }
   };
 
-  // Edit-mode marks pending a flush. In "edit" mode the marks duplicate
-  // the still-visible tools-block rows on tool-only turns, so we hold
-  // them until either an utterance fires (flush above the new content)
-  // or the turn ends. At turn-end, we keep the buffer's marks IF this
-  // turn ever produced an utterance — otherwise we drop them since the
-  // tool rows above are still the user's only signal. "diff" mode
-  // bypasses this buffer entirely — the diff body is informative even
-  // when it sits right under the tool row.
-  let pendingEditMarks: { toolCallId: string; diff: EditDiff }[] = [];
-  // Set on the first utterance of a turn (agent-text or visible thought).
-  // Reset at turn boundary. Used to decide whether trailing pending
-  // edit marks should be flushed at turn-end or discarded.
-  let turnHadUtterance = false;
+  // Path of the most recently emitted "edit" mode mark. Used to drop a
+  // consecutive same-path mark so a series of edits to one file shows a
+  // single "▸ Edited foo.ts" line. Reset on agent-text and visible
+  // agent-thought (so a fresh round of edits after prose shows again),
+  // and at turn boundaries. "diff" mode never consults this — every
+  // diff is informative on its own.
+  let lastEditMarkPath: string | null = null;
 
-  // Drop a separate scrollback block under the tools block when the user
+  // Drop a separate scrollback block under the tool row when the user
   // has opted in via `tui.showFileUpdates`. Keyed by toolCallId so a
   // re-render against the same id amends in place.
   //
@@ -3047,37 +3040,18 @@ async function runSession(
       }
       return;
     }
-    pendingEditMarks.push({ toolCallId, diff: state.editDiff });
-  };
-
-  // Push any pending edit-mode marks to scrollback, deduping consecutive
-  // same-path entries within the batch. Called when the agent emits
-  // prose (agent-text / agent-thought) — and again at turn-end if the
-  // turn ever produced an utterance, so trailing edits after the last
-  // text still get marks. On tool-only turns the buffer is dropped
-  // unflushed, since the tool rows already show the same info. The
-  // dedup is batch-local on purpose: an utterance between two same-path
-  // edits breaks the visual continuity, so the second edit is a fresh
-  // mark worth showing.
-  const flushPendingEditMarks = (): void => {
-    if (pendingEditMarks.length === 0) {
+    const diff = state.editDiff;
+    if (diff.path && diff.path === lastEditMarkPath) {
       return;
     }
-    let lastPath: string | null = null;
-    for (const { toolCallId, diff } of pendingEditMarks) {
-      if (diff.path && diff.path === lastPath) {
-        continue;
-      }
-      const lines = formatEditDiffBlock(diff, "edit");
-      if (lines.length === 0) {
-        continue;
-      }
-      screen.upsertLines(`editdiff:${toolCallId}`, lines);
-      if (diff.path) {
-        lastPath = diff.path;
-      }
+    const lines = formatEditDiffBlock(diff, "edit");
+    if (lines.length === 0) {
+      return;
     }
-    pendingEditMarks = [];
+    screen.upsertLines(`editdiff:${toolCallId}`, lines);
+    if (diff.path) {
+      lastEditMarkPath = diff.path;
+    }
   };
 
   applyRenderEvent = (event: RenderEvent): void => {
@@ -3193,8 +3167,7 @@ async function runSession(
       toolCallOrder.length = 0;
       toolsExpanded = false;
       toolsBlockEndedAt = null;
-      pendingEditMarks = [];
-      turnHadUtterance = false;
+      lastEditMarkPath = null;
       startToolsBlock();
       // Force an immediate paint past the content-repaint throttle. The
       // user-text event is the user's "I just sent this" signal — they
@@ -3207,8 +3180,12 @@ async function runSession(
     }
     if (event.kind === "agent-text") {
       closeThought();
-      turnHadUtterance = true;
-      flushPendingEditMarks();
+      // Only reset the dedupe path when this chunk actually emits visible
+      // text — empty chunks are framing/no-ops (appendAgentText itself
+      // bails on them) and shouldn't visually break a run of edits.
+      if (event.text.length > 0) {
+        lastEditMarkPath = null;
+      }
       appendAgentText(event.text);
       return;
     }
@@ -3219,13 +3196,13 @@ async function runSession(
       // setHideThoughts() filters at draw time so toggling ^T reveals lines
       // that streamed in while hidden.
       closeAgentText();
-      // Hidden thoughts don't visually break the tools block above, so
-      // they don't qualify as an "utterance" for edit-mark flush purposes.
-      // Toggling ^T while thoughts are queued won't retroactively flush —
-      // acceptable since the marks are a UX nicety, not load-bearing.
-      if (viewPrefs.showThoughts) {
-        turnHadUtterance = true;
-        flushPendingEditMarks();
+      // Hidden thoughts don't visually break the visual flow, so they
+      // don't qualify as prose for edit-mark dedupe purposes. Empty
+      // thought chunks also don't reset — they emit no visible text
+      // (appendThought bails on empty input) so a run of edits straddling
+      // one stays a logical series.
+      if (viewPrefs.showThoughts && event.text.length > 0) {
+        lastEditMarkPath = null;
       }
       appendThought(event.text);
       return;
@@ -3404,15 +3381,7 @@ async function runSession(
       toolsBlockStopReason = null;
       toolsExpanded = false;
       upstreamInterruptedSeen = false;
-      // Trailing edits after the last utterance need their marks if the
-      // turn ever spoke — without this they'd be silently discarded.
-      // Pure tool-only turns skip the flush; the tools block above is
-      // the only signal those leave anyway.
-      if (turnHadUtterance) {
-        flushPendingEditMarks();
-      }
-      pendingEditMarks = [];
-      turnHadUtterance = false;
+      lastEditMarkPath = null;
       screen.ensureSeparator();
       // Drift reconcile. At a real turn boundary with no queued prompt,
       // no own prompt awaiting (turnInFlight), and no in-flight head id,
@@ -3549,8 +3518,7 @@ async function runSession(
     toolsBlockEndedAt = null;
     toolsBlockStopReason = null;
     toolsExpanded = false;
-    pendingEditMarks = [];
-    turnHadUtterance = false;
+    lastEditMarkPath = null;
   };
 
   // Disconnect signal arrives the moment the underlying WS drops and a
