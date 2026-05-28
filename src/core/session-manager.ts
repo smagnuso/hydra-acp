@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import { customAlphabet } from "nanoid";
 import { AgentInstance, type AgentInstanceOptions, type AgentLogger } from "./agent-instance.js";
 import {
@@ -703,11 +704,25 @@ export class SessionManager {
       existing.add(`${rec.agentId}::${rec.upstreamSessionId}`);
     }
 
+    // Sessions whose cwd is under hydra's own data dir are internal
+    // ephemeral runs — the synopsis coordinator spawns claude-acp with
+    // cwd=~/.hydra-acp/sessions/<id>/ as a sandbox, which makes claude-acp
+    // persist that ephemeral session in its own per-project storage.
+    // sessionCapabilities.list then surfaces those back to syncFromAgent,
+    // and without this guard we'd import them as real hydra sessions
+    // (cwd pointing into hydra's data dir, replaying the synopsis prompt
+    // as user input on first resurrect). Users never legitimately work
+    // out of ~/.hydra-acp/, so a prefix filter is safe.
+    const hydraHomeDir = paths.home();
     const synced: SessionRecord[] = [];
     let skipped = 0;
     for (const entry of entries) {
       const dedupeKey = `${agentId}::${entry.sessionId}`;
       if (existing.has(dedupeKey)) {
+        skipped += 1;
+        continue;
+      }
+      if (isUnderHydraHome(entry.cwd, hydraHomeDir)) {
         skipped += 1;
         continue;
       }
@@ -1819,6 +1834,18 @@ export class SessionManager {
       }
     }
   }
+}
+
+// True when `cwd` lives under hydra's own data dir. Used by
+// syncFromAgent to skip importing ephemeral synopsis sessions (the
+// synopsis coordinator spawns agents with cwd=~/.hydra-acp/sessions/<id>/).
+function isUnderHydraHome(cwd: string, hydraHomeDir: string): boolean {
+  if (typeof cwd !== "string" || cwd.length === 0) {
+    return false;
+  }
+  const resolved = path.resolve(cwd);
+  const home = path.resolve(hydraHomeDir);
+  return resolved === home || resolved.startsWith(home + path.sep);
 }
 
 // Build the record we'll persist to meta.json. Read-modify-write style:

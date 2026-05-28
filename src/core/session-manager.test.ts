@@ -2675,6 +2675,25 @@ describe("SessionManager.syncFromAgent", () => {
       code: JsonRpcErrorCodes.AgentNotInstalled,
     });
   });
+
+  it("skips entries whose cwd is under hydra's data dir (synopsis ephemerals)", async () => {
+    const { paths } = await import("./paths.js");
+    const synopsisCwd = paths.sessionDir("hydra_session_some_other");
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            { sessionId: "u_real", cwd: "/projects/real" },
+            { sessionId: "u_synopsis_leak", cwd: synopsisCwd },
+          ],
+        },
+      ],
+    });
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(synced.map((r) => r.upstreamSessionId)).toEqual(["u_real"]);
+    expect(skipped).toBe(1);
+  });
 });
 
 describe("SessionManager.resurrect: pendingHistorySync", () => {
