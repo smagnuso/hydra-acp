@@ -45,6 +45,7 @@ import {
 } from "./hydra-commands.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
+import { coalesceReplay } from "./coalesce-replay.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import {
   deleteQueue,
@@ -802,7 +803,7 @@ export class Session {
     historyPolicy: HistoryPolicy,
     opts: { afterMessageId?: string },
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
-    const all = await this.getHistorySnapshot();
+    const all = coalesceReplay(await this.getHistorySnapshot());
     const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
       const cutoff = opts.afterMessageId
