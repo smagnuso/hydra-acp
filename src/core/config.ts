@@ -168,6 +168,13 @@ export const HydraConfig = z.object({
   // Optional override: model id passed to session/set_model on the
   // ephemeral synopsis agent. Unset → the agent uses its default.
   synopsisModel: z.string().optional(),
+  // Background synopsis on session close is opt-in. The coordinator
+  // spawns a fresh ephemeral agent per close, holds the full history
+  // in memory for the duration, and can stack up under bursty idle
+  // sweeps — defaulting off keeps the daemon's resident set predictable.
+  // Explicit user paths (picker T, `/hydra title`) are unaffected by
+  // this flag — they always schedule, since the user just asked.
+  synopsisOnClose: z.boolean().default(false),
   // Where new sessions land when POST /v1/sessions omits cwd. Stored as
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.

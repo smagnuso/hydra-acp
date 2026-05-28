@@ -175,6 +175,7 @@ export async function startDaemon(
     defaultModels: config.defaultModels,
     synopsisAgent: config.synopsisAgent,
     synopsisModel: config.synopsisModel,
+    synopsisOnClose: config.synopsisOnClose,
     defaultTransformers: config.defaultTransformers,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,

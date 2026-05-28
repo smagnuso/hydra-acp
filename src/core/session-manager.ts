@@ -144,6 +144,10 @@ export interface SessionManagerOptions {
   // Optional override: model id passed to session/set_model on the
   // ephemeral synopsis agent. Unset → agent picks its default.
   synopsisModel?: string;
+  // When true, schedule a background synopsis as part of session close
+  // (the onClose hook below). Defaults off — explicit user paths
+  // (picker T, `/hydra title`, scheduleSynopsis()) always run regardless.
+  synopsisOnClose?: boolean;
   // Cap on entries kept in each session's on-disk history.jsonl. Forwarded
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
@@ -178,6 +182,7 @@ export class SessionManager {
   private defaultModels: Record<string, string>;
   private synopsisAgent?: string;
   private synopsisModel?: string;
+  private synopsisOnClose: boolean;
   readonly defaultTransformers: string[];
   private idleEventTimeoutMs: number;
   private sessionHistoryMaxEntries: number;
@@ -208,6 +213,7 @@ export class SessionManager {
     this.defaultModels = options.defaultModels ?? {};
     this.synopsisAgent = options.synopsisAgent;
     this.synopsisModel = options.synopsisModel;
+    this.synopsisOnClose = options.synopsisOnClose ?? false;
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
@@ -936,8 +942,12 @@ export class SessionManager {
       // coordinator reads the cold record + history.jsonl, spawns a
       // fresh ephemeral agent, and writes synopsis directly via
       // persistSynopsis. firstPromptSeeded is the gate — a session
-      // that never received a prompt has nothing to summarize.
-      if (session.firstPromptSeeded) {
+      // that never received a prompt has nothing to summarize. The
+      // synopsisOnClose flag is the other gate — defaults off so the
+      // ephemeral-agent fork cost doesn't pile up under idle sweeps.
+      // Explicit paths (picker T, `/hydra title`, scheduleSynopsis())
+      // bypass this flag and always run.
+      if (session.firstPromptSeeded && this.synopsisOnClose) {
         this.synopsisCoordinator.schedule(session.sessionId);
       }
     });
