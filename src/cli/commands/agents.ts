@@ -1,3 +1,4 @@
+import * as fsp from "node:fs/promises";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
@@ -271,6 +272,60 @@ export async function runAgentsLogs(
   }
   const logPath = paths.agentLogFile(agentId);
   await runLogTail(logPath, rest, "No log file (agent never ran?)");
+}
+
+export async function runAgentsSetDefault(
+  agentId: string | undefined,
+): Promise<void> {
+  if (!agentId) {
+    process.stderr.write("Usage: hydra-acp agent set <agent-id>\n");
+    process.exit(2);
+    return;
+  }
+  const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+
+  let known: string[] | undefined;
+  try {
+    const r = await fetch(`${baseUrl}/v1/agents`, {
+      headers: { Authorization: `Bearer ${serviceToken}` },
+    });
+    if (r.ok) {
+      const body = (await r.json()) as { agents: AgentSummary[] };
+      known = body.agents.map((a) => a.id);
+    }
+  } catch {
+    void 0;
+  }
+
+  if (known !== undefined && !known.includes(agentId)) {
+    process.stderr.write(
+      `hydra agent set: '${agentId}' is not in the registry. Known ids: ${known.join(", ")}\n`,
+    );
+    process.exit(1);
+    return;
+  }
+
+  const raw = await readRawConfig();
+  raw.defaultAgent = agentId;
+  await writeRawConfig(raw);
+  process.stdout.write(
+    `Set defaultAgent to '${agentId}' in ${paths.config()}\n`,
+  );
+}
+
+async function readRawConfig(): Promise<Record<string, unknown>> {
+  const raw = await fsp.readFile(paths.config(), "utf8");
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+async function writeRawConfig(raw: Record<string, unknown>): Promise<void> {
+  await fsp.writeFile(
+    paths.config(),
+    JSON.stringify(raw, null, 2) + "\n",
+    { encoding: "utf8", mode: 0o600 },
+  );
 }
 
 export async function runAgentsRefresh(): Promise<void> {

@@ -54,6 +54,7 @@ import {
   runAgentsList,
   runAgentsLogs,
   runAgentsRefresh,
+  runAgentsSetDefault,
   runAgentsSync,
 } from "./cli/commands/agents.js";
 import { splitNameFromLogTailArgs } from "./cli/commands/log-tail.js";
@@ -509,6 +510,10 @@ async function main(): Promise<void> {
         await runAgentsSync(positional[2]);
         return;
       }
+      if (sub === "set") {
+        await runAgentsSetDefault(positional[2]);
+        return;
+      }
       if (sub === "log" || sub === "logs") {
         const agIdx = argv.indexOf(subcommand);
         const tail = argv.slice(agIdx + 2);
@@ -784,6 +789,7 @@ function printHelp(): void {
       "  hydra-acp agent [list]                      List agents in the cached registry",
       "  hydra-acp agent refresh                     Force a registry re-fetch",
       "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)",
+      "  hydra-acp agent set <id>                    Set <id> as the default agent (config.defaultAgent)",
       "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
       "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log",
       "  hydra-acp auth password [--force]           Set the daemon's master password",
