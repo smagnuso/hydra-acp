@@ -19,7 +19,7 @@ import {
   type Row,
   type Widths,
 } from "../cli/session-row.js";
-import { shortenHomePath } from "../core/paths.js";
+import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { HYDRA_CAT_CLIENT_NAME } from "../core/hydra-version.js";
 import type { HydraConfig } from "../core/config.js";
@@ -34,6 +34,7 @@ import {
   type DiscoveredSession,
   type SessionHits,
 } from "./discovery.js";
+import { loadHistory } from "./history.js";
 import { InputDispatcher, type KeyEvent } from "./input.js";
 import {
   computePromptLayout,
@@ -325,6 +326,21 @@ export async function pickSession(
   // ^A/^E, ^U/^K/^W, ^Y, etc.) works identically. The dispatcher's
   // buffer text is sent as the new session's first prompt on Enter.
   const composer = new InputDispatcher({ history: [] });
+  // Seed Up-arrow recall with the global cross-session prompt history,
+  // same as the live composer. Loaded asynchronously so we don't suspend
+  // before installing input handlers; in practice the file load resolves
+  // before the user can type, but even if they beat it, the worst case
+  // is that the very first Up keystroke before load has no history.
+  const composerHistoryCap = opts.config.tui.promptHistoryMaxEntries;
+  loadHistory(paths.globalTuiHistoryFile())
+    .then((entries) => {
+      const capped =
+        entries.length > composerHistoryCap
+          ? entries.slice(entries.length - composerHistoryCap)
+          : entries;
+      composer.setHistory(capped);
+    })
+    .catch(() => undefined);
 
   // All layout state — recomputed on initial paint AND on every resize.
   let termHeight = readTermHeight(term);
@@ -1905,12 +1921,18 @@ export async function pickSession(
         // ↓ at the bottom visual row of the buffer drops focus into the
         // first session row. Anywhere else, ↓ feeds the dispatcher for
         // intra-buffer cursor motion. With no sessions to drop into, ↓
-        // is a no-op (composer stays focused).
+        // is a no-op (composer stays focused). While the dispatcher is
+        // walking prompt history or the queue, always fall through so
+        // ↓ steps newer through history first — only after walkDown
+        // restores the live draft (historyIndex === -1) does another
+        // ↓ at the bottom row escape to the list.
         if (name === "DOWN") {
+          const cs = composer.state();
+          const inWalk = cs.historyIndex !== -1 || cs.queueIndex !== -1;
           const atBottom =
             composerVisualRows.length === 0 ||
             composerCursorRow === composerVisualRows.length - 1;
-          if (atBottom && visible.length > 0) {
+          if (!inWalk && atBottom && visible.length > 0) {
             move(1);
             return;
           }
