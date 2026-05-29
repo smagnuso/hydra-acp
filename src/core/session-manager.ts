@@ -239,7 +239,21 @@ export class SessionManager {
       histories: this.histories,
       synopsisAgent: this.synopsisAgent,
       synopsisModel: this.synopsisModel,
-      persistTitle: (id, title) => this.persistTitle(id, title),
+      persistTitle: async (id, title) => {
+        // Route through the live session when one exists (e.g. bare
+        // `/hydra title` on an attached session). retitle() broadcasts
+        // session_info_update to attached clients AND updates the
+        // in-memory title so list() (and thus the picker poll) reflects
+        // it; its onTitleChange hook persists to disk. When the session
+        // is cold (synopsis-on-close), there's nothing in memory to
+        // broadcast to, so write meta.json directly.
+        const live = this.get(id);
+        if (live) {
+          await live.retitle(title);
+          return;
+        }
+        await this.persistTitle(id, title);
+      },
       persistSynopsis: (id, synopsis, through) =>
         this.persistSynopsis(id, synopsis, through),
       logger: this.logger,
