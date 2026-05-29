@@ -466,6 +466,13 @@ async function runSession(
   // Hydra serializes session/prompt requests on the wire so we don't
   // gate sending on this — it's purely for the banner busy state.
   let pendingTurns = 0;
+  // Set when the user has ^C-cancelled the in-flight turn but it hasn't
+  // settled yet. While true the banner shows "cancelling" and the OS
+  // progress pulse (OSC 9;4) stays off — session/cancel is fire-and-forget,
+  // so without this the pulse would keep going until the agent acks (or
+  // forever, if it never does). Cleared by adjustPendingTurns on settle or
+  // when a new turn proves the session is genuinely busy again.
+  let cancelling = false;
   // messageId of the prompt currently being processed by the agent
   // (whether ours or a peer's). Tracked from prompt_received and
   // cleared on turn_complete. Used as the targetMessageId for
@@ -504,6 +511,7 @@ async function runSession(
     // events correctly.
     const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
     if (before === 0 && pendingTurns > 0) {
+      cancelling = false;
       sessionBusySince = Date.now();
       lastUpdateAt = Date.now();
       dispatcherRef?.setTurnRunning(true);
@@ -530,6 +538,7 @@ async function runSession(
         }, 1_000);
       }
     } else if (before > 0 && pendingTurns === 0) {
+      cancelling = false;
       sessionBusySince = null;
       lastUpdateAt = null;
       dispatcherRef?.setTurnRunning(false);
@@ -543,6 +552,14 @@ async function runSession(
           elapsedMs: undefined,
           stalled: false,
         });
+      }
+    } else if (pendingTurns > 0 && cancelling) {
+      // A turn started (or one of several remains) while we were
+      // optimistically showing "cancelling" — the session is genuinely
+      // busy, so restore the busy banner and progress pulse.
+      cancelling = false;
+      if (screenReady) {
+        screenRef!.setBanner({ status: "busy", stalled: false });
       }
     }
     void delta;
@@ -1569,13 +1586,34 @@ async function runSession(
       .notify("session/cancel", { sessionId: resolvedSessionId })
       .catch(() => undefined);
   };
+  // Optimistically reflect a just-issued cancel: drop the busy banner and
+  // OS progress pulse now rather than waiting for the cancelled turn to
+  // settle. Only when this is the sole outstanding turn — a peer/amend turn
+  // still running keeps the pulse on, and adjustPendingTurns re-asserts busy
+  // if one arrives while we're showing "cancelling".
+  const markCancelling = (): void => {
+    if (screenRef === null) {
+      return;
+    }
+    if (pendingTurns !== 1) {
+      return;
+    }
+    cancelling = true;
+    screenRef.setBanner({
+      status: "cancelling",
+      elapsedMs: undefined,
+      stalled: false,
+    });
+  };
   const sigintHandler = (): void => {
     if (turnInFlight) {
       turnInFlight.cancel();
+      markCancelling();
       return;
     }
     if (pendingTurns > 0) {
       cancelRemoteTurn();
+      markCancelling();
       return;
     }
     requestExit();
@@ -2004,6 +2042,7 @@ async function runSession(
         } else if (pendingTurns > 0) {
           cancelRemoteTurn();
         }
+        markCancelling();
         // ^C stops only the in-flight turn. Queued prompts stay put —
         // the daemon's queue picks the next one up once the cancelled
         // turn settles. Use Up + ^C / Enter to drop a specific queued

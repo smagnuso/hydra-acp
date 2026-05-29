@@ -1045,6 +1045,29 @@ describe("Screen lifecycle", () => {
     }
     expect(writeCount).toBe(0);
   });
+
+  it("clears the OSC 9;4 progress pulse when the banner leaves busy", () => {
+    const screen = makeScreen({ progressIndicator: true });
+    screen.start();
+    const original = process.stdout.write.bind(process.stdout);
+    const chunks: string[] = [];
+    process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+      chunks.push(typeof chunk === "string" ? chunk : (chunk as Buffer).toString("binary"));
+      return original(chunk as Parameters<typeof original>[0], ...(rest as []));
+    }) as typeof process.stdout.write;
+    try {
+      screen.setBanner({ status: "busy", elapsedMs: 0 });
+      // Cancelling (or any non-busy status) must emit state 0 so the host
+      // terminal's taskbar / dock pulse stops the instant the user ^C's,
+      // not only when the cancelled turn eventually settles.
+      screen.setBanner({ status: "cancelling", elapsedMs: undefined });
+    } finally {
+      process.stdout.write = original;
+    }
+    const out = chunks.join("");
+    expect(out).toContain("\x1b]9;4;3\x1b\\");
+    expect(out).toContain("\x1b]9;4;0\x1b\\");
+  });
 });
 
 describe("Selective Mouse Reporting probe + wheel", () => {
