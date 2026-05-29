@@ -623,6 +623,24 @@ async function dispatchTui(
   if (base.dangerouslySkipPermissions === true) {
     tuiOpts.dangerouslySkipPermissions = true;
   }
+  // Debug: replay the attached session's recorded history at its
+  // original per-chunk granularity/timing instead of the coalesced
+  // instant replay. Requires a concrete session id. --drip-speed scales
+  // the original timing (>1 = faster). Used to reproduce streaming
+  // render behavior (e.g. flicker) deterministically.
+  if (flags.drip === true) {
+    if (base.sessionId === undefined) {
+      process.stderr.write(
+        "hydra-acp: --drip requires a session id. Pass --session <id-or-url> --drip.\n",
+      );
+      process.exit(2);
+    }
+    tuiOpts.drip = true;
+    const dripSpeed = parseNumericFlag(flags, "drip-speed");
+    if (dripSpeed !== undefined && dripSpeed > 0) {
+      tuiOpts.dripSpeed = dripSpeed;
+    }
+  }
   await runTui(tuiOpts);
 }
 

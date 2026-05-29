@@ -844,10 +844,11 @@ export function registerAcpWsEndpoint(
         params.clientInfo,
         params.clientId,
       );
+      const drip = params.replayMode === "drip";
       const { entries: replay, appliedPolicy } = await session.attach(
         client,
         params.historyPolicy,
-        { afterMessageId: params.afterMessageId },
+        { afterMessageId: params.afterMessageId, raw: drip },
       );
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
@@ -855,10 +856,42 @@ export function registerAcpWsEndpoint(
         readonly,
       });
       app.log.info(
-        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} requestedPolicy=${params.historyPolicy} appliedPolicy=${appliedPolicy} replayed=${replay.length} readonly=${readonly}`,
+        `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} requestedPolicy=${params.historyPolicy} appliedPolicy=${appliedPolicy} replayed=${replay.length} readonly=${readonly}${drip ? " replayMode=drip" : ""}`,
       );
-      for (const note of replay) {
-        await connection.notify(note.method, note.params);
+      if (drip) {
+        // Decouple the emit from the response: a dripped replay can span
+        // the full wall-clock duration of the original turn(s), so we
+        // return immediately and stream the notifications afterward,
+        // honoring each entry's recordedAt delta (scaled by dripSpeed,
+        // capped so multi-minute idle gaps don't stall the playback).
+        // Debug path only — set via SessionAttachParams.replayMode.
+        const speed = params.dripSpeed && params.dripSpeed > 0 ? params.dripSpeed : 1;
+        const MAX_GAP_MS = 750;
+        void (async () => {
+          let prev: number | null = null;
+          for (const note of replay) {
+            const at = typeof note.recordedAt === "number" ? note.recordedAt : null;
+            if (prev !== null && at !== null) {
+              const gap = Math.min(MAX_GAP_MS, Math.max(0, (at - prev) / speed));
+              if (gap > 0) {
+                await new Promise((r) => setTimeout(r, gap));
+              }
+            }
+            if (at !== null) {
+              prev = at;
+            }
+            try {
+              await connection.notify(note.method, note.params);
+            } catch {
+              // Client detached mid-drip — stop quietly.
+              return;
+            }
+          }
+        })();
+      } else {
+        for (const note of replay) {
+          await connection.notify(note.method, note.params);
+        }
       }
       session.replayPendingPermissions(client);
       const modesPayload = buildModesPayload(session);

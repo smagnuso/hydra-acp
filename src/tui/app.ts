@@ -150,6 +150,13 @@ export interface TuiOptions {
   // warning at startup so it's never silent. Useful for unattended
   // demos and trusted local agents, not for shared environments.
   dangerouslySkipPermissions?: boolean;
+  // Debug-only: replay the session's recorded history at its original
+  // per-chunk granularity and timing instead of the normal coalesced
+  // instant replay. Used to reproduce streaming render behavior (e.g.
+  // flicker) deterministically. dripSpeed scales the original timing
+  // (>1 = faster). Set via `--drip` / `--drip-speed`.
+  drip?: boolean;
+  dripSpeed?: number;
 }
 
 // Shared view-only preferences that persist across the runSession loop
@@ -1146,6 +1153,12 @@ async function runSession(
       historyPolicy: "full",
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
       ...(opts.readonly === true ? { readonly: true } : {}),
+      ...(opts.drip === true
+        ? {
+            replayMode: "drip",
+            ...(opts.dripSpeed !== undefined ? { dripSpeed: opts.dripSpeed } : {}),
+          }
+        : {}),
       // Forward the user-chosen cwd via a full resume hint. An empty
       // upstreamSessionId routes through doResurrectFromImport
       // (first-launch imports); a real one takes the normal session/load

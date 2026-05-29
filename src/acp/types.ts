@@ -131,6 +131,17 @@ export const SessionAttachParams = z.object({
   // to a cold session does not resurrect or spawn an agent — just
   // streams history from disk. Used by the TUI's view-only mode.
   readonly: z.boolean().optional(),
+  // Debug-only replay pacing. When "drip", the daemon skips chunk
+  // coalescing and re-emits each recorded session/update individually,
+  // spacing them by their original recordedAt deltas (scaled by
+  // dripSpeed, with a per-gap cap) so a session's streaming render can
+  // be reproduced at its real granularity for flicker investigation.
+  // Omitted/"instant" preserves the normal coalesced, as-fast-as-possible
+  // replay.
+  replayMode: z.enum(["instant", "drip"]).optional(),
+  // Multiplier applied to original inter-entry gaps in drip mode. >1
+  // compresses time (faster), <1 stretches it. Defaults to 1.
+  dripSpeed: z.number().positive().optional(),
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionAttachParams = z.infer<typeof SessionAttachParams>;

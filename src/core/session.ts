@@ -775,7 +775,7 @@ export class Session {
   attach(
     client: AttachedClient,
     historyPolicy: HistoryPolicy,
-    opts: { afterMessageId?: string } = {},
+    opts: { afterMessageId?: string; raw?: boolean } = {},
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     if (this.closed) {
       throw withCode(
@@ -811,13 +811,21 @@ export class Session {
 
   private async loadReplay(
     historyPolicy: HistoryPolicy,
-    opts: { afterMessageId?: string },
+    opts: { afterMessageId?: string; raw?: boolean },
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     // Search the raw snapshot, coalesce the slice. Coalescing first would
     // drop the messageIds of every non-leading chunk in a run (and every
     // non-trailing tool_call_update / non-final plan), so a TUI whose
     // lastSeenMessageId pointed at one of those would never find a cutoff
     // and we'd fall back to "full".
+    //
+    // opts.raw bypasses coalescing entirely so every original chunk is
+    // replayed individually — used by the drip-replay debug path so the
+    // streaming render can be reproduced at its real granularity. The
+    // synthetic state snapshot is never coalesced, so it's emitted as-is
+    // either way.
+    const maybeCoalesce = (entries: CachedNotification[]): CachedNotification[] =>
+      opts.raw ? entries : coalesceReplay(entries);
     const raw = await this.getHistorySnapshot();
     const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
@@ -826,17 +834,17 @@ export class Session {
         : -1;
       if (cutoff < 0) {
         return {
-          entries: [...state, ...coalesceReplay(raw)],
+          entries: [...state, ...maybeCoalesce(raw)],
           appliedPolicy: "full",
         };
       }
       return {
-        entries: [...state, ...coalesceReplay(raw.slice(cutoff + 1))],
+        entries: [...state, ...maybeCoalesce(raw.slice(cutoff + 1))],
         appliedPolicy: "after_message",
       };
     }
     return {
-      entries: [...state, ...coalesceReplay(raw)],
+      entries: [...state, ...maybeCoalesce(raw)],
       appliedPolicy: "full",
     };
   }
