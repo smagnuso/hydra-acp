@@ -293,7 +293,7 @@ describe("SessionManager.resurrect", () => {
       title: "feature-X",
     });
     expect(session.title).toBe("feature-X");
-    const entries = await titledMgr.list();
+    const entries = await titledMgr.list({ includeNonInteractive: true });
     expect(entries[0]?.title).toBe("feature-X");
   });
 
@@ -2764,7 +2764,7 @@ describe("SessionManager: parentSessionId", () => {
       parentSessionId: "hydra_session_parent",
     });
 
-    const entries = await manager.list();
+    const entries = await manager.list({ includeNonInteractive: true });
     expect(entries).toHaveLength(1);
     expect(entries[0]!.parentSessionId).toBe("hydra_session_parent");
   });
@@ -2788,7 +2788,7 @@ describe("SessionManager: parentSessionId", () => {
       () => { throw new Error("should not spawn"); },
     );
 
-    const entries = await manager.list();
+    const entries = await manager.list({ includeNonInteractive: true });
     const child = entries.find((e) => e.sessionId === "hydra_session_child");
     expect(child?.parentSessionId).toBe("hydra_session_parent_cold");
   });
@@ -2813,7 +2813,7 @@ describe("SessionManager: originatingClient", () => {
       originatingClient: { name: "hydra-acp-cat", version: "9.9.9" },
     });
 
-    const entries = await manager.list();
+    const entries = await manager.list({ includeNonInteractive: true });
     expect(entries).toHaveLength(1);
     expect(entries[0]!.originatingClient).toEqual({
       name: "hydra-acp-cat",
@@ -2848,7 +2848,7 @@ describe("SessionManager: originatingClient", () => {
       () => { throw new Error("should not spawn"); },
     );
 
-    const entries = await manager.list();
+    const entries = await manager.list({ includeNonInteractive: true });
     const cat = entries.find((e) => e.sessionId === "hydra_session_cat_cold");
     expect(cat?.originatingClient).toEqual({ name: "hydra-acp-cat" });
   });

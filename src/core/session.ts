@@ -166,10 +166,13 @@ export interface SessionInit {
   // meta.json so list views can show "branched from <id>".
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
-  // clientInfo from the process that issued session/new. SessionManager
-  // captures it from the WS connection's `initialize` and persists it on
-  // meta.json so list views can hide cat-style ancillary sessions.
+  // clientInfo from the process that issued session/new. Carried for
+  // log attribution and as the legacy hint inside effectiveInteractive.
   originatingClient?: { name: string; version?: string };
+  // Tristate marker controlling whether the session shows in default
+  // list views. SessionManager sets this from the persisted record on
+  // resurrect; the first-prompt path flips undefined → true.
+  interactive?: boolean;
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
@@ -266,6 +269,12 @@ export class Session {
   readonly forkedFromSessionId: string | undefined;
   readonly forkedFromMessageId: string | undefined;
   readonly originatingClient: { name: string; version?: string } | undefined;
+  // Tristate. Mutates from undefined → true on first prompt (or directly
+  // false if init.interactive === false). Persisted via interactiveHandlers.
+  private _interactive: boolean | undefined;
+  get interactive(): boolean | undefined {
+    return this._interactive;
+  }
   title: string | undefined;
   // Snapshot state delivered to attaching clients via the attach
   // response _meta rather than via history replay (which would be
@@ -401,6 +410,7 @@ export class Session {
   private agentModelsHandlers: Array<(models: AdvertisedModel[]) => void> = [];
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
+  private interactiveHandlers: Array<(interactive: boolean) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
   private cumulativeCost: number = 0;
 
@@ -492,6 +502,7 @@ export class Session {
     if (init.firstPromptSeeded) {
       this._firstPromptSeeded = true;
     }
+    this._interactive = init.interactive;
     this.historyStore = init.historyStore;
     this.historyMaxEntries = init.historyMaxEntries ?? DEFAULT_HISTORY_MAX_ENTRIES;
     this.compactEvery = Math.max(1, Math.floor(this.historyMaxEntries * 0.2));
@@ -1045,6 +1056,20 @@ export class Session {
     // as "had no prompt." Promotion to true is unconditional here.
     this.maybeSeedTitleFromPrompt(params);
     this._firstPromptSeeded = true;
+    // First real prompt promotes an undecided session to interactive.
+    // An explicitly-non-interactive session (e.g. `hydra cat`, init.interactive=false)
+    // stays false — `cat` does submit prompts, but the session it created
+    // is by design hidden from default listings.
+    if (this._interactive === undefined) {
+      this._interactive = true;
+      for (const handler of this.interactiveHandlers) {
+        try {
+          handler(true);
+        } catch {
+          // Persistence is best-effort; never break the prompt path.
+        }
+      }
+    }
     return this.enqueueUserPrompt(client, params, messageId);
   }
 
@@ -2283,6 +2308,10 @@ export class Session {
 
   onModeChange(handler: (mode: string) => void): void {
     this.modeHandlers.push(handler);
+  }
+
+  onInteractiveChange(handler: (interactive: boolean) => void): void {
+    this.interactiveHandlers.push(handler);
   }
 
   // Apply a model change initiated by a client request (session/set_model)

@@ -635,6 +635,9 @@ export function registerAcpWsEndpoint(
           onInstallProgress: makeInstallProgressForwarder(connection),
           transformChain,
           originatingClient: state.clientInfo,
+          ...(hydraMeta.interactive !== undefined
+            ? { interactive: hydraMeta.interactive }
+            : {}),
         });
       } catch (err) {
         if (stdinReservation !== undefined) {

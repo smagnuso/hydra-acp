@@ -42,7 +42,7 @@ import type { AgentCapabilities, SessionListEntry } from "../acp/types.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
-import { HYDRA_VERSION } from "./hydra-version.js";
+import { HYDRA_CAT_CLIENT_NAME, HYDRA_VERSION } from "./hydra-version.js";
 import { loadQueue, rewriteQueue } from "./queue-store.js";
 
 // Persisted queued prompts older than this are dropped at restart
@@ -78,9 +78,13 @@ export interface CreateSessionParams {
   // Set when this session is spawned as a child by a transformer.
   parentSessionId?: string;
   // clientInfo from the WS connection's initialize. acp-ws.ts captures
-  // it from `session/new` and threads it here; persisted to meta.json so
-  // list views can hide cat-style ancillary sessions by default.
+  // it from `session/new` and threads it here; persisted to meta.json
+  // and used by effectiveInteractive as a legacy hint for pre-flag rows.
   originatingClient?: { name: string; version?: string };
+  // Caller-supplied initial value of the interactive tristate. Cat
+  // passes `false`; everything else leaves it undefined (the first
+  // session/prompt will promote it to true).
+  interactive?: boolean;
 }
 
 export interface ResurrectParams {
@@ -118,9 +122,11 @@ export interface ResurrectParams {
   // after the resurrect completes.
   pendingHistorySync?: boolean;
   // Propagated from meta.json so resurrected sessions keep their
-  // origin (and stay hidden from the default `sessions list` view if
-  // they were originally cat-spawned).
+  // origin (used by effectiveInteractive as a legacy hint).
   originatingClient?: { name: string; version?: string };
+  // Persisted tristate flag from meta.json; the live Session carries
+  // it forward and persists changes (first prompt promotes undefined→true).
+  interactive?: boolean;
   // Local-fork breadcrumbs from meta.json. Read-only on the resurrected
   // Session; surfaced in list views so future UI can show "branched from <id>".
   forkedFromSessionId?: string;
@@ -295,6 +301,7 @@ export class SessionManager {
       transformChain: params.transformChain,
       parentSessionId: params.parentSessionId,
       originatingClient: params.originatingClient,
+      interactive: params.interactive,
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
     });
@@ -522,6 +529,7 @@ export class SessionManager {
         ? new Date(params.createdAt).getTime()
         : undefined,
       originatingClient: params.originatingClient,
+      interactive: params.interactive,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
@@ -603,6 +611,7 @@ export class SessionManager {
         ? new Date(params.createdAt).getTime()
         : undefined,
       originatingClient: params.originatingClient,
+      interactive: params.interactive,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
@@ -737,6 +746,10 @@ export class SessionManager {
         agentId,
         cwd: entry.cwd,
         pendingHistorySync: true,
+        // `hydra agent sync` is a user-explicit "show me agent-side
+        // sessions" action; the rows are meant to be visible immediately
+        // even before the first resurrect populates history.jsonl.
+        interactive: true,
         createdAt: ts,
         updatedAt: ts,
       };
@@ -984,6 +997,11 @@ export class SessionManager {
         () => undefined,
       );
     });
+    session.onInteractiveChange((interactive) => {
+      void this.persistSnapshot(session.sessionId, { interactive }).catch(
+        () => undefined,
+      );
+    });
     session.onUsageChange((usage) => {
       void this.persistSnapshot(session.sessionId, {
         currentUsage: usageSnapshotToPersisted(usage),
@@ -1096,6 +1114,7 @@ export class SessionManager {
       createdAt: record.createdAt,
       pendingHistorySync: record.pendingHistorySync,
       originatingClient: record.originatingClient,
+      interactive: record.interactive,
       forkedFromSessionId: record.forkedFromSessionId,
       forkedFromMessageId: record.forkedFromMessageId,
     };
@@ -1194,17 +1213,40 @@ export class SessionManager {
     return session;
   }
 
-  async list(filter: { cwd?: string } = {}): Promise<SessionListEntry[]> {
+  async list(
+    filter: { cwd?: string; includeNonInteractive?: boolean } = {},
+  ): Promise<SessionListEntry[]> {
     const entries: SessionListEntry[] = [];
     const liveIds = new Set<string>();
+    // Filter rule (when includeNonInteractive is false, the default):
+    // only effective === true is visible. False (cat one-shots) and
+    // undefined (fresh editor panels that never typed) are both hidden.
+    // The "user just created a session and is about to type" objection
+    // doesn't apply — that user is inside their own TUI for that
+    // session, not staring at the picker.
+    const includeRow = (interactive: boolean | undefined): boolean => {
+      if (filter.includeNonInteractive) return true;
+      return interactive === true;
+    };
     for (const session of this.sessions.values()) {
       if (filter.cwd && session.cwd !== filter.cwd) {
         continue;
       }
       liveIds.add(session.sessionId);
-      const used =
-        (await historyMtimeIso(session.sessionId)) ??
-        new Date(session.updatedAt).toISOString();
+      const hist = await historyStatus(session.sessionId);
+      const interactive = effectiveInteractive(
+        {
+          interactive: session.interactive,
+          ...(session.originatingClient
+            ? { originatingClient: session.originatingClient }
+            : {}),
+        },
+        hist.hasContent,
+      );
+      if (!includeRow(interactive)) {
+        continue;
+      }
+      const used = hist.mtime ?? new Date(session.updatedAt).toISOString();
       entries.push({
         sessionId: session.sessionId,
         upstreamSessionId: session.upstreamSessionId,
@@ -1217,6 +1259,7 @@ export class SessionManager {
         forkedFromSessionId: session.forkedFromSessionId,
         forkedFromMessageId: session.forkedFromMessageId,
         originatingClient: session.originatingClient,
+        interactive,
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
@@ -1231,7 +1274,12 @@ export class SessionManager {
       if (filter.cwd && r.cwd !== filter.cwd) {
         continue;
       }
-      const used = (await historyMtimeIso(r.sessionId)) ?? r.updatedAt;
+      const hist = await historyStatus(r.sessionId);
+      const interactive = effectiveInteractive(r, hist.hasContent);
+      if (!includeRow(interactive)) {
+        continue;
+      }
+      const used = hist.mtime ?? r.updatedAt;
       entries.push({
         sessionId: r.sessionId,
         upstreamSessionId: r.upstreamSessionId,
@@ -1253,6 +1301,7 @@ export class SessionManager {
         forkedFromSessionId: r.forkedFromSessionId,
         forkedFromMessageId: r.forkedFromMessageId,
         originatingClient: r.originatingClient,
+        interactive,
         updatedAt: used,
         attachedClients: 0,
         status: "cold",
@@ -1561,8 +1610,13 @@ export class SessionManager {
         currentUsage: args.bundle.session.currentUsage,
         agentCommands: args.bundle.session.agentCommands,
         agentModes: args.bundle.session.agentModes,
+        // Imports and forks are user-explicit creation actions — even
+        // with empty history, the user wants this row visible in the
+        // picker. Without this, an imported bundle with a yet-empty
+        // history file would be filtered out of default views.
+        interactive: true,
         createdAt: args.preservedCreatedAt ?? now,
-        // Fallback path for historyMtimeIso (used when the history file
+        // Fallback path for historyStatus (used when the history file
         // is missing). Keep this consistent with the utimes stamp above.
         updatedAt: args.bundle.session.updatedAt,
       });
@@ -1681,6 +1735,7 @@ export class SessionManager {
       agentCommands?: PersistedAgentCommand[];
       agentModes?: PersistedAgentMode[];
       agentModels?: PersistedAgentModel[];
+      interactive?: boolean;
     },
   ): Promise<void> {
     await this.enqueueMetaWrite(sessionId, async () => {
@@ -1707,6 +1762,9 @@ export class SessionManager {
           : {}),
         ...(update.agentModels !== undefined
           ? { agentModels: update.agentModels }
+          : {}),
+        ...(update.interactive !== undefined
+          ? { interactive: update.interactive }
           : {}),
         updatedAt: new Date().toISOString(),
       });
@@ -1929,6 +1987,7 @@ function mergeForPersistence(
       session.forkedFromMessageId ?? existing?.forkedFromMessageId,
     originatingClient:
       session.originatingClient ?? existing?.originatingClient,
+    interactive: session.interactive ?? existing?.interactive,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }
@@ -2383,14 +2442,49 @@ async function loadPromptHistorySafely(sessionId: string): Promise<string[]> {
 // the history.jsonl mtime — it only gets touched on recordable
 // broadcasts (user prompts, agent chunks, tool calls) and skips noisy
 // state pings (model/mode/title/commands), so an idle session reads
-// honestly idle. Returns undefined when the file doesn't exist (e.g.
-// freshly created session that hasn't been prompted yet) so callers
-// can fall back to the on-disk record's updatedAt.
-async function historyMtimeIso(sessionId: string): Promise<string | undefined> {
+// honestly idle. `mtime` is undefined when the file doesn't exist;
+// `hasContent` is true only when the file exists AND has non-zero size,
+// which effectiveInteractive uses as the "ever had a prompt" signal for
+// legacy records that pre-date the interactive flag.
+async function historyStatus(
+  sessionId: string,
+): Promise<{ mtime?: string; hasContent: boolean }> {
   try {
     const st = await fs.stat(paths.historyFile(sessionId));
-    return new Date(st.mtimeMs).toISOString();
+    return {
+      mtime: new Date(st.mtimeMs).toISOString(),
+      hasContent: st.size > 0,
+    };
   } catch {
-    return undefined;
+    return { hasContent: false };
   }
+}
+
+// Single resolver for the `interactive` tristate that every default
+// list / picker view filters on. Explicit values win; otherwise we
+// infer from historical signals so existing on-disk records keep
+// behaving the same way they did before the flag was introduced.
+//
+//   - record.interactive defined → use it verbatim
+//   - legacy `hydra cat` row (no flag, originatingClient.name matches)
+//     → treat as false (cat sessions have history but aren't
+//     interactive; without this hint, every pre-flag cat session would
+//     suddenly start appearing in default views)
+//   - any other row with persisted history → treat as true
+//   - everything else → undefined (hidden by default — covers the
+//     editor-spawned "empty panel" sessions like Zed's)
+export function effectiveInteractive(
+  record: {
+    interactive?: boolean;
+    originatingClient?: { name: string };
+  },
+  hasContent: boolean,
+): boolean | undefined {
+  if (record.interactive !== undefined) {
+    return record.interactive;
+  }
+  if (record.originatingClient?.name === HYDRA_CAT_CLIENT_NAME) {
+    return false;
+  }
+  return hasContent ? true : undefined;
 }

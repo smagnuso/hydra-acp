@@ -41,10 +41,13 @@ export interface DiscoveredSession {
   status: "live" | "cold";
   // Mid-turn flag from the daemon. Drives the picker's busy indicator.
   busy?: boolean;
-  // clientInfo from the process that issued session/new. Picker and
-  // `sessions list` filter on the `name` to hide cat-style ancillary
-  // sessions by default.
+  // clientInfo from the process that issued session/new. Carried for
+  // log/display; the effective filtering signal is `interactive` below.
   originatingClient?: { name: string; version?: string };
+  // Tristate filter signal computed by the daemon's effectiveInteractive
+  // helper. The picker uses this to render hints; the daemon already
+  // applied the filter when constructing the list.
+  interactive?: boolean;
 }
 
 export interface DiscoveredUsage {
@@ -57,6 +60,10 @@ export interface DiscoveredUsage {
 export interface ListOptions {
   cwd?: string;
   all?: boolean;
+  // When true, asks the daemon to skip its default interactive-only
+  // filter and return every row (including `hydra cat` sessions and
+  // editor-spawned empty sessions). Picker's `i` toggle sets this.
+  includeNonInteractive?: boolean;
 }
 
 export async function listSessions(
@@ -71,6 +78,9 @@ export async function listSessions(
   }
   if (opts.all) {
     url.searchParams.set("all", "true");
+  }
+  if (opts.includeNonInteractive) {
+    url.searchParams.set("includeNonInteractive", "true");
   }
   const response = await fetchImpl(url.toString(), {
     headers: { Authorization: `Bearer ${target.token}` },
@@ -101,6 +111,7 @@ export async function listSessions(
     forkedFromMessageId: s.forkedFromMessageId,
     busy: s.busy,
     originatingClient: s.originatingClient,
+    interactive: s.interactive,
   }));
 }
 

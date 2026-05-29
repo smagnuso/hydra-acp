@@ -40,8 +40,16 @@ export function registerSessionRoutes(
   defaults: SessionRouteDefaults,
 ): void {
   app.get("/v1/sessions", async (request) => {
-    const query = request.query as { cwd?: string } | undefined;
-    const sessions = await manager.list({ cwd: query?.cwd });
+    const query = request.query as
+      | { cwd?: string; includeNonInteractive?: string }
+      | undefined;
+    const includeNonInteractive =
+      query?.includeNonInteractive === "1" ||
+      query?.includeNonInteractive === "true";
+    const sessions = await manager.list({
+      cwd: query?.cwd,
+      includeNonInteractive,
+    });
     return { sessions };
   });
 

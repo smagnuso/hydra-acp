@@ -21,7 +21,6 @@ import {
 } from "../cli/session-row.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
-import { HYDRA_CAT_CLIENT_NAME } from "../core/hydra-version.js";
 import type { HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 import {
@@ -103,11 +102,11 @@ export interface PickerFilters {
   // "__local" | "__all" | host name. See `hostFilter` in pickSession
   // for the cycle order and meaning.
   hostFilter: string;
-  // When false (default), sessions tagged with originatingClient.name
-  // == HYDRA_CAT_CLIENT_NAME are hidden — they're usually one-shot
-  // `hydra cat` invocations that clutter the picker. Toggle with `i`
-  // (matches the CLI's --include-cat). `c` is taken by "create new".
-  showCat: boolean;
+  // When false (default), the picker only renders rows the daemon
+  // marked interactive (real conversations). Cat one-shots and
+  // editor-spawned empty sessions stay hidden. Toggle with `i` to
+  // surface everything.
+  includeNonInteractive: boolean;
 }
 
 // User-tweakable picker state that should outlive a single pickSession
@@ -120,7 +119,11 @@ export interface PickerPrefs {
 
 export function createPickerPrefs(): PickerPrefs {
   return {
-    filters: { cwdOnly: false, hostFilter: "__local", showCat: false },
+    filters: {
+      cwdOnly: false,
+      hostFilter: "__local",
+      includeNonInteractive: false,
+    },
   };
 }
 
@@ -253,10 +256,11 @@ export async function pickSession(
     if (prefs.filters.cwdOnly) {
       base = base.filter((s) => s.cwd === opts.cwd);
     }
-    if (!prefs.filters.showCat) {
-      base = base.filter(
-        (s) => s.originatingClient?.name !== HYDRA_CAT_CLIENT_NAME,
-      );
+    if (!prefs.filters.includeNonInteractive) {
+      // Mirror the daemon's includeRow rule: only effective === true is
+      // visible. Cat (false) and never-prompted editor panels (undefined)
+      // both stay hidden until the user toggles `i`.
+      base = base.filter((s) => s.interactive === true);
     }
     base = filterByHost(base, prefs.filters.hostFilter);
     return base;
@@ -568,8 +572,8 @@ export async function pickSession(
           : `host: ${prefs.filters.hostFilter}`,
       );
     }
-    if (prefs.filters.showCat) {
-      parts.push("+cat");
+    if (prefs.filters.includeNonInteractive) {
+      parts.push("+non-interactive");
     }
     if (above > 0) {
       parts.push(`↑ ${above} above`);
@@ -1411,7 +1415,9 @@ export async function pickSession(
       try {
         const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
         const beforeTotal = total;
-        const next = await listSessions(opts.target);
+        const next = await listSessions(opts.target, {
+          includeNonInteractive: true,
+        });
         // Snapshot the session the cursor is on right now — after the
         // HTTP wait, not before — so callers that don't pin a specific
         // id (auto-refresh, `r`) still follow the user's CURRENT
@@ -2098,7 +2104,8 @@ export async function pickSession(
         if (name === "i" || name === "I") {
           const keepId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
-          prefs.filters.showCat = !prefs.filters.showCat;
+          prefs.filters.includeNonInteractive =
+            !prefs.filters.includeNonInteractive;
           applyFilter();
           restoreCursorAfterFilter(keepId);
           renderFromScratch();

@@ -21,6 +21,10 @@ function session(overrides: Partial<DiscoveredSession>): DiscoveredSession {
     updatedAt: "2026-05-14T10:00:00Z",
     attachedClients: 0,
     status: "cold",
+    // Default to interactive so the picker's interactive-only filter
+    // doesn't silently hide every test fixture. Tests that exercise
+    // non-interactive filtering can override.
+    interactive: true,
     ...overrides,
   };
 }

@@ -902,6 +902,12 @@ async function openOrAttachSession(
     // grep available for this turn.
     hydraMeta.mcpStdin = true;
   }
+  // `hydra cat` is by design a one-shot ancillary invocation, not an
+  // interactive session. Tagging the new session false keeps it out of
+  // default `sessions list` / picker views without depending on the
+  // clientInfo.name → cat name match (which only worked for sessions
+  // created by `hydra cat` itself, not any future ancillary tool).
+  hydraMeta.interactive = false;
   const cwd = opts.cwd ?? process.cwd();
   const params: Record<string, unknown> = { cwd };
   if (opts.agentId) {

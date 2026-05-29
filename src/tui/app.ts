@@ -1694,7 +1694,10 @@ async function runSession(
     let resolvedChoice: { choice: PickerResult; sessions: DiscoveredSession[] } | null = null;
     let attachOverrides: { readonly?: boolean; cwd?: string; importAttachHint?: { agentId: string; cwd: string } } | null = null;
     while (resolvedChoice === null) {
-      const sessions = await listSessions(target);
+      // Picker manages its own interactive-only filter; ask the daemon
+      // for everything and let prefs.filters.includeNonInteractive decide
+      // what to render.
+      const sessions = await listSessions(target, { includeNonInteractive: true });
       const choice: PickerResult = await pickSession(term, {
         cwd: resolvedCwd,
         sessions,
@@ -3742,7 +3745,8 @@ async function resolveSession(
   // picker so the user isn't trapped after pressing Enter on the wrong
   // imported row. Every other picker exit path resolves the function.
   while (true) {
-    const sessions = await listSessions(target);
+    // Picker manages its own interactive-only filter; ask for everything.
+    const sessions = await listSessions(target, { includeNonInteractive: true });
     const choice: PickerResult = await pickSession(term, {
       cwd,
       sessions,

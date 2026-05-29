@@ -349,7 +349,7 @@ async function main(): Promise<void> {
           all: flags.all === true,
           json: flags.json === true,
           host: typeof flags.host === "string" ? flags.host : undefined,
-          includeCat: flags["include-cat"] === true,
+          includeNonInteractive: flags["include-non-interactive"] === true,
         });
         return;
       }
@@ -758,10 +758,10 @@ function printHelp(): void {
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
-      "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-cat]",
+      "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive]",
       "                                     List sessions (live + 20 most-recent cold; --all for everything; --json emits JSON for scripts).",
       "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer.",
-      "                                     --include-cat surfaces sessions spawned by `hydra cat` (hidden by default).",
+      "                                     --include-non-interactive surfaces sessions that are tagged ancillary (e.g. `hydra cat`) or have never received a prompt (hidden by default).",
       "  hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]",
       "                                     Aggregate one session: turn count, tool histogram, files touched, cost/duration, synopsis. --diff appends the session diff under the summary and pages the whole thing on a TTY (inherits --fold).",
       "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]",

@@ -244,6 +244,10 @@ export interface HydraMeta {
   // mcpServers, and registers the (token → session) pair so the agent
   // can call tail_stdin / read_stdin / wait_for_more against the ring.
   mcpStdin?: boolean;
+  // Initial value for the session's interactive tristate. `cat` sets
+  // false; everything else leaves it undefined so the first prompt
+  // promotes it to true. Honoured only on session/new.
+  interactive?: boolean;
 }
 
 export function extractHydraMeta(
@@ -331,6 +335,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.mcpStdin === "boolean") {
     out.mcpStdin = obj.mcpStdin;
+  }
+  if (typeof obj.interactive === "boolean") {
+    out.interactive = obj.interactive;
   }
   if (typeof obj.promptAmending === "boolean") {
     out.promptAmending = obj.promptAmending;
@@ -483,12 +490,16 @@ export const SessionListEntry = z.object({
   // local session, an import is a cross-machine takeover.
   forkedFromSessionId: z.string().optional(),
   forkedFromMessageId: z.string().optional(),
-  // clientInfo from the process that issued session/new. Lets list views
-  // hide cat-style ancillary sessions by default while letting an
-  // override flag surface them.
+  // clientInfo from the process that issued session/new. Carried for
+  // log/display; the effective filtering signal is `interactive` below.
   originatingClient: z
     .object({ name: z.string(), version: z.string().optional() })
     .optional(),
+  // Tristate filter signal computed by effectiveInteractive(): explicit
+  // when the record stored a value, else inferred (legacy cat hint or
+  // history-presence). Clients can use this to render a hint glyph
+  // (e.g. dim non-interactive rows when the user toggles them in).
+  interactive: z.boolean().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),

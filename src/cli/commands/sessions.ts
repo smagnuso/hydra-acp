@@ -6,7 +6,6 @@ import { resolveLocalTarget } from "../../core/remote-target.js";
 import { formatHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
 import { stripHydraSessionPrefix } from "../../core/session.js";
 import { listSessions, pickMostRecent } from "../../tui/discovery.js";
-import { HYDRA_CAT_CLIENT_NAME } from "../../core/hydra-version.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import {
@@ -22,13 +21,16 @@ export async function runSessionsList(
     all?: boolean;
     json?: boolean;
     host?: string;
-    includeCat?: boolean;
+    includeNonInteractive?: boolean;
   } = {},
 ): Promise<void> {
   const config = await loadConfig();
   const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const url = new URL(`${baseUrl}/v1/sessions`);
+  if (opts.includeNonInteractive) {
+    url.searchParams.set("includeNonInteractive", "true");
+  }
   const response = await fetch(url.toString(), {
     headers: { Authorization: `Bearer ${serviceToken}` },
   });
@@ -57,14 +59,11 @@ export async function runSessionsList(
       originatingClient?: { name: string; version?: string };
     }>;
   };
-  // `hydra cat` registers `originatingClient.name = HYDRA_CAT_CLIENT_NAME`
-  // on its initialize call. These sessions are usually one-shot and
-  // would clutter the list; drop them unless --include-cat is passed.
-  const sessionsAfterCatFilter = opts.includeCat
-    ? body.sessions
-    : body.sessions.filter(
-        (s) => s.originatingClient?.name !== HYDRA_CAT_CLIENT_NAME,
-      );
+  // The daemon already applied the interactive filter unless we asked
+  // for `?includeNonInteractive=true` above. No client-side cat-name
+  // check needed; the tristate handles cat AND any future ancillary
+  // tool that tags itself non-interactive on session/new.
+  const sessionsAfterInteractiveFilter = body.sessions;
   // Host filter:
   //   "local" — sessions created here OR imported and bound to a local
   //             agent (upstreamSessionId set). The "I'm working on this
@@ -77,12 +76,12 @@ export async function runSessionsList(
   // view as humans.
   const host = opts.host ?? "local";
   const hostFiltered = host === "all"
-    ? sessionsAfterCatFilter
+    ? sessionsAfterInteractiveFilter
     : host === "local"
-      ? sessionsAfterCatFilter.filter(
+      ? sessionsAfterInteractiveFilter.filter(
           (s) => !s.importedFromMachine || !!s.upstreamSessionId,
         )
-      : sessionsAfterCatFilter.filter(
+      : sessionsAfterInteractiveFilter.filter(
           (s) =>
             s.importedFromMachine === host && !s.upstreamSessionId,
         );

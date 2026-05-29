@@ -668,11 +668,12 @@ describe("startDaemon", () => {
       ws.close();
     });
 
-    it("filters out hydra-acp-cat sessions from session/list over ACP", async () => {
-      // `hydra cat` initializes with clientInfo.name = HYDRA_CAT_CLIENT_NAME
-      // so any session it mints is tagged as ancillary. The ACP
-      // session/list response should hide these by default, mirroring
-      // the picker / `sessions list` client-side filter over /v1/sessions.
+    it("filters non-interactive sessions out of session/list over ACP", async () => {
+      // The daemon's default session/list view shows only effective
+      // interactive=true rows. This covers three filter paths in one
+      // test: explicit interactive=true is visible, explicit false is
+      // hidden, and the legacy cat clientInfo hint still hides pre-flag
+      // cat rows.
       const store = new SessionStore();
       const now = new Date().toISOString();
       await store.write({
@@ -681,6 +682,7 @@ describe("startDaemon", () => {
         cwd: "/work",
         agentId: "claude-acp",
         originatingClient: { name: "regular-client" },
+        interactive: true,
         createdAt: now,
         updatedAt: now,
       });

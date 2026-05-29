@@ -180,7 +180,10 @@ describe("session routes: termination broadcasts session_closed", () => {
     });
     expect(res.status).toBe(204);
 
-    const entries = await harness.manager.list({ cwd: "/w" });
+    const entries = await harness.manager.list({
+      cwd: "/w",
+      includeNonInteractive: true,
+    });
     const entry = entries.find((e) => e.sessionId === id);
     expect(entry?.title).toBe("Cold rename");
   });
@@ -278,7 +281,9 @@ describe("session routes: termination broadcasts session_closed", () => {
       agentId: "claude-code",
     });
 
-    const res = await fetch(`${harness.baseUrl}/v1/sessions`);
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true`,
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       sessions: Array<{ sessionId: string; status: string; busy?: boolean }>;

@@ -144,10 +144,17 @@ export const SessionRecord = z.object({
   // ended at. Kept so future UI can show "branched from turn N of session X".
   forkedFromSessionId: z.string().optional(),
   forkedFromMessageId: z.string().optional(),
-  // clientInfo from the process that issued session/new. Picker and
-  // `sessions list` use this to hide cat-style ancillary sessions by
-  // default; carried in meta.json so cold sessions filter the same way.
+  // clientInfo from the process that issued session/new. Display only
+  // since the `interactive` flag below; kept on the record for log
+  // attribution and as the legacy hint inside effectiveInteractive
+  // (pre-flag cat sessions can be recognised from this field).
   originatingClient: PersistedOriginatingClient.optional(),
+  // Tristate: true once the session has had a real turn, false when
+  // explicitly created as ancillary (e.g. `hydra cat`), undefined for
+  // pre-flag records / freshly-created sessions that haven't decided
+  // yet. effectiveInteractive() in session-manager.ts is the single
+  // resolver — every filter site goes through it.
+  interactive: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -279,6 +286,7 @@ export function recordFromMemorySession(args: {
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
   originatingClient?: PersistedOriginatingClient;
+  interactive?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -307,6 +315,7 @@ export function recordFromMemorySession(args: {
     forkedFromSessionId: args.forkedFromSessionId,
     forkedFromMessageId: args.forkedFromMessageId,
     originatingClient: args.originatingClient,
+    interactive: args.interactive,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };
