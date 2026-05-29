@@ -3793,4 +3793,87 @@ describe("Session", () => {
       expect(session.title).toBe("my title");
     });
   });
+
+  describe("applyModelChange / applyModeChange broadcast", () => {
+    it("applyModelChange broadcasts current_model_update even when value already equals currentModel (overrides stale agent echo)", async () => {
+      // Regression for the "1 behind" bug: claude-acp's set_model flow
+      // emits a stale current_model_update (pre-change value) followed by
+      // a config_option_update with the new value. The configOption path
+      // updates currentModel, so applyModelChange would see value == state
+      // and (previously) skip its corrective broadcast — leaving the TUI
+      // showing the stale value. The broadcast must fire unconditionally.
+      const { session } = makeSession("sess_m", "u_m");
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      session.currentModel = "opus[1m]";
+      stream.sent.length = 0;
+
+      session.applyModelChange("opus[1m]");
+
+      const broadcast = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } })?.update
+            ?.sessionUpdate === "current_model_update",
+      );
+      expect(broadcast).toBeDefined();
+      expect(
+        (broadcast as JsonRpcNotification).params,
+      ).toMatchObject({
+        sessionId: "sess_m",
+        update: {
+          sessionUpdate: "current_model_update",
+          currentModel: "opus[1m]",
+        },
+      });
+    });
+
+    it("applyModeChange broadcasts current_mode_update so attached peers (e.g. TUI) repaint when set_mode arrives from another client", async () => {
+      const { session } = makeSession("sess_mode", "u_mode");
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      stream.sent.length = 0;
+
+      session.applyModeChange("plan");
+
+      const broadcast = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } })?.update
+            ?.sessionUpdate === "current_mode_update",
+      );
+      expect(broadcast).toBeDefined();
+      expect(
+        (broadcast as JsonRpcNotification).params,
+      ).toMatchObject({
+        sessionId: "sess_mode",
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentModeId: "plan",
+        },
+      });
+      expect(session.currentMode).toBe("plan");
+    });
+
+    it("applyModeChange broadcasts even when value already equals currentMode (mirrors applyModelChange so a redundant set_mode still resyncs clients)", async () => {
+      const { session } = makeSession("sess_mode2", "u_mode2");
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      session.currentMode = "plan";
+      stream.sent.length = 0;
+
+      session.applyModeChange("plan");
+
+      const broadcast = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } })?.update
+            ?.sessionUpdate === "current_mode_update",
+      );
+      expect(broadcast).toBeDefined();
+    });
+  });
 });

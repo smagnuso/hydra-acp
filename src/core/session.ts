@@ -2280,20 +2280,31 @@ export class Session {
   // emits a non-spec shape (e.g. config_option_update). Fires modelHandlers
   // (persistence) and broadcasts a synthetic current_model_update so all
   // attached clients — including the originator — repaint immediately.
+  //
+  // The broadcast fires even when `modelId` already equals currentModel.
+  // claude-acp emits a stale current_model_update (with the pre-change
+  // value) during set_model processing and a separate config_option_update
+  // with the new value; the configOption path updates currentModel here
+  // before our synthetic broadcast would run, so a value-equality guard
+  // would suppress the corrective broadcast and leave attached clients
+  // (notably the TUI, which doesn't render config_option_update) showing
+  // the stale model from the agent's earlier notification.
   applyModelChange(modelId: string): void {
     const trimmed = modelId.trim();
-    if (!trimmed || trimmed === this.currentModel) {
+    if (!trimmed) {
       return;
     }
-    this.logger?.info(
-      `applyModelChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
-    );
-    this.currentModel = trimmed;
-    for (const handler of this.modelHandlers) {
-      try {
-        handler(trimmed);
-      } catch {
-        void 0;
+    if (trimmed !== this.currentModel) {
+      this.logger?.info(
+        `applyModelChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
+      );
+      this.currentModel = trimmed;
+      for (const handler of this.modelHandlers) {
+        try {
+          handler(trimmed);
+        } catch {
+          void 0;
+        }
       }
     }
     const update: Record<string, unknown> = {
@@ -2311,24 +2322,40 @@ export class Session {
 
   // Apply a mode change initiated by a client request (session/set_mode)
   // when the agent doesn't emit a current_mode_update notification on its
-  // own. Fires modeHandlers so the persistence hook and any other listeners
-  // see the change, identical to the agent-notification path.
+  // own. Fires modeHandlers (persistence) and broadcasts a synthetic
+  // current_mode_update so all attached clients — including the originator
+  // — repaint immediately, mirroring applyModelChange. Without the
+  // broadcast, peer clients (e.g. the TUI when set_mode was issued by Zed
+  // through the shim) would stay on the prior mode.
   applyModeChange(modeId: string): void {
     const trimmed = modeId.trim();
-    if (!trimmed || trimmed === this.currentMode) {
+    if (!trimmed) {
       return;
     }
-    this.logger?.info(
-      `applyModeChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
-    );
-    this.currentMode = trimmed;
-    for (const handler of this.modeHandlers) {
-      try {
-        handler(trimmed);
-      } catch {
-        void 0;
+    if (trimmed !== this.currentMode) {
+      this.logger?.info(
+        `applyModeChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
+      );
+      this.currentMode = trimmed;
+      for (const handler of this.modeHandlers) {
+        try {
+          handler(trimmed);
+        } catch {
+          void 0;
+        }
       }
     }
+    const update: Record<string, unknown> = {
+      sessionUpdate: "current_mode_update",
+      currentModeId: trimmed,
+    };
+    if (this.agentAdvertisedModes.length > 0) {
+      update.availableModes = [...this.agentAdvertisedModes];
+    }
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update,
+    });
   }
 
   onUsageChange(handler: (usage: UsageSnapshot) => void): void {
