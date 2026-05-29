@@ -1610,11 +1610,16 @@ export class SessionManager {
         currentUsage: args.bundle.session.currentUsage,
         agentCommands: args.bundle.session.agentCommands,
         agentModes: args.bundle.session.agentModes,
-        // Imports and forks are user-explicit creation actions — even
-        // with empty history, the user wants this row visible in the
-        // picker. Without this, an imported bundle with a yet-empty
-        // history file would be filtered out of default views.
-        interactive: true,
+        // Carry the source's raw interactive tristate and originating
+        // client rather than forcing true. A real conversation arrives
+        // as true (visible immediately); an empty source arrives as
+        // undefined (hidden until a turn lands here); a cat source
+        // arrives as undefined + cat originatingClient, so
+        // effectiveInteractive hides it via the hint while leaving it
+        // promotable. Legacy bundles (pre-flag) carry neither and fall
+        // back to effectiveInteractive's history-presence inference.
+        interactive: args.bundle.session.interactive,
+        originatingClient: args.bundle.session.originatingClient,
         createdAt: args.preservedCreatedAt ?? now,
         // Fallback path for historyStatus (used when the history file
         // is missing). Keep this consistent with the utimes stamp above.

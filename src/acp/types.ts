@@ -244,10 +244,16 @@ export interface HydraMeta {
   // mcpServers, and registers the (token → session) pair so the agent
   // can call tail_stdin / read_stdin / wait_for_more against the ring.
   mcpStdin?: boolean;
-  // Initial value for the session's interactive tristate. `cat` sets
-  // false; everything else leaves it undefined so the first prompt
-  // promotes it to true. Honoured only on session/new.
+  // Initial value for the session's interactive tristate. Carried only
+  // for the force-visible direction (agent sync / imports): `true` makes
+  // an empty-history session show immediately. Honoured only on
+  // session/new; the don't-promote direction lives on `ancillary` below.
   interactive?: boolean;
+  // Set on a session/prompt by a hydra component acting as an external
+  // ACP client (today only `hydra cat`) to mark the turn as ancillary:
+  // it does NOT promote an undecided session to interactive. Absent (the
+  // default) means a normal human turn that promotes undefined → true.
+  ancillary?: boolean;
 }
 
 export function extractHydraMeta(
@@ -338,6 +344,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.interactive === "boolean") {
     out.interactive = obj.interactive;
+  }
+  if (typeof obj.ancillary === "boolean") {
+    out.ancillary = obj.ancillary;
   }
   if (typeof obj.promptAmending === "boolean") {
     out.promptAmending = obj.promptAmending;
@@ -577,6 +586,9 @@ export function sessionListEntryToWire(
 export const SessionPromptParams = z.object({
   sessionId: z.string(),
   prompt: z.array(z.unknown()),
+  // Hydra extensions ride under _meta["hydra-acp"] (e.g. `ancillary` to
+  // mark a non-promoting turn). Kept so Session.prompt can read them.
+  _meta: z.record(z.unknown()).optional(),
 });
 export type SessionPromptParams = z.infer<typeof SessionPromptParams>;
 

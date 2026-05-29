@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   PersistedAgentCommand,
   PersistedAgentMode,
+  PersistedOriginatingClient,
   PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
@@ -44,6 +45,14 @@ const BundleSession = z.object({
   currentUsage: PersistedUsage.optional(),
   agentCommands: z.array(PersistedAgentCommand).optional(),
   agentModes: z.array(PersistedAgentMode).optional(),
+  // Raw interactive tristate (NOT the resolved effectiveInteractive) so
+  // the value stays promotable on the destination: a cat/empty source
+  // arrives as undefined and a real turn there can still flip it to
+  // true. Carried alongside originatingClient so the importer's
+  // effectiveInteractive can re-apply the cat-name hint at read time
+  // without freezing a sticky `false` into the record.
+  interactive: z.boolean().optional(),
+  originatingClient: PersistedOriginatingClient.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -116,6 +125,12 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
         : {}),
       ...(params.record.agentModes !== undefined
         ? { agentModes: params.record.agentModes }
+        : {}),
+      ...(params.record.interactive !== undefined
+        ? { interactive: params.record.interactive }
+        : {}),
+      ...(params.record.originatingClient !== undefined
+        ? { originatingClient: params.record.originatingClient }
         : {}),
       createdAt: params.record.createdAt,
       updatedAt: params.record.updatedAt,

@@ -28,7 +28,11 @@ export async function runSessionsList(
   const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   const url = new URL(`${baseUrl}/v1/sessions`);
-  if (opts.includeNonInteractive) {
+  // `--all` means "show everything in scope" — it lifts the cold-recency
+  // cap (below) AND drops the non-interactive filter. `--include-non-
+  // interactive` stays as the narrower knob (surface ancillary rows but
+  // still respect the cold cap).
+  if (opts.includeNonInteractive || opts.all) {
     url.searchParams.set("includeNonInteractive", "true");
   }
   const response = await fetch(url.toString(), {

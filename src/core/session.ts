@@ -62,7 +62,7 @@ import type {
   PromptQueueEntry as PromptQueueSnapshotEntry,
   UpdatePromptResult,
 } from "../acp/types.js";
-import { JsonRpcErrorCodes } from "../acp/types.js";
+import { JsonRpcErrorCodes, extractHydraMeta } from "../acp/types.js";
 import * as fsp from "node:fs/promises";
 
 export interface AttachedClient {
@@ -1056,11 +1056,17 @@ export class Session {
     // as "had no prompt." Promotion to true is unconditional here.
     this.maybeSeedTitleFromPrompt(params);
     this._firstPromptSeeded = true;
-    // First real prompt promotes an undecided session to interactive.
-    // An explicitly-non-interactive session (e.g. `hydra cat`, init.interactive=false)
-    // stays false — `cat` does submit prompts, but the session it created
-    // is by design hidden from default listings.
-    if (this._interactive === undefined) {
+    // First human-driven prompt promotes an undecided session to
+    // interactive. Ancillary turns (e.g. `hydra cat`, which sets
+    // _meta.ancillary) deliberately skip promotion, so a cat-spawned
+    // session stays undefined/hidden — but remains promotable if a real
+    // turn ever lands. We only ever go undefined → true here, never
+    // write false, so nothing gets frozen as non-interactive.
+    const ancillary =
+      extractHydraMeta(
+        ((params ?? {}) as { _meta?: Record<string, unknown> })._meta,
+      ).ancillary === true;
+    if (!ancillary && this._interactive === undefined) {
       this._interactive = true;
       for (const handler of this.interactiveHandlers) {
         try {

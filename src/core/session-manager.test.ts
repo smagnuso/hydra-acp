@@ -5,6 +5,7 @@ import {
   SessionManager,
   extractInitialModel,
   extractInitialModels,
+  effectiveInteractive,
 } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
 import {
@@ -1455,6 +1456,8 @@ describe("SessionManager: importBundle", () => {
     promptHistory?: string[];
     createdAt?: string;
     updatedAt?: string;
+    interactive?: boolean;
+    originatingClient?: { name: string; version?: string };
   }) {
     return {
       version: 1 as const,
@@ -1469,6 +1472,12 @@ describe("SessionManager: importBundle", () => {
         agentId: opts.agentId ?? "claude-code",
         cwd: opts.cwd ?? "/work",
         title: opts.title,
+        ...(opts.interactive !== undefined
+          ? { interactive: opts.interactive }
+          : {}),
+        ...(opts.originatingClient !== undefined
+          ? { originatingClient: opts.originatingClient }
+          : {}),
         createdAt: opts.createdAt ?? "2026-05-13T00:00:00.000Z",
         updatedAt: opts.updatedAt ?? "2026-05-13T00:00:00.000Z",
       },
@@ -1533,6 +1542,63 @@ describe("SessionManager: importBundle", () => {
     const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
     expect(record.importedFromMachine).toBe("build-host");
     expect(record.importedFromUpstreamSessionId).toBe("agent-side-xyz");
+  });
+
+  it("carries the source's raw interactive value rather than forcing true", async () => {
+    const manager = noSpawnManager();
+    const readInteractive = async (sessionId: string): Promise<unknown> => {
+      const metaPath = path.join(
+        process.env.HYDRA_ACP_HOME!,
+        "sessions",
+        sessionId,
+        "meta.json",
+      );
+      const record = JSON.parse(await fs.readFile(metaPath, "utf8"));
+      return record.interactive;
+    };
+
+    // Real conversation: arrives true → visible immediately.
+    const real = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_real", interactive: true }),
+    );
+    expect(await readInteractive(real.sessionId)).toBe(true);
+
+    // Empty / undecided source: stays undefined (no forced true), so it's
+    // hidden until a real turn lands here.
+    const empty = await manager.importBundle(
+      bundleFor({ lineageId: "hydra_lineage_empty" }),
+    );
+    expect(await readInteractive(empty.sessionId)).toBeUndefined();
+  });
+
+  it("keeps an imported cat session hidden but promotable", async () => {
+    const manager = noSpawnManager();
+    const result = await manager.importBundle(
+      bundleFor({
+        lineageId: "hydra_lineage_cat",
+        originatingClient: { name: "hydra-acp-cat" },
+        history: [
+          { method: "session/update", params: { x: 1 }, recordedAt: 1 },
+        ],
+      }),
+    );
+    const record = JSON.parse(
+      await fs.readFile(
+        path.join(
+          process.env.HYDRA_ACP_HOME!,
+          "sessions",
+          result.sessionId,
+          "meta.json",
+        ),
+        "utf8",
+      ),
+    );
+    // Raw value never frozen to false — it stays undefined (promotable)…
+    expect(record.interactive).toBeUndefined();
+    expect(record.originatingClient).toEqual({ name: "hydra-acp-cat" });
+    // …but the read-time resolver still hides it via the cat-name hint
+    // even though it has history content.
+    expect(effectiveInteractive(record, true)).toBe(false);
   });
 
   it("stamps history file mtime with the bundle's updatedAt so AGE reflects source activity, not import time", async () => {
@@ -3042,6 +3108,7 @@ describe("SessionManager.forkSession", () => {
     promptHistory?: string[];
     currentModel?: string;
     currentMode?: string;
+    interactive?: boolean;
   }) {
     return {
       version: 1 as const,
@@ -3055,6 +3122,7 @@ describe("SessionManager.forkSession", () => {
         ...(opts.title !== undefined ? { title: opts.title } : {}),
         ...(opts.currentModel !== undefined ? { currentModel: opts.currentModel } : {}),
         ...(opts.currentMode !== undefined ? { currentMode: opts.currentMode } : {}),
+        ...(opts.interactive !== undefined ? { interactive: opts.interactive } : {}),
         createdAt: "2026-05-13T00:00:00.000Z",
         updatedAt: "2026-05-13T00:00:00.000Z",
       },
@@ -3111,6 +3179,20 @@ describe("SessionManager.forkSession", () => {
     expect(fork.forkedFromSessionId).toBe(source.sessionId);
     const history = await readHistory(fork.sessionId);
     expect(history.length).toBe(2);
+  });
+
+  it("copies the source's interactive value onto the fork", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_interactive",
+        interactive: true,
+        history: [turnComplete("m_one", 1)],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId);
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.interactive).toBe(true);
   });
 
   it("forks at a specific messageId, truncating later turns", async () => {

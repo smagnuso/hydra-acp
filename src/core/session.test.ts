@@ -976,6 +976,70 @@ describe("Session", () => {
     });
   });
 
+  describe("interactive promotion", () => {
+    const endTurn = (mock: ReturnType<typeof makeSession>["mock"]): void => {
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+    };
+
+    it("promotes an undecided session to interactive on a normal prompt", async () => {
+      const { session, mock } = makeSession("sess_pi", "u_pi");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      endTurn(mock);
+      const fired: boolean[] = [];
+      session.onInteractiveChange((v) => fired.push(v));
+
+      expect(session.interactive).toBeUndefined();
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_pi",
+        prompt: [{ type: "text", text: "hi" }],
+      });
+
+      expect(session.interactive).toBe(true);
+      expect(fired).toEqual([true]);
+    });
+
+    it("does NOT promote on an ancillary prompt and never writes false", async () => {
+      const { session, mock } = makeSession("sess_anc", "u_anc");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      endTurn(mock);
+      const fired: boolean[] = [];
+      session.onInteractiveChange((v) => fired.push(v));
+
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_anc",
+        prompt: [{ type: "text", text: "cat output" }],
+        _meta: { "hydra-acp": { ancillary: true } },
+      });
+
+      expect(session.interactive).toBeUndefined();
+      expect(fired).toEqual([]);
+    });
+
+    it("stays promotable: a real prompt after ancillary ones flips it true", async () => {
+      const { session, mock } = makeSession("sess_heal", "u_heal");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      endTurn(mock);
+
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_heal",
+        prompt: [{ type: "text", text: "ancillary" }],
+        _meta: { "hydra-acp": { ancillary: true } },
+      });
+      expect(session.interactive).toBeUndefined();
+
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_heal",
+        prompt: [{ type: "text", text: "real turn" }],
+      });
+      expect(session.interactive).toBe(true);
+    });
+  });
+
   describe("history compaction trigger", () => {
     it("triggers compact() once every floor(historyMaxEntries * 0.2) appends", async () => {
       const store = new HistoryStore();

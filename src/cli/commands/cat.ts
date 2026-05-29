@@ -91,6 +91,21 @@ const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
 // starts with this prefix is one of our read-the-pipe tools.
 const HYDRA_STDIN_TOOL_PREFIX = "mcp__hydra-acp-stdin__";
 
+// `hydra cat` is a one-shot ancillary client — its turns must never
+// promote the session to interactive. Every session/prompt cat sends
+// goes through here so the `ancillary` flag is set in one place rather
+// than at each call site.
+function catPromptParams(
+  sessionId: string,
+  prompt: unknown[],
+): Record<string, unknown> {
+  return {
+    sessionId,
+    prompt,
+    _meta: { [HYDRA_META_KEY]: { ancillary: true } },
+  };
+}
+
 function deriveTitleFromPrompt(prompt: string | undefined): string | undefined {
   if (!prompt) {
     return undefined;
@@ -439,10 +454,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
       return;
     }
     try {
-      await conn.request("session/prompt", {
-        sessionId,
-        prompt: promptBlocks,
-      });
+      await conn.request("session/prompt", catPromptParams(sessionId, promptBlocks));
       firstChunkSent = true;
     } catch (err) {
       stderr(`hydra-acp cat: prompt failed: ${(err as Error).message}\n`);
@@ -770,10 +782,10 @@ function runStreamingPath(args: StreamingPathArgs): void {
     // completion) is what triggers settle below. We need to keep
     // pumping stdin into the stream while the agent works.
     const promptDone = conn
-      .request("session/prompt", {
-        sessionId,
-        prompt: [{ type: "text", text: promptText }],
-      })
+      .request(
+        "session/prompt",
+        catPromptParams(sessionId, [{ type: "text", text: promptText }]),
+      )
       .catch((err) => {
         args.onPromptFailed(
           new Error(`prompt failed: ${(err as Error).message}`),
@@ -902,12 +914,11 @@ async function openOrAttachSession(
     // grep available for this turn.
     hydraMeta.mcpStdin = true;
   }
-  // `hydra cat` is by design a one-shot ancillary invocation, not an
-  // interactive session. Tagging the new session false keeps it out of
-  // default `sessions list` / picker views without depending on the
-  // clientInfo.name → cat name match (which only worked for sessions
-  // created by `hydra cat` itself, not any future ancillary tool).
-  hydraMeta.interactive = false;
+  // The session is born undecided (interactive: undefined). cat keeps it
+  // out of default listings not at birth but per-turn: every prompt cat
+  // sends carries _meta.ancillary (see catPromptParams), so the daemon's
+  // promotion gate never flips it to interactive. Leaving it undefined
+  // means a human who later attaches and sends a real turn promotes it.
   const cwd = opts.cwd ?? process.cwd();
   const params: Record<string, unknown> = { cwd };
   if (opts.agentId) {

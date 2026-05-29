@@ -205,6 +205,10 @@ describe("startDaemon", () => {
           lineageId: "hydra_lineage_route_test",
           agentId: "claude-acp",
           cwd: "/work",
+          // A real imported conversation carries interactive=true so it's
+          // visible in the default list (this test asserts default
+          // visibility). Empty/undecided imports are hidden by design.
+          interactive: true,
           createdAt: "2026-05-13T00:00:00.000Z",
           updatedAt: "2026-05-13T00:00:00.000Z",
         },
@@ -602,6 +606,8 @@ describe("startDaemon", () => {
           agentId: "claude-acp",
           cwd: "/wire-check",
           title: "wire shape check",
+          // Visible by default so this wire-shape check finds the row.
+          interactive: true,
           createdAt: "2026-05-13T00:00:00.000Z",
           updatedAt: "2026-05-13T00:00:00.000Z",
         },

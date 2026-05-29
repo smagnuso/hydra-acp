@@ -44,6 +44,36 @@ describe("Bundle", () => {
     expect(decoded.exportedFrom.machine).toBe("test-host");
   });
 
+  it("carries raw interactive + originatingClient when set, omits when absent", () => {
+    const withFlags = encodeBundle({
+      record: {
+        ...sampleRecord(),
+        interactive: true,
+        originatingClient: { name: "hydra-acp-cat", version: "9.9.9" },
+      },
+      history: [],
+      hydraVersion: "0.1.0",
+      machine: "h",
+    });
+    const decoded = decodeBundle(JSON.parse(JSON.stringify(withFlags)));
+    expect(decoded.session.interactive).toBe(true);
+    expect(decoded.session.originatingClient).toEqual({
+      name: "hydra-acp-cat",
+      version: "9.9.9",
+    });
+
+    // Undecided source (interactive undefined) must NOT serialize a value
+    // — that's what keeps an imported cat/empty session promotable.
+    const withoutFlags = encodeBundle({
+      record: sampleRecord(),
+      history: [],
+      hydraVersion: "0.1.0",
+      machine: "h",
+    });
+    expect("interactive" in withoutFlags.session).toBe(false);
+    expect("originatingClient" in withoutFlags.session).toBe(false);
+  });
+
   it("carries upstreamSessionId when the source record has one", () => {
     const encoded = encodeBundle({
       record: { ...sampleRecord(), upstreamSessionId: "agent-side-id-123" },

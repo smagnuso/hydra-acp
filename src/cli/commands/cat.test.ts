@@ -419,10 +419,16 @@ describe("runCatLoop", () => {
     h.fakeStdin.end();
 
     const prompt = await h.waitForRequest("session/prompt");
-    const params = prompt.params as { prompt: Array<{ text?: string }> };
+    const params = prompt.params as {
+      prompt: Array<{ text?: string }>;
+      _meta?: { "hydra-acp"?: { ancillary?: boolean } };
+    };
     expect(params.prompt).toHaveLength(2);
     expect(params.prompt[0]?.text).toBe("summarize");
     expect(params.prompt[1]?.text).toBe("alpha\nbeta\ngamma\n");
+    // Cat turns must be tagged ancillary so they never promote the
+    // session to interactive.
+    expect(params._meta?.["hydra-acp"]?.ancillary).toBe(true);
 
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
     await loopPromise;
@@ -465,7 +471,11 @@ describe("runCatLoop", () => {
     ).toBe("hello world");
     h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
 
-    await h.waitForRequest("session/prompt");
+    const streamPrompt = await h.waitForRequest("session/prompt");
+    expect(
+      (streamPrompt.params as { _meta?: { "hydra-acp"?: { ancillary?: boolean } } })
+        ._meta?.["hydra-acp"]?.ancillary,
+    ).toBe(true);
     h.fakeStdin.end();
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
     h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
