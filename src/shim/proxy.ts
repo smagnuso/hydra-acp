@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { ndjsonStreamFromStdio } from "../acp/framing.js";
 import { loadConfig } from "../core/config.js";
 import {
@@ -14,6 +15,8 @@ import { ResilientWsStream } from "./resilient-ws.js";
 import { SessionTracker, type ResumeContext } from "./session-tracker.js";
 import type { MessageStream } from "../acp/framing.js";
 import { buildApproveResponse } from "../acp/permission-pick.js";
+import { HYDRA_VERSION } from "../core/hydra-version.js";
+import { paths } from "../core/paths.js";
 import {
   buildTitleFromArgv,
   setHydraProcessTitle,
@@ -119,6 +122,7 @@ export function wireShim({
   tracker,
 }: WireShimArgs): void {
   upstream.onMessage((msg) => {
+    wireLog("daemon→client", msg);
     tracker.observeFromServer(msg);
     // --dangerously-skip-permissions: when the daemon asks us to
     // approve a tool call, reply directly to upstream with an "allow"
@@ -147,7 +151,12 @@ export function wireShim({
   const namingState = { name: opts.name, used: false };
 
   downstream.onMessage((msg) => {
+    wireLog("client→daemon", msg);
     tracker.observeFromClient(msg);
+    if (isInitializeRequest(msg)) {
+      void upstream.send(normaliseInitializeClientInfo(msg));
+      return;
+    }
     if (isSessionNewRequest(msg)) {
       if (opts.sessionId) {
         void upstream.send(buildAttachFromNew(msg, opts.sessionId));
@@ -355,6 +364,50 @@ function isSessionNewRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
   );
 }
 
+function isInitializeRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
+  return (
+    "method" in msg &&
+    "id" in msg &&
+    msg.id !== undefined &&
+    msg.method === "initialize"
+  );
+}
+
+// Preserve every field the downstream client sent; only stamp
+// clientInfo.name + version when the client didn't identify itself. This
+// keeps a future client that sets clientInfo.name="zed" (or anything
+// else) flowing through unchanged, while anonymous initialises land on
+// the daemon tagged as `hydra-acp-shim` so they're not invisible in
+// session listings.
+export function normaliseInitializeClientInfo(
+  msg: JsonRpcRequest,
+): JsonRpcRequest {
+  const params = (msg.params ?? {}) as Record<string, unknown>;
+  const existing = params.clientInfo;
+  const existingObj =
+    existing && typeof existing === "object" && !Array.isArray(existing)
+      ? (existing as Record<string, unknown>)
+      : undefined;
+  const existingName =
+    existingObj && typeof existingObj.name === "string"
+      ? existingObj.name.trim()
+      : "";
+  if (existingName.length > 0) {
+    return msg;
+  }
+  return {
+    ...msg,
+    params: {
+      ...params,
+      clientInfo: {
+        ...(existingObj ?? {}),
+        name: "hydra-acp-shim",
+        version: HYDRA_VERSION,
+      },
+    },
+  };
+}
+
 function isPermissionRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
   return (
     "method" in msg &&
@@ -388,6 +441,49 @@ function rewriteSessionNewWithAgent(
     ...msg,
     params: { ...params, agentId },
   };
+}
+
+// Diagnostic wire dump. Opt-in via HYDRA_SHIM_WIRE_LOG (any non-empty
+// value enables it). Append-only NDJSON at paths.shimWireLogFile(). Pid
+// is included on every line so concurrent shims (Zed spawns one per
+// agent panel) remain distinguishable. The file is rotated once on
+// first write of each process if it has grown past WIRE_LOG_MAX_BYTES,
+// so an enabled long-running install doesn't accumulate gigabytes.
+const WIRE_LOG_MAX_BYTES = 25 * 1024 * 1024;
+let wireLogChecked = false;
+let wireLogPath: string | null = null;
+function wireLog(direction: "client→daemon" | "daemon→client", msg: unknown): void {
+  if (!process.env.HYDRA_SHIM_WIRE_LOG) {
+    return;
+  }
+  if (!wireLogChecked) {
+    wireLogChecked = true;
+    try {
+      wireLogPath = paths.shimWireLogFile();
+      fs.mkdirSync(paths.home(), { recursive: true });
+      const st = fs.statSync(wireLogPath, { throwIfNoEntry: false });
+      if (st && st.size > WIRE_LOG_MAX_BYTES) {
+        fs.renameSync(wireLogPath, `${wireLogPath}.1`);
+      }
+    } catch {
+      wireLogPath = null;
+    }
+  }
+  if (!wireLogPath) {
+    return;
+  }
+  try {
+    const line =
+      JSON.stringify({
+        t: new Date().toISOString(),
+        pid: process.pid,
+        dir: direction,
+        msg,
+      }) + "\n";
+    fs.appendFile(wireLogPath, line, () => undefined);
+  } catch {
+    // Diagnostic logging is best-effort; never block the shim on IO.
+  }
 }
 
 function injectHydraMeta(

@@ -114,4 +114,8 @@ export const paths = {
   // writes.
   globalTuiHistoryFile: () => path.join(hydraHome(), "prompt-history"),
   tuiLogFile: () => path.join(hydraHome(), "tui.log"),
+  // Diagnostic dump of every JSON-RPC message that crosses a `hydra-acp
+  // shim` process. Append-only NDJSON. One file shared by every shim;
+  // each line carries the writing process's pid for disambiguation.
+  shimWireLogFile: () => path.join(hydraHome(), "shim-wire.log"),
 };

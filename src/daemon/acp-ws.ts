@@ -814,8 +814,16 @@ export function registerAcpWsEndpoint(
           err.code = JsonRpcErrorCodes.SessionNotFound;
           throw err;
         }
+        // Backfill originatingClient from the attaching connection's
+        // initialize when disk has none. Catches sessions created before
+        // the shim started stamping clientInfo: the next attach through
+        // a tagged connection promotes them out of the "anonymous" pool
+        // instead of leaving them invisible in `sessions list` forever.
+        const resurrectWithOriginator = resurrectParams.originatingClient
+          ? resurrectParams
+          : { ...resurrectParams, originatingClient: state.clientInfo };
         session = await deps.manager.resurrect({
-          ...resurrectParams,
+          ...resurrectWithOriginator,
           onInstallProgress: makeInstallProgressForwarder(connection),
         });
         wireDefaultTransformers(session, deps);

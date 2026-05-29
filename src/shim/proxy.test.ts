@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { wireShim } from "./proxy.js";
+import { wireShim, normaliseInitializeClientInfo } from "./proxy.js";
 import { SessionTracker } from "./session-tracker.js";
 import { makeControlledStream } from "../__tests__/test-utils.js";
-import type { JsonRpcNotification } from "../acp/types.js";
+import { HYDRA_VERSION } from "../core/hydra-version.js";
+import type { JsonRpcNotification, JsonRpcRequest } from "../acp/types.js";
 
 describe("wireShim forwarding", () => {
   it("forwards initialize to upstream and does NOT spuriously respond on downstream", async () => {
@@ -474,6 +475,114 @@ describe("wireShim forwarding", () => {
     expect(sent.method).toBe("session/attach");
     expect(sent.params).toMatchObject({
       sessionId: "sess_existing",
+    });
+  });
+});
+
+describe("normaliseInitializeClientInfo", () => {
+  const baseReq = (params: Record<string, unknown> = {}): JsonRpcRequest => ({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params,
+  });
+
+  it("injects hydra-acp-shim when no clientInfo is set", () => {
+    const out = normaliseInitializeClientInfo(baseReq({ protocolVersion: 1 }));
+    expect(out.params).toMatchObject({
+      protocolVersion: 1,
+      clientInfo: { name: "hydra-acp-shim", version: HYDRA_VERSION },
+    });
+  });
+
+  it("injects hydra-acp-shim when clientInfo is present but name is missing", () => {
+    const out = normaliseInitializeClientInfo(
+      baseReq({ clientInfo: { title: "Stable" } }),
+    );
+    expect(out.params).toMatchObject({
+      clientInfo: {
+        title: "Stable",
+        name: "hydra-acp-shim",
+        version: HYDRA_VERSION,
+      },
+    });
+  });
+
+  it("passes through clientInfo unchanged when name is a non-empty string", () => {
+    const orig = baseReq({
+      clientInfo: { name: "zed", version: "0.190.0", title: "Stable" },
+    });
+    const out = normaliseInitializeClientInfo(orig);
+    expect(out).toBe(orig);
+  });
+
+  it("injects hydra-acp-shim when clientInfo.name is an empty string", () => {
+    const out = normaliseInitializeClientInfo(
+      baseReq({ clientInfo: { name: "   " } }),
+    );
+    expect(out.params).toMatchObject({
+      clientInfo: { name: "hydra-acp-shim", version: HYDRA_VERSION },
+    });
+  });
+});
+
+describe("wireShim initialize normalisation", () => {
+  it("stamps clientInfo.name=hydra-acp-shim on initialize that lacks it", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: 1 },
+    });
+
+    await new Promise((r) => setImmediate(r));
+
+    expect(upstream.sent).toHaveLength(1);
+    const sent = upstream.sent[0] as {
+      method: string;
+      params: { clientInfo: { name: string; version: string } };
+    };
+    expect(sent.method).toBe("initialize");
+    expect(sent.params.clientInfo).toEqual({
+      name: "hydra-acp-shim",
+      version: HYDRA_VERSION,
+    });
+  });
+
+  it("passes a client-provided clientInfo.name through unchanged", async () => {
+    const upstream = makeControlledStream();
+    const downstream = makeControlledStream();
+    const tracker = new SessionTracker();
+
+    wireShim({ opts: {}, upstream, downstream, tracker });
+
+    downstream.emitMessage({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: {
+        protocolVersion: 1,
+        clientInfo: { name: "zed", version: "0.190.0", title: "Stable" },
+      },
+    });
+
+    await new Promise((r) => setImmediate(r));
+
+    expect(upstream.sent).toHaveLength(1);
+    const sent = upstream.sent[0] as {
+      method: string;
+      params: { clientInfo: { name: string; version: string; title: string } };
+    };
+    expect(sent.params.clientInfo).toEqual({
+      name: "zed",
+      version: "0.190.0",
+      title: "Stable",
     });
   });
 });
