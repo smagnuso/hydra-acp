@@ -152,12 +152,19 @@ describe("pickMostRecent", () => {
 });
 
 describe("searchSessions", () => {
-  it("issues GET .../search with q and bearer auth", async () => {
-    const captured: { url: string; auth?: string } = { url: "" };
+  it("issues POST .../search with q in the JSON body and bearer auth", async () => {
+    const captured: {
+      url: string;
+      method?: string;
+      auth?: string;
+      body?: unknown;
+    } = { url: "" };
     const fetchImpl = (async (input: string, init?: RequestInit) => {
       captured.url = input as string;
+      captured.method = init?.method;
       const headers = init?.headers as Record<string, string> | undefined;
       captured.auth = headers?.["Authorization"];
+      captured.body = init?.body ? JSON.parse(init.body as string) : undefined;
       return new Response(
         JSON.stringify({ query: "needle", truncated: false, results: [] }),
         { status: 200 },
@@ -165,16 +172,18 @@ describe("searchSessions", () => {
     }) as typeof fetch;
     const out = await searchSessions(target, "needle", {}, fetchImpl);
     expect(captured.url).toBe(
-      `http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/search?q=needle`,
+      `http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/search`,
     );
+    expect(captured.method).toBe("POST");
     expect(captured.auth).toBe("Bearer tok");
+    expect(captured.body).toEqual({ q: "needle" });
     expect(out.results).toEqual([]);
   });
 
-  it("joins sessionIds with commas in the query string", async () => {
-    const captured: { url: string } = { url: "" };
-    const fetchImpl = (async (input: string) => {
-      captured.url = input as string;
+  it("includes sessionIds in the JSON body when provided", async () => {
+    const captured: { body?: unknown } = {};
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      captured.body = init?.body ? JSON.parse(init.body as string) : undefined;
       return new Response(
         JSON.stringify({ query: "x", truncated: false, results: [] }),
         { status: 200 },
@@ -186,7 +195,10 @@ describe("searchSessions", () => {
       { sessionIds: ["sess_a", "sess_b", "sess_c"] },
       fetchImpl,
     );
-    expect(captured.url).toContain("sessionIds=sess_a%2Csess_b%2Csess_c");
+    expect(captured.body).toEqual({
+      q: "x",
+      sessionIds: ["sess_a", "sess_b", "sess_c"],
+    });
   });
 
   it("throws on non-2xx", async () => {

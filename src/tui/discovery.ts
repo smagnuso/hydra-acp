@@ -225,19 +225,27 @@ export async function regenSessionTitle(
 // visible rows so the existing filters compose with the find scope); when
 // omitted, the daemon scans every session it knows about. Server
 // returns 400 for an empty query, which we surface as a thrown error.
+//
+// POST (not GET) because the picker's allowlist can grow past the
+// HTTP header-size limit when serialized into a query string on
+// long-lived installs (HTTP 431).
 export async function searchSessions(
   target: RemoteTarget,
   query: string,
   opts: { sessionIds?: string[] } = {},
   fetchImpl: typeof fetch = fetch,
 ): Promise<SessionSearchResponse> {
-  const url = new URL(`${target.baseUrl}/v1/sessions/search`);
-  url.searchParams.set("q", query);
+  const body: { q: string; sessionIds?: string[] } = { q: query };
   if (opts.sessionIds && opts.sessionIds.length > 0) {
-    url.searchParams.set("sessionIds", opts.sessionIds.join(","));
+    body.sessionIds = opts.sessionIds;
   }
-  const response = await fetchImpl(url.toString(), {
-    headers: { Authorization: `Bearer ${target.token}` },
+  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/search`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${target.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);

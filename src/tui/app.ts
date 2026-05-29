@@ -2521,6 +2521,7 @@ async function runSession(
         toolsBlockStopReason = null;
         toolsExpanded = false;
         lastEditMarkPath = null;
+        turnHasShownProse = false;
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -3031,6 +3032,14 @@ async function runSession(
   // and at turn boundaries. "diff" mode never consults this — every
   // diff is informative on its own.
   let lastEditMarkPath: string | null = null;
+  // "edit" mode is meant to ride alongside agent prose — a tool-only
+  // turn already exposes the file via the tools block, so an extra
+  // mark below would just duplicate that. We only emit the mark when
+  // the turn has already shown visible prose at the moment the tool
+  // completes; edits that finish before prose appears are dropped
+  // (the tools block still shows them). "diff" mode is unaffected
+  // — diffs carry their own information regardless.
+  let turnHasShownProse = false;
 
   // Drop a separate scrollback block under the tool row when the user
   // has opted in via `tui.showFileUpdates`. Keyed by toolCallId so a
@@ -3055,6 +3064,12 @@ async function runSession(
       if (lines.length > 0) {
         screen.upsertLines(`editdiff:${toolCallId}`, lines);
       }
+      return;
+    }
+    // mode === "edit": only show the mark when this turn has produced
+    // prose. Tool-only turns already display the edit in the tools
+    // block; the mark below would just duplicate it.
+    if (!turnHasShownProse) {
       return;
     }
     const diff = state.editDiff;
@@ -3185,6 +3200,7 @@ async function runSession(
       toolsExpanded = false;
       toolsBlockEndedAt = null;
       lastEditMarkPath = null;
+      turnHasShownProse = false;
       startToolsBlock();
       // Force an immediate paint past the content-repaint throttle. The
       // user-text event is the user's "I just sent this" signal — they
@@ -3201,6 +3217,7 @@ async function runSession(
       // text — empty chunks are framing/no-ops (appendAgentText itself
       // bails on them) and shouldn't visually break a run of edits.
       if (event.text.length > 0) {
+        turnHasShownProse = true;
         lastEditMarkPath = null;
       }
       appendAgentText(event.text);
@@ -3219,6 +3236,7 @@ async function runSession(
       // (appendThought bails on empty input) so a run of edits straddling
       // one stays a logical series.
       if (viewPrefs.showThoughts && event.text.length > 0) {
+        turnHasShownProse = true;
         lastEditMarkPath = null;
       }
       appendThought(event.text);
@@ -3430,6 +3448,7 @@ async function runSession(
       toolsExpanded = false;
       upstreamInterruptedSeen = false;
       lastEditMarkPath = null;
+      turnHasShownProse = false;
       screen.ensureSeparator();
       // Drift reconcile. At a real turn boundary with no queued prompt,
       // no own prompt awaiting (turnInFlight), and no in-flight head id,
@@ -3567,6 +3586,7 @@ async function runSession(
     toolsBlockStopReason = null;
     toolsExpanded = false;
     lastEditMarkPath = null;
+    turnHasShownProse = false;
   };
 
   // Disconnect signal arrives the moment the underlying WS drops and a

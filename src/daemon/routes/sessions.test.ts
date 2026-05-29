@@ -289,7 +289,7 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry?.busy).toBe(false);
   });
 
-  it("GET /v1/sessions/search returns grouped hits", async () => {
+  it("POST /v1/sessions/search returns grouped hits", async () => {
     // Two sessions, distinct prose, plus an Edit tool call so the file
     // path scan path also runs.
     const a = await harness.manager.create({
@@ -326,7 +326,12 @@ describe("session routes: termination broadcasts session_closed", () => {
     });
 
     const proseRes = await fetch(
-      `${harness.baseUrl}/v1/sessions/search?q=banana`,
+      `${harness.baseUrl}/v1/sessions/search`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: "banana" }),
+      },
     );
     expect(proseRes.status).toBe(200);
     const proseBody = (await proseRes.json()) as {
@@ -339,7 +344,12 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(proseBody.results.map((r) => r.sessionId)).toEqual([a.sessionId]);
 
     const toolRes = await fetch(
-      `${harness.baseUrl}/v1/sessions/search?q=foo.ts`,
+      `${harness.baseUrl}/v1/sessions/search`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: "foo.ts" }),
+      },
     );
     const toolBody = (await toolRes.json()) as {
       results: Array<{
@@ -355,7 +365,7 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(inputSnippet?.text).toContain("foo.ts");
   });
 
-  it("GET /v1/sessions/search scopes the scan to sessionIds when provided", async () => {
+  it("POST /v1/sessions/search scopes the scan to sessionIds when provided", async () => {
     const a = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -379,7 +389,12 @@ describe("session routes: termination broadcasts session_closed", () => {
     await history.append(b.sessionId, sameText);
 
     const res = await fetch(
-      `${harness.baseUrl}/v1/sessions/search?q=needle&sessionIds=${b.sessionId}`,
+      `${harness.baseUrl}/v1/sessions/search`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: "needle", sessionIds: [b.sessionId] }),
+      },
     );
     const body = (await res.json()) as {
       results: Array<{ sessionId: string }>;
@@ -387,10 +402,18 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(body.results.map((r) => r.sessionId)).toEqual([b.sessionId]);
   });
 
-  it("GET /v1/sessions/search returns 400 when q is missing or blank", async () => {
-    const missing = await fetch(`${harness.baseUrl}/v1/sessions/search`);
+  it("POST /v1/sessions/search returns 400 when q is missing or blank", async () => {
+    const missing = await fetch(`${harness.baseUrl}/v1/sessions/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
     expect(missing.status).toBe(400);
-    const blank = await fetch(`${harness.baseUrl}/v1/sessions/search?q=%20%20`);
+    const blank = await fetch(`${harness.baseUrl}/v1/sessions/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "  " }),
+    });
     expect(blank.status).toBe(400);
   });
 });
