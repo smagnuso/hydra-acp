@@ -3461,6 +3461,7 @@ async function runSession(
           ownTurnInFlight: turnInFlight !== null,
           hasInFlightHead: currentHeadMessageId !== undefined,
           replayDraining,
+          amended: event.amended === true,
         })
       ) {
         adjustPendingTurns(-pendingTurns);

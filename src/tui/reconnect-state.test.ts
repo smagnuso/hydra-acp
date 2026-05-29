@@ -86,6 +86,7 @@ describe("shouldDriftSnap", () => {
     ownTurnInFlight: false,
     hasInFlightHead: false,
     replayDraining: false,
+    amended: false,
   } as const;
 
   it("snaps when local accounting says busy but no live signal agrees", () => {
@@ -123,6 +124,32 @@ describe("shouldDriftSnap", () => {
         ownTurnInFlight: false,
         hasInFlightHead: false,
         replayDraining: true,
+        amended: false,
+      }),
+    ).toBe(false);
+  });
+
+  // Regression: amending an amendment (or any in-flight turn this TUI
+  // didn't start via runPrompt) fires a synthesized amend-cancel
+  // turn_complete while turnInFlight is null, the replacement's chip
+  // paint is still deferred (queueCache empty), and currentHeadMessageId
+  // was just cleared — so every other signal looks idle. Before the
+  // `amended` gate the snap zeroed pendingTurns and the banner sat on
+  // "ready" for the entire replacement turn even though the agent was
+  // mid-turn with an active plan. See session
+  // hydra_session_VoEhR2QbnOCdk8Um, 2026-05-29.
+  it("regression: never snaps on an amend-cancel turn_complete", () => {
+    expect(shouldDriftSnap({ ...baseline, amended: true })).toBe(false);
+    // Every other condition met (the amend-of-an-amendment shape), only
+    // the amended flag holds the snap off.
+    expect(
+      shouldDriftSnap({
+        pendingTurns: 2,
+        queueSize: 0,
+        ownTurnInFlight: false,
+        hasInFlightHead: false,
+        replayDraining: false,
+        amended: true,
       }),
     ).toBe(false);
   });

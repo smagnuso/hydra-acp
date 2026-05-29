@@ -62,15 +62,27 @@ export function parseReattachResponse(result: unknown): ReattachResponseFields {
 // state, not drift. The other inputs distinguish a real turn boundary
 // (no queued prompt, no own prompt awaiting, no in-flight head) from a
 // boundary where some local signal already says we're mid-turn.
+//
+// `amended` is the cancel-half of an amend (M1→M2): the daemon always
+// splices a replacement turn behind it, so this is never an idle
+// boundary even though every other signal can look idle in the gap
+// (the replacement isn't in queueCache yet — its chip paint is deferred
+// — turnInFlight is null when amending a turn this TUI didn't start via
+// runPrompt, and currentHeadMessageId is cleared just above the call).
+// Snapping here would zero pendingTurns and pin the banner to "ready"
+// for the whole replacement turn. The eventual non-amended turn_complete
+// that ends the chain still triggers the snap, so the safety net holds.
 export function shouldDriftSnap(args: {
   pendingTurns: number;
   queueSize: number;
   ownTurnInFlight: boolean;
   hasInFlightHead: boolean;
   replayDraining: boolean;
+  amended: boolean;
 }): boolean {
   return (
     !args.replayDraining &&
+    !args.amended &&
     args.pendingTurns > 0 &&
     args.queueSize === 0 &&
     !args.ownTurnInFlight &&
