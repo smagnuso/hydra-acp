@@ -32,7 +32,18 @@ beforeEach(() => {
 
 afterEach(() => {
   if (currentHome) {
-    fs.rmSync(currentHome, { recursive: true, force: true });
+    // Fire-and-forget writes from Session (queue persist, history append)
+    // can land mid-rm: as rmSync walks the tree, a pending mkdir/writeFile
+    // recreates a file inside the dir we just emptied and the next rmdir
+    // fails with ENOTEMPTY. maxRetries/retryDelay tells Node to retry on
+    // exactly that code (also EBUSY/EMFILE/ENFILE/EPERM), which gives
+    // those stragglers enough time to land and be swept on the next pass.
+    fs.rmSync(currentHome, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 10,
+    });
     currentHome = undefined;
   }
 });

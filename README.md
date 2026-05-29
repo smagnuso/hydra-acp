@@ -528,7 +528,9 @@ client ← daemon ← [Tn ← … ← T1] ← agent
 
 This means a transformer can inspect every prompt before the LLM sees it and every response before it reaches clients or mutates daemon state (model, mode, history). It cannot do this invisibly — the chain is operator-visible and each transformer's intercepts are declared up front.
 
-A transformer is configured in the same way as an extension but under a separate key. ```json
+A transformer is configured in the same way as an extension but under a separate key.
+
+```json
 {
   "transformers": {
     "my-transformer": {
