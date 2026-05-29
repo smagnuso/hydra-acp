@@ -802,21 +802,32 @@ export class Session {
     historyPolicy: HistoryPolicy,
     opts: { afterMessageId?: string },
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
-    const all = coalesceReplay(await this.getHistorySnapshot());
+    // Search the raw snapshot, coalesce the slice. Coalescing first would
+    // drop the messageIds of every non-leading chunk in a run (and every
+    // non-trailing tool_call_update / non-final plan), so a TUI whose
+    // lastSeenMessageId pointed at one of those would never find a cutoff
+    // and we'd fall back to "full".
+    const raw = await this.getHistorySnapshot();
     const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
       const cutoff = opts.afterMessageId
-        ? findMessageIdIndex(all, opts.afterMessageId)
+        ? findMessageIdIndex(raw, opts.afterMessageId)
         : -1;
       if (cutoff < 0) {
-        return { entries: [...state, ...all], appliedPolicy: "full" };
+        return {
+          entries: [...state, ...coalesceReplay(raw)],
+          appliedPolicy: "full",
+        };
       }
       return {
-        entries: [...state, ...all.slice(cutoff + 1)],
+        entries: [...state, ...coalesceReplay(raw.slice(cutoff + 1))],
         appliedPolicy: "after_message",
       };
     }
-    return { entries: [...state, ...all], appliedPolicy: "full" };
+    return {
+      entries: [...state, ...coalesceReplay(raw)],
+      appliedPolicy: "full",
+    };
   }
 
   // Synthesizes one session/update notification per cached STATE_UPDATE_KIND

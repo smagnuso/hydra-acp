@@ -588,7 +588,7 @@ async function runSession(
       ?.sessionUpdate;
     // Capture messageId for after_message reconnect replay. Skip state-
     // kind updates — those aren't persisted, so the daemon can't find
-    // them when computing the replay cutoff (see session.ts:1827).
+    // them when computing the replay cutoff.
     if (typeof rawTag === "string" && !STATE_UPDATE_KINDS.has(rawTag)) {
       const u = (update as { messageId?: unknown }) ?? {};
       if (typeof u.messageId === "string") {

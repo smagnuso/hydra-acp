@@ -467,6 +467,60 @@ describe("Session", () => {
       ).toBe("agent_message_chunk");
     });
 
+    it("after_message resolves a cutoff that coalesceReplay would drop", async () => {
+      // Regression: coalesceReplay folds consecutive same-kind chunks into
+      // the first one, so a TUI whose lastSeenMessageId pointed at a
+      // middle chunk used to miss the cutoff and fall back to "full".
+      // We now search the raw snapshot, then coalesce the tail.
+      const { session, mock } = makeSession("sess_mid", "u_mid");
+      const { client: warm } = makeClient();
+      await session.attach(warm, "full");
+
+      for (const text of ["a", "b", "c"]) {
+        mock.triggerNotification("session/update", {
+          sessionId: "u_mid",
+          update: { sessionUpdate: "agent_message_chunk", content: { text } },
+        });
+      }
+      mock.triggerNotification("session/update", {
+        sessionId: "u_mid",
+        update: { sessionUpdate: "turn_complete", stopReason: "end_turn" },
+      });
+      await flushHistoryWrites();
+
+      const snap = await session.getHistorySnapshot();
+      const chunkEntries = snap.filter(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "agent_message_chunk",
+      );
+      expect(chunkEntries).toHaveLength(3);
+      const middleId = (chunkEntries[1]?.params as {
+        update: { messageId: string };
+      }).update.messageId;
+
+      const { client: late } = makeClient();
+      const { entries, appliedPolicy } = await session.attach(
+        late,
+        "after_message",
+        { afterMessageId: middleId },
+      );
+      expect(appliedPolicy).toBe("after_message");
+
+      const delta = entries.filter((e) => !isStateSnapshotEntry(e));
+      // Third chunk + turn_complete. The single trailing chunk has no
+      // siblings to merge with in the coalesced tail.
+      expect(delta).toHaveLength(2);
+      expect(
+        (delta[0]?.params as { update: { sessionUpdate: string; content: { text: string } } })
+          .update,
+      ).toMatchObject({ sessionUpdate: "agent_message_chunk", content: { text: "c" } });
+      expect(
+        (delta[1]?.params as { update: { sessionUpdate: string } }).update
+          .sessionUpdate,
+      ).toBe("turn_complete");
+    });
+
     it("after_message falls back to full when the id is unknown", async () => {
       const { session, mock } = makeSession();
       const { client: warm } = makeClient();
