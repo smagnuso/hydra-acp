@@ -114,6 +114,38 @@ export function formatAge(ms: number): string {
   return `${day} day${day === 1 ? "" : "s"}`;
 }
 
+// Validate an explicit --agent id against the daemon's registry before a
+// caller commits to launching the TUI / cat (which only discover a bad id
+// at session/new, after the terminal's already been taken over). Exits
+// the process with a clear message + the known ids on a definitive
+// mismatch. If the registry can't be reached we stay silent and let the
+// later session/new path surface whatever error it would have.
+export async function assertKnownAgent(agentId: string): Promise<void> {
+  const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
+  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  let known: string[];
+  try {
+    const r = await fetch(`${baseUrl}/v1/agents`, {
+      headers: { Authorization: `Bearer ${serviceToken}` },
+    });
+    if (!r.ok) {
+      return;
+    }
+    const body = (await r.json()) as { agents: AgentSummary[] };
+    known = body.agents.map((a) => a.id);
+  } catch {
+    return;
+  }
+  if (known.includes(agentId)) {
+    return;
+  }
+  process.stderr.write(
+    `hydra-acp: unknown agent '${agentId}'. Run 'hydra-acp agent list' to see available agents.\n`,
+  );
+  process.exit(2);
+}
+
 interface SyncedSession {
   sessionId: string;
   upstreamSessionId: string;

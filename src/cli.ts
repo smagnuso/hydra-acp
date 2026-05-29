@@ -50,6 +50,7 @@ import {
   runTransformersStop,
 } from "./cli/commands/transformers.js";
 import {
+  assertKnownAgent,
   runAgentsInstall,
   runAgentsList,
   runAgentsLogs,
@@ -305,6 +306,9 @@ async function main(): Promise<void> {
       const streamBufferBytes = parseNumericFlag(flags, "stream-bytes");
       if (streamBufferBytes !== undefined) {
         catOpts.streamBufferBytes = streamBufferBytes;
+      }
+      if (agentIdFromFlag !== undefined) {
+        await assertKnownAgent(agentIdFromFlag);
       }
       suppressUpdateNotice = true;
       await runCat(catOpts);
@@ -593,6 +597,12 @@ async function dispatchTui(
       "hydra-acp: --readonly requires a session id. Pass --session <id-or-url> --readonly, or open the picker and press `v` on a session.\n",
     );
     process.exit(2);
+  }
+  // Validate an explicit --agent against the registry before the TUI
+  // takes over the terminal, so a typo'd id fails at the shell rather
+  // than mid-session at session/new.
+  if (base.agentId !== undefined) {
+    await assertKnownAgent(base.agentId);
   }
   // Rewrite argv0 so `ps`/`top` show the full command (TUI vs which
   // session etc.) while `killall hydra` still finds every interactive
