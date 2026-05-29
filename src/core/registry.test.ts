@@ -77,6 +77,8 @@ function fakeConfig(): HydraConfig {
       defaultEnterAction: "amend" as const,
       showThoughts: true,
       promptHistoryMaxEntries: 2_000,
+      maxToolItems: 5,
+      maxPlanItems: 5,
       showFileUpdates: "none" as const,
     },
   };

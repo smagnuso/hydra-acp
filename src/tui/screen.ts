@@ -156,6 +156,13 @@ export class Screen {
   // current line count so subsequent upserts splice in-place — adjusting
   // the starts of any later keyed blocks if the size changes.
   private keyedBlocks = new Map<string, { start: number; count: number }>();
+  // When set, the named block is kept at the bottom of scrollback: any
+  // subsequent append/upsert that lands new content after it triggers a
+  // float that slides the sticky block back to the end. Used so the
+  // agent's plan stays anchored at the bottom of the current turn even
+  // as tool calls / agent text accumulate below it. Surviving past
+  // `clearKey(stickyBottomKey)` is a no-op since the block is gone.
+  private stickyBottomKey: string | null = null;
   private streamingActive = false;
   // When true, lines with bodyStyle="thought" are skipped at draw time
   // (they remain in `this.lines` so toggling back on reveals them again).
@@ -831,6 +838,7 @@ export class Screen {
     this.lines.push(...lines);
     this.trackLines(lines);
     this.adjustScrollForRowChange(this.wrappedRowsOfMany(lines));
+    this.moveStickyToEnd();
     this.trimScrollback();
     this.scheduleRepaint();
   }
@@ -840,6 +848,7 @@ export class Screen {
     this.lines.push(line);
     this.trackLine(line);
     this.adjustScrollForRowChange(this.wrappedRowsOf(line));
+    this.moveStickyToEnd();
     this.trimScrollback();
     this.scheduleRepaint();
   }
@@ -979,6 +988,13 @@ export class Screen {
       this.streamingActive = false;
     }
     this.adjustScrollForRowChange(rowDelta);
+    // Upserting any non-sticky key may have pushed content past the
+    // sticky block (new block tacked onto the end) — float the sticky
+    // block back. Upserting the sticky key itself doesn't need this:
+    // the splice happens at its existing position.
+    if (key !== this.stickyBottomKey) {
+      this.moveStickyToEnd();
+    }
     this.trimScrollback();
     this.scheduleRepaint();
   }
@@ -1051,6 +1067,12 @@ export class Screen {
     }
     this.streamingActive = true;
     this.adjustScrollForRowChange(rowDelta);
+    // The streaming chunk pushed lines onto the end of scrollback; if a
+    // sticky block is set, slide it back to the bottom. This also resets
+    // streamingActive — the next chunk starts a fresh line above the
+    // sticky block rather than trying to extend a line that's no longer
+    // the tail.
+    this.moveStickyToEnd();
     this.trimScrollback();
     this.scheduleRepaint();
   }
@@ -1284,6 +1306,50 @@ export class Screen {
     this.keyedBlocks.delete(key);
   }
 
+  // Mark `key` as the sticky-bottom block. While set, whenever new content
+  // lands after the block's lines (appendLines / appendStreaming / a new
+  // upserted block) the screen floats this block back to the end so it
+  // remains the last thing in scrollback. Pass null to disable. The key
+  // doesn't need to refer to an existing block — the float is a no-op
+  // until a block with that key is upserted.
+  setStickyBottomKey(key: string | null): void {
+    this.stickyBottomKey = key;
+    this.moveStickyToEnd();
+    this.scheduleRepaint();
+  }
+
+  // If a sticky-bottom block is configured and isn't already at the tail,
+  // splice it out and re-push it at the end. Indices of the other keyed
+  // blocks that sat after the sticky block shift up by sticky.count to
+  // stay aligned with the lines array. Resets streamingActive because the
+  // last line is now part of the sticky block — extending the buried
+  // streaming line in place would corrupt the sticky content.
+  private moveStickyToEnd(): void {
+    if (this.stickyBottomKey === null) {
+      return;
+    }
+    const sticky = this.keyedBlocks.get(this.stickyBottomKey);
+    if (!sticky) {
+      return;
+    }
+    const stickyEnd = sticky.start + sticky.count;
+    if (stickyEnd >= this.lines.length) {
+      return;
+    }
+    const stickyLines = this.lines.splice(sticky.start, sticky.count);
+    for (const [k, range] of this.keyedBlocks) {
+      if (k === this.stickyBottomKey) {
+        continue;
+      }
+      if (range.start >= stickyEnd) {
+        range.start -= sticky.count;
+      }
+    }
+    sticky.start = this.lines.length;
+    this.lines.push(...stickyLines);
+    this.streamingActive = false;
+  }
+
   // Splice a keyed block's lines out of scrollback entirely and drop the
   // key. Used when a placeholder block (e.g. "thinking…" with no tool
   // calls ever fired) shouldn't be kept as a historical artifact after
@@ -1415,18 +1481,43 @@ export class Screen {
   }
 
   // Adds a blank spacer line to the scrollback, but only if scrollback is
-  // non-empty and the last line isn't already a spacer. Idempotent so callers
-  // can request it freely at turn boundaries.
+  // non-empty and the last "real" line isn't already a spacer. Idempotent
+  // so callers can request it freely at turn boundaries. When a sticky
+  // block sits at the tail, the separator is inserted directly above it
+  // and the "is there already a separator" check looks at the line above
+  // the sticky block instead of the array tail. The sticky block's own
+  // first line (if blank) doesn't count: that blank floats with the
+  // plan to its eventual tail position, and the separator we're adding
+  // here is for whatever content is *about* to be appended (which will
+  // land at sticky.start and push the plan back via moveStickyToEnd).
   ensureSeparator(): void {
     if (this.lines.length === 0) {
       return;
     }
-    const last = this.lines[this.lines.length - 1];
-    if (last && last.body === "" && (last.prefix === undefined || last.prefix === "")) {
+    const sticky =
+      this.stickyBottomKey !== null
+        ? this.keyedBlocks.get(this.stickyBottomKey)
+        : undefined;
+    const stickyAtEnd =
+      sticky !== undefined &&
+      sticky.start + sticky.count === this.lines.length;
+    const probeIdx = stickyAtEnd
+      ? (sticky as { start: number }).start - 1
+      : this.lines.length - 1;
+    if (probeIdx < 0) {
+      return;
+    }
+    const probe = this.lines[probeIdx];
+    if (probe && probe.body === "" && (probe.prefix === undefined || probe.prefix === "")) {
       return;
     }
     const sep: FormattedLine = { body: "" };
-    this.lines.push(sep);
+    if (stickyAtEnd) {
+      this.lines.splice((sticky as { start: number }).start, 0, sep);
+      (sticky as { start: number }).start += 1;
+    } else {
+      this.lines.push(sep);
+    }
     this.trackLine(sep);
     this.streamingActive = false;
     this.adjustScrollForRowChange(this.wrappedRowsOf(sep));

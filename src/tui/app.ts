@@ -1318,6 +1318,14 @@ async function runSession(
   // handshake (notably adjustPendingTurns via conn.onNotification).
   screenRef = screen;
 
+  // Keep the plan block anchored at the bottom of its turn. Without this
+  // the plan stays wherever it was first emitted (often near the top of
+  // the turn, above all subsequent tool calls / agent text), forcing the
+  // user to scroll up to see the current entries. The screen floats the
+  // sticky block back to the tail on every append/upsert; turn-end
+  // clearKey("plan") freezes the previous turn's plan in place.
+  screen.setStickyBottomKey("plan");
+
   // Slash-command completion. Built-ins listed here are TUI-only verbs
   // handled locally in handleBuiltinCommand (so they never reach the
   // daemon). /hydra verbs and the agent's own commands both arrive via
@@ -2776,8 +2784,13 @@ async function runSession(
   // splice point is cleared.
   let lastPlanEvent: Extract<RenderEvent, { kind: "plan" }> | null = null;
   // How many recent tool rows the collapsed view shows; older ones get
-  // rolled into the "N hidden" counter in the header.
-  const TOOLS_COLLAPSED_LIMIT = 5;
+  // rolled into the "N hidden" counter in the header. 0 disables the
+  // cap so every tool row stays visible.
+  const TOOLS_COLLAPSED_LIMIT = config.tui.maxToolItems;
+  // Same for the plan. Plumbed into formatEvent so the agent's plan
+  // updates and the turn-end stopped re-render share the cap.
+  const PLAN_VISIBLE_LIMIT = config.tui.maxPlanItems;
+  const formatOptions = { maxPlanItems: PLAN_VISIBLE_LIMIT };
 
   // Buffered text + a stable key for the current agent utterance. Agent
   // chunks accumulate here; on each chunk the whole buffer is re-parsed
@@ -2867,9 +2880,13 @@ async function runSession(
       return;
     }
     const total = toolCallOrder.length;
-    const visibleIds = toolsExpanded
-      ? toolCallOrder
-      : toolCallOrder.slice(Math.max(0, total - TOOLS_COLLAPSED_LIMIT));
+    // limit <= 0 disables the cap — render every row regardless of
+    // toolsExpanded so the ^O toggle is a no-op in unlimited mode.
+    const capped = TOOLS_COLLAPSED_LIMIT > 0;
+    const visibleIds =
+      !capped || toolsExpanded
+        ? toolCallOrder
+        : toolCallOrder.slice(Math.max(0, total - TOOLS_COLLAPSED_LIMIT));
     const hidden = total - visibleIds.length;
     const inProgress = toolsBlockEndedAt === null;
     const end = toolsBlockEndedAt ?? Date.now();
@@ -2911,7 +2928,7 @@ async function runSession(
       const parts: string[] = [`${total} ${noun}`, timing];
       // Only advertise the hotkey while the block is live — once frozen,
       // ^O no longer affects it and the hint would be misleading.
-      if (inProgress) {
+      if (inProgress && capped) {
         if (hidden > 0) {
           parts.push(`${hidden} hidden — ^O expand`);
         } else if (toolsExpanded && total > TOOLS_COLLAPSED_LIMIT) {
@@ -3249,10 +3266,32 @@ async function runSession(
       closeAgentText();
       closeThought();
       lastPlanEvent = event;
-      const lines = formatEvent(event);
+      const lines = formatEvent(event, formatOptions);
       if (lines.length > 0) {
-        screen.upsertLines("plan", lines);
+        // Leading blank stays part of the keyed block so it floats with
+        // the plan when sticky bumps it back to the tail — keeping the
+        // visual gap between the plan and whatever's above it.
+        // ensureSeparator is taught to skip when the sticky block
+        // already starts with this blank, so other code paths don't
+        // stack a second one on top.
+        screen.upsertLines("plan", [{ body: "" }, ...lines]);
       }
+      // While the plan still has open entries it anchors to the bottom
+      // of the turn (the sticky float bumps it back below any tool
+      // calls / agent text that lands afterward). Once every entry is
+      // checked off the plan is historical: drop the sticky float so
+      // further activity appends below it. We keep the upsert key
+      // tracked so a redundant all-completed snapshot (some agents send
+      // the same plan more than once) still splices in place — clearing
+      // the key here was the cause of duplicate plan blocks. If the
+      // agent later re-opens an entry, the next event flips sticky
+      // back on.
+      const allComplete =
+        event.entries.length > 0 &&
+        event.entries.every(
+          (e) => (e.status ?? "pending") === "completed",
+        );
+      screen.setStickyBottomKey(allComplete ? null : "plan");
       return;
     }
     if (event.kind === "tool-call-update") {
@@ -3326,17 +3365,26 @@ async function runSession(
         effectiveStopReason !== undefined &&
         effectiveStopReason !== "end_turn"
       ) {
-        const lines = formatEvent({
-          ...lastPlanEvent,
-          stopped: true,
-          amended: event.amended === true,
-        });
+        const lines = formatEvent(
+          {
+            ...lastPlanEvent,
+            stopped: true,
+            amended: event.amended === true,
+          },
+          formatOptions,
+        );
         if (lines.length > 0) {
-          screen.upsertLines("plan", lines);
+          screen.upsertLines("plan", [{ body: "" }, ...lines]);
         }
       }
       lastPlanEvent = null;
       screen.clearKey("plan");
+      // Re-arm the sticky float for the next turn. If this turn's plan
+      // completed, the in-turn handler set the sticky key to null to let
+      // post-completion content append below — that needs to flip back
+      // to "plan" before the next turn so a fresh plan event there
+      // anchors to the bottom of its turn.
+      screen.setStickyBottomKey("plan");
       // Freeze the tools block (header switches from live "Xs" to
       // "took Xs") and then drop the key so next turn's tool calls
       // append a fresh block below. If no tool ever fired this turn the

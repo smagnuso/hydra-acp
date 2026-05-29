@@ -8,8 +8,10 @@ import {
   formatExitPlanMode,
   formatToolLine,
   parseAgentMarkdown,
+  pickPlanWindow,
   type FormattedLine,
 } from "./format.js";
+import type { PlanEntry } from "../core/render-update.js";
 
 // Measure the on-screen width of a rendered table line. Mirrors what
 // the screen layer eventually writes: prefix + body, with terminal-kit
@@ -618,5 +620,247 @@ describe("formatExitPlanMode", () => {
     expect(lines.some((l) => l.body === "awaiting approval…")).toBe(false);
     expect(lines.some((l) => l.body.startsWith("✓") || l.body.startsWith("✗")))
       .toBe(false);
+  });
+});
+
+describe("pickPlanWindow", () => {
+  function entries(statuses: string[]): PlanEntry[] {
+    return statuses.map((status, i) => ({ content: `step ${i}`, status }));
+  }
+
+  it("returns the full range when there are fewer than the limit", () => {
+    const e = entries(["completed", "in_progress", "pending"]);
+    expect(pickPlanWindow(e, 5)).toEqual({ start: 0, end: 3 });
+  });
+
+  it("returns the full range when exactly at the limit", () => {
+    const e = entries(["completed", "pending", "pending", "pending", "pending"]);
+    expect(pickPlanWindow(e, 5)).toEqual({ start: 0, end: 5 });
+  });
+
+  it("anchors on the in_progress entry with two slots above when possible", () => {
+    const e = entries([
+      "completed", "completed", "completed", "in_progress",
+      "pending", "pending", "pending", "pending", "pending", "pending",
+    ]);
+    expect(pickPlanWindow(e, 5)).toEqual({ start: 1, end: 6 });
+  });
+
+  it("falls back to first pending when nothing is in_progress", () => {
+    const e = entries([
+      "completed", "completed", "pending",
+      "pending", "pending", "pending", "pending",
+    ]);
+    expect(pickPlanWindow(e, 5)).toEqual({ start: 0, end: 5 });
+  });
+
+  it("anchors at the head when no completed entries exist yet", () => {
+    const e = entries([
+      "in_progress", "pending", "pending", "pending", "pending", "pending",
+      "pending",
+    ]);
+    expect(pickPlanWindow(e, 5)).toEqual({ start: 0, end: 5 });
+  });
+
+  it("slides the window left when the anchor sits near the end of the list", () => {
+    const e = entries([
+      "completed", "completed", "completed", "completed",
+      "completed", "completed", "completed", "in_progress", "pending", "pending",
+    ]);
+    expect(pickPlanWindow(e, 5)).toEqual({ start: 5, end: 10 });
+  });
+
+  it("anchors on the last entry when every entry is completed", () => {
+    const e = entries([
+      "completed", "completed", "completed", "completed", "completed",
+      "completed", "completed", "completed",
+    ]);
+    expect(pickPlanWindow(e, 5)).toEqual({ start: 3, end: 8 });
+  });
+
+  it("returns the full range when limit is 0 (unlimited)", () => {
+    const e = entries([
+      "completed", "completed", "in_progress",
+      "pending", "pending", "pending", "pending", "pending",
+    ]);
+    expect(pickPlanWindow(e, 0)).toEqual({ start: 0, end: 8 });
+  });
+});
+
+describe("formatEvent plan windowing", () => {
+  function planEvent(
+    statuses: string[],
+    opts: { stopped?: boolean; amended?: boolean } = {},
+  ) {
+    return {
+      kind: "plan" as const,
+      entries: statuses.map((status, i) => ({
+        content: `step ${i}`,
+        status,
+      })),
+      ...(opts.stopped !== undefined ? { stopped: opts.stopped } : {}),
+      ...(opts.amended !== undefined ? { amended: opts.amended } : {}),
+    };
+  }
+
+  it("omits the summary suffix when the plan fits in the visible window", () => {
+    const lines = formatEvent(
+      planEvent(["completed", "in_progress", "pending"]),
+    );
+    expect(lines[0]).toMatchObject({ body: "Plan" });
+    expect(lines).toHaveLength(4);
+  });
+
+  it("appends a `X done · Y left` summary when truncating", () => {
+    const lines = formatEvent(
+      planEvent([
+        "completed", "completed", "completed",
+        "in_progress",
+        "pending", "pending", "pending", "pending", "pending", "pending",
+      ]),
+    );
+    expect(lines[0]?.body).toBe("Plan · 3 done · 7 left");
+  });
+
+  it("renders only the windowed entries when truncating", () => {
+    const lines = formatEvent(
+      planEvent([
+        "completed", "completed", "completed",
+        "in_progress",
+        "pending", "pending", "pending", "pending", "pending", "pending",
+      ]),
+    );
+    // 1 header + 5 entries = 6 lines
+    expect(lines).toHaveLength(6);
+    const entryBodies = lines.slice(1).map((l) => l.body);
+    expect(entryBodies).toEqual([
+      "[x] step 1",
+      "[x] step 2",
+      "[~] step 3",
+      "[ ] step 4",
+      "[ ] step 5",
+    ]);
+  });
+
+  it("includes the last completed entry as context above the in_progress anchor", () => {
+    const lines = formatEvent(
+      planEvent([
+        "completed", "completed", "completed", "completed", "completed",
+        "completed",
+        "in_progress",
+        "pending", "pending", "pending",
+      ]),
+    );
+    expect(lines[0]?.body).toBe("Plan · 6 done · 4 left");
+    const bodies = lines.slice(1).map((l) => l.body);
+    expect(bodies[0]).toBe("[x] step 4");
+    expect(bodies[1]).toBe("[x] step 5");
+    expect(bodies[2]).toBe("[~] step 6");
+  });
+
+  it("counts all done when the plan is fully completed and truncates", () => {
+    const lines = formatEvent(
+      planEvent([
+        "completed", "completed", "completed", "completed",
+        "completed", "completed", "completed", "completed",
+      ]),
+    );
+    expect(lines[0]?.body).toBe("Plan · 8 done");
+    expect(lines[0]?.bodyStyle).toBe("plan-done");
+    expect(lines).toHaveLength(6);
+  });
+
+  it("renders every entry and skips the summary when maxPlanItems is 0", () => {
+    const lines = formatEvent(
+      planEvent([
+        "completed", "completed", "completed",
+        "in_progress",
+        "pending", "pending", "pending", "pending", "pending", "pending",
+      ]),
+      { maxPlanItems: 0 },
+    );
+    expect(lines[0]?.body).toBe("Plan");
+    expect(lines).toHaveLength(11);
+  });
+
+  it("respects an explicit maxPlanItems override", () => {
+    const lines = formatEvent(
+      planEvent([
+        "completed", "in_progress", "pending", "pending", "pending",
+        "pending", "pending",
+      ]),
+      { maxPlanItems: 3 },
+    );
+    expect(lines[0]?.body).toBe("Plan · 1 done · 6 left");
+    expect(lines).toHaveLength(4);
+  });
+
+  it("strips a leading N/M progress prefix from each entry's content", () => {
+    const lines = formatEvent({
+      kind: "plan" as const,
+      entries: [
+        { content: "1/3 First step", status: "completed" },
+        { content: "2/3 Second step", status: "in_progress" },
+        { content: "3/3 Third step", status: "pending" },
+      ],
+    });
+    const bodies = lines.slice(1).map((l) => l.body);
+    expect(bodies).toEqual([
+      "[x] First step",
+      "[~] Second step",
+      "[ ] Third step",
+    ]);
+  });
+
+  it("strips a trailing parenthesised (N/M) progress suffix", () => {
+    const lines = formatEvent({
+      kind: "plan" as const,
+      entries: [
+        { content: "First step (1/3)", status: "completed" },
+        { content: "Second step (2/3)", status: "in_progress" },
+        { content: "Third step (3/3)", status: "pending" },
+      ],
+    });
+    const bodies = lines.slice(1).map((l) => l.body);
+    expect(bodies).toEqual([
+      "[x] First step",
+      "[~] Second step",
+      "[ ] Third step",
+    ]);
+  });
+
+  it("strips a trailing bare N/M progress suffix", () => {
+    const lines = formatEvent({
+      kind: "plan" as const,
+      entries: [{ content: "Read config 1/5", status: "completed" }],
+    });
+    expect(lines[1]?.body).toBe("[x] Read config");
+  });
+
+  it("leaves fractions inside an entry intact", () => {
+    const lines = formatEvent({
+      kind: "plan" as const,
+      entries: [
+        { content: "Reduce 1/5 of records before sweep", status: "pending" },
+      ],
+    });
+    expect(lines[1]?.body).toBe(
+      "[ ] Reduce 1/5 of records before sweep",
+    );
+  });
+
+  it("preserves the stopped header style when truncating", () => {
+    const lines = formatEvent(
+      planEvent(
+        [
+          "completed", "completed",
+          "in_progress",
+          "pending", "pending", "pending", "pending",
+        ],
+        { stopped: true },
+      ),
+    );
+    expect(lines[0]?.bodyStyle).toBe("tool-status-fail");
+    expect(lines[0]?.body).toBe("Plan · 2 done · 5 left");
   });
 });

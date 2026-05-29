@@ -10,6 +10,7 @@ import {
   sanitizeSingleLine,
   sanitizeWireText,
   type EditDiff,
+  type PlanEntry,
   type RenderEvent,
 } from "../core/render-update.js";
 
@@ -58,7 +59,18 @@ export interface FormattedLine {
   iterm2Image?: { data: string; heightCells: number };
 }
 
-export function formatEvent(event: RenderEvent): FormattedLine[] {
+export interface FormatEventOptions {
+  // Cap on plan entries shown before the renderer collapses to a sliding
+  // window. 0 means render all entries (no window). Defaults to
+  // PLAN_VISIBLE_LIMIT when omitted so tests / direct callers don't have
+  // to plumb config through.
+  maxPlanItems?: number;
+}
+
+export function formatEvent(
+  event: RenderEvent,
+  options: FormatEventOptions = {},
+): FormattedLine[] {
   switch (event.kind) {
     case "user-text": {
       const lines = formatBlock(
@@ -99,7 +111,7 @@ export function formatEvent(event: RenderEvent): FormattedLine[] {
       // appended through here. Same unreachable-but-exhaustive treatment.
       return [];
     case "plan":
-      return formatPlan(event);
+      return formatPlan(event, options.maxPlanItems ?? PLAN_VISIBLE_LIMIT);
     case "mode-changed":
       return [
         {
@@ -1171,7 +1183,54 @@ function exitPlanFooter(status: string): FormattedLine | null {
   }
 }
 
-function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLine[] {
+// Maximum plan entries rendered inline before the formatter switches to a
+// sliding window. Picked to match the tools-block cap so a busy turn with
+// both a long plan and many tool calls stays roughly the same vertical
+// footprint as a turn with one or the other.
+const PLAN_VISIBLE_LIMIT = 5;
+
+// Pick the window of entries to render when there are too many to show
+// all at once. Anchors the window on the "action point" — the first
+// in_progress entry, falling back to the first pending entry, then the
+// last entry when everything is done — and biases the window to put the
+// anchor near the middle so the user can see what just finished above
+// and what's coming below. Sliding the start back when the right edge
+// hits `total` keeps the window the same width as the anchor approaches
+// the end of the list. A limit of 0 disables windowing — every entry
+// is included.
+export function pickPlanWindow(
+  entries: PlanEntry[],
+  limit: number,
+): { start: number; end: number } {
+  const total = entries.length;
+  if (limit <= 0 || total <= limit) {
+    return { start: 0, end: total };
+  }
+  const inProgressIdx = entries.findIndex(
+    (e) => (e.status ?? "pending") === "in_progress",
+  );
+  const firstPendingIdx = entries.findIndex(
+    (e) => (e.status ?? "pending") === "pending",
+  );
+  const anchor =
+    inProgressIdx >= 0
+      ? inProgressIdx
+      : firstPendingIdx >= 0
+        ? firstPendingIdx
+        : total - 1;
+  const aboveSlots = Math.floor((limit - 1) / 2);
+  let start = Math.max(0, anchor - aboveSlots);
+  let end = Math.min(total, start + limit);
+  if (end - start < limit) {
+    start = Math.max(0, end - limit);
+  }
+  return { start, end };
+}
+
+function formatPlan(
+  event: Extract<RenderEvent, { kind: "plan" }>,
+  limit: number,
+): FormattedLine[] {
   const stopped = event.stopped === true;
   const amended = event.amended === true;
   // Amended is a deliberate user action (the user replaced this prompt),
@@ -1193,15 +1252,46 @@ function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLin
     : stopped
       ? stoppedStyle
       : "plan";
+  const total = event.entries.length;
+  const { start: winStart, end: winEnd } = pickPlanWindow(
+    event.entries,
+    limit,
+  );
+  const truncated = winEnd - winStart < total;
+  // Summary suffix only when truncation is in play — for short plans the
+  // entries themselves carry the status and a counter would be noise.
+  // "X done · Y left" mirrors the user's mental model (work behind /
+  // ahead) rather than which rows are off-screen, since the off-screen
+  // rows can be either side of the active entry.
+  let headerBody = "Plan";
+  if (truncated) {
+    let doneCount = 0;
+    for (const e of event.entries) {
+      if ((e.status ?? "pending") === "completed") {
+        doneCount += 1;
+      }
+    }
+    const leftCount = total - doneCount;
+    // Once everything is checked off, "0 left" is just noise — the
+    // green header style already signals completion. Drop it.
+    headerBody =
+      leftCount === 0
+        ? `Plan · ${doneCount} done`
+        : `Plan · ${doneCount} done · ${leftCount} left`;
+  }
   const lines: FormattedLine[] = [
     {
       prefix: "▣ ",
       prefixStyle: headerStyle,
-      body: "Plan",
+      body: headerBody,
       bodyStyle: headerStyle,
     },
   ];
-  for (const entry of event.entries) {
+  for (let i = winStart; i < winEnd; i++) {
+    const entry = event.entries[i];
+    if (!entry) {
+      continue;
+    }
     const status = entry.status ?? "pending";
     const marker =
       status === "completed"
@@ -1220,9 +1310,18 @@ function formatPlan(event: Extract<RenderEvent, { kind: "plan" }>): FormattedLin
             ? "plan-pending"
             : "plan"
           : "plan-pending";
+    // Agents sometimes decorate each plan entry with a "N/M" progress
+    // marker — either leading ("1/5 Read config") or trailing
+    // ("Read config (1/5)" / "Read config 1/5"). Now that the header
+    // carries "X done · Y left", the per-entry marker is redundant
+    // noise. Strip leading and trailing forms; preserve any other use
+    // of digits inside the entry.
+    const content = entry.content
+      .replace(/^\d+\/\d+\s+/, "")
+      .replace(/\s*\(?\d+\/\d+\)?\s*$/, "");
     lines.push({
       prefix: "  ",
-      body: `${marker} ${entry.content}`,
+      body: `${marker} ${content}`,
       bodyStyle: style,
     });
   }

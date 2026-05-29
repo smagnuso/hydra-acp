@@ -782,6 +782,139 @@ describe("Screen scroll anchor on new content", () => {
   });
 });
 
+describe("Screen sticky-bottom block", () => {
+  it("keeps the sticky block at the tail when other content is appended", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.appendLine({ body: "before" });
+    screen.upsertLines("plan", [{ body: "plan-1" }, { body: "plan-2" }]);
+    screen.appendLine({ body: "after" });
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies).toEqual(["before", "after", "plan-1", "plan-2"]);
+    const range = getKeyedBlocks(screen).get("plan")!;
+    expect(range.start).toBe(2);
+    expect(range.count).toBe(2);
+  });
+
+  it("floats the sticky block back past a new upserted block", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.upsertLines("plan", [{ body: "plan" }]);
+    screen.upsertLines("tools", [{ body: "tool-header" }, { body: "tool-row" }]);
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies).toEqual(["tool-header", "tool-row", "plan"]);
+    const blocks = getKeyedBlocks(screen);
+    expect(blocks.get("tools")?.start).toBe(0);
+    expect(blocks.get("plan")?.start).toBe(2);
+  });
+
+  it("keeps the sticky block at the tail when an existing block in front of it grows", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.upsertLines("tools", [{ body: "t1" }]);
+    screen.upsertLines("plan", [{ body: "plan" }]);
+    screen.upsertLines("tools", [{ body: "t1" }, { body: "t2" }, { body: "t3" }]);
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies).toEqual(["t1", "t2", "t3", "plan"]);
+    expect(getKeyedBlocks(screen).get("plan")?.start).toBe(3);
+  });
+
+  it("upserting the sticky key in place stays at the tail", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.upsertLines("plan", [{ body: "p1" }]);
+    screen.upsertLines("tools", [{ body: "t1" }]);
+    screen.upsertLines("plan", [{ body: "p1" }, { body: "p2" }]);
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies).toEqual(["t1", "p1", "p2"]);
+    const blocks = getKeyedBlocks(screen);
+    expect(blocks.get("plan")?.start).toBe(1);
+    expect(blocks.get("plan")?.count).toBe(2);
+  });
+
+  it("stops floating once clearKey drops the sticky block", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.upsertLines("plan", [{ body: "plan" }]);
+    screen.appendLine({ body: "during" });
+    expect(getLines(screen).map((l) => l.body)).toEqual(["during", "plan"]);
+    screen.clearKey("plan");
+    screen.appendLine({ body: "next-turn" });
+    expect(getLines(screen).map((l) => l.body)).toEqual([
+      "during",
+      "plan",
+      "next-turn",
+    ]);
+  });
+
+  it("ensureSeparator inserts above the sticky block instead of after it", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.appendLine({ body: "before" });
+    screen.upsertLines("plan", [{ body: "plan" }]);
+    screen.ensureSeparator();
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies).toEqual(["before", "", "plan"]);
+    expect(getKeyedBlocks(screen).get("plan")?.start).toBe(2);
+  });
+
+  it("ensureSeparator inserts a separator above the sticky block when the line above it is non-blank, even if the sticky block opens with its own blank", () => {
+    // Real-world scenario: plan upserted with a leading-blank "own
+    // separator", then a new agent block lands. Without the
+    // separator above the sticky, post-float scrollback reads
+    // [..., prev_content, agent_lines, plan_lines] with no gap
+    // between prev_content and agent_lines.
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.appendLine({ body: "tools" });
+    screen.upsertLines("plan", [{ body: "" }, { body: "plan" }]);
+    screen.ensureSeparator();
+    screen.appendLine({ body: "agent" });
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies).toEqual(["tools", "", "agent", "", "plan"]);
+  });
+
+  it("ensureSeparator is a no-op when the line above the sticky block is already blank", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.appendLine({ body: "before" });
+    screen.ensureSeparator();
+    screen.upsertLines("plan", [{ body: "plan" }]);
+    expect(getLines(screen).map((l) => l.body)).toEqual([
+      "before",
+      "",
+      "plan",
+    ]);
+    screen.ensureSeparator();
+    expect(getLines(screen).map((l) => l.body)).toEqual([
+      "before",
+      "",
+      "plan",
+    ]);
+  });
+
+  it("appendStreaming followed by a sticky upsert keeps the streaming line above the plan", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.appendStreaming("hello", "", "agent");
+    screen.upsertLines("plan", [{ body: "plan" }]);
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies[bodies.length - 1]).toBe("plan");
+    expect(bodies).toContain("hello");
+    expect(bodies.indexOf("hello")).toBeLessThan(bodies.indexOf("plan"));
+  });
+
+  it("appendStreaming after the plan exists routes the new line above the plan", () => {
+    const screen = makeScreen();
+    screen.setStickyBottomKey("plan");
+    screen.upsertLines("plan", [{ body: "plan" }]);
+    screen.appendStreaming("hi", "", "agent");
+    const bodies = getLines(screen).map((l) => l.body);
+    expect(bodies[bodies.length - 1]).toBe("plan");
+    expect(bodies.indexOf("hi")).toBeLessThan(bodies.indexOf("plan"));
+  });
+});
+
 describe("buildIterm2ImageEscape", () => {
   it("emits OSC 1337 with inline=1, height, preserveAspectRatio, and BEL terminator", () => {
     const out = buildIterm2ImageEscape("AAAA", 5, false);

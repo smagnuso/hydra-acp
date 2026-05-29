@@ -42,6 +42,8 @@ function testConfig(): HydraConfig {
       defaultEnterAction: "amend" as const,
       showThoughts: true,
       promptHistoryMaxEntries: 2_000,
+      maxToolItems: 5,
+      maxPlanItems: 5,
       showFileUpdates: "none" as const,
     },
   };
@@ -1180,6 +1182,8 @@ describe("startDaemon — extensions REST lifecycle", () => {
         defaultEnterAction: "amend" as const,
         showThoughts: true,
         promptHistoryMaxEntries: 2_000,
+        maxToolItems: 5,
+        maxPlanItems: 5,
         showFileUpdates: "none" as const,
       },
     };

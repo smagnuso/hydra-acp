@@ -100,6 +100,17 @@ const TuiConfig = z.object({
   // installs can grow past this — it's enforced at load time and per
   // append in memory.
   promptHistoryMaxEntries: z.number().int().positive().default(2_000),
+  // Cap on tool rows shown inside the collapsed tools block. When more
+  // tools have fired than the cap, only the most recent N are visible
+  // and the header advertises "^O expand" so the user can see the rest.
+  // 0 disables the cap entirely — every tool row stays visible.
+  maxToolItems: z.number().int().nonnegative().default(5),
+  // Cap on plan entries rendered before the formatter switches to a
+  // sliding window around the active (in_progress / first pending)
+  // entry. Counters in the header summarize what's done and what's
+  // left when truncation kicks in. 0 disables the cap — every plan
+  // entry is rendered.
+  maxPlanItems: z.number().int().nonnegative().default(5),
   // How edit-style tool calls (Edit, Write, str_replace) render in
   // scrollback, *in addition to* the normal tool row inside the tools
   // block.
@@ -201,6 +212,8 @@ export const HydraConfig = z.object({
     defaultEnterAction: "amend",
     showThoughts: true,
     promptHistoryMaxEntries: 2_000,
+    maxToolItems: 5,
+    maxPlanItems: 5,
     showFileUpdates: "edit",
   }),
 });
