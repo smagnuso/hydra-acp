@@ -1,13 +1,18 @@
 import type { FastifyInstance } from "fastify";
 
+export interface DaemonConfigView {
+  defaultAgent: string;
+  defaultCwd: string;
+  defaultModels: Record<string, string>;
+  synopsisAgent?: string;
+  synopsisModel?: string;
+  synopsisOnClose: boolean;
+  defaultTransformers: string[];
+}
+
 export function registerConfigRoutes(
   app: FastifyInstance,
-  defaults: { defaultAgent: string; defaultCwd: string },
+  snapshot: DaemonConfigView,
 ): void {
-  app.get("/v1/config", async () => {
-    return {
-      defaultAgent: defaults.defaultAgent,
-      defaultCwd: defaults.defaultCwd,
-    };
-  });
+  app.get("/v1/config", async () => snapshot);
 }

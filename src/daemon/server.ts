@@ -204,6 +204,15 @@ export async function startDaemon(
   registerConfigRoutes(app, {
     defaultAgent: config.defaultAgent,
     defaultCwd: config.defaultCwd,
+    defaultModels: { ...config.defaultModels },
+    ...(config.synopsisAgent !== undefined
+      ? { synopsisAgent: config.synopsisAgent }
+      : {}),
+    ...(config.synopsisModel !== undefined
+      ? { synopsisModel: config.synopsisModel }
+      : {}),
+    synopsisOnClose: config.synopsisOnClose,
+    defaultTransformers: [...config.defaultTransformers],
   });
   registerAuthRoutes(app, {
     store: sessionTokenStore,

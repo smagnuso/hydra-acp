@@ -278,16 +278,16 @@ export async function runAgentsSet(
   agentId: string | undefined,
   modelId: string | undefined,
 ): Promise<void> {
-  if (!agentId) {
-    process.stderr.write(
-      "Usage: hydra-acp agent set <agent-id> [model-id]\n",
-    );
-    process.exit(2);
-    return;
-  }
   const config = await loadConfig();
   const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+
+  if (!agentId) {
+    const daemonView = await fetchDaemonAgentDefaults(baseUrl, serviceToken);
+    const view = daemonView ?? readAgentDefaults(await readRawConfig());
+    process.stdout.write(`${formatDefaultLine(view)}\n`);
+    return;
+  }
 
   let known: string[] | undefined;
   try {
@@ -314,25 +314,83 @@ export async function runAgentsSet(
   if (modelId === undefined) {
     raw.defaultAgent = agentId;
     await writeRawConfig(raw);
-    process.stdout.write(
-      `Set defaultAgent to '${agentId}' in ${paths.config()}\n`,
-    );
-    return;
+  } else {
+    // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",
+    // "openai/gpt-5-codex"), so we don't try to validate the model
+    // against the agent — just write it through.
+    const models =
+      raw.defaultModels && typeof raw.defaultModels === "object"
+        ? (raw.defaultModels as Record<string, unknown>)
+        : {};
+    models[agentId] = modelId;
+    raw.defaultModels = models;
+    await writeRawConfig(raw);
   }
 
-  // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",
-  // "openai/gpt-5-codex"), so we don't try to validate the model
-  // against the agent — just write it through.
+  const disk = readAgentDefaults(await readRawConfig());
+  if (modelId !== undefined && agentId !== disk.agent) {
+    process.stdout.write(
+      `Default model for ${agentId} is now ${modelId}.\n`,
+    );
+  }
+  process.stdout.write(`${formatDefaultLine(disk)}\n`);
+
+  const daemonView = await fetchDaemonAgentDefaults(baseUrl, serviceToken);
+  if (daemonView === undefined) {
+    return;
+  }
+  if (daemonView.agent === disk.agent && daemonView.model === disk.model) {
+    return;
+  }
+  process.stdout.write(
+    `Daemon still has ${formatAgentModel(daemonView)} — restart with \`hydra-acp daemon restart\` to apply.\n`,
+  );
+}
+
+function formatDefaultLine(view: { agent: string; model?: string }): string {
+  return `Default agent is ${formatAgentModel(view)}`;
+}
+
+function formatAgentModel(view: { agent: string; model?: string }): string {
+  return view.model !== undefined
+    ? `${view.agent} with ${view.model}`
+    : view.agent;
+}
+
+function readAgentDefaults(
+  raw: Record<string, unknown>,
+): { agent: string; model?: string } {
+  const agent =
+    typeof raw.defaultAgent === "string" ? raw.defaultAgent : "(unset)";
   const models =
     raw.defaultModels && typeof raw.defaultModels === "object"
       ? (raw.defaultModels as Record<string, unknown>)
       : {};
-  models[agentId] = modelId;
-  raw.defaultModels = models;
-  await writeRawConfig(raw);
-  process.stdout.write(
-    `Set defaultModels['${agentId}'] to '${modelId}' in ${paths.config()}\n`,
-  );
+  const rawModel = models[agent];
+  return typeof rawModel === "string"
+    ? { agent, model: rawModel }
+    : { agent };
+}
+
+async function fetchDaemonAgentDefaults(
+  baseUrl: string,
+  serviceToken: string,
+): Promise<{ agent: string; model?: string } | undefined> {
+  try {
+    const r = await fetch(`${baseUrl}/v1/config`, {
+      headers: { Authorization: `Bearer ${serviceToken}` },
+    });
+    if (!r.ok) {
+      return undefined;
+    }
+    const body = (await r.json()) as {
+      defaultAgent?: unknown;
+      defaultModels?: unknown;
+    };
+    return readAgentDefaults(body as Record<string, unknown>);
+  } catch {
+    return undefined;
+  }
 }
 
 async function readRawConfig(): Promise<Record<string, unknown>> {

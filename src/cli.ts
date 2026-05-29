@@ -789,7 +789,7 @@ function printHelp(): void {
       "  hydra-acp agent [list]                      List agents in the cached registry",
       "  hydra-acp agent refresh                     Force a registry re-fetch",
       "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)",
-      "  hydra-acp agent set <id> [model]            Set <id> as the default agent (config.defaultAgent), or set the per-agent default model (config.defaultModels[<id>]) when [model] is supplied",
+      "  hydra-acp agent set [<id>] [model]          With no args, report the daemon's current default agent and its default model. With <id>, set <id> as the default agent (config.defaultAgent). With <id> and [model], set the per-agent default model (config.defaultModels[<id>]).",
       "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
       "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log",
       "  hydra-acp auth password [--force]           Set the daemon's master password",

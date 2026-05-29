@@ -264,10 +264,12 @@ hydra-acp transformer log <name> [-f] [-n] # tail (default 50) or follow a trans
 
 hydra-acp agent [list]                     # list agents in the registry
 hydra-acp agent install <id>               # pre-install an agent (else lazy on first use)
-hydra-acp agent set <id> [model]           # set <id> as the default agent (config.defaultAgent),
-                                           # or set the per-agent default model
-                                           # (config.defaultModels[<id>]) when [model] is supplied;
-                                           # requires `daemon restart` to take effect
+hydra-acp agent set [<id>] [model]         # with no args, report the daemon's current default
+                                           # agent and its default model. With <id>, set <id> as
+                                           # the default agent (config.defaultAgent). With <id>
+                                           # and [model], set the per-agent default model
+                                           # (config.defaultModels[<id>]). Writes require
+                                           # `daemon restart` to take effect.
 hydra-acp agent refresh                    # force a registry re-fetch
 hydra-acp agent sync <id>                  # spawn <id> just long enough to ACP session/list it,
                                            # then persist any sessions it remembers as cold rows
