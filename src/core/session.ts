@@ -38,7 +38,6 @@ import {
 } from "./stream-buffer.js";
 import {
   HYDRA_COMMANDS,
-  hydraCommandsAsAdvertised,
   type AdvertisedCommand,
   type AdvertisedMode,
   type AdvertisedModel,
@@ -2368,9 +2367,13 @@ export class Session {
   // top-level daemon verbs (/model, /sessions, /help), extension-registered
   // entries, then whatever the agent advertised.
   mergedAvailableCommands(): AdvertisedCommand[] {
+    // Clients (Zed, agent-shell, …) don't reliably handle multi-word
+    // slash commands, so advertise bare verbs only. Sub-commands
+    // (`/hydra kill`, `/model <id>`) are still accepted by the session
+    // dispatcher — users just type the rest themselves.
     const out: AdvertisedCommand[] = [
-      ...hydraCommandsAsAdvertised(),
-      { name: "model <model-id>", description: "Switch model; omit arg to list available models" },
+      { name: "hydra", description: "Hydra session command (kill, restart, title, agent <agent>)" },
+      { name: "model", description: "Switch model; omit arg to list available models" },
       { name: "sessions", description: "List all sessions" },
       { name: "help", description: "Show available commands" },
     ];

@@ -962,12 +962,13 @@ describe("Session", () => {
   });
 
   describe("available_commands_update merging", () => {
-    it("exposes the hydra verbs via mergedAvailableCommands at construction", () => {
+    it("exposes the bare /hydra and /model commands via mergedAvailableCommands at construction", () => {
       const { session } = makeSession();
       const names = session.mergedAvailableCommands().map((c) => c.name);
-      expect(names).toContain("hydra title");
-      expect(names).toContain("hydra agent <agent>");
-      expect(names).toContain("hydra kill");
+      expect(names).toContain("hydra");
+      expect(names).toContain("model");
+      expect(names).toContain("sessions");
+      expect(names).toContain("help");
     });
 
     it("merges agent-emitted commands with hydra verbs and broadcasts the merge live", async () => {
@@ -987,7 +988,7 @@ describe("Session", () => {
       // mergedAvailableCommands is the snapshot accessor used by
       // acp-ws.ts's buildResponseMeta to deliver commands via _meta.
       const names = session.mergedAvailableCommands().map((c) => c.name);
-      expect(names).toContain("hydra title");
+      expect(names).toContain("hydra");
       expect(names).toContain("create_plan");
 
       // Live broadcast to attached clients still happens — only the
@@ -1021,7 +1022,7 @@ describe("Session", () => {
           update: { availableCommands: Array<{ name: string }> };
         }
       ).update.availableCommands.map((c) => c.name);
-      expect(replayedNames).toContain("hydra title");
+      expect(replayedNames).toContain("hydra");
       expect(replayedNames).toContain("create_plan");
     });
   });
