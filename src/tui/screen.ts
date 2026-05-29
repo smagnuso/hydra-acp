@@ -10,7 +10,10 @@ import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
+import { formatElapsed } from "./format.js";
 import type { FormattedLine, Style } from "./format.js";
+
+export { formatElapsed };
 import type {
   Attachment,
   InputDispatcher,
@@ -3704,20 +3707,7 @@ function formatUsage(usage: UsageState | undefined): string | null {
   return parts.length === 0 ? null : parts.join(" · ");
 }
 
-export function formatElapsed(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  if (totalSec < 60) {
-    return `${totalSec}s`;
-  }
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  if (min < 60) {
-    return sec === 0 ? `${min}m` : `${min}m ${sec}s`;
-  }
-  const hr = Math.floor(min / 60);
-  const remMin = min % 60;
-  return remMin === 0 ? `${hr}h` : `${hr}h ${remMin}m`;
-}
+
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) {

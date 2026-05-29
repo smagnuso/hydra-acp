@@ -876,6 +876,23 @@ function formatBlock(
   return out;
 }
 
+// Humanize a millisecond span as "Xs" / "Ym Zs" / "Hh Mm". Shared by the
+// busy banner, the tools-block header, and per-tool durations.
+export function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) {
+    return `${totalSec}s`;
+  }
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min < 60) {
+    return sec === 0 ? `${min}m` : `${min}m ${sec}s`;
+  }
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return remMin === 0 ? `${hr}h` : `${hr}h ${remMin}m`;
+}
+
 export interface ToolLineState {
   // The title from the initial `tool_call` event — usually the tool's
   // generic name (e.g. "Terminal", "Read File").
@@ -896,13 +913,28 @@ export interface ToolLineState {
   // `tool_call_update` that flips status to "completed", which is when
   // we actually drop the block into scrollback.
   editDiff?: EditDiff;
+  // Wall-clock start of this tool call (set when the call first appears).
+  // Drives the live "running for Xs" timer and the frozen "took Xs"
+  // duration once the call reaches a terminal status.
+  startedAt?: number;
+  // Set the first time status flips to a terminal value (completed /
+  // failed / etc.). Once set, the duration is frozen.
+  endedAt?: number;
 }
 
 // One tool call → one or more FormattedLines. The primary row is the
 // icon + title (combined from initialTitle and latestTitle when the
 // update refined the label). On failure, a second indented line carries
 // the error text so a small red ✗ doesn't hide the actual cause.
-export function formatToolLine(state: ToolLineState): FormattedLine[] {
+//
+// `now` is the wall-clock used to compute a still-running tool's live
+// duration; it's threaded in (rather than read here) so the function stays
+// pure and the 1Hz tools-block repaint advances the timer. Falls back to
+// Date.now() for direct callers / tests that don't care about the tick.
+export function formatToolLine(
+  state: ToolLineState,
+  now: number = Date.now(),
+): FormattedLine[] {
   const initial = state.initialTitle;
   const latest = state.latestTitle;
   const initialLc = initial.toLowerCase();
@@ -914,6 +946,13 @@ export function formatToolLine(state: ToolLineState): FormattedLine[] {
     title = initial;
   } else {
     title = `${initial} · ${latest}`;
+  }
+  // Append a duration: a live "running for Xs" counter while in flight,
+  // frozen as the total once the call hits a terminal status. Inherits the
+  // row's status style (yellow while running, normal once done).
+  if (state.startedAt !== undefined) {
+    const end = state.endedAt ?? now;
+    title = `${title} · ${formatElapsed(end - state.startedAt)}`;
   }
   const lines: FormattedLine[] = [
     {
@@ -1069,6 +1108,23 @@ function diffLines(a: string[], b: string[]): DiffOp[] {
     j++;
   }
   return out;
+}
+
+// A tool call is "done" once it reaches any of these statuses. Used to
+// freeze the per-tool duration timer.
+export function isTerminalToolStatus(status: string): boolean {
+  switch (status) {
+    case "completed":
+    case "succeeded":
+    case "ok":
+    case "failed":
+    case "error":
+    case "rejected":
+    case "cancelled":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function toolStatusIcon(status: string): string {

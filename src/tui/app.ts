@@ -93,6 +93,7 @@ import {
   formatEvent,
   formatExitPlanMode,
   formatToolLine,
+  isTerminalToolStatus,
   parseAgentMarkdown,
   parseThoughtMarkdown,
   type ExitPlanState,
@@ -2975,7 +2976,7 @@ async function runSession(
     for (const id of visibleIds) {
       const state = toolStates.get(id);
       if (state) {
-        lines.push(...formatToolLine(state));
+        lines.push(...formatToolLine(state, end));
       }
     }
     screen.upsertLines("tools", lines);
@@ -3006,6 +3007,7 @@ async function runSession(
       initialTitle: title ?? "tool",
       latestTitle: title ?? "tool",
       status: status ?? "pending",
+      startedAt: Date.now(),
     };
     if (existing && title !== undefined) {
       state.latestTitle = title;
@@ -3015,6 +3017,11 @@ async function runSession(
     }
     if (!existing) {
       state.status = status ?? "pending";
+    }
+    // Freeze the duration the first time the call reaches a terminal
+    // status; a started-but-not-yet-ended call keeps ticking live.
+    if (state.endedAt === undefined && isTerminalToolStatus(state.status)) {
+      state.endedAt = Date.now();
     }
     if (errorText !== undefined) {
       state.errorText = errorText;

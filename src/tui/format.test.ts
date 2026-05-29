@@ -4,9 +4,11 @@ import stringWidth from "string-width";
 import {
   buildUnifiedDiff,
   formatEditDiffBlock,
+  formatElapsed,
   formatEvent,
   formatExitPlanMode,
   formatToolLine,
+  isTerminalToolStatus,
   parseAgentMarkdown,
   pickPlanWindow,
   type FormattedLine,
@@ -490,6 +492,74 @@ describe("formatToolLine", () => {
     expect(lines[1]?.body).toBe("line one line two line three");
   });
 
+  it("omits a duration when startedAt is unset", () => {
+    const lines = formatToolLine(
+      { initialTitle: "Terminal", latestTitle: "ls", status: "running" },
+      10_000,
+    );
+    expect(lines[0]?.body).toBe("Terminal · ls");
+  });
+
+  it("appends a live duration for a running tool using `now`", () => {
+    const lines = formatToolLine(
+      {
+        initialTitle: "Terminal",
+        latestTitle: "ls",
+        status: "running",
+        startedAt: 1_000,
+      },
+      6_000,
+    );
+    expect(lines[0]?.body).toBe("Terminal · ls · 5s");
+    expect(lines[0]?.bodyStyle).toBe("tool-status-running");
+  });
+
+  it("freezes the duration at endedAt for a completed tool", () => {
+    const lines = formatToolLine(
+      {
+        initialTitle: "Terminal",
+        latestTitle: "ls",
+        status: "completed",
+        startedAt: 1_000,
+        endedAt: 4_000,
+      },
+      999_999,
+    );
+    expect(lines[0]?.body).toBe("Terminal · ls · 3s");
+  });
+
+});
+
+describe("isTerminalToolStatus", () => {
+  it("treats completed/failed/etc. as terminal", () => {
+    for (const s of [
+      "completed",
+      "succeeded",
+      "ok",
+      "failed",
+      "error",
+      "rejected",
+      "cancelled",
+    ]) {
+      expect(isTerminalToolStatus(s)).toBe(true);
+    }
+  });
+
+  it("treats in-flight / queued statuses as non-terminal", () => {
+    for (const s of ["pending", "in_progress", "running", "updated", "weird"]) {
+      expect(isTerminalToolStatus(s)).toBe(false);
+    }
+  });
+});
+
+describe("formatElapsed", () => {
+  it("formats seconds, minutes, and hours", () => {
+    expect(formatElapsed(5_000)).toBe("5s");
+    expect(formatElapsed(65_000)).toBe("1m 5s");
+    expect(formatElapsed(120_000)).toBe("2m");
+    expect(formatElapsed(3_600_000)).toBe("1h");
+    expect(formatElapsed(3_900_000)).toBe("1h 5m");
+  });
 });
 
 describe("formatEditDiffBlock", () => {
