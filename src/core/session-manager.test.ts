@@ -21,6 +21,7 @@ import {
   type MockAgentControls,
 } from "../__tests__/test-utils.js";
 import { JsonRpcErrorCodes } from "../acp/types.js";
+import { HYDRA_CAT_CLIENT_NAME } from "./hydra-version.js";
 
 function fakeRegistryAgent(id = "claude-code"): RegistryAgent {
   return {
@@ -381,6 +382,80 @@ describe("SessionManager.resurrect: dead cwd reseed", () => {
     const reloaded = await manager.loadFromDisk("hydra_dead_cwd");
     expect(reloaded?.cwd).toBe(fallback);
     expect(reloaded?.upstreamSessionId).toBe("u_reseeded");
+  });
+});
+
+describe("SessionManager.reapIfOrphanedNonInteractive", () => {
+  // create()/reap never stat the cwd, so any existing dir works — use one
+  // that needs no import so this block stands on its own.
+  const REAP_CWD = process.cwd();
+  function makeCreateManager(): {
+    manager: SessionManager;
+    requestMock: ReturnType<typeof vi.fn>;
+  } {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: REAP_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock.mockImplementation((method: string) => {
+      if (method === "initialize") {
+        return Promise.resolve({ protocolVersion: 1 });
+      }
+      if (method === "session/new") {
+        return Promise.resolve({ sessionId: `u_${Math.random()}` });
+      }
+      return Promise.resolve({});
+    });
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    return { manager, requestMock };
+  }
+
+  it("closes an orphaned cat-origin session (kills agent, keeps cold record)", async () => {
+    const { manager } = makeCreateManager();
+    const session = await manager.create({
+      cwd: REAP_CWD,
+      agentId: "claude-code",
+      originatingClient: { name: HYDRA_CAT_CLIENT_NAME },
+    });
+    const id = session.sessionId;
+    expect(manager.get(id)).toBeDefined();
+    expect(session.attachedCount).toBe(0);
+
+    await manager.reapIfOrphanedNonInteractive(id);
+
+    // Live agent dropped, but the cold record survives for a later refine.
+    expect(manager.get(id)).toBeUndefined();
+    expect(await manager.loadFromDisk(id)).toBeDefined();
+  });
+
+  it("leaves an interactive session running", async () => {
+    const { manager } = makeCreateManager();
+    const session = await manager.create({
+      cwd: REAP_CWD,
+      agentId: "claude-code",
+      originatingClient: { name: "hydra-acp-tui" },
+      interactive: true,
+    });
+    const id = session.sessionId;
+
+    await manager.reapIfOrphanedNonInteractive(id);
+
+    expect(manager.get(id)).toBeDefined();
+  });
+
+  it("leaves a non-cat undecided session running (effectiveInteractive !== false)", async () => {
+    const { manager } = makeCreateManager();
+    const session = await manager.create({
+      cwd: REAP_CWD,
+      agentId: "claude-code",
+      originatingClient: { name: "hydra-acp-tui" },
+    });
+    const id = session.sessionId;
+
+    await manager.reapIfOrphanedNonInteractive(id);
+
+    expect(manager.get(id)).toBeDefined();
   });
 });
 

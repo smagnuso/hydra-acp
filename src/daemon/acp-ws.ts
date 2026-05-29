@@ -140,6 +140,12 @@ export function registerAcpWsEndpoint(
         session?.detach(att.clientId);
       }
       state.attached.clear();
+      // NB: we deliberately do NOT reap on raw WS close. `cat` always
+      // closes its socket on exit but only sends session/detach when not
+      // --detach (cat.ts), so reaping here would tear down --detach
+      // sessions too. Reaping lives in the session/detach handler, which
+      // only non-detach cat reaches — matching cat's documented
+      // "closed pipe takes the session with it; --detach keeps it."
     });
 
     // Refuse mutating JSON-RPC methods on a read-only attachment.
@@ -886,6 +892,11 @@ export function registerAcpWsEndpoint(
       const session = deps.manager.get(params.sessionId);
       session?.detach(att.clientId);
       state.attached.delete(params.sessionId);
+      // `cat` detaches explicitly on exit; reap the now-orphaned
+      // non-interactive session so its agent doesn't linger.
+      if (session) {
+        void deps.manager.reapIfOrphanedNonInteractive(params.sessionId);
+      }
       return { sessionId: params.sessionId, status: "detached" as const };
     });
 

@@ -653,6 +653,39 @@ export class SessionManager {
     }
   }
 
+  // When the last client detaches from a session that resolves to
+  // non-interactive — e.g. a `hydra cat` run, born interactive:undefined
+  // with originatingClient hydra-acp-cat, whose every prompt is ancillary
+  // — close it so its agent process doesn't linger until the (default 1h)
+  // idle timeout fires. The cold record is kept, so the rare refine-in-TUI
+  // still works via the resurrect/reseed path. Sessions promoted to
+  // interactive (driven by a real, non-ancillary prompt) resolve to true
+  // and are left running.
+  async reapIfOrphanedNonInteractive(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.attachedCount > 0) {
+      return;
+    }
+    // hasContent can't flip the result to/from `false` (the explicit and
+    // cat-origin branches both return before it), so any value is safe.
+    const interactive = effectiveInteractive(
+      {
+        interactive: session.interactive,
+        ...(session.originatingClient
+          ? { originatingClient: session.originatingClient }
+          : {}),
+      },
+      true,
+    );
+    if (interactive !== false) {
+      return;
+    }
+    this.logger?.info(
+      `reaping orphaned non-interactive session ${sessionId} (agent killed, cold record kept)`,
+    );
+    await session.close({ deleteRecord: false }).catch(() => undefined);
+  }
+
   // Resolve a recorded cwd for resurrect: use it if it still exists,
   // otherwise fall back to the configured defaultCwd. Covers both bundles
   // imported from another machine and local sessions (e.g. `cat`) whose
