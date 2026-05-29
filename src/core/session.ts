@@ -2062,14 +2062,12 @@ export class Session {
           this.logger?.info(
             `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
           );
-          this.currentModel = trimmed;
-          for (const handler of this.modelHandlers) {
-            try {
-              handler(trimmed);
-            } catch {
-              void 0;
-            }
-          }
+          // Delegate to applyModelChange so the daemon also emits a
+          // spec-shaped current_model_update. opencode/claude-acp carry
+          // the new model only in this non-spec config_option_update;
+          // clients that don't render it (notably the TUI) would
+          // otherwise stay pinned to the agent's earlier stale value.
+          this.applyModelChange(trimmed);
         }
       }
       break;

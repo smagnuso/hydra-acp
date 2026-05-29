@@ -704,6 +704,47 @@ describe("Session", () => {
       expect(session.currentModel).toBe("ncp-anthropic/claude-opus-4-7");
     });
 
+    it("broadcasts a synthetic current_model_update when a model change arrives via config_option_update", async () => {
+      // opencode/claude-acp carry an agent-initiated model switch only in
+      // the non-spec config_option_update. Clients that don't render that
+      // shape (the TUI) repaint off current_model_update, so the daemon
+      // must synthesize one — otherwise the session banner stays pinned to
+      // the stale model even though daemon state and meta.json updated.
+      const { session, mock } = makeSession("sess_ocswap", "u_ocswap");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ocswap",
+        update: {
+          sessionUpdate: "current_model_update",
+          currentModel: "ncp-anthropic/claude-opus-4-7",
+        },
+      });
+      const before = warm.stream.sent.length;
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ocswap",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "model", currentValue: "ncp-anthropic/claude-opus-4-8" },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+
+      expect(session.currentModel).toBe("ncp-anthropic/claude-opus-4-8");
+      const sent = warm.stream.sent.slice(before) as Array<{
+        params?: { update?: { sessionUpdate?: string; currentModel?: string } };
+      }>;
+      const synth = sent.find(
+        (m) => m.params?.update?.sessionUpdate === "current_model_update",
+      );
+      expect(synth).toBeDefined();
+      expect(synth!.params?.update?.currentModel).toBe(
+        "ncp-anthropic/claude-opus-4-8",
+      );
+    });
+
     it("clears availableModels on /hydra agent swap so set_model can't validate against the dead agent", async () => {
       // Regression guard for the swap path: cached model list belongs
       // to the old agent and would be meaningless (or actively harmful)
