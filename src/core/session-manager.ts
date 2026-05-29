@@ -653,31 +653,30 @@ export class SessionManager {
     }
   }
 
-  // When the last client detaches from a session that resolves to
-  // non-interactive — e.g. a `hydra cat` run, born interactive:undefined
-  // with originatingClient hydra-acp-cat, whose every prompt is ancillary
-  // — close it so its agent process doesn't linger until the (default 1h)
-  // idle timeout fires. The cold record is kept, so the rare refine-in-TUI
-  // still works via the resurrect/reseed path. Sessions promoted to
-  // interactive (driven by a real, non-ancillary prompt) resolve to true
-  // and are left running.
+  // When the last client detaches from a session that was never promoted
+  // to interactive, close it so its agent process doesn't linger until the
+  // (default 1h) idle timeout fires. This covers both `hydra cat` runs
+  // (born interactive:undefined with originatingClient hydra-acp-cat, every
+  // prompt ancillary) and any other client that opened a session but never
+  // sent a real, non-ancillary prompt. Promotion to interactive is
+  // synchronous on the first real prompt (Session.prompt sets _interactive
+  // = true before enqueuing), so a session that ever saw a genuine turn
+  // resolves to true here and is left running. The cold record is kept, so
+  // re-attaching resurrects via the reseed path.
+  //
+  // Note: this only fires from the explicit session/detach handler — raw WS
+  // close deliberately does NOT reap (see acp-ws.ts), so an abrupt
+  // disconnect of a never-prompted session falls through to the idle
+  // timeout rather than being torn down.
   async reapIfOrphanedNonInteractive(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session || session.attachedCount > 0) {
       return;
     }
-    // hasContent can't flip the result to/from `false` (the explicit and
-    // cat-origin branches both return before it), so any value is safe.
-    const interactive = effectiveInteractive(
-      {
-        interactive: session.interactive,
-        ...(session.originatingClient
-          ? { originatingClient: session.originatingClient }
-          : {}),
-      },
-      true,
-    );
-    if (interactive !== false) {
+    // Reap unless the session was explicitly created interactive or got
+    // promoted by a real prompt — i.e. interactive === true. undefined
+    // (never prompted, including cat) and an explicit false both reap.
+    if (session.interactive === true) {
       return;
     }
     this.logger?.info(

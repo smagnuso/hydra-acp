@@ -444,7 +444,7 @@ describe("SessionManager.reapIfOrphanedNonInteractive", () => {
     expect(manager.get(id)).toBeDefined();
   });
 
-  it("leaves a non-cat undecided session running (effectiveInteractive !== false)", async () => {
+  it("reaps an orphaned never-prompted non-cat session (interactive===undefined)", async () => {
     const { manager } = makeCreateManager();
     const session = await manager.create({
       cwd: REAP_CWD,
@@ -452,6 +452,61 @@ describe("SessionManager.reapIfOrphanedNonInteractive", () => {
       originatingClient: { name: "hydra-acp-tui" },
     });
     const id = session.sessionId;
+    expect(session.interactive).toBeUndefined();
+    expect(session.attachedCount).toBe(0);
+
+    await manager.reapIfOrphanedNonInteractive(id);
+
+    // Never promoted to interactive → reaped, cold record kept.
+    expect(manager.get(id)).toBeUndefined();
+    expect(await manager.loadFromDisk(id)).toBeDefined();
+  });
+
+  it("leaves a session that was promoted to interactive by a real prompt", async () => {
+    const { manager } = makeCreateManager();
+    const session = await manager.create({
+      cwd: REAP_CWD,
+      agentId: "claude-code",
+      originatingClient: { name: "hydra-acp-tui" },
+    });
+    const id = session.sessionId;
+    expect(session.interactive).toBeUndefined();
+
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import(
+      "../__tests__/test-utils.js"
+    );
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    await session.attach({ clientId: "c1", connection: conn }, "full");
+    await session.prompt("c1", {
+      prompt: [{ type: "text", text: "a real, non-ancillary prompt" }],
+    });
+    expect(session.interactive).toBe(true);
+    session.detach("c1");
+    expect(session.attachedCount).toBe(0);
+
+    await manager.reapIfOrphanedNonInteractive(id);
+
+    expect(manager.get(id)).toBeDefined();
+  });
+
+  it("does not reap while another client is still attached", async () => {
+    const { manager } = makeCreateManager();
+    const session = await manager.create({
+      cwd: REAP_CWD,
+      agentId: "claude-code",
+      originatingClient: { name: HYDRA_CAT_CLIENT_NAME },
+    });
+    const id = session.sessionId;
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import(
+      "../__tests__/test-utils.js"
+    );
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    await session.attach({ clientId: "c1", connection: conn }, "full");
+    expect(session.attachedCount).toBe(1);
 
     await manager.reapIfOrphanedNonInteractive(id);
 
