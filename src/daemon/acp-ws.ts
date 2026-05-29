@@ -48,7 +48,7 @@ import type {
   ExtensionMcpRegistry,
   ExtensionMcpToolSpec,
 } from "../core/extension-mcp.js";
-import { HYDRA_VERSION } from "../core/hydra-version.js";
+import { HYDRA_CAT_CLIENT_NAME, HYDRA_VERSION } from "../core/hydra-version.js";
 import { randomBytes } from "node:crypto";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
 
@@ -888,8 +888,17 @@ export function registerAcpWsEndpoint(
       // returns all matches in one page so it's currently a no-op.
       const params = SessionListParams.parse(raw ?? {});
       const entries = await deps.manager.list({ cwd: params.cwd });
+      // Drop sessions created by `hydra cat` — they're one-shot ancillary
+      // sessions (export, ad-hoc prompt, etc.) and would clutter every
+      // ACP client's list view. The CLI/picker already filter these out
+      // client-side over /v1/sessions; mirror that here so spec-compliant
+      // ACP clients get the same view without having to know about the
+      // hydra-acp _meta tag.
+      const visible = entries.filter(
+        (e) => e.originatingClient?.name !== HYDRA_CAT_CLIENT_NAME,
+      );
       const result: SessionListResult = {
-        sessions: entries.map(sessionListEntryToWire),
+        sessions: visible.map(sessionListEntryToWire),
       };
       return result;
     });

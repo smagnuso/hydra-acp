@@ -6,6 +6,8 @@ import type { AddressInfo } from "node:net";
 import { WebSocket } from "ws";
 import { startDaemon, type DaemonHandle } from "./server.js";
 import type { HydraConfig } from "../core/config.js";
+import { SessionStore } from "../core/session-store.js";
+import { HYDRA_CAT_CLIENT_NAME } from "../core/hydra-version.js";
 
 const TEST_TOKEN = "hydra_token_0123456789abcdef0123456789abcdef";
 
@@ -662,6 +664,62 @@ describe("startDaemon", () => {
       expect(hydra.agentId).toBe("claude-acp");
       expect(hydra.status).toBe("cold");
       expect(hydra.attachedClients).toBe(0);
+
+      ws.close();
+    });
+
+    it("filters out hydra-acp-cat sessions from session/list over ACP", async () => {
+      // `hydra cat` initializes with clientInfo.name = HYDRA_CAT_CLIENT_NAME
+      // so any session it mints is tagged as ancillary. The ACP
+      // session/list response should hide these by default, mirroring
+      // the picker / `sessions list` client-side filter over /v1/sessions.
+      const store = new SessionStore();
+      const now = new Date().toISOString();
+      await store.write({
+        sessionId: "hydra_session_kept_normal",
+        upstreamSessionId: "u_keep_normal",
+        cwd: "/work",
+        agentId: "claude-acp",
+        originatingClient: { name: "regular-client" },
+        createdAt: now,
+        updatedAt: now,
+      });
+      await store.write({
+        sessionId: "hydra_session_hide_cat",
+        upstreamSessionId: "u_hide_cat",
+        cwd: "/work",
+        agentId: "claude-acp",
+        originatingClient: { name: HYDRA_CAT_CLIENT_NAME },
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      const responsePromise = new Promise<unknown>((resolve) => {
+        ws.on("message", (data) =>
+          resolve(JSON.parse(data.toString("utf8"))),
+        );
+      });
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 12,
+          method: "session/list",
+          params: {},
+        }),
+      );
+      const response = (await responsePromise) as {
+        id: number;
+        result: { sessions: Array<{ sessionId: string }> };
+      };
+      expect(response.id).toBe(12);
+      const ids = response.result.sessions.map((s) => s.sessionId);
+      expect(ids).toContain("hydra_session_kept_normal");
+      expect(ids).not.toContain("hydra_session_hide_cat");
 
       ws.close();
     });
