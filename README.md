@@ -643,40 +643,15 @@ Capabilities advertised in the `initialize` response:
 
 Hydra is a transparent proxy for prompt content and MCP server configs — they're forwarded to the underlying agent unchanged — so the daemon advertises the union of relevant capabilities. The agent ultimately determines what it accepts. If an editor sends a content type the underlying agent rejects, the rejection surfaces as a normal ACP error from the agent, not a hydra-side error.
 
-## REST API
+## Protocol surfaces
 
-All REST endpoints require `Authorization: Bearer <token>`.
+The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514`):
 
-```
-GET    /v1/health                 # liveness
-GET    /v1/sessions               # list sessions
-POST   /v1/sessions               # create session (alternative to ACP session/new)
-POST   /v1/sessions/:id/kill      # demote a live session to cold (keeps the on-disk record); idempotent
-DELETE /v1/sessions/:id           # remove a session entirely (live or cold)
-GET    /v1/sessions/:id/export    # download a session bundle (*.hydra JSON; meta + history)
-POST   /v1/sessions/import        # body { bundle, replace? } → { sessionId, importedFromSessionId, replaced }
-                                  # 409 with existingSessionId on a lineageId clash unless replace:true
-GET    /v1/agents                 # list known agents (registry + installed)
-POST   /v1/agents/:id/install     # pre-install an agent
-GET    /v1/registry               # current cached registry contents
-POST   /v1/registry/refresh       # force refresh
+- **REST API** at `/v1/*` — management plane (auth, sessions, agents, registry, extensions, transformers, MCP routes).
+- **ACP WebSocket** at `/acp` — JSON-RPC 2.0. Standard ACP plus the Hydra-specific extensions (prompt queue, stdin streaming, transformer plumbing, …).
+- **Agent-facing MCP** at `/mcp/*` — Streamable HTTP MCP transport used by spawned agents to reach the per-session stdin ring buffer and extension-contributed tools.
 
-GET    /v1/extensions             # list configured extensions and live state
-POST   /v1/extensions             # register a new extension (takes effect immediately)
-DELETE /v1/extensions/:name       # unregister and stop an extension
-POST   /v1/extensions/:name/start
-POST   /v1/extensions/:name/stop
-POST   /v1/extensions/:name/restart
-
-GET    /v1/transformers           # list configured transformers and live state
-POST   /v1/transformers           # register a new transformer (takes effect immediately)
-DELETE /v1/transformers/:name     # unregister and stop a transformer
-POST   /v1/transformers/:name/start
-POST   /v1/transformers/:name/stop
-POST   /v1/transformers/:name/restart
-```
-
-Sessions are also reachable via `session/list` over ACP itself, for clients that prefer the protocol-native path.
+All three are documented in [`PROTOCOL.md`](PROTOCOL.md), with endpoint shapes, request/response bodies, JSON-RPC method semantics, capability discovery, and the JSON-RPC error code reservations.
 
 ## Security
 
