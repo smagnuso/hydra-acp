@@ -274,11 +274,14 @@ export async function runAgentsLogs(
   await runLogTail(logPath, rest, "No log file (agent never ran?)");
 }
 
-export async function runAgentsSetDefault(
+export async function runAgentsSet(
   agentId: string | undefined,
+  modelId: string | undefined,
 ): Promise<void> {
   if (!agentId) {
-    process.stderr.write("Usage: hydra-acp agent set <agent-id>\n");
+    process.stderr.write(
+      "Usage: hydra-acp agent set <agent-id> [model-id]\n",
+    );
     process.exit(2);
     return;
   }
@@ -308,10 +311,27 @@ export async function runAgentsSetDefault(
   }
 
   const raw = await readRawConfig();
-  raw.defaultAgent = agentId;
+  if (modelId === undefined) {
+    raw.defaultAgent = agentId;
+    await writeRawConfig(raw);
+    process.stdout.write(
+      `Set defaultAgent to '${agentId}' in ${paths.config()}\n`,
+    );
+    return;
+  }
+
+  // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",
+  // "openai/gpt-5-codex"), so we don't try to validate the model
+  // against the agent — just write it through.
+  const models =
+    raw.defaultModels && typeof raw.defaultModels === "object"
+      ? (raw.defaultModels as Record<string, unknown>)
+      : {};
+  models[agentId] = modelId;
+  raw.defaultModels = models;
   await writeRawConfig(raw);
   process.stdout.write(
-    `Set defaultAgent to '${agentId}' in ${paths.config()}\n`,
+    `Set defaultModels['${agentId}'] to '${modelId}' in ${paths.config()}\n`,
   );
 }
 

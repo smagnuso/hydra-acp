@@ -156,6 +156,15 @@ npm install -g @hydra-acp/cli
 
 Drops `hydra-acp` (and `hydra`) on your PATH.
 
+Then pick the agent the daemon should spawn by default. `defaultAgent` is the registry id used when `session/new` doesn't specify one (the common case for editor-spawned shims), and `defaultModels[<agent>]` pins a per-agent default model. Both are read once at daemon startup, so a `daemon restart` is needed for changes to take effect:
+
+```sh
+hydra-acp agent list                              # browse known agent ids
+hydra-acp agent set claude-acp                    # write defaultAgent
+hydra-acp agent set claude-acp openai/gpt-5-codex # write defaultModels[opencode]
+hydra-acp daemon restart                          # apply
+```
+
 ## Quick start
 
 ```bash
@@ -255,6 +264,10 @@ hydra-acp transformer log <name> [-f] [-n] # tail (default 50) or follow a trans
 
 hydra-acp agent [list]                     # list agents in the registry
 hydra-acp agent install <id>               # pre-install an agent (else lazy on first use)
+hydra-acp agent set <id> [model]           # set <id> as the default agent (config.defaultAgent),
+                                           # or set the per-agent default model
+                                           # (config.defaultModels[<id>]) when [model] is supplied;
+                                           # requires `daemon restart` to take effect
 hydra-acp agent refresh                    # force a registry re-fetch
 hydra-acp agent sync <id>                  # spawn <id> just long enough to ACP session/list it,
                                            # then persist any sessions it remembers as cold rows
