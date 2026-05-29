@@ -745,6 +745,35 @@ describe("Session", () => {
       );
     });
 
+    it("does not record config_option_update to history (would falsely mark never-prompted sessions interactive)", async () => {
+      // config_option_update is a state-snapshot carrier: its canonical
+      // form lives in meta.json and is re-synthesized on attach. Recording
+      // it gave never-prompted sessions a non-empty history.jsonl, which
+      // effectiveInteractive() infers as interactive=true and surfaces in
+      // the picker.
+      const { session, mock } = makeSession("sess_ocrec", "u_ocrec");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ocrec",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "model", currentValue: "ncp-anthropic/claude-opus-4-7" },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+
+      const snap = await session.getHistorySnapshot();
+      const recorded = snap.filter(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "config_option_update",
+      );
+      expect(recorded).toHaveLength(0);
+    });
+
     it("clears availableModels on /hydra agent swap so set_model can't validate against the dead agent", async () => {
       // Regression guard for the swap path: cached model list belongs
       // to the old agent and would be meaningless (or actively harmful)

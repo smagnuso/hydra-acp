@@ -3866,6 +3866,11 @@ const STATE_UPDATE_KINDS = new Set([
   "available_commands_update",
   "available_modes_update",
   "usage_update",
+  // opencode's non-spec carrier for model/mode/config state. Its canonical
+  // form is harvested into meta.json and re-synthesized on attach, so
+  // recording it would just give never-prompted sessions a non-empty
+  // history and make them look interactive in the picker.
+  "config_option_update",
 ]);
 
 function isStateUpdate(method: string, params: unknown): boolean {

@@ -592,6 +592,7 @@ async function runSession(
     "available_commands_update",
     "available_modes_update",
     "usage_update",
+    "config_option_update",
   ]);
   const handleSessionUpdate = (params: unknown): void => {
     const { update } = (params ?? {}) as { update?: unknown };
