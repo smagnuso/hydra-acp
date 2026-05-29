@@ -59,24 +59,21 @@ Agents are sourced from the [ACP Registry](https://github.com/agentclientprotoco
 ## Architecture
 
 ```
-            editor       browser        Slack       ← clients (the heads)
-              │             │             │
-            stdio           │             │
-              │             │             │
-       hydra-acp shim       │             │
-              │             │             │
-              └─────────────┼─────────────┘
-                            │
-                       WSS / HTTP
-                            │
-                    hydra-acp daemon                ← daemon (the body)
-                            │
-                    T1 → T2 → … → Tn                ← transformers (per-session middleware)
-                            │
-              ┌─────────────┼─────────────┐
-              │             │             │
-       ACP agent A      ACP agent B   ACP agent C   ← agents (the feet)
-       (one per session, sourced from the ACP Registry)
+            editor         browser          Slack        ← clients
+              │               │               │
+          hydra-acp   hydra-acp-browser hydra-acp-slack  ← hydra extensions
+              │               │               │
+              └───────────────┼───────────────┘
+                              │
+                          WSS / HTTP
+                              │
+                          hydra-acp                      ← hydra daemon
+                              │
+                      T1 → T2 → … → Tn                  ← hydra transformers
+                              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+            claude         opencode         gemini       ← agents
 ```
 
 ### How it works
@@ -160,9 +157,9 @@ Then pick the agent the daemon should spawn by default. `defaultAgent` is the re
 
 ```sh
 hydra-acp agent list                              # browse known agent ids
-hydra-acp agent set claude-acp                    # write defaultAgent
-hydra-acp agent set claude-acp openai/gpt-5-codex # write defaultModels[opencode]
-hydra-acp daemon restart                          # apply
+hydra-acp agent set opencode                      # update the default agent
+hydra-acp agent set opencode openai/gpt-5-codex   # update the default model for agent
+hydra-acp daemon restart                          # restart the daemon to pickup changes
 ```
 
 ## Quick start
@@ -665,7 +662,7 @@ The daemon exposes a process-management surface. Treat the service token like an
 
 ## Registry entry mockup
 
-If accepted, `hydra-acp` would land in the [ACP Registry](https://github.com/agentclientprotocol/registry) under either `agent.json` or `extension.json` (TBD with maintainers — likely `extension.json`, since hydra is a session-multiplexer rather than an LLM-backed coding agent).
+If accepted, `hydra-acp` could land in the [ACP Registry](https://github.com/agentclientprotocol/registry):
 
 ```json
 {
