@@ -210,15 +210,14 @@ describe("InputDispatcher", () => {
     expect(feed(d, [k("ctrl-d")])).toEqual([{ type: "exit" }]);
   });
 
-  it("Ctrl+D at end of last line exits when there's nothing forward to delete", () => {
+  it("Ctrl+D at end of last line does not exit while text remains", () => {
     const d = new InputDispatcher();
     feed(d, [{ type: "paste", text: "abc" }]);
     expect(d.state().buffer).toEqual(["abc"]);
     expect(d.state().col).toBe(3);
     // Cursor sits at the end of the last (only) line with text behind.
-    // Standard readline would silently no-op here; we widen to emit exit
-    // so the next ^d after the last forward-delete closes the input.
-    expect(feed(d, [k("ctrl-d")])).toEqual([{ type: "exit" }]);
+    // ^d must not detach while any text remains — it's a no-op here.
+    expect(feed(d, [k("ctrl-d")])).toEqual([]);
     expect(d.state().buffer).toEqual(["abc"]);
   });
 
