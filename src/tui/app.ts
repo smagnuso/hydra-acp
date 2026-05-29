@@ -1265,9 +1265,6 @@ async function runSession(
         if (pendingPermission && tryHandlePermissionKey(ev)) {
           continue;
         }
-        if (exitConfirmation && tryHandleExitConfirmKey(ev)) {
-          continue;
-        }
         if (tryHandleHelpKey(ev)) {
           continue;
         }
@@ -1574,99 +1571,11 @@ async function runSession(
       cancelRemoteTurn();
       return;
     }
-    void requestExit();
+    requestExit();
   };
 
-  // Pending interrupt-before-exit modal, if one is showing. Set by
-  // requestExit when the user tries to leave during a turn that no other
-  // client is observing — handled inline by tryHandleExitConfirmKey.
-  let exitConfirmation: { offered: true } | null = null;
-
-  // Mediated quit. If a turn is mid-flight and no peer client is watching,
-  // pop a "interrupt or just detach?" modal so the user isn't unknowingly
-  // leaving an agent running for nobody. Otherwise (no turn, or peers
-  // attached) just exit silently as before.
-  const requestExit = async (): Promise<void> => {
-    if (exitConfirmation) {
-      // Modal already up — second exit attempt collapses to a silent quit.
-      stop(0);
-      return;
-    }
-    if (pendingTurns === 0) {
-      stop(0);
-      return;
-    }
-    let onlyClient = false;
-    try {
-      const sessions = await listSessions(target);
-      const me = sessions.find((s) => s.sessionId === resolvedSessionId);
-      onlyClient = !me || me.attachedClients <= 1;
-    } catch {
-      // If the daemon is unreachable, the user almost certainly wants to
-      // bail. Default to silent exit rather than block on the network.
-      stop(0);
-      return;
-    }
-    if (!onlyClient) {
-      stop(0);
-      return;
-    }
-    exitConfirmation = { offered: true };
-    screen.setConfirmPrompt({
-      question: "Agent is still working. Interrupt it before exit?",
-      hint: "y interrupt then exit · n / Enter detach silently · Esc cancel",
-    });
-  };
-
-  const dismissExitConfirmation = (): void => {
-    exitConfirmation = null;
-    screen.setConfirmPrompt(null);
-  };
-
-  const tryHandleExitConfirmKey = (ev: KeyEvent): boolean => {
-    if (!exitConfirmation) {
-      return false;
-    }
-    if (ev.type === "char") {
-      const ch = ev.ch.toLowerCase();
-      if (ch === "y") {
-        dismissExitConfirmation();
-        conn
-          .notify("session/cancel", { sessionId: resolvedSessionId })
-          .catch(() => undefined);
-        stop(0);
-        return true;
-      }
-      if (ch === "n") {
-        dismissExitConfirmation();
-        stop(0);
-        return true;
-      }
-      // Any other char is a no-op so a fat-finger doesn't accidentally
-      // confirm or cancel a destructive action.
-      return true;
-    }
-    if (ev.type === "key") {
-      if (ev.name === "enter") {
-        // Default to the safe option: detach silently.
-        dismissExitConfirmation();
-        stop(0);
-        return true;
-      }
-      if (ev.name === "escape") {
-        // Esc backs out of the modal so the user can keep working.
-        dismissExitConfirmation();
-        return true;
-      }
-      if (ev.name === "ctrl-c" || ev.name === "ctrl-d") {
-        // Treat a second exit signal as "yes, get me out" — silent
-        // detach (not interrupt) so we don't surprise-kill the agent.
-        dismissExitConfirmation();
-        stop(0);
-        return true;
-      }
-    }
-    return true;
+  const requestExit = (): void => {
+    stop(0);
   };
   // Open or close the global hotkey cheatsheet (^G). Toggling lets the
   // same key dismiss it without a second binding.
@@ -2053,7 +1962,7 @@ async function runSession(
         return;
       }
       case "exit":
-        void requestExit();
+        requestExit();
         return;
       case "plan-toggle":
         void handleModeToggle(effect.on);
@@ -2510,7 +2419,7 @@ async function runSession(
     switch (cmd) {
       case "/quit":
       case "/exit":
-        void requestExit();
+        requestExit();
         return true;
       case "/clear":
         toolStates.clear();

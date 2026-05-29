@@ -1980,17 +1980,10 @@ export async function pickSession(
           before.buffer.every((line, i) => line === after.buffer[i]) &&
           before.row === after.row &&
           before.col === after.col;
-        // Dispatcher told us to exit (e.g. ^c with no text left to clear,
-        // or ^d on a fully empty buffer), or ^d at end-of-buffer where
-        // deleteForward had nothing to remove — either way, detach. The
-        // ^d widening is intentional: the dispatcher only emits exit on
-        // a fully empty buffer, but in the picker we want the next ^d
-        // after the last forward-delete to detach without making the
-        // user clear what's behind the cursor too.
-        if (
-          effects.some((e) => e.type === "exit") ||
-          (unchanged && name === "CTRL_D")
-        ) {
+        // Dispatcher told us to exit — ^c with no text left to clear,
+        // ^d on an empty buffer, or ^d at end-of-buffer with nothing
+        // forward to delete (all handled inside the dispatcher).
+        if (effects.some((e) => e.type === "exit")) {
           cleanup();
           resolve({ kind: "abort" });
           return;

@@ -457,14 +457,25 @@ export class InputDispatcher {
         return [];
       case "ctrl-c":
         return this.handleCtrlC();
-      case "ctrl-d":
-        // Standard readline: EOF on empty buffer, delete-forward otherwise
-        // (no-op at end-of-buffer when there's nothing to delete).
+      case "ctrl-d": {
+        // Widened readline EOF: exit on empty buffer OR when the cursor
+        // is at end-of-buffer with nothing forward to delete. Standard
+        // readline only exits on an empty buffer, but that leaves a dead
+        // zone — the press after deleting the last forward character is
+        // a silent no-op. Treating "nothing forward" as exit means a
+        // second ^d in that position cleanly closes the input.
         if (this.bufferIsEmpty()) {
+          return [{ type: "exit" }];
+        }
+        const lastLine = this.buffer[this.buffer.length - 1] ?? "";
+        const atEndOfBuffer =
+          this.row === this.buffer.length - 1 && this.col >= lastLine.length;
+        if (atEndOfBuffer) {
           return [{ type: "exit" }];
         }
         this.deleteForward();
         return [];
+      }
       case "ctrl-l":
         return [{ type: "redraw" }];
       case "ctrl-p":

@@ -1437,9 +1437,9 @@ export class Screen {
     this.repaint();
   }
 
-  // Two-line confirmation modal that takes over the prompt area. Used to
-  // ask "interrupt before exit?" when the user quits during an in-flight
-  // turn that no one else is watching. Pass null to dismiss.
+  // Two-line confirmation modal that takes over the prompt area. Pass
+  // null to dismiss. Currently unused — kept as a generic primitive for
+  // any future modal that needs a question + hint footer.
   setConfirmPrompt(spec: ConfirmPromptSpec | null): void {
     this.confirmPrompt = spec ? { ...spec } : null;
     this.repaint();
