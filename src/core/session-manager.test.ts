@@ -228,6 +228,8 @@ describe("SessionManager.resurrect", () => {
       prompt: [{ type: "text", text: "first prompt of the new life" }],
     });
     expect(session.title).toBe("feature-X");
+    await titledMgr.flushMetaWrites();
+    await titledMgr.flushHistoryWrites();
   });
 
   it("re-seeds the title from the next prompt when the resurrected record had none (firstPromptSeeded gates on title)", async () => {
@@ -263,9 +265,11 @@ describe("SessionManager.resurrect", () => {
       prompt: [{ type: "text", text: "recovered title line" }],
     });
     expect(session.title).toBe("recovered title line");
-    // Drain pending persistTitle writes before tmpHome cleanup so a
-    // straggler doesn't race the next test's beforeEach.
+    // Drain pending persistTitle + history.append writes before tmpHome
+    // cleanup so a straggler's fs.mkdir doesn't race the rmSync and
+    // surface as ENOTEMPTY in the next test's teardown.
     await untitledMgr.flushMetaWrites();
+    await untitledMgr.flushHistoryWrites();
   });
 
   it("propagates title onto the resurrected session and into list()", async () => {
