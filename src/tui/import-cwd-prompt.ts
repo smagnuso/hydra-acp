@@ -29,6 +29,11 @@ import {
 
 export interface PromptOptions {
   defaultCwd?: string;
+  // Box title. Defaults to the fork-locally wording; the dead-cwd repair
+  // path overrides it.
+  title?: string;
+  // Line shown above the input. Defaults to the fork-locally wording.
+  intro?: string;
 }
 
 export type CwdPromptResult =
@@ -48,8 +53,18 @@ export async function promptForImportCwd(
   resetTerminalModes();
 
   const shortId = stripHydraSessionPrefix(session.sessionId);
-  const fromMachine = session.importedFromMachine ?? "another machine";
   const originalCwd = shortenHomePath(session.cwd);
+  const title = opts.title ?? "Fork locally — choose cwd";
+  const intro = opts.intro ?? "Pick a local cwd for this session:";
+  // The "from:" row only makes sense for imported sessions; the dead-cwd
+  // repair path has no origin machine, so it's omitted there.
+  const headerRows = [
+    { label: "session: ", value: shortId },
+    ...(session.importedFromMachine
+      ? [{ label: "from:    ", value: session.importedFromMachine }]
+      : []),
+    { label: "cwd:     ", value: originalCwd },
+  ];
 
   let buffer = defaultCwd;
   let errorLine: string | null = null;
@@ -57,17 +72,12 @@ export async function promptForImportCwd(
   let layout: BoxLayout | null = null;
 
   const render = (): void => {
-    const contentHeight = 9;
+    const contentHeight = headerRows.length + 6;
     layout = drawBox(term, {
       contentHeight,
-      title: "Fork locally — choose cwd",
+      title,
     });
     const innerW = layout.contentW;
-    const headerRows = [
-      { label: "session: ", value: shortId },
-      { label: "from:    ", value: fromMachine },
-      { label: "cwd:     ", value: originalCwd },
-    ];
     let row = 0;
     for (const hr of headerRows) {
       term.moveTo(layout.contentX, layout.contentY + row);
@@ -77,7 +87,7 @@ export async function promptForImportCwd(
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.noFormat(" Pick a local cwd for this session:");
+    term.noFormat(` ${intro}`);
     row += 2;
     paintInputRow(row);
     row += 2;
@@ -92,7 +102,8 @@ export async function promptForImportCwd(
     }
   };
 
-  const inputRow = (): number => 6;
+  // Header rows, one blank, the intro line, one blank — then the input.
+  const inputRow = (): number => headerRows.length + 3;
 
   const paintInputRow = (rowOffset?: number): void => {
     if (!layout) {

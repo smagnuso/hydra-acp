@@ -18,7 +18,8 @@ import {
   AgentInstallProgressParams,
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
-import { loadConfig, type HydraConfig } from "../core/config.js";
+import { loadConfig, expandHome, type HydraConfig } from "../core/config.js";
+import { validateLocalCwd } from "../core/cwd.js";
 import {
   resolveLocalTarget,
   type RemoteTarget,
@@ -132,14 +133,17 @@ export interface TuiOptions {
   // leave this undefined and get the default service-token + local
   // daemon flow.
   target?: RemoteTarget;
-  // First-launch import hint forwarded from the ^p picker through the
-  // runSession loop. resolveSession's short-circuit copies it onto the
-  // returned SessionContext so the WS attach builds the same _meta
-  // resume payload as the initial-picker path. Cleared by the next
-  // attach.
-  importAttachHint?: {
+  // Resume hint forwarded from the ^p picker through the runSession
+  // loop. resolveSession's short-circuit copies it onto the returned
+  // SessionContext so the WS attach builds the _meta resume payload.
+  // Used both for first-launch imports (upstreamSessionId="" routes
+  // through the import-reseed path) and for repairing a local session
+  // whose recorded cwd no longer exists (real upstreamSessionId, normal
+  // session/load path). Cleared by the next attach.
+  resumeHint?: {
     agentId: string;
     cwd: string;
+    upstreamSessionId: string;
   };
   // Auto-approve every session/request_permission instead of showing
   // the modal. Wire bypass for the user; the CLI prints a stderr
@@ -160,14 +164,16 @@ interface SessionContext {
   sessionId: string;
   agentId: string;
   cwd: string;
-  // First-launch-on-this-machine for an imported session: the user
-  // picked a local cwd via promptForImportCwd. We forward a full resume
-  // hint on the initial session/attach so the daemon takes the
-  // import-resurrect path (upstreamSessionId === "") with that cwd
-  // instead of silently falling back to $HOME via resolveImportCwd.
-  importAttachHint?: {
+  // The user picked a local cwd via promptForImportCwd. We forward a
+  // full resume hint on the initial session/attach so the daemon
+  // resurrects with that cwd. upstreamSessionId === "" takes the
+  // import-reseed path (first-launch imports); a real upstreamSessionId
+  // takes the normal session/load path (repairing a local session whose
+  // recorded cwd no longer exists).
+  resumeHint?: {
     agentId: string;
     cwd: string;
+    upstreamSessionId: string;
   };
 }
 
@@ -1122,19 +1128,20 @@ async function runSession(
       historyPolicy: "full",
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
       ...(opts.readonly === true ? { readonly: true } : {}),
-      // Forward the user-chosen cwd for first-launch imported sessions
-      // via a full resume hint. upstreamSessionId is empty so the
-      // daemon routes through doResurrectFromImport (session-manager.ts)
-      // with the user-supplied cwd instead of silently falling back to
-      // $HOME in resolveImportCwd.
-      ...(ctx.importAttachHint !== undefined
+      // Forward the user-chosen cwd via a full resume hint. An empty
+      // upstreamSessionId routes through doResurrectFromImport
+      // (first-launch imports); a real one takes the normal session/load
+      // path (repairing a local session whose recorded cwd is gone).
+      // Either way the daemon resurrects with this cwd instead of the
+      // stale recorded one.
+      ...(ctx.resumeHint !== undefined
         ? {
             _meta: {
               [HYDRA_META_KEY]: {
                 resume: {
-                  upstreamSessionId: "",
-                  agentId: ctx.importAttachHint.agentId,
-                  cwd: ctx.importAttachHint.cwd,
+                  upstreamSessionId: ctx.resumeHint.upstreamSessionId,
+                  agentId: ctx.resumeHint.agentId,
+                  cwd: ctx.resumeHint.cwd,
                 },
               },
             },
@@ -1692,7 +1699,7 @@ async function runSession(
     // "back" to re-show the picker, same as the initial-picker flow.
     // Picker abort exits the loop and resumes the live session.
     let resolvedChoice: { choice: PickerResult; sessions: DiscoveredSession[] } | null = null;
-    let attachOverrides: { readonly?: boolean; cwd?: string; importAttachHint?: { agentId: string; cwd: string } } | null = null;
+    let attachOverrides: { readonly?: boolean; cwd?: string; resumeHint?: { agentId: string; cwd: string; upstreamSessionId: string } } | null = null;
     while (resolvedChoice === null) {
       // Picker manages its own interactive-only filter; ask the daemon
       // for everything and let prefs.filters.includeNonInteractive decide
@@ -1740,8 +1747,8 @@ async function runSession(
           readonly: false,
           cwd: decided.ctx.cwd,
         };
-        if (decided.ctx.importAttachHint !== undefined) {
-          attachOverrides.importAttachHint = decided.ctx.importAttachHint;
+        if (decided.ctx.resumeHint !== undefined) {
+          attachOverrides.resumeHint = decided.ctx.resumeHint;
         }
         break;
       }
@@ -1755,6 +1762,45 @@ async function runSession(
         !chosen.upstreamSessionId &&
         choice.readonly !== true;
       if (!isImportedFirstLaunch) {
+        // Same dead-cwd repair as the initial-picker path: a local
+        // session whose recorded cwd is gone can't be resumed (the agent
+        // is pinned to it), so prompt for a new cwd and forward a resume
+        // hint with an empty upstreamSessionId to reseed there.
+        if (
+          target.isLocal &&
+          chosen &&
+          !chosen.importedFromMachine &&
+          choice.readonly !== true
+        ) {
+          const v = await validateLocalCwd(chosen.cwd);
+          if (!v.ok) {
+            const r = await promptForImportCwd(term, chosen, {
+              defaultCwd: expandHome(config.defaultCwd),
+              title: "Working directory missing — choose cwd",
+              intro:
+                "This session's working directory no longer exists. Pick a new one:",
+            });
+            if (r.kind === "cancel") {
+              screen.start({ skipFullscreen: true });
+              screen.resumeRepaint();
+              return;
+            }
+            if (r.kind === "back") {
+              continue;
+            }
+            resolvedChoice = { choice, sessions };
+            attachOverrides = {
+              readonly: false,
+              cwd: r.path,
+              resumeHint: {
+                agentId: choice.agentId ?? chosen.agentId ?? "",
+                cwd: r.path,
+                upstreamSessionId: "",
+              },
+            };
+            break;
+          }
+        }
         resolvedChoice = { choice, sessions };
         break;
       }
@@ -1776,8 +1822,8 @@ async function runSession(
         readonly: opsShim.readonly === true,
         cwd: decided.ctx.cwd,
       };
-      if (decided.ctx.importAttachHint !== undefined) {
-        attachOverrides.importAttachHint = decided.ctx.importAttachHint;
+      if (decided.ctx.resumeHint !== undefined) {
+        attachOverrides.resumeHint = decided.ctx.resumeHint;
       }
     }
     const { choice } = resolvedChoice;
@@ -1823,12 +1869,12 @@ async function runSession(
     if (choice.agentId !== undefined) {
       nextOpts.agentId = choice.agentId;
     }
-    if (attachOverrides?.importAttachHint !== undefined) {
-      nextOpts.importAttachHint = attachOverrides.importAttachHint;
+    if (attachOverrides?.resumeHint !== undefined) {
+      nextOpts.resumeHint = attachOverrides.resumeHint;
     } else {
       // Clear any stale hint inherited from the current session's opts —
       // it was for the previous attach, not the new one.
-      delete nextOpts.importAttachHint;
+      delete nextOpts.resumeHint;
     }
     resume(nextOpts);
   };
@@ -3716,8 +3762,8 @@ async function resolveSession(
       agentId: opts.agentId ?? "",
       cwd,
     };
-    if (opts.importAttachHint !== undefined) {
-      ctx.importAttachHint = opts.importAttachHint;
+    if (opts.resumeHint !== undefined) {
+      ctx.resumeHint = opts.resumeHint;
     }
     return ctx;
   }
@@ -3798,6 +3844,41 @@ async function resolveSession(
       }
       return decided.ctx;
     }
+    // A local session whose recorded cwd no longer exists (e.g. a `cat`
+    // session whose /tmp sandbox was cleaned up) can't be resumed: the
+    // agent's own session is pinned to that dir (claude-acp fails with
+    // `Path "…" does not exist`). Prompt for a replacement cwd, defaulting
+    // to the configured defaultCwd, and forward it as a resume hint with
+    // an empty upstreamSessionId so the daemon reseeds a fresh agent
+    // session there and replays history. Only for local, non-imported,
+    // non-readonly picks — remote daemons own a cwd we can't stat here.
+    if (target.isLocal && chosen && !chosen.importedFromMachine && !opts.readonly) {
+      const v = await validateLocalCwd(chosen.cwd);
+      if (!v.ok) {
+        const r = await promptForImportCwd(term, chosen, {
+          defaultCwd: expandHome(config.defaultCwd),
+          title: "Working directory missing — choose cwd",
+          intro: "This session's working directory no longer exists. Pick a new one:",
+        });
+        if (r.kind === "cancel") {
+          return null;
+        }
+        if (r.kind === "back") {
+          continue;
+        }
+        const agentId = choice.agentId ?? chosen.agentId ?? "";
+        return {
+          sessionId: choice.sessionId,
+          agentId,
+          cwd: r.path,
+          resumeHint: {
+            agentId,
+            cwd: r.path,
+            upstreamSessionId: "",
+          },
+        };
+      }
+    }
     return {
       sessionId: choice.sessionId,
       agentId: choice.agentId ?? "",
@@ -3863,7 +3944,9 @@ async function runImportedFirstLaunchFlow(
         sessionId: choice.sessionId,
         agentId,
         cwd: cwdResult.path,
-        importAttachHint: { agentId, cwd: cwdResult.path },
+        // Empty upstreamSessionId → import-reseed path for a never-launched
+        // imported session.
+        resumeHint: { agentId, cwd: cwdResult.path, upstreamSessionId: "" },
       },
     };
   }
@@ -3920,10 +4003,16 @@ async function runForkFlow(
       // For foreign-never-launched forks, the daemon stamped the chosen
       // cwd onto meta.json via the POST body, but the very first attach
       // still goes through the import-reseed path (upstreamSessionId=""),
-      // and importAttachHint is what makes attachManagerHooks persist
+      // and the resume hint is what makes attachManagerHooks persist
       // the local cwd over the bundle's recorded one.
       ...(isForeignNeverLaunched
-        ? { importAttachHint: { agentId: choice.sourceAgentId ?? "", cwd } }
+        ? {
+            resumeHint: {
+              agentId: choice.sourceAgentId ?? "",
+              cwd,
+              upstreamSessionId: "",
+            },
+          }
         : {}),
     },
   };

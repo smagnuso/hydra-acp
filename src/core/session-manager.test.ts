@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+
+// Resurrect now reseeds when the recorded cwd is gone (the agent's own
+// session is pinned to it), so resurrect-path tests need a cwd that
+// actually exists. These stand in for the old WORK_CWD / W_CWD placeholders.
+const WORK_CWD = mkdtempSync(path.join(os.tmpdir(), "hydra-test-work-"));
+const W_CWD = mkdtempSync(path.join(os.tmpdir(), "hydra-test-w-"));
 import {
   SessionManager,
   extractInitialModel,
@@ -47,7 +55,7 @@ describe("SessionManager.resurrect", () => {
     manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock
@@ -59,11 +67,14 @@ describe("SessionManager.resurrect", () => {
   });
 
   it("spawns the agent, calls initialize then session/load, and registers a session", async () => {
+    // Use a real dir so the resurrect cwd-heal is a no-op and the cwd
+    // threading assertion below stays meaningful.
+    const realCwd = process.cwd();
     const session = await manager.resurrect({
       hydraSessionId: "sess_hyd",
       upstreamSessionId: "u_loaded",
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: realCwd,
     });
 
     expect(session.sessionId).toBe("sess_hyd");
@@ -73,7 +84,7 @@ describe("SessionManager.resurrect", () => {
     expect(requestMock.mock.calls[0]?.[0]).toBe("initialize");
     expect(requestMock.mock.calls[1]).toMatchObject([
       "session/load",
-      { sessionId: "u_loaded", cwd: "/work" },
+      { sessionId: "u_loaded", cwd: realCwd },
     ]);
     void mockIndex;
   });
@@ -83,13 +94,13 @@ describe("SessionManager.resurrect", () => {
       hydraSessionId: "sess_hyd",
       upstreamSessionId: "u_loaded",
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
     });
     const second = await manager.resurrect({
       hydraSessionId: "sess_hyd",
       upstreamSessionId: "u_loaded",
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
     });
     expect(second).toBe(first);
     expect(mocks).toHaveLength(1);
@@ -100,14 +111,14 @@ describe("SessionManager.resurrect", () => {
       hydraSessionId: "sess_hyd",
       upstreamSessionId: "u_loaded",
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
     });
     await expect(
       manager.resurrect({
         hydraSessionId: "sess_hyd",
         upstreamSessionId: "u_DIFFERENT",
         agentId: "claude-code",
-        cwd: "/work",
+        cwd: WORK_CWD,
       }),
     ).rejects.toMatchObject({ code: JsonRpcErrorCodes.AlreadyAttached });
   });
@@ -118,13 +129,13 @@ describe("SessionManager.resurrect", () => {
         hydraSessionId: "sess_concurrent",
         upstreamSessionId: "u_c",
         agentId: "claude-code",
-        cwd: "/work",
+        cwd: WORK_CWD,
       }),
       manager.resurrect({
         hydraSessionId: "sess_concurrent",
         upstreamSessionId: "u_c",
         agentId: "claude-code",
-        cwd: "/work",
+        cwd: WORK_CWD,
       }),
     ]);
     expect(a).toBe(b);
@@ -136,7 +147,7 @@ describe("SessionManager.resurrect", () => {
     const failingMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         if (spawnCount === 0) {
@@ -161,7 +172,7 @@ describe("SessionManager.resurrect", () => {
       hydraSessionId: "sess_fail",
       upstreamSessionId: "u_fail",
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
     });
 
     expect(session.upstreamSessionId).toBe("u_new");
@@ -176,7 +187,7 @@ describe("SessionManager.resurrect", () => {
     const passthroughMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock
@@ -191,7 +202,7 @@ describe("SessionManager.resurrect", () => {
       hydraSessionId: "sess_meta",
       upstreamSessionId: "u",
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
     });
     expect(session.agentMeta).toEqual({ "agent-vendor": { sequence: 7 } });
   });
@@ -200,7 +211,7 @@ describe("SessionManager.resurrect", () => {
     const titledMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock
@@ -214,7 +225,7 @@ describe("SessionManager.resurrect", () => {
       hydraSessionId: "sess_resurrect_title",
       upstreamSessionId: "u",
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
       title: "feature-X",
     });
     const { JsonRpcConnection } = await import("../acp/connection.js");
@@ -237,7 +248,7 @@ describe("SessionManager.resurrect", () => {
     const untitledMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock
@@ -251,7 +262,7 @@ describe("SessionManager.resurrect", () => {
       hydraSessionId: "sess_no_title",
       upstreamSessionId: "u",
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
       // No title — should NOT lock firstPromptSeeded on.
     });
     const { JsonRpcConnection } = await import("../acp/connection.js");
@@ -277,7 +288,7 @@ describe("SessionManager.resurrect", () => {
     const titledMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock
@@ -290,7 +301,7 @@ describe("SessionManager.resurrect", () => {
       hydraSessionId: "sess_titled",
       upstreamSessionId: "u",
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
       title: "feature-X",
     });
     expect(session.title).toBe("feature-X");
@@ -310,6 +321,69 @@ describe("SessionManager.resurrect", () => {
   });
 });
 
+describe("SessionManager.resurrect: dead cwd reseed", () => {
+  it("reseeds a fresh agent session in defaultCwd (not session/load) when the recorded cwd is gone, and persists the new id + cwd", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    const store = new SessionStore();
+    const deadCwd = "/no/such/hydra/dir/abc123";
+    const fallback = process.cwd();
+
+    await store.write({
+      sessionId: "hydra_dead_cwd",
+      cwd: deadCwd,
+      agentId: "claude-code",
+      upstreamSessionId: "u_dead",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date(Date.now() - 30_000).toISOString(),
+    });
+
+    let spawnedCwd: string | undefined;
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: fallback });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock.mockImplementation((method: string) => {
+      if (method === "initialize") {
+        return Promise.resolve({ protocolVersion: 1 });
+      }
+      if (method === "session/new") {
+        return Promise.resolve({ sessionId: "u_reseeded" });
+      }
+      return Promise.resolve({});
+    });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      (opts) => {
+        spawnedCwd = opts.cwd;
+        return mock.agent;
+      },
+      undefined,
+      { defaultCwd: fallback },
+    );
+
+    const params = await manager.loadFromDisk("hydra_dead_cwd");
+    expect(params).not.toBeNull();
+    const session = await manager.resurrect(params!);
+
+    // The dead-dir session can't be resumed (its agent is pinned to a gone
+    // cwd), so we reseed: a fresh session/new in the fallback cwd, never a
+    // session/load against the stale upstream id.
+    expect(spawnedCwd).toBe(fallback);
+    const methods = requestMock.mock.calls.map((c) => c[0]);
+    expect(methods).toContain("session/new");
+    expect(methods).not.toContain("session/load");
+    expect(session.cwd).toBe(fallback);
+    expect(session.upstreamSessionId).toBe("u_reseeded");
+
+    // The new upstream id + healed cwd are persisted so the next resurrect
+    // resumes normally instead of pointing at the dead dir.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const reloaded = await manager.loadFromDisk("hydra_dead_cwd");
+    expect(reloaded?.cwd).toBe(fallback);
+    expect(reloaded?.upstreamSessionId).toBe("u_reseeded");
+  });
+});
+
 describe("SessionManager: history persistence", () => {
   let tmpHome: string;
   let mocks: MockAgentControls[];
@@ -321,7 +395,7 @@ describe("SessionManager: history persistence", () => {
     manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<
           typeof vi.fn
@@ -344,7 +418,7 @@ describe("SessionManager: history persistence", () => {
 
   it("persists broadcast notifications to disk and serves them on getHistory", async () => {
     const session = await manager.create({
-      cwd: "/w",
+      cwd: W_CWD,
       agentId: "claude-code",
     });
     const m = mocks[0]!;
@@ -373,7 +447,7 @@ describe("SessionManager: history persistence", () => {
 
   it("replays the persisted history to the next attaching client after resurrect", async () => {
     // First incarnation: emit a notification, then idle-close (no record delete).
-    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
     const sessionId = live.sessionId;
     mocks[0]!.triggerNotification("session/update", {
       sessionId: live.upstreamSessionId,
@@ -419,7 +493,7 @@ describe("SessionManager: history persistence", () => {
   it("drops the agent's session/load replay instead of re-recording it (regression: doubled history every resurrect)", async () => {
     // First incarnation: emit one real chunk that legitimately lands in
     // history, then idle-close so the disk record sticks around.
-    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
     const sessionId = live.sessionId;
     const upstream = live.upstreamSessionId;
     mocks[0]!.triggerNotification("session/update", {
@@ -441,7 +515,7 @@ describe("SessionManager: history persistence", () => {
     const replayMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<
           typeof vi.fn
@@ -471,7 +545,7 @@ describe("SessionManager: history persistence", () => {
       hydraSessionId: sessionId,
       upstreamSessionId: upstream,
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
     });
     await flushHistoryWrites();
 
@@ -491,7 +565,7 @@ describe("SessionManager: history persistence", () => {
 
   it("loads history from disk on resume-hints resurrect (regression: hints used to skip the disk load)", async () => {
     // Pre-create + emit a chunk so a history file exists on disk.
-    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
     const sessionId = live.sessionId;
     mocks[0]!.triggerNotification("session/update", {
       sessionId: live.upstreamSessionId,
@@ -509,7 +583,7 @@ describe("SessionManager: history persistence", () => {
       hydraSessionId: sessionId,
       upstreamSessionId: "u_freshly_loaded",
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
     });
 
     const { JsonRpcConnection } = await import("../acp/connection.js");
@@ -532,7 +606,7 @@ describe("SessionManager: history persistence", () => {
   });
 
   it("self-heals a missing title from the first prompt in history on loadFromDisk", async () => {
-    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
     const sessionId = live.sessionId;
     // Drive a prompt_received into history without the in-memory title
     // path firing setTitle's persist hook — simulate the race that
@@ -568,7 +642,7 @@ describe("SessionManager: history persistence", () => {
   });
 
   it("preserves createdAt across resurrect (regression: attachManagerHooks used to reset it)", async () => {
-    const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
     const sessionId = live.sessionId;
     const original = await manager.loadFromDisk(sessionId);
     const originalCreatedAt = original?.createdAt;
@@ -582,7 +656,7 @@ describe("SessionManager: history persistence", () => {
       hydraSessionId: sessionId,
       upstreamSessionId: "u_resurrected",
       agentId: "claude-code",
-      cwd: "/w",
+      cwd: W_CWD,
       title: original?.title,
       createdAt: original?.createdAt,
     });
@@ -594,7 +668,7 @@ describe("SessionManager: history persistence", () => {
 
   it("deletes the history file when the session record is destroyed", async () => {
     const session = await manager.create({
-      cwd: "/w",
+      cwd: W_CWD,
       agentId: "claude-code",
     });
     mocks[0]!.triggerNotification("session/update", {
@@ -633,7 +707,7 @@ describe("SessionManager: history persistence", () => {
 
   it("preserves the history file across idle close (deleteRecord: false)", async () => {
     const session = await manager.create({
-      cwd: "/w",
+      cwd: W_CWD,
       agentId: "claude-code",
     });
     mocks[0]!.triggerNotification("session/update", {
@@ -676,7 +750,7 @@ describe("SessionManager: history persistence", () => {
 
     it("persists current_model_update + current_mode_update into meta.json", async () => {
       const session = await manager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       const m = mocks[0]!;
@@ -703,7 +777,7 @@ describe("SessionManager: history persistence", () => {
 
     it("persists agent-emitted available_commands_update into meta.json", async () => {
       const session = await manager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       mocks[0]!.triggerNotification("session/update", {
@@ -729,7 +803,7 @@ describe("SessionManager: history persistence", () => {
 
     it("filters snapshot updates out of history (transcript stays focused on conversation)", async () => {
       const session = await manager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       mocks[0]!.triggerNotification("session/update", {
@@ -762,7 +836,7 @@ describe("SessionManager: history persistence", () => {
     });
 
     it("threads snapshot state into the resurrected Session", async () => {
-      const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
       const sessionId = live.sessionId;
       mocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
@@ -795,7 +869,7 @@ describe("SessionManager: history persistence", () => {
     });
 
     it("pushes persisted currentMode back to the agent via session/set_mode on resurrect (regression: plan mode silently reverted to default on daemon restart)", async () => {
-      const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
       const sessionId = live.sessionId;
       mocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
@@ -841,7 +915,7 @@ describe("SessionManager: history persistence", () => {
       const localManager = new SessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
-          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
           localMocks.push(m);
           const requestMock = m.agent.connection.request as ReturnType<
             typeof vi.fn
@@ -864,7 +938,7 @@ describe("SessionManager: history persistence", () => {
       );
 
       const live = await localManager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       const sessionId = live.sessionId;
@@ -905,7 +979,7 @@ describe("SessionManager: history persistence", () => {
       const localManager = new SessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
-          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
           localMocks.push(m);
           const requestMock = m.agent.connection.request as ReturnType<
             typeof vi.fn
@@ -929,7 +1003,7 @@ describe("SessionManager: history persistence", () => {
       );
 
       const live = await localManager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       const sessionId = live.sessionId;
@@ -971,7 +1045,7 @@ describe("SessionManager: history persistence", () => {
       const localManager = new SessionManager(
         fakeRegistry([fakeRegistryAgent("claude-acp")]),
         () => {
-          const m = makeMockAgent({ agentId: "claude-acp", cwd: "/work" });
+          const m = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
           localMocks.push(m);
           const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
           if (callIndex === 0) {
@@ -990,7 +1064,7 @@ describe("SessionManager: history persistence", () => {
         },
       );
 
-      const live = await localManager.create({ cwd: "/w", agentId: "claude-acp" });
+      const live = await localManager.create({ cwd: W_CWD, agentId: "claude-acp" });
       const sessionId = live.sessionId;
       localMocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
@@ -1021,7 +1095,7 @@ describe("SessionManager: history persistence", () => {
       const localManager = new SessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
-          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
           localMocks.push(m);
           const requestMock = m.agent.connection.request as ReturnType<
             typeof vi.fn
@@ -1044,7 +1118,7 @@ describe("SessionManager: history persistence", () => {
       );
 
       const live = await localManager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       const sessionId = live.sessionId;
@@ -1082,7 +1156,7 @@ describe("SessionManager: history persistence", () => {
       const localManager = new SessionManager(
         fakeRegistry([fakeRegistryAgent("claude-code")]),
         () => {
-          const m = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
           localMocks.push(m);
           const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
           if (callIndex === 0) {
@@ -1105,7 +1179,7 @@ describe("SessionManager: history persistence", () => {
         },
       );
 
-      const live = await localManager.create({ cwd: "/w", agentId: "claude-code" });
+      const live = await localManager.create({ cwd: W_CWD, agentId: "claude-code" });
       const sessionId = live.sessionId;
       localMocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
@@ -1133,7 +1207,7 @@ describe("SessionManager: history persistence", () => {
       const localManager = new SessionManager(
         fakeRegistry([fakeRegistryAgent("codex-acp")]),
         () => {
-          const m = makeMockAgent({ agentId: "codex-acp", cwd: "/work" });
+          const m = makeMockAgent({ agentId: "codex-acp", cwd: WORK_CWD });
           localMocks.push(m);
           const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
           if (callIndex === 0) {
@@ -1152,7 +1226,7 @@ describe("SessionManager: history persistence", () => {
         },
       );
 
-      const live = await localManager.create({ cwd: "/w", agentId: "codex-acp" });
+      const live = await localManager.create({ cwd: W_CWD, agentId: "codex-acp" });
       const sessionId = live.sessionId;
       localMocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
@@ -1175,7 +1249,7 @@ describe("SessionManager: history persistence", () => {
     });
 
     it("preserves cumulative cost across resurrect (regression: meta.json overwritten with raw cost after restart)", async () => {
-      const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
       const sessionId = live.sessionId;
       mocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
@@ -1219,7 +1293,7 @@ describe("SessionManager: history persistence", () => {
     });
 
     it("does not drop currentUsage when resurrectParams is rebuilt with resume-hint identity overrides (regression: src/daemon/acp-ws.ts hydraHints branch)", async () => {
-      const live = await manager.create({ cwd: "/w", agentId: "claude-code" });
+      const live = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
       const sessionId = live.sessionId;
       mocks[0]!.triggerNotification("session/update", {
         sessionId: live.upstreamSessionId,
@@ -1246,7 +1320,7 @@ describe("SessionManager: history persistence", () => {
         hydraSessionId: sessionId,
         upstreamSessionId: "u_resume_hint_buggy",
         agentId: "claude-code",
-        cwd: "/w",
+        cwd: W_CWD,
         title: fromDisk?.title,
         agentArgs: fromDisk?.agentArgs,
         currentModel: fromDisk?.currentModel,
@@ -1272,7 +1346,7 @@ describe("SessionManager: history persistence", () => {
         ...fromDiskAfterBug!,
         upstreamSessionId: "u_resume_hint_fixed",
         agentId: "claude-code",
-        cwd: "/w",
+        cwd: W_CWD,
       };
       requestMock = mocks[0]!.agent.connection.request as ReturnType<
         typeof vi.fn
@@ -1288,7 +1362,7 @@ describe("SessionManager: history persistence", () => {
   describe("getHistory (used by the REST history endpoint)", () => {
     it("returns the persisted history for a hot session (disk is the source of truth)", async () => {
       const session = await manager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       mocks[0]!.triggerNotification("session/update", {
@@ -1312,7 +1386,7 @@ describe("SessionManager: history persistence", () => {
 
     it("falls back to on-disk history for a cold session", async () => {
       const live = await manager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       const sessionId = live.sessionId;
@@ -1340,7 +1414,7 @@ describe("SessionManager: history persistence", () => {
   describe("flushMetaWrites", () => {
     it("awaits pending title persistence so a shutdown right after setTitle doesn't lose it", async () => {
       const session = await manager.create({
-        cwd: "/w",
+        cwd: W_CWD,
         agentId: "claude-code",
       });
       // Drive a title set; persistTitle is fire-and-forget.
@@ -1368,8 +1442,8 @@ describe("SessionManager: /hydra agent persistence", () => {
   });
 
   it("rewrites the on-disk record's agentId + upstreamSessionId after a switch", async () => {
-    const oldMock = makeMockAgent({ agentId: "old", cwd: "/work" });
-    const newMock = makeMockAgent({ agentId: "new", cwd: "/work" });
+    const oldMock = makeMockAgent({ agentId: "old", cwd: WORK_CWD });
+    const newMock = makeMockAgent({ agentId: "new", cwd: WORK_CWD });
     const handed: MockAgentControls[] = [oldMock, newMock];
     let idx = 0;
 
@@ -1396,7 +1470,7 @@ describe("SessionManager: /hydra agent persistence", () => {
     );
 
     const session = await manager.create({
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "old",
     });
 
@@ -1470,7 +1544,7 @@ describe("SessionManager: importBundle", () => {
           ? { upstreamSessionId: opts.upstreamSessionId }
           : {}),
         agentId: opts.agentId ?? "claude-code",
-        cwd: opts.cwd ?? "/work",
+        cwd: opts.cwd ?? WORK_CWD,
         title: opts.title,
         ...(opts.interactive !== undefined
           ? { interactive: opts.interactive }
@@ -1791,7 +1865,7 @@ describe("SessionManager: importBundle", () => {
     // Replace-over-live is the only importBundle path that can yank the
     // session out from under an attached client; assert it broadcasts
     // hydra-acp/session_closed so the TUI's cold-banner handler trips.
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     // bootstrap: initialize + session/new for the resurrect-from-import
     // path. No history in the bundle → seedFromImport is a no-op.
@@ -1812,7 +1886,7 @@ describe("SessionManager: importBundle", () => {
       hydraSessionId: imported.sessionId,
       upstreamSessionId: "",
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
     });
 
     const { JsonRpcConnection } = await import("../acp/connection.js");
@@ -1848,7 +1922,7 @@ describe("SessionManager: closeAll", () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock
@@ -1858,8 +1932,8 @@ describe("SessionManager: closeAll", () => {
       },
     );
 
-    const sessionA = await manager.create({ cwd: "/w", agentId: "claude-code" });
-    const sessionB = await manager.create({ cwd: "/w", agentId: "claude-code" });
+    const sessionA = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
+    const sessionB = await manager.create({ cwd: W_CWD, agentId: "claude-code" });
 
     const { JsonRpcConnection } = await import("../acp/connection.js");
     const { makeControlledStream } = await import(
@@ -1896,7 +1970,7 @@ describe("SessionManager: closeAll", () => {
 
 describe("SessionManager: resurrect from import", () => {
   it("bootstraps a fresh agent and runs seedFromImport when upstreamSessionId is empty", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     // bootstrap: initialize + session/new, then seedFromImport's
     // session/prompt (transcript replay).
@@ -1919,7 +1993,7 @@ describe("SessionManager: resurrect from import", () => {
         sessionId: "hydra_session_origin",
         lineageId: "hydra_lineage_reseed",
         agentId: "claude-code",
-        cwd: "/work",
+        cwd: WORK_CWD,
         createdAt: "2026-05-13T00:00:00.000Z",
         updatedAt: "2026-05-13T00:00:00.000Z",
       },
@@ -1943,7 +2017,7 @@ describe("SessionManager: resurrect from import", () => {
       hydraSessionId: imported.sessionId,
       upstreamSessionId: "",
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
     });
 
     expect(session.upstreamSessionId).toBe("u_fresh");
@@ -1967,7 +2041,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock.mockRejectedValueOnce(new Error("spawn ENOENT: npx-not-found"));
@@ -1975,7 +2049,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
       },
     );
     await expect(
-      manager.create({ cwd: "/w", agentId: "claude-code" }),
+      manager.create({ cwd: W_CWD, agentId: "claude-code" }),
     ).rejects.toThrow(/npx-not-found/);
     expect(mocks[0]?.agent.kill).toHaveBeenCalled();
   });
@@ -1985,7 +2059,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock
@@ -1995,7 +2069,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
       },
     );
     await expect(
-      manager.create({ cwd: "/w", agentId: "claude-code" }),
+      manager.create({ cwd: W_CWD, agentId: "claude-code" }),
     ).rejects.toThrow(/bad model/);
     expect(mocks[0]?.agent.kill).toHaveBeenCalled();
   });
@@ -2003,10 +2077,10 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   it("create() rejects when the agent id isn't in the registry", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
-      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+      () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
     await expect(
-      manager.create({ cwd: "/w", agentId: "ghost-agent" }),
+      manager.create({ cwd: W_CWD, agentId: "ghost-agent" }),
     ).rejects.toMatchObject({ code: JsonRpcErrorCodes.AgentNotInstalled });
   });
 
@@ -2015,7 +2089,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         requestMock.mockRejectedValueOnce(new Error("agent died mid-handshake"));
@@ -2027,7 +2101,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
         hydraSessionId: "sess_init_fail",
         upstreamSessionId: "u_old",
         agentId: "claude-code",
-        cwd: "/w",
+        cwd: W_CWD,
       }),
     ).rejects.toThrow(/died mid-handshake/);
     expect(mocks[0]?.agent.kill).toHaveBeenCalled();
@@ -2039,7 +2113,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
         mocks.push(m);
         const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
         if (spawnCount === 0) {
@@ -2060,7 +2134,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
         hydraSessionId: "sess_cascade",
         upstreamSessionId: "u_gone",
         agentId: "claude-code",
-        cwd: "/w",
+        cwd: W_CWD,
       }),
     ).rejects.toThrow(/agent binary missing/);
     expect(spawnCount).toBe(2);
@@ -2071,7 +2145,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   it("loadFromDisk returns undefined for an unknown session id", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
-      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+      () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
     const result = await manager.loadFromDisk("hydra_session_does_not_exist");
     expect(result).toBeUndefined();
@@ -2080,7 +2154,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   it("hasRecord returns false for an unknown session id", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
-      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+      () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
     expect(await manager.hasRecord("hydra_session_does_not_exist")).toBe(false);
   });
@@ -2088,7 +2162,7 @@ describe("SessionManager: bootstrap failures and unknown ids", () => {
   it("getHistory returns undefined for an unknown session id", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
-      () => makeMockAgent({ agentId: "claude-code", cwd: "/w" }).agent,
+      () => makeMockAgent({ agentId: "claude-code", cwd: W_CWD }).agent,
     );
     expect(await manager.getHistory("hydra_session_does_not_exist")).toBeUndefined();
   });
@@ -2220,7 +2294,7 @@ describe("extractInitialModels", () => {
 
 describe("SessionManager: defaultModels", () => {
   it("issues session/set_model after session/new and seeds currentModel", async () => {
-    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2234,7 +2308,7 @@ describe("SessionManager: defaultModels", () => {
       { defaultModels: { opencode: "openai/gpt-5-codex" } },
     );
 
-    const session = await manager.create({ cwd: "/work", agentId: "opencode" });
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
 
     expect(requestMock.mock.calls[0]?.[0]).toBe("initialize");
     expect(requestMock.mock.calls[1]?.[0]).toBe("session/new");
@@ -2246,7 +2320,7 @@ describe("SessionManager: defaultModels", () => {
   });
 
   it("skips session/set_model when the agent already reports that model", async () => {
-    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2262,12 +2336,12 @@ describe("SessionManager: defaultModels", () => {
       { defaultModels: { opencode: "openai/gpt-5-codex" } },
     );
 
-    await manager.create({ cwd: "/work", agentId: "opencode" });
+    await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
     expect(requestMock.mock.calls.length).toBe(2);
   });
 
   it("skips session/set_model when no defaultModel is configured for the agent", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2280,7 +2354,7 @@ describe("SessionManager: defaultModels", () => {
       { defaultModels: { opencode: "openai/gpt-5-codex" } },
     );
 
-    await manager.create({ cwd: "/work", agentId: "claude-code" });
+    await manager.create({ cwd: WORK_CWD, agentId: "claude-code" });
     expect(requestMock.mock.calls.length).toBe(2);
   });
 
@@ -2290,7 +2364,7 @@ describe("SessionManager: defaultModels", () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-acp")]),
       () => {
-        const m = makeMockAgent({ agentId: "claude-acp", cwd: "/work" });
+        const m = makeMockAgent({ agentId: "claude-acp", cwd: WORK_CWD });
         mocks.push(m);
         const req = m.agent.connection.request as ReturnType<typeof vi.fn>;
         req
@@ -2306,7 +2380,7 @@ describe("SessionManager: defaultModels", () => {
       hydraSessionId: "sess_hyd",
       upstreamSessionId: "u_loaded",
       agentId: "claude-acp",
-      cwd: "/work",
+      cwd: WORK_CWD,
       currentModel: "opus[1m]",
     });
 
@@ -2325,7 +2399,7 @@ describe("SessionManager: defaultModels", () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("opencode")]),
       () => {
-        const m = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+        const m = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
         mocks.push(m);
         const req = m.agent.connection.request as ReturnType<typeof vi.fn>;
         req
@@ -2339,7 +2413,7 @@ describe("SessionManager: defaultModels", () => {
       hydraSessionId: "sess_hyd",
       upstreamSessionId: "u_loaded",
       agentId: "opencode",
-      cwd: "/work",
+      cwd: WORK_CWD,
       currentModel: "ncp-anthropic/claude-opus-4-7",
     });
 
@@ -2349,7 +2423,7 @@ describe("SessionManager: defaultModels", () => {
   });
 
   it("prefers params.model over defaultModels[agentId] on create", async () => {
-    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2364,7 +2438,7 @@ describe("SessionManager: defaultModels", () => {
     );
 
     const session = await manager.create({
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "opencode",
       model: "openai/gpt-5",
     });
@@ -2377,7 +2451,7 @@ describe("SessionManager: defaultModels", () => {
   });
 
   it("uses params.model when no defaultModel is configured", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2392,7 +2466,7 @@ describe("SessionManager: defaultModels", () => {
     );
 
     await manager.create({
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "claude-code",
       model: "claude-opus-4-7",
     });
@@ -2404,7 +2478,7 @@ describe("SessionManager: defaultModels", () => {
   });
 
   it("falls back to the agent's chosen model when set_model rejects", async () => {
-    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2421,7 +2495,7 @@ describe("SessionManager: defaultModels", () => {
       { defaultModels: { opencode: "bogus/no-such-model" } },
     );
 
-    const session = await manager.create({ cwd: "/work", agentId: "opencode" });
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
     expect(session.currentModel).toBe("openai/gpt-4o");
   });
 
@@ -2432,7 +2506,7 @@ describe("SessionManager: defaultModels", () => {
     // anyway, opencode would silently store garbage as the model id,
     // and every subsequent prompt returned end_turn with no message.
     // Validate against the response's advertised list before firing.
-    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2459,7 +2533,7 @@ describe("SessionManager: defaultModels", () => {
       },
     );
 
-    const session = await manager.create({ cwd: "/work", agentId: "opencode" });
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
 
     // initialize + session/new only — NO session/set_model.
     expect(requestMock.mock.calls.length).toBe(2);
@@ -2486,7 +2560,7 @@ describe("SessionManager: defaultModels", () => {
     // validate locally — fall back to the previous behavior of
     // forwarding optimistically. The agent's own validation (or
     // silence) is the safety net.
-    const mock = makeMockAgent({ agentId: "opencode", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2500,7 +2574,7 @@ describe("SessionManager: defaultModels", () => {
       { defaultModels: { opencode: "openai/gpt-5-codex" } },
     );
 
-    await manager.create({ cwd: "/work", agentId: "opencode" });
+    await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
 
     expect(requestMock.mock.calls[2]).toEqual([
       "session/set_model",
@@ -2520,7 +2594,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
     // can find it on startup.
     await store.write({
       sessionId: "hydra_session_replay",
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "claude-code",
       upstreamSessionId: "u_replay",
       createdAt: new Date(Date.now() - 60_000).toISOString(),
@@ -2536,7 +2610,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
       },
     ]);
 
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2574,7 +2648,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
 
     await store.write({
       sessionId: "hydra_session_stale",
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "claude-code",
       upstreamSessionId: "u_stale",
       createdAt: new Date(Date.now() - 86_400_000).toISOString(),
@@ -2595,7 +2669,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
         spawnCount += 1;
-        return makeMockAgent({ agentId: "claude-code", cwd: "/work" }).agent;
+        return makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD }).agent;
       },
     );
 
@@ -2621,7 +2695,7 @@ describe("SessionManager.syncFromAgent", () => {
       nextCursor?: string;
     }>;
   }): { manager: SessionManager; mock: MockAgentControls } {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock.mockResolvedValueOnce({
       protocolVersion: 1,
@@ -2768,7 +2842,7 @@ describe("SessionManager.syncFromAgent", () => {
 
 describe("SessionManager.resurrect: pendingHistorySync", () => {
   it("keeps the agent's session/load replay and clears the flag", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2787,7 +2861,7 @@ describe("SessionManager.resurrect: pendingHistorySync", () => {
     const store = new SessionStore();
     await store.write({
       sessionId: "hydra_session_synced",
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "claude-code",
       upstreamSessionId: "u_synced",
       pendingHistorySync: true,
@@ -2799,7 +2873,7 @@ describe("SessionManager.resurrect: pendingHistorySync", () => {
       hydraSessionId: "hydra_session_synced",
       upstreamSessionId: "u_synced",
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
       pendingHistorySync: true,
     });
 
@@ -2813,7 +2887,7 @@ describe("SessionManager.resurrect: pendingHistorySync", () => {
 
 describe("SessionManager: parentSessionId", () => {
   it("surfaces parentSessionId for a live session in list()", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2826,7 +2900,7 @@ describe("SessionManager: parentSessionId", () => {
 
     await manager.create({
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
       parentSessionId: "hydra_session_parent",
     });
 
@@ -2841,7 +2915,7 @@ describe("SessionManager: parentSessionId", () => {
 
     await store.write({
       sessionId: "hydra_session_child",
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "claude-code",
       upstreamSessionId: "u_cold_child",
       parentSessionId: "hydra_session_parent_cold",
@@ -2862,7 +2936,7 @@ describe("SessionManager: parentSessionId", () => {
 
 describe("SessionManager: originatingClient", () => {
   it("surfaces originatingClient for a live session in list() and persists it", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2875,7 +2949,7 @@ describe("SessionManager: originatingClient", () => {
 
     const session = await manager.create({
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
       originatingClient: { name: "hydra-acp-cat", version: "9.9.9" },
     });
 
@@ -2901,7 +2975,7 @@ describe("SessionManager: originatingClient", () => {
 
     await store.write({
       sessionId: "hydra_session_cat_cold",
-      cwd: "/work",
+      cwd: WORK_CWD,
       agentId: "claude-code",
       upstreamSessionId: "u_cold_cat",
       originatingClient: { name: "hydra-acp-cat" },
@@ -2925,7 +2999,7 @@ describe("SessionManager.create: transformChain threading", () => {
     const { JsonRpcConnection } = await import("../acp/connection.js");
     const { makeControlledStream } = await import("../__tests__/test-utils.js");
 
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2946,7 +3020,7 @@ describe("SessionManager.create: transformChain threading", () => {
 
     const session = await manager.create({
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
       transformChain: [transformerRef],
     });
 
@@ -2958,7 +3032,7 @@ describe("SessionManager.create: transformChain threading", () => {
   });
 
   it("session has empty chain when no transformChain is provided", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -2969,7 +3043,7 @@ describe("SessionManager.create: transformChain threading", () => {
       () => mock.agent,
     );
 
-    const session = await manager.create({ agentId: "claude-code", cwd: "/work" });
+    const session = await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
     expect(
       (session as unknown as { transformChain: unknown[] }).transformChain,
     ).toHaveLength(0);
@@ -2981,7 +3055,7 @@ describe("SessionManager.create: agent:initialize intercept", () => {
     const { makeControlledStream } = await import("../__tests__/test-utils.js");
     const { JsonRpcConnection } = await import("../acp/connection.js");
 
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     // initialize returns capabilities; session/new returns session id.
     requestMock
@@ -3018,7 +3092,7 @@ describe("SessionManager.create: agent:initialize intercept", () => {
 
     await manager.create({
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
       transformChain: [transformerRef],
     });
 
@@ -3033,7 +3107,7 @@ describe("SessionManager.create: agent:initialize intercept", () => {
   });
 
   it("skips the intercept when no transformer declares agent:initialize", async () => {
-    const mock = makeMockAgent({ agentId: "claude-code", cwd: "/work" });
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
       .mockResolvedValueOnce({ protocolVersion: 1 })
@@ -3052,7 +3126,7 @@ describe("SessionManager.create: agent:initialize intercept", () => {
 
     await manager.create({
       agentId: "claude-code",
-      cwd: "/work",
+      cwd: WORK_CWD,
       transformChain: [{
         name: "prompt-only",
         intercepts: new Set(["request:session/prompt"]), // no agent:initialize
@@ -3118,7 +3192,7 @@ describe("SessionManager.forkSession", () => {
         sessionId: opts.sessionId ?? "hydra_session_src",
         lineageId: opts.lineageId,
         agentId: opts.agentId ?? "claude-code",
-        cwd: opts.cwd ?? "/work",
+        cwd: opts.cwd ?? WORK_CWD,
         ...(opts.title !== undefined ? { title: opts.title } : {}),
         ...(opts.currentModel !== undefined ? { currentModel: opts.currentModel } : {}),
         ...(opts.currentMode !== undefined ? { currentMode: opts.currentMode } : {}),

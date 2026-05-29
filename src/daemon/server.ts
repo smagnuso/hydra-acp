@@ -181,6 +181,7 @@ export async function startDaemon(
     logger: agentLogger,
     npmRegistry: config.npmRegistry,
     extensionCommands,
+    defaultCwd: config.defaultCwd,
   });
 
   const extensions = new ExtensionManager(extensionList(config), undefined, {

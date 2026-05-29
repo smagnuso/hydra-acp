@@ -31,6 +31,7 @@ import type { SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator } from "./synopsis-coordinator.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { paths } from "./paths.js";
+import { expandHome } from "./config.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
 import { encodeBundle, type Bundle } from "./bundle.js";
 import type {
@@ -177,6 +178,11 @@ export interface SessionManagerOptions {
   // registry across all sessions so an extension only has to register
   // once at connect time and every live session can dispatch to it.
   extensionCommands?: ExtensionCommandRegistry;
+  // Fallback cwd used when a resurrected session's recorded cwd no longer
+  // exists on disk (e.g. a `cat` session whose /tmp sandbox was cleaned
+  // up, or a bundle imported from another machine). May be "~"/"$HOME";
+  // expanded at use time. Defaults to "~".
+  defaultCwd?: string;
 }
 
 export class SessionManager {
@@ -200,6 +206,7 @@ export class SessionManager {
   private logger?: AgentLogger;
   private npmRegistry?: string;
   private extensionCommands?: ExtensionCommandRegistry;
+  private defaultCwd: string;
   // Background queue for ephemeral-agent synopsis generation. Runs
   // out-of-band so session close is instant; persists synopsis/title
   // via the same enqueueMetaWrite path the in-session handlers used.
@@ -225,6 +232,7 @@ export class SessionManager {
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
     this.extensionCommands = options.extensionCommands;
+    this.defaultCwd = options.defaultCwd ?? "~";
     this.synopsisCoordinator = new SynopsisCoordinator({
       registry: this.registry,
       store: this.store,
@@ -357,6 +365,19 @@ export class SessionManager {
     // transcript rather than calling session/load against an id this
     // install has never heard of.
     if (params.upstreamSessionId === "") {
+      return this.doResurrectFromImport(params);
+    }
+
+    // The agent's own session is pinned to the recorded cwd: claude-acp /
+    // Claude Code resume fails with `Path "…" does not exist` once that
+    // dir is gone (e.g. a `cat` session whose /tmp sandbox was cleaned
+    // up), and the cwd passed to session/load can't redirect it. So if the
+    // dir is missing, reseed a fresh agent session in the fallback cwd and
+    // replay history instead of resuming. The TUI repair path drives this
+    // explicitly via a resume hint with an empty upstreamSessionId; this
+    // covers every other entry point (session/prompt auto-resurrect,
+    // `session attach <id>`, the shim).
+    if (!(await this.dirExists(params.cwd))) {
       return this.doResurrectFromImport(params);
     }
 
@@ -549,9 +570,9 @@ export class SessionManager {
   private async doResurrectFromImport(params: ResurrectParams): Promise<Session> {
     // Bundles carry the exporter's cwd, which often doesn't exist on
     // this machine when pulling in a session from another user. Fall
-    // back to $HOME so the spawn doesn't fail with ENOENT; the merge-
+    // back to defaultCwd so the spawn doesn't fail with ENOENT; the merge-
     // write in attachManagerHooks persists the resolved cwd.
-    const cwd = await this.resolveImportCwd(params.cwd);
+    const cwd = await this.resolveResurrectCwd(params.cwd);
     const fresh = await this.bootstrapAgent({
       agentId: params.agentId,
       cwd,
@@ -624,16 +645,23 @@ export class SessionManager {
     return session;
   }
 
-  private async resolveImportCwd(cwd: string): Promise<string> {
+  private async dirExists(cwd: string): Promise<boolean> {
     try {
-      const stat = await fs.stat(cwd);
-      if (stat.isDirectory()) {
-        return cwd;
-      }
+      return (await fs.stat(cwd)).isDirectory();
     } catch {
-      void 0;
+      return false;
     }
-    return os.homedir();
+  }
+
+  // Resolve a recorded cwd for resurrect: use it if it still exists,
+  // otherwise fall back to the configured defaultCwd. Covers both bundles
+  // imported from another machine and local sessions (e.g. `cat`) whose
+  // recorded dir was cleaned up, so the reseed spawn never ENOENTs.
+  private async resolveResurrectCwd(cwd: string): Promise<string> {
+    if (await this.dirExists(cwd)) {
+      return cwd;
+    }
+    return expandHome(this.defaultCwd);
   }
 
   // Pull every session the agent itself remembers (across all cwds) and
@@ -1741,6 +1769,7 @@ export class SessionManager {
       agentModes?: PersistedAgentMode[];
       agentModels?: PersistedAgentModel[];
       interactive?: boolean;
+      cwd?: string;
     },
   ): Promise<void> {
     await this.enqueueMetaWrite(sessionId, async () => {
@@ -1771,6 +1800,7 @@ export class SessionManager {
         ...(update.interactive !== undefined
           ? { interactive: update.interactive }
           : {}),
+        ...(update.cwd !== undefined ? { cwd: update.cwd } : {}),
         updatedAt: new Date().toISOString(),
       });
     });
