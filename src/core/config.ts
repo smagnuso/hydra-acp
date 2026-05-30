@@ -183,7 +183,7 @@ export type TransformerConfig = TransformerBody & { name: string };
 export const HydraConfig = z.object({
   daemon: DaemonConfig.default({}),
   registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
-  defaultAgent: z.string().default("claude-acp"),
+  defaultAgent: z.string().default("opencode"),
   // Optional per-agent default model id. When a brand-new agent process
   // is spawned (session/new path), hydra issues session/set_model with
   // the matching entry so the user lands on their preferred model from

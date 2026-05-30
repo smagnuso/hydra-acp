@@ -68,6 +68,10 @@ import {
 import { runShim } from "./shim/proxy.js";
 import { runCat } from "./cli/commands/cat.js";
 import {
+  offerAgentPicker,
+  shouldOfferAgentPicker,
+} from "./cli/first-launch-agent.js";
+import {
   buildTitleFromArgv,
   setHydraProcessTitle,
 } from "./core/process-title.js";
@@ -616,6 +620,28 @@ async function dispatchTui(
   // than mid-session at session/new.
   if (base.agentId !== undefined) {
     await assertKnownAgent(base.agentId);
+  }
+  // First-launch: if the user never picked a default agent and didn't
+  // pass --agent, offer a picker before the TUI takes over. Enter sets
+  // the default; `s` is session-only; esc/q/^D aborts. Skipped for
+  // attach/readonly/drip flows (those already target a session) and when
+  // the agent list can't be fetched (we fall through to the schema
+  // default, opencode).
+  if (
+    base.agentId === undefined &&
+    base.sessionId === undefined &&
+    !readonly &&
+    flags.drip !== true &&
+    process.stdout.isTTY &&
+    (await shouldOfferAgentPicker())
+  ) {
+    const outcome = await offerAgentPicker();
+    if (outcome === "aborted") {
+      process.exit(0);
+    }
+    if (outcome !== "fetch-failed") {
+      base.agentId = outcome.agentId;
+    }
   }
   // Rewrite argv0 so `ps`/`top` show the full command (TUI vs which
   // session etc.) while `killall hydra` still finds every interactive

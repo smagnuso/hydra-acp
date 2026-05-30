@@ -156,7 +156,7 @@ describe("writeConfig", () => {
     await writeConfig(cfg);
     const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
     expect(raw.daemon.port).toBe(DEFAULT_DAEMON_PORT);
-    expect(raw.defaultAgent).toBe("claude-acp");
+    expect(raw.defaultAgent).toBe("opencode");
   });
 });
 
