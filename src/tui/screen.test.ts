@@ -1194,11 +1194,15 @@ describe("Selective Mouse Reporting probe + wheel", () => {
     expect(out).toContain("\x1b[=0;0w");
   });
 
-  it("does NOT emit disable sequence on stop() if never enabled", () => {
+  it("does NOT emit disable sequence on picker stop() if never enabled", () => {
     const screen = makeScreen();
     screen.start();
-    // Don't send a probe reply; protocol never enabled.
-    const out = captureStdout(() => screen.stop());
+    // Don't send a probe reply; protocol never enabled. The picker
+    // round-trip (keepFullscreen) skips the full emergency reset, so the
+    // uninstall optimization still suppresses the selective-mouse-off.
+    // The final-exit path deliberately sends it unconditionally as part
+    // of the idempotent emergencyTerminalReset() convergence.
+    const out = captureStdout(() => screen.stop({ keepFullscreen: true }));
     expect(out).not.toContain("\x1b[=0;0w");
   });
 

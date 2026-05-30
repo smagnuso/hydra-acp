@@ -435,6 +435,16 @@ export class Screen {
     // is correctly rejected by paintRow/placeCursor/repaint.
     this.started = false;
     if (!opts.keepFullscreen) {
+      // Converge the graceful exit on the same full reset the crash /
+      // signal path uses. terminal-kit's grabInput(false) above leaves
+      // SGR mouse mode (\x1b[?1006) enabled — it never disables it — so
+      // a clean quit with mouse capture on would leave the host shell
+      // subtly wedged until a manual `reset`. Running the shared
+      // sequence here closes that gap and keeps both exit paths
+      // identical. Sequences are idempotent, so the redundant
+      // ?1049l/?7h/?25h are harmless; fullscreen(false) still runs after
+      // to keep terminal-kit's own internal state in sync.
+      emergencyTerminalReset();
       this.term.fullscreen(false);
       this.term("\n");
     }
