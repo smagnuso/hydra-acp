@@ -103,10 +103,10 @@ export const ALL_COLUMNS: ColumnKey[] = [
 export const DEFAULT_COLUMNS: ColumnKey[] = [
   "session",
   "state",
-  "agent",
   "age",
   "cwd",
   "title",
+  "agent",
   "cost",
 ];
 

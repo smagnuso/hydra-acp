@@ -333,6 +333,9 @@ export async function pickSession(
   let mode: Mode = "normal";
   let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
   // Find-session state. All transient — cleared when exitFind() fires.
+  // findLayerActive gates the bracketed-paste interceptor so pasted text
+  // reaches findComposer while the find dialog is open.
+  let findLayerActive = false;
   let findSubMode: "input" | "results" = "input";
   let findComposer = new InputDispatcher({
     history: [],
@@ -1129,6 +1132,20 @@ export async function pickSession(
 
   const findQueryText = (): string => findComposer.state().buffer.join("\n");
 
+  // Feed pasted text into findComposer and reflow the find box. Called from
+  // the bracketed-paste interceptor when the find dialog is open and the
+  // input box is focused.
+  const feedFindPaste = (text: string): void => {
+    const prevRows = findBoxRows;
+    findComposer.feed({ type: "paste", text });
+    computeFindBoxLayout();
+    if (findBoxRows !== prevRows) {
+      renderFind();
+    } else {
+      repaintFindBoxBodyRows();
+    }
+  };
+
   // Kick off the search HTTP call from the input phase. Scopes to the
   // picker's currently `visible` ids so cwd-only/host/`/` filters
   // compose with the find scope. While the call is in flight, mode stays
@@ -1313,7 +1330,11 @@ export async function pickSession(
         .replace(/\r\n?/g, "\n");
       pasteBuffer = "";
       const remaining = text.slice(endIdx + PASTE_END.length);
-      if (selectedIdx === 0 && !searchActive) {
+      if (findLayerActive) {
+        if (findSubMode === "input" && !findInFlight) {
+          feedFindPaste(pasted);
+        }
+      } else if (selectedIdx === 0 && !searchActive) {
         composer.feed({ type: "paste", text: pasted });
         const after = composer.state();
         const newVr = computePromptVisualRows(after.buffer, composerRoom);
@@ -1384,6 +1405,7 @@ export async function pickSession(
       findError = null;
       findInFlight = false;
       findSubMode = "input";
+      findLayerActive = false;
       popLayer(); // restores picker layer → renderFromScratch
     };
     const dispatch = (
@@ -1648,7 +1670,10 @@ export async function pickSession(
         paintIndicator();
         return;
       }
-      findComposer = new InputDispatcher({ history: [] });
+      findComposer = new InputDispatcher({
+        history: [],
+        collapsePastes: false,
+      });
       findResults = [];
       findTruncated = false;
       findSelectedIdx = 0;
@@ -1657,6 +1682,7 @@ export async function pickSession(
       findError = null;
       findInFlight = false;
       findSubMode = "input";
+      findLayerActive = true;
       computeFindBoxLayout();
       renderFind();
 
