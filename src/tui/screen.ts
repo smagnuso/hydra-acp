@@ -26,6 +26,11 @@ export interface ScreenOptions {
   term: Terminal;
   dispatcher: InputDispatcher;
   onKey: (events: KeyEvent[]) => void;
+  // Invoked with the keyed-block key under a left-click, when full mouse
+  // capture is on and the click lands on a row owned by an upserted block
+  // (e.g. "tools:3", "plan", "editdiff:<id>"). Lets the app toggle a
+  // single block's expand/collapse. Clicks on unkeyed rows are ignored.
+  onBlockClick?: (key: string) => void;
   // Minimum ms between full-screen repaints driven by content events.
   // 0 disables throttling. User-action repaints (scroll, modal, resize,
   // /clear, ^L) bypass this regardless. Default 1000 (1 Hz).
@@ -162,6 +167,7 @@ export class Screen {
   private term: Terminal;
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
+  private onBlockClick: ((key: string) => void) | undefined;
   private lines: FormattedLine[] = [];
   // Tracks contiguous blocks of lines that callers may want to mutate in
   // place (e.g. tool-call rows that update from "pending" to "completed",
@@ -318,6 +324,7 @@ export class Screen {
     this.term = opts.term;
     this.dispatcher = opts.dispatcher;
     this.onKey = opts.onKey;
+    this.onBlockClick = opts.onBlockClick;
     this.contentRepaintThrottleMs =
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
     this.maxScrollbackLines =
@@ -327,7 +334,7 @@ export class Screen {
     this.readonly = opts.readonly ?? false;
     this.resizeHandler = () => this.repaint();
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
-    this.mouseHandler = (name) => this.handleMouse(name);
+    this.mouseHandler = (name, data) => this.handleMouse(name, data);
     this.rawStdinHandler = (chunk) => this.handleRawStdin(chunk);
   }
 
@@ -974,6 +981,12 @@ export class Screen {
     if (newLines.length === 0) {
       return;
     }
+    // Stamp each line with its owning key so a click can resolve it back
+    // to the block even after clearKey forgets the keyedBlocks entry (the
+    // lines stay painted, carrying the stamp).
+    for (const line of newLines) {
+      line.blockKey = key;
+    }
     const existing = this.keyedBlocks.get(key);
     // Only reset the streaming flag when this op actually disturbs the
     // last line of scrollback. Mid-array splices (e.g. the 5-second
@@ -1503,6 +1516,13 @@ export class Screen {
     this.repaint();
   }
 
+  // Force an immediate full repaint, bypassing the content throttle. For
+  // user-driven actions (e.g. click-to-toggle a block) that must feel
+  // instant rather than wait out the throttle window.
+  repaintNow(): void {
+    this.repaint();
+  }
+
   // While a permission prompt is active, the prompt area is replaced with
   // an interactive options list. Pass null to dismiss.
   setPermissionPrompt(spec: PermissionPromptSpec | null): void {
@@ -1657,7 +1677,7 @@ export class Screen {
     }
   }
 
-  private handleMouse(name: string): void {
+  private handleMouse(name: string, data?: unknown): void {
     // terminal-kit emits MOUSE_WHEEL_{UP,DOWN} (and MOUSE_LEFT_BUTTON_*,
     // etc.) on the "mouse" event channel, not "key", when grabInput's
     // mouse: "button" is set.
@@ -1669,6 +1689,55 @@ export class Screen {
       this.scrollBy(-3);
       return;
     }
+    // Left-click on a keyed scrollback block toggles that single block's
+    // expand/collapse via the app. Only consulted under full mouse
+    // capture (this path is unreachable in wheel-only/selective mode,
+    // which never reports button events). Clicks on unkeyed rows fall
+    // through silently so they don't disturb anything.
+    if (name === "MOUSE_LEFT_BUTTON_PRESSED" && this.onBlockClick) {
+      const y =
+        data && typeof data === "object" && "y" in data
+          ? Number((data as { y: unknown }).y)
+          : NaN;
+      if (Number.isFinite(y)) {
+        const key = this.keyAtRow(y);
+        if (key !== null) {
+          this.onBlockClick(key);
+        }
+      }
+    }
+  }
+
+  // Map a 1-based terminal row to the key of the block whose line is
+  // painted there, or null. Mirrors drawScrollback's row→line mapping:
+  // the same wrapTail slice and bottom-anchored padding, then reads the
+  // blockKey stamped on the wrapped chunk. Reading the stamp (rather than
+  // scanning keyedBlocks) means a click resolves even on a frozen block
+  // whose key was already forgotten via clearKey — the line stays painted
+  // and carries its stamp. Returns null for padding rows, rows outside
+  // the scrollback area, or plainly-appended (unkeyed) lines.
+  private keyAtRow(y: number): string | null {
+    const w = this.term.width;
+    const top = 1;
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0) {
+      return null;
+    }
+    const rowIdx = y - top;
+    if (rowIdx < 0 || rowIdx >= visibleRows) {
+      return null;
+    }
+    const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
+    const end = wrapped.length - this.scrollOffset;
+    const start = Math.max(0, end - visibleRows);
+    const slice = wrapped.slice(start, end);
+    const padTop = Math.max(0, visibleRows - slice.length);
+    const sliceIdx = rowIdx - padTop;
+    if (sliceIdx < 0 || sliceIdx >= slice.length) {
+      return null;
+    }
+    const clicked = slice[sliceIdx];
+    return clicked?.blockKey ?? null;
   }
 
   scrollBy(delta: number): void {
@@ -3079,6 +3148,9 @@ export class Screen {
       }
       if (line.bodyStyle !== undefined) {
         wrappedLine.bodyStyle = line.bodyStyle;
+      }
+      if (line.blockKey !== undefined) {
+        wrappedLine.blockKey = line.blockKey;
       }
       if (line.fillRow) {
         wrappedLine.fillRow = true;

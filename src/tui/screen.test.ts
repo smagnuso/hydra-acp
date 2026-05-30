@@ -1221,3 +1221,156 @@ describe("Selective Mouse Reporting probe + wheel", () => {
     screen.stop();
   });
 });
+
+// Click-to-toggle: a left-click resolves to the keyed block painted under
+// it (keyAtRow) and is reported via onBlockClick — but only under full
+// mouse capture.
+describe("Screen block-click routing", () => {
+  // A taller/wider mock than makeScreen so scrollbackVisibleRows() is
+  // positive and the row→line mapping has real geometry to walk.
+  function makeTallScreen(opts: {
+    mouse?: boolean;
+    onBlockClick?: (key: string) => void;
+    width?: number;
+    height?: number;
+  }): Screen {
+    const width = opts.width ?? 40;
+    const height = opts.height ?? 24;
+    const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
+      apply: () => term,
+      get(_target, prop) {
+        if (prop === "width") return width;
+        if (prop === "height") return height;
+        if (prop === "on" || prop === "off") return () => undefined;
+        return new Proxy(() => term, handler);
+      },
+    };
+    const term = new Proxy(
+      function noop() {} as (...args: unknown[]) => unknown,
+      handler,
+    ) as unknown as Terminal;
+    const dispatcher = {
+      state: () => ({
+        buffer: [""],
+        row: 0,
+        col: 0,
+        planMode: false,
+        historyIndex: -1,
+        queueIndex: -1,
+        attachments: [],
+        historySearchQuery: null,
+      }),
+    } as unknown as InputDispatcher;
+    return new Screen({
+      term,
+      dispatcher,
+      onKey: () => {},
+      onBlockClick: opts.onBlockClick,
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: opts.mouse ?? false,
+    });
+  }
+
+  function callKeyAtRow(screen: Screen, y: number): string | null {
+    return (
+      screen as unknown as { keyAtRow: (y: number) => string | null }
+    ).keyAtRow(y);
+  }
+
+  function dispatchMouse(screen: Screen, name: string, data?: unknown): void {
+    (
+      screen as unknown as {
+        handleMouse: (name: string, data?: unknown) => void;
+      }
+    ).handleMouse(name, data);
+  }
+
+  function visibleRows(screen: Screen): number {
+    return (
+      screen as unknown as { scrollbackVisibleRows: () => number }
+    ).scrollbackVisibleRows();
+  }
+
+  it("keyAtRow maps a click row to the keyed block painted there", () => {
+    const screen = makeTallScreen({ mouse: true });
+    // Three single-row blocks, bottom-anchored in the scrollback area.
+    screen.upsertLines("tools:1", [{ body: "tool-header" }]);
+    screen.upsertLines("plan", [{ body: "plan-row" }]);
+    screen.upsertLines("editdiff:abc", [{ body: "diff-row" }]);
+    const rows = visibleRows(screen);
+    // Content is bottom-anchored: with 3 rows of content, the last three
+    // terminal rows (1-based) of the scrollback area hold the blocks.
+    expect(callKeyAtRow(screen, rows - 2)).toBe("tools:1");
+    expect(callKeyAtRow(screen, rows - 1)).toBe("plan");
+    expect(callKeyAtRow(screen, rows)).toBe("editdiff:abc");
+  });
+
+  it("keyAtRow still resolves a frozen block after clearKey", () => {
+    // A past-turn block: clearKey forgets the keyedBlocks entry but leaves
+    // the line painted, carrying its blockKey stamp. The click must still
+    // resolve so history blocks stay clickable.
+    const screen = makeTallScreen({ mouse: true });
+    screen.upsertLines("tools:1", [{ body: "frozen-tool-row" }]);
+    screen.clearKey("tools:1");
+    expect(
+      (
+        screen as unknown as {
+          keyedBlocks: Map<string, unknown>;
+        }
+      ).keyedBlocks.has("tools:1"),
+    ).toBe(false);
+    expect(callKeyAtRow(screen, visibleRows(screen))).toBe("tools:1");
+  });
+
+  it("keyAtRow returns null for padding rows above the content", () => {
+    const screen = makeTallScreen({ mouse: true });
+    screen.upsertLines("tools:1", [{ body: "only-row" }]);
+    // Row 1 is in the top padding (content is anchored at the bottom).
+    expect(callKeyAtRow(screen, 1)).toBeNull();
+  });
+
+  it("keyAtRow returns null for rows outside the scrollback area", () => {
+    const screen = makeTallScreen({ mouse: true });
+    screen.upsertLines("tools:1", [{ body: "only-row" }]);
+    expect(callKeyAtRow(screen, 0)).toBeNull();
+    expect(callKeyAtRow(screen, visibleRows(screen) + 1)).toBeNull();
+  });
+
+  it("left-click fires onBlockClick with the resolved key", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key) => clicks.push(key),
+    });
+    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", {
+      y: visibleRows(screen),
+    });
+    expect(clicks).toEqual(["editdiff:xyz"]);
+  });
+
+  it("left-click on an unkeyed row does not fire onBlockClick", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key) => clicks.push(key),
+    });
+    screen.upsertLines("tools:1", [{ body: "only-row" }]);
+    // Top padding row — no block there.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { y: 1 });
+    expect(clicks).toEqual([]);
+  });
+
+  it("wheel events never fire onBlockClick", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key) => clicks.push(key),
+    });
+    screen.upsertLines("tools:1", [{ body: "only-row" }]);
+    dispatchMouse(screen, "MOUSE_WHEEL_UP", { y: visibleRows(screen) });
+    dispatchMouse(screen, "MOUSE_WHEEL_DOWN", { y: visibleRows(screen) });
+    expect(clicks).toEqual([]);
+  });
+});

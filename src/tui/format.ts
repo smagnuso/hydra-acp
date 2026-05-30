@@ -57,6 +57,13 @@ export interface FormattedLine {
   // of the attached image appears in scrollback. Non-iTerm2 terminals
   // ignore the field and only the body (filename / size) is shown.
   iterm2Image?: { data: string; heightCells: number };
+  // The upsert key of the block this line belongs to, stamped by
+  // Screen.upsertLines. Lets a left-click resolve the line back to its
+  // owning block (for click-to-expand) even after the key is forgotten
+  // via clearKey — the lines stay painted, so the stamp outlives the
+  // keyedBlocks entry. Plain appended lines (appendLine/appendLines)
+  // carry no key.
+  blockKey?: string;
 }
 
 export interface FormatEventOptions {
@@ -992,12 +999,25 @@ export function formatEditDiffBlock(
   mode: FileUpdateMode,
 ): FormattedLine[] {
   const lines: FormattedLine[] = [];
+  // Summarize the change as (+added -removed) so the one-line mark conveys
+  // the edit's magnitude. Counts come from the same LCS op stream the diff
+  // body uses, so they always agree with the rendered hunk. Omitted when
+  // both are zero (e.g. a no-op or pure rename).
+  const counts = countDiffChanges(diff);
+  const summaryParts: string[] = [];
+  if (counts.added > 0) {
+    summaryParts.push(`+${counts.added}`);
+  }
+  if (counts.removed > 0) {
+    summaryParts.push(`-${counts.removed}`);
+  }
+  const summary = summaryParts.length > 0 ? ` (${summaryParts.join(" ")})` : "";
   // Build the header lazily so the marker reflects whether a diff body
   // actually follows: ▾ (open) when an expanded body is rendered below,
   // ▸ (closed) for the terse one-line "edit" mark or a header-only diff.
   const header = (open: boolean): FormattedLine => ({
     prefix: "  ",
-    body: `${open ? "▾" : "▸"} Edited ${sanitizeSingleLine(shortenHomePath(diff.path!))}`,
+    body: `${open ? "▾" : "▸"} Edited ${sanitizeSingleLine(shortenHomePath(diff.path!))}${summary}`,
     bodyStyle: "dim",
   });
   if (mode === "edit") {
@@ -1031,6 +1051,41 @@ export function formatEditDiffBlock(
   return lines;
 }
 
+// Split an edit's old/new text into lines the way buildUnifiedDiff does:
+// a trailing empty line from a final \n is dropped so a 3-line edit
+// doesn't count as 4. Shared so the header summary and the rendered body
+// always agree on line counts.
+function diffLinePair(diff: EditDiff): { oldLines: string[]; newLines: string[] } {
+  const oldLines = sanitizeWireText(diff.oldText).split("\n");
+  const newLines = sanitizeWireText(diff.newText).split("\n");
+  if (oldLines.length > 0 && oldLines[oldLines.length - 1] === "") {
+    oldLines.pop();
+  }
+  if (newLines.length > 0 && newLines[newLines.length - 1] === "") {
+    newLines.pop();
+  }
+  return { oldLines, newLines };
+}
+
+// Count added / removed lines for an edit via the same LCS op stream the
+// unified-diff body uses, so the (+N -M) header summary matches the hunk.
+export function countDiffChanges(diff: EditDiff): {
+  added: number;
+  removed: number;
+} {
+  const { oldLines, newLines } = diffLinePair(diff);
+  let added = 0;
+  let removed = 0;
+  for (const op of diffLines(oldLines, newLines)) {
+    if (op.op === "+") {
+      added++;
+    } else if (op.op === "-") {
+      removed++;
+    }
+  }
+  return { added, removed };
+}
+
 export interface BuildUnifiedDiffOptions {
   // Cap rendered lines (including the truncation trailer). Defaults to
   // EDIT_DIFF_MAX_LINES for the TUI scrollback path; callers like
@@ -1047,16 +1102,7 @@ export function buildUnifiedDiff(
   opts: BuildUnifiedDiffOptions = {},
 ): string {
   const maxLines = opts.maxLines ?? EDIT_DIFF_MAX_LINES;
-  const oldLines = sanitizeWireText(diff.oldText).split("\n");
-  const newLines = sanitizeWireText(diff.newText).split("\n");
-  // Drop a trailing empty line that came from a final \n in the source,
-  // so a 3-line edit doesn't render as 4 lines with an empty tail.
-  if (oldLines.length > 0 && oldLines[oldLines.length - 1] === "") {
-    oldLines.pop();
-  }
-  if (newLines.length > 0 && newLines[newLines.length - 1] === "") {
-    newLines.pop();
-  }
+  const { oldLines, newLines } = diffLinePair(diff);
   const ops = diffLines(oldLines, newLines);
   const rendered: string[] = [];
   for (let idx = 0; idx < ops.length; idx++) {

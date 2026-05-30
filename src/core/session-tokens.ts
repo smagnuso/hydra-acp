@@ -212,21 +212,33 @@ export class SessionTokenStore {
     }, WRITE_DEBOUNCE_MS);
   }
 
-  private async persist(): Promise<void> {
-    if (this.writeInflight) {
-      await this.writeInflight;
-    }
-    const records = Array.from(this.records.values());
-    this.writeInflight = writeJsonAtomic(
-      tokensFilePath(),
-      { records },
-      { mode: 0o600 },
-    );
-    try {
-      await this.writeInflight;
-    } finally {
-      this.writeInflight = null;
-    }
+  // Serialize writes by chaining onto whatever write is in flight. Two
+  // concurrent persists (e.g. a debounced scheduleWrite timer firing while
+  // flush() awaits) would otherwise both write a temp file and race their
+  // renames onto the same path — the older snapshot could win. Chaining
+  // guarantees writes run one after another, each snapshotting records at
+  // the moment it actually runs, so the final on-disk state reflects the
+  // latest records. The returned promise resolves once THIS persist's
+  // write has completed.
+  private persist(): Promise<void> {
+    const run = (this.writeInflight ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() =>
+        writeJsonAtomic(
+          tokensFilePath(),
+          { records: Array.from(this.records.values()) },
+          { mode: 0o600 },
+        ),
+      );
+    this.writeInflight = run;
+    // Clear the inflight handle once we settle, but only if no later
+    // persist has already chained on (which would have replaced it).
+    run.catch(() => undefined).finally(() => {
+      if (this.writeInflight === run) {
+        this.writeInflight = null;
+      }
+    });
+    return run;
   }
 }
 

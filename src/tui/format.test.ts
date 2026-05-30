@@ -570,7 +570,7 @@ describe("formatEditDiffBlock", () => {
     );
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({
-      body: "▸ Edited /repo/src/foo.ts",
+      body: "▸ Edited /repo/src/foo.ts (+1 -1)",
       bodyStyle: "dim",
     });
   });
@@ -588,7 +588,7 @@ describe("formatEditDiffBlock", () => {
     expect(lines).toHaveLength(4);
     expect(lines[0]?.body).toBe("");
     expect(lines[1]).toMatchObject({
-      body: "▾ Edited /repo/src/foo.ts",
+      body: "▾ Edited /repo/src/foo.ts (+1 -1)",
       bodyStyle: "dim",
     });
     expect(lines[2]?.bodyStyle).toBe("code");
@@ -620,7 +620,28 @@ describe("formatEditDiffBlock", () => {
       { path: `${home}/dev/proj/foo.ts`, oldText: "x", newText: "y" },
       "edit",
     );
-    expect(lines[0]?.body).toBe("▸ Edited ~/dev/proj/foo.ts");
+    expect(lines[0]?.body).toBe("▸ Edited ~/dev/proj/foo.ts (+1 -1)");
+  });
+
+  it("summarizes added-only and removed-only edits", () => {
+    const added = formatEditDiffBlock(
+      { path: "/repo/a.ts", oldText: "", newText: "l1\nl2\nl3\n" },
+      "edit",
+    );
+    expect(added[0]?.body).toBe("▸ Edited /repo/a.ts (+3)");
+    const removed = formatEditDiffBlock(
+      { path: "/repo/b.ts", oldText: "l1\nl2\n", newText: "" },
+      "edit",
+    );
+    expect(removed[0]?.body).toBe("▸ Edited /repo/b.ts (-2)");
+  });
+
+  it("omits the summary when nothing changed", () => {
+    const lines = formatEditDiffBlock(
+      { path: "/repo/c.ts", oldText: "same\n", newText: "same\n" },
+      "edit",
+    );
+    expect(lines[0]?.body).toBe("▸ Edited /repo/c.ts");
   });
 });
 

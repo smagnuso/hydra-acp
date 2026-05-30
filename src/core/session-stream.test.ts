@@ -80,11 +80,18 @@ describe("Session stream lifecycle", () => {
       });
       expect(result.filePath).toBe(path.join(dir, "sess_stream.log"));
       session.streamWrite(Buffer.from("file-mode bytes\n").toString("base64"));
-      // Drain via the public streamRead path so the test doesn't reach
-      // into private buffer internals.
-      await new Promise((r) => setImmediate(r));
-      await new Promise((r) => setImmediate(r));
-      const onDisk = await fsp.readFile(result.filePath!, "utf8");
+      // File writes are async/fire-and-forget, so a fixed number of ticks
+      // can race under parallel load. Poll the file until the bytes land
+      // (or the deadline trips) — same pattern as the unlink test below.
+      const deadline = Date.now() + 1000;
+      let onDisk = "";
+      while (Date.now() < deadline) {
+        onDisk = await fsp.readFile(result.filePath!, "utf8").catch(() => "");
+        if (onDisk === "file-mode bytes\n") {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
       expect(onDisk).toBe("file-mode bytes\n");
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });

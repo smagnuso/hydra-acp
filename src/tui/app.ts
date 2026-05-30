@@ -291,7 +291,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const term = termkit.terminal;
 
   // Filled in by runSession as soon as a session is attached/created.
-  // Used to print a "To resume: …" hint on the way out so the user
+  // Used to print a "Coninue: …" hint on the way out so the user
   // doesn't have to dig through `hydra-acp sessions list` to come back.
   const exitHint: { sessionId?: string; readonly?: boolean } = {};
   // TUI-process-wide view preferences. Each runSession() invocation reads
@@ -382,7 +382,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     const short = stripHydraSessionPrefix(exitHint.sessionId);
     const flags = exitHint.readonly ? " --readonly" : "";
     process.stdout.write(
-      `To resume: ${invokedBinName()} tui --session ${short}${flags}\n`,
+      `Continue: ${invokedBinName()} --session ${short}${flags}\n`,
     );
   }
 }
@@ -1329,6 +1329,12 @@ async function runSession(
     mouse: viewPrefs.mouseEnabled,
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
+    // Click a collapsed/expanded scrollback block to toggle just that one
+    // block (the ^O dialog toggles all blocks of a type session-wide).
+    // Routes by key prefix to the matching per-block override.
+    onBlockClick: (key: string) => {
+      handleBlockClick(key);
+    },
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
         if (pendingPermission && tryHandlePermissionKey(ev)) {
@@ -1803,10 +1809,13 @@ async function runSession(
     switch (id) {
       case "tools":
         viewPrefs.toolsExpanded = !viewPrefs.toolsExpanded;
-        renderToolsBlock();
+        // Global toggle wins over any per-block click overrides.
+        toolsOverrides.clear();
+        reRenderAllTools();
         break;
       case "plan":
         viewPrefs.planExpanded = !viewPrefs.planExpanded;
+        planOverride = null;
         rerenderPlan();
         break;
       case "thoughts":
@@ -1816,6 +1825,8 @@ async function runSession(
       case "diffs":
         viewPrefs.showFileUpdates =
           viewPrefs.showFileUpdates === "diff" ? "edit" : "diff";
+        // Global toggle wins over any per-block click overrides.
+        editDiffOverrides.clear();
         // Re-converge every diff in scrollback (this turn and past turns)
         // to the new mode: "diff" surfaces full bodies, "edit" shrinks
         // them to one-line marks.
@@ -2783,9 +2794,10 @@ async function runSession(
         toolsBlockStartedAt = null;
         toolsBlockEndedAt = null;
         toolsBlockStopReason = null;
-        lastEditMarkPath = null;
-        turnHasShownProse = false;
         renderedEditDiffs.clear();
+        editDiffOverrides.clear();
+        renderedTools.clear();
+        toolsOverrides.clear();
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -3028,6 +3040,11 @@ async function runSession(
   // can re-converge every past diff to the new mode. Cleared only when
   // scrollback itself is cleared (/clear).
   const renderedEditDiffs = new Map<string, EditDiff>();
+  // Per-block expand overrides set by clicking an edit-diff block. Keyed by
+  // toolCallId; true = force the full "diff" body, false = force the
+  // one-line "edit" mark. Layered over viewPrefs.showFileUpdates for that
+  // one block. Cleared when the global ^O File-updates toggle fires.
+  const editDiffOverrides = new Map<string, boolean>();
   // toolCallId → Claude ExitPlanMode plan + latest status. Lives until
   // turn end (cleared alongside toolStates) so a permission resolution
   // landing as a tool_call_update can amend the rendered block in place.
@@ -3036,6 +3053,31 @@ async function runSession(
   // "most recent K" window in the tools block and is the source of
   // truth for the "ran N tools" header count.
   const toolCallOrder: string[] = [];
+  // Per-turn key for the tools block. A fresh key each turn (rather than a
+  // single reused "tools") lets every turn's frozen block stay individually
+  // addressable for click-to-expand. Bumped in startToolsBlock; the live
+  // block upserts under it, and the freeze sites clear it.
+  let toolsBlockSeq = 0;
+  let currentToolsKey = `tools:${toolsBlockSeq}`;
+  // Snapshot of every frozen tools block, keyed by its per-turn key, so a
+  // click on a past turn can re-render it at a different expand level even
+  // after toolStates/toolCallOrder are wiped. Mirrors renderedEditDiffs.
+  // Cleared only when scrollback itself is cleared (/clear).
+  const renderedTools = new Map<
+    string,
+    {
+      order: string[];
+      states: Map<string, ToolLineState>;
+      startedAt: number;
+      endedAt: number;
+      stopReason: string | null;
+    }
+  >();
+  // Per-block expand overrides set by clicking a tools block. Keyed by the
+  // per-turn tools key; value is the desired expanded state. Layered over
+  // viewPrefs.toolsExpanded for that one block. Cleared when the global ^O
+  // Tools toggle fires (global wins).
+  const toolsOverrides = new Map<string, boolean>();
   // Wall-clock bounds for the active tools block. startedAt is set on
   // the first tool call of the turn; endedAt is set when the turn
   // completes and freezes the block (header switches from "Xs" to
@@ -3052,6 +3094,11 @@ async function runSession(
   // stopped state (header red, in-progress entries dimmed) before the
   // splice point is cleared.
   let lastPlanEvent: Extract<RenderEvent, { kind: "plan" }> | null = null;
+  // Per-block expand override for the live plan, set by clicking it. true =
+  // expanded, false = collapsed, null = follow the global ^O Plan setting.
+  // Plans don't persist across turns, so this only ever affects the live
+  // block; it's reset at each turn boundary alongside lastPlanEvent.
+  let planOverride: boolean | null = null;
   // How many recent tool rows the collapsed view shows; older ones get
   // rolled into the "N hidden" counter in the header. 0 disables the
   // cap so every tool row stays visible.
@@ -3062,9 +3109,10 @@ async function runSession(
   // the cap live — expanded → Infinity (show every entry), else the
   // configured maxPlanItems window.
   const PLAN_VISIBLE_LIMIT = config.tui.maxPlanItems;
-  const planFormatOptions = (): { maxPlanItems: number } => ({
-    maxPlanItems: viewPrefs.planExpanded ? Infinity : PLAN_VISIBLE_LIMIT,
-  });
+  const planFormatOptions = (): { maxPlanItems: number } => {
+    const expanded = planOverride ?? viewPrefs.planExpanded;
+    return { maxPlanItems: expanded ? Infinity : PLAN_VISIBLE_LIMIT };
+  };
   // Re-render the current turn's plan block under the active expand
   // setting. Driven by the ^O "Plan" toggle. A no-op once the turn ended
   // (lastPlanEvent is cleared and the block frozen) — only the live plan
@@ -3162,32 +3210,37 @@ async function runSession(
     thoughtBuffer = "";
   };
 
-  const renderToolsBlock = (): void => {
-    if (toolsBlockStartedAt === null) {
-      return;
-    }
-    const total = toolCallOrder.length;
+  // Pure tools-block renderer. All turn-scoped inputs are passed in so it
+  // serves both the live block (current toolStates/order) and a click-driven
+  // re-render of a frozen snapshot. `expanded` decides whether the rolling
+  // collapse cap applies; `endedAt` null means the block is still live.
+  const buildToolsLines = (args: {
+    order: string[];
+    states: Map<string, ToolLineState>;
+    startedAt: number;
+    endedAt: number | null;
+    stopReason: string | null;
+    expanded: boolean;
+  }): FormattedLine[] => {
+    const { order, states, startedAt, endedAt, stopReason: stop } = args;
+    const total = order.length;
     // limit <= 0 disables the cap — render every row regardless of
-    // toolsExpanded so the ^O toggle is a no-op in unlimited mode.
+    // expanded so the ^O toggle is a no-op in unlimited mode.
     const capped = TOOLS_COLLAPSED_LIMIT > 0;
     const visibleIds =
-      !capped || viewPrefs.toolsExpanded
-        ? toolCallOrder
-        : toolCallOrder.slice(Math.max(0, total - TOOLS_COLLAPSED_LIMIT));
+      !capped || args.expanded
+        ? order
+        : order.slice(Math.max(0, total - TOOLS_COLLAPSED_LIMIT));
     const hidden = total - visibleIds.length;
-    const inProgress = toolsBlockEndedAt === null;
-    const end = toolsBlockEndedAt ?? Date.now();
-    const elapsed = end - toolsBlockStartedAt;
+    const inProgress = endedAt === null;
+    const end = endedAt ?? Date.now();
+    const elapsed = end - startedAt;
     // Any frozen non-success stopReason gets the loud "stopped (<reason>)"
     // treatment so cancel/refusal/max_tokens etc. aren't visually identical
     // to a normal end_turn finish. Amended is the exception: a deliberate
     // user replacement, not a failure — rendered dim with a softer label.
     const stoppedReason =
-      !inProgress &&
-      toolsBlockStopReason !== null &&
-      toolsBlockStopReason !== "end_turn"
-        ? toolsBlockStopReason
-        : null;
+      !inProgress && stop !== null && stop !== "end_turn" ? stop : null;
     const isAmended = stoppedReason === "amended";
     const stoppedLabel = isAmended
       ? `amended · ${formatElapsed(elapsed)}`
@@ -3246,12 +3299,79 @@ async function runSession(
       },
     ];
     for (const id of visibleIds) {
-      const state = toolStates.get(id);
+      const state = states.get(id);
       if (state) {
         lines.push(...formatToolLine(state, end));
       }
     }
-    screen.upsertLines("tools", lines);
+    return lines;
+  };
+
+  // Whether the tools block for `key` should render expanded: a per-block
+  // click override wins; otherwise the global ^O Tools setting applies.
+  const toolsExpandedFor = (key: string): boolean =>
+    toolsOverrides.get(key) ?? viewPrefs.toolsExpanded;
+
+  // Render the live (current-turn) tools block under its per-turn key.
+  const renderToolsBlock = (): void => {
+    if (toolsBlockStartedAt === null) {
+      return;
+    }
+    const lines = buildToolsLines({
+      order: toolCallOrder,
+      states: toolStates,
+      startedAt: toolsBlockStartedAt,
+      endedAt: toolsBlockEndedAt,
+      stopReason: toolsBlockStopReason,
+      expanded: toolsExpandedFor(currentToolsKey),
+    });
+    screen.upsertLines(currentToolsKey, lines);
+  };
+
+  // Re-render a frozen tools snapshot in place (click-to-expand on a past
+  // turn). No-op if we don't have a snapshot for the key.
+  const renderToolsBlockFor = (key: string): void => {
+    const snap = renderedTools.get(key);
+    if (!snap) {
+      return;
+    }
+    const lines = buildToolsLines({
+      order: snap.order,
+      states: snap.states,
+      startedAt: snap.startedAt,
+      endedAt: snap.endedAt,
+      stopReason: snap.stopReason,
+      expanded: toolsExpandedFor(key),
+    });
+    screen.upsertLines(key, lines);
+  };
+
+  // Re-render every tools block (live + frozen snapshots) under the current
+  // global setting. Driven by the ^O Tools toggle, which must reach past
+  // turns too. The live block re-renders only if its key isn't also a
+  // snapshot (a frozen turn whose key collides — it won't, keys are unique).
+  const reRenderAllTools = (): void => {
+    if (toolsBlockStartedAt !== null && !renderedTools.has(currentToolsKey)) {
+      renderToolsBlock();
+    }
+    for (const key of renderedTools.keys()) {
+      renderToolsBlockFor(key);
+    }
+  };
+
+  // Capture the just-frozen tools block so a later click can re-render it.
+  // Called at each freeze site right before clearKey wipes the live state.
+  const snapshotToolsBlock = (): void => {
+    if (toolsBlockStartedAt === null) {
+      return;
+    }
+    renderedTools.set(currentToolsKey, {
+      order: [...toolCallOrder],
+      states: new Map(toolStates),
+      startedAt: toolsBlockStartedAt,
+      endedAt: toolsBlockEndedAt ?? Date.now(),
+      stopReason: toolsBlockStopReason,
+    });
   };
 
   // Anchor a fresh tools block at the current bottom of scrollback so the
@@ -3260,6 +3380,8 @@ async function runSession(
   // user-text handler so it fires for both our own prompts (synthesized
   // via runPrompt) and peers' prompts (broadcast by the daemon).
   const startToolsBlock = (): void => {
+    toolsBlockSeq += 1;
+    currentToolsKey = `tools:${toolsBlockSeq}`;
     toolsBlockStartedAt = Date.now();
     toolsBlockEndedAt = null;
     toolsBlockStopReason = null;
@@ -3315,22 +3437,6 @@ async function runSession(
     }
   };
 
-  // Path of the most recently emitted "edit" mode mark. Used to drop a
-  // consecutive same-path mark so a series of edits to one file shows a
-  // single "▸ Edited foo.ts" line. Reset on agent-text and visible
-  // agent-thought (so a fresh round of edits after prose shows again),
-  // and at turn boundaries. "diff" mode never consults this — every
-  // diff is informative on its own.
-  let lastEditMarkPath: string | null = null;
-  // "edit" mode is meant to ride alongside agent prose — a tool-only
-  // turn already exposes the file via the tools block, so an extra
-  // mark below would just duplicate that. We only emit the mark when
-  // the turn has already shown visible prose at the moment the tool
-  // completes; edits that finish before prose appears are dropped
-  // (the tools block still shows them). "diff" mode is unaffected
-  // — diffs carry their own information regardless.
-  let turnHasShownProse = false;
-
   // Drop a separate scrollback block under the tool row when the user
   // has opted in via `tui.showFileUpdates`. Keyed by toolCallId so a
   // re-render against the same id amends in place.
@@ -3357,35 +3463,27 @@ async function runSession(
       if (!state?.editDiff || state.status !== "completed") {
         return null;
       }
+      // A per-block click override forces this id's mode and skips the
+      // prose/dedup gating — the user explicitly asked to see it.
+      const override = editDiffOverrides.get(toolCallId);
+      if (override !== undefined) {
+        const out = formatEditDiffBlock(
+          state.editDiff,
+          override ? "diff" : "edit",
+        );
+        return out.length > 0 ? out : null;
+      }
       if (mode === "diff") {
         const out = formatEditDiffBlock(state.editDiff, "diff");
         return out.length > 0 ? out : null;
       }
-      // mode === "edit": only show the mark when this turn has produced
-      // prose. Tool-only turns already display the edit in the tools
-      // block; the mark below would just duplicate it.
-      if (!turnHasShownProse) {
-        return null;
-      }
-      const diff = state.editDiff;
-      // Dedupe consecutive marks for the same path — but only when this
-      // id isn't already showing a block (else a diff→edit toggle on the
-      // last-marked path would leave its diff body painted).
-      if (
-        diff.path &&
-        diff.path === lastEditMarkPath &&
-        !screen.hasKey(key)
-      ) {
-        return null;
-      }
-      const out = formatEditDiffBlock(diff, "edit");
-      if (out.length === 0) {
-        return null;
-      }
-      if (diff.path) {
-        lastEditMarkPath = diff.path;
-      }
-      return out;
+      // mode === "edit": every completed edit gets its own clickable
+      // "▸ Edited <path>" mark — including edits that finish before any
+      // agent prose, and repeated edits of the same path. Each mark
+      // expands to its own diff on click, so neither omission applies
+      // anymore.
+      const out = formatEditDiffBlock(state.editDiff, "edit");
+      return out.length > 0 ? out : null;
     })();
     if (lines === null) {
       screen.removeKey(key);
@@ -3407,9 +3505,13 @@ async function runSession(
   // Unconditional per mode (no turn-scoped prose/dedup gating): diff →
   // full body, edit → one-line mark, none → removed.
   const reRenderAllEditDiffs = (): void => {
-    const mode = viewPrefs.showFileUpdates;
+    const globalMode = viewPrefs.showFileUpdates;
     for (const [toolCallId, diff] of renderedEditDiffs) {
       const key = `editdiff:${toolCallId}`;
+      // A surviving per-block override forces that block's mode; otherwise
+      // the global mode applies (and "none" removes the block).
+      const override = editDiffOverrides.get(toolCallId);
+      const mode = override === undefined ? globalMode : override ? "diff" : "edit";
       if (mode === "none") {
         screen.removeKey(key);
         continue;
@@ -3420,6 +3522,58 @@ async function runSession(
       } else {
         screen.upsertLines(key, out);
       }
+    }
+  };
+
+  // Route a left-click on a keyed scrollback block to a per-block
+  // expand/collapse toggle. Only the clicked block changes; the global ^O
+  // settings are untouched. Unknown keys (agent text, thoughts, etc.) are
+  // ignored. Each toggle flips relative to what the block currently shows.
+  const handleBlockClick = (key: string): void => {
+    if (key.startsWith("editdiff:")) {
+      const id = key.slice("editdiff:".length);
+      const diff = renderedEditDiffs.get(id);
+      if (!diff) {
+        return;
+      }
+      // Current shown state: an existing override, else the global mode
+      // ("diff" counts as expanded, "edit" as collapsed). Flip it.
+      const current =
+        editDiffOverrides.get(id) ?? viewPrefs.showFileUpdates === "diff";
+      editDiffOverrides.set(id, !current);
+      // Past-turn diffs have no live toolState; re-render from the retained
+      // payload. maybeRenderEditDiff handles the live turn, but using the
+      // retained-payload path uniformly is simpler and correct for both.
+      const next = !current ? "diff" : "edit";
+      const out = formatEditDiffBlock(diff, next);
+      if (out.length === 0) {
+        screen.removeKey(key);
+      } else {
+        screen.upsertLines(key, out);
+      }
+      screen.repaintNow();
+      return;
+    }
+    if (key === "plan") {
+      if (lastPlanEvent === null) {
+        return;
+      }
+      const current = planOverride ?? viewPrefs.planExpanded;
+      planOverride = !current;
+      rerenderPlan();
+      screen.repaintNow();
+      return;
+    }
+    if (key.startsWith("tools:")) {
+      const current = toolsOverrides.get(key) ?? viewPrefs.toolsExpanded;
+      toolsOverrides.set(key, !current);
+      if (key === currentToolsKey && toolsBlockStartedAt !== null) {
+        renderToolsBlock();
+      } else {
+        renderToolsBlockFor(key);
+      }
+      screen.repaintNow();
+      return;
     }
   };
 
@@ -3522,21 +3676,21 @@ async function runSession(
       // and gets skipped if the request throws (agent crash, network
       // blip, daemon restart) — leaving the prompt recorded without a
       // matching turn_complete. When that unbalanced seed history is
-      // replayed at attach, the "tools"/"plan" keyed blocks stay
-      // anchored mid-scrollback. The next turn's renderToolsBlock would
-      // then splice into that stale anchor far above the viewport, so
-      // the user never sees their live thinking/tool rows. Clear the
-      // turn-scoped state here so a new turn always anchors at the
-      // current bottom.
-      screen.clearKey("tools");
+      // replayed at attach, the previous turn's plan keyed block stays
+      // anchored mid-scrollback. The next turn's plan event would then
+      // splice into that stale anchor far above the viewport, so clear
+      // it here. The tools block uses a per-turn key (bumped in
+      // startToolsBlock), so the next turn anchors fresh regardless — we
+      // snapshot it (for click-to-expand) but keep its keyedBlocks entry
+      // so a click can still re-render it in place.
+      snapshotToolsBlock();
       screen.clearKey("plan");
       lastPlanEvent = null;
+      planOverride = null;
       toolStates.clear();
       exitPlanStates.clear();
       toolCallOrder.length = 0;
       toolsBlockEndedAt = null;
-      lastEditMarkPath = null;
-      turnHasShownProse = false;
       startToolsBlock();
       // Force an immediate paint past the content-repaint throttle. The
       // user-text event is the user's "I just sent this" signal — they
@@ -3549,13 +3703,6 @@ async function runSession(
     }
     if (event.kind === "agent-text") {
       closeThought();
-      // Only reset the dedupe path when this chunk actually emits visible
-      // text — empty chunks are framing/no-ops (appendAgentText itself
-      // bails on them) and shouldn't visually break a run of edits.
-      if (event.text.length > 0) {
-        turnHasShownProse = true;
-        lastEditMarkPath = null;
-      }
       appendAgentText(event.text);
       return;
     }
@@ -3566,15 +3713,6 @@ async function runSession(
       // setHideThoughts() filters at draw time so toggling ^T reveals lines
       // that streamed in while hidden.
       closeAgentText();
-      // Hidden thoughts don't visually break the visual flow, so they
-      // don't qualify as prose for edit-mark dedupe purposes. Empty
-      // thought chunks also don't reset — they emit no visible text
-      // (appendThought bails on empty input) so a run of edits straddling
-      // one stays a logical series.
-      if (viewPrefs.showThoughts && event.text.length > 0) {
-        turnHasShownProse = true;
-        lastEditMarkPath = null;
-      }
       appendThought(event.text);
       return;
     }
@@ -3732,6 +3870,7 @@ async function runSession(
         }
       }
       lastPlanEvent = null;
+      planOverride = null;
       screen.clearKey("plan");
       // Re-arm the sticky float for the next turn. If this turn's plan
       // completed, the in-turn handler set the sticky key to null to let
@@ -3740,8 +3879,9 @@ async function runSession(
       // anchors to the bottom of its turn.
       screen.setStickyBottomKey("plan");
       // Freeze the tools block (header switches from live "Xs" to
-      // "took Xs") and then drop the key so next turn's tool calls
-      // append a fresh block below. If no tool ever fired this turn the
+      // "took Xs"). The next turn uses a fresh per-turn key, so we keep
+      // this block's keyedBlocks entry — a click can then re-render it in
+      // place from the snapshot. If no tool ever fired this turn the
       // block is just a thinking-indicator with no info worth keeping;
       // splice it out of scrollback entirely.
       if (toolsBlockStartedAt !== null) {
@@ -3753,7 +3893,7 @@ async function runSession(
         toolsBlockEndedAt = Date.now();
         toolsBlockStopReason = effectiveStopReason ?? null;
         renderToolsBlock();
-        screen.clearKey("tools");
+        snapshotToolsBlock();
       } else if (
         effectiveStopReason !== undefined &&
         effectiveStopReason !== "end_turn" &&
@@ -3782,8 +3922,6 @@ async function runSession(
       toolsBlockEndedAt = null;
       toolsBlockStopReason = null;
       upstreamInterruptedSeen = false;
-      lastEditMarkPath = null;
-      turnHasShownProse = false;
       screen.ensureSeparator();
       // Drift reconcile. At a real turn boundary with no queued prompt,
       // no own prompt awaiting (turnInFlight), and no in-flight head id,
@@ -3913,15 +4051,13 @@ async function runSession(
     toolsBlockEndedAt = Date.now();
     toolsBlockStopReason = "reconnect-recovery-failed";
     renderToolsBlock();
-    screen.clearKey("tools");
+    snapshotToolsBlock();
     toolStates.clear();
     exitPlanStates.clear();
     toolCallOrder.length = 0;
     toolsBlockStartedAt = null;
     toolsBlockEndedAt = null;
     toolsBlockStopReason = null;
-    lastEditMarkPath = null;
-    turnHasShownProse = false;
   };
 
   // Disconnect signal arrives the moment the underlying WS drops and a
