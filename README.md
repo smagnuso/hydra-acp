@@ -27,7 +27,25 @@
 
 ## What it is
 
-`hydra-acp` is a daemon + CLI shim that implements two open ACP RFDs as a single coherent surface, on top of the standard ACP protocol (including `session/list` for session discovery), plus the official ACP Registry as its agent-distribution mechanism.
+`hydra-acp` is a **session manager, multiplexer, and TUI** for AI coding agents. One daemon manages your agent processes and the sessions running inside them; many clients — a terminal TUI, your editor, a browser, Slack — attach to the same live session at once and see it update in real time. Start a session at your desk, follow it from your phone, hand it off to a teammate.
+
+```bash
+npm install -g @hydra-acp/cli
+hydra-acp            # launch the TUI and start a session
+```
+
+That's the whole getting-started path: install, run, talk to an agent. The TUI is the front door — it picks an agent, drives the conversation, lists your sessions, and lets you attach to one that's already running. From there you can wire up your editor, add a browser or Slack bridge, or pipe data through it on the command line.
+
+### What it gives you
+
+- **A session manager.** Every session is tracked, named, listable (`hydra-acp session`), exportable, and resurrectable. Close your terminal and the session keeps running in the daemon; reattach later from anywhere.
+- **A multiplexer.** Many clients share one live session. Events broadcast to all attached clients; prompts serialize through a per-session queue; permission requests race (first response wins). Editor, TUI, browser, and Slack all watch the same agent at once.
+- **A TUI.** A full terminal UI for driving sessions interactively — picking agents, prompting, approving tool calls, scrolling transcripts, and switching between live sessions.
+- **Extensions.** Optional companion processes — Slack bridge, web UI, desktop notifier, auto-approver, cross-machine sync — that the daemon spawns and manages for you. See [Extensions](#extensions) below.
+
+### How it's built
+
+Under the hood, `hydra-acp` is a daemon + CLI shim that implements two open ACP RFDs as a single coherent surface, on top of the standard ACP protocol (including `session/list` for session discovery), plus the official ACP Registry as its agent-distribution mechanism. The rest of this section is the protocol detail; skip to [Quick start](#quick-start) if you just want to use it.
 
 ### The standards it stitches together
 
@@ -193,6 +211,105 @@ hydra-acp session
 #    Bare invocation auto-detects: TUI in a terminal, ACP shim when piped.
 hydra-acp --session hydra_session_abc123
 ```
+
+## Extensions
+
+Hydra can spawn user-configured extension processes when the daemon starts. Extensions are arbitrary commands — written in any language — that talk to the daemon over its existing REST or WSS endpoints. Hydra handles their lifecycle (spawn on start, kill on stop, auto-restart on crash with exponential backoff up to ~60s) and injects daemon connection info via env vars.
+
+Various ready-made extensions ship under the same `@hydra-acp` npm scope. All are optional and can be installed independently.
+
+**[`@hydra-acp/slack`](https://github.com/smagnuso/hydra-acp-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Respects RFD #533's `prompt_received` and survives daemon restarts via session resurrection.
+
+```sh
+npm install -g @hydra-acp/slack
+hydra-acp extension add hydra-acp-slack
+hydra-acp extension restart hydra-acp-slack
+```
+
+You'll also need a Slack app and a config at `~/.hydra-acp-slack.conf` — see the [package's setup section](https://github.com/smagnuso/hydra-acp-slack#setup) for scopes, tokens, and authorized users.
+
+**[`@hydra-acp/browser`](https://github.com/smagnuso/hydra-acp-browser) — local web UI.** Single-page app that lists live sessions, attaches to each one, and renders the transcript (agent messages, tool calls, plans, mode/model changes) with a composer for prompting and permission widgets for approving tool use. Cheap to bring up when you want to spot-check an agent without firing up the editor.
+
+```sh
+npm install -g @hydra-acp/browser
+hydra-acp extension add hydra-acp-browser
+hydra-acp extension restart hydra-acp-browser
+```
+
+The first launch generates `~/.hydra-acp-browser/authkey` and writes the open URL (with `?authkey=…`) to `~/.hydra-acp-browser/link`. Defaults to localhost-only; see the [package's HTTPS section](https://github.com/smagnuso/hydra-acp-browser#https) for binding to a LAN address with TLS.
+
+**[`@hydra-acp/notifier`](https://github.com/smagnuso/hydra-acp-notifier) — desktop notifications.** Always-on companion that fires `notify-send` (Linux) or `osascript` (macOS) when sessions emit notable events — by default, `turn_complete`. The default title is `🐉 <agentId> · <short-session-id> · <session-title-or-cwd>` and the body renders the agent's stop reason as friendly text (`Finished`, `Max token limit reached`, etc.). Drop a JS rule at `~/.hydra-acp/notifier.config.js` to customize per-event, or set `HYDRA_ACP_NOTIFY_CMD` to route everything to ntfy/Pushover/your phone.
+
+```sh
+npm install -g @hydra-acp/notifier
+hydra-acp extension add hydra-acp-notifier
+hydra-acp extension start hydra-acp-notifier
+```
+
+**[`@hydra-acp/approver`](https://github.com/smagnuso/hydra-acp-approver) — headless permission auto-responder.** Attaches to every live session and answers `session/request_permission` based on a JS rule at `~/.hydra-acp/approver.config.js`. When the rule returns an `optionId` it wins the race and dismisses the prompt before any human client sees it; when it abstains (returns `null`), the prompt stays open for your interactive clients. Useful for centralizing approval policy in one place so per-client approval can go away.
+
+```sh
+npm install -g @hydra-acp/approver
+hydra-acp extension add hydra-acp-approver
+hydra-acp extension start hydra-acp-approver
+```
+
+Without a config file the approver abstains on everything — installing it has no behavioral effect until you write a rule.
+
+**[`@hydra-acp/archiver`](https://github.com/smagnuso/hydra-acp-archiver) — cross-machine session sync.** Uploads session bundles to a shared backend (Google Drive, plain filesystem) after every turn and imports peers' bundles in the background, so a session started on machine A shows up on machine B without manual export/import. Imported sessions carry an `importedFromMachine` breadcrumb that the picker, browser, slack, and `sessions list` honor for host filtering.
+
+```sh
+npm install -g @hydra-acp/archiver
+hydra-acp extension add hydra-acp-archiver
+hydra-acp extension start hydra-acp-archiver
+```
+
+See the [package README](https://github.com/smagnuso/hydra-acp-archiver#readme) for backend setup (Drive OAuth, filesystem path).
+
+### Configuring extensions
+
+Configure in `~/.hydra-acp/config.json`:
+
+```json
+{
+  "extensions": {
+    "hydra-acp-slack": {},
+    "hydra-acp-browser": {
+      "command": ["hydra-acp-browser"],
+      "args": ["--port", "9999"],
+      "env": { "UI_THEME": "dark" }
+    }
+  }
+}
+```
+
+If `command` is omitted, it defaults to `[<name>]` — useful when the package's `bin` matches its key (e.g. `npm install -g @hydra-acp/slack` exposes `hydra-acp-slack` on PATH, so `"hydra-acp-slack": {}` is enough).
+
+Each extension is launched with these env vars set:
+
+| Env var | Example |
+|---|---|
+| `HYDRA_ACP_DAEMON_URL` | `http://127.0.0.1:55514` |
+| `HYDRA_ACP_DAEMON_HOST` | `127.0.0.1` |
+| `HYDRA_ACP_DAEMON_PORT` | `55514` |
+| `HYDRA_ACP_TOKEN` | `hydra_token_<hex>` |
+| `HYDRA_ACP_WS_URL` | `ws://127.0.0.1:55514/acp` |
+| `HYDRA_ACP_HOME` | `~/.hydra-acp` |
+| `HYDRA_ACP_EXTENSION_NAME` | the `name` from config |
+
+Extension stdout/stderr are appended to `~/.hydra-acp/extensions/<name>.log`.
+
+While the daemon is running you can manage extensions without bouncing it:
+
+```text
+hydra-acp extension list
+hydra-acp extension restart hydra-acp-slack
+hydra-acp extension log hydra-acp-slack --follow
+```
+
+`stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply. Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block. `hydra-acp extension log <name> -f` tails an extension's stdout/stderr if you need to debug.
+
+**Trust model**: each extension receives its own per-process token scoped to that process's lifetime. The token grants the same read/write access to the daemon's REST and WSS surfaces as a logged-in client. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism. See `cli/examples/client-observe.mjs` for an annotated reference implementation.
 
 ## CLI
 
@@ -412,107 +529,6 @@ The service token lives in its own file (`~/.hydra-acp/auth-token`, mode 0600) a
 `tui.mouse` (default `false`) controls whether the TUI captures mouse events. With capture off (the default), plain click-drag selects text via your terminal emulator, but wheel-driven scrollback stops working — use `PgUp` / `PgDn` instead. Set to `true` to enable capture, which lets the scroll wheel drive scrollback at the cost of requiring `shift+drag` to select text.
 
 `tui.defaultEnterAction` (default `"amend"`) controls what the unmodified Enter key does in the prompt composer. With `"amend"` (the default), Enter amends the in-flight turn and `Shift+Enter` enqueues a new prompt; with no turn in flight either key just enqueues, since there's nothing to amend. Set to `"enqueue"` to flip the two: Enter enqueues (sends immediately when idle, queues behind an in-flight turn) and `Shift+Enter` amends.
-
-### Extensions
-
-Hydra can spawn user-configured extension processes when the daemon starts. Extensions are arbitrary commands — written in any language — that talk to the daemon over its existing REST or WSS endpoints. Hydra handles their lifecycle (spawn on start, kill on stop, auto-restart on crash with exponential backoff up to ~60s) and injects daemon connection info via env vars.
-
-Configure in `~/.hydra-acp/config.json`:
-
-```json
-{
-  "extensions": {
-    "hydra-acp-slack": {},
-    "hydra-acp-browser": {
-      "command": ["hydra-acp-browser"],
-      "args": ["--port", "9999"],
-      "env": { "UI_THEME": "dark" }
-    }
-  }
-}
-```
-
-If `command` is omitted, it defaults to `[<name>]` — useful when the package's `bin` matches its key (e.g. `npm install -g @hydra-acp/slack` exposes `hydra-acp-slack` on PATH, so `"hydra-acp-slack": {}` is enough).
-
-Each extension is launched with these env vars set:
-
-| Env var | Example |
-|---|---|
-| `HYDRA_ACP_DAEMON_URL` | `http://127.0.0.1:55514` |
-| `HYDRA_ACP_DAEMON_HOST` | `127.0.0.1` |
-| `HYDRA_ACP_DAEMON_PORT` | `55514` |
-| `HYDRA_ACP_TOKEN` | `hydra_token_<hex>` |
-| `HYDRA_ACP_WS_URL` | `ws://127.0.0.1:55514/acp` |
-| `HYDRA_ACP_HOME` | `~/.hydra-acp` |
-| `HYDRA_ACP_EXTENSION_NAME` | the `name` from config |
-
-Extension stdout/stderr are appended to `~/.hydra-acp/extensions/<name>.log`.
-
-While the daemon is running you can manage extensions without bouncing it:
-
-```text
-hydra-acp extension list
-hydra-acp extension restart hydra-acp-slack
-hydra-acp extension log hydra-acp-slack --follow
-```
-
-`stop` suppresses the auto-restart backoff; the extension stays down until the next `start`, `restart`, or daemon bounce. `add`/`remove` are config-only — restart the daemon to apply.
-
-**Trust model**: each extension receives its own per-process token scoped to that process's lifetime. The token grants the same read/write access to the daemon's REST and WSS surfaces as a logged-in client. Treat extensions as part of your trusted compute base — review extensions before installing and don't run untrusted code through this mechanism. See `cli/examples/client-observe.mjs` for an annotated reference implementation.
-
-#### Optional extensions
-
-Various ready-made extensions ship under the same `@hydra-acp` npm scope. All are optional and can be installed independently.
-
-**[`@hydra-acp/slack`](https://github.com/smagnuso/hydra-acp-slack) — Slack thread bridge.** Each hydra session gets its own Slack thread; the agent's prose, tool cards, plans, and permission prompts stream in, and replies typed in the thread come back to the agent as user prompts. Useful for non-developer collaborators, or for driving an agent from your phone while you're away from the keyboard. Respects RFD #533's `prompt_received` and survives daemon restarts via session resurrection.
-
-```sh
-npm install -g @hydra-acp/slack
-hydra-acp extension add hydra-acp-slack
-hydra-acp extension restart hydra-acp-slack
-```
-
-You'll also need a Slack app and a config at `~/.hydra-acp-slack.conf` — see the [package's setup section](https://github.com/smagnuso/hydra-acp-slack#setup) for scopes, tokens, and authorized users.
-
-**[`@hydra-acp/browser`](https://github.com/smagnuso/hydra-acp-browser) — local web UI.** Single-page app that lists live sessions, attaches to each one, and renders the transcript (agent messages, tool calls, plans, mode/model changes) with a composer for prompting and permission widgets for approving tool use. Cheap to bring up when you want to spot-check an agent without firing up the editor.
-
-```sh
-npm install -g @hydra-acp/browser
-hydra-acp extension add hydra-acp-browser
-hydra-acp extension restart hydra-acp-browser
-```
-
-The first launch generates `~/.hydra-acp-browser/authkey` and writes the open URL (with `?authkey=…`) to `~/.hydra-acp-browser/link`. Defaults to localhost-only; see the [package's HTTPS section](https://github.com/smagnuso/hydra-acp-browser#https) for binding to a LAN address with TLS.
-
-**[`@hydra-acp/notifier`](https://github.com/smagnuso/hydra-acp-notifier) — desktop notifications.** Always-on companion that fires `notify-send` (Linux) or `osascript` (macOS) when sessions emit notable events — by default, `turn_complete`. The default title is `🐉 <agentId> · <short-session-id> · <session-title-or-cwd>` and the body renders the agent's stop reason as friendly text (`Finished`, `Max token limit reached`, etc.). Drop a JS rule at `~/.hydra-acp/notifier.config.js` to customize per-event, or set `HYDRA_ACP_NOTIFY_CMD` to route everything to ntfy/Pushover/your phone.
-
-```sh
-npm install -g @hydra-acp/notifier
-hydra-acp extension add hydra-acp-notifier
-hydra-acp extension start hydra-acp-notifier
-```
-
-**[`@hydra-acp/approver`](https://github.com/smagnuso/hydra-acp-approver) — headless permission auto-responder.** Attaches to every live session and answers `session/request_permission` based on a JS rule at `~/.hydra-acp/approver.config.js`. When the rule returns an `optionId` it wins the race and dismisses the prompt before any human client sees it; when it abstains (returns `null`), the prompt stays open for your interactive clients. Useful for centralizing approval policy in one place so per-client approval can go away.
-
-```sh
-npm install -g @hydra-acp/approver
-hydra-acp extension add hydra-acp-approver
-hydra-acp extension start hydra-acp-approver
-```
-
-Without a config file the approver abstains on everything — installing it has no behavioral effect until you write a rule.
-
-**[`@hydra-acp/archiver`](https://github.com/smagnuso/hydra-acp-archiver) — cross-machine session sync.** Uploads session bundles to a shared backend (Google Drive, plain filesystem) after every turn and imports peers' bundles in the background, so a session started on machine A shows up on machine B without manual export/import. Imported sessions carry an `importedFromMachine` breadcrumb that the picker, browser, slack, and `sessions list` honor for host filtering.
-
-```sh
-npm install -g @hydra-acp/archiver
-hydra-acp extension add hydra-acp-archiver
-hydra-acp extension start hydra-acp-archiver
-```
-
-See the [package README](https://github.com/smagnuso/hydra-acp-archiver#readme) for backend setup (Drive OAuth, filesystem path).
-
-Per-extension config (env vars, args, custom command paths) goes in the same `extensions` block in `~/.hydra-acp/config.json` — see the snippet above. `hydra-acp extension log <name> -f` tails an extension's stdout/stderr if you need to debug.
 
 ### Transformers
 
