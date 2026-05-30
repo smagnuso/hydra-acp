@@ -303,6 +303,22 @@ export async function pickSession(
   let searchActive = false;
   let searchTerm = "";
 
+  // When a held UP key walks the selection up into the composer
+  // (selectedIdx 1→0), terminal key auto-repeat keeps emitting UP events.
+  // Once focus reaches the composer, those repeats would otherwise feed
+  // the composer's prompt-history walk. We can't see key-up events, so we
+  // infer "still held" from cadence: auto-repeat fires every few tens of
+  // ms, while a deliberate re-press comes after a human-scale gap. While
+  // the guard is armed we swallow every UP whose gap from the previous UP
+  // is within the repeat window, refreshing the timer each time. The
+  // first UP separated by a longer gap (key released + re-pressed) clears
+  // the guard and feeds history normally.
+  const UP_REPEAT_GAP_MS = 120;
+  // Armed when an UP crosses from the first session row into the composer.
+  let upGuardArmed = false;
+  // Timestamp of the most recent UP key event (list or composer).
+  let lastUpAt = 0;
+
   // Confirmation state. While in 'confirm-kill' or 'confirm-delete' we
   // hijack key handling, replace the indicator with a yes/no prompt, and
   // ignore navigation until the user resolves (y/n/ESC). `pendingAction`
@@ -1965,6 +1981,22 @@ export async function pickSession(
           }
           return;
         }
+        // A held UP that just walked focus up into the composer keeps
+        // auto-repeating. While the guard is armed, swallow each UP that
+        // arrives within the auto-repeat cadence of the previous one
+        // (refreshing the timer), so a sustained hold never tumbles into
+        // prompt-history. The first UP after a human-scale gap (key
+        // released + re-pressed) disarms the guard and enters history.
+        if (name === "UP" && upGuardArmed) {
+          const now = Date.now();
+          const gap = now - lastUpAt;
+          lastUpAt = now;
+          if (gap < UP_REPEAT_GAP_MS) {
+            placeComposerCursor();
+            return;
+          }
+          upGuardArmed = false;
+        }
         // ↓ at the bottom visual row of the buffer drops focus into the
         // first session row. Anywhere else, ↓ feeds the dispatcher for
         // intra-buffer cursor motion. With no sessions to drop into, ↓
@@ -2006,6 +2038,9 @@ export async function pickSession(
           }
           return;
         }
+        // Any other key in the composer cancels the held-UP guard so a
+        // later, deliberate UP isn't wrongly swallowed.
+        upGuardArmed = false;
         const before = composer.state();
         let event: KeyEvent | null = null;
         if (data?.isCharacter) {
@@ -2256,6 +2291,15 @@ export async function pickSession(
         case "UP":
         case "SHIFT_TAB":
         case "CTRL_P":
+          // Crossing from the topmost session row into the composer via a
+          // held UP arms the guard so auto-repeat doesn't fall through into
+          // prompt-history (see upGuardArmed / lastUpAt).
+          if (name === "UP") {
+            if (selectedIdx === 1) {
+              upGuardArmed = true;
+            }
+            lastUpAt = Date.now();
+          }
           move(-1);
           return;
         case "DOWN":

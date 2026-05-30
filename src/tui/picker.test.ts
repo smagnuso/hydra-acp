@@ -492,6 +492,25 @@ describe("pickSession composer", () => {
     });
   });
 
+  it("a held UP from the first session row settles in the composer", async () => {
+    // Back-to-back synchronous UP presses simulate key auto-repeat: the
+    // first walks focus from the first session row into the composer, and
+    // every subsequent repeat (arriving within the cadence window) is
+    // swallowed instead of falling through into prompt-history. Focus must
+    // remain on the composer so typing + Enter creates a new session.
+    const drv = makePicker({ sessions });
+    drv.press("DOWN");
+    for (let i = 0; i < 6; i += 1) {
+      drv.press("UP");
+    }
+    drv.type("still composer");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "still composer",
+    });
+  });
+
   it("preserves typed text across composer↔list focus toggles", async () => {
     const drv = makePicker({ sessions });
     drv.type("draft");
