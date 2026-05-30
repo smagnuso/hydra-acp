@@ -1,6 +1,6 @@
 {
   "name": "@hydra-acp/cli",
-  "version": "0.1.60",
+  "version": "0.1.61",
   "description": "Multi-client ACP session daemon: spawn agents, attach over WSS, multiplex sessions across editors.",
   "license": "MIT",
   "type": "module",
