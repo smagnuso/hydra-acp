@@ -23,17 +23,23 @@ export interface SessionSummary {
   attachedClients: number;
   updatedAt: string;
   status?: "live" | "cold";
-  // Mid-turn flag from the daemon. Renders as a trailing dot in the
-  // STATE cell so the picker can show which live sessions are working
-  // without the user having to attach.
+  // Mid-turn flag from the daemon. Renders as a filled trailing dot
+  // (`•`) in the STATE cell so the picker can show which live sessions
+  // are working without the user having to attach.
   busy?: boolean;
+  // Set when the agent is blocked on the user (outstanding permission
+  // request / posed question). Renders as a hollow trailing dot (`◦`),
+  // distinct from the busy dot. Takes precedence over `busy` since a
+  // session awaiting input is mid-turn but stalled on the human.
+  awaitingInput?: boolean;
 }
 
 export interface Row {
   session: string;
   upstream: string;
-  // Live/cold status plus a trailing `•` when a live session is
-  // mid-turn. `LIVE` / `LIVE•` / `COLD`.
+  // Live/cold status plus a trailing dot for in-flight work: filled
+  // `•` when mid-turn, hollow `◦` when blocked awaiting the user.
+  // `LIVE` / `LIVE•` / `LIVE◦` / `COLD`.
   state: string;
   agent: string;
   age: string;
@@ -73,7 +79,7 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: formatUpstreamCell(s.upstreamSessionId, s.importedFromMachine),
-    state: formatState(s.status, s.busy),
+    state: formatState(s.status, s.busy, s.awaitingInput),
     agent: formatAgentCell(s.agentId, s.currentUsage),
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
@@ -100,15 +106,23 @@ export function formatUpstreamCell(
   return "-";
 }
 
-// Live/cold state cell. Live sessions render as `LIVE` (or `LIVE•`
-// when mid-turn); cold sessions render as `COLD`. The HEADER row
-// reuses formatRow's plumbing but its `state` cell is literal "STATE".
+// Live/cold state cell. Cold sessions render as `COLD`. Live sessions
+// render as `LIVE◦` when the agent is blocked awaiting the user (a
+// permission request / posed question), `LIVE•` when actively mid-turn,
+// or plain `LIVE` when idle. Awaiting-input wins over busy: such a
+// session is mid-turn but stalled on the human, and the hollow dot is
+// the more useful signal. The HEADER row reuses formatRow's plumbing
+// but its `state` cell is literal "STATE".
 function formatState(
   status: "live" | "cold" | undefined,
   busy: boolean | undefined,
+  awaitingInput: boolean | undefined,
 ): string {
   if (status === "cold") {
     return "COLD";
+  }
+  if (awaitingInput) {
+    return "LIVE◦";
   }
   return busy ? "LIVE•" : "LIVE";
 }

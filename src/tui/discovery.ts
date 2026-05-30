@@ -41,6 +41,10 @@ export interface DiscoveredSession {
   status: "live" | "cold";
   // Mid-turn flag from the daemon. Drives the picker's busy indicator.
   busy?: boolean;
+  // True when the agent is blocked on the user (outstanding permission
+  // request / posed question). Drives the picker's "waiting on you"
+  // glyph, distinct from the busy dot.
+  awaitingInput?: boolean;
   // clientInfo from the process that issued session/new. Carried for
   // log/display; the effective filtering signal is `interactive` below.
   originatingClient?: { name: string; version?: string };
@@ -110,6 +114,7 @@ export async function listSessions(
     forkedFromSessionId: s.forkedFromSessionId,
     forkedFromMessageId: s.forkedFromMessageId,
     busy: s.busy,
+    awaitingInput: s.awaitingInput,
     originatingClient: s.originatingClient,
     interactive: s.interactive,
   }));

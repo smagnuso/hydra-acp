@@ -527,6 +527,11 @@ export const SessionListEntry = z.object({
   // Always false for cold sessions. Lets pickers render a busy dot
   // without having to attach.
   busy: z.boolean().default(false),
+  // True when the agent is blocked on the user (an outstanding
+  // session/request_permission, which also covers agent-posed
+  // questions). Always false for cold sessions. Lets pickers render a
+  // distinct "waiting on you" glyph instead of the busy dot.
+  awaitingInput: z.boolean().default(false),
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -563,6 +568,7 @@ export function sessionListEntryToWire(
     attachedClients: entry.attachedClients,
     status: entry.status,
     busy: entry.busy,
+    awaitingInput: entry.awaitingInput,
   };
   if (entry.agentId !== undefined) {
     hydraMeta.agentId = entry.agentId;

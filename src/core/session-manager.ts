@@ -1338,6 +1338,7 @@ export class SessionManager {
         attachedClients: session.attachedCount,
         status: "live",
         busy: session.turnStartedAt !== undefined,
+        awaitingInput: session.awaitingInput,
       });
     }
     const records = await this.store.list().catch(() => []);
@@ -1380,6 +1381,7 @@ export class SessionManager {
         attachedClients: 0,
         status: "cold",
         busy: false,
+        awaitingInput: false,
       });
     }
     entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));

@@ -286,12 +286,18 @@ describe("session routes: termination broadcasts session_closed", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      sessions: Array<{ sessionId: string; status: string; busy?: boolean }>;
+      sessions: Array<{
+        sessionId: string;
+        status: string;
+        busy?: boolean;
+        awaitingInput?: boolean;
+      }>;
     };
     const entry = body.sessions.find((s) => s.sessionId === session.sessionId);
     expect(entry).toBeDefined();
     expect(entry?.status).toBe("live");
     expect(entry?.busy).toBe(false);
+    expect(entry?.awaitingInput).toBe(false);
   });
 
   it("POST /v1/sessions/search returns grouped hits", async () => {

@@ -741,6 +741,15 @@ export class Session {
     return this.promptStartedAt;
   }
 
+  // True when the agent is blocked on the user: an outstanding
+  // session/request_permission (which also carries agent-posed
+  // questions — there's no separate "ask the user" request in ACP).
+  // Lets pickers show a "waiting on you" glyph distinct from the
+  // "actively working" one without having to attach.
+  get awaitingInput(): boolean {
+    return this.inFlightPermissions.size > 0;
+  }
+
   // Read the persisted history from disk. Returns [] if no history
   // file exists (fresh session, never prompted). Used by attach() and
   // the HTTP /history endpoint.

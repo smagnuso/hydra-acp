@@ -123,6 +123,28 @@ describe("toRow state column", () => {
     expect(r.state).toBe("LIVE•");
   });
 
+  it("renders LIVE◦ for a live session awaiting user input", () => {
+    const r = toRow({
+      ...base,
+      attachedClients: 1,
+      status: "live",
+      busy: true,
+      awaitingInput: true,
+    });
+    expect(r.state).toBe("LIVE◦");
+  });
+
+  it("awaiting input wins over busy on the state glyph", () => {
+    const r = toRow({
+      ...base,
+      attachedClients: 1,
+      status: "live",
+      busy: false,
+      awaitingInput: true,
+    });
+    expect(r.state).toBe("LIVE◦");
+  });
+
   it("renders COLD for cold sessions regardless of busy flag", () => {
     const r = toRow({ ...base, attachedClients: 0, status: "cold", busy: true });
     expect(r.state).toBe("COLD");

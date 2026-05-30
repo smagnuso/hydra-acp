@@ -318,6 +318,51 @@ describe("sortSessions", () => {
     ]);
   });
 
+  it("floats awaiting-input sessions above merely-busy ones", () => {
+    const busy = session({
+      sessionId: "hydra-busy",
+      status: "live",
+      busy: true,
+      cwd,
+      updatedAt: "2026-05-20T13:00:00Z",
+    });
+    const awaiting = session({
+      sessionId: "hydra-awaiting",
+      status: "live",
+      busy: true,
+      awaitingInput: true,
+      cwd,
+      updatedAt: "2026-05-20T10:00:00Z",
+    });
+    const out = sortSessions([busy, awaiting], cwd);
+    expect(out.map((s) => s.sessionId)).toEqual([
+      "hydra-awaiting",
+      "hydra-busy",
+    ]);
+  });
+
+  it("ranks awaiting-input elsewhere above busy in the current cwd", () => {
+    const busyHere = session({
+      sessionId: "hydra-here",
+      status: "live",
+      busy: true,
+      cwd,
+      updatedAt: "2026-05-20T12:00:00Z",
+    });
+    const awaitingElsewhere = session({
+      sessionId: "hydra-elsewhere",
+      status: "live",
+      awaitingInput: true,
+      cwd: "/other/place",
+      updatedAt: "2026-05-20T11:00:00Z",
+    });
+    const out = sortSessions([busyHere, awaitingElsewhere], cwd);
+    expect(out.map((s) => s.sessionId)).toEqual([
+      "hydra-elsewhere",
+      "hydra-here",
+    ]);
+  });
+
   it("prefers busy + cwd match over busy in a different cwd", () => {
     const busyHere = session({
       sessionId: "hydra-here",
