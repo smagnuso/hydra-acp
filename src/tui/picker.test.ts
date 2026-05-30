@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Terminal } from "terminal-kit";
 import {
   createPickerPrefs,
@@ -48,6 +48,7 @@ function makePicker(opts: {
   cwd?: string;
   currentSessionId?: string;
   prefs?: PickerPrefs;
+  target?: RemoteTarget;
 }): KeyDriver {
   let onKey: ((name: string, _matches: unknown, data?: { isCharacter?: boolean }) => void) | null = null;
   // Fake stdin: captures whatever rawStdinHandler is registered via
@@ -92,7 +93,7 @@ function makePicker(opts: {
   const config = {
     tui: { cwdColumnMaxWidth: 40 },
   } as unknown as HydraConfig;
-  const target = {} as RemoteTarget;
+  const target = opts.target ?? ({} as RemoteTarget);
 
   const resolveOnce = pickSession(term, {
     cwd: opts.cwd ?? "/home/me/work/project",
@@ -549,5 +550,104 @@ describe("pickSession composer", () => {
       kind: "new",
       prompt: "prefix: pasted value",
     });
+  });
+});
+
+describe("pickSession: killing the current session blocks abort", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const target = {
+    baseUrl: "http://localhost:9999",
+    token: "test-token",
+    isLocal: true,
+  } as unknown as RemoteTarget;
+
+  // Drain queued microtasks so the async kill → refresh chain settles
+  // before the test inspects picker state.
+  const flush = async (): Promise<void> => {
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("refuses to abort back into the session that was just killed", async () => {
+    const live = session({
+      sessionId: "hydra-current",
+      status: "live",
+      agentId: "claude-code",
+    });
+    // After kill the daemon reports the session as cold (still on disk).
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/kill")) {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(
+        JSON.stringify({
+          sessions: [{ ...live, status: "cold" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const drv = makePicker({
+      sessions: [live],
+      currentSessionId: "hydra-current",
+      target,
+    });
+    // Focus the current session row, kill it, confirm.
+    drv.press("DOWN");
+    drv.press("k", { isCharacter: true });
+    drv.press("y", { isCharacter: true });
+    await flush();
+    // Escape must NOT resolve the picker — there's no live session to
+    // return to.
+    drv.press("ESCAPE");
+    const settled = await Promise.race([
+      drv.resolveOnce.then(() => "resolved"),
+      new Promise((r) => setTimeout(() => r("pending"), 20)),
+    ]);
+    expect(settled).toBe("pending");
+    // Attaching to a different choice still works: start a new session.
+    drv.press("UP");
+    drv.type("fresh start");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      prompt: "fresh start",
+    });
+  });
+
+  it("still aborts normally when a non-current session is killed", async () => {
+    const current = session({ sessionId: "hydra-current", status: "live" });
+    const other = session({ sessionId: "hydra-other", status: "live" });
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/kill")) {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(
+        JSON.stringify({
+          sessions: [current, { ...other, status: "cold" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const drv = makePicker({
+      sessions: [current, other],
+      currentSessionId: "hydra-current",
+      target,
+    });
+    // Move focus to the "other" row (row order is sorted; navigate to it).
+    drv.press("DOWN");
+    drv.press("DOWN");
+    drv.press("k", { isCharacter: true });
+    drv.press("y", { isCharacter: true });
+    await flush();
+    drv.press("ESCAPE");
+    await expect(drv.resolveOnce).resolves.toEqual({ kind: "abort" });
   });
 });

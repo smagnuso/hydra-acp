@@ -324,6 +324,11 @@ export async function pickSession(
   // Transient one-line hint shown in the indicator slot. Cleared on the
   // next key press so it never lingers.
   let transientStatus: string | null = null;
+  // Set when the user kills or deletes the session they opened the picker
+  // from. Aborting (Esc) would otherwise resume that now-dead session,
+  // which then errors on the first prompt — so we block the abort and
+  // make the user pick a live session or start a new one instead.
+  let currentSessionGone = false;
 
   // Composer pane at the top of the picker. Reuses the live composer's
   // InputDispatcher so every readline shortcut (Alt+Enter newline,
@@ -1385,6 +1390,21 @@ export async function pickSession(
       term.moveTo(1, indicatorRow() + 1);
       term("\n");
     };
+    // Abort returns the user to the session they opened the picker from.
+    // If that session was killed/deleted in this picker session there's
+    // nothing live to return to, so we refuse the abort and keep the
+    // picker up. Returns true if the abort was handled (i.e. resolved).
+    const tryAbort = (): boolean => {
+      if (currentSessionGone) {
+        transientStatus =
+          "current session ended — pick a session or start a new one";
+        paintIndicator();
+        return false;
+      }
+      cleanup();
+      resolve({ kind: "abort" });
+      return true;
+    };
     // Refetch sessions from the daemon and re-render. When `preferredId`
     // is provided we try to land the cursor on that session id (used
     // after kill so the cursor follows the row as it sorts to the cold
@@ -1512,6 +1532,9 @@ export async function pickSession(
         }
         mode = "normal";
         pendingAction = null;
+        if (session.sessionId === opts.currentSessionId) {
+          currentSessionGone = true;
+        }
         await refresh(kind === "kill" ? session.sessionId : undefined);
       } catch (err) {
         mode = "normal";
@@ -1910,8 +1933,7 @@ export async function pickSession(
         // and only detach the picker when the dispatcher emits its
         // `exit` effect (i.e. there's nothing left to peel).
         if (name === "ESCAPE") {
-          cleanup();
-          resolve({ kind: "abort" });
+          tryAbort();
           return;
         }
         if (name === "ENTER" || name === "KP_ENTER") {
@@ -1990,8 +2012,7 @@ export async function pickSession(
         // ^d on an empty buffer, or ^d at end-of-buffer with nothing
         // forward to delete (all handled inside the dispatcher).
         if (effects.some((e) => e.type === "exit")) {
-          cleanup();
-          resolve({ kind: "abort" });
+          tryAbort();
           return;
         }
         if (unchanged) {
@@ -2076,8 +2097,7 @@ export async function pickSession(
           return;
         }
         if (name === "q" || name === "Q") {
-          cleanup();
-          resolve({ kind: "abort" });
+          tryAbort();
           return;
         }
         if (name === "o" || name === "O") {
@@ -2264,8 +2284,7 @@ export async function pickSession(
         case "ESCAPE":
         case "CTRL_C":
         case "CTRL_D":
-          cleanup();
-          resolve({ kind: "abort" });
+          tryAbort();
           return;
       }
     };
