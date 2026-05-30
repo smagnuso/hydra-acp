@@ -43,7 +43,9 @@ export interface DrawBoxOptions {
   // clamps to the terminal so callers don't have to.
   contentHeight: number;
   // Desired content width (cols). drawBox adds 2 for the borders and
-  // clamps to Math.min(termWidth - 4, MAX_BOX_WIDTH).
+  // clamps to the terminal width (termWidth - 4). When omitted, defaults
+  // to MAX_BOX_WIDTH; an explicit value may exceed MAX_BOX_WIDTH (it's
+  // only the default, not a hard ceiling).
   contentWidth?: number;
   title?: string;
 }
@@ -86,7 +88,9 @@ export function drawBox(term: Terminal, opts: DrawBoxOptions): BoxLayout {
   const termW = readTermWidth(term);
   const termH = readTermHeight(term);
   const desiredContentW = opts.contentWidth ?? MAX_BOX_WIDTH;
-  const maxContentW = Math.max(10, Math.min(MAX_BOX_WIDTH, termW - 4));
+  // An explicit contentWidth may exceed MAX_BOX_WIDTH (that's just the
+  // default); the only hard cap is the terminal width.
+  const maxContentW = Math.max(10, termW - 4);
   const contentW = Math.min(desiredContentW, maxContentW);
   const w = contentW + 2;
   const contentH = Math.max(1, Math.min(opts.contentHeight, termH - 4));

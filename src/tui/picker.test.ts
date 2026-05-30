@@ -624,7 +624,7 @@ describe("pickSession: killing the current session blocks abort", () => {
       agentId: "claude-code",
     });
     // After kill the daemon reports the session as cold (still on disk).
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
       const url = String(input);
       if (url.includes("/kill")) {
         return new Response(null, { status: 202 });
@@ -668,7 +668,7 @@ describe("pickSession: killing the current session blocks abort", () => {
   it("still aborts normally when a non-current session is killed", async () => {
     const current = session({ sessionId: "hydra-current", status: "live" });
     const other = session({ sessionId: "hydra-other", status: "live" });
-    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
       const url = String(input);
       if (url.includes("/kill")) {
         return new Response(null, { status: 202 });

@@ -22,6 +22,8 @@ import {
   loadConfig,
   expandHome,
   setTuiConfigValue,
+  setDefaultAgent,
+  hasConfiguredDefaultAgent,
   type HydraConfig,
 } from "../core/config.js";
 import { validateLocalCwd } from "../core/cwd.js";
@@ -50,6 +52,7 @@ import {
 import {
   forkSession,
   listSessions,
+  listAgents,
   pickMostRecent,
   type DiscoveredSession,
 } from "./discovery.js";
@@ -61,6 +64,7 @@ import {
 } from "./picker.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
+import { promptForAgent } from "./agent-prompt.js";
 import { formatElapsed, Screen } from "./screen.js";
 import {
   InputDispatcher,
@@ -4141,6 +4145,12 @@ async function resolveSession(
     return ctx;
   }
   if (opts.forceNew) {
+    // --new bypasses the picker, so there's no list to fall back to:
+    // both Esc (back) and ^C (cancel) from the agent prompt exit all.
+    const agentStep = await ensureAgentForNew(term, target, opts);
+    if (agentStep !== "ok") {
+      return null;
+    }
     return newCtx(opts, cwd, config);
   }
   if (opts.resume) {
@@ -4172,6 +4182,9 @@ async function resolveSession(
       config,
       target,
       prefs: pickerPrefs,
+      ...(opts.initialPrompt !== undefined
+        ? { initialPrompt: opts.initialPrompt }
+        : {}),
     });
     if (choice.kind === "abort") {
       return null;
@@ -4179,6 +4192,17 @@ async function resolveSession(
     if (choice.kind === "new") {
       if (choice.prompt !== undefined) {
         opts.initialPrompt = choice.prompt;
+      }
+      // If no agent is configured, choose one before creating the
+      // session. Esc (back) re-shows the picker — opts.initialPrompt is
+      // preserved above, so the composer re-opens with the typed text.
+      // ^C (cancel) tears down the launch.
+      const agentStep = await ensureAgentForNew(term, target, opts);
+      if (agentStep === "cancel") {
+        return null;
+      }
+      if (agentStep === "back") {
+        continue;
       }
       return newCtx(opts, cwd, config);
     }
@@ -4401,6 +4425,52 @@ function newCtx(
     agentId: opts.agentId ?? config.defaultAgent ?? "",
     cwd,
   };
+}
+
+// When a new session is about to spawn an agent and the user has neither
+// passed --agent nor configured a default, surface the agent picker.
+// Returns "ok" once opts.agentId is set (either it already was, a default
+// is configured, or the user just chose one), "back" if the user pressed
+// Esc, or "cancel" on ^C/^D. On a successful pick, `s` also persists the
+// choice as config.defaultAgent. A fetch failure is non-fatal: we leave
+// opts.agentId unset and let the daemon fall back to its schema default.
+async function ensureAgentForNew(
+  term: termkit.Terminal,
+  target: RemoteTarget,
+  opts: TuiOptions,
+): Promise<"ok" | "back" | "cancel"> {
+  if (opts.agentId) {
+    return "ok";
+  }
+  if (await hasConfiguredDefaultAgent()) {
+    return "ok";
+  }
+  let agents;
+  try {
+    agents = await listAgents(target);
+  } catch {
+    return "ok";
+  }
+  if (agents.length === 0) {
+    return "ok";
+  }
+  const result = await promptForAgent(term, agents);
+  if (result.kind === "cancel") {
+    return "cancel";
+  }
+  if (result.kind === "back") {
+    return "back";
+  }
+  opts.agentId = result.agentId;
+  if (result.persist) {
+    try {
+      await setDefaultAgent(result.agentId);
+    } catch {
+      // Persisting is best-effort — the session still launches with the
+      // chosen agent via opts.agentId even if the config write fails.
+    }
+  }
+  return "ok";
 }
 
 // Always-on append-only log of every session/update the TUI receives,

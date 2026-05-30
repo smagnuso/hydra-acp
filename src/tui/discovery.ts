@@ -120,6 +120,39 @@ export async function listSessions(
   }));
 }
 
+export interface DiscoveredAgent {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+// List the agents the daemon's registry knows about (GET /v1/agents),
+// routed through the active RemoteTarget so it works against local and
+// remote daemons alike. Used by the in-TUI agent picker shown when a new
+// session needs an agent and none is configured.
+export async function listAgents(
+  target: RemoteTarget,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DiscoveredAgent[]> {
+  const response = await fetchImpl(`${target.baseUrl}/v1/agents`, {
+    headers: { Authorization: `Bearer ${target.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+  const body = (await response.json()) as {
+    agents?: Array<{ id: string; name: string; description?: string }>;
+  };
+  if (!Array.isArray(body.agents)) {
+    return [];
+  }
+  return body.agents.map((a) => ({
+    id: a.id,
+    name: a.name,
+    description: a.description,
+  }));
+}
+
 // Demote a live session to cold (POST .../kill). A 404 is tolerated so
 // callers don't have to special-case races where the session was already
 // removed by another client.

@@ -386,6 +386,16 @@ export async function setDefaultAgent(
   });
 }
 
+// True when the user has explicitly recorded a defaultAgent in
+// config.json. The parsed HydraConfig always carries the schema default
+// ("opencode"), which masks "never chosen" — so detecting first-launch
+// requires reading the raw file. Used by the TUI to decide whether to
+// surface the agent picker on a new session.
+export async function hasConfiguredDefaultAgent(): Promise<boolean> {
+  const raw = await readConfigFile();
+  return typeof raw.defaultAgent === "string" && raw.defaultAgent.length > 0;
+}
+
 export function defaultConfig(): HydraConfig {
   return HydraConfig.parse({});
 }

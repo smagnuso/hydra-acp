@@ -87,6 +87,10 @@ export interface PickOptions {
   // When the picker is opened from inside a session (^p), pre-select that
   // session's row so the user can drop straight back in with Enter.
   currentSessionId?: string;
+  // Seed the composer with this text on open. Used when the agent
+  // picker's Esc re-shows the session picker — the prompt the user
+  // already typed for the new session is restored into the composer box.
+  initialPrompt?: string;
   // Persistent filter state. Seeded on first picker open from
   // createPickerPrefs(); pickSession mutates it in place so the next
   // invocation re-opens with the same `o`/`h` toggles the user left in
@@ -345,6 +349,12 @@ export async function pickSession(
   // ^A/^E, ^U/^K/^W, ^Y, etc.) works identically. The dispatcher's
   // buffer text is sent as the new session's first prompt on Enter.
   const composer = new InputDispatcher({ history: [] });
+  // Restore a prompt the user already typed for a new session (e.g. the
+  // agent picker's Esc re-opened this picker) so the composer box isn't
+  // cleared out from under them.
+  if (opts.initialPrompt) {
+    composer.setBuffer(opts.initialPrompt);
+  }
   // Seed Up-arrow recall with the global cross-session prompt history,
   // same as the live composer. Loaded asynchronously so we don't suspend
   // before installing input handlers; in practice the file load resolves
