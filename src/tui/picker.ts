@@ -1413,6 +1413,7 @@ export async function pickSession(
       _matches: unknown,
       data?: { isCharacter?: boolean },
     ): void => {
+      resetAutoRefresh();
       focusStack[focusStack.length - 1]?.onKey(name, _matches, data);
     };
     const dispatchResize = (): void => {
@@ -1446,6 +1447,40 @@ export async function pickSession(
       term.hideCursor(false);
       term.moveTo(1, indicatorRow() + 1);
       term("\n");
+    };
+    // One tick of the low-frequency background refresh. Skipped while a
+    // modal/find layer, prompt, or search is up (so we don't trample a
+    // partial buffer) and while a prior refresh is still pending.
+    const autoRefreshTick = (): void => {
+      if (
+        resolved ||
+        focusStack.length > 1 ||
+        mode !== "normal" ||
+        searchActive ||
+        autoRefreshInFlight
+      ) {
+        return;
+      }
+      const currentId =
+        selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+      autoRefreshInFlight = true;
+      void refresh(currentId, { silent: true }).finally(() => {
+        autoRefreshInFlight = false;
+      });
+    };
+    // Restart the 3s countdown. Called on every keypress so a silent
+    // refresh (which re-sorts `visible`) can only fire after 3s of
+    // keyboard idle — never landing a resort between a navigation key and
+    // the Enter that selects a row, which previously let the cursor's
+    // session shift out from under the user.
+    const resetAutoRefresh = (): void => {
+      if (resolved) {
+        return;
+      }
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+      }
+      autoRefreshTimer = setInterval(autoRefreshTick, 3000);
     };
     // Abort returns the user to the session they opened the picker from.
     // If that session was killed/deleted in this picker session there's
@@ -1510,6 +1545,13 @@ export async function pickSession(
           const idx = visible.findIndex((s) => s.sessionId === followId);
           if (idx >= 0) {
             selectedIdx = idx + 1;
+          } else {
+            // The session under the cursor is gone after the resort.
+            // Don't leave selectedIdx pointing at its old numeric slot —
+            // that now aliases onto whatever session slid into that
+            // position, so Enter would pick the wrong one. Fall back to
+            // the composer ("New session"), a predictable, safe landing.
+            selectedIdx = 0;
           }
         }
         if (selectedIdx > total - 1) {
@@ -1621,24 +1663,17 @@ export async function pickSession(
         return;
       }
       const old = selectedIdx;
-      const oldScroll = scrollOffset;
       selectedIdx = next;
       adjustScroll();
-      // Wrap the whole focus change so the two-row swap (and any
-      // composer chrome repaint on a focus-boundary crossing) commits
-      // as one atomic frame on terminals that support DEC 2026.
+      // Always repaint the whole viewport rather than a targeted two-row
+      // swap. The swap relied on repaintSessionRow for both the old and new
+      // rows, but repaintSessionRow silently no-ops when a row falls outside
+      // the current window — which left the old highlight painted as a
+      // "ghost" alongside the live one. A full viewport paint is atomic
+      // (one DEC 2026 frame) and only writes viewportSize rows, so it's
+      // cheap and always consistent.
       withSync(() => {
-        if (scrollOffset !== oldScroll) {
-          repaintViewport();
-          onFocusChange(old, selectedIdx);
-          return;
-        }
-        if (old !== 0) {
-          repaintSessionRow(old - 1);
-        }
-        if (selectedIdx !== 0) {
-          repaintSessionRow(selectedIdx - 1);
-        }
+        repaintViewport();
         onFocusChange(old, selectedIdx);
       });
     };
@@ -2402,17 +2437,7 @@ export async function pickSession(
     // a slow daemon can't pile up overlapping repaints. `silent: true`
     // makes refresh a no-op when the visible state is unchanged, which
     // is the common case — keeps the picker quiet between actual events.
-    autoRefreshTimer = setInterval(() => {
-      if (resolved || focusStack.length > 1 || mode !== "normal" || searchActive || autoRefreshInFlight) {
-        return;
-      }
-      const currentId =
-        selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
-      autoRefreshInFlight = true;
-      void refresh(currentId, { silent: true }).finally(() => {
-        autoRefreshInFlight = false;
-      });
-    }, 3000);
+    autoRefreshTimer = setInterval(autoRefreshTick, 3000);
   });
 }
 
