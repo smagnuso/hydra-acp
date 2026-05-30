@@ -2435,6 +2435,7 @@ export class Session {
     const out: AdvertisedCommand[] = [
       { name: "hydra", description: "Hydra session command (kill, restart, title, agent <agent>)" },
       { name: "model", description: "Switch model; omit arg to list available models" },
+      { name: "mode", description: "Switch mode; omit arg to list available modes" },
       { name: "sessions", description: "List all sessions" },
       { name: "help", description: "Show available commands" },
     ];
@@ -2720,6 +2721,64 @@ export class Session {
       sessionId: this.sessionId,
       modelId: arg,
     });
+    return { stopReason: "end_turn" };
+  }
+
+  // /mode — the text-command twin of session/set_mode, so clients that
+  // can only send prompts (e.g. Slack) can switch modes. With no arg it
+  // lists advertised modes; with an arg it forwards session/set_mode to
+  // the agent and then applies the change locally. The forward +
+  // applyModeChange pair MUST stay identical to the daemon's
+  // session/set_mode handler (see acp-ws.ts) — applyModeChange owns the
+  // persistence + synthetic current_mode_update broadcast for both paths.
+  private async handleModeCommand(text: string): Promise<unknown> {
+    const arg = text.slice("/mode".length).trim();
+    if (arg === "") {
+      const modes = this.agentAdvertisedModes;
+      const current = this.currentMode;
+      let body: string;
+      if (modes.length === 0) {
+        body = current ? `Current mode: ${current}` : "_(no modes advertised yet)_";
+      } else {
+        const inList = current ? modes.some((m) => m.id === current) : true;
+        const lines = modes.map((m) => {
+          const marker = m.id === current ? "▶ " : "  ";
+          const desc = m.name && m.name !== m.id ? `  ${m.name}` : "";
+          return `${marker}${m.id}${desc}`;
+        });
+        // Current mode valid but not in the advertised list — surface it
+        // at the top so the user can see what they're on.
+        if (!inList && current) {
+          lines.unshift(`▶ ${current}`);
+        }
+        body = lines.join("\n");
+      }
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `\n${body}\n` },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
+    // Validate against the advertised list when the agent supplied one,
+    // so a fat-fingered id from Slack gets a helpful error instead of a
+    // silent no-op. Pass-through when no modes were advertised.
+    const modes = this.agentAdvertisedModes;
+    if (modes.length > 0 && !modes.some((m) => m.id === arg)) {
+      const known = modes.map((m) => m.id).join(", ");
+      throw withCode(
+        new Error(`unknown mode: ${arg} (known: ${known})`),
+        JsonRpcErrorCodes.InvalidParams,
+      );
+    }
+    await this.forwardRequest("session/set_mode", {
+      sessionId: this.sessionId,
+      modeId: arg,
+    });
+    this.applyModeChange(arg);
     return { stopReason: "end_turn" };
   }
 
@@ -3804,6 +3863,8 @@ export class Session {
     if (
       promptText === "/model" ||
       promptText.startsWith("/model ") ||
+      promptText === "/mode" ||
+      promptText.startsWith("/mode ") ||
       promptText === "/sessions" ||
       promptText === "/help"
     ) {
@@ -3812,6 +3873,8 @@ export class Session {
         result = await this.handleSessionsCommand();
       } else if (promptText === "/help") {
         result = await this.handleHelpCommand();
+      } else if (promptText === "/mode" || promptText.startsWith("/mode ")) {
+        result = await this.handleModeCommand(promptText);
       } else {
         result = await this.handleModelCommand(promptText);
       }
