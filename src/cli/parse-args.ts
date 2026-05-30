@@ -43,6 +43,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
 const KNOWN_VALUE_FLAGS = new Set([
   "agent",
   "args",
+  "columns",
   "command",
   "cwd",
   "drip-speed",

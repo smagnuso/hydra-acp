@@ -30,6 +30,7 @@ import {
   runSessionsTranscript,
 } from "./cli/commands/sessions.js";
 import { runSessionsInfo } from "./cli/commands/sessions-info.js";
+import { parseColumns } from "./cli/session-row.js";
 import { runSessionsDiff } from "./cli/commands/sessions-diff.js";
 import {
   runExtensionsAdd,
@@ -349,11 +350,23 @@ async function main(): Promise<void> {
     case "sessions": {
       const sub = positional[1];
       if (sub === undefined || sub === "list") {
+        const columnsRaw = resolveOption(flags, "columns");
+        let columns;
+        if (columnsRaw !== undefined) {
+          try {
+            columns = parseColumns(columnsRaw);
+          } catch (err) {
+            process.stderr.write(`${(err as Error).message}\n`);
+            process.exit(2);
+            return;
+          }
+        }
         await runSessionsList({
           all: flags.all === true,
           json: flags.json === true,
           host: typeof flags.host === "string" ? flags.host : undefined,
           includeNonInteractive: flags["include-non-interactive"] === true,
+          columns,
         });
         return;
       }
@@ -786,10 +799,11 @@ function printHelp(): void {
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart",
       "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
-      "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive]",
+      "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive] [--columns=<list>]",
       "                                     List sessions (live + 20 most-recent cold; --all lifts the cold cap AND surfaces non-interactive sessions; --json emits JSON for scripts).",
       "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer.",
       "                                     --include-non-interactive surfaces ancillary (e.g. `hydra cat`) or never-prompted sessions while keeping the cold cap (a narrower --all).",
+      "                                     --columns picks which columns show and their order, e.g. --columns=session,state,title,cost (valid: session,upstream,host,state,agent,model,age,cwd,title,cost). UPSTREAM/HOST/MODEL hidden by default; COST is the trailing column; overrides config.tui.sessionColumns.",
       "  hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]",
       "                                     Aggregate one session: turn count, tool histogram, files touched, cost/duration, synopsis. --diff appends the session diff under the summary and pages the whole thing on a TTY (inherits --fold).",
       "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]",

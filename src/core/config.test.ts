@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import * as fs from "node:fs/promises";
 import {
   DEFAULT_DAEMON_PORT,
+  HydraConfig,
   defaultConfig,
   expandHome,
   loadConfig,
@@ -25,6 +26,31 @@ describe("defaultConfig", () => {
 
   it("defaults defaultModels to an empty object (no per-agent overrides)", () => {
     expect(defaultConfig().defaultModels).toEqual({});
+  });
+
+  it("leaves tui.sessionColumns unset by default", () => {
+    expect(defaultConfig().tui.sessionColumns).toBeUndefined();
+  });
+});
+
+describe("tui.sessionColumns schema", () => {
+  it("accepts a valid ordered column list", () => {
+    const cfg = HydraConfig.parse({
+      tui: { sessionColumns: ["session", "title", "state"] },
+    });
+    expect(cfg.tui.sessionColumns).toEqual(["session", "title", "state"]);
+  });
+
+  it("rejects an unknown column name", () => {
+    expect(() =>
+      HydraConfig.parse({ tui: { sessionColumns: ["session", "bogus"] } }),
+    ).toThrow();
+  });
+
+  it("rejects an empty array", () => {
+    expect(() =>
+      HydraConfig.parse({ tui: { sessionColumns: [] } }),
+    ).toThrow();
   });
 });
 

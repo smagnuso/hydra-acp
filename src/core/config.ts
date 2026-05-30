@@ -74,7 +74,7 @@ const TuiConfig = z.object({
   // Width cap on the cwd column in the `sessions list` output and the
   // TUI picker. Set higher if you keep deeply-nested working directories
   // and want them visible; the elastic title column shrinks to make room.
-  cwdColumnMaxWidth: z.number().int().positive().default(24),
+  cwdColumnMaxWidth: z.number().int().positive().default(32),
   // When true (default), emit OSC 9;4 progress-bar control codes so the
   // host terminal can show an indeterminate busy indicator (taskbar pulse
   // on Windows Terminal, dock badge on KDE/Konsole, etc.) while a turn is
@@ -126,6 +126,30 @@ const TuiConfig = z.object({
   // type:"diff" entries, falling back to rawInput shapes), so any agent
   // that emits one of those shapes gets the treatment.
   showFileUpdates: z.enum(["none", "edit", "diff"]).default("edit"),
+  // Columns shown in the `sessions list` output and the TUI picker, in
+  // the given order — so this controls both which columns appear and
+  // their left-to-right order. Valid names: session, upstream, host,
+  // state, agent, model, age, cwd, title, cost. Omit to use the built-in
+  // default (session, state, agent, age, cwd, title, cost — UPSTREAM,
+  // HOST, and MODEL hidden). The CLI's `--columns` flag overrides this
+  // per-invocation. Duplicate or unknown names are rejected.
+  sessionColumns: z
+    .array(
+      z.enum([
+        "session",
+        "upstream",
+        "host",
+        "state",
+        "agent",
+        "model",
+        "age",
+        "cwd",
+        "title",
+        "cost",
+      ]),
+    )
+    .nonempty()
+    .optional(),
 });
 
 const ExtensionName = z
@@ -207,7 +231,7 @@ export const HydraConfig = z.object({
     maxScrollbackLines: 10_000,
     mouse: false,
     logMaxBytes: 5 * 1024 * 1024,
-    cwdColumnMaxWidth: 24,
+    cwdColumnMaxWidth: 32,
     progressIndicator: true,
     defaultEnterAction: "amend",
     showThoughts: true,

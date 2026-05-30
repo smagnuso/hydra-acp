@@ -3,6 +3,7 @@ import {
   formatAgentCell,
   formatAgentWithModel,
   formatCost,
+  formatCostCell,
   shortenModel,
 } from "./agent-display.js";
 
@@ -58,42 +59,34 @@ describe("formatCost", () => {
 });
 
 describe("formatAgentCell", () => {
-  it("appends whole-dollar cost when present and >= $0.50", () => {
-    expect(
-      formatAgentCell("opencode", {
-        costAmount: 1.42,
-        costCurrency: "USD",
-      }),
-    ).toBe("opencode $1");
-    expect(
-      formatAgentCell("opencode", { costAmount: 53.12 }),
-    ).toBe("opencode $53");
-  });
-
-  it("rounds to nearest dollar", () => {
-    expect(formatAgentCell("opencode", { costAmount: 5.6 })).toBe("opencode $6");
-  });
-
-  it("omits the cost suffix entirely when it rounds to zero", () => {
-    expect(formatAgentCell("opencode", { costAmount: 0.42 })).toBe("opencode");
-    expect(formatAgentCell("opencode", { costAmount: 0.0042 })).toBe("opencode");
-  });
-
-  it("falls back to bare agent id when no cost is present", () => {
-    expect(formatAgentCell("opencode", undefined)).toBe("opencode");
-    expect(formatAgentCell("opencode", {})).toBe("opencode");
+  it("returns the bare agent id (cost now lives in its own column)", () => {
+    expect(formatAgentCell("opencode")).toBe("opencode");
   });
 
   it("renders '?' when the agent id is missing", () => {
-    expect(formatAgentCell(undefined, { costAmount: 2.1 })).toBe("? $2");
+    expect(formatAgentCell(undefined)).toBe("?");
+  });
+});
+
+describe("formatCostCell", () => {
+  it("renders whole-dollar USD (cents dropped)", () => {
+    expect(formatCostCell({ costAmount: 1.42, costCurrency: "USD" })).toBe("$1");
+    expect(formatCostCell({ costAmount: 53.7 })).toBe("$54");
   });
 
-  it("renders non-USD currencies without a $ sign", () => {
-    expect(
-      formatAgentCell("opencode", {
-        costAmount: 5.6,
-        costCurrency: "EUR",
-      }),
-    ).toBe("opencode 6 EUR");
+  it("rounds sub-dollar amounts to the nearest dollar", () => {
+    expect(formatCostCell({ costAmount: 0.42 })).toBe("$0");
+    expect(formatCostCell({ costAmount: 0.6 })).toBe("$1");
+  });
+
+  it("renders non-USD with two decimals and the currency code", () => {
+    expect(formatCostCell({ costAmount: 5.6, costCurrency: "EUR" })).toBe(
+      "5.60 EUR",
+    );
+  });
+
+  it("renders an empty string when there's no cost data", () => {
+    expect(formatCostCell(undefined)).toBe("");
+    expect(formatCostCell({})).toBe("");
   });
 });

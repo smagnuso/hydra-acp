@@ -14,6 +14,23 @@ import { generateSynopsis } from "./synopsis-agent.js";
 
 const mockGenerate = generateSynopsis as ReturnType<typeof vi.fn>;
 
+// Poll until `predicate` holds, instead of sleeping a fixed interval and
+// hoping the async drain ran. A fixed sleep is flaky under a loaded
+// parallel suite where the drain timer/microtask can slip past the
+// window; polling waits exactly as long as needed (up to `timeoutMs`).
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor: timed out waiting for condition");
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 function makeRecord(opts: Partial<SessionRecord> = {}): SessionRecord {
   return {
     version: 1,
@@ -251,8 +268,12 @@ describe("SynopsisCoordinator", () => {
       persistSynopsis: async () => undefined,
     });
     coord.schedule(record.sessionId);
-    // Let drain pick it up.
-    await new Promise((r) => setTimeout(r, 10));
+    // Wait until the job has progressed past runOne's pre-generate awaits
+    // and actually entered generateSynopsis (so `resolveSyn` is wired up).
+    // Polling beats a fixed sleep, which is flaky under a loaded suite:
+    // too short and the job is still mid-await with resolveSyn undefined,
+    // so resolveSyn?.() below no-ops and shutdown() hangs to the timeout.
+    await waitFor(() => mockGenerate.mock.calls.length === 1);
     expect(coord.size().inflight).toBe(1);
 
     const shutdownPromise = coord.shutdown();

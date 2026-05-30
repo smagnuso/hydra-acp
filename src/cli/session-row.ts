@@ -4,7 +4,12 @@
 // place ensures the two views stay byte-identical, and centralizes the
 // width-aware truncation so neither caller wraps onto a second line.
 
-import { formatAgentCell, type DisplayUsage } from "../core/agent-display.js";
+import {
+  formatAgentCell,
+  formatCostCell,
+  shortenModel,
+  type DisplayUsage,
+} from "../core/agent-display.js";
 import { shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 
@@ -13,6 +18,10 @@ export interface SessionSummary {
   upstreamSessionId?: string;
   cwd: string;
   agentId?: string;
+  // Last-known model id. Rendered (provider-prefix stripped) in the
+  // optional MODEL column; the AGENT cell deliberately omits it to stay
+  // narrow.
+  currentModel?: string;
   currentUsage?: DisplayUsage;
   title?: string;
   // Origin host for imported sessions. Used to populate the UPSTREAM
@@ -42,9 +51,18 @@ export interface Row {
   // `LIVE` / `LIVE•` / `LIVE◦` / `COLD`.
   state: string;
   agent: string;
+  // Last-known model id, provider prefix stripped (e.g. "claude-opus-4").
+  // "-" when unknown. Not shown by default.
+  model: string;
   age: string;
   title: string;
   cwd: string;
+  // Origin host for imported sessions (e.g. "machine-b"); "-" otherwise.
+  // Not shown by default.
+  host: string;
+  // Full-precision per-session cost (e.g. "$5.60"); "-" when unknown.
+  // Shown by default as the trailing column.
+  cost: string;
 }
 
 export interface Widths {
@@ -52,19 +70,62 @@ export interface Widths {
   upstream: number;
   state: number;
   agent: number;
+  model: number;
   age: number;
   cwd: number;
   title: number;
+  host: number;
+  cost: number;
 }
+
+// Every column the session table knows how to render, in their canonical
+// left-to-right order. Doubles as the validation allowlist for --columns
+// and tui.sessionColumns: any name outside this set is rejected.
+export type ColumnKey = keyof Widths;
+export const ALL_COLUMNS: ColumnKey[] = [
+  "session",
+  "upstream",
+  "host",
+  "state",
+  "agent",
+  "model",
+  "age",
+  "cwd",
+  "title",
+  "cost",
+];
+
+// Columns shown when the caller doesn't specify a set. UPSTREAM/HOST/
+// MODEL are omitted — they rarely help when switching sessions. COST is
+// the trailing column (after the elastic TITLE) so per-session spend is
+// always visible flush-right. Opt into the hidden columns / reorder via
+// --columns or config.tui.sessionColumns.
+export const DEFAULT_COLUMNS: ColumnKey[] = [
+  "session",
+  "state",
+  "agent",
+  "age",
+  "cwd",
+  "title",
+  "cost",
+];
+
+// Elastic columns flex under a width budget; the rest take their natural
+// (header-aware) width and are never truncated. cwd is middle-truncated
+// (paths read better with both ends preserved); title is right-truncated.
+const ELASTIC_COLUMNS: ReadonlySet<ColumnKey> = new Set(["cwd", "title"]);
 
 export const HEADER: Row = {
   session: "SESSION",
   upstream: "UPSTREAM",
+  host: "HOST",
   state: "STATE",
   agent: "AGENT",
+  model: "MODEL",
   age: "AGE",
   title: "TITLE",
   cwd: "CWD",
+  cost: "COST",
 };
 
 const SEP = "  ";
@@ -73,17 +134,58 @@ const SEP = "  ";
 // the CLI sessions command and the TUI picker pass an explicit value
 // (sourced from config.tui.cwdColumnMaxWidth); the default is the fallback
 // for callers that don't have config in hand.
-const DEFAULT_CWD_MAX_WIDTH = 24;
+const DEFAULT_CWD_MAX_WIDTH = 32;
+
+export interface FormatOptions {
+  // Columns to render, in the given order. Defaults to DEFAULT_COLUMNS.
+  // Honored as-is so callers can reorder columns, not just hide them.
+  columns?: ColumnKey[];
+  // Cap on the cwd column's natural width. Defaults to
+  // DEFAULT_CWD_MAX_WIDTH.
+  cwdMaxWidth?: number;
+}
+
+// Parse a comma-separated column list (from --columns or config) into a
+// validated, ordered ColumnKey[]. Order is preserved. Throws on an empty
+// list, an unknown name, or a duplicate — all of which are user error
+// worth surfacing rather than silently papering over.
+export function parseColumns(raw: string): ColumnKey[] {
+  const parts = raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    throw new Error("--columns: no column names given");
+  }
+  const seen = new Set<string>();
+  const out: ColumnKey[] = [];
+  for (const name of parts) {
+    if (!ALL_COLUMNS.includes(name as ColumnKey)) {
+      throw new Error(
+        `--columns: unknown column "${name}" (valid: ${ALL_COLUMNS.join(", ")})`,
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(`--columns: duplicate column "${name}"`);
+    }
+    seen.add(name);
+    out.push(name as ColumnKey);
+  }
+  return out;
+}
 
 export function toRow(s: SessionSummary, now: number = Date.now()): Row {
   return {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: formatUpstreamCell(s.upstreamSessionId, s.importedFromMachine),
+    host: s.importedFromMachine ?? "-",
     state: formatState(s.status, s.busy, s.awaitingInput),
-    agent: formatAgentCell(s.agentId, s.currentUsage),
+    agent: formatAgentCell(s.agentId),
+    model: shortenModel(s.currentModel) ?? "-",
     age: formatRelativeAge(s.updatedAt, now),
     title: s.title ?? "-",
     cwd: shortenHomePath(s.cwd),
+    cost: formatCostCell(s.currentUsage),
   };
 }
 
@@ -127,16 +229,28 @@ function formatState(
   return busy ? "LIVE•" : "LIVE";
 }
 
-export function computeWidths(rows: Row[]): Widths {
-  return {
-    session: maxLen(HEADER.session, rows.map((r) => r.session)),
-    upstream: maxLen(HEADER.upstream, rows.map((r) => r.upstream)),
-    state: maxLen(HEADER.state, rows.map((r) => r.state)),
-    agent: maxLen(HEADER.agent, rows.map((r) => r.agent)),
-    age: maxLen(HEADER.age, rows.map((r) => r.age)),
-    cwd: maxLen(HEADER.cwd, rows.map((r) => r.cwd)),
-    title: maxLen(HEADER.title, rows.map((r) => r.title)),
+// Header-aware natural width per column. Only the selected columns are
+// sized; unselected ones get 0 so they reserve no space. (formatRow
+// renders strictly from the same column list, so a 0 here is never read
+// for a rendered cell.)
+export function computeWidths(rows: Row[], opts: FormatOptions = {}): Widths {
+  const columns = opts.columns ?? DEFAULT_COLUMNS;
+  const w: Widths = {
+    session: 0,
+    upstream: 0,
+    host: 0,
+    state: 0,
+    agent: 0,
+    model: 0,
+    age: 0,
+    cwd: 0,
+    title: 0,
+    cost: 0,
   };
+  for (const col of columns) {
+    w[col] = maxLen(HEADER[col], rows.map((r) => r[col]));
+  }
+  return w;
 }
 
 // Short, roughly-accurate "time since" hint. Tuned for table display
@@ -190,46 +304,112 @@ function maxLen(headerCell: string, values: string[]): number {
   return max;
 }
 
-// Build a single formatted row. When `maxWidth` is provided, the row is
-// guaranteed to occupy at most `maxWidth` columns: cwd is middle-truncated
-// (paths read better with the leading and trailing segments preserved)
-// and title is right-truncated to absorb whatever budget remains. The
-// fixed columns (session/upstream/state/agent/age) are never truncated —
-// they're keyed by short ids and short labels, so their natural width is
-// expected to fit.
+// Build a single formatted row from the selected columns, in the order
+// given (defaults to DEFAULT_COLUMNS). Fixed columns
+// (session/upstream/host/state/agent/model/age/cost) take their natural
+// width and are never truncated — they're keyed by short ids and short
+// labels. The elastic columns flex: cwd is middle-truncated (paths read
+// better with both ends preserved), title is right-truncated. When
+// `maxWidth` is provided the row is guaranteed to fit: fixed columns are
+// laid out first, then the remaining budget is handed to the elastic
+// columns — the LAST elastic column in the list absorbs whatever's left,
+// earlier elastic columns take their natural (cwd: capped) width. A
+// fixed column placed after the last elastic column (e.g. the default
+// trailing COST) is pushed flush-right because the elastic cell pads out
+// to its allocation.
 export function formatRow(
   r: Row,
   w: Widths,
   maxWidth?: number,
-  cwdMaxWidth: number = DEFAULT_CWD_MAX_WIDTH,
+  opts: FormatOptions = {},
 ): string {
-  const fixed = [
-    r.session.padEnd(w.session),
-    r.upstream.padEnd(w.upstream),
-    r.state.padEnd(w.state),
-    r.agent.padEnd(w.agent),
-    r.age.padStart(w.age),
-  ].join(SEP);
+  const columns = opts.columns ?? DEFAULT_COLUMNS;
+  const cwdMaxWidth = opts.cwdMaxWidth ?? DEFAULT_CWD_MAX_WIDTH;
 
+  // Natural-width cell, no truncation. age is right-aligned (numeric-ish),
+  // everything else left-aligned — matching the original layout.
+  const naturalCell = (col: ColumnKey): string =>
+    col === "age" ? r[col].padStart(w[col]) : r[col].padEnd(w[col]);
+
+  // Unbounded path: every column at natural width. The trailing column
+  // isn't padded (no need to pad the last cell out to a fixed width).
   if (maxWidth === undefined) {
-    return [fixed, r.cwd.padEnd(w.cwd), r.title].join(SEP);
+    const cells = columns.map((col, i) =>
+      i === columns.length - 1 ? r[col] : naturalCell(col),
+    );
+    return cells.join(SEP);
   }
 
-  const budget = maxWidth - fixed.length - SEP.length;
-  if (budget <= 0) {
-    return fixed.slice(0, maxWidth);
+  // Width-bounded path. Lay out fixed columns at natural width, reserve
+  // the leftover budget for the elastic columns.
+  const elasticIdx = columns
+    .map((col, i) => ({ col, i }))
+    .filter(({ col }) => ELASTIC_COLUMNS.has(col));
+  const lastElastic =
+    elasticIdx.length > 0 ? elasticIdx[elasticIdx.length - 1]!.i : -1;
+
+  // No elastic column selected: the row is all fixed cells. Join in order
+  // and hard-clip to maxWidth as a backstop.
+  if (lastElastic === -1) {
+    const out = columns.map(naturalCell).join(SEP);
+    return out.length > maxWidth ? out.slice(0, maxWidth) : out;
   }
 
-  // Give cwd its natural (header-aware, capped) width first; title takes
-  // whatever's left as the trailing elastic cell. Always reserve at least
-  // one column for title so an oversized cwd can't push it off the row.
-  const cwdCap = Math.min(w.cwd, cwdMaxWidth);
-  const cwdAlloc = Math.min(cwdCap, Math.max(0, budget - SEP.length - 1));
-  const cwdCell = truncateMiddle(r.cwd, cwdAlloc).padEnd(cwdAlloc);
-  const titleBudget = Math.max(0, budget - cwdAlloc - SEP.length);
-  const titleCell = truncateRight(r.title, titleBudget);
+  // Budget available to elastic columns: maxWidth minus the natural width
+  // of every fixed cell, minus every separator joining the row (counted
+  // once each — fixed-vs-elastic doesn't matter for the separator count).
+  const fixedWidth = columns
+    .filter((col) => !ELASTIC_COLUMNS.has(col))
+    .reduce((sum, col) => sum + w[col], 0);
+  const sepCount = Math.max(0, columns.length - 1);
+  let budget = maxWidth - fixedWidth - sepCount * SEP.length;
+  if (budget < 0) {
+    budget = 0;
+  }
 
-  return [fixed, cwdCell, titleCell].join(SEP);
+  // Allocate each elastic column. Non-last elastic columns take their
+  // natural width (cwd capped by cwdMaxWidth), always reserving at least
+  // one column for the trailing elastic cell. The last elastic column
+  // absorbs the remainder.
+  const elasticAlloc = new Map<number, number>();
+  let remaining = budget;
+  for (const { col, i } of elasticIdx) {
+    if (i === lastElastic) {
+      continue;
+    }
+    const natural = col === "cwd" ? Math.min(w[col], cwdMaxWidth) : w[col];
+    const alloc = Math.min(natural, Math.max(0, remaining - 1));
+    elasticAlloc.set(i, alloc);
+    remaining = Math.max(0, remaining - alloc);
+  }
+  elasticAlloc.set(lastElastic, Math.max(0, remaining));
+
+  const lastCol = columns.length - 1;
+  // Render an elastic cell. cwd is always padded out (it's never the
+  // trailing cell in practice). title is right-truncated; it's padded to
+  // its allocated width only when something follows it (e.g. a trailing
+  // COST column), so that following column sits flush at the right edge.
+  // When title is the visually-last cell we leave it unpadded to avoid a
+  // ragged trailing run of spaces.
+  const renderElastic = (col: ColumnKey, width: number, isLast: boolean): string => {
+    if (col === "cwd") {
+      return truncateMiddle(r[col], width).padEnd(width);
+    }
+    const cell = truncateRight(r[col], width);
+    return isLast ? cell : cell.padEnd(width);
+  };
+
+  const cells = columns.map((col, i) => {
+    if (ELASTIC_COLUMNS.has(col)) {
+      return renderElastic(col, elasticAlloc.get(i) ?? 0, i === lastCol);
+    }
+    return naturalCell(col);
+  });
+
+  // Backstop: when the fixed columns alone overflow maxWidth (elastic
+  // budget already 0), hard-clip so the row never exceeds the cap.
+  const out = cells.join(SEP);
+  return out.length > maxWidth ? out.slice(0, maxWidth) : out;
 }
 
 export function truncateRight(s: string, max: number): string {

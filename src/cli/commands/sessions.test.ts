@@ -50,7 +50,7 @@ describe("bundleToSummary", () => {
     expect(row.state).toBe("COLD");
   });
 
-  it("threads currentUsage through the formatter so the cost shows in the agent cell", () => {
+  it("threads currentUsage into the dedicated cost cell (not the agent cell)", () => {
     const s = bundleToSummary(
       bundle({
         currentUsage: {
@@ -62,7 +62,7 @@ describe("bundleToSummary", () => {
       }),
     );
     const row = toRow(s);
-    expect(row.agent).toContain("opencode");
-    expect(row.agent).toContain("37");
+    expect(row.agent).toBe("opencode");
+    expect(row.cost).toBe("$37");
   });
 });

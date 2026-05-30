@@ -45,6 +45,10 @@ export interface SessionsInfoOptions {
 
 interface SessionInfoData {
   sessionId: string;
+  // Agent-side (upstream) session id. Surfaced here because the session
+  // list hides the UPSTREAM column by default — `info` is the place to
+  // recover it when needed.
+  upstreamSessionId?: string;
   title?: string;
   cwd: string;
   agentId: string;
@@ -202,6 +206,9 @@ export function aggregate(
 
   return {
     sessionId: r.sessionId,
+    ...(r.upstreamSessionId !== undefined
+      ? { upstreamSessionId: r.upstreamSessionId }
+      : {}),
     ...(r.title !== undefined ? { title: r.title } : {}),
     cwd: r.cwd,
     agentId: r.agentId,
@@ -232,6 +239,9 @@ function formatSummary(d: SessionInfoData, verbose: boolean): string {
   const pad = (label: string): string => label.padEnd(14);
 
   lines.push(`${pad("Session:")}${d.sessionId}`);
+  if (d.upstreamSessionId) {
+    lines.push(`${pad("Upstream:")}${d.upstreamSessionId}`);
+  }
   if (d.title) {
     lines.push(`${pad("Title:")}${d.title}`);
   }

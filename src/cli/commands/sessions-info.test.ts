@@ -79,6 +79,7 @@ describe("aggregate — bare bundle", () => {
   it("returns sane defaults for an empty session", () => {
     const d = aggregate(makeBundle(), "cold");
     expect(d.sessionId).toBe("hydra_session_ABC");
+    expect(d.upstreamSessionId).toBe("u_test");
     expect(d.agentId).toBe("claude-acp");
     expect(d.turns).toBe(0);
     expect(d.tools).toEqual([]);

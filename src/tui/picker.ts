@@ -16,8 +16,10 @@ import {
   formatRow,
   toRow,
   truncateMiddle,
+  DEFAULT_COLUMNS,
   type Row,
   type Widths,
+  type FormatOptions,
 } from "../cli/session-row.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
@@ -266,8 +268,16 @@ export async function pickSession(
     return base;
   };
   let visible: DiscoveredSession[] = applyPrefsFilters(allSessions);
+  // Column selection + cwd cap, shared by computeWidths and formatRow so
+  // widths and rendering agree on the same set/order. Honors the user's
+  // tui.sessionColumns (which also controls order); falls back to the
+  // built-in default (UPSTREAM hidden).
+  const formatOpts: FormatOptions = {
+    columns: opts.config.tui.sessionColumns ?? DEFAULT_COLUMNS,
+    cwdMaxWidth: opts.config.tui.cwdColumnMaxWidth,
+  };
   let rows: Row[] = visible.map((s) => toRow(s, Date.now()));
-  let widths: Widths = computeWidths(rows);
+  let widths: Widths = computeWidths(rows, formatOpts);
 
   // selectedIdx 0 = "New session"; 1..N = visible sessions in order.
   // scrollOffset is the 0-indexed session that occupies the first viewport
@@ -380,7 +390,6 @@ export async function pickSession(
   let findBoxCursorVisualRow = 0;
   let findBoxCursorVisualCol = 0;
 
-  const cwdMaxWidth = opts.config.tui.cwdColumnMaxWidth;
   const computeLayout = (): void => {
     termHeight = readTermHeight(term);
     termWidth = readTermWidth(term);
@@ -415,11 +424,11 @@ export async function pickSession(
     // header paint can overwrite the previous frame without an
     // eraseLineAfter. Without padding, a shorter new row would leave
     // stale glyphs from the prior frame.
-    headerLine = formatRow(HEADER, widths, rowMaxWidth, cwdMaxWidth).padEnd(
+    headerLine = formatRow(HEADER, widths, rowMaxWidth, formatOpts).padEnd(
       rowMaxWidth,
     );
     sessionLines = rows.map((r) =>
-      formatRow(r, widths, rowMaxWidth, cwdMaxWidth).padEnd(rowMaxWidth),
+      formatRow(r, widths, rowMaxWidth, formatOpts).padEnd(rowMaxWidth),
     );
   };
 
@@ -428,7 +437,7 @@ export async function pickSession(
   // cursor placement and trigger the actual repaint themselves.
   const rebuildRows = (): void => {
     rows = visible.map((s) => toRow(s, Date.now()));
-    widths = computeWidths(rows);
+    widths = computeWidths(rows, formatOpts);
     total = 1 + visible.length;
     computeLayout();
   };
@@ -1423,7 +1432,7 @@ export async function pickSession(
       const cells = rows
         .map(
           (r) =>
-            `${r.session}|${r.upstream}|${r.state}|${r.agent}|${r.age}|${r.title}|${r.cwd}`,
+            `${r.session}|${r.upstream}|${r.host}|${r.state}|${r.agent}|${r.model}|${r.age}|${r.title}|${r.cwd}|${r.cost}`,
         )
         .join("\n");
       return `${selectedIdx}:${scrollOffset}:${transientStatus ?? ""}\n${cells}`;

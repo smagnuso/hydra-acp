@@ -44,24 +44,30 @@ export interface DisplayUsage {
   costCurrency?: string;
 }
 
-// Just the agent id, optionally suffixed with a whole-dollar cost when
-// the last-known usage carries one. Used by `sessions list` rows and
-// the TUI picker — the model is intentionally omitted to keep the row
-// narrow (the TUI header still shows agent•model for the live session).
-// Sub-dollar costs are dropped so the row stays uncluttered.
-export function formatAgentCell(
-  agentId: string | undefined,
-  usage: DisplayUsage | undefined,
-): string {
-  const base = agentId ?? "?";
+// Just the agent id (or "?" when unknown). Used by `sessions list` rows
+// and the TUI picker. Cost lives in its own COST column now, and the
+// model in its own optional MODEL column, so the AGENT cell stays a bare
+// identifier. (The TUI header still shows agent•model for the live
+// session separately.)
+export function formatAgentCell(agentId: string | undefined): string {
+  return agentId ?? "?";
+}
+
+// Cost cell for the session table's COST column. USD (or unspecified)
+// renders as a whole-dollar `$N` — cents are dropped to keep the
+// far-right column uncluttered. Non-USD keeps two decimals plus the
+// code (`X.XX <code>`) since rounding an unfamiliar currency is riskier.
+// Returns "" (not "-") when there's no cost data, so empty cost reads as
+// blank rather than a column of dashes.
+export function formatCostCell(usage: DisplayUsage | undefined): string {
   if (!usage || typeof usage.costAmount !== "number") {
-    return base;
+    return "";
   }
-  const compact = formatCostCompact(usage.costAmount, usage.costCurrency);
-  if (compact === null) {
-    return base;
+  const { costAmount, costCurrency } = usage;
+  if (costCurrency === undefined || costCurrency === "USD") {
+    return `$${Math.round(costAmount)}`;
   }
-  return `${base} ${compact}`;
+  return formatCost(costAmount, costCurrency);
 }
 
 // Formats a cost amount with sensible defaults for header display:

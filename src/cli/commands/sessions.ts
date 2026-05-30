@@ -10,9 +10,13 @@ import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import {
   HEADER,
+  ALL_COLUMNS,
+  DEFAULT_COLUMNS,
   computeWidths,
   formatRow,
   toRow,
+  type ColumnKey,
+  type FormatOptions,
   type SessionSummary,
 } from "../session-row.js";
 
@@ -22,6 +26,9 @@ export async function runSessionsList(
     json?: boolean;
     host?: string;
     includeNonInteractive?: boolean;
+    // Explicit column set/order from --columns. Overrides
+    // config.tui.sessionColumns. Already parsed/validated by the caller.
+    columns?: ColumnKey[];
   } = {},
 ): Promise<void> {
   const config = await loadConfig();
@@ -133,14 +140,19 @@ export async function runSessionsList(
   }
   const now = Date.now();
   const rows = visible.map((s) => toRow(s, now));
-  const widths = computeWidths(rows);
+  // Column precedence: --columns flag > config.tui.sessionColumns >
+  // built-in default (UPSTREAM hidden). Order is honored as given.
+  const formatOpts: FormatOptions = {
+    columns: opts.columns ?? config.tui.sessionColumns ?? DEFAULT_COLUMNS,
+    cwdMaxWidth: config.tui.cwdColumnMaxWidth,
+  };
+  const widths = computeWidths(rows, formatOpts);
   // Truncate to terminal width only when stdout is a TTY — piping to a
   // file or grep should preserve the full row.
   const maxWidth = process.stdout.isTTY ? process.stdout.columns : undefined;
-  const cwdMax = config.tui.cwdColumnMaxWidth;
-  process.stdout.write(formatRow(HEADER, widths, maxWidth, cwdMax) + "\n");
+  process.stdout.write(formatRow(HEADER, widths, maxWidth, formatOpts) + "\n");
   for (const r of rows) {
-    process.stdout.write(formatRow(r, widths, maxWidth, cwdMax) + "\n");
+    process.stdout.write(formatRow(r, widths, maxWidth, formatOpts) + "\n");
   }
   if (truncated > 0) {
     process.stdout.write(
@@ -435,10 +447,16 @@ function printBundleInfo(raw: unknown, cwdColumnMaxWidth: number): void {
   }
   const summary = bundleToSummary(parsed);
   const row = toRow(summary);
-  const widths = computeWidths([row]);
+  // Inspect view: always show every column (UPSTREAM included) regardless
+  // of the user's list preference — the upstream id is useful detail here.
+  const formatOpts: FormatOptions = {
+    columns: ALL_COLUMNS,
+    cwdMaxWidth: cwdColumnMaxWidth,
+  };
+  const widths = computeWidths([row], formatOpts);
   const maxWidth = process.stdout.isTTY ? process.stdout.columns : undefined;
-  process.stdout.write(formatRow(HEADER, widths, maxWidth, cwdColumnMaxWidth) + "\n");
-  process.stdout.write(formatRow(row, widths, maxWidth, cwdColumnMaxWidth) + "\n");
+  process.stdout.write(formatRow(HEADER, widths, maxWidth, formatOpts) + "\n");
+  process.stdout.write(formatRow(row, widths, maxWidth, formatOpts) + "\n");
   const originUpstream = parsed.session.upstreamSessionId ?? "-";
   process.stdout.write(
     `\nlineage: ${parsed.session.lineageId}\n` +
