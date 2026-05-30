@@ -18,7 +18,12 @@ import {
   AgentInstallProgressParams,
 } from "../acp/types.js";
 import { ResilientWsStream } from "../shim/resilient-ws.js";
-import { loadConfig, expandHome, type HydraConfig } from "../core/config.js";
+import {
+  loadConfig,
+  expandHome,
+  setTuiConfigValue,
+  type HydraConfig,
+} from "../core/config.js";
 import { validateLocalCwd } from "../core/cwd.js";
 import {
   resolveLocalTarget,
@@ -166,6 +171,22 @@ export interface TuiOptions {
 // in runTuiApp; mutated by hotkey handlers inside runSession.
 interface ViewPrefs {
   showThoughts: boolean;
+  // Whether the tools block is expanded. Lives here (rather than as a
+  // per-turn local) so the ^O session-options toggle persists across
+  // turns, /clear, and session switches until the user flips it back.
+  toolsExpanded: boolean;
+  // Whether the plan block shows every entry (true) or the capped
+  // sliding window around the active entry (false). Persisted like the
+  // others; the ^O dialog flips it live for the current turn's plan.
+  planExpanded: boolean;
+  // Mirror of config.tui.showFileUpdates so the options dialog can flip
+  // it live (edit ↔ diff) without persisting to config.
+  showFileUpdates: "none" | "edit" | "diff";
+  // Whether mouse capture is on (wheel scrolls vs. native text select).
+  mouseEnabled: boolean;
+  // What unmodified Enter does in the composer. Mirrors
+  // config.tui.defaultEnterAction; the options dialog flips it live.
+  defaultEnterAction: "enqueue" | "amend";
 }
 
 interface SessionContext {
@@ -233,7 +254,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+N / Alt+Tab", "next live session"],
   ["^T", "show / hide thoughts"],
   ["^V", "paste image from clipboard"],
-  ["^O", "expand / collapse tools block"],
+  ["^O", "session options (tools · plan · thoughts · diffs · mouse · enter)"],
   null,
   ["^R", "history reverse search (^S walks forward once engaged)"],
   ["PgUp / PgDn", "scroll scrollback"],
@@ -276,6 +297,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // hotkey handler inside runSession mutates in place.
   const viewPrefs: ViewPrefs = {
     showThoughts: config.tui.showThoughts,
+    toolsExpanded: false,
+    planExpanded: false,
+    showFileUpdates: config.tui.showFileUpdates,
+    mouseEnabled: config.tui.mouse,
+    defaultEnterAction: config.tui.defaultEnterAction,
   };
   // Picker filter toggles (cwd-only, host) are mutated in place by the
   // picker so re-opening via ^p restores the same filtered view the
@@ -1296,7 +1322,7 @@ async function runSession(
     dispatcher,
     repaintThrottleMs: config.tui.repaintThrottleMs,
     maxScrollbackLines: config.tui.maxScrollbackLines,
-    mouse: config.tui.mouse,
+    mouse: viewPrefs.mouseEnabled,
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
     onKey: (events: KeyEvent[]) => {
@@ -1305,6 +1331,9 @@ async function runSession(
           continue;
         }
         if (tryHandleHelpKey(ev)) {
+          continue;
+        }
+        if (tryHandleOptionsKey(ev)) {
           continue;
         }
         if (tryHandleScrollbackSearchKey(ev)) {
@@ -1649,7 +1678,7 @@ async function runSession(
     // support that some terminals (libvte / gnome-terminal pre-0.78)
     // don't have.
     const head: Array<readonly [string, string] | null> =
-      config.tui.defaultEnterAction === "amend"
+      viewPrefs.defaultEnterAction === "amend"
         ? [
             ["Enter", amendDesc],
             ["Ctrl+Enter / Shift+Enter / ^S", enqueueDesc],
@@ -1685,6 +1714,225 @@ async function runSession(
       return true;
     }
     screen.setHelpPrompt(null);
+    return true;
+  };
+
+  // Session-options modal (^O). Each entry maps a stable id to its
+  // current on/off reading and a flip that applies the live side-effect.
+  // Order here is the order shown in the dialog and the 1–9 quick-toggle
+  // index, so keep it stable.
+  const OPTION_IDS = [
+    "tools",
+    "plan",
+    "thoughts",
+    "diffs",
+    "mouse",
+    "enter",
+  ] as const;
+  type OptionId = (typeof OPTION_IDS)[number];
+  let optionsSelectedIndex = 0;
+
+  const optionValue = (id: OptionId): string => {
+    switch (id) {
+      case "tools":
+        return viewPrefs.toolsExpanded ? "expanded" : "collapsed";
+      case "plan":
+        return viewPrefs.planExpanded ? "expanded" : "collapsed";
+      case "thoughts":
+        return viewPrefs.showThoughts ? "shown" : "hidden";
+      case "diffs":
+        return viewPrefs.showFileUpdates;
+      case "mouse":
+        return viewPrefs.mouseEnabled ? "on" : "off";
+      case "enter":
+        return viewPrefs.defaultEnterAction;
+    }
+  };
+
+  const optionLabel = (id: OptionId): string => {
+    switch (id) {
+      case "tools":
+        return "Tools";
+      case "plan":
+        return "Plan";
+      case "thoughts":
+        return "Thoughts";
+      case "diffs":
+        return "File updates";
+      case "mouse":
+        return "Mouse capture";
+      case "enter":
+        return "Enter key";
+    }
+  };
+
+  const buildOptionsSpec = (): {
+    title: string;
+    options: Array<{ label: string; value: string }>;
+    selectedIndex: number;
+  } => ({
+    title: "Session options",
+    options: OPTION_IDS.map((id) => ({
+      label: optionLabel(id),
+      value: optionValue(id),
+    })),
+    selectedIndex: optionsSelectedIndex,
+  });
+
+  const refreshOptionsPrompt = (): void => {
+    if (!screen.isOptionsPromptActive()) {
+      return;
+    }
+    screen.setOptionsPrompt(buildOptionsSpec());
+  };
+
+  const toggleOptionsModal = (): void => {
+    if (screen.isOptionsPromptActive()) {
+      screen.setOptionsPrompt(null);
+      return;
+    }
+    optionsSelectedIndex = 0;
+    screen.setOptionsPrompt(buildOptionsSpec());
+  };
+
+  const applyOptionToggle = (id: OptionId): void => {
+    switch (id) {
+      case "tools":
+        viewPrefs.toolsExpanded = !viewPrefs.toolsExpanded;
+        renderToolsBlock();
+        break;
+      case "plan":
+        viewPrefs.planExpanded = !viewPrefs.planExpanded;
+        rerenderPlan();
+        break;
+      case "thoughts":
+        viewPrefs.showThoughts = !viewPrefs.showThoughts;
+        screen.setHideThoughts(!viewPrefs.showThoughts);
+        break;
+      case "diffs":
+        viewPrefs.showFileUpdates =
+          viewPrefs.showFileUpdates === "diff" ? "edit" : "diff";
+        // Re-converge every diff in scrollback (this turn and past turns)
+        // to the new mode: "diff" surfaces full bodies, "edit" shrinks
+        // them to one-line marks.
+        reRenderAllEditDiffs();
+        break;
+      case "mouse": {
+        const next = !screen.isMouseEnabled();
+        screen.setMouseEnabled(next);
+        viewPrefs.mouseEnabled = next;
+        break;
+      }
+      case "enter":
+        viewPrefs.defaultEnterAction =
+          viewPrefs.defaultEnterAction === "amend" ? "enqueue" : "amend";
+        break;
+    }
+    refreshOptionsPrompt();
+  };
+
+  // Persist the selected option's current value as the config default
+  // (the `s` key). Tools/Plan expand state is session-only — there's no
+  // config field for it — so `s` there just says so. The rest map to a
+  // tui.<key> written through the shared atomic setTuiConfigValue.
+  const saveOption = (id: OptionId): void => {
+    void (async (): Promise<void> => {
+      try {
+        switch (id) {
+          case "tools":
+          case "plan":
+            screen.notify(`${optionLabel(id)} is session-only — not saved`);
+            return;
+          case "thoughts":
+            await setTuiConfigValue("showThoughts", viewPrefs.showThoughts);
+            break;
+          case "diffs":
+            await setTuiConfigValue(
+              "showFileUpdates",
+              viewPrefs.showFileUpdates,
+            );
+            break;
+          case "mouse":
+            await setTuiConfigValue("mouse", viewPrefs.mouseEnabled);
+            break;
+          case "enter":
+            await setTuiConfigValue(
+              "defaultEnterAction",
+              viewPrefs.defaultEnterAction,
+            );
+            break;
+        }
+        screen.notify(`saved default: ${optionLabel(id)} ${optionValue(id)}`);
+      } catch (err) {
+        screen.notify(
+          `save failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    })();
+  };
+
+  // While the options modal is open it owns input: arrows navigate,
+  // Enter / 1–9 cycle the selected row's value live (this session only),
+  // `s` saves the selected value as the config default, Esc or ^O closes.
+  // The modal stays open after Enter / `s`. Everything else is swallowed
+  // so it can't leak into the prompt buffer behind the modal.
+  const tryHandleOptionsKey = (ev: KeyEvent): boolean => {
+    if (!screen.isOptionsPromptActive()) {
+      return false;
+    }
+    if (ev.type === "key") {
+      switch (ev.name) {
+        case "up":
+          optionsSelectedIndex = Math.max(0, optionsSelectedIndex - 1);
+          refreshOptionsPrompt();
+          return true;
+        case "down":
+          optionsSelectedIndex = Math.min(
+            OPTION_IDS.length - 1,
+            optionsSelectedIndex + 1,
+          );
+          refreshOptionsPrompt();
+          return true;
+        case "enter": {
+          const id = OPTION_IDS[optionsSelectedIndex];
+          if (id) {
+            applyOptionToggle(id);
+          }
+          return true;
+        }
+        case "ctrl-o":
+        case "escape":
+        case "ctrl-c":
+          screen.setOptionsPrompt(null);
+          return true;
+        case "ctrl-d":
+          // Detach must always work — close the modal and let ^D fall
+          // through to the dispatcher's normal exit-on-empty-buffer path.
+          screen.setOptionsPrompt(null);
+          return false;
+        default:
+          return true;
+      }
+    }
+    if (ev.type === "char") {
+      if (/^[1-9]$/.test(ev.ch)) {
+        const idx = parseInt(ev.ch, 10) - 1;
+        const id = OPTION_IDS[idx];
+        if (id) {
+          optionsSelectedIndex = idx;
+          applyOptionToggle(id);
+        }
+        return true;
+      }
+      // `s` saves the selected option's current value as the config default.
+      if (ev.ch === "s" || ev.ch === "S") {
+        const id = OPTION_IDS[optionsSelectedIndex];
+        if (id) {
+          saveOption(id);
+        }
+        return true;
+      }
+    }
     return true;
   };
 
@@ -1962,19 +2210,19 @@ async function runSession(
   const handleEffect = (effect: InputEffect): void => {
     switch (effect.type) {
       case "send":
-        // config.tui.defaultEnterAction == "amend" swaps the meaning of
+        // viewPrefs.defaultEnterAction == "amend" swaps the meaning of
         // the two send routes: Enter goes through the amend path and
         // Shift+Enter enqueues. The dispatcher doesn't know about the
-        // config; the swap happens here so the input layer stays a pure
-        // state machine.
-        if (config.tui.defaultEnterAction === "amend") {
+        // pref; the swap happens here so the input layer stays a pure
+        // state machine. Seeded from config; the ^O dialog flips it live.
+        if (viewPrefs.defaultEnterAction === "amend") {
           amendPrompt(effect.text, effect.attachments, effect.displayText);
         } else {
           enqueuePrompt(effect.text, effect.attachments, effect.displayText);
         }
         return;
       case "amend":
-        if (config.tui.defaultEnterAction === "amend") {
+        if (viewPrefs.defaultEnterAction === "amend") {
           enqueuePrompt(effect.text, effect.attachments, effect.displayText);
         } else {
           amendPrompt(effect.text, effect.attachments, effect.displayText);
@@ -2088,9 +2336,8 @@ async function runSession(
       case "next-live-session":
         void cycleLiveSession();
         return;
-      case "toggle-tools":
-        toolsExpanded = !toolsExpanded;
-        renderToolsBlock();
+      case "toggle-options":
+        toggleOptionsModal();
         return;
       case "toggle-thoughts":
         viewPrefs.showThoughts = !viewPrefs.showThoughts;
@@ -2102,6 +2349,7 @@ async function runSession(
       case "toggle-mouse": {
         const next = !screen.isMouseEnabled();
         screen.setMouseEnabled(next);
+        viewPrefs.mouseEnabled = next;
         screen.notify(
           next
             ? "mouse capture on — wheel scrolls; shift+drag to select text"
@@ -2531,9 +2779,9 @@ async function runSession(
         toolsBlockStartedAt = null;
         toolsBlockEndedAt = null;
         toolsBlockStopReason = null;
-        toolsExpanded = false;
         lastEditMarkPath = null;
         turnHasShownProse = false;
+        renderedEditDiffs.clear();
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -2770,6 +3018,12 @@ async function runSession(
   // turn's tools block. Cleared at turn boundaries (the block gets
   // frozen into scrollback first) so each turn starts fresh.
   const toolStates = new Map<string, ToolLineState>();
+  // toolCallId → the edit diff that was rendered into scrollback for it,
+  // in render order. Unlike toolStates this survives turn boundaries (the
+  // editdiff: scrollback blocks do too), so the ^O "File updates" toggle
+  // can re-converge every past diff to the new mode. Cleared only when
+  // scrollback itself is cleared (/clear).
+  const renderedEditDiffs = new Map<string, EditDiff>();
   // toolCallId → Claude ExitPlanMode plan + latest status. Lives until
   // turn end (cleared alongside toolStates) so a permission resolution
   // landing as a tool_call_update can amend the rendered block in place.
@@ -2778,8 +3032,6 @@ async function runSession(
   // "most recent K" window in the tools block and is the source of
   // truth for the "ran N tools" header count.
   const toolCallOrder: string[] = [];
-  // Toggled by ^O. Resets each turn so a turn always starts collapsed.
-  let toolsExpanded = false;
   // Wall-clock bounds for the active tools block. startedAt is set on
   // the first tool call of the turn; endedAt is set when the turn
   // completes and freezes the block (header switches from "Xs" to
@@ -2801,9 +3053,27 @@ async function runSession(
   // cap so every tool row stays visible.
   const TOOLS_COLLAPSED_LIMIT = config.tui.maxToolItems;
   // Same for the plan. Plumbed into formatEvent so the agent's plan
-  // updates and the turn-end stopped re-render share the cap.
+  // updates and the turn-end stopped re-render share the cap. Computed
+  // per render so the ^O "Plan" toggle (viewPrefs.planExpanded) can lift
+  // the cap live — expanded → Infinity (show every entry), else the
+  // configured maxPlanItems window.
   const PLAN_VISIBLE_LIMIT = config.tui.maxPlanItems;
-  const formatOptions = { maxPlanItems: PLAN_VISIBLE_LIMIT };
+  const planFormatOptions = (): { maxPlanItems: number } => ({
+    maxPlanItems: viewPrefs.planExpanded ? Infinity : PLAN_VISIBLE_LIMIT,
+  });
+  // Re-render the current turn's plan block under the active expand
+  // setting. Driven by the ^O "Plan" toggle. A no-op once the turn ended
+  // (lastPlanEvent is cleared and the block frozen) — only the live plan
+  // can change its window.
+  const rerenderPlan = (): void => {
+    if (lastPlanEvent === null) {
+      return;
+    }
+    const lines = formatEvent(lastPlanEvent, planFormatOptions());
+    if (lines.length > 0) {
+      screen.upsertLines("plan", [{ body: "" }, ...lines]);
+    }
+  };
 
   // Buffered text + a stable key for the current agent utterance. Agent
   // chunks accumulate here; on each chunk the whole buffer is re-parsed
@@ -2897,7 +3167,7 @@ async function runSession(
     // toolsExpanded so the ^O toggle is a no-op in unlimited mode.
     const capped = TOOLS_COLLAPSED_LIMIT > 0;
     const visibleIds =
-      !capped || toolsExpanded
+      !capped || viewPrefs.toolsExpanded
         ? toolCallOrder
         : toolCallOrder.slice(Math.max(0, total - TOOLS_COLLAPSED_LIMIT));
     const hidden = total - visibleIds.length;
@@ -2939,14 +3209,12 @@ async function runSession(
             ? formatElapsed(elapsed)
             : `took ${formatElapsed(elapsed)}`;
       const parts: string[] = [`${total} ${noun}`, timing];
-      // Only advertise the hotkey while the block is live — once frozen,
-      // ^O no longer affects it and the hint would be misleading.
-      if (inProgress && capped) {
-        if (hidden > 0) {
-          parts.push(`${hidden} hidden — ^O expand`);
-        } else if (toolsExpanded && total > TOOLS_COLLAPSED_LIMIT) {
-          parts.push("^O collapse");
-        }
+      // Surface the hidden count while the block is live and capped so the
+      // user knows there's more behind the collapse. Expand/collapse now
+      // lives in the ^O options dialog, so we don't advertise a hotkey
+      // here (it would be misleading — ^O opens the dialog, not a toggle).
+      if (inProgress && capped && hidden > 0) {
+        parts.push(`${hidden} hidden`);
       }
       summary = parts.join(" · ");
     }
@@ -3069,38 +3337,85 @@ async function runSession(
   // arrived via the initial tool_call's rawInput, so a completion update
   // with no content[] of its own still finds it.
   const maybeRenderEditDiff = (toolCallId: string): void => {
-    const mode = config.tui.showFileUpdates;
-    if (mode === "none") {
-      return;
-    }
-    const state = toolStates.get(toolCallId);
-    if (!state?.editDiff || state.status !== "completed") {
-      return;
-    }
-    if (mode === "diff") {
-      const lines = formatEditDiffBlock(state.editDiff, "diff");
-      if (lines.length > 0) {
-        screen.upsertLines(`editdiff:${toolCallId}`, lines);
+    const key = `editdiff:${toolCallId}`;
+    // Compute the lines this id should currently show under the active
+    // mode; null means "show nothing". Then converge the keyed block to
+    // that — including removing a previously-rendered block when the
+    // mode no longer warrants one (e.g. toggling diffs off, or flipping
+    // diff→edit on a path already marked). Without the removeKey path a
+    // live mode change would leave stale diff bodies painted.
+    const lines = ((): FormattedLine[] | null => {
+      const mode = viewPrefs.showFileUpdates;
+      if (mode === "none") {
+        return null;
       }
+      const state = toolStates.get(toolCallId);
+      if (!state?.editDiff || state.status !== "completed") {
+        return null;
+      }
+      if (mode === "diff") {
+        const out = formatEditDiffBlock(state.editDiff, "diff");
+        return out.length > 0 ? out : null;
+      }
+      // mode === "edit": only show the mark when this turn has produced
+      // prose. Tool-only turns already display the edit in the tools
+      // block; the mark below would just duplicate it.
+      if (!turnHasShownProse) {
+        return null;
+      }
+      const diff = state.editDiff;
+      // Dedupe consecutive marks for the same path — but only when this
+      // id isn't already showing a block (else a diff→edit toggle on the
+      // last-marked path would leave its diff body painted).
+      if (
+        diff.path &&
+        diff.path === lastEditMarkPath &&
+        !screen.hasKey(key)
+      ) {
+        return null;
+      }
+      const out = formatEditDiffBlock(diff, "edit");
+      if (out.length === 0) {
+        return null;
+      }
+      if (diff.path) {
+        lastEditMarkPath = diff.path;
+      }
+      return out;
+    })();
+    if (lines === null) {
+      screen.removeKey(key);
       return;
     }
-    // mode === "edit": only show the mark when this turn has produced
-    // prose. Tool-only turns already display the edit in the tools
-    // block; the mark below would just duplicate it.
-    if (!turnHasShownProse) {
-      return;
+    // Remember the payload so a later ^O mode toggle can re-render this
+    // diff even after the turn boundary wipes toolStates/toolCallOrder.
+    const diff = toolStates.get(toolCallId)?.editDiff;
+    if (diff) {
+      renderedEditDiffs.set(toolCallId, diff);
     }
-    const diff = state.editDiff;
-    if (diff.path && diff.path === lastEditMarkPath) {
-      return;
-    }
-    const lines = formatEditDiffBlock(diff, "edit");
-    if (lines.length === 0) {
-      return;
-    }
-    screen.upsertLines(`editdiff:${toolCallId}`, lines);
-    if (diff.path) {
-      lastEditMarkPath = diff.path;
+    screen.upsertLines(key, lines);
+  };
+
+  // Re-converge every diff ever rendered this scrollback to the current
+  // showFileUpdates mode. Driven by the ^O "File updates" toggle, which
+  // must affect past turns too — those diffs still sit in scrollback but
+  // their toolStates are long gone, so we rebuild from renderedEditDiffs.
+  // Unconditional per mode (no turn-scoped prose/dedup gating): diff →
+  // full body, edit → one-line mark, none → removed.
+  const reRenderAllEditDiffs = (): void => {
+    const mode = viewPrefs.showFileUpdates;
+    for (const [toolCallId, diff] of renderedEditDiffs) {
+      const key = `editdiff:${toolCallId}`;
+      if (mode === "none") {
+        screen.removeKey(key);
+        continue;
+      }
+      const out = formatEditDiffBlock(diff, mode);
+      if (out.length === 0) {
+        screen.removeKey(key);
+      } else {
+        screen.upsertLines(key, out);
+      }
     }
   };
 
@@ -3215,7 +3530,6 @@ async function runSession(
       toolStates.clear();
       exitPlanStates.clear();
       toolCallOrder.length = 0;
-      toolsExpanded = false;
       toolsBlockEndedAt = null;
       lastEditMarkPath = null;
       turnHasShownProse = false;
@@ -3302,7 +3616,7 @@ async function runSession(
       closeAgentText();
       closeThought();
       lastPlanEvent = event;
-      const lines = formatEvent(event, formatOptions);
+      const lines = formatEvent(event, planFormatOptions());
       if (lines.length > 0) {
         // Leading blank stays part of the keyed block so it floats with
         // the plan when sticky bumps it back to the tail — keeping the
@@ -3407,7 +3721,7 @@ async function runSession(
             stopped: true,
             amended: event.amended === true,
           },
-          formatOptions,
+          planFormatOptions(),
         );
         if (lines.length > 0) {
           screen.upsertLines("plan", [{ body: "" }, ...lines]);
@@ -3463,7 +3777,6 @@ async function runSession(
       toolsBlockStartedAt = null;
       toolsBlockEndedAt = null;
       toolsBlockStopReason = null;
-      toolsExpanded = false;
       upstreamInterruptedSeen = false;
       lastEditMarkPath = null;
       turnHasShownProse = false;
@@ -3603,7 +3916,6 @@ async function runSession(
     toolsBlockStartedAt = null;
     toolsBlockEndedAt = null;
     toolsBlockStopReason = null;
-    toolsExpanded = false;
     lastEditMarkPath = null;
     turnHasShownProse = false;
   };

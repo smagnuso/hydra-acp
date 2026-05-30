@@ -109,7 +109,7 @@ export type InputEffect =
   | { type: "scroll-to-bottom" }
   | { type: "switch-session" }
   | { type: "next-live-session" }
-  | { type: "toggle-tools" }
+  | { type: "toggle-options" }
   | { type: "toggle-thoughts" }
   | { type: "toggle-mouse" }
   | { type: "show-help" }
@@ -448,7 +448,7 @@ export class InputDispatcher {
       case "ctrl-n":
         return this.handleDown();
       case "ctrl-o":
-        return [{ type: "toggle-tools" }];
+        return [{ type: "toggle-options" }];
       case "backspace":
         this.backspace();
         return [];

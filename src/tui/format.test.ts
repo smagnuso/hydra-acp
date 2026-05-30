@@ -584,16 +584,17 @@ describe("formatEditDiffBlock", () => {
       },
       "diff",
     );
-    // 1 path header + 2 diff lines (1 removed, 1 added)
-    expect(lines).toHaveLength(3);
-    expect(lines[0]).toMatchObject({
-      body: "▸ Edited /repo/src/foo.ts",
+    // leading blank separator + 1 path header + 2 diff lines (1 removed, 1 added)
+    expect(lines).toHaveLength(4);
+    expect(lines[0]?.body).toBe("");
+    expect(lines[1]).toMatchObject({
+      body: "▾ Edited /repo/src/foo.ts",
       bodyStyle: "dim",
     });
-    expect(lines[1]?.bodyStyle).toBe("code");
-    expect(lines[1]?.ansi).toBe(true);
     expect(lines[2]?.bodyStyle).toBe("code");
     expect(lines[2]?.ansi).toBe(true);
+    expect(lines[3]?.bodyStyle).toBe("code");
+    expect(lines[3]?.ansi).toBe(true);
   });
 
   it("omits the header when path is absent", () => {
@@ -601,8 +602,10 @@ describe("formatEditDiffBlock", () => {
       { oldText: "a\n", newText: "b\n" },
       "diff",
     );
-    expect(lines).toHaveLength(2);
-    expect(lines[0]?.bodyStyle).toBe("code");
+    // leading blank separator + 2 diff lines
+    expect(lines).toHaveLength(3);
+    expect(lines[0]?.body).toBe("");
+    expect(lines[1]?.bodyStyle).toBe("code");
   });
 
   it("returns no lines when 'diff' mode has nothing to show", () => {

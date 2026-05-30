@@ -992,22 +992,42 @@ export function formatEditDiffBlock(
   mode: FileUpdateMode,
 ): FormattedLine[] {
   const lines: FormattedLine[] = [];
-  if (diff.path) {
-    lines.push({
-      prefix: "  ",
-      body: `▸ Edited ${sanitizeSingleLine(shortenHomePath(diff.path))}`,
-      bodyStyle: "dim",
-    });
-  }
+  // Build the header lazily so the marker reflects whether a diff body
+  // actually follows: ▾ (open) when an expanded body is rendered below,
+  // ▸ (closed) for the terse one-line "edit" mark or a header-only diff.
+  const header = (open: boolean): FormattedLine => ({
+    prefix: "  ",
+    body: `${open ? "▾" : "▸"} Edited ${sanitizeSingleLine(shortenHomePath(diff.path!))}`,
+    bodyStyle: "dim",
+  });
   if (mode === "edit") {
+    if (diff.path) {
+      lines.push(header(false));
+    }
     return lines;
   }
-  const body = buildUnifiedDiff(diff);
+  // No line cap in the TUI diff view — show the whole change rather than
+  // truncating with a "… N more" footer. The collapsed "edit" mark is the
+  // terse option; opting into "diff" means you want to see everything.
+  const body = buildUnifiedDiff(diff, { maxLines: Infinity });
   if (body.length === 0) {
+    // Nothing to expand — fall back to the closed header (or nothing).
+    if (diff.path) {
+      lines.push(header(false));
+    }
     return lines;
+  }
+  if (diff.path) {
+    lines.push(header(true));
   }
   const fenced = "```diff\n" + body + "\n```";
   lines.push(...parseAgentMarkdown(fenced));
+  // In diff mode the block is a multi-line visual unit (mark + fenced
+  // body); a leading blank line sets it off from the prose above. Only
+  // added once we know there's real content to show.
+  if (lines.length > 0) {
+    lines.unshift({ body: "" });
+  }
   return lines;
 }
 

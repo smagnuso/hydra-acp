@@ -94,6 +94,16 @@ export interface PermissionPromptSpec {
   selectedIndex: number;
 }
 
+// Interactive session-options modal opened by ^O. Each row shows its
+// current value (e.g. on/off, edit/diff, amend/enqueue); the app cycles
+// one in place and re-renders without closing, so several can be changed
+// in one visit. Dismissed by passing null to setOptionsPrompt.
+export interface OptionsPromptSpec {
+  title: string;
+  options: Array<{ label: string; value: string }>;
+  selectedIndex: number;
+}
+
 // Tiny modal used by the TUI to confirm a destructive exit (e.g. "agent
 // is still working — interrupt before quitting?"). Two-line layout:
 // the question, then a one-line hint listing the accepted keys.
@@ -123,6 +133,7 @@ const SEPARATOR_ROWS = 1;
 export const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
+const MAX_OPTIONS_ROWS = 12;
 const MAX_HELP_ROWS = 30;
 const MAX_COMPLETION_ROWS = 6;
 const MAX_CHIP_ROWS = 4;
@@ -217,6 +228,7 @@ export class Screen {
   private lastFrameW = 0;
   private lastFrameH = 0;
   private permissionPrompt: PermissionPromptSpec | null = null;
+  private optionsPrompt: OptionsPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
   private helpPrompt: HelpPromptSpec | null = null;
   private completions: CompletionItem[] = [];
@@ -691,9 +703,20 @@ export class Screen {
     }
     // Bare LF — universal fallback for terminals without modifyOtherKeys
     // / kitty protocol that still need a way to distinguish Ctrl+Enter
-    // from plain Enter.
+    // from plain Enter. But a chunk with multiple LF-separated non-empty
+    // segments isn't a keypress — it's an unbracketed multi-line paste
+    // (terminal didn't send \x1b[200~ markers). Treating each LF as a
+    // Ctrl+Enter there would submit each line as its own prompt (and, if
+    // a modal had been dismissed mid-chunk, leak the pasted text into the
+    // buffer and fire a send). Route such chunks through the paste path
+    // so the whole thing lands as one text insert with embedded newlines.
     if (text.includes("\x0a")) {
       const parts = text.split("\x0a");
+      const nonEmpty = parts.filter((p) => p.length > 0).length;
+      if (nonEmpty > 1) {
+        this.onKey([{ type: "paste", text: text.replace(/\r/g, "") }]);
+        return;
+      }
       for (let i = 0; i < parts.length; i++) {
         if (parts[i]!.length > 0) {
           this.handleRawStdin(Buffer.from(parts[i]!, "binary"));
@@ -1319,6 +1342,43 @@ export class Screen {
     this.keyedBlocks.delete(key);
   }
 
+  // Whether a keyed block currently exists in scrollback.
+  hasKey(key: string): boolean {
+    return this.keyedBlocks.has(key);
+  }
+
+  // Splice a keyed block's lines out of scrollback entirely (unlike
+  // clearKey, which only forgets the key but leaves the lines painted).
+  // Later blocks' start indices shift up by the removed count so they
+  // stay aligned with the lines array. No-op if the key is unknown.
+  removeKey(key: string): void {
+    const block = this.keyedBlocks.get(key);
+    if (!block) {
+      return;
+    }
+    const end = block.start + block.count;
+    const touchesEnd = end >= this.lines.length;
+    const removedRows = this.wrappedRowsOfMany(
+      this.lines.slice(block.start, end),
+    );
+    const removed = this.lines.splice(block.start, block.count);
+    for (const line of removed) {
+      this.forgetLine(line);
+    }
+    this.keyedBlocks.delete(key);
+    for (const [k, range] of this.keyedBlocks) {
+      if (k !== key && range.start > block.start) {
+        range.start -= block.count;
+      }
+    }
+    if (touchesEnd) {
+      this.streamingActive = false;
+    }
+    this.adjustScrollForRowChange(-removedRows);
+    this.moveStickyToEnd();
+    this.scheduleRepaint();
+  }
+
   // Mark `key` as the sticky-bottom block. While set, whenever new content
   // lands after the block's lines (appendLines / appendStreaming / a new
   // upserted block) the screen floats this block back to the end so it
@@ -1448,6 +1508,19 @@ export class Screen {
   setPermissionPrompt(spec: PermissionPromptSpec | null): void {
     this.permissionPrompt = spec ? { ...spec } : null;
     this.repaint();
+  }
+
+  // Interactive session-options modal (^O). Takes over the prompt area
+  // like the permission modal. Pass null to dismiss.
+  setOptionsPrompt(spec: OptionsPromptSpec | null): void {
+    this.optionsPrompt = spec
+      ? { ...spec, options: spec.options.map((o) => ({ ...o })) }
+      : null;
+    this.repaint();
+  }
+
+  isOptionsPromptActive(): boolean {
+    return this.optionsPrompt !== null;
   }
 
   // Two-line confirmation modal that takes over the prompt area. Pass
@@ -2045,7 +2118,12 @@ export class Screen {
       this.drawSeparator(h - SESSIONBAR_ROWS);
       this.drawSessionbar();
       this.placeCursor();
-      if (this.permissionPrompt || this.confirmPrompt || this.helpPrompt) {
+      if (
+        this.permissionPrompt ||
+        this.optionsPrompt ||
+        this.confirmPrompt ||
+        this.helpPrompt
+      ) {
         this.term.hideCursor(false);
       }
       this.lastPromptRows = promptRows;
@@ -2199,7 +2277,12 @@ export class Screen {
   }
 
   private completionRows(): number {
-    if (this.permissionPrompt || this.confirmPrompt || this.helpPrompt) {
+    if (
+      this.permissionPrompt ||
+      this.optionsPrompt ||
+      this.confirmPrompt ||
+      this.helpPrompt
+    ) {
       // Completions are pointless when the prompt area is taken over by
       // a modal — the user can't be typing into it.
       return 0;
@@ -2397,6 +2480,10 @@ export class Screen {
   private drawPrompt(): void {
     if (this.permissionPrompt) {
       this.drawPermissionPrompt();
+      return;
+    }
+    if (this.optionsPrompt) {
+      this.drawOptionsPrompt();
       return;
     }
     if (this.confirmPrompt) {
@@ -2699,6 +2786,22 @@ export class Screen {
       this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
       return;
     }
+    if (this.optionsPrompt) {
+      const rows = this.optionsRows();
+      const top =
+        this.term.height -
+        rows -
+        BANNER_ROWS -
+        SEPARATOR_ROWS -
+        SESSIONBAR_ROWS +
+        1;
+      // title precedes the option rows
+      const optionRow = top + 1 + this.optionsPrompt.selectedIndex;
+      const lastUsableRow =
+        this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+      this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
+      return;
+    }
     if (this.confirmPrompt) {
       // Park cursor at the end of the question — there's no field to type
       // into, but a visible cursor reads as "waiting for your keypress".
@@ -2773,6 +2876,9 @@ export class Screen {
     if (this.permissionPrompt) {
       return this.permissionRows();
     }
+    if (this.optionsPrompt) {
+      return this.optionsRows();
+    }
     if (this.confirmPrompt) {
       return CONFIRM_PROMPT_ROWS;
     }
@@ -2800,6 +2906,75 @@ export class Screen {
       MAX_PERMISSION_ROWS,
       4 + this.permissionPrompt.options.length,
     );
+  }
+
+  private optionsRows(): number {
+    if (!this.optionsPrompt) {
+      return 0;
+    }
+    // title + N options + hint = 2 + N
+    return Math.min(MAX_OPTIONS_ROWS, 2 + this.optionsPrompt.options.length);
+  }
+
+  private drawOptionsPrompt(): void {
+    const spec = this.optionsPrompt;
+    if (!spec) {
+      return;
+    }
+    const w = this.term.width;
+    const rows = this.optionsRows();
+    const top =
+      this.term.height -
+      rows -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
+    let row = top;
+    const writeRow = (sig: string, paint: () => void): void => {
+      if (row >= top + rows) {
+        return;
+      }
+      this.paintRow(row, sig, paint);
+      row += 1;
+    };
+    writeRow(`opts|t|${w}|${spec.title}`, () => {
+      this.term.brightYellow(` ⚙ ${truncate(spec.title, w - 5)}`);
+    });
+    // Align the value column just past the longest label so values line
+    // up in a tidy right-hand column.
+    const labelWidth = Math.max(
+      ...spec.options.map((o) => o.label.length),
+      0,
+    );
+    for (let i = 0; i < spec.options.length; i++) {
+      if (row >= top + rows - 1) {
+        break;
+      }
+      const opt = spec.options[i];
+      if (!opt) {
+        continue;
+      }
+      const isSel = i === spec.selectedIndex;
+      const marker = isSel ? "❯" : " ";
+      const prefix = ` ${marker} ${i + 1}. `;
+      const paddedLabel = opt.label.padEnd(labelWidth);
+      const room = w - prefix.length - 3;
+      const body = `${prefix}${truncate(`${paddedLabel}  ${opt.value}`, room)}`;
+      writeRow(
+        `opts|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.value}|${opt.label}`,
+        () => {
+          if (isSel) {
+            this.term.brightYellow(body);
+          } else {
+            this.term.dim(body);
+          }
+        },
+      );
+    }
+    writeRow(`opts|hint|${w}`, () => {
+      this.term.dim(" ↑/↓ choose · Enter this session · s save default · Esc close");
+    });
   }
 
   // Walk this.lines from the tail, accumulating wrapped rows via the

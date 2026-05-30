@@ -1,5 +1,5 @@
 import * as fsp from "node:fs/promises";
-import { loadConfig } from "../../core/config.js";
+import { loadConfig, setDefaultAgent } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
 import { runLogTail } from "./log-tail.js";
@@ -342,22 +342,10 @@ export async function runAgentsSet(
     return;
   }
 
-  const raw = await readRawConfig();
-  if (modelId === undefined) {
-    raw.defaultAgent = agentId;
-    await writeRawConfig(raw);
-  } else {
-    // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",
-    // "openai/gpt-5-codex"), so we don't try to validate the model
-    // against the agent — just write it through.
-    const models =
-      raw.defaultModels && typeof raw.defaultModels === "object"
-        ? (raw.defaultModels as Record<string, unknown>)
-        : {};
-    models[agentId] = modelId;
-    raw.defaultModels = models;
-    await writeRawConfig(raw);
-  }
+  // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",
+  // "openai/gpt-5-codex"), so we don't try to validate the model against
+  // the agent — setDefaultAgent writes it through under defaultModels.
+  await setDefaultAgent(agentId, modelId);
 
   const disk = readAgentDefaults(await readRawConfig());
   if (modelId !== undefined && agentId !== disk.agent) {
@@ -428,14 +416,6 @@ async function fetchDaemonAgentDefaults(
 async function readRawConfig(): Promise<Record<string, unknown>> {
   const raw = await fsp.readFile(paths.config(), "utf8");
   return JSON.parse(raw) as Record<string, unknown>;
-}
-
-async function writeRawConfig(raw: Record<string, unknown>): Promise<void> {
-  await fsp.writeFile(
-    paths.config(),
-    JSON.stringify(raw, null, 2) + "\n",
-    { encoding: "utf8", mode: 0o600 },
-  );
 }
 
 export async function runAgentsRefresh(): Promise<void> {

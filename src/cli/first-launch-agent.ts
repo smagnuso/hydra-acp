@@ -5,7 +5,7 @@
 // terminal mode before the TUI takes over the terminal.
 
 import * as fsp from "node:fs/promises";
-import { loadConfig } from "../core/config.js";
+import { loadConfig, setDefaultAgent } from "../core/config.js";
 import { loadServiceToken } from "../core/service-token.js";
 import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
 import { paths } from "../core/paths.js";
@@ -57,7 +57,7 @@ export async function offerAgentPicker(): Promise<
     return "aborted";
   }
   if (choice.persist) {
-    await persistDefaultAgent(choice.agentId);
+    await setDefaultAgent(choice.agentId);
   }
   return choice;
 }
@@ -89,27 +89,6 @@ async function fetchAgents(): Promise<AgentChoice[] | undefined> {
   } catch {
     return undefined;
   }
-}
-
-async function persistDefaultAgent(agentId: string): Promise<void> {
-  // Read-modify-write the raw JSON so we preserve any unknown fields a
-  // user may have hand-added, mirroring `hydra agent set`.
-  let raw: Record<string, unknown> = {};
-  try {
-    raw = JSON.parse(await fsp.readFile(paths.config(), "utf8")) as Record<
-      string,
-      unknown
-    >;
-  } catch {
-    raw = {};
-  }
-  raw.defaultAgent = agentId;
-  await fsp.mkdir(paths.home(), { recursive: true });
-  await fsp.writeFile(
-    paths.config(),
-    JSON.stringify(raw, null, 2) + "\n",
-    { encoding: "utf8", mode: 0o600 },
-  );
 }
 
 function initialIndex(agents: AgentChoice[]): number {

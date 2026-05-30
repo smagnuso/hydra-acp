@@ -325,6 +325,67 @@ export async function writeConfig(config: HydraConfig): Promise<void> {
   await writeJsonAtomic(paths.config(), config, { mode: 0o600 });
 }
 
+// Mutate config.json in place without expanding it to the parsed/
+// defaulted shape. Reads the raw JSON (preserving the user's minimal
+// file), hands it to `mutate` for in-place edits, validates the result
+// against the schema so a bad value can't corrupt the file, then writes
+// it back atomically (temp + rename, mode 0o600). All raw-config writers
+// — `hydra agent set`, the TUI ^O options "save", and the TUI's agent
+// switch — funnel through here so every edit is a single atomic write
+// that only touches the keys the caller changed.
+//
+// The mutation runs synchronously on a fresh raw object; callers express
+// their change by setting/deleting keys on it (no return value needed).
+export async function updateRawConfig(
+  mutate: (raw: Record<string, unknown>) => void,
+): Promise<void> {
+  // Heal legacy auth-token layout first so the raw object we hand back
+  // matches what loadConfig would see (no orphan daemon.authToken).
+  await migrateLegacyAuthToken();
+  const raw = await readConfigFile();
+  mutate(raw);
+  // Validate the mutated shape; throws before any write if it's invalid.
+  HydraConfig.parse(raw);
+  await writeJsonAtomic(paths.config(), raw, { mode: 0o600 });
+}
+
+// Convenience over updateRawConfig for the common case of persisting a
+// single tui.<key> value (TUI ^O options "save").
+export async function setTuiConfigValue<K extends keyof HydraConfig["tui"]>(
+  key: K,
+  value: HydraConfig["tui"][K],
+): Promise<void> {
+  await updateRawConfig((raw) => {
+    const tui =
+      raw.tui && typeof raw.tui === "object" && !Array.isArray(raw.tui)
+        ? (raw.tui as Record<string, unknown>)
+        : {};
+    tui[key as string] = value;
+    raw.tui = tui;
+  });
+}
+
+// Convenience over updateRawConfig for persisting the default agent and
+// optionally its default model in one atomic write. Used by `hydra agent
+// set` and the TUI agent switch. Pass model=undefined to set only the
+// agent; pass a model to also record it under defaultModels[agent].
+export async function setDefaultAgent(
+  agentId: string,
+  modelId?: string,
+): Promise<void> {
+  await updateRawConfig((raw) => {
+    raw.defaultAgent = agentId;
+    if (modelId !== undefined) {
+      const models =
+        raw.defaultModels && typeof raw.defaultModels === "object"
+          ? (raw.defaultModels as Record<string, unknown>)
+          : {};
+      models[agentId] = modelId;
+      raw.defaultModels = models;
+    }
+  });
+}
+
 export function defaultConfig(): HydraConfig {
   return HydraConfig.parse({});
 }
