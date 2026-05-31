@@ -3440,8 +3440,13 @@ async function runSession(
     if (wasNew) {
       // The block is normally anchored by startToolsBlock on the user-text
       // event; this fallback covers replay/edge cases where a tool call
-      // arrives without a preceding prompt visible to us.
+      // arrives without a preceding prompt visible to us. Must bump the
+      // per-turn key too (like startToolsBlock) — otherwise this turn's
+      // tools splice into the previous turn's frozen-but-still-keyed block,
+      // and the eventual startToolsBlock then renders a second block.
       if (toolsBlockStartedAt === null) {
+        toolsBlockSeq += 1;
+        currentToolsKey = `tools:${toolsBlockSeq}`;
         toolsBlockStartedAt = Date.now();
         toolsBlockEndedAt = null;
         toolsBlockStopReason = null;
@@ -4023,7 +4028,24 @@ async function runSession(
         renderToolsBlock();
       }, 1_000);
     }
-    startToolsBlock();
+    // Only anchor a fresh tools block if the replay didn't already leave
+    // one live. The busy turn's replayed user-text calls startToolsBlock,
+    // so its tool rows are already rendered under the current per-turn
+    // key; a second startToolsBlock here would bump to a new key and
+    // paint a duplicate empty block below the replayed one. (Harmless
+    // before per-turn keys, when both calls shared the constant "tools"
+    // key and the second just re-anchored the same block in place.)
+    if (toolsBlockStartedAt === null) {
+      startToolsBlock();
+    }
+    // Anchor the tools header's elapsed clock to the daemon's authoritative
+    // turn start, not the reattach moment. Whether the block was anchored
+    // by replay or by startToolsBlock above, its startedAt is Date.now()
+    // (time-of-reattach), which would make the header read "thinking · 0s"
+    // for a turn that's actually been running a while. Override it so the
+    // tools "Xs" matches the banner elapsed.
+    toolsBlockStartedAt = initialTurnStartedAt;
+    renderToolsBlock();
   } else if (initialTurnStartedAt === undefined && pendingTurns > 0) {
     // Daemon says idle but local replay counted unmatched user-text
     // events. The daemon's turnStartedAt is authoritative — any
