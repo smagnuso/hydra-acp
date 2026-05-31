@@ -413,7 +413,7 @@ If both `launch <agent>` and `--session-id` are given, `--session-id` wins (atta
 
 ### Naming sessions from the editor
 
-Pass `--name <label>` or set `HYDRA_ACP_NAME` and the first `session/new` from that shim is labeled accordingly. The label flows through `_meta["hydra-acp"].name` on the wire, lands in `Session.title`, and shows up in `session/list` and `hydra-acp session`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
+Pass `--name <label>` or set `HYDRA_ACP_NAME` and the first `session/new` from that shim is labeled accordingly. The label flows through `_meta["hydra-acp"].title` on the wire, lands in `Session.title`, and shows up in `session/list` and `hydra-acp session`. Subsequent `session/new` calls from the same shim are not labeled — first one wins. The label survives daemon restart (it's carried in the resume hints).
 
 ```text
 HYDRA_ACP_NAME="$BUFFER_NAME" hydra-acp launch claude-acp

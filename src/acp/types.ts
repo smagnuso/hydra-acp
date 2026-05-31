@@ -193,7 +193,10 @@ export interface HydraMeta {
   upstreamSessionId?: string;
   agentId?: string;
   cwd?: string;
-  name?: string;
+  // Session label (Session.title). Read off session/new params (the
+  // `--name`/HYDRA_ACP_NAME label) and off the session-describing
+  // responses. Spec-aligned with the top-level `title` on session/list.
+  title?: string;
   agentArgs?: string[];
   // Transformer names to attach to the session chain. Falls back to the
   // daemon's defaultTransformers when absent.
@@ -265,6 +268,23 @@ export interface HydraMeta {
   // it does NOT promote an undecided session to interactive. Absent (the
   // default) means a normal human turn that promotes undefined → true.
   ancillary?: boolean;
+  // Triage/provenance fields. Emitted on every session-describing response
+  // (session/list, session/new, session/attach) by buildHydraSessionMeta so
+  // an attaching client gets the same view session/list offers. status,
+  // busy, awaitingInput, and attachedClients are always present on the wire;
+  // the rest are present only when applicable.
+  status?: "live" | "cold";
+  busy?: boolean;
+  awaitingInput?: boolean;
+  attachedClients?: number;
+  importedFromMachine?: string;
+  importedFromUpstreamSessionId?: string;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+  forkedFromMessageId?: string;
+  originatingClient?: { name: string; version?: string };
+  // Agent's own initialize-time capability claim, forwarded verbatim.
+  agentCapabilities?: unknown;
 }
 
 export function extractHydraMeta(
@@ -288,8 +308,8 @@ export function extractHydraMeta(
   if (typeof obj.cwd === "string") {
     out.cwd = obj.cwd;
   }
-  if (typeof obj.name === "string") {
-    out.name = obj.name;
+  if (typeof obj.title === "string") {
+    out.title = obj.title;
   }
   if (Array.isArray(obj.agentArgs) && obj.agentArgs.every((a) => typeof a === "string")) {
     out.agentArgs = obj.agentArgs as string[];
@@ -444,6 +464,48 @@ export function extractHydraMeta(
       out.availableModels = models;
     }
   }
+  if (obj.status === "live" || obj.status === "cold") {
+    out.status = obj.status;
+  }
+  if (typeof obj.busy === "boolean") {
+    out.busy = obj.busy;
+  }
+  if (typeof obj.awaitingInput === "boolean") {
+    out.awaitingInput = obj.awaitingInput;
+  }
+  if (typeof obj.attachedClients === "number") {
+    out.attachedClients = obj.attachedClients;
+  }
+  if (typeof obj.importedFromMachine === "string") {
+    out.importedFromMachine = obj.importedFromMachine;
+  }
+  if (typeof obj.importedFromUpstreamSessionId === "string") {
+    out.importedFromUpstreamSessionId = obj.importedFromUpstreamSessionId;
+  }
+  if (typeof obj.parentSessionId === "string") {
+    out.parentSessionId = obj.parentSessionId;
+  }
+  if (typeof obj.forkedFromSessionId === "string") {
+    out.forkedFromSessionId = obj.forkedFromSessionId;
+  }
+  if (typeof obj.forkedFromMessageId === "string") {
+    out.forkedFromMessageId = obj.forkedFromMessageId;
+  }
+  if (
+    obj.originatingClient &&
+    typeof obj.originatingClient === "object" &&
+    !Array.isArray(obj.originatingClient) &&
+    typeof (obj.originatingClient as Record<string, unknown>).name === "string"
+  ) {
+    const oc = obj.originatingClient as Record<string, unknown>;
+    out.originatingClient = {
+      name: oc.name as string,
+      ...(typeof oc.version === "string" ? { version: oc.version } : {}),
+    };
+  }
+  if (obj.agentCapabilities !== undefined) {
+    out.agentCapabilities = obj.agentCapabilities;
+  }
   return out;
 }
 
@@ -557,6 +619,112 @@ export const SessionListResult = z.object({
 });
 export type SessionListResult = z.infer<typeof SessionListResult>;
 
+// Live-session-only additions to the hydra session meta. These are
+// fields that only exist for a session that is currently resident (or
+// loadable) — the agent's advertised palette, the in-flight turn clock,
+// the prompt queue, etc. The session/list path leaves them undefined;
+// the session/new and session/attach paths fill them in. Keeping them
+// separate from SessionListEntry lets one builder emit a consistent
+// superset across every response that carries session meta.
+export interface LiveSessionMetaExtras {
+  currentMode?: string;
+  agentArgs?: string[];
+  availableCommands?: unknown[];
+  availableModes?: unknown[];
+  availableModels?: unknown[];
+  turnStartedAt?: number;
+  agentCapabilities?: unknown;
+  queue?: unknown[];
+}
+
+// Single source of truth for the `_meta["hydra-acp"]` object emitted on
+// every response that describes a session — session/list, session/new,
+// session/attach (live + viewer). Producers derive a SessionListEntry
+// for the session and (for the live paths) pass the LiveSessionMetaExtras
+// the list path can't know. This keeps the three response shapes in sync:
+// add a field here and every surface gets it.
+//
+// Title is emitted as `title`, matching the top-level session/list
+// field. (An older `name` alias was removed once all in-tree readers
+// moved to `title`.)
+export function buildHydraSessionMeta(
+  entry: SessionListEntry,
+  extras?: LiveSessionMetaExtras,
+): Record<string, unknown> {
+  const meta: Record<string, unknown> = {
+    attachedClients: entry.attachedClients,
+    status: entry.status,
+    busy: entry.busy,
+    awaitingInput: entry.awaitingInput,
+  };
+  if (entry.cwd !== undefined) {
+    meta.cwd = entry.cwd;
+  }
+  if (entry.title !== undefined) {
+    meta.title = entry.title;
+  }
+  if (entry.agentId !== undefined) {
+    meta.agentId = entry.agentId;
+  }
+  if (entry.upstreamSessionId !== undefined) {
+    meta.upstreamSessionId = entry.upstreamSessionId;
+  }
+  if (entry.currentModel !== undefined) {
+    meta.currentModel = entry.currentModel;
+  }
+  if (entry.currentUsage !== undefined) {
+    meta.currentUsage = entry.currentUsage;
+  }
+  if (entry.importedFromMachine !== undefined) {
+    meta.importedFromMachine = entry.importedFromMachine;
+  }
+  if (entry.importedFromUpstreamSessionId !== undefined) {
+    meta.importedFromUpstreamSessionId = entry.importedFromUpstreamSessionId;
+  }
+  if (entry.parentSessionId !== undefined) {
+    meta.parentSessionId = entry.parentSessionId;
+  }
+  if (entry.forkedFromSessionId !== undefined) {
+    meta.forkedFromSessionId = entry.forkedFromSessionId;
+  }
+  if (entry.forkedFromMessageId !== undefined) {
+    meta.forkedFromMessageId = entry.forkedFromMessageId;
+  }
+  if (entry.originatingClient !== undefined) {
+    meta.originatingClient = entry.originatingClient;
+  }
+  if (entry.interactive !== undefined) {
+    meta.interactive = entry.interactive;
+  }
+  if (extras) {
+    if (extras.currentMode !== undefined) {
+      meta.currentMode = extras.currentMode;
+    }
+    if (extras.agentArgs !== undefined && extras.agentArgs.length > 0) {
+      meta.agentArgs = extras.agentArgs;
+    }
+    if (extras.availableCommands !== undefined && extras.availableCommands.length > 0) {
+      meta.availableCommands = extras.availableCommands;
+    }
+    if (extras.availableModes !== undefined && extras.availableModes.length > 0) {
+      meta.availableModes = extras.availableModes;
+    }
+    if (extras.availableModels !== undefined && extras.availableModels.length > 0) {
+      meta.availableModels = extras.availableModels;
+    }
+    if (extras.turnStartedAt !== undefined) {
+      meta.turnStartedAt = extras.turnStartedAt;
+    }
+    if (extras.agentCapabilities !== undefined) {
+      meta.agentCapabilities = extras.agentCapabilities;
+    }
+    if (extras.queue !== undefined && extras.queue.length > 0) {
+      meta.queue = extras.queue;
+    }
+  }
+  return meta;
+}
+
 // Map an internal SessionListEntry to the ACP wire shape, packing
 // hydra-specific fields into `_meta["hydra-acp"]` per the
 // Extensibility convention. Any pre-existing `_meta` keys outside
@@ -564,35 +732,11 @@ export type SessionListResult = z.infer<typeof SessionListResult>;
 export function sessionListEntryToWire(
   entry: SessionListEntry,
 ): SessionListEntryWire {
-  const hydraMeta: Record<string, unknown> = {
-    attachedClients: entry.attachedClients,
-    status: entry.status,
-    busy: entry.busy,
-    awaitingInput: entry.awaitingInput,
-  };
-  if (entry.agentId !== undefined) {
-    hydraMeta.agentId = entry.agentId;
-  }
-  if (entry.upstreamSessionId !== undefined) {
-    hydraMeta.upstreamSessionId = entry.upstreamSessionId;
-  }
-  if (entry.currentModel !== undefined) {
-    hydraMeta.currentModel = entry.currentModel;
-  }
-  if (entry.currentUsage !== undefined) {
-    hydraMeta.currentUsage = entry.currentUsage;
-  }
-  if (entry.importedFromMachine !== undefined) {
-    hydraMeta.importedFromMachine = entry.importedFromMachine;
-  }
-  if (entry.importedFromUpstreamSessionId !== undefined) {
-    hydraMeta.importedFromUpstreamSessionId = entry.importedFromUpstreamSessionId;
-  }
   const wire: SessionListEntryWire = {
     sessionId: entry.sessionId,
     cwd: entry.cwd,
     updatedAt: entry.updatedAt,
-    _meta: mergeMeta(entry._meta, hydraMeta),
+    _meta: mergeMeta(entry._meta, buildHydraSessionMeta(entry)),
   };
   if (entry.title !== undefined) {
     wire.title = entry.title;

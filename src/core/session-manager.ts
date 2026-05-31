@@ -1289,6 +1289,36 @@ export class SessionManager {
     return session;
   }
 
+  // Synchronous SessionListEntry for a resident session. Mirrors the
+  // live-session branch of list() but skips the async history probe:
+  // callers on the attach/new hot path already hold the Session and
+  // don't need the history-derived `interactive` inference (they pass
+  // through the session's own tristate) or the history mtime (the
+  // session's updatedAt is current). Used to build the reconciled
+  // session/new + session/attach response `_meta["hydra-acp"]` from the
+  // same shape session/list emits.
+  liveListEntry(session: Session): SessionListEntry {
+    return {
+      sessionId: session.sessionId,
+      upstreamSessionId: session.upstreamSessionId,
+      cwd: session.cwd,
+      title: session.title,
+      agentId: session.agentId,
+      currentModel: session.currentModel,
+      currentUsage: session.currentUsage,
+      parentSessionId: session.parentSessionId,
+      forkedFromSessionId: session.forkedFromSessionId,
+      forkedFromMessageId: session.forkedFromMessageId,
+      originatingClient: session.originatingClient,
+      interactive: session.interactive,
+      updatedAt: new Date(session.updatedAt).toISOString(),
+      attachedClients: session.attachedCount,
+      status: "live",
+      busy: session.turnStartedAt !== undefined,
+      awaitingInput: session.awaitingInput,
+    };
+  }
+
   async list(
     filter: { cwd?: string; includeNonInteractive?: boolean } = {},
   ): Promise<SessionListEntry[]> {

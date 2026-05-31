@@ -163,7 +163,10 @@ async function poll() {
   try {
     const result = await request(mainWs, "session/list", {});
     for (const entry of result?.sessions ?? []) {
-      if (entry.status === "live") {
+      // Hydra-specific fields ride under _meta["hydra-acp"] per the
+      // Extensibility convention; status is one of them.
+      const hydra = entry._meta?.["hydra-acp"] ?? {};
+      if (hydra.status === "live") {
         attachSession(entry.sessionId);
       }
     }

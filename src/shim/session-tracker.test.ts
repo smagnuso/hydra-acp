@@ -55,7 +55,7 @@ describe("SessionTracker", () => {
             upstreamSessionId: "u_x",
             agentId: "claude-code",
             cwd: "/work",
-            name: "feature-X",
+            title: "feature-X",
           },
         },
       },

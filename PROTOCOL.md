@@ -655,7 +655,7 @@ Standard ACP requests and responses carry an optional `_meta: Record<string, unk
 |---|---|---|
 | `agentId` | `string` | Override `params.agentId`. Used by `hydra-acp launch <agent>` so the editor doesn't need to know how to pick agents. |
 | `cwd` | `string` | Override `params.cwd`. |
-| `name` | `string` | Session label (`Session.title`). Surfaces in `session/list`, the picker, slack-bridge thread titles. First write wins; replaced by the first user prompt unless the agent has emitted its own `session_info_update`. |
+| `title` | `string` | Session label (`Session.title`). Surfaces in `session/list`, the picker, slack-bridge thread titles. First write wins; replaced by the first user prompt unless the agent has emitted its own `session_info_update`. |
 | `agentArgs` | `string[]` | Forwarded to the underlying agent's command line. Stored in the resume hints so a resurrected session re-spawns the agent with the same args. |
 | `transformers` | `string[]` | Names of transformers to attach to the session chain. Resolves to live connections at session-creation time; missing names are silently skipped (fail-open). Falls back to `config.defaultTransformers`. |
 | `model` | `string` | One-shot model id applied via `session/set_model` at agent bootstrap. Ignored on resurrect. |
@@ -665,25 +665,45 @@ Standard ACP requests and responses carry an optional `_meta: Record<string, unk
 
 #### On `session/new` and `session/attach` responses (`_meta.hydra-acp`)
 
+The `session/new`, `session/attach` (live and read-only viewer), `session/load`, and `session/list` responses all build their `_meta["hydra-acp"]` object from a single function (`buildHydraSessionMeta`), so they share one consistent shape. An attaching client therefore sees the **same session info `session/list` exposes** — status, busy, attach count, provenance — plus the live-only extras below that only a resident session has. Add a field to that builder and every surface gets it.
+
+The shared core (identical to the [`session/list` entry meta](#on-sessionlist-entries-_metahydra-acp)):
+
 | Field | Type | Semantics |
 |---|---|---|
+| `status` | `"live" \| "cold"` | Always present. `cold` on the read-only viewer attach path. |
+| `busy` | `boolean` | Always present. True while a turn is in flight. |
+| `awaitingInput` | `boolean` | Always present. True when blocked on the user (permission/question). |
+| `attachedClients` | `number` | Always present. Count of currently-attached clients. |
 | `upstreamSessionId` | `string` | The agent's own session id (distinct from the daemon's id). |
 | `agentId` | `string` | Resolved agent id (after registry id lookup / npx-basename fallback). |
 | `cwd` | `string` | Effective working directory. |
-| `currentModel` | `string` | Last-known model id; lets attach paint header state before any new updates land. |
-| `currentMode` | `string` | Last-known agent mode. |
+| `title` | `string?` | Session label (`Session.title`). Matches the top-level `title` on `session/list`. |
+| `currentModel` | `string?` | Last-known model id; lets attach paint header state before any new updates land. |
 | `currentUsage` | `{used?, size?, costAmount?, costCurrency?}` | Last-known token/cost snapshot. |
-| `availableCommands` | `{name, description?}[]` | Command palette known to the daemon (agent + hydra slash commands + extension verbs). |
-| `availableModes` | `{id, name?, description?}[]` | Modes the underlying agent advertises. |
-| `availableModels` | `{modelId, name?, description?}[]` | Models the agent will accept on `session/set_model`. |
-| `turnStartedAt` | `number` (epoch ms) | Present only when an agent turn is in flight at response time. Lets a fresh client paint the busy indicator with the right elapsed time. |
-| `promptQueueing` | `boolean` | Daemon accepts concurrent `session/prompt` requests and queues them. |
-| `promptCancelling` | `boolean` | Daemon implements `hydra-acp/cancel_prompt`. |
-| `promptUpdating` | `boolean` | Daemon implements `hydra-acp/update_prompt`. |
-| `promptAmending` | `boolean` | Daemon implements `hydra-acp/amend_prompt`. |
-| `promptPipelining` | `boolean` | Daemon forwards concurrent prompts directly to the agent (only true for agents that absorb streaming input). Implies `promptQueueing`. |
-| `queue` | `PromptQueueEntry[]` | Snapshot of the daemon-side queue at attach time, so late-joining clients can paint chips without waiting for new `prompt_queue_added` notifications. |
-| `mcpStdin` | `boolean` | Echoed when stdin streaming was wired up. |
+| `importedFromMachine` | `string?` | Origin hostname; present iff imported. |
+| `importedFromUpstreamSessionId` | `string?` | Origin upstream id; present iff imported. |
+| `parentSessionId` | `string?` | Set iff spawned as a transformer child. |
+| `forkedFromSessionId` | `string?` | Local-fork breadcrumb. |
+| `forkedFromMessageId` | `string?` | Local-fork breadcrumb. |
+| `originatingClient` | `{name, version?}?` | `clientInfo` of the process that issued `session/new`. |
+| `interactive` | `boolean?` | Tristate filter signal; absent when undecided. |
+
+Live-only extras (present on `session/new` and `session/attach`; the read-only viewer path supplies the disk-persisted subset, omitting `turnStartedAt`/`queue`/`agentCapabilities`):
+
+| Field | Type | Semantics |
+|---|---|---|
+| `currentMode` | `string?` | Last-known agent mode. |
+| `agentArgs` | `string[]?` | Agent command-line args, when set. |
+| `availableCommands` | `{name, description?}[]?` | Command palette known to the daemon (agent + hydra slash commands + extension verbs). |
+| `availableModes` | `{id, name?, description?}[]?` | Modes the underlying agent advertises. |
+| `availableModels` | `{modelId, name?, description?}[]?` | Models the agent will accept on `session/set_model`. |
+| `turnStartedAt` | `number?` (epoch ms) | Present only when an agent turn is in flight at response time. Lets a fresh client paint the busy indicator with the right elapsed time. |
+| `agentCapabilities` | `object?` | The underlying agent's own initialize-time capability claim, forwarded verbatim. |
+| `queue` | `PromptQueueEntry[]?` | Snapshot of the daemon-side queue at attach time, so late-joining clients can paint chips without waiting for new `prompt_queue_added` notifications. Omitted when empty. |
+| `mcpStdin` | `boolean?` | Echoed when stdin streaming was wired up. |
+
+> Capability flags (`promptQueueing`, `promptCancelling`, `promptUpdating`, `promptAmending`, `promptPipelining`) are daemon-wide and ride on the **`initialize`** response's `_meta["hydra-acp"]`, not per-session.
 
 #### On `session/list` entries (`_meta.hydra-acp`)
 
@@ -700,16 +720,42 @@ Per the [Session List Protocol](https://agentclientprotocol.com/protocol/session
       "attachedClients": 2,
       "status": "live",         // "live" | "cold"
       "busy": false,            // mid-turn flag (live sessions only)
+      "awaitingInput": false,   // blocked on user (permission/question); live only
       "agentId": "claude-acp",
       "upstreamSessionId": "<agent id>",
       "currentModel": "claude-opus-4-7",
       "currentUsage": { "used": 12345, "costAmount": 0.18, "costCurrency": "USD" },
       "importedFromMachine": "<hostname>",          // present iff imported
-      "importedFromUpstreamSessionId": "<id>"       // present iff imported
+      "importedFromUpstreamSessionId": "<id>",      // present iff imported
+      "parentSessionId": "<id>",                    // present iff spawned as a transformer child
+      "forkedFromSessionId": "<id>",                // present iff locally forked
+      "forkedFromMessageId": "<id>",                // present iff locally forked
+      "originatingClient": { "name": "<client>", "version": "<ver?>" },
+      "interactive": true       // tristate filter signal; absent when undecided
     }
   }
 }
 ```
+
+Field reference for `_meta["hydra-acp"]` (always-present fields first, then optional):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `attachedClients` | `number` | Count of clients currently attached. |
+| `status` | `"live" \| "cold"` | Whether the session is in memory or persisted-only. |
+| `busy` | `boolean` | Mid-turn flag (a prompt is in flight). Always `false` for cold sessions. |
+| `awaitingInput` | `boolean` | Blocked on the user (outstanding `session/request_permission` or agent question). Always `false` for cold sessions. |
+| `agentId` | `string?` | Agent that owns the session. |
+| `upstreamSessionId` | `string?` | The agent-side session id. |
+| `currentModel` | `string?` | Last-known model id. |
+| `currentUsage` | `object?` | Last-known usage snapshot: `{ used?, size?, costAmount?, costCurrency? }`. |
+| `importedFromMachine` | `string?` | Origin hostname; present iff imported. |
+| `importedFromUpstreamSessionId` | `string?` | Origin upstream id; present iff imported. |
+| `parentSessionId` | `string?` | Set iff spawned as a child by a transformer. |
+| `forkedFromSessionId` | `string?` | Local-fork breadcrumb; present iff locally forked. |
+| `forkedFromMessageId` | `string?` | Local-fork breadcrumb; present iff locally forked. |
+| `originatingClient` | `object?` | `clientInfo` of the process that issued `session/new`: `{ name, version? }`. |
+| `interactive` | `boolean?` | Tristate filter signal; absent when undecided. |
 
 #### `SessionAttachParams.readonly` (Hydra-only flag)
 

@@ -23,6 +23,9 @@ import {
   HYDRA_META_KEY,
   mergeMeta,
   sessionListEntryToWire,
+  buildHydraSessionMeta,
+  type LiveSessionMetaExtras,
+  type SessionListEntry,
   type InitializeResult,
   type SessionListResult,
   JsonRpcErrorCodes,
@@ -635,7 +638,7 @@ export function registerAcpWsEndpoint(
           cwd: params.cwd,
           agentId: params.agentId ?? deps.defaultAgent,
           mcpServers: augmentedMcpServers,
-          title: hydraMeta.name,
+          title: hydraMeta.title,
           agentArgs: hydraMeta.agentArgs,
           model: hydraMeta.model,
           onInstallProgress: makeInstallProgressForwarder(connection),
@@ -717,7 +720,7 @@ export function registerAcpWsEndpoint(
         clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
-        _meta: buildResponseMeta(session),
+        _meta: buildResponseMeta(deps.manager, session),
       };
     });
 
@@ -908,7 +911,7 @@ export function registerAcpWsEndpoint(
         replayed: replay.length,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
-        _meta: buildResponseMeta(session),
+        _meta: buildResponseMeta(deps.manager, session),
       };
     });
 
@@ -1204,7 +1207,7 @@ export function registerAcpWsEndpoint(
         clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
-        _meta: buildResponseMeta(session),
+        _meta: buildResponseMeta(deps.manager, session),
       };
     });
 
@@ -1570,102 +1573,79 @@ export function decideSetModel(
 
 // Viewer-mode _meta builder. Mirrors buildResponseMeta but reads from the
 // on-disk ResurrectParams shape since no Session instance exists in
-// manager.sessions for a read-only cold attach. Omits live-only fields
-// (turnStartedAt, queue) — there's no agent driving the session so
-// neither is ever populated.
+// manager.sessions for a read-only cold attach. The session stays cold:
+// status is "cold", attachedClients 0, and the live-only clock/queue
+// fields (turnStartedAt, queue, agentCapabilities) are never populated.
+// Routes through buildHydraSessionMeta so the field set and naming stay
+// identical to session/list and the live attach/new response.
 function buildViewerResponseMeta(
   fromDisk: ResurrectParams,
 ): Record<string, unknown> {
-  const ours: Record<string, unknown> = {
+  const entry: SessionListEntry = {
+    sessionId: fromDisk.hydraSessionId,
     upstreamSessionId: fromDisk.upstreamSessionId,
-    agentId: fromDisk.agentId,
     cwd: fromDisk.cwd,
+    title: fromDisk.title,
+    agentId: fromDisk.agentId,
+    currentModel: fromDisk.currentModel,
+    currentUsage: fromDisk.currentUsage,
+    forkedFromSessionId: fromDisk.forkedFromSessionId,
+    forkedFromMessageId: fromDisk.forkedFromMessageId,
+    originatingClient: fromDisk.originatingClient,
+    interactive: fromDisk.interactive,
+    updatedAt: fromDisk.createdAt ?? new Date().toISOString(),
+    attachedClients: 0,
+    status: "cold",
+    busy: false,
+    awaitingInput: false,
   };
-  if (fromDisk.title !== undefined) {
-    ours.name = fromDisk.title;
-  }
-  if (fromDisk.agentArgs && fromDisk.agentArgs.length > 0) {
-    ours.agentArgs = fromDisk.agentArgs;
-  }
-  if (fromDisk.currentModel !== undefined) {
-    ours.currentModel = fromDisk.currentModel;
-  }
-  if (fromDisk.currentMode !== undefined) {
-    ours.currentMode = fromDisk.currentMode;
-  }
-  if (fromDisk.currentUsage !== undefined) {
-    ours.currentUsage = fromDisk.currentUsage;
-  }
-  if (fromDisk.agentCommands && fromDisk.agentCommands.length > 0) {
-    ours.availableCommands = fromDisk.agentCommands;
-  }
-  if (fromDisk.agentModes && fromDisk.agentModes.length > 0) {
-    ours.availableModes = fromDisk.agentModes;
-  }
-  if (fromDisk.agentModels && fromDisk.agentModels.length > 0) {
-    ours.availableModels = fromDisk.agentModels;
-  }
-  return { [HYDRA_META_KEY]: ours };
+  const extras: LiveSessionMetaExtras = {
+    currentMode: fromDisk.currentMode,
+    agentArgs: fromDisk.agentArgs,
+    availableCommands: fromDisk.agentCommands,
+    availableModes: fromDisk.agentModes,
+    availableModels: fromDisk.agentModels,
+  };
+  return { [HYDRA_META_KEY]: buildHydraSessionMeta(entry, extras) };
 }
 
-function buildResponseMeta(session: Session): Record<string, unknown> {
-  const ours: Record<string, unknown> = {
-    upstreamSessionId: session.upstreamSessionId,
-    agentId: session.agentId,
-    cwd: session.cwd,
-  };
-  if (session.title !== undefined) {
-    ours.name = session.title;
-  }
-  if (session.agentArgs && session.agentArgs.length > 0) {
-    ours.agentArgs = session.agentArgs;
-  }
+// Reconciled _meta builder for the live session/new and session/attach
+// responses. Derives the same SessionListEntry session/list emits (via
+// manager.liveListEntry) so the triage fields — status, busy,
+// awaitingInput, attachedClients, provenance — match across surfaces,
+// then layers the live-only extras (palette, mode, turn clock, queue,
+// agent capabilities) that only a resident session has. Agent-namespaced
+// `_meta` passes through via mergeMeta.
+function buildResponseMeta(
+  manager: SessionManager,
+  session: Session,
+): Record<string, unknown> {
+  const entry = manager.liveListEntry(session);
   // Snapshot state for the attaching client. Carries what would
   // otherwise come from history-replayed snapshot events
   // (current_model_update / current_mode_update / available_commands_update)
   // so a fresh attach has the right view from the get-go.
-  if (session.currentModel !== undefined) {
-    ours.currentModel = session.currentModel;
-  }
-  if (session.currentMode !== undefined) {
-    ours.currentMode = session.currentMode;
-  }
-  if (session.currentUsage !== undefined) {
-    ours.currentUsage = session.currentUsage;
-  }
-  const commands = session.mergedAvailableCommands();
-  if (commands.length > 0) {
-    ours.availableCommands = commands;
-  }
-  const modes = session.availableModes();
-  if (modes.length > 0) {
-    ours.availableModes = modes;
-  }
-  const models = session.availableModels();
-  if (models.length > 0) {
-    ours.availableModels = models;
-  }
-  // Mid-turn at attach time: hand the client the original prompt's
-  // recordedAt so it can boot directly into "busy · Ns" instead of
-  // sitting on "ready" until the next live notification.
-  if (session.turnStartedAt !== undefined) {
-    ours.turnStartedAt = session.turnStartedAt;
-  }
-  // The underlying agent's own initialize-time capability claim, captured
-  // verbatim. Lets capability-aware clients (cat --stream) pick the right
-  // consumption surface without re-probing the agent.
-  if (session.agentCapabilities !== undefined) {
-    ours.agentCapabilities = session.agentCapabilities;
-  }
-  // Snapshot of the daemon-owned prompt queue. Lets a late attacher
-  // paint queue chips for entries that landed before it joined without
-  // waiting for new prompt_queue_added notifications. Omitted entirely
-  // when the queue is empty (the common case).
-  const queue = session.queueSnapshot();
-  if (queue.length > 0) {
-    ours.queue = queue;
-  }
-  return mergeMeta(session.agentMeta, ours);
+  const extras: LiveSessionMetaExtras = {
+    currentMode: session.currentMode,
+    agentArgs: session.agentArgs,
+    availableCommands: session.mergedAvailableCommands(),
+    availableModes: session.availableModes(),
+    availableModels: session.availableModels(),
+    // Mid-turn at attach time: hand the client the original prompt's
+    // recordedAt so it can boot directly into "busy · Ns" instead of
+    // sitting on "ready" until the next live notification.
+    turnStartedAt: session.turnStartedAt,
+    // The underlying agent's own initialize-time capability claim, captured
+    // verbatim. Lets capability-aware clients (cat --stream) pick the right
+    // consumption surface without re-probing the agent.
+    agentCapabilities: session.agentCapabilities,
+    // Snapshot of the daemon-owned prompt queue. Lets a late attacher
+    // paint queue chips for entries that landed before it joined without
+    // waiting for new prompt_queue_added notifications. Omitted entirely
+    // when the queue is empty (the common case).
+    queue: session.queueSnapshot(),
+  };
+  return mergeMeta(session.agentMeta, buildHydraSessionMeta(entry, extras));
 }
 
 function buildInitializeResult(): InitializeResult {

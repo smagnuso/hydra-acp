@@ -4,6 +4,8 @@ import {
   extractHydraMeta,
   mergeMeta,
   SessionAttachParams,
+  sessionListEntryToWire,
+  buildHydraSessionMeta,
 } from "./types.js";
 
 describe("extractHydraMeta", () => {
@@ -22,14 +24,14 @@ describe("extractHydraMeta", () => {
           upstreamSessionId: "u_x",
           agentId: "claude-code",
           cwd: "/work",
-          name: "MyBuffer",
+          title: "MyBuffer",
         },
       }),
     ).toEqual({
       upstreamSessionId: "u_x",
       agentId: "claude-code",
       cwd: "/work",
-      name: "MyBuffer",
+      title: "MyBuffer",
     });
   });
 
@@ -86,6 +88,167 @@ describe("mergeMeta", () => {
     expect(mergeMeta(undefined, { agentId: "x" })).toEqual({
       [HYDRA_META_KEY]: { agentId: "x" },
     });
+  });
+});
+
+describe("sessionListEntryToWire", () => {
+  it("puts spec fields at the top level and everything else under hydra-acp", () => {
+    const wire = sessionListEntryToWire({
+      sessionId: "hydra_session_abc",
+      cwd: "/work",
+      title: "fix flaky test",
+      updatedAt: "2026-05-29T18:01:23.000Z",
+      attachedClients: 2,
+      status: "live",
+      busy: false,
+      awaitingInput: false,
+    });
+    expect(wire.sessionId).toBe("hydra_session_abc");
+    expect(wire.cwd).toBe("/work");
+    expect(wire.title).toBe("fix flaky test");
+    expect(wire.updatedAt).toBe("2026-05-29T18:01:23.000Z");
+    expect(wire._meta?.[HYDRA_META_KEY]).toEqual({
+      attachedClients: 2,
+      status: "live",
+      busy: false,
+      awaitingInput: false,
+      cwd: "/work",
+      // Title is mirrored into _meta so attach/new and list stay identical.
+      title: "fix flaky test",
+    });
+  });
+
+  it("packs all optional hydra fields into hydra-acp when present", () => {
+    const wire = sessionListEntryToWire({
+      sessionId: "s",
+      cwd: "/w",
+      updatedAt: "t",
+      attachedClients: 0,
+      status: "cold",
+      busy: false,
+      awaitingInput: false,
+      agentId: "claude-acp",
+      upstreamSessionId: "u_1",
+      currentModel: "claude-opus-4-7",
+      currentUsage: { used: 12345, costAmount: 0.18, costCurrency: "USD" },
+      importedFromMachine: "host-a",
+      importedFromUpstreamSessionId: "u_orig",
+      parentSessionId: "p_1",
+      forkedFromSessionId: "f_1",
+      forkedFromMessageId: "m_1",
+      originatingClient: { name: "cli", version: "1.0" },
+      interactive: true,
+    });
+    expect(wire._meta?.[HYDRA_META_KEY]).toEqual({
+      attachedClients: 0,
+      status: "cold",
+      busy: false,
+      awaitingInput: false,
+      cwd: "/w",
+      agentId: "claude-acp",
+      upstreamSessionId: "u_1",
+      currentModel: "claude-opus-4-7",
+      currentUsage: { used: 12345, costAmount: 0.18, costCurrency: "USD" },
+      importedFromMachine: "host-a",
+      importedFromUpstreamSessionId: "u_orig",
+      parentSessionId: "p_1",
+      forkedFromSessionId: "f_1",
+      forkedFromMessageId: "m_1",
+      originatingClient: { name: "cli", version: "1.0" },
+      interactive: true,
+    });
+  });
+
+  it("omits absent optionals and leaves title undefined", () => {
+    const wire = sessionListEntryToWire({
+      sessionId: "s",
+      cwd: "/w",
+      updatedAt: "t",
+      attachedClients: 0,
+      status: "cold",
+      busy: false,
+      awaitingInput: false,
+    });
+    expect(wire.title).toBeUndefined();
+    const hydra = wire._meta?.[HYDRA_META_KEY] as Record<string, unknown>;
+    expect("forkedFromSessionId" in hydra).toBe(false);
+    expect("parentSessionId" in hydra).toBe(false);
+    expect("interactive" in hydra).toBe(false);
+    expect("originatingClient" in hydra).toBe(false);
+  });
+});
+
+describe("buildHydraSessionMeta", () => {
+  const baseEntry = {
+    sessionId: "s",
+    cwd: "/w",
+    title: "my session",
+    updatedAt: "t",
+    attachedClients: 1,
+    status: "live" as const,
+    busy: true,
+    awaitingInput: false,
+    agentId: "claude-acp",
+  };
+
+  it("emits the title under the spec-aligned title key", () => {
+    const meta = buildHydraSessionMeta(baseEntry);
+    expect(meta.title).toBe("my session");
+    expect("name" in meta).toBe(false);
+    expect(meta.cwd).toBe("/w");
+  });
+
+  it("layers live-only extras when provided", () => {
+    const meta = buildHydraSessionMeta(baseEntry, {
+      currentMode: "ask",
+      agentArgs: ["--foo"],
+      availableCommands: [{ name: "c" }],
+      availableModes: [{ id: "ask" }],
+      availableModels: [{ modelId: "m" }],
+      turnStartedAt: 123,
+      agentCapabilities: { promptCapabilities: {} },
+      queue: [{ messageId: "q1" }],
+    });
+    expect(meta.currentMode).toBe("ask");
+    expect(meta.agentArgs).toEqual(["--foo"]);
+    expect(meta.availableCommands).toEqual([{ name: "c" }]);
+    expect(meta.turnStartedAt).toBe(123);
+    expect(meta.queue).toEqual([{ messageId: "q1" }]);
+    expect(meta.agentCapabilities).toEqual({ promptCapabilities: {} });
+  });
+
+  it("drops empty extras arrays", () => {
+    const meta = buildHydraSessionMeta(baseEntry, {
+      agentArgs: [],
+      availableCommands: [],
+      availableModes: [],
+      availableModels: [],
+      queue: [],
+    });
+    expect("agentArgs" in meta).toBe(false);
+    expect("availableCommands" in meta).toBe(false);
+    expect("queue" in meta).toBe(false);
+  });
+
+  it("the list wire and a live response share the same triage block", () => {
+    // session/list packs via sessionListEntryToWire; attach/new pack via
+    // buildHydraSessionMeta with extras. The triage fields must be byte
+    // identical so a client sees one consistent shape across surfaces.
+    const wire = sessionListEntryToWire(baseEntry);
+    const live = buildHydraSessionMeta(baseEntry, { currentMode: "ask" });
+    for (const k of [
+      "status",
+      "busy",
+      "awaitingInput",
+      "attachedClients",
+      "agentId",
+      "title",
+      "cwd",
+    ]) {
+      expect((live as Record<string, unknown>)[k]).toEqual(
+        (wire._meta?.[HYDRA_META_KEY] as Record<string, unknown>)[k],
+      );
+    }
   });
 });
 

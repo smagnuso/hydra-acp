@@ -145,13 +145,13 @@ describe("wireShim forwarding", () => {
     const sent = upstream.sent[0] as {
       params: {
         agentId: string;
-        _meta: { "hydra-acp": { name: string; agentArgs: string[] } };
+        _meta: { "hydra-acp": { title: string; agentArgs: string[] } };
       };
     };
     expect(sent.params.agentId).toBe("codex-acp");
     expect(sent.params._meta["hydra-acp"]).toEqual({
       agentArgs: ["-c", "sandbox_mode=danger-full-access"],
-      name: "feature-X",
+      title: "feature-X",
     });
   });
 
@@ -274,10 +274,10 @@ describe("wireShim forwarding", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(upstream.sent).toHaveLength(2);
-    const first = upstream.sent[0] as { params: { _meta?: { "hydra-acp"?: { name?: string } } } };
-    const second = upstream.sent[1] as { params: { _meta?: { "hydra-acp"?: { name?: string } } } };
-    expect(first.params._meta?.["hydra-acp"]?.name).toBe("feature-X");
-    expect(second.params._meta?.["hydra-acp"]?.name).toBeUndefined();
+    const first = upstream.sent[0] as { params: { _meta?: { "hydra-acp"?: { title?: string } } } };
+    const second = upstream.sent[1] as { params: { _meta?: { "hydra-acp"?: { title?: string } } } };
+    expect(first.params._meta?.["hydra-acp"]?.title).toBe("feature-X");
+    expect(second.params._meta?.["hydra-acp"]?.title).toBeUndefined();
   });
 
   it("synthesizes a downstream response when daemon resolves a sibling-answered permission", async () => {

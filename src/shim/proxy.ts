@@ -170,7 +170,7 @@ export function wireShim({
         outgoing = injectHydraMeta(outgoing, { agentArgs: opts.agentArgs });
       }
       if (namingState.name && !namingState.used) {
-        outgoing = injectHydraMeta(outgoing, { name: namingState.name });
+        outgoing = injectHydraMeta(outgoing, { title: namingState.name });
         namingState.used = true;
       }
       if (opts.model) {

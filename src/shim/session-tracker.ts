@@ -176,7 +176,7 @@ export class SessionTracker {
       upstreamSessionId,
       agentId,
       cwd,
-      title: hydraMeta.name,
+      title: hydraMeta.title,
       agentArgs: hydraMeta.agentArgs,
     });
   }

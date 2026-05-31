@@ -1147,7 +1147,7 @@ async function runSession(
   if (ctx.sessionId === "__new__") {
     const hydraNewMeta: Record<string, unknown> = {};
     if (opts.name) {
-      hydraNewMeta.name = opts.name;
+      hydraNewMeta.title = opts.name;
     }
     if (opts.model) {
       hydraNewMeta.model = opts.model;
@@ -1177,8 +1177,8 @@ async function runSession(
     if (hydraMeta.cwd) {
       resolvedCwd = hydraMeta.cwd;
     }
-    if (hydraMeta.name) {
-      resolvedTitle = hydraMeta.name;
+    if (hydraMeta.title) {
+      resolvedTitle = hydraMeta.title;
     }
     initialModel = hydraMeta.currentModel;
     initialMode = hydraMeta.currentMode;
@@ -1241,8 +1241,8 @@ async function runSession(
     if (hydraMeta.cwd) {
       resolvedCwd = hydraMeta.cwd;
     }
-    if (hydraMeta.name) {
-      resolvedTitle = hydraMeta.name;
+    if (hydraMeta.title) {
+      resolvedTitle = hydraMeta.title;
     }
     initialModel = hydraMeta.currentModel;
     initialMode = hydraMeta.currentMode;
