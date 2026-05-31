@@ -1,5 +1,12 @@
 import * as fsp from "node:fs/promises";
-import { loadConfig, setDefaultAgent } from "../../core/config.js";
+import {
+  loadConfig,
+  setDefaultAgent,
+  setAgentOverride,
+  setLocalAgent,
+  setRegistryPinned,
+  type LocalAgentConfig,
+} from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
 import { runLogTail } from "./log-tail.js";
@@ -12,6 +19,7 @@ interface AgentSummary {
   description?: string;
   distributions: string[];
   installed: "yes" | "no" | "lazy";
+  source?: "local" | "registry";
 }
 
 export async function runAgentsList(): Promise<void> {
@@ -49,6 +57,7 @@ export async function runAgentsList(): Promise<void> {
     id: a.id,
     name: a.name,
     version: a.version,
+    source: a.source ?? "registry",
     distributions: a.distributions.join(","),
     installed: a.installed,
     description: a.description ?? "",
@@ -57,6 +66,7 @@ export async function runAgentsList(): Promise<void> {
     id: "ID",
     name: "NAME",
     version: "VERSION",
+    source: "SOURCE",
     distributions: "DIST",
     installed: "INSTALLED",
     description: "DESCRIPTION",
@@ -65,6 +75,7 @@ export async function runAgentsList(): Promise<void> {
     id: maxLen(header.id, rows.map((r) => r.id)),
     name: maxLen(header.name, rows.map((r) => r.name)),
     version: maxLen(header.version, rows.map((r) => r.version)),
+    source: maxLen(header.source, rows.map((r) => r.source)),
     distributions: maxLen(header.distributions, rows.map((r) => r.distributions)),
     installed: maxLen(header.installed, rows.map((r) => r.installed)),
   };
@@ -73,6 +84,7 @@ export async function runAgentsList(): Promise<void> {
       r.id.padEnd(widths.id),
       r.name.padEnd(widths.name),
       r.version.padEnd(widths.version),
+      r.source.padEnd(widths.source),
       r.distributions.padEnd(widths.distributions),
       r.installed.padEnd(widths.installed),
       r.description,
@@ -122,6 +134,11 @@ export function formatAge(ms: number): string {
 // later session/new path surface whatever error it would have.
 export async function assertKnownAgent(agentId: string): Promise<void> {
   const config = await loadConfig();
+  // A locally-defined agent is always valid — it doesn't need to be in
+  // the registry, and the daemon may not have reloaded config yet.
+  if (config.agents[agentId] !== undefined) {
+    return;
+  }
   const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   let known: string[];
@@ -334,9 +351,12 @@ export async function runAgentsSet(
     void 0;
   }
 
-  if (known !== undefined && !known.includes(agentId)) {
+  // A locally-defined agent (config.agents) is valid even when absent
+  // from the registry — and shadows a registry agent of the same id.
+  const isLocal = config.agents[agentId] !== undefined;
+  if (!isLocal && known !== undefined && !known.includes(agentId)) {
     process.stderr.write(
-      `hydra agent set: '${agentId}' is not in the registry. Known ids: ${known.join(", ")}\n`,
+      `hydra agent set: '${agentId}' is not in the registry or config.agents. Known ids: ${known.join(", ")}\n`,
     );
     process.exit(1);
     return;
@@ -442,6 +462,155 @@ export async function runAgentsRefresh(): Promise<void> {
   }
   process.stdout.write(
     `Refreshed registry: ${body.agentCount} agents (version ${body.version})\n`,
+  );
+}
+
+// `hydra agent pin <id> [packageSpec]` — pin a registry agent to a
+// specific npm package spec (e.g. "opencode-ai@0.5.12"). With no spec,
+// clears the pin. Requires a daemon restart to take effect on new spawns.
+export async function runAgentsPin(
+  agentId: string | undefined,
+  packageSpec: string | undefined,
+): Promise<void> {
+  if (!agentId) {
+    process.stderr.write(
+      "Usage: hydra-acp agent pin <id> [packageSpec]   (omit packageSpec to clear)\n",
+    );
+    process.exit(2);
+    return;
+  }
+  await setAgentOverride(agentId, packageSpec);
+  if (packageSpec === undefined) {
+    process.stdout.write(`Cleared version pin for ${agentId}.\n`);
+  } else {
+    process.stdout.write(`Pinned ${agentId} to ${packageSpec}.\n`);
+  }
+  process.stdout.write(
+    "Restart with `hydra-acp daemon restart` to apply to new sessions.\n",
+  );
+}
+
+// `hydra agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...` —
+// define (or update) a local agent that bypasses the registry. Mirrors
+// `extensions add`. With no --command the executable defaults to <id>.
+export async function runAgentsAdd(
+  agentId: string | undefined,
+  argv: string[],
+): Promise<void> {
+  if (!agentId) {
+    process.stderr.write(
+      "Usage: hydra-acp agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...\n",
+    );
+    process.exit(2);
+    return;
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(agentId)) {
+    process.stderr.write(
+      `Invalid agent id '${agentId}': must match [A-Za-z0-9._-]+\n`,
+    );
+    process.exit(2);
+    return;
+  }
+  const { command, args, env } = parseAgentAddFlags(argv);
+  const def: LocalAgentConfig = {};
+  if (command !== undefined) {
+    def.command = command;
+  }
+  if (args.length > 0) {
+    def.args = args;
+  }
+  if (Object.keys(env).length > 0) {
+    def.env = env;
+  }
+  await setLocalAgent(agentId, def);
+  const shown = command ?? `${agentId} (default — resolved off PATH)`;
+  process.stdout.write(
+    `Local agent ${agentId} → ${shown}${args.length > 0 ? " " + args.join(" ") : ""}\n`,
+  );
+  process.stdout.write(
+    "Restart with `hydra-acp daemon restart` to apply to new sessions.\n",
+  );
+}
+
+// `hydra agent remove <id>` — delete a local agent from config.
+export async function runAgentsRemove(agentId: string | undefined): Promise<void> {
+  if (!agentId) {
+    process.stderr.write("Usage: hydra-acp agent remove <id>\n");
+    process.exit(2);
+    return;
+  }
+  await setLocalAgent(agentId, undefined);
+  process.stdout.write(`Removed local agent ${agentId}.\n`);
+  process.stdout.write(
+    "Restart with `hydra-acp daemon restart` to apply to new sessions.\n",
+  );
+}
+
+function parseAgentAddFlags(argv: string[]): {
+  command: string | undefined;
+  args: string[];
+  env: Record<string, string>;
+} {
+  let command: string | undefined;
+  let args: string[] = [];
+  const env: Record<string, string> = {};
+  let i = 0;
+  while (i < argv.length) {
+    const tok = argv[i];
+    if (tok === "--command") {
+      const v = argv[i + 1];
+      if (v === undefined) {
+        process.stderr.write("--command requires a value\n");
+        process.exit(2);
+      }
+      command = v;
+      i += 2;
+      continue;
+    }
+    if (tok === "--args") {
+      const v = argv[i + 1];
+      if (v === undefined) {
+        process.stderr.write("--args requires a value\n");
+        process.exit(2);
+      }
+      args = v.split(",").filter((s) => s.length > 0);
+      i += 2;
+      continue;
+    }
+    if (tok === "--env") {
+      const v = argv[i + 1];
+      if (v === undefined) {
+        process.stderr.write("--env requires KEY=VALUE\n");
+        process.exit(2);
+      }
+      const eq = v.indexOf("=");
+      if (eq <= 0) {
+        process.stderr.write(`Invalid --env value '${v}': expected KEY=VALUE\n`);
+        process.exit(2);
+      }
+      env[v.slice(0, eq)] = v.slice(eq + 1);
+      i += 2;
+      continue;
+    }
+    process.stderr.write(`Unknown flag: ${tok}\n`);
+    process.exit(2);
+    return { command: undefined, args: [], env: {} };
+  }
+  return { command, args, env };
+}
+
+// `hydra registry pin` / `hydra registry unpin` — freeze (or unfreeze)
+// the daemon on its on-disk registry cache so a bad upstream push can't
+// be picked up. `hydra agent refresh` still forces a one-off fetch.
+export async function runRegistryPin(pinned: boolean): Promise<void> {
+  await setRegistryPinned(pinned);
+  process.stdout.write(
+    pinned
+      ? "Registry pinned to the on-disk cache. `hydra-acp agent refresh` still forces a fetch.\n"
+      : "Registry unpinned — the daemon will re-fetch per registry.ttlHours.\n",
+  );
+  process.stdout.write(
+    "Restart with `hydra-acp daemon restart` to apply.\n",
   );
 }
 

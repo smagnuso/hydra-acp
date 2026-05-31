@@ -25,12 +25,15 @@ function testConfig(): HydraConfig {
     registry: {
       url: "http://127.0.0.1:65535/never-reached",
       ttlHours: 24,
+      pinned: false,
     },
     defaultAgent: "claude-acp",
     defaultModels: {},
     synopsisOnClose: false,
     defaultCwd: os.homedir(),
     sessionListColdLimit: 20,
+    agents: {},
+    agentOverrides: {},
     extensions: {},
     transformers: {},
     defaultTransformers: [],
@@ -1300,12 +1303,15 @@ describe("startDaemon — extensions REST lifecycle", () => {
       registry: {
         url: "http://127.0.0.1:65535/never-reached",
         ttlHours: 24,
+      pinned: false,
       },
       defaultAgent: "claude-acp",
       defaultModels: {},
       synopsisOnClose: false,
       defaultCwd: os.homedir(),
       sessionListColdLimit: 20,
+      agents: {},
+      agentOverrides: {},
       extensions: {
         probe: {
           command: ["node", "-e", PROBE_SCRIPT],

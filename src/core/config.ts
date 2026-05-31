@@ -48,7 +48,43 @@ const DaemonConfig = z.object({
 const RegistryConfig = z.object({
   url: z.string().url().default(REGISTRY_URL_DEFAULT),
   ttlHours: z.number().positive().default(24),
+  // When true, the daemon never re-fetches the registry over the network:
+  // it serves whatever is in the on-disk cache (~/.hydra-acp/registry.json)
+  // indefinitely, ignoring ttlHours. An escape hatch for when a bad registry
+  // push breaks an agent — pin to the last-known-good cache until upstream
+  // is fixed. `hydra registry refresh` still forces a one-off fetch.
+  pinned: z.boolean().default(false),
 });
+
+// A user-defined agent that bypasses the network registry entirely. The
+// daemon spawns `command` (with `args`/`env`) directly over stdio ACP —
+// no install step, no version resolution. Lets a user point hydra at a
+// system binary (e.g. their own `opencode`), a locally-built agent, or
+// any ACP agent not yet published to the registry. Keyed by agent id in
+// config.agents; a local agent with the same id as a registry agent
+// shadows the registry entry.
+const LocalAgentConfig = z.object({
+  name: z.string().optional(),
+  description: z.string().optional(),
+  // Optional: defaults to the agent id (the config.agents key), mirroring
+  // how extensions default their command to the extension name. Set it
+  // when the executable differs from the id, or to point at an absolute
+  // path / wrapper script.
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string()).optional(),
+});
+export type LocalAgentConfig = z.infer<typeof LocalAgentConfig>;
+
+// Pin overrides applied to a *registry* agent at spawn time. `packageSpec`
+// replaces the npx package spec (e.g. "opencode-ai@0.5.12") so a bad
+// upstream publish can be sidestepped without editing the registry. The
+// pinned spec also keys its own install dir so it never collides with the
+// floating "current" install.
+const AgentOverrideConfig = z.object({
+  packageSpec: z.string().optional(),
+});
+export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfig>;
 
 const TuiConfig = z.object({
   // Minimum interval (ms) between full-screen repaints driven by content
@@ -182,7 +218,18 @@ export type TransformerConfig = TransformerBody & { name: string };
 
 export const HydraConfig = z.object({
   daemon: DaemonConfig.default({}),
-  registry: RegistryConfig.default({ url: REGISTRY_URL_DEFAULT, ttlHours: 24 }),
+  registry: RegistryConfig.default({
+    url: REGISTRY_URL_DEFAULT,
+    ttlHours: 24,
+    pinned: false,
+  }),
+  // User-defined agents that bypass the network registry. Keyed by agent
+  // id; each is spawned via its `command`/`args` directly. Shadow registry
+  // agents of the same id.
+  agents: z.record(z.string(), LocalAgentConfig).default({}),
+  // Per-agent pin overrides applied to registry agents (e.g. force a
+  // specific npm version of opencode). Keyed by agent id.
+  agentOverrides: z.record(z.string(), AgentOverrideConfig).default({}),
   defaultAgent: z.string().default("opencode"),
   // Optional per-agent default model id. When a brand-new agent process
   // is spawned (session/new path), hydra issues session/set_model with
@@ -383,6 +430,60 @@ export async function setDefaultAgent(
       models[agentId] = modelId;
       raw.defaultModels = models;
     }
+  });
+}
+
+// Pin a registry agent to a specific npm package spec (e.g.
+// "opencode-ai@0.5.12"). Pass packageSpec=undefined to clear the pin.
+// Used by `hydra agent pin`.
+export async function setAgentOverride(
+  agentId: string,
+  packageSpec: string | undefined,
+): Promise<void> {
+  await updateRawConfig((raw) => {
+    const overrides =
+      raw.agentOverrides && typeof raw.agentOverrides === "object"
+        ? (raw.agentOverrides as Record<string, unknown>)
+        : {};
+    if (packageSpec === undefined) {
+      delete overrides[agentId];
+    } else {
+      overrides[agentId] = { packageSpec };
+    }
+    raw.agentOverrides = overrides;
+  });
+}
+
+// Define (or update) a local agent that bypasses the registry. Pass
+// def=undefined to remove it. Used by `hydra agent local`.
+export async function setLocalAgent(
+  agentId: string,
+  def: LocalAgentConfig | undefined,
+): Promise<void> {
+  await updateRawConfig((raw) => {
+    const agents =
+      raw.agents && typeof raw.agents === "object"
+        ? (raw.agents as Record<string, unknown>)
+        : {};
+    if (def === undefined) {
+      delete agents[agentId];
+    } else {
+      agents[agentId] = def;
+    }
+    raw.agents = agents;
+  });
+}
+
+// Toggle registry pinning (freeze on the on-disk cache). Used by
+// `hydra registry pin` / `hydra registry unpin`.
+export async function setRegistryPinned(pinned: boolean): Promise<void> {
+  await updateRawConfig((raw) => {
+    const registry =
+      raw.registry && typeof raw.registry === "object"
+        ? (raw.registry as Record<string, unknown>)
+        : {};
+    registry.pinned = pinned;
+    raw.registry = registry;
   });
 }
 

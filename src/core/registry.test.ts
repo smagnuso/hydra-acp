@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import {
   agentInstallState,
   Registry,
+  listAgents,
   planSpawn,
   type AgentInstallProgress,
   type RegistryAgent,
@@ -58,12 +59,15 @@ function fakeConfig(): HydraConfig {
     registry: {
       url: "http://example.invalid/never",
       ttlHours: 24,
+      pinned: false,
     },
     defaultAgent: "claude-acp",
     defaultModels: {},
     synopsisOnClose: false,
     defaultCwd: homedir(),
     sessionListColdLimit: 20,
+    agents: {},
+    agentOverrides: {},
     extensions: {},
     transformers: {},
     defaultTransformers: [],
@@ -356,11 +360,144 @@ describe("planSpawn", () => {
   });
 });
 
+describe("local agents and pin overrides", () => {
+  it("planSpawn handles an exec distribution directly", async () => {
+    const agent: RegistryAgent = {
+      id: "my-opencode",
+      name: "System opencode",
+      version: "local",
+      distribution: {
+        exec: { command: "opencode", args: ["acp"], env: { FOO: "bar" } },
+      },
+    };
+    const plan = await planSpawn(agent);
+    expect(plan).toMatchObject({
+      command: "opencode",
+      args: ["acp"],
+      env: { FOO: "bar" },
+      version: "local",
+    });
+  });
+
+  it("getAgent synthesizes a config-defined local agent without the network", async () => {
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agents: {
+        "my-opencode": { name: "System opencode", command: "opencode", args: ["acp"] },
+      },
+    };
+    const registry = new Registry(config);
+    const agent = await registry.getAgent("my-opencode");
+    expect(agent?.distribution.exec).toEqual({
+      command: "opencode",
+      args: ["acp"],
+      env: undefined,
+    });
+    expect(agent?.version).toBe("local");
+  });
+
+  it("defaults a local agent's command to the agent id when omitted", async () => {
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      agents: { opencode: {} },
+    };
+    const registry = new Registry(config);
+    const agent = await registry.getAgent("opencode");
+    expect(agent?.distribution.exec?.command).toBe("opencode");
+  });
+
+  it("listAgents surfaces local agents even when the registry is unreachable", async () => {
+    const config: HydraConfig = {
+      ...fakeConfig(),
+      registry: { url: "http://127.0.0.1:0/never", ttlHours: 24, pinned: false },
+      agents: { local1: { command: "foo" } },
+    };
+    const registry = new Registry(config);
+    const result = await listAgents(registry);
+    const ids = result.agents.map((a) => a.id);
+    expect(ids).toContain("local1");
+    const local = result.agents.find((a) => a.id === "local1");
+    expect(local?.installed).toBe("yes");
+    expect(local?.distributions).toContain("exec");
+    expect(local?.source).toBe("local");
+  });
+
+  it("a local agent shadows a same-id registry agent", async () => {
+    const doc = JSON.stringify({
+      version: "1.0.0",
+      agents: [
+        {
+          id: "opencode",
+          name: "Registry opencode",
+          distribution: { npx: { package: "opencode-ai" } },
+        },
+      ],
+    });
+    const server = http.createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(doc);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const addr = server.address();
+    if (!addr || typeof addr === "string") {
+      throw new Error("no server addr");
+    }
+    const url = `http://127.0.0.1:${addr.port}/registry.json`;
+    try {
+      const config: HydraConfig = {
+        ...fakeConfig(),
+        registry: { url, ttlHours: 24, pinned: false },
+        agents: {
+          opencode: { name: "System opencode", command: "opencode", args: ["acp"] },
+        },
+      };
+      const registry = new Registry(config);
+      const agent = await registry.getAgent("opencode");
+      expect(agent?.name).toBe("System opencode");
+      expect(agent?.distribution.exec?.command).toBe("opencode");
+
+      const list = await listAgents(registry);
+      const matches = list.agents.filter((a) => a.id === "opencode");
+      expect(matches).toHaveLength(1);
+      expect(matches[0]?.name).toBe("System opencode");
+      expect(matches[0]?.distributions).toContain("exec");
+      expect(matches[0]?.source).toBe("local");
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
+  });
+
+  it("derives a pinned install-dir version key from a packageSpec", async () => {
+    const pinned: RegistryAgent = {
+      id: "opencode",
+      name: "opencode",
+      version: versionKeyForTest("opencode-ai@0.5.12"),
+      distribution: { npx: { package: "opencode-ai@0.5.12" } },
+    };
+    process.env.HYDRA_ACP_SKIP_NPM_PREFETCH = "1";
+    const plan = await planSpawn(pinned);
+    delete process.env.HYDRA_ACP_SKIP_NPM_PREFETCH;
+    expect(plan.command).toBe("npx");
+    expect(plan.args).toEqual(["-y", "opencode-ai@0.5.12"]);
+    expect(plan.version).toBe("pin-0.5.12");
+  });
+});
+
+// Mirror of registry.ts versionKeyFromSpec for assertion in the pin test.
+function versionKeyForTest(spec: string): string {
+  const lastAt = spec.lastIndexOf("@");
+  const version = lastAt > 0 ? spec.slice(lastAt + 1) : "";
+  const sanitized = version.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return sanitized.length > 0 ? `pin-${sanitized}` : "pinned";
+}
+
 describe("Registry disk cache", () => {
   function configForUrl(url: string): HydraConfig {
     return {
       ...fakeConfig(),
-      registry: { url, ttlHours: 24 },
+      registry: { url, ttlHours: 24, pinned: false },
     };
   }
 

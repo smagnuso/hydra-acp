@@ -58,10 +58,20 @@ const UvxDistribution = z.object({
   env: z.record(z.string()).optional(),
 });
 
+// A directly-executable command. Used only by config-defined local agents
+// (config.agents) — never present in the network registry document. There
+// is no install step: the daemon spawns `command` with `args`/`env` as-is.
+const ExecDistribution = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string()).optional(),
+});
+
 const Distribution = z.object({
   npx: NpxDistribution.optional(),
   binary: BinaryDistribution.optional(),
   uvx: UvxDistribution.optional(),
+  exec: ExecDistribution.optional(),
 });
 
 export const RegistryAgent = z.object({
@@ -112,11 +122,11 @@ export class Registry {
   ) {}
 
   async load(): Promise<RegistryDocument> {
-    if (this.cache && this.isFresh(this.cache.fetchedAt)) {
+    if (this.cache && (this.isPinned() || this.isFresh(this.cache.fetchedAt))) {
       return this.cache.data;
     }
     const onDisk = await this.readDiskCache();
-    if (onDisk && this.isFresh(onDisk.fetchedAt)) {
+    if (onDisk && (this.isPinned() || this.isFresh(onDisk.fetchedAt))) {
       this.cache = onDisk;
       return onDisk.data;
     }
@@ -150,12 +160,62 @@ export class Registry {
   }
 
   async getAgent(id: string): Promise<RegistryAgent | undefined> {
+    // Config-defined local agents shadow the registry — check them first
+    // so a user can override a broken registry agent by id.
+    const local = this.localAgents().find((a) => a.id === id);
+    if (local) {
+      return local;
+    }
     const doc = await this.load();
     const exact = doc.agents.find((a) => a.id === id);
     if (exact) {
-      return exact;
+      return this.applyOverride(exact);
     }
-    return doc.agents.find((a) => npxPackageBasename(a) === id);
+    const byBasename = doc.agents.find((a) => npxPackageBasename(a) === id);
+    return byBasename ? this.applyOverride(byBasename) : undefined;
+  }
+
+  // Synthesize RegistryAgent entries from config.agents. These carry an
+  // `exec` distribution and a fixed "local" version key (no install dir).
+  localAgents(): RegistryAgent[] {
+    return Object.entries(this.config.agents ?? {}).map(([id, def]) => ({
+      id,
+      name: def.name ?? id,
+      description: def.description,
+      version: "local",
+      distribution: {
+        exec: {
+          // Default the command to the agent id (like extensions default
+          // theirs to the extension name) — resolved off PATH at spawn.
+          command: def.command ?? id,
+          args: def.args,
+          env: def.env,
+        },
+      },
+    }));
+  }
+
+  // Apply a config.agentOverrides[id] pin to a registry agent: swap the
+  // npx package spec and key the install dir on the pinned version so it
+  // never collides with the floating "current" install. No-op when the
+  // agent has no override or isn't npx-distributed.
+  private applyOverride(agent: RegistryAgent): RegistryAgent {
+    const override = this.config.agentOverrides?.[agent.id];
+    if (!override?.packageSpec || !agent.distribution.npx) {
+      return agent;
+    }
+    return {
+      ...agent,
+      version: versionKeyFromSpec(override.packageSpec),
+      distribution: {
+        ...agent.distribution,
+        npx: { ...agent.distribution.npx, package: override.packageSpec },
+      },
+    };
+  }
+
+  private isPinned(): boolean {
+    return this.config.registry?.pinned === true;
   }
 
   private isFresh(fetchedAt: number): boolean {
@@ -222,6 +282,19 @@ export interface SpawnPlan {
   version: string;
 }
 
+// Derive an install-dir version key from a pinned package spec. For
+// "opencode-ai@0.5.12" → "0.5.12"; for a scoped "@scope/pkg@1.2.3" →
+// "1.2.3"; for a bare "opencode-ai" (no version) → "pinned" so it still
+// gets its own dir distinct from the floating "current" install. Any
+// filesystem-hostile characters (dist-tags, ranges like "^1") are
+// sanitized to keep the path safe.
+function versionKeyFromSpec(spec: string): string {
+  const lastAt = spec.lastIndexOf("@");
+  const version = lastAt > 0 ? spec.slice(lastAt + 1) : "";
+  const sanitized = version.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return sanitized.length > 0 ? `pin-${sanitized}` : "pinned";
+}
+
 function npxPackageBasename(agent: RegistryAgent): string | undefined {
   const pkg = agent.distribution.npx?.package;
   if (!pkg) {
@@ -248,6 +321,9 @@ export interface AgentListEntry {
   description: string | undefined;
   distributions: string[];
   installed: AgentInstallState;
+  // Where this entry came from: "local" → config.agents (shadows any
+  // same-id registry entry); "registry" → the network registry document.
+  source: "local" | "registry";
 }
 
 export interface AgentListResult {
@@ -260,15 +336,34 @@ export interface AgentListResult {
 // creating a session. Backs both the REST endpoint and the ACP method
 // so the two surfaces never drift.
 export async function listAgents(registry: Registry): Promise<AgentListResult> {
-  const doc = await registry.load();
+  // Tolerate registry doubles (tests) that don't implement localAgents.
+  const local =
+    typeof registry.localAgents === "function" ? registry.localAgents() : [];
+  // When the registry is unreachable and the user only relies on local
+  // agents, still surface those rather than failing the whole list.
+  let doc: RegistryDocument;
+  try {
+    doc = await registry.load();
+  } catch (err) {
+    if (local.length === 0) {
+      throw err;
+    }
+    doc = { version: "local-only", agents: [] };
+  }
+  const localIds = new Set(local.map((a) => a.id));
+  // Local agents shadow registry entries of the same id.
+  const merged = [...local, ...doc.agents.filter((a) => !localIds.has(a.id))];
   const agents = await Promise.all(
-    doc.agents.map(async (a) => ({
+    merged.map(async (a) => ({
       id: a.id,
       name: a.name,
       version: a.version,
       description: a.description,
       distributions: Object.keys(a.distribution),
       installed: await agentInstallState(a),
+      source: localIds.has(a.id)
+        ? ("local" as const)
+        : ("registry" as const),
     })),
   );
   return {
@@ -286,6 +381,10 @@ export async function agentInstallState(
     return "no";
   }
   const version = agent.version ?? "current";
+  // Local exec agents are always "installed" — there's nothing to fetch.
+  if (agent.distribution.exec) {
+    return "yes";
+  }
   if (agent.distribution.binary) {
     const target = pickBinaryTarget(agent.distribution.binary, platformKey);
     if (target?.cmd) {
@@ -405,6 +504,16 @@ export async function planSpawn(
       command: "uvx",
       args: [uvx.package, ...tail],
       env: uvx.env ?? {},
+      version,
+    };
+  }
+  if (agent.distribution.exec) {
+    const exec = agent.distribution.exec;
+    const tail = callerArgs.length > 0 ? callerArgs : (exec.args ?? []);
+    return {
+      command: exec.command,
+      args: tail,
+      env: exec.env ?? {},
       version,
     };
   }

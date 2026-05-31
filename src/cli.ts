@@ -58,6 +58,10 @@ import {
   runAgentsRefresh,
   runAgentsSet,
   runAgentsSync,
+  runAgentsPin,
+  runAgentsAdd,
+  runAgentsRemove,
+  runRegistryPin,
 } from "./cli/commands/agents.js";
 import { splitNameFromLogTailArgs } from "./cli/commands/log-tail.js";
 import {
@@ -531,6 +535,22 @@ async function main(): Promise<void> {
         await runAgentsSet(positional[2], positional[3]);
         return;
       }
+      if (sub === "pin") {
+        await runAgentsPin(positional[2], positional[3]);
+        return;
+      }
+      if (sub === "add") {
+        // Use the raw argv tail (not stripped positionals) so --command /
+        // --args / --env flags reach the parser intact.
+        const agIdx = argv.indexOf(subcommand);
+        const tail = argv.slice(agIdx + 1); // ["add", <id>, ...flags]
+        await runAgentsAdd(tail[1], tail.slice(2));
+        return;
+      }
+      if (sub === "remove") {
+        await runAgentsRemove(positional[2]);
+        return;
+      }
       if (sub === "log" || sub === "logs") {
         const agIdx = argv.indexOf(subcommand);
         const tail = argv.slice(agIdx + 2);
@@ -539,6 +559,24 @@ async function main(): Promise<void> {
         return;
       }
       process.stderr.write(`Unknown agent subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
+    case "registry": {
+      const sub = positional[1];
+      if (sub === "refresh") {
+        await runAgentsRefresh();
+        return;
+      }
+      if (sub === "pin") {
+        await runRegistryPin(true);
+        return;
+      }
+      if (sub === "unpin") {
+        await runRegistryPin(false);
+        return;
+      }
+      process.stderr.write(`Unknown registry subcommand: ${sub}\n`);
       process.exit(2);
       return;
     }
@@ -832,6 +870,10 @@ function printHelp(): void {
       "  hydra-acp agent refresh                     Force a registry re-fetch",
       "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)",
       "  hydra-acp agent set [<id>] [model]          With no args, report the daemon's current default agent and its default model. With <id>, set <id> as the default agent (config.defaultAgent). With <id> and [model], set the per-agent default model (config.defaultModels[<id>]).",
+      "  hydra-acp agent pin <id> [packageSpec]      Pin a registry agent to a specific npm version (e.g. opencode-ai@0.5.12). Omit packageSpec to clear. Sidesteps a broken upstream publish.",
+      "  hydra-acp agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...  Define a local agent that bypasses the registry (e.g. your system `opencode`). --command defaults to <id> (resolved off PATH).",
+      "  hydra-acp agent remove <id>                 Remove a local agent.",
+      "  hydra-acp registry pin | unpin              Freeze the daemon on its cached registry (pin) so a bad push isn't picked up, or resume normal TTL fetching (unpin). `agent refresh` still forces a fetch.",
       "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
       "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log",
       "  hydra-acp auth password [--force]           Set the daemon's master password",
