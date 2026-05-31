@@ -721,6 +721,18 @@ async function runSession(
   const amendPendingPaintTimers = new Map<string, NodeJS.Timeout>();
   const AMEND_CHIP_DISPLAY_DELAY_MS = 200;
 
+  // Epoch ms of the last hydra-acp/cancel_failed we surfaced. The runPrompt
+  // cancel-timeout backstop checks this to avoid double-warning when the
+  // agent already told us (via an error frame) that cancel is unsupported.
+  let lastCancelFailedAt = 0;
+  // Set when a soft cancel was rejected/ignored for the current turn, so a
+  // subsequent cancel keypress escalates to a force-stop (kill + respawn)
+  // instead of re-sending the no-op session/cancel. Reset at each new turn.
+  let forceStopArmed = false;
+  // How long after a user cancel we wait for the turn to actually end
+  // before warning that the agent didn't acknowledge it.
+  const CANCEL_ACK_TIMEOUT_MS = 4000;
+
   conn.onNotification("hydra-acp/prompt_queue/added", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as {
@@ -857,6 +869,34 @@ async function runSession(
         currentTurnEcho = echo;
       }
     }
+  });
+
+  // The agent rejected our session/cancel (e.g. current opencode, which
+  // returns UnsupportedOperation/-32601 for cancel after PR #29929). The
+  // daemon couldn't correlate the id-less error to a request, so it
+  // surfaces it here. Tell the user the cancel didn't take and why.
+  conn.onNotification("hydra-acp/cancel_failed", (params) => {
+    if (teardownStarted) return;
+    const p = (params ?? {}) as { code?: unknown; message?: unknown };
+    const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
+    if (!screenReady) return;
+    // Suppress the runPrompt timeout backstop — we have the precise reason.
+    lastCancelFailedAt = Date.now();
+    // Arm escalation: the next cancel keypress force-stops the agent.
+    forceStopArmed = true;
+    const code = typeof p.code === "number" ? ` (${p.code})` : "";
+    const detail =
+      typeof p.message === "string" && p.message.length > 0
+        ? `: ${p.message}`
+        : "";
+    screenRef!.appendLines([
+      {
+        prefix: "⚠ ",
+        prefixStyle: "tool-status-fail",
+        body: `cancel rejected by agent${code}${detail} — this agent build may not support cancellation. Cancel again to force-stop (restarts the agent).`,
+        bodyStyle: "tool-status-fail",
+      },
+    ]);
   });
 
   // Sibling client answered the permission first (or the daemon synthesized
@@ -2955,18 +2995,59 @@ async function runSession(
     };
     pendingEchoes.push(echo);
 
-    let cancelled = false;
+    // Each new turn starts un-escalated: the first cancel is always a soft
+    // session/cancel; only a failed/ignored one arms the force-stop.
+    forceStopArmed = false;
+    let softCancelSent = false;
+    let cancelAckTimer: NodeJS.Timeout | null = null;
+    const warnLine = (body: string): void => {
+      const screenReady =
+        typeof screenRef !== "undefined" && screenRef !== null;
+      if (!screenReady) return;
+      screenRef!.appendLines([
+        { prefix: "⚠ ", prefixStyle: "tool-status-fail", body, bodyStyle: "tool-status-fail" },
+      ]);
+    };
+    let forceStopRequested = false;
     turnInFlight = {
       text,
       attachments,
       cancel: () => {
-        if (cancelled) {
+        // Escalation: a prior cancel was rejected/ignored. Tear the agent
+        // down to actually stop the turn; the session resumes (via
+        // session/load) on the next message.
+        if (forceStopArmed) {
+          forceStopArmed = false;
+          forceStopRequested = true;
+          warnLine("force-stopping agent — turn aborted; resumes on your next message…");
+          conn
+            .request("hydra-acp/session/force_cancel", {
+              sessionId: resolvedSessionId,
+            })
+            .catch((err) => {
+              warnLine(`force-stop failed: ${(err as Error).message}`);
+            });
           return;
         }
-        cancelled = true;
+        if (softCancelSent) {
+          return;
+        }
+        softCancelSent = true;
         conn.notify("session/cancel", { sessionId: resolvedSessionId }).catch(
           () => undefined,
         );
+        // Backstop: if the turn is still in flight after the window and we
+        // didn't already get an explicit cancel_failed, the agent silently
+        // ignored the cancel. Warn + arm the force-stop escalation.
+        const cancelSentAt = Date.now();
+        cancelAckTimer = setTimeout(() => {
+          if (turnInFlight === null) return;
+          if (lastCancelFailedAt >= cancelSentAt) return;
+          forceStopArmed = true;
+          warnLine(
+            "cancel not acknowledged by agent — the turn is still running. Cancel again to force-stop (restarts the agent).",
+          );
+        }, CANCEL_ACK_TIMEOUT_MS);
       },
     };
     let stopReason: string | undefined;
@@ -2989,16 +3070,34 @@ async function runSession(
       if (echo.messageId !== undefined) {
         ownPendingByMid.delete(echo.messageId);
       }
-      screen.appendLines([
-        {
-          prefix: "✗ ",
-          prefixStyle: "tool-status-fail",
-          body: (err as Error).message,
-          bodyStyle: "tool-status-fail",
-        },
-      ]);
+      // A force-stop tears the agent down, so the in-flight prompt may
+      // reject with a transport error before the daemon's cancelled
+      // response lands. Render it as a clean cancellation, not a failure.
+      if (forceStopRequested) {
+        screen.appendLines([
+          {
+            prefix: "⚠ ",
+            prefixStyle: "tool-status-fail",
+            body: "turn force-stopped",
+            bodyStyle: "tool-status-fail",
+          },
+        ]);
+      } else {
+        screen.appendLines([
+          {
+            prefix: "✗ ",
+            prefixStyle: "tool-status-fail",
+            body: (err as Error).message,
+            bodyStyle: "tool-status-fail",
+          },
+        ]);
+      }
     } finally {
       turnInFlight = null;
+      if (cancelAckTimer !== null) {
+        clearTimeout(cancelAckTimer);
+        cancelAckTimer = null;
+      }
       adjustPendingTurns(-1);
       // Daemon broadcasts turn_complete to other clients but excludes
       // the originator. Synthesize it locally so the streaming buffer

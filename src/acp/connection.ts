@@ -35,6 +35,15 @@ export class JsonRpcConnection {
   private pending = new Map<JsonRpcId, PendingRequest>();
   private closed = false;
   private closeHandlers: Array<(err?: Error) => void> = [];
+  // Observers for error frames that arrive with no matching pending
+  // request — e.g. an agent replying with an error to a notification
+  // (which carries no id, so it can't be correlated the normal way).
+  // session/cancel is the canonical case: an agent that doesn't support
+  // it (current opencode) emits a MethodNotFound/UnsupportedOperation
+  // error frame we'd otherwise silently drop. See handleResponse.
+  private orphanErrorHandlers: Array<
+    (error: { code?: number; message: string; data?: unknown }) => void
+  > = [];
 
   constructor(private stream: MessageStream) {
     this.stream.onMessage((m) => this.handleIncoming(m));
@@ -80,6 +89,13 @@ export class JsonRpcConnection {
 
   onClose(handler: (err?: Error) => void): void {
     this.closeHandlers.push(handler);
+  }
+
+  // Subscribe to error frames that can't be matched to a pending request.
+  onOrphanError(
+    handler: (error: { code?: number; message: string; data?: unknown }) => void,
+  ): void {
+    this.orphanErrorHandlers.push(handler);
   }
 
   async request<T = unknown>(method: string, params?: unknown): Promise<T> {
@@ -148,6 +164,11 @@ export class JsonRpcConnection {
       }
     } else if ("id" in message) {
       this.handleResponse(message);
+    } else if ("error" in message) {
+      // Error frame with no id at all (some agents reply this way to a
+      // notification). Route it through handleResponse so orphan-error
+      // observers still see it.
+      this.handleResponse(message as JsonRpcResponse);
     }
   }
 
@@ -201,6 +222,22 @@ export class JsonRpcConnection {
   private handleResponse(res: JsonRpcResponse): void {
     const pending = this.pending.get(res.id);
     if (!pending) {
+      // Uncorrelated frame. If it's an error, surface it to orphan-error
+      // observers rather than dropping silently — this is how a reply to
+      // an id-less notification (e.g. session/cancel) reaches a consumer.
+      if (res.error) {
+        for (const handler of this.orphanErrorHandlers) {
+          try {
+            handler({
+              code: res.error.code,
+              message: res.error.message,
+              data: res.error.data,
+            });
+          } catch {
+            void 0;
+          }
+        }
+      }
       return;
     }
     this.pending.delete(res.id);

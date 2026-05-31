@@ -327,6 +327,16 @@ export class Session {
   // endpoint uses this to tail a live session's conversation stream
   // without participating in turns or prompts.
   private broadcastHandlers: Array<(entry: CachedNotification) => void> = [];
+  // Epoch ms of the most recent session/cancel we sent to the agent.
+  // Used to attribute an id-less error frame from the agent to a cancel
+  // (see wireAgent's orphan-error observer). Window kept short so an
+  // unrelated later error isn't mislabeled.
+  private lastCancelAt = 0;
+  private static readonly CANCEL_ERROR_WINDOW_MS = 2000;
+  // Set by forceCancel() so the in-flight turn's agent-kill rejection is
+  // reported to the originator as a clean "cancelled" stopReason instead of
+  // a raw "connection closed" error.
+  private forceCancelling = false;
   // True once we've observed our first session/prompt; gates the
   // first-prompt-seeded title so subsequent prompts don't churn it.
   // Also read by SessionManager's onClose hook to decide whether to
@@ -577,11 +587,48 @@ export class Session {
     agent.connection.onRequest("session/request_permission", async (params) => {
       return this.handlePermissionRequest(params);
     });
+    // Guard: some test doubles / alternate transports don't implement
+    // the orphan-error hook. Real JsonRpcConnection always does.
+    if (typeof agent.connection.onOrphanError === "function") {
+      agent.connection.onOrphanError((error) => {
+        this.handleOrphanError(error);
+      });
+    }
     agent.onExit(() => {
       if (this.agent !== agent) {
         return;
       }
       this.markClosed({ deleteRecord: false });
+    });
+  }
+
+  // An error frame arrived from the agent that couldn't be matched to a
+  // pending request. The canonical case is a reply to our id-less
+  // session/cancel notification: agents that don't support cancellation
+  // (current opencode) answer with MethodNotFound (-32601) or an
+  // UnsupportedOperation error. If one lands within the cancel window,
+  // surface it to attached clients so the TUI can tell the user the
+  // cancel didn't take rather than silently dropping it.
+  private handleOrphanError(error: {
+    code?: number;
+    message: string;
+    data?: unknown;
+  }): void {
+    const sinceCancel = Date.now() - this.lastCancelAt;
+    if (this.lastCancelAt === 0 || sinceCancel > Session.CANCEL_ERROR_WINDOW_MS) {
+      this.logger?.warn(
+        `agent ${this.agentId} sent uncorrelated error frame code=${error.code} message=${error.message}`,
+      );
+      return;
+    }
+    this.lastCancelAt = 0;
+    this.logger?.warn(
+      `agent ${this.agentId} rejected session/cancel code=${error.code} message=${error.message}`,
+    );
+    this.broadcastQueueNotification("hydra-acp/cancel_failed", {
+      sessionId: this.sessionId,
+      code: error.code,
+      message: error.message,
     });
   }
 
@@ -1685,7 +1732,13 @@ export class Session {
     }
     // session/cancel is a notification per the ACP spec — agents process it
     // and don't reply. Sending it as a request would hang our promise
-    // forever waiting for a response that never comes.
+    // forever waiting for a response that never comes. The downside: an
+    // agent that doesn't support cancel (current opencode after PR #29929
+    // returns UnsupportedOperationError) replies with an id-less error
+    // frame we can't correlate. We record the send time so the orphan-error
+    // observer in wireAgent can attribute a closely-following error to this
+    // cancel and surface it to clients via hydra-acp/cancel_failed.
+    this.lastCancelAt = Date.now();
     await this.agent.connection.notify("session/cancel", {
       sessionId: this.upstreamSessionId,
     });
@@ -2926,50 +2979,84 @@ export class Session {
         JsonRpcErrorCodes.InternalError,
       );
     }
-    const spawnAgent = this.spawnReplacementAgent;
-    const agentId = this.agentId;
+    // Queued: waits for any in-flight turn to finish naturally, then
+    // respawns. Use forceCancel() to abort a stuck turn immediately.
     return this.enqueuePrompt(async () => {
-      const transcript = await this.buildSwitchTranscript(agentId);
-
-      const fresh = await spawnAgent({
-        agentId,
-        cwd: this.cwd,
-        agentArgs: this.agentArgs,
-      });
-      this.accumulateAndResetCost();
-      this.wireAgent(fresh.agent);
-
-      const oldAgent = this.agent;
-      this.agent = fresh.agent;
-      this.upstreamSessionId = fresh.upstreamSessionId;
-      this.agentMeta = fresh.agentMeta;
-      this.agentCapabilities = fresh.agentCapabilities;
-      this.agentAdvertisedCommands = [];
-      this.broadcastMergedCommands();
-      if (this.agentAdvertisedModels.length > 0) {
-        this.setAgentAdvertisedModels([]);
-      }
-      if (this.agentAdvertisedModes.length > 0) {
-        this.setAgentAdvertisedModes([]);
-      }
-      await oldAgent.kill().catch(() => undefined);
-
-      if (transcript) {
-        await this.runInternalPrompt(transcript).catch(() => undefined);
-      }
-
-      this.broadcastAgentSwitch(agentId, agentId);
-
-      const info = { agentId, upstreamSessionId: this.upstreamSessionId };
-      for (const handler of this.agentChangeHandlers) {
-        try {
-          handler(info);
-        } catch {
-          void 0;
-        }
-      }
+      await this.respawnAgent();
       return { stopReason: "end_turn" };
     });
+  }
+
+  // Last-resort cancellation. When an agent ignores session/cancel (current
+  // opencode returns UnsupportedOperation and keeps generating), the only
+  // way to actually stop the turn is to tear the subprocess down. Rather
+  // than respawn + replay the transcript (slow, and renders as an agent
+  // "switch"), we close the session keeping its record: agent.kill() aborts
+  // the in-flight turn, and the next prompt auto-resurrects via session/load
+  // (cheap — the agent restores its own context). The forceCancelling flag
+  // makes runQueueEntry render the aborted turn as "cancelled" rather than a
+  // raw connection error. Runs OUTSIDE the prompt queue so a wedged turn
+  // can't block it.
+  async forceCancel(): Promise<{ stopReason: string }> {
+    if (this.closed || this.closing) {
+      throw withCode(
+        new Error("session is closing"),
+        JsonRpcErrorCodes.SessionClosing,
+      );
+    }
+    this.lastCancelAt = 0;
+    this.forceCancelling = true;
+    await this.close({ deleteRecord: false });
+    return { stopReason: "cancelled" };
+  }
+
+  // Shared kill-and-respawn used by /hydra restart (queued) and forceCancel
+  // (immediate). Spawns a fresh agent, swaps it in, kills the old one, and
+  // re-seeds the conversation transcript so the new process has context.
+  private async respawnAgent(): Promise<void> {
+    const spawnAgent = this.spawnReplacementAgent!;
+    const agentId = this.agentId;
+    const transcript = await this.buildSwitchTranscript(agentId);
+
+    const fresh = await spawnAgent({
+      agentId,
+      cwd: this.cwd,
+      agentArgs: this.agentArgs,
+    });
+    this.accumulateAndResetCost();
+    this.wireAgent(fresh.agent);
+
+    const oldAgent = this.agent;
+    this.agent = fresh.agent;
+    this.upstreamSessionId = fresh.upstreamSessionId;
+    this.agentMeta = fresh.agentMeta;
+    this.agentCapabilities = fresh.agentCapabilities;
+    this.agentAdvertisedCommands = [];
+    this.broadcastMergedCommands();
+    if (this.agentAdvertisedModels.length > 0) {
+      this.setAgentAdvertisedModels([]);
+    }
+    if (this.agentAdvertisedModes.length > 0) {
+      this.setAgentAdvertisedModes([]);
+    }
+    // Killing the old agent rejects any in-flight session/prompt bound to
+    // its (already-captured) connection — that's how a stuck turn ends.
+    await oldAgent.kill().catch(() => undefined);
+
+    if (transcript) {
+      await this.runInternalPrompt(transcript).catch(() => undefined);
+    }
+
+    this.broadcastAgentSwitch(agentId, agentId);
+
+    const info = { agentId, upstreamSessionId: this.upstreamSessionId };
+    for (const handler of this.agentChangeHandlers) {
+      try {
+        handler(info);
+      } catch {
+        void 0;
+      }
+    }
   }
 
   // Walk the persisted history and produce a labeled transcript suitable
@@ -3894,6 +3981,14 @@ export class Session {
         },
       );
     } catch (err) {
+      // Deliberate force-cancel: the agent was killed on purpose. Resolve
+      // the originator's prompt as cancelled (markClosed already broadcast
+      // the interrupted turn_complete to peers) rather than surfacing the
+      // raw "connection closed" error.
+      if (this.forceCancelling) {
+        this.clearAmendIfMatches(entry.messageId);
+        return { stopReason: "cancelled" };
+      }
       // Skip if markClosed already broadcast turn_complete for this entry
       // (session was closed while the request was in-flight).
       if (!this.closed) {

@@ -218,4 +218,46 @@ describe("JsonRpcConnection", () => {
     expect(handler).toHaveBeenNthCalledWith(1, { i: 36 }, "x/spam");
     expect(handler).toHaveBeenLastCalledWith({ i: 99 }, "x/spam");
   });
+
+  it("surfaces an error frame with an unknown id to orphan-error observers", async () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    const orphan = vi.fn();
+    conn.onOrphanError(orphan);
+
+    // No pending request with id "nope" — this is a reply to an id-less
+    // notification (e.g. session/cancel) that some agents answer with an
+    // error frame.
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      id: "nope",
+      error: { code: JsonRpcErrorCodes.MethodNotFound, message: "unsupported" },
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(orphan).toHaveBeenCalledWith({
+      code: JsonRpcErrorCodes.MethodNotFound,
+      message: "unsupported",
+      data: undefined,
+    });
+  });
+
+  it("surfaces an error frame with no id at all to orphan-error observers", async () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    const orphan = vi.fn();
+    conn.onOrphanError(orphan);
+
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      error: { code: -32601, message: "method not found" },
+    } as unknown as JsonRpcRequest);
+    await new Promise((r) => setImmediate(r));
+
+    expect(orphan).toHaveBeenCalledWith({
+      code: -32601,
+      message: "method not found",
+      data: undefined,
+    });
+  });
 });

@@ -1835,6 +1835,31 @@ describe("Session", () => {
       expect(promptCalls.length).toBe(0);
     });
 
+    it("forceCancel kills the agent and closes the session (keeping the record) so it can resurrect", async () => {
+      const { session, mock } = makeSession("hydra_session_FC", "u_old");
+      const { client } = makeClient();
+      await session.attach(client, "full");
+
+      let closeOpts: { deleteRecord: boolean } | undefined;
+      session.onClose((opts) => {
+        closeOpts = opts;
+      });
+      const kill = mock.agent.kill as ReturnType<typeof vi.fn>;
+
+      const result = await session.forceCancel();
+
+      expect(result).toMatchObject({ stopReason: "cancelled" });
+      expect(kill).toHaveBeenCalled();
+      // Record is kept (deleteRecord:false) so the next prompt resurrects.
+      expect(closeOpts).toEqual({ deleteRecord: false });
+    });
+
+    it("forceCancel rejects once the session is already closing", async () => {
+      const { session } = makeSession();
+      await session.forceCancel();
+      await expect(session.forceCancel()).rejects.toThrow(/closing/);
+    });
+
     it("/hydra agent swaps the agent, broadcasts info+banner, and feeds transcript to new agent", async () => {
       const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
       const newMock = makeMockAgent({ agentId: "new", cwd: "/w" });

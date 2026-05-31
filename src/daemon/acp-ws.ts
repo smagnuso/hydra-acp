@@ -1097,6 +1097,23 @@ export function registerAcpWsEndpoint(
       return session.cancelQueuedPrompt(params.messageId);
     });
 
+    // Force-cancel escalation: when the agent ignores session/cancel, this
+    // tears the subprocess down (aborting the stuck turn) and respawns it
+    // with history restored. Request-shaped so the client gets a reply.
+    connection.onRequest("hydra-acp/session/force_cancel", async (raw) => {
+      const params = SessionCancelParams.parse(raw);
+      denyIfReadonly(params.sessionId, "hydra-acp/session/force_cancel");
+      const session = deps.manager.get(params.sessionId);
+      if (!session) {
+        const err = new Error(`session ${params.sessionId} not found`) as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      return session.forceCancel();
+    });
+
     connection.onRequest("hydra-acp/prompt/update", async (raw) => {
       const params = UpdatePromptParams.parse(raw);
       denyIfReadonly(params.sessionId, "hydra-acp/prompt/update");
