@@ -216,6 +216,7 @@ export async function runCat(opts: CatOptions): Promise<void> {
     stderr: (chunk) => {
       process.stderr.write(chunk);
     },
+    streamClient: makeRestStdinClient(target.baseUrl, target.token),
   });
   process.exit(result.exitCode);
 }
@@ -238,6 +239,53 @@ export interface CatStdin {
   setEncoding?: (enc: BufferEncoding) => unknown;
 }
 
+// Producer side of `--stream`: feed piped stdin into the session's
+// daemon-side ring (the `hydra-acp-stdin` MCP surface the agent reads)
+// via REST. Injected so tests can mock it without standing up an HTTP
+// server.
+export interface StdinStreamClient {
+  open(
+    sessionId: string,
+    opts: { mode?: "memory" | "file"; capacityBytes?: number },
+  ): Promise<{ capacityBytes: number }>;
+  write(sessionId: string, chunkB64: string, eof: boolean): Promise<void>;
+}
+
+function makeRestStdinClient(
+  baseUrl: string,
+  token: string,
+): StdinStreamClient {
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+  const url = (sessionId: string, suffix: string): string =>
+    `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/stdin${suffix}`;
+  return {
+    async open(sessionId, opts) {
+      const res = await fetch(url(sessionId, "/open"), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(opts),
+      });
+      if (!res.ok) {
+        throw new Error(`stdin/open HTTP ${res.status}`);
+      }
+      return (await res.json()) as { capacityBytes: number };
+    },
+    async write(sessionId, chunkB64, eof) {
+      const res = await fetch(url(sessionId, ""), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ chunk: chunkB64, eof }),
+      });
+      if (!res.ok) {
+        throw new Error(`stdin write HTTP ${res.status}`);
+      }
+    },
+  };
+}
+
 export interface CatLoopArgs {
   conn: JsonRpcConnection;
   opts: CatOptions;
@@ -252,6 +300,9 @@ export interface CatLoopArgs {
   stdoutIsTty: boolean;
   stdout: (chunk: string) => void;
   stderr: (chunk: string) => void;
+  // Producer for `--stream` stdin (REST control plane). Injected so
+  // tests can mock it. Only used on the auto-stream path.
+  streamClient: StdinStreamClient;
 }
 
 // The orchestration core. Pure-ish: takes injected I/O so a test can
@@ -581,6 +632,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     }
     runStreamingPath({
       conn,
+      streamClient: args.streamClient,
       sessionId,
       opts,
       stdin,
@@ -695,6 +747,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
 // stream, hand the agent a file path, pump stdin into it).
 interface StreamingPathArgs {
   conn: JsonRpcConnection;
+  streamClient: StdinStreamClient;
   sessionId: string;
   opts: CatOptions;
   stdin: CatStdin;
@@ -706,7 +759,7 @@ interface StreamingPathArgs {
 }
 
 function runStreamingPath(args: StreamingPathArgs): void {
-  const { conn, sessionId, opts, stdin, stderr, sendInline } = args;
+  const { conn, streamClient, sessionId, opts, stdin, stderr, sendInline } = args;
   const threshold = opts.streamThreshold ?? DEFAULT_STREAM_THRESHOLD;
 
   type Mode = "undecided" | "inline" | "file";
@@ -719,18 +772,12 @@ function runStreamingPath(args: StreamingPathArgs): void {
   let writeChain: Promise<unknown> = Promise.resolve();
 
   const writeToStream = (chunk: Buffer, eof: boolean): void => {
-    const payload: Record<string, unknown> = {
-      sessionId,
-      chunk: chunk.toString("base64"),
-    };
-    if (eof) {
-      payload.eof = true;
-    }
+    const chunkB64 = chunk.toString("base64");
     writeChain = writeChain
-      .then(() => conn.request("hydra-acp/stream/write", payload))
+      .then(() => streamClient.write(sessionId, chunkB64, eof))
       .catch((err) => {
         stderr(
-          `hydra-acp cat: stream_write failed: ${(err as Error).message}\n`,
+          `hydra-acp cat: stdin write failed: ${(err as Error).message}\n`,
         );
       });
   };
@@ -752,19 +799,16 @@ function runStreamingPath(args: StreamingPathArgs): void {
     mode = "file";
     let open: { capacityBytes: number };
     try {
-      const openParams: Record<string, unknown> = {
-        sessionId,
+      const openParams: { mode: "memory"; capacityBytes?: number } = {
         mode: "memory",
       };
       if (opts.streamBufferBytes !== undefined) {
         openParams.capacityBytes = opts.streamBufferBytes;
       }
-      open = (await conn.request("hydra-acp/stream/open", openParams)) as {
-        capacityBytes: number;
-      };
+      open = await streamClient.open(sessionId, openParams);
     } catch (err) {
       args.onPromptFailed(
-        new Error(`stream_open failed: ${(err as Error).message}`),
+        new Error(`stdin/open failed: ${(err as Error).message}`),
       );
       return;
     }
@@ -897,11 +941,11 @@ async function openOrAttachSession(
   }
   const hydraMeta: Record<string, unknown> = {};
   if (opts.name) {
-    hydraMeta.name = opts.name;
+    hydraMeta.title = opts.name;
   } else {
     const derived = deriveTitleFromPrompt(opts.prompt);
     if (derived) {
-      hydraMeta.name = derived;
+      hydraMeta.title = derived;
     }
   }
   if (opts.model) {

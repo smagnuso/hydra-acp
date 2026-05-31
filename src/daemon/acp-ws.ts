@@ -15,9 +15,6 @@ import {
   SessionListParams,
   SessionNewParams,
   SessionPromptParams,
-  StreamOpenParams,
-  StreamReadParams,
-  StreamWriteParams,
   UpdatePromptParams,
   extractHydraMeta,
   HYDRA_META_KEY,
@@ -33,8 +30,6 @@ import {
   AGENT_INSTALL_PROGRESS_METHOD,
   type AgentInstallProgressParams,
 } from "../acp/types.js";
-import * as os from "node:os";
-import * as path from "node:path";
 import { listAgents, type AgentInstallProgress, type Registry } from "../core/registry.js";
 import {
   tokenFromUpgradeRequest,
@@ -1136,62 +1131,6 @@ export function registerAcpWsEndpoint(
         throw err;
       }
       return session.amendPrompt(att.clientId, params);
-    });
-
-    connection.onRequest("hydra-acp/stream/open", async (raw) => {
-      const params = StreamOpenParams.parse(raw);
-      denyIfReadonly(params.sessionId, "hydra-acp/stream/open");
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
-      const openOpts: Parameters<Session["openStream"]>[0] = {};
-      if (params.mode !== undefined) {
-        openOpts.mode = params.mode;
-      }
-      if (params.capacityBytes !== undefined) {
-        openOpts.capacityBytes = params.capacityBytes;
-      }
-      if (params.fileCapBytes !== undefined) {
-        openOpts.fileCapBytes = params.fileCapBytes;
-      }
-      if ((params.mode ?? "memory") === "file") {
-        openOpts.filePathFor = (sid) =>
-          path.join(os.tmpdir(), `hydra-acp-stdin-${sid}.log`);
-      }
-      return session.openStream(openOpts);
-    });
-
-    connection.onRequest("hydra-acp/stream/write", async (raw) => {
-      const params = StreamWriteParams.parse(raw);
-      denyIfReadonly(params.sessionId, "hydra-acp/stream/write");
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
-      return session.streamWrite(params.chunk, params.eof);
-    });
-
-    connection.onRequest("hydra-acp/stream/read", async (raw) => {
-      const params = StreamReadParams.parse(raw);
-      // Read is safe under read-only attach — no state mutation.
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
-      return session.streamRead(params.cursor, params.maxBytes, params.waitMs);
     });
 
     connection.onRequest("session/load", async (raw) => {

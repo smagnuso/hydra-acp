@@ -1,4 +1,5 @@
 import * as os from "node:os";
+import * as path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { expandHome } from "../../core/config.js";
 import type { SessionManager } from "../../core/session-manager.js";
@@ -127,6 +128,64 @@ export function registerSessionRoutes(
       return;
     }
     reply.code(204).send();
+  });
+
+  // Producer side of `hydra cat --stream`: feed piped stdin into a live
+  // session's in-memory ring, which the agent reads through the
+  // `hydra-acp-stdin` MCP server. `open` sizes the ring; `POST /stdin`
+  // appends a base64 chunk (and optionally marks EOF).
+  app.post("/v1/sessions/:id/stdin/open", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const session = manager.get(id);
+    if (!session) {
+      reply.code(404).send({ error: "session not found" });
+      return reply;
+    }
+    const body = (request.body ?? {}) as {
+      mode?: unknown;
+      capacityBytes?: unknown;
+      fileCapBytes?: unknown;
+    };
+    const openOpts: Parameters<typeof session.openStream>[0] = {};
+    if (body.mode === "memory" || body.mode === "file") {
+      openOpts.mode = body.mode;
+    }
+    if (typeof body.capacityBytes === "number") {
+      openOpts.capacityBytes = body.capacityBytes;
+    }
+    if (typeof body.fileCapBytes === "number") {
+      openOpts.fileCapBytes = body.fileCapBytes;
+    }
+    if ((openOpts.mode ?? "memory") === "file") {
+      openOpts.filePathFor = (sid) =>
+        path.join(os.tmpdir(), `hydra-acp-stdin-${sid}.log`);
+    }
+    try {
+      return session.openStream(openOpts);
+    } catch (err) {
+      reply.code(409).send({ error: (err as Error).message });
+      return reply;
+    }
+  });
+
+  app.post("/v1/sessions/:id/stdin", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const session = manager.get(id);
+    if (!session) {
+      reply.code(404).send({ error: "session not found" });
+      return reply;
+    }
+    const body = (request.body ?? {}) as { chunk?: unknown; eof?: unknown };
+    const chunk = typeof body.chunk === "string" ? body.chunk : "";
+    const eof = body.eof === true;
+    try {
+      return session.streamWrite(chunk, eof);
+    } catch (err) {
+      reply.code(409).send({ error: (err as Error).message });
+      return reply;
+    }
   });
 
   // Retitle a session. Body shape: { title: string } sets the title

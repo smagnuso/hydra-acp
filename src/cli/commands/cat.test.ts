@@ -7,7 +7,11 @@ import type {
   JsonRpcRequest,
   JsonRpcResponse,
 } from "../../acp/types.js";
-import { runCatLoop, type CatLoopArgs } from "./cat.js";
+import {
+  runCatLoop,
+  type CatLoopArgs,
+  type StdinStreamClient,
+} from "./cat.js";
 
 // Stand-in for process.stdin. Push() emits a "data" event synchronously
 // if a listener is attached; otherwise it buffers and replays once
@@ -60,6 +64,26 @@ function makeHarness() {
   const fakeStdin = new FakeStdin();
   const stdout: string[] = [];
   const stderr: string[] = [];
+
+  // Recording mock for the REST stdin producer (the `--stream` path).
+  // Tests assert against these instead of the old ACP stream/* requests.
+  const streamCalls: {
+    open: Array<{ sessionId: string; capacityBytes?: number }>;
+    writes: Array<{ sessionId: string; text: string; eof: boolean }>;
+  } = { open: [], writes: [] };
+  const streamClient: StdinStreamClient = {
+    async open(sessionId, opts) {
+      streamCalls.open.push({ sessionId, capacityBytes: opts.capacityBytes });
+      return { capacityBytes: opts.capacityBytes ?? 1024 * 1024 };
+    },
+    async write(sessionId, chunkB64, eof) {
+      streamCalls.writes.push({
+        sessionId,
+        text: Buffer.from(chunkB64, "base64").toString("utf8"),
+        eof,
+      });
+    },
+  };
 
   // Reply to a sent request whose id we haven't replied to yet, matching
   // by `method`. Walks sent[] in order so chained turns (multiple
@@ -137,6 +161,7 @@ function makeHarness() {
     stdoutIsTty: false,
     stdout: (chunk) => stdout.push(chunk),
     stderr: (chunk) => stderr.push(chunk),
+    streamClient,
   };
 
   return {
@@ -148,6 +173,7 @@ function makeHarness() {
     respondToRequest,
     waitForRequest,
     emitSessionUpdate,
+    streamCalls,
     baseArgs,
   };
 }
@@ -460,25 +486,19 @@ describe("runCatLoop", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     h.fakeStdin.push("hello world");
-    const openReq = await h.waitForRequest("hydra-acp/stream/open");
-    expect((openReq.params as { mode: string }).mode).toBe("memory");
-    h.respondToRequest("hydra-acp/stream/open", {
-      capacityBytes: 1024 * 1024,
-    });
-    const w = await h.waitForRequest("hydra-acp/stream/write");
-    expect(
-      Buffer.from((w.params as { chunk: string }).chunk, "base64").toString("utf8"),
-    ).toBe("hello world");
-    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
-
+    // stdin streaming goes over the REST control plane (mocked here), not
+    // ACP. The kick-off prompt fires only after the head buffer is drained
+    // into the ring via the stream client.
     const streamPrompt = await h.waitForRequest("session/prompt");
+    expect(h.streamCalls.open).toHaveLength(1);
+    expect(h.streamCalls.open[0]?.sessionId).toBe("hydra_session_test");
+    expect(h.streamCalls.writes.some((w) => w.text === "hello world")).toBe(true);
     expect(
       (streamPrompt.params as { _meta?: { "hydra-acp"?: { ancillary?: boolean } } })
         ._meta?.["hydra-acp"]?.ancillary,
     ).toBe(true);
     h.fakeStdin.end();
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
-    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
     await loopPromise;
   });
 
@@ -506,13 +526,6 @@ describe("runCatLoop", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     h.fakeStdin.push("hello world");
-    await h.waitForRequest("hydra-acp/stream/open");
-    h.respondToRequest("hydra-acp/stream/open", {
-      capacityBytes: 1024 * 1024,
-    });
-    await h.waitForRequest("hydra-acp/stream/write");
-    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
-
     await h.waitForRequest("session/prompt");
     // The agent answers via session/update before we respond to the
     // prompt — same ordering the daemon produces.
@@ -522,7 +535,6 @@ describe("runCatLoop", () => {
     });
     h.fakeStdin.end();
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
-    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
     await loopPromise;
 
     expect(h.stdout.join("")).toContain("resolution was 1920x1080");
@@ -812,11 +824,8 @@ describe("runCatLoop", () => {
       // Inline mode reuses sendChunk → standing prompt + the buffered text.
       expect(params.prompt[0]?.text).toBe("summarize");
       expect(params.prompt[1]?.text).toBe("short stdin\n");
-      // No stream_open should have been issued.
-      const opens = h.stream.sent.filter(
-        (m) => "method" in m && m.method === "hydra-acp/stream/open",
-      );
-      expect(opens.length).toBe(0);
+      // No stream should have been opened (inline mode).
+      expect(h.streamCalls.open.length).toBe(0);
 
       h.respondToRequest("session/prompt", { stopReason: "end_turn" });
       await loopPromise;
@@ -831,32 +840,18 @@ describe("runCatLoop", () => {
       await performHandshake(h);
 
       // Push 12 bytes — 4 over the 8-byte threshold. Should trigger a
-      // stream_open + drain of the buffered head.
+      // stream open + drain of the buffered head over the REST client.
       h.fakeStdin.push("abcdefghijkl");
 
-      const openReq = await h.waitForRequest("hydra-acp/stream/open");
-      const openParams = openReq.params as {
-        sessionId: string;
-        mode: string;
-      };
-      // No /tmp file: stream is in-memory and the agent uses MCP tools.
-      expect(openParams.mode).toBe("memory");
-      expect((openParams as { fileCapBytes?: number }).fileCapBytes).toBeUndefined();
-      h.respondToRequest("hydra-acp/stream/open", {
-        capacityBytes: 16 * 1024 * 1024,
-      });
+      // Kick-off prompt fires after the head buffer drains into the ring.
+      const promptReq = await h.waitForRequest("session/prompt");
 
-      // First stream_write: the buffered head (12 bytes).
-      const writeReq = await h.waitForRequest("hydra-acp/stream/write");
-      const writeParams = writeReq.params as { chunk: string; eof?: boolean };
-      expect(Buffer.from(writeParams.chunk, "base64").toString("utf8")).toBe(
-        "abcdefghijkl",
-      );
-      expect(writeParams.eof).toBeUndefined();
-      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 12 });
+      // Stream was opened in-memory (no file cap), head bytes drained.
+      expect(h.streamCalls.open).toHaveLength(1);
+      expect(h.streamCalls.writes[0]?.text).toBe("abcdefghijkl");
+      expect(h.streamCalls.writes[0]?.eof).toBe(false);
 
       // Kick-off prompt: standing prompt + the MCP tool note.
-      const promptReq = await h.waitForRequest("session/prompt");
       const promptParams = promptReq.params as {
         prompt: Array<{ text?: string }>;
       };
@@ -867,21 +862,13 @@ describe("runCatLoop", () => {
       expect(text).toContain("tail");
       expect(text).not.toContain("/tmp/");
 
-      // After the prompt resolves, cat should send an eof stream_write.
+      // After the prompt resolves, cat should send an eof write.
       h.fakeStdin.end();
       h.respondToRequest("session/prompt", { stopReason: "end_turn" });
 
       await loopPromise;
-      const writes = h.stream.sent.filter(
-        (m): m is JsonRpcRequest =>
-          "method" in m && m.method === "hydra-acp/stream/write",
-      );
       // At least one eof write should have landed.
-      expect(
-        writes.some(
-          (w) => (w.params as { eof?: boolean }).eof === true,
-        ),
-      ).toBe(true);
+      expect(h.streamCalls.writes.some((w) => w.eof === true)).toBe(true);
     });
 
     it("auto-approves session/request_permission for mcp__hydra-acp-stdin__* tools", async () => {
@@ -995,7 +982,7 @@ describe("runCatLoop", () => {
       await loopPromise.catch(() => undefined);
     });
 
-    it("MCP path: subsequent stdin chunks become stream_write calls", async () => {
+    it("MCP path: subsequent stdin chunks become stream write calls", async () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
@@ -1004,30 +991,20 @@ describe("runCatLoop", () => {
       await performHandshake(h);
 
       h.fakeStdin.push("aaaaa"); // 5 bytes, just over threshold
-      await h.waitForRequest("hydra-acp/stream/open");
-      h.respondToRequest("hydra-acp/stream/open", {
-        capacityBytes: 1024,
-      });
-
-      // First write (the buffered head)
-      const w1 = await h.waitForRequest("hydra-acp/stream/write");
-      expect(Buffer.from((w1.params as { chunk: string }).chunk, "base64").toString("utf8")).toBe("aaaaa");
-      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 5 });
 
       // Wait for the kick-off prompt to land so we know we're past the
-      // switchToFile() barrier and into the "stdin → stream_write"
-      // steady state.
+      // switchToFile() barrier and into the "stdin → stream write"
+      // steady state. The head buffer drained over the REST client first.
       await h.waitForRequest("session/prompt");
+      expect(h.streamCalls.open).toHaveLength(1);
+      expect(h.streamCalls.writes[0]?.text).toBe("aaaaa");
 
-      // Subsequent stdin chunks should arrive as stream_write calls.
+      // Subsequent stdin chunks should arrive as stream write calls.
       h.fakeStdin.push("bbb");
-      const w2 = await waitForStreamWriteWithBytes(h, "bbb");
-      expect(Buffer.from((w2.params as { chunk: string }).chunk, "base64").toString("utf8")).toBe("bbb");
+      await waitForStreamWriteWithBytes(h, "bbb");
 
       h.fakeStdin.end();
       h.respondToRequest("session/prompt", { stopReason: "end_turn" });
-      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 8 });
-      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 8 });
       await loopPromise;
     });
   });
@@ -1037,25 +1014,15 @@ async function waitForStreamWriteWithBytes(
   h: ReturnType<typeof makeHarness>,
   expectedUtf8: string,
   timeoutMs = 1_000,
-): Promise<JsonRpcRequest> {
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const w = h.stream.sent.find((m): m is JsonRpcRequest => {
-      if (!("method" in m) || m.method !== "hydra-acp/stream/write") {
-        return false;
-      }
-      const p = m.params as { chunk?: string } | undefined;
-      if (typeof p?.chunk !== "string") {
-        return false;
-      }
-      return Buffer.from(p.chunk, "base64").toString("utf8") === expectedUtf8;
-    });
-    if (w) {
-      return w;
+    if (h.streamCalls.writes.some((w) => w.text === expectedUtf8)) {
+      return;
     }
     await new Promise((r) => setTimeout(r, 5));
   }
-  throw new Error(`timed out waiting for stream_write with bytes ${expectedUtf8}`);
+  throw new Error(`timed out waiting for stream write with bytes ${expectedUtf8}`);
 }
 
 function countPromptsSent(h: ReturnType<typeof makeHarness>): number {

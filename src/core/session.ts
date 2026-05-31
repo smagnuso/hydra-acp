@@ -3303,7 +3303,7 @@ export class Session {
   private requireStreamBuffer(): SessionStreamBuffer {
     if (this.streamBuffer === undefined) {
       const err = new Error(
-        `session ${this.sessionId} has no stream buffer; call hydra-acp/stream/open first`,
+        `session ${this.sessionId} has no stream buffer; POST /v1/sessions/:id/stdin/open first`,
       ) as Error & { code: number };
       err.code = JsonRpcErrorCodes.StreamNotEnabled;
       throw err;

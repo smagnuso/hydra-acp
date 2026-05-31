@@ -70,6 +70,58 @@ describe("session routes: termination broadcasts session_closed", () => {
     await harness.app.close();
   });
 
+  it("POST /v1/sessions/:id/stdin/open + /stdin feed the session's stdin ring", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const openRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/stdin/open`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "memory", capacityBytes: 4096 }),
+      },
+    );
+    expect(openRes.status).toBe(200);
+    const open = (await openRes.json()) as { capacityBytes: number };
+    expect(open.capacityBytes).toBe(4096);
+
+    const writeRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/stdin`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chunk: Buffer.from("hello stdin").toString("base64"),
+          eof: true,
+        }),
+      },
+    );
+    expect(writeRes.status).toBe(200);
+    const write = (await writeRes.json()) as { writeCursor: number };
+    expect(write.writeCursor).toBe("hello stdin".length);
+
+    // The bytes are now readable from the session's ring (the surface
+    // the MCP stdin tools consume in-process).
+    const read = await session.streamRead(0, undefined, 0);
+    expect(Buffer.from(read.bytes, "base64").toString("utf8")).toBe("hello stdin");
+    expect(read.eof).toBe(true);
+  });
+
+  it("POST /v1/sessions/:id/stdin 404s for an unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_nope/stdin`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chunk: "" }),
+      },
+    );
+    expect(res.status).toBe(404);
+  });
+
   it("POST /v1/sessions/:id/kill notifies attached clients and demotes the session to cold", async () => {
     const session = await harness.manager.create({
       cwd: "/w",

@@ -290,6 +290,41 @@ Demote a live session to cold. The on-disk record is preserved so the session ca
 - `204` — session was already cold; nothing to do.
 - `404` — session unknown.
 
+#### `POST /v1/sessions/:id/stdin/open` + `POST /v1/sessions/:id/stdin`
+
+Producer side of `hydra cat --stream`: feed piped stdin into a live session's in-memory ring, which the agent reads through the `hydra-acp-stdin` MCP server (`POST /mcp/hydra-acp-stdin`). Cursors are **absolute monotonic byte offsets**; eviction surfaces as a `gap` on the read side.
+
+**`POST /v1/sessions/:id/stdin/open`** — allocate the ring.
+
+```jsonc
+// body
+{
+  "mode":          "memory" | "file",   // optional; default "memory"
+  "capacityBytes": 1048576,              // optional; daemon default otherwise
+  "fileCapBytes":  10485760              // optional; file mode only — soft cap on the mirror
+}
+// 200 response
+{
+  "filePath":      "<path>",   // present iff mode === "file"
+  "capacityBytes": 1048576,
+  "fileCapBytes":  10485760    // optional; echoes the soft cap when applied
+}
+```
+
+**`POST /v1/sessions/:id/stdin`** — append a chunk.
+
+```jsonc
+// body
+{
+  "chunk": "<base64-encoded bytes>",
+  "eof":   false   // optional; true on the final write — long-poll readers see eof:true once observed
+}
+// 200 response
+{ "writeCursor": 4096 }   // absolute byte offset after the append
+```
+
+**Response codes** (both): `200` ok; `404` session not live; `409` ring not open / already open.
+
 #### `PATCH /v1/sessions/:id`
 
 Retitle a session or schedule an LLM-driven retitle. Two body shapes, mutually exclusive.
@@ -640,9 +675,9 @@ The `/acp` WebSocket carries JSON-RPC 2.0 frames in both directions. After the W
 - two RFD-track additions Hydra implements (`session/attach`, `session/detach` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533)),
 - the Hydra-specific extensions documented below.
 
-All Hydra additions live under a single vendor prefix, `hydra-acp/`, and follow ACP's own `resource/action` shape at the leaf (e.g. `hydra-acp/prompt/cancel`, `hydra-acp/stream/open`, `hydra-acp/agents/list`). The single prefix guarantees no collision with future ACP standard methods.
+All Hydra additions live under a single vendor prefix, `hydra-acp/`, and follow ACP's own `resource/action` shape at the leaf (e.g. `hydra-acp/prompt/cancel`, `hydra-acp/agents/list`). The single prefix guarantees no collision with future ACP standard methods.
 
-Resource groups: `prompt/*` (cancel, update, amend, amended), `prompt_queue/*` (added, updated, removed), `stream/*` (open, write, read), `child_session/*` (spawn, close, await), `session/*` (fork, closed), `commands/*` (register, invoke), `mcp_tools/*` (register, invoke), `message/*` (emit), `agents/*` (list, install_progress), `connection/*` (keep_alive), and `transformer/*` (initialize, message, session_event).
+Resource groups: `prompt/*` (cancel, update, amend, amended), `prompt_queue/*` (added, updated, removed), `child_session/*` (spawn, close, await), `session/*` (fork, closed), `commands/*` (register, invoke), `mcp_tools/*` (register, invoke), `message/*` (emit), `agents/*` (list, install_progress), `connection/*` (keep_alive), and `transformer/*` (initialize, message, session_event).
 
 The `hydra-acp/transformer/*` methods are transformer-specific: only callable on a connection that authenticated as a transformer; extensions and ordinary clients receive `MethodNotFound`.
 
@@ -922,70 +957,6 @@ Fires once when a session is closed (cold demotion, delete, daemon shutdown, imp
 
 ```jsonc
 { "sessionId": "<id>" }
-```
-
-### Stdin streaming
-
-Three RPCs implement an in-memory ring buffer per session, used by `hydra cat --stream` to feed piped stdin to the agent without round-tripping through a tempfile. The companion MCP server at `POST /mcp/hydra-acp-stdin` exposes the same buffer to the agent as MCP tools (`head`, `tail`, `read`, `grep`, `wait_for_more`, `info`).
-
-All cursors are **absolute monotonic byte offsets**, never ring indices. Eviction is observable: a read whose `cursor` points before the oldest still-resident byte returns `gap: <count>` and advances `cursor` to the oldest resident position.
-
-#### Request: `hydra-acp/stream/open`
-
-Allocate the buffer.
-
-```jsonc
-// params
-{
-  "sessionId":     "<id>",
-  "mode":          "memory" | "file",   // optional; default "memory"
-  "capacityBytes": 1048576,              // optional; daemon defaults
-  "fileCapBytes":  10485760              // optional; file mode only — soft cap on the mirror
-}
-// result
-{
-  "filePath":      "<path>",   // present iff mode === "file"
-  "capacityBytes": 1048576,
-  "fileCapBytes":  10485760    // optional; echoes the soft cap when one was applied
-}
-```
-
-`mode: "memory"` keeps the ring in RAM only — required for the MCP tool surface. `mode: "file"` also writes to a tempfile so an agent without HTTP MCP can consume it via `tail -f` / `head` / `grep`.
-
-#### Request: `hydra-acp/stream/write`
-
-Append bytes to the ring (and the mirror file, if any).
-
-```jsonc
-// params
-{
-  "sessionId": "<id>",
-  "chunk":     "<base64-encoded bytes>",
-  "eof":       false   // optional; true on the final write — long-poll readers return eof:true once observed
-}
-// result
-{ "writeCursor": 4096 }   // absolute byte offset after the append
-```
-
-#### Request: `hydra-acp/stream/read`
-
-Read from the ring at an absolute cursor.
-
-```jsonc
-// params
-{
-  "sessionId": "<id>",
-  "cursor":    0,        // absolute byte offset to read from
-  "maxBytes":  65536,    // optional; daemon caps at 64 KiB
-  "waitMs":    30000     // optional; long-poll if nothing's available (server cap 60_000)
-}
-// result
-{
-  "bytes":      "<base64-encoded bytes>",   // "" when nothing new and waitMs expired
-  "nextCursor": 4096,
-  "gap":        128,     // optional; bytes evicted between the caller's cursor and what we still have
-  "eof":        true     // optional; producer closed AND no more bytes after nextCursor
-}
 ```
 
 ### Local fork

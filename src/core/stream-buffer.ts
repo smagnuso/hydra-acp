@@ -127,8 +127,8 @@ export class SessionStreamBuffer {
   private fileCapReached = false;
   private onFileCapReached: (() => void) | undefined;
   private logWriteError: ((err: Error) => void) | undefined;
-  // Single-flight chain for file appends so concurrent stream_write
-  // calls don't interleave their writes.
+  // Single-flight chain for file appends so concurrent stdin writes
+  // don't interleave their file writes.
   private fileWriteChain: Promise<unknown> = Promise.resolve();
 
   constructor(opts: StreamBufferOptions = {}) {
