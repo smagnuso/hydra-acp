@@ -71,3 +71,102 @@ export function buildRejectResponse(
   ]);
   return { outcome: { outcome: "selected", optionId } };
 }
+
+// What a tool call actually wants to touch, pulled out of the ACP
+// toolCall so a frontend can show it instead of a bare title like
+// "external_directory". Every field is best-effort: agents populate
+// these inconsistently, so callers should treat an empty result as
+// "nothing extra to show" and fall back to the title.
+export interface PermissionDetail {
+  // Tool category (read / edit / execute / fetch / …) if the agent set it.
+  kind?: string;
+  // File/dir paths the call targets, from toolCall.locations[].path
+  // and/or rawInput.{file_path,path,filePath}.
+  paths: string[];
+  // Shell command for execute-kind calls (rawInput.command).
+  command?: string;
+  // URL for fetch-kind calls (rawInput.url).
+  url?: string;
+  // Short human description (rawInput.description) when present.
+  description?: string;
+}
+
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" ? (v as Record<string, unknown>) : undefined;
+}
+
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+// Extract the human-relevant context from a session/request_permission
+// params payload. Shared by the TUI prompt and the daemon-side
+// formatting so every frontend describes a request the same way.
+export function extractPermissionDetail(params: unknown): PermissionDetail {
+  const p = asRecord(params);
+  const toolCall = asRecord(p?.toolCall);
+  const detail: PermissionDetail = { paths: [] };
+  if (!toolCall) {
+    return detail;
+  }
+  const kind = asString(toolCall.kind);
+  if (kind) {
+    detail.kind = kind;
+  }
+
+  const seen = new Set<string>();
+  const addPath = (val: unknown): void => {
+    const s = asString(val);
+    if (s && !seen.has(s)) {
+      seen.add(s);
+      detail.paths.push(s);
+    }
+  };
+
+  const locations = toolCall.locations;
+  if (Array.isArray(locations)) {
+    for (const loc of locations) {
+      addPath(asRecord(loc)?.path);
+    }
+  }
+
+  const rawInput = asRecord(toolCall.rawInput);
+  if (rawInput) {
+    addPath(rawInput.file_path);
+    addPath(rawInput.filePath);
+    addPath(rawInput.path);
+    const command = asString(rawInput.command);
+    if (command) {
+      detail.command = command;
+    }
+    const url = asString(rawInput.url);
+    if (url) {
+      detail.url = url;
+    }
+    const description = asString(rawInput.description);
+    if (description) {
+      detail.description = description;
+    }
+  }
+
+  return detail;
+}
+
+// Collapse a PermissionDetail into a single-line summary suitable for a
+// compact surface (TUI subtitle, Slack context line). Returns "" when
+// there's nothing beyond the title worth showing.
+export function formatPermissionDetailLine(detail: PermissionDetail): string {
+  const parts: string[] = [];
+  if (detail.command) {
+    parts.push(`$ ${detail.command}`);
+  } else if (detail.url) {
+    parts.push(detail.url);
+  } else if (detail.paths.length === 1) {
+    parts.push(detail.paths[0] as string);
+  } else if (detail.paths.length > 1) {
+    parts.push(`${detail.paths[0]} (+${detail.paths.length - 1} more)`);
+  } else if (detail.description) {
+    parts.push(detail.description);
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}

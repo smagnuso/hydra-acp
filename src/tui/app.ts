@@ -36,7 +36,11 @@ import { invokedBinName } from "../core/bin-name.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
-import { buildApproveResponse } from "../acp/permission-pick.js";
+import {
+  buildApproveResponse,
+  extractPermissionDetail,
+  formatPermissionDetailLine,
+} from "../acp/permission-pick.js";
 import {
   formatUpdateNoticeLine,
   getPendingUpdate,
@@ -920,6 +924,7 @@ async function runSession(
   let pendingPermission:
     | {
         title: string;
+        detail: string;
         options: PermissionOption[];
         selectedIndex: number;
         resolve: (result: unknown) => void;
@@ -987,6 +992,7 @@ async function runSession(
     }
     screen.setPermissionPrompt({
       title: pendingPermission.title,
+      detail: pendingPermission.detail,
       options: pendingPermission.options.map((o) => ({ label: o.name })),
       selectedIndex: pendingPermission.selectedIndex,
     });
@@ -1041,6 +1047,12 @@ async function runSession(
     }));
     const rawTitle = p.toolCall?.title ?? p.toolCall?.name ?? "tool";
     const title = sanitizeSingleLine(rawTitle);
+    // What's actually being accessed (path / command / url), so the modal
+    // describes the request instead of leaning on a terse title like
+    // "external_directory". Also subject to single-line sanitizing.
+    const detail = sanitizeSingleLine(
+      formatPermissionDetailLine(extractPermissionDetail(params)),
+    );
     const toolCallId = p.toolCall?.toolCallId;
     if (options.length === 0) {
       screen.appendLines([
@@ -1055,6 +1067,7 @@ async function runSession(
     return new Promise<unknown>((resolve) => {
       pendingPermission = {
         title,
+        detail,
         options,
         selectedIndex: 0,
         resolve,

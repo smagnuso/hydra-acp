@@ -95,6 +95,9 @@ export interface UsageState {
 
 export interface PermissionPromptSpec {
   title: string;
+  // Single-line summary of what's being accessed (path / command / url).
+  // Empty when the agent gave nothing beyond the title.
+  detail?: string;
   options: Array<{ label: string }>;
   selectedIndex: number;
 }
@@ -2725,8 +2728,11 @@ export class Screen {
     writeRow(`perm|t|${w}|${spec.title}`, () => {
       this.term.brightYellow(` 🔒 ${truncate(spec.title, w - 5)}`);
     });
-    writeRow(`perm|sub|${w}`, () => {
-      this.term.dim(" This action requires approval");
+    const sub = spec.detail && spec.detail.length > 0
+      ? spec.detail
+      : "This action requires approval";
+    writeRow(`perm|sub|${w}|${sub}`, () => {
+      this.term.dim(` ${truncate(sub, w - 2)}`);
     });
     writeRow(`perm|q|${w}`, () => {
       this.term(" Do you want to proceed?");
