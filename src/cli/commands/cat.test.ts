@@ -460,16 +460,16 @@ describe("runCatLoop", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     h.fakeStdin.push("hello world");
-    const openReq = await h.waitForRequest("hydra-acp/stream_open");
+    const openReq = await h.waitForRequest("hydra-acp/stream/open");
     expect((openReq.params as { mode: string }).mode).toBe("memory");
-    h.respondToRequest("hydra-acp/stream_open", {
+    h.respondToRequest("hydra-acp/stream/open", {
       capacityBytes: 1024 * 1024,
     });
-    const w = await h.waitForRequest("hydra-acp/stream_write");
+    const w = await h.waitForRequest("hydra-acp/stream/write");
     expect(
       Buffer.from((w.params as { chunk: string }).chunk, "base64").toString("utf8"),
     ).toBe("hello world");
-    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
 
     const streamPrompt = await h.waitForRequest("session/prompt");
     expect(
@@ -478,7 +478,7 @@ describe("runCatLoop", () => {
     ).toBe(true);
     h.fakeStdin.end();
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
-    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
     await loopPromise;
   });
 
@@ -506,12 +506,12 @@ describe("runCatLoop", () => {
     await new Promise((r) => setTimeout(r, 0));
 
     h.fakeStdin.push("hello world");
-    await h.waitForRequest("hydra-acp/stream_open");
-    h.respondToRequest("hydra-acp/stream_open", {
+    await h.waitForRequest("hydra-acp/stream/open");
+    h.respondToRequest("hydra-acp/stream/open", {
       capacityBytes: 1024 * 1024,
     });
-    await h.waitForRequest("hydra-acp/stream_write");
-    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+    await h.waitForRequest("hydra-acp/stream/write");
+    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
 
     await h.waitForRequest("session/prompt");
     // The agent answers via session/update before we respond to the
@@ -522,7 +522,7 @@ describe("runCatLoop", () => {
     });
     h.fakeStdin.end();
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
-    h.respondToRequest("hydra-acp/stream_write", { writeCursor: 11 });
+    h.respondToRequest("hydra-acp/stream/write", { writeCursor: 11 });
     await loopPromise;
 
     expect(h.stdout.join("")).toContain("resolution was 1920x1080");
@@ -814,7 +814,7 @@ describe("runCatLoop", () => {
       expect(params.prompt[1]?.text).toBe("short stdin\n");
       // No stream_open should have been issued.
       const opens = h.stream.sent.filter(
-        (m) => "method" in m && m.method === "hydra-acp/stream_open",
+        (m) => "method" in m && m.method === "hydra-acp/stream/open",
       );
       expect(opens.length).toBe(0);
 
@@ -834,7 +834,7 @@ describe("runCatLoop", () => {
       // stream_open + drain of the buffered head.
       h.fakeStdin.push("abcdefghijkl");
 
-      const openReq = await h.waitForRequest("hydra-acp/stream_open");
+      const openReq = await h.waitForRequest("hydra-acp/stream/open");
       const openParams = openReq.params as {
         sessionId: string;
         mode: string;
@@ -842,18 +842,18 @@ describe("runCatLoop", () => {
       // No /tmp file: stream is in-memory and the agent uses MCP tools.
       expect(openParams.mode).toBe("memory");
       expect((openParams as { fileCapBytes?: number }).fileCapBytes).toBeUndefined();
-      h.respondToRequest("hydra-acp/stream_open", {
+      h.respondToRequest("hydra-acp/stream/open", {
         capacityBytes: 16 * 1024 * 1024,
       });
 
       // First stream_write: the buffered head (12 bytes).
-      const writeReq = await h.waitForRequest("hydra-acp/stream_write");
+      const writeReq = await h.waitForRequest("hydra-acp/stream/write");
       const writeParams = writeReq.params as { chunk: string; eof?: boolean };
       expect(Buffer.from(writeParams.chunk, "base64").toString("utf8")).toBe(
         "abcdefghijkl",
       );
       expect(writeParams.eof).toBeUndefined();
-      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 12 });
+      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 12 });
 
       // Kick-off prompt: standing prompt + the MCP tool note.
       const promptReq = await h.waitForRequest("session/prompt");
@@ -874,7 +874,7 @@ describe("runCatLoop", () => {
       await loopPromise;
       const writes = h.stream.sent.filter(
         (m): m is JsonRpcRequest =>
-          "method" in m && m.method === "hydra-acp/stream_write",
+          "method" in m && m.method === "hydra-acp/stream/write",
       );
       // At least one eof write should have landed.
       expect(
@@ -1004,15 +1004,15 @@ describe("runCatLoop", () => {
       await performHandshake(h);
 
       h.fakeStdin.push("aaaaa"); // 5 bytes, just over threshold
-      await h.waitForRequest("hydra-acp/stream_open");
-      h.respondToRequest("hydra-acp/stream_open", {
+      await h.waitForRequest("hydra-acp/stream/open");
+      h.respondToRequest("hydra-acp/stream/open", {
         capacityBytes: 1024,
       });
 
       // First write (the buffered head)
-      const w1 = await h.waitForRequest("hydra-acp/stream_write");
+      const w1 = await h.waitForRequest("hydra-acp/stream/write");
       expect(Buffer.from((w1.params as { chunk: string }).chunk, "base64").toString("utf8")).toBe("aaaaa");
-      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 5 });
+      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 5 });
 
       // Wait for the kick-off prompt to land so we know we're past the
       // switchToFile() barrier and into the "stdin → stream_write"
@@ -1026,8 +1026,8 @@ describe("runCatLoop", () => {
 
       h.fakeStdin.end();
       h.respondToRequest("session/prompt", { stopReason: "end_turn" });
-      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 8 });
-      h.respondToRequest("hydra-acp/stream_write", { writeCursor: 8 });
+      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 8 });
+      h.respondToRequest("hydra-acp/stream/write", { writeCursor: 8 });
       await loopPromise;
     });
   });
@@ -1041,7 +1041,7 @@ async function waitForStreamWriteWithBytes(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const w = h.stream.sent.find((m): m is JsonRpcRequest => {
-      if (!("method" in m) || m.method !== "hydra-acp/stream_write") {
+      if (!("method" in m) || m.method !== "hydra-acp/stream/write") {
         return false;
       }
       const p = m.params as { chunk?: string } | undefined;

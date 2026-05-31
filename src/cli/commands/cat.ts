@@ -727,7 +727,7 @@ function runStreamingPath(args: StreamingPathArgs): void {
       payload.eof = true;
     }
     writeChain = writeChain
-      .then(() => conn.request("hydra-acp/stream_write", payload))
+      .then(() => conn.request("hydra-acp/stream/write", payload))
       .catch((err) => {
         stderr(
           `hydra-acp cat: stream_write failed: ${(err as Error).message}\n`,
@@ -759,7 +759,7 @@ function runStreamingPath(args: StreamingPathArgs): void {
       if (opts.streamBufferBytes !== undefined) {
         openParams.capacityBytes = opts.streamBufferBytes;
       }
-      open = (await conn.request("hydra-acp/stream_open", openParams)) as {
+      open = (await conn.request("hydra-acp/stream/open", openParams)) as {
         capacityBytes: number;
       };
     } catch (err) {
@@ -922,7 +922,7 @@ async function openOrAttachSession(
   const cwd = opts.cwd ?? process.cwd();
   const params: Record<string, unknown> = { cwd };
   if (opts.agentId) {
-    params.agentId = opts.agentId;
+    hydraMeta.agentId = opts.agentId;
   }
   if (Object.keys(hydraMeta).length > 0) {
     params._meta = { [HYDRA_META_KEY]: hydraMeta };

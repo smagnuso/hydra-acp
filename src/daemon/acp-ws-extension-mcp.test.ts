@@ -150,7 +150,7 @@ describe("acp-ws: register_mcp_tools", () => {
   it("populates extensionMcp with a successful registration", async () => {
     const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
     try {
-      const resp = await request("hydra-acp/register_mcp_tools", {
+      const resp = await request("hydra-acp/mcp_tools/register", {
         instructions: "memory help",
         tools: [
           {
@@ -180,7 +180,7 @@ describe("acp-ws: register_mcp_tools", () => {
   it("re-registration overwrites tools and instructions", async () => {
     const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
     try {
-      await request("hydra-acp/register_mcp_tools", {
+      await request("hydra-acp/mcp_tools/register", {
         instructions: "v1",
         tools: [
           {
@@ -190,7 +190,7 @@ describe("acp-ws: register_mcp_tools", () => {
           },
         ],
       });
-      await request("hydra-acp/register_mcp_tools", {
+      await request("hydra-acp/mcp_tools/register", {
         instructions: "v2",
         tools: [
           {
@@ -211,7 +211,7 @@ describe("acp-ws: register_mcp_tools", () => {
   it("rejects payload with an empty tools list", async () => {
     const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
     try {
-      const resp = await request("hydra-acp/register_mcp_tools", {
+      const resp = await request("hydra-acp/mcp_tools/register", {
         tools: [],
       });
       expect(resp.error).toBeDefined();
@@ -226,7 +226,7 @@ describe("acp-ws: register_mcp_tools", () => {
     try {
       // No name → dropped; inputSchema not an object → dropped; nothing
       // valid remains → handler treats as empty list and rejects.
-      const resp = await request("hydra-acp/register_mcp_tools", {
+      const resp = await request("hydra-acp/mcp_tools/register", {
         tools: [
           { description: "missing name", inputSchema: { type: "object" } },
           { name: "bad-schema", description: "", inputSchema: "string" },
@@ -241,7 +241,7 @@ describe("acp-ws: register_mcp_tools", () => {
   it("optional outputSchema is preserved", async () => {
     const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
     try {
-      await request("hydra-acp/register_mcp_tools", {
+      await request("hydra-acp/mcp_tools/register", {
         tools: [
           {
             name: "ping",
@@ -263,7 +263,7 @@ describe("acp-ws: register_mcp_tools", () => {
 
   it("clearing the registry happens on connection close", async () => {
     const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
-    await request("hydra-acp/register_mcp_tools", {
+    await request("hydra-acp/mcp_tools/register", {
       tools: [
         { name: "t", description: "", inputSchema: { type: "object" } },
       ],
@@ -279,12 +279,12 @@ describe("acp-ws: register_mcp_tools", () => {
     const a = await openExtensionWs(wsUrl, handle!, "memory");
     const b = await openExtensionWs(wsUrl, handle!, "notifier");
     try {
-      await a.request("hydra-acp/register_mcp_tools", {
+      await a.request("hydra-acp/mcp_tools/register", {
         tools: [
           { name: "search", description: "", inputSchema: { type: "object" } },
         ],
       });
-      await b.request("hydra-acp/register_mcp_tools", {
+      await b.request("hydra-acp/mcp_tools/register", {
         tools: [
           { name: "notify", description: "", inputSchema: { type: "object" } },
         ],

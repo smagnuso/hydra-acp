@@ -70,7 +70,7 @@ export interface CreateSessionParams {
   model?: string;
   // Per-request callback that fires while the agent's binary or npm
   // package is being fetched. Forwarded to planSpawn; the daemon WS
-  // handler uses it to push hydra-acp/agent_install_progress
+  // handler uses it to push hydra-acp/agents/install_progress
   // notifications back to the originating client, isolated from any
   // other concurrent install on the same daemon.
   onInstallProgress?: AgentInstallProgressCallback;
@@ -282,7 +282,7 @@ export class SessionManager {
           continue;
         }
         try {
-          const result = await t.connection.request("transformer/message", {
+          const result = await t.connection.request("hydra-acp/transformer/message", {
             token: `t_${generateRawSessionId()}`,
             phase: "response",
             method: "initialize",

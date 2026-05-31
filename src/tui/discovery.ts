@@ -31,7 +31,7 @@ export interface DiscoveredSession {
   // look like they appeared out of nowhere.
   importedFromMachine?: string;
   importedFromUpstreamSessionId?: string;
-  // Set when this session was created by hydra-acp/fork_session.
+  // Set when this session was created by hydra-acp/session/fork.
   // forkedFromSessionId points to the local source session; forkedFromMessageId
   // is the messageId of the turn_complete the slice ended at.
   forkedFromSessionId?: string;

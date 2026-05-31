@@ -1994,7 +1994,7 @@ describe("SessionManager: importBundle", () => {
   it("closes a live session backed by the replaced record and notifies attached clients", async () => {
     // Replace-over-live is the only importBundle path that can yank the
     // session out from under an attached client; assert it broadcasts
-    // hydra-acp/session_closed so the TUI's cold-banner handler trips.
+    // hydra-acp/session/closed so the TUI's cold-banner handler trips.
     const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     // bootstrap: initialize + session/new for the resurrect-from-import
@@ -2034,7 +2034,7 @@ describe("SessionManager: importBundle", () => {
     expect(replaced.replaced).toBe(true);
 
     const closeMsg = stream.sent.find(
-      (m) => "method" in m && m.method === "hydra-acp/session_closed",
+      (m) => "method" in m && m.method === "hydra-acp/session/closed",
     );
     expect(closeMsg).toMatchObject({
       params: { sessionId: imported.sessionId },
@@ -2044,7 +2044,7 @@ describe("SessionManager: importBundle", () => {
 });
 
 describe("SessionManager: closeAll", () => {
-  it("broadcasts hydra-acp/session_closed to every attached client", async () => {
+  it("broadcasts hydra-acp/session/closed to every attached client", async () => {
     // Daemon graceful shutdown calls closeAll; without this, attached
     // clients would just see the WS drop and never the explicit "session
     // is gone" signal that drives the cold banner.
@@ -2087,7 +2087,7 @@ describe("SessionManager: closeAll", () => {
       [streamB, sessionB],
     ] as const) {
       const closeMsg = stream.sent.find(
-        (m) => "method" in m && m.method === "hydra-acp/session_closed",
+        (m) => "method" in m && m.method === "hydra-acp/session/closed",
       );
       expect(closeMsg).toMatchObject({
         params: { sessionId: session.sessionId },
@@ -3203,7 +3203,7 @@ describe("SessionManager.create: agent:initialize intercept", () => {
     const interceptedRequests: unknown[] = [];
     const stream = makeControlledStream();
     const conn = new JsonRpcConnection(stream);
-    // Spy on transformer/message calls and return a replaced capabilities object.
+    // Spy on hydra-acp/transformer/message calls and return a replaced capabilities object.
     const connRequestSpy = vi.spyOn(conn, "request").mockImplementation(
       async (_method: string, params: unknown) => {
         interceptedRequests.push(params);
@@ -3226,9 +3226,9 @@ describe("SessionManager.create: agent:initialize intercept", () => {
       transformChain: [transformerRef],
     });
 
-    // The intercept should have received a transformer/message call.
+    // The intercept should have received a hydra-acp/transformer/message call.
     expect(connRequestSpy).toHaveBeenCalledWith(
-      "transformer/message",
+      "hydra-acp/transformer/message",
       expect.objectContaining({ method: "initialize", phase: "response" }),
     );
     // The envelope passed should carry the agent's original capabilities.

@@ -417,7 +417,7 @@ async function runSession(
   // wipes whatever we printed here.
   //
   // The line is also rewritten in-place while a fresh agent's binary or
-  // npm package is being downloaded (see hydra-acp/agent_install_progress
+  // npm package is being downloaded (see hydra-acp/agents/install_progress
   // handler below) so the user gets bytes-and-percent feedback during
   // what would otherwise look like a multi-second hang.
   const launchLabelBase =
@@ -459,7 +459,7 @@ async function runSession(
   await stream.start();
 
   // Subscribe BEFORE issuing session/new or session/attach. The daemon
-  // fires hydra-acp/agent_install_progress notifications during those
+  // fires hydra-acp/agents/install_progress notifications during those
   // requests if it has to fetch a binary or npm package — registering
   // late would miss the first download_start tick. Stopped once the
   // session is fully attached (see installStatus.finalize() below).
@@ -518,7 +518,7 @@ async function runSession(
   // messageId of the prompt currently being processed by the agent
   // (whether ours or a peer's). Tracked from prompt_received and
   // cleared on turn_complete. Used as the targetMessageId for
-  // hydra-acp/amend_prompt when the user presses Shift+Enter.
+  // hydra-acp/prompt/amend when the user presses Shift+Enter.
   let currentHeadMessageId: string | undefined;
   // Wall-clock moment the session became busy (pendingTurns went 0 → >0).
   // Drives the banner's elapsed counter so the user sees "● running 30s"
@@ -695,7 +695,7 @@ async function runSession(
   // bookkeeping so the elapsed timer stops, then flip the banner to a
   // terminal "closed" state. The WS itself stays up; a subsequent prompt
   // will get rejected by the daemon and surface that error in scrollback.
-  conn.onNotification("hydra-acp/session_closed", () => {
+  conn.onNotification("hydra-acp/session/closed", () => {
     if (teardownStarted) {
       return;
     }
@@ -721,7 +721,7 @@ async function runSession(
   const amendPendingPaintTimers = new Map<string, NodeJS.Timeout>();
   const AMEND_CHIP_DISPLAY_DELAY_MS = 200;
 
-  conn.onNotification("hydra-acp/prompt_queue_added", (params) => {
+  conn.onNotification("hydra-acp/prompt_queue/added", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as {
       messageId?: unknown;
@@ -767,7 +767,7 @@ async function runSession(
       }
     }
   });
-  conn.onNotification("hydra-acp/prompt_queue_updated", (params) => {
+  conn.onNotification("hydra-acp/prompt_queue/updated", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as {
       messageId?: unknown;
@@ -777,7 +777,7 @@ async function runSession(
     if (!queueCache.has(p.messageId)) return;
     queueCache.set(p.messageId, chipFromPrompt(p.messageId, p.prompt));
     // If the underlying prompt of one of our own deferred echoes was
-    // mutated (via hydra-acp/update_prompt), refresh the pending echo's
+    // mutated (via hydra-acp/prompt/update), refresh the pending echo's
     // text/attachments too so the eventual scrollback flush reflects
     // what actually got forwarded upstream.
     const pending = ownPendingByMid.get(p.messageId);
@@ -812,7 +812,7 @@ async function runSession(
       refreshQueueDisplay();
     }
   });
-  conn.onNotification("hydra-acp/prompt_queue_removed", (params) => {
+  conn.onNotification("hydra-acp/prompt_queue/removed", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as { messageId?: unknown; reason?: unknown };
     if (typeof p.messageId !== "string") return;
@@ -863,7 +863,7 @@ async function runSession(
   // a cancellation on disconnect). Reconstruct the JSON-RPC response shape
   // the modal expects from the update's `outcome` (preferred) or
   // `chosenOptionId` so the awaiting Promise resolves cleanly.
-  conn.onNotification("hydra-acp/prompt_amended", (params) => {
+  conn.onNotification("hydra-acp/prompt/amended", (params) => {
     if (teardownStarted) return;
     const p = (params ?? {}) as { cancelledMessageId?: unknown };
     if (typeof p.cancelledMessageId !== "string") return;
@@ -1113,7 +1113,7 @@ async function runSession(
       agentAcceptsImages = false;
     }
     const hydraMeta = extractHydraMeta(initResult?._meta ?? undefined);
-    daemonSupportsAmend = hydraMeta.promptAmending === true;
+    daemonSupportsAmend = hydraMeta.prompt?.amending === true;
   } catch {
     // initialize is optional from the daemon's perspective; proceed regardless.
   }
@@ -1146,6 +1146,9 @@ async function runSession(
   let initialTurnStartedAt: number | undefined;
   if (ctx.sessionId === "__new__") {
     const hydraNewMeta: Record<string, unknown> = {};
+    if (opts.agentId) {
+      hydraNewMeta.agentId = opts.agentId;
+    }
     if (opts.name) {
       hydraNewMeta.title = opts.name;
     }
@@ -1154,22 +1157,22 @@ async function runSession(
     }
     const created = (await conn.request("session/new", {
       cwd: ctx.cwd,
-      ...(opts.agentId ? { agentId: opts.agentId } : {}),
       ...(Object.keys(hydraNewMeta).length > 0
         ? { _meta: { [HYDRA_META_KEY]: hydraNewMeta } }
         : {}),
     })) as {
       sessionId: string;
-      clientId?: string;
       _meta?: Record<string, unknown>;
     };
     resolvedSessionId = created.sessionId;
-    if (created.clientId) {
-      ownClientId = created.clientId;
-    }
     exitHint.sessionId = resolvedSessionId;
     exitHint.readonly = false;
     const hydraMeta = extractHydraMeta(created._meta ?? undefined);
+    // session/new is a core spec method, so the daemon delivers our
+    // clientId under _meta["hydra-acp"] rather than top-level.
+    if (hydraMeta.clientId) {
+      ownClientId = hydraMeta.clientId;
+    }
     upstreamSessionId = hydraMeta.upstreamSessionId;
     if (hydraMeta.agentId) {
       resolvedAgentId = hydraMeta.agentId;
@@ -1192,35 +1195,38 @@ async function runSession(
     }
     initialQueue = hydraMeta.queue;
   } else {
+    // Hydra-specific attach options (readonly / drip pacing) and the
+    // resume hint all ride under _meta["hydra-acp"] — session/attach
+    // carries only RFD #533's own fields at the top level.
+    const attachHydraMeta: Record<string, unknown> = {};
+    if (opts.readonly === true) {
+      attachHydraMeta.readonly = true;
+    }
+    if (opts.drip === true) {
+      attachHydraMeta.replayMode = "drip";
+      if (opts.dripSpeed !== undefined) {
+        attachHydraMeta.dripSpeed = opts.dripSpeed;
+      }
+    }
+    // Forward the user-chosen cwd via a full resume hint. An empty
+    // upstreamSessionId routes through doResurrectFromImport
+    // (first-launch imports); a real one takes the normal session/load
+    // path (repairing a local session whose recorded cwd is gone).
+    // Either way the daemon resurrects with this cwd instead of the
+    // stale recorded one.
+    if (ctx.resumeHint !== undefined) {
+      attachHydraMeta.resume = {
+        upstreamSessionId: ctx.resumeHint.upstreamSessionId,
+        agentId: ctx.resumeHint.agentId,
+        cwd: ctx.resumeHint.cwd,
+      };
+    }
     const attached = (await conn.request("session/attach", {
       sessionId: ctx.sessionId,
       historyPolicy: "full",
       clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
-      ...(opts.readonly === true ? { readonly: true } : {}),
-      ...(opts.drip === true
-        ? {
-            replayMode: "drip",
-            ...(opts.dripSpeed !== undefined ? { dripSpeed: opts.dripSpeed } : {}),
-          }
-        : {}),
-      // Forward the user-chosen cwd via a full resume hint. An empty
-      // upstreamSessionId routes through doResurrectFromImport
-      // (first-launch imports); a real one takes the normal session/load
-      // path (repairing a local session whose recorded cwd is gone).
-      // Either way the daemon resurrects with this cwd instead of the
-      // stale recorded one.
-      ...(ctx.resumeHint !== undefined
-        ? {
-            _meta: {
-              [HYDRA_META_KEY]: {
-                resume: {
-                  upstreamSessionId: ctx.resumeHint.upstreamSessionId,
-                  agentId: ctx.resumeHint.agentId,
-                  cwd: ctx.resumeHint.cwd,
-                },
-              },
-            },
-          }
+      ...(Object.keys(attachHydraMeta).length > 0
+        ? { _meta: { [HYDRA_META_KEY]: attachHydraMeta } }
         : {}),
     })) as {
       sessionId: string;
@@ -2274,7 +2280,7 @@ async function runSession(
         // Enter, hydra returns already_running / not_found — surface
         // those quietly so the user knows the edit didn't land.
         conn
-          .request("hydra-acp/update_prompt", {
+          .request("hydra-acp/prompt/update", {
             sessionId: resolvedSessionId,
             messageId: mid,
             prompt: blocks,
@@ -2296,7 +2302,7 @@ async function runSession(
           return;
         }
         conn
-          .request("hydra-acp/cancel_prompt", {
+          .request("hydra-acp/prompt/cancel", {
             sessionId: resolvedSessionId,
             messageId: mid,
           })
@@ -2337,7 +2343,7 @@ async function runSession(
         // ^C stops only the in-flight turn. Queued prompts stay put —
         // the daemon's queue picks the next one up once the cancelled
         // turn settles. Use Up + ^C / Enter to drop a specific queued
-        // entry via hydra-acp/cancel_prompt.
+        // entry via hydra-acp/prompt/cancel.
         return;
       }
       case "exit":
@@ -2535,7 +2541,7 @@ async function runSession(
   };
 
   // Server-driven view of the daemon-owned prompt queue. Populated by
-  // hydra-acp/prompt_queue_added notifications and by the queue snapshot
+  // hydra-acp/prompt_queue/added notifications and by the queue snapshot
   // delivered on attach (_meta["hydra-acp"].queue). Entries are removed
   // by prompt_queue_removed regardless of reason — once gone, the chip
   // disappears whether the entry started, was cancelled, or abandoned.
@@ -2579,7 +2585,7 @@ async function runSession(
   // until prompt_queue_removed for that messageId tells us to flush
   // (started) or drop (cancelled / abandoned).
   const ownPendingByMid = new Map<string, PendingEcho>();
-  // messageIds that were the target of a hydra-acp/amend_prompt — used
+  // messageIds that were the target of a hydra-acp/prompt/amend — used
   // by runPrompt's finally to synthesize a turn-complete with
   // amended: true so the cancelled turn renders as "stopped (amended)"
   // instead of "stopped (cancelled)". The daemon broadcasts
@@ -2654,11 +2660,11 @@ async function runSession(
   };
 
   // Shift+Enter route. Three cases:
-  //   1. Daemon doesn't advertise promptAmending → fall through to a
+  //   1. Daemon doesn't advertise prompt.amending → fall through to a
   //      regular send. The chord still works on older daemons.
   //   2. No in-flight head (currentHeadMessageId undefined) → also a
   //      regular send. Nothing to amend.
-  //   3. Head is in flight → fire hydra-acp/amend_prompt with the head
+  //   3. Head is in flight → fire hydra-acp/prompt/amend with the head
   //      as targetMessageId. On target_completed, surface a "send
   //      anyway?" affordance instead of silently submitting; the user
   //      can re-press Shift+Enter or Enter to confirm.
@@ -2706,7 +2712,7 @@ async function runSession(
       }
     };
     conn
-      .request("hydra-acp/amend_prompt", {
+      .request("hydra-acp/prompt/amend", {
         sessionId: resolvedSessionId,
         targetMessageId: target,
         prompt: blocks,
@@ -4681,7 +4687,7 @@ function writeDebugLine(payload: Record<string, unknown>): void {
 // gap between the picker closing and screen.start() entering the
 // alternate screen. Backs the launch label ("Starting new session…"
 // / "Resuming session…") and overwrites it with live agent-install
-// progress when the daemon fires hydra-acp/agent_install_progress.
+// progress when the daemon fires hydra-acp/agents/install_progress.
 //
 // Implementation notes:
 //   - We never know the previous line's printed width precisely (TTY

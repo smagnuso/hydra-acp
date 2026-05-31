@@ -101,7 +101,7 @@ describe("session routes: termination broadcasts session_closed", () => {
     }
 
     const closeMsg = stream.sent.find(
-      (m) => "method" in m && m.method === "hydra-acp/session_closed",
+      (m) => "method" in m && m.method === "hydra-acp/session/closed",
     );
     expect(closeMsg).toMatchObject({
       params: { sessionId: session.sessionId },
@@ -266,7 +266,7 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(res.status).toBe(204);
 
     const closeMsg = stream.sent.find(
-      (m) => "method" in m && m.method === "hydra-acp/session_closed",
+      (m) => "method" in m && m.method === "hydra-acp/session/closed",
     );
     expect(closeMsg).toMatchObject({
       params: { sessionId: session.sessionId },

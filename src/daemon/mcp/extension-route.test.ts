@@ -221,7 +221,7 @@ describe("extension MCP route — happy path", () => {
     const content = r.content as Array<{ type: string; text: string }>;
     expect(content[0]!.text).toBe("pong");
     expect(mock.calls).toHaveLength(1);
-    expect(mock.calls[0]!.method).toBe("hydra-acp/invoke_mcp_tool");
+    expect(mock.calls[0]!.method).toBe("hydra-acp/mcp_tools/invoke");
     expect(mock.calls[0]!.params).toEqual({
       server: "memory",
       tool: "ping",

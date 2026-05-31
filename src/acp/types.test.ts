@@ -24,6 +24,7 @@ describe("extractHydraMeta", () => {
           upstreamSessionId: "u_x",
           agentId: "claude-code",
           cwd: "/work",
+          clientId: "cli_x",
           title: "MyBuffer",
         },
       }),
@@ -31,6 +32,7 @@ describe("extractHydraMeta", () => {
       upstreamSessionId: "u_x",
       agentId: "claude-code",
       cwd: "/work",
+      clientId: "cli_x",
       title: "MyBuffer",
     });
   });
@@ -200,6 +202,7 @@ describe("buildHydraSessionMeta", () => {
 
   it("layers live-only extras when provided", () => {
     const meta = buildHydraSessionMeta(baseEntry, {
+      clientId: "cli_abc",
       currentMode: "ask",
       agentArgs: ["--foo"],
       availableCommands: [{ name: "c" }],
@@ -209,12 +212,18 @@ describe("buildHydraSessionMeta", () => {
       agentCapabilities: { promptCapabilities: {} },
       queue: [{ messageId: "q1" }],
     });
+    expect(meta.clientId).toBe("cli_abc");
     expect(meta.currentMode).toBe("ask");
     expect(meta.agentArgs).toEqual(["--foo"]);
     expect(meta.availableCommands).toEqual([{ name: "c" }]);
     expect(meta.turnStartedAt).toBe(123);
     expect(meta.queue).toEqual([{ messageId: "q1" }]);
     expect(meta.agentCapabilities).toEqual({ promptCapabilities: {} });
+  });
+
+  it("omits clientId when not provided (session/list path)", () => {
+    const meta = buildHydraSessionMeta(baseEntry);
+    expect("clientId" in meta).toBe(false);
   });
 
   it("drops empty extras arrays", () => {

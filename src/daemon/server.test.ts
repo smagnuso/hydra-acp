@@ -469,7 +469,7 @@ describe("startDaemon", () => {
       ws.close();
     });
 
-    it("advertises promptQueueing capability in initialize _meta", async () => {
+    it("advertises prompt.queueing capability in initialize _meta", async () => {
       const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
       await new Promise<void>((resolve, reject) => {
         ws.once("open", () => resolve());
@@ -498,15 +498,15 @@ describe("startDaemon", () => {
       const response = (await responsePromise) as {
         id: number;
         result: {
-          _meta?: { "hydra-acp"?: { promptQueueing?: boolean } };
+          _meta?: { "hydra-acp"?: { prompt?: { queueing?: boolean } } };
         };
       };
-      expect(response.result._meta?.["hydra-acp"]?.promptQueueing).toBe(true);
+      expect(response.result._meta?.["hydra-acp"]?.prompt?.queueing).toBe(true);
 
       ws.close();
     });
 
-    it("advertises the full hydra-acp capability family (queueing, cancelling, updating, amending, pipelining) in initialize _meta", async () => {
+    it("advertises the full hydra-acp capability family (prompt + agents groups) in initialize _meta", async () => {
       const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
       await new Promise<void>((resolve, reject) => {
         ws.once("open", () => resolve());
@@ -537,24 +537,30 @@ describe("startDaemon", () => {
         result: {
           _meta?: {
             "hydra-acp"?: {
-              promptQueueing?: boolean;
-              promptCancelling?: boolean;
-              promptUpdating?: boolean;
-              promptAmending?: boolean;
-              promptPipelining?: boolean;
+              prompt?: {
+                queueing?: boolean;
+                cancelling?: boolean;
+                updating?: boolean;
+                amending?: boolean;
+                pipelining?: boolean;
+              };
+              agents?: { list?: boolean; installProgress?: boolean };
             };
           };
         };
       };
       const flags = response.result._meta?.["hydra-acp"];
       expect(flags).toBeDefined();
-      expect(flags!.promptQueueing).toBe(true);
-      expect(flags!.promptCancelling).toBe(true);
-      expect(flags!.promptUpdating).toBe(true);
-      expect(flags!.promptAmending).toBe(true);
+      expect(flags!.prompt?.queueing).toBe(true);
+      expect(flags!.prompt?.cancelling).toBe(true);
+      expect(flags!.prompt?.updating).toBe(true);
+      expect(flags!.prompt?.amending).toBe(true);
       // pipelining stays false until the streaming-input probe lands
       // (Option A in the steering brief).
-      expect(flags!.promptPipelining).toBe(false);
+      expect(flags!.prompt?.pipelining).toBe(false);
+      // Agent-catalog capability group.
+      expect(flags!.agents?.list).toBe(true);
+      expect(flags!.agents?.installProgress).toBe(true);
 
       ws.close();
     });
@@ -670,6 +676,78 @@ describe("startDaemon", () => {
       expect(hydra.agentId).toBe("claude-acp");
       expect(hydra.status).toBe("cold");
       expect(hydra.attachedClients).toBe(0);
+
+      ws.close();
+    });
+
+    it("returns the agent catalog over hydra-acp/agents/list matching GET /v1/agents", async () => {
+      // Seed the registry disk cache so the lazily-loaded Registry finds
+      // it (the test config points at an unreachable URL). Both the REST
+      // endpoint and the ACP method call core listAgents(), so they must
+      // return byte-identical results.
+      const doc = {
+        version: "2026-01-01",
+        agents: [
+          {
+            id: "claude-acp",
+            name: "Claude",
+            version: "1.0.0",
+            description: "Anthropic agent",
+            distribution: { npx: { package: "@anthropic-ai/claude-code" } },
+          },
+          {
+            id: "opencode",
+            name: "OpenCode",
+            distribution: { uvx: { package: "opencode" } },
+          },
+        ],
+      };
+      await fs.writeFile(
+        path.join(tmpHome, "registry.json"),
+        JSON.stringify({ fetchedAt: Date.now(), data: doc }),
+        "utf8",
+      );
+
+      const restRes = await fetch(`${baseUrl}/v1/agents`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(restRes.status).toBe(200);
+      const rest = await restRes.json();
+
+      const ws = new WebSocket(`${wsUrl}?token=${TEST_TOKEN}`);
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      const responsePromise = new Promise<unknown>((resolve) => {
+        ws.on("message", (data) => resolve(JSON.parse(data.toString("utf8"))));
+      });
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 42,
+          method: "hydra-acp/agents/list",
+          params: {},
+        }),
+      );
+      const response = (await responsePromise) as {
+        id: number;
+        result: {
+          version: string;
+          agents: Array<{ id: string; installed: string; distributions: string[] }>;
+        };
+      };
+      expect(response.id).toBe(42);
+      expect(response.result).toEqual(rest);
+      expect(response.result.version).toBe("2026-01-01");
+      expect(response.result.agents.map((a) => a.id)).toEqual([
+        "claude-acp",
+        "opencode",
+      ]);
+      // uvx-only agent resolves lazily.
+      expect(
+        response.result.agents.find((a) => a.id === "opencode")?.installed,
+      ).toBe("lazy");
 
       ws.close();
     });
@@ -926,7 +1004,7 @@ describe("startDaemon", () => {
             method: "session/attach",
             params: {
               sessionId,
-              readonly: true,
+              _meta: { "hydra-acp": { readonly: true } },
               clientInfo: { name: "ro-test" },
             },
           }),
@@ -976,7 +1054,7 @@ describe("startDaemon", () => {
             jsonrpc: "2.0",
             id: 1,
             method: "session/attach",
-            params: { sessionId, readonly: true },
+            params: { sessionId, _meta: { "hydra-acp": { readonly: true } } },
           }),
         );
         await attachDone;
@@ -1029,7 +1107,7 @@ describe("startDaemon", () => {
             jsonrpc: "2.0",
             id: 1,
             method: "session/attach",
-            params: { sessionId, readonly: true },
+            params: { sessionId, _meta: { "hydra-acp": { readonly: true } } },
           }),
         );
         await attachDone;
@@ -1078,7 +1156,7 @@ describe("startDaemon", () => {
             jsonrpc: "2.0",
             id: 1,
             method: "session/attach",
-            params: { sessionId, readonly: true },
+            params: { sessionId, _meta: { "hydra-acp": { readonly: true } } },
           }),
         );
         await attachDone;
@@ -1107,7 +1185,7 @@ describe("startDaemon", () => {
         const response = await detachResponse;
         expect(response.result).toMatchObject({
           sessionId,
-          status: "detached",
+          _meta: { "hydra-acp": { detachStatus: "detached" } },
         });
 
         ws.close();

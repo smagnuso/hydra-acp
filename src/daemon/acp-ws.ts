@@ -35,7 +35,7 @@ import {
 } from "../acp/types.js";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentInstallProgress } from "../core/registry.js";
+import { listAgents, type AgentInstallProgress, type Registry } from "../core/registry.js";
 import {
   tokenFromUpgradeRequest,
   type TokenValidator,
@@ -89,10 +89,10 @@ export interface AcpWsDeps {
   onExtensionVersion?: (name: string, version: string) => void;
   onTransformerVersion?: (name: string, version: string) => void;
   // TransformerManager for registering transformer connections after
-  // transformer/initialize completes.
+  // hydra-acp/transformer/initialize completes.
   transformers?: TransformerManager;
   // Daemon-wide registry of process-name → registered command list.
-  // The hydra-acp/register_commands handler binds the connection here so
+  // The hydra-acp/commands/register handler binds the connection here so
   // Session.handleSlashCommand can later route "/hydra <name> <verb>"
   // calls back to the originating extension/transformer.
   extensionCommands?: ExtensionCommandRegistry;
@@ -101,13 +101,17 @@ export interface AcpWsDeps {
   // extension MCP plug-point.
   mcpTokenRegistry?: McpTokenRegistry;
   // Daemon-wide registry of extension-contributed MCP servers. The
-  // hydra-acp/register_mcp_tools handler binds the registration here so
+  // hydra-acp/mcp_tools/register handler binds the registration here so
   // /mcp/<extension-name> resolves to the right connection.
   extensionMcp?: ExtensionMcpRegistry;
   // Lazy getter for the daemon's externally-reachable origin (scheme +
   // host + port). Lazy because the bound port isn't known until after
   // `app.listen` returns, which happens after this registration runs.
   getDaemonOrigin?: () => string;
+  // Agent registry, exposed over ACP via `hydra-acp/agents/list` so a
+  // protocol-only client can enumerate selectable agents without the
+  // REST `GET /v1/agents` endpoint.
+  registry?: Registry;
 }
 
 export function registerAcpWsEndpoint(
@@ -198,12 +202,12 @@ export function registerAcpWsEndpoint(
     // Extensions and transformers register slash-command verbs they handle
     // via this method. Once registered, "/hydra <process-name> <verb>"
     // typed in any session routes to this connection as a
-    // hydra-acp/extension_command request. Registrations drop on
+    // hydra-acp/commands/invoke request. Registrations drop on
     // disconnect — Session sees the entry vanish from the registry.
     // Re-calling overwrites the prior registration for this name.
     if (processIdentity && deps.extensionCommands) {
       const registry = deps.extensionCommands;
-      connection.onRequest("hydra-acp/register_commands", async (raw) => {
+      connection.onRequest("hydra-acp/commands/register", async (raw) => {
         const params = (raw ?? {}) as { commands?: unknown };
         const commands = Array.isArray(params.commands)
           ? (params.commands
@@ -240,13 +244,13 @@ export function registerAcpWsEndpoint(
 
     // Extensions and transformers register MCP tools they handle via this
     // method. Once registered, /mcp/<process-name> routes inbound MCP
-    // requests back to this connection as hydra-acp/invoke_mcp_tool.
+    // requests back to this connection as hydra-acp/mcp_tools/invoke.
     // Registrations drop on disconnect — the route's onChange listener
     // evicts any cached transports built against the old spec. Re-calling
     // overwrites the prior tools/instructions for this name.
     if (processIdentity && deps.extensionMcp) {
       const mcpRegistry = deps.extensionMcp;
-      connection.onRequest("hydra-acp/register_mcp_tools", async (raw) => {
+      connection.onRequest("hydra-acp/mcp_tools/register", async (raw) => {
         const params = (raw ?? {}) as {
           instructions?: unknown;
           tools?: unknown;
@@ -310,11 +314,11 @@ export function registerAcpWsEndpoint(
       });
     }
 
-    // transformer/initialize is only registered for transformer connections.
+    // hydra-acp/transformer/initialize is only registered for transformer connections.
     // Extension and client connections receive MethodNotFound if they attempt
     // to call it, enforcing the kind boundary at the method-registration layer.
     if (processIdentity?.kind === "transformer") {
-      connection.onRequest("transformer/initialize", async (raw) => {
+      connection.onRequest("hydra-acp/transformer/initialize", async (raw) => {
         const params = (raw ?? {}) as {
           intercepts?: unknown;
           transformerConfig?: unknown;
@@ -350,7 +354,7 @@ export function registerAcpWsEndpoint(
       });
 
       // Outbox: transformer emits an ACP message back into the system.
-      connection.onRequest("hydra-acp/emit_message", async (raw) => {
+      connection.onRequest("hydra-acp/message/emit", async (raw) => {
         const params = (raw ?? {}) as {
           sessionId?: unknown;
           method?: unknown;
@@ -397,7 +401,7 @@ export function registerAcpWsEndpoint(
 
       // Spawn a child session on behalf of the transformer. Returns the new
       // session's hydra id so the transformer can await or close it later.
-      connection.onRequest("hydra-acp/spawn_child_session", async (raw) => {
+      connection.onRequest("hydra-acp/child_session/spawn", async (raw) => {
         const params = (raw ?? {}) as {
           agentId?: unknown;
           cwd?: unknown;
@@ -432,7 +436,7 @@ export function registerAcpWsEndpoint(
       // defaults to the source's cwd. The new session is written with
       // upstreamSessionId="" so its first attach triggers seedFromImport
       // (same wire shape as an imported session).
-      connection.onRequest("hydra-acp/fork_session", async (raw) => {
+      connection.onRequest("hydra-acp/session/fork", async (raw) => {
         const params = (raw ?? {}) as {
           sessionId?: unknown;
           forkAt?: unknown;
@@ -455,7 +459,7 @@ export function registerAcpWsEndpoint(
         });
       });
 
-      connection.onRequest("hydra-acp/await_child", async (raw) => {
+      connection.onRequest("hydra-acp/child_session/await", async (raw) => {
         const params = (raw ?? {}) as {
           childSessionId?: unknown;
           until?: unknown;
@@ -503,7 +507,7 @@ export function registerAcpWsEndpoint(
           });
 
           // For "idle", the transformer will also receive session.idle via
-          // transformer/session_event on the child's chain. await_child with
+          // hydra-acp/transformer/session_event on the child's chain. await_child with
           // until:"idle" times out if no activity and the child closes naturally.
 
           const timer = setTimeout(finish, timeoutMs);
@@ -516,7 +520,7 @@ export function registerAcpWsEndpoint(
         });
       });
 
-      connection.onRequest("hydra-acp/close_child_session", async (raw) => {
+      connection.onRequest("hydra-acp/child_session/close", async (raw) => {
         const params = (raw ?? {}) as { childSessionId?: unknown };
         const childSessionId = typeof params.childSessionId === "string"
           ? params.childSessionId
@@ -532,7 +536,7 @@ export function registerAcpWsEndpoint(
       });
 
       // Keep-alive: resets the abandonment timer for an outstanding processing claim.
-      connection.onRequest("hydra-acp/keep_alive", async (raw) => {
+      connection.onRequest("hydra-acp/connection/keep_alive", async (raw) => {
         const params = (raw ?? {}) as {
           token?: unknown;
           sessionId?: unknown;
@@ -636,7 +640,7 @@ export function registerAcpWsEndpoint(
       try {
         session = await deps.manager.create({
           cwd: params.cwd,
-          agentId: params.agentId ?? deps.defaultAgent,
+          agentId: hydraMeta.agentId ?? deps.defaultAgent,
           mcpServers: augmentedMcpServers,
           title: hydraMeta.title,
           agentArgs: hydraMeta.agentArgs,
@@ -713,14 +717,15 @@ export function registerAcpWsEndpoint(
       const modelsPayload = buildModelsPayload(session);
       return {
         sessionId: session.sessionId,
-        // session/new is implicitly an attach; mirror session/attach's
-        // shape by including the clientId so deferred-echo clients
-        // (TUI's queue work) can recognize their own prompt_queue_added
-        // events without an extra round-trip.
-        clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
-        _meta: buildResponseMeta(deps.manager, session),
+        // session/new is a core ACP spec method, so the per-attachment
+        // clientId rides under _meta["hydra-acp"] rather than top-level.
+        // Deferred-echo clients (TUI's queue work) read it from there to
+        // recognize their own prompt_queue_added events.
+        _meta: buildResponseMeta(deps.manager, session, {
+          clientId: client.clientId,
+        }),
       };
     });
 
@@ -737,8 +742,12 @@ export function registerAcpWsEndpoint(
           deps.onTransformerVersion?.(processIdentity.name, attachVersion);
         }
       }
-      const hydraHints = extractHydraMeta(params._meta).resume;
-      const readonly = params.readonly === true;
+      // Hydra-specific attach options ride under _meta["hydra-acp"], not
+      // top-level — session/attach exposes only RFD #533's own fields at
+      // the top level.
+      const hydraAttach = extractHydraMeta(params._meta);
+      const hydraHints = hydraAttach.resume;
+      const readonly = hydraAttach.readonly === true;
       app.log.info(
         `session/attach sessionId=${params.sessionId} hasResumeHints=${!!hydraHints} readonly=${readonly}`,
       );
@@ -847,7 +856,7 @@ export function registerAcpWsEndpoint(
         params.clientInfo,
         params.clientId,
       );
-      const drip = params.replayMode === "drip";
+      const drip = hydraAttach.replayMode === "drip";
       const { entries: replay, appliedPolicy } = await session.attach(
         client,
         params.historyPolicy,
@@ -867,8 +876,9 @@ export function registerAcpWsEndpoint(
         // return immediately and stream the notifications afterward,
         // honoring each entry's recordedAt delta (scaled by dripSpeed,
         // capped so multi-minute idle gaps don't stall the playback).
-        // Debug path only — set via SessionAttachParams.replayMode.
-        const speed = params.dripSpeed && params.dripSpeed > 0 ? params.dripSpeed : 1;
+        // Debug path only — set via _meta["hydra-acp"].replayMode.
+        const speed =
+          hydraAttach.dripSpeed && hydraAttach.dripSpeed > 0 ? hydraAttach.dripSpeed : 1;
         const MAX_GAP_MS = 750;
         void (async () => {
           let prev: number | null = null;
@@ -933,7 +943,13 @@ export function registerAcpWsEndpoint(
       if (session) {
         void deps.manager.reapIfOrphanedNonInteractive(params.sessionId);
       }
-      return { sessionId: params.sessionId, status: "detached" as const };
+      // session/detach is RFD-track; the detach outcome is a hydra
+      // extension, so it rides under _meta["hydra-acp"].detachStatus
+      // rather than a top-level `status` field.
+      return {
+        sessionId: params.sessionId,
+        _meta: { [HYDRA_META_KEY]: { detachStatus: "detached" as const } },
+      };
     });
 
     connection.onRequest("session/list", async (raw) => {
@@ -959,6 +975,23 @@ export function registerAcpWsEndpoint(
         sessions: visible.map(sessionListEntryToWire),
       };
       return result;
+    });
+
+    // Enumerate the agents a client can select when creating a session
+    // (via `_meta["hydra-acp"].agentId` on session/new). Mirror of the
+    // REST `GET /v1/agents` endpoint — both call core listAgents() — so a
+    // protocol-only ACP client can discover and pick agents without the
+    // REST surface. Hydra-specific (no ACP spec equivalent yet); namespaced
+    // under hydra-acp per the Extensibility convention.
+    connection.onRequest("hydra-acp/agents/list", async () => {
+      if (!deps.registry) {
+        const err = new Error("agent registry unavailable") as Error & {
+          code: number;
+        };
+        err.code = JsonRpcErrorCodes.InternalError;
+        throw err;
+      }
+      return listAgents(deps.registry);
     });
 
     connection.onRequest("session/prompt", async (raw) => {
@@ -1055,9 +1088,9 @@ export function registerAcpWsEndpoint(
       return null;
     });
 
-    connection.onRequest("hydra-acp/cancel_prompt", async (raw) => {
+    connection.onRequest("hydra-acp/prompt/cancel", async (raw) => {
       const params = CancelPromptParams.parse(raw);
-      denyIfReadonly(params.sessionId, "hydra-acp/cancel_prompt");
+      denyIfReadonly(params.sessionId, "hydra-acp/prompt/cancel");
       const session = deps.manager.get(params.sessionId);
       if (!session) {
         const err = new Error(`session ${params.sessionId} not found`) as Error & {
@@ -1069,9 +1102,9 @@ export function registerAcpWsEndpoint(
       return session.cancelQueuedPrompt(params.messageId);
     });
 
-    connection.onRequest("hydra-acp/update_prompt", async (raw) => {
+    connection.onRequest("hydra-acp/prompt/update", async (raw) => {
       const params = UpdatePromptParams.parse(raw);
-      denyIfReadonly(params.sessionId, "hydra-acp/update_prompt");
+      denyIfReadonly(params.sessionId, "hydra-acp/prompt/update");
       const session = deps.manager.get(params.sessionId);
       if (!session) {
         const err = new Error(`session ${params.sessionId} not found`) as Error & {
@@ -1083,9 +1116,9 @@ export function registerAcpWsEndpoint(
       return session.updateQueuedPrompt(params.messageId, params.prompt);
     });
 
-    connection.onRequest("hydra-acp/amend_prompt", async (raw) => {
+    connection.onRequest("hydra-acp/prompt/amend", async (raw) => {
       const params = AmendPromptParams.parse(raw);
-      denyIfReadonly(params.sessionId, "hydra-acp/amend_prompt");
+      denyIfReadonly(params.sessionId, "hydra-acp/prompt/amend");
       const att = state.attached.get(params.sessionId);
       if (!att) {
         const err = new Error("not attached to session") as Error & {
@@ -1105,9 +1138,9 @@ export function registerAcpWsEndpoint(
       return session.amendPrompt(att.clientId, params);
     });
 
-    connection.onRequest("hydra-acp/stream_open", async (raw) => {
+    connection.onRequest("hydra-acp/stream/open", async (raw) => {
       const params = StreamOpenParams.parse(raw);
-      denyIfReadonly(params.sessionId, "hydra-acp/stream_open");
+      denyIfReadonly(params.sessionId, "hydra-acp/stream/open");
       const session = deps.manager.get(params.sessionId);
       if (!session) {
         const err = new Error(`session ${params.sessionId} not found`) as Error & {
@@ -1133,9 +1166,9 @@ export function registerAcpWsEndpoint(
       return session.openStream(openOpts);
     });
 
-    connection.onRequest("hydra-acp/stream_write", async (raw) => {
+    connection.onRequest("hydra-acp/stream/write", async (raw) => {
       const params = StreamWriteParams.parse(raw);
-      denyIfReadonly(params.sessionId, "hydra-acp/stream_write");
+      denyIfReadonly(params.sessionId, "hydra-acp/stream/write");
       const session = deps.manager.get(params.sessionId);
       if (!session) {
         const err = new Error(`session ${params.sessionId} not found`) as Error & {
@@ -1147,7 +1180,7 @@ export function registerAcpWsEndpoint(
       return session.streamWrite(params.chunk, params.eof);
     });
 
-    connection.onRequest("hydra-acp/stream_read", async (raw) => {
+    connection.onRequest("hydra-acp/stream/read", async (raw) => {
       const params = StreamReadParams.parse(raw);
       // Read is safe under read-only attach — no state mutation.
       const session = deps.manager.get(params.sessionId);
@@ -1202,12 +1235,14 @@ export function registerAcpWsEndpoint(
       const modelsPayload = buildModelsPayload(session);
       return {
         sessionId: session.sessionId,
-        // Same as session/new: include clientId so the deferred-echo
-        // path in queue-aware clients can recognize own broadcasts.
-        clientId: client.clientId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
-        _meta: buildResponseMeta(deps.manager, session),
+        // session/load is a core ACP spec method: clientId rides under
+        // _meta["hydra-acp"] (not top-level), same as session/new. Lets
+        // deferred-echo clients recognize their own broadcasts.
+        _meta: buildResponseMeta(deps.manager, session, {
+          clientId: client.clientId,
+        }),
       };
     });
 
@@ -1343,7 +1378,7 @@ export function registerAcpWsEndpoint(
 }
 
 // Build a callback that forwards agent install progress events as
-// hydra-acp/agent_install_progress notifications on the originating WS
+// hydra-acp/agents/install_progress notifications on the originating WS
 // connection. Per-request — each session/new or session/attach handler
 // gets its own forwarder, isolated from any other concurrent install
 // running on the same daemon. Notifies are fire-and-forget; failures
@@ -1609,16 +1644,22 @@ function buildViewerResponseMeta(
   return { [HYDRA_META_KEY]: buildHydraSessionMeta(entry, extras) };
 }
 
-// Reconciled _meta builder for the live session/new and session/attach
-// responses. Derives the same SessionListEntry session/list emits (via
-// manager.liveListEntry) so the triage fields — status, busy,
+// Reconciled _meta builder for the live session/new, session/attach, and
+// session/load responses. Derives the same SessionListEntry session/list
+// emits (via manager.liveListEntry) so the triage fields — status, busy,
 // awaitingInput, attachedClients, provenance — match across surfaces,
 // then layers the live-only extras (palette, mode, turn clock, queue,
 // agent capabilities) that only a resident session has. Agent-namespaced
 // `_meta` passes through via mergeMeta.
+//
+// `clientId` is passed by the session/new and session/load callers (those
+// are core ACP spec methods, so the per-attachment id can't ride at the
+// top level); session/attach is RFD-track and keeps clientId top-level, so
+// it doesn't pass one here.
 function buildResponseMeta(
   manager: SessionManager,
   session: Session,
+  opts: { clientId?: string } = {},
 ): Record<string, unknown> {
   const entry = manager.liveListEntry(session);
   // Snapshot state for the attaching client. Carries what would
@@ -1626,6 +1667,7 @@ function buildResponseMeta(
   // (current_model_update / current_mode_update / available_commands_update)
   // so a fresh attach has the right view from the get-go.
   const extras: LiveSessionMetaExtras = {
+    clientId: opts.clientId,
     currentMode: session.currentMode,
     agentArgs: session.agentArgs,
     availableCommands: session.mergedAvailableCommands(),
@@ -1677,18 +1719,26 @@ function buildInitializeResult(): InitializeResult {
         description: "Bearer token presented at WS upgrade",
       },
     ],
-    // Advertise hydra-only capabilities via _meta["hydra-acp"]. Generic
-    // ACP clients ignore the field; capability-aware clients learn here
-    // which hydra-acp extensions the daemon supports so they can gate
-    // UI surface accordingly. promptPipelining is false until the
-    // streaming-input probe lands (Option A in the steering brief);
-    // the others are unconditional method-availability flags.
+    // Advertise hydra-only capabilities via _meta["hydra-acp"], grouped by
+    // resource to mirror the hydra-acp/<resource>/<action> method
+    // namespaces. Generic ACP clients ignore the field; capability-aware
+    // clients probe here to gate UI before calling a method. `pipelining`
+    // is false until the streaming-input probe lands; the rest are
+    // unconditional method-availability flags. (Named `prompt`/`agents`,
+    // not `promptCapabilities`/`agentCapabilities` — those are ACP spec
+    // names with different meanings.)
     _meta: mergeMeta(undefined, {
-      promptQueueing: true,
-      promptCancelling: true,
-      promptUpdating: true,
-      promptAmending: true,
-      promptPipelining: false,
+      prompt: {
+        queueing: true,
+        cancelling: true,
+        updating: true,
+        amending: true,
+        pipelining: false,
+      },
+      agents: {
+        list: true,
+        installProgress: true,
+      },
     }),
   };
 }

@@ -14,7 +14,7 @@ export type TransformerContext = BaseChildContext;
 export type TransformerStatus = BaseChildStatus;
 export type TransformerInfo = BaseChildInfo;
 
-// A transformer that has completed transformer/initialize and is ready to
+// A transformer that has completed hydra-acp/transformer/initialize and is ready to
 // participate in session chains. Held by TransformerManager and handed to
 // Session when the session is created.
 export interface TransformerRef {
@@ -35,7 +35,7 @@ const TRANSFORMER_ADAPTER: SupervisorAdapter = {
 };
 
 export class TransformerManager extends ChildSupervisor<TransformerConfig> {
-  // Transformers that have completed transformer/initialize and are ready to
+  // Transformers that have completed hydra-acp/transformer/initialize and are ready to
   // participate in chains. Keyed by transformer name.
   private connected = new Map<string, TransformerRef>();
 
@@ -47,7 +47,7 @@ export class TransformerManager extends ChildSupervisor<TransformerConfig> {
     super(transformers, TRANSFORMER_ADAPTER, context, options);
   }
 
-  // Called by the WS handler after transformer/initialize completes. The
+  // Called by the WS handler after hydra-acp/transformer/initialize completes. The
   // transformer is now eligible to participate in session chains.
   registerConnection(
     name: string,

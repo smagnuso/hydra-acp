@@ -1,7 +1,7 @@
 // Registry of MCP servers contributed by extensions and transformers.
 //
 // Mirror of ExtensionCommandRegistry (slash commands) for MCP tools. An
-// extension calls hydra-acp/register_mcp_tools over its JsonRpcConnection
+// extension calls hydra-acp/mcp_tools/register over its JsonRpcConnection
 // and the daemon binds those tools at /mcp/<extension-name>. The route
 // param is always the extension's processIdentity.name — extensions don't
 // get to choose; cardinality is one MCP server per extension, same
@@ -15,7 +15,7 @@
 // Used by:
 //   - extension-route.ts: looks up a registration by name on each request
 //   - acp-ws.ts: session/new enumerates list() to mint mcpServers entries
-//   - acp-ws.ts: hydra-acp/register_mcp_tools handler calls register/clear
+//   - acp-ws.ts: hydra-acp/mcp_tools/register handler calls register/clear
 //   - acp-ws.ts: connection.onClose calls clear(extName)
 
 import type { JsonRpcConnection } from "../acp/connection.js";

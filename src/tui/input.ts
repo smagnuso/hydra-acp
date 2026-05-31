@@ -80,7 +80,7 @@ export type InputEffect =
       attachments: Attachment[];
     }
   // Amend the in-flight turn — interrupt and replace via
-  // hydra-acp/amend_prompt. App falls through to "send" if no turn is
+  // hydra-acp/prompt/amend. App falls through to "send" if no turn is
   // running or the daemon doesn't advertise the capability.
   | {
       type: "amend";

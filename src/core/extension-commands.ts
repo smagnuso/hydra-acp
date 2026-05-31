@@ -1,7 +1,7 @@
 import type { JsonRpcConnection } from "../acp/connection.js";
 
 // Schema for one verb advertised by an extension or transformer through
-// hydra-acp/register_commands. The verb is the second token in
+// hydra-acp/commands/register. The verb is the second token in
 // "/hydra <name> <verb>"; description and argsHint surface in completions.
 export interface ExtensionCommandSpec {
   verb: string;
@@ -15,7 +15,7 @@ interface Entry {
 }
 
 // Bag of process-name → registered command list. Populated when an
-// extension/transformer calls hydra-acp/register_commands; the entry
+// extension/transformer calls hydra-acp/commands/register; the entry
 // drops on disconnect (the WS handler clears it via clear(name)).
 //
 // Used by:

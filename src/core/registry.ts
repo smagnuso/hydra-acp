@@ -239,6 +239,45 @@ function npxPackageBasename(agent: RegistryAgent): string | undefined {
 // because uvx resolves on first run.
 export type AgentInstallState = "yes" | "no" | "lazy";
 
+// One entry in the agent-list view (REST `GET /v1/agents` and the ACP
+// `hydra-acp/agents/list` method share this shape).
+export interface AgentListEntry {
+  id: string;
+  name: string;
+  version: string | undefined;
+  description: string | undefined;
+  distributions: string[];
+  installed: AgentInstallState;
+}
+
+export interface AgentListResult {
+  version: string;
+  fetchedAt: number | undefined;
+  agents: AgentListEntry[];
+}
+
+// Shared builder for the agent catalog a client can choose from when
+// creating a session. Backs both the REST endpoint and the ACP method
+// so the two surfaces never drift.
+export async function listAgents(registry: Registry): Promise<AgentListResult> {
+  const doc = await registry.load();
+  const agents = await Promise.all(
+    doc.agents.map(async (a) => ({
+      id: a.id,
+      name: a.name,
+      version: a.version,
+      description: a.description,
+      distributions: Object.keys(a.distribution),
+      installed: await agentInstallState(a),
+    })),
+  );
+  return {
+    version: doc.version,
+    fetchedAt: registry.lastFetchedAt(),
+    agents,
+  };
+}
+
 export async function agentInstallState(
   agent: RegistryAgent,
 ): Promise<AgentInstallState> {

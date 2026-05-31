@@ -88,10 +88,13 @@ export const HistoryPolicy = z.enum([
 ]);
 export type HistoryPolicy = z.infer<typeof HistoryPolicy>;
 
+// Per the ACP spec, NewSessionRequest carries only `cwd` and `mcpServers`.
+// Hydra's agent selection rides under `_meta["hydra-acp"].agentId` (parsed
+// via extractHydraMeta) rather than a non-spec top-level field.
 export const SessionNewParams = z.object({
   cwd: z.string(),
-  agentId: z.string().optional(),
   mcpServers: z.array(z.unknown()).optional(),
+  _meta: z.record(z.unknown()).optional(),
 });
 export type SessionNewParams = z.infer<typeof SessionNewParams>;
 
@@ -125,23 +128,10 @@ export const SessionAttachParams = z.object({
       version: z.string().optional(),
     })
     .optional(),
-  // When true, the connection observes the session but cannot mutate
-  // it: state-changing methods (session/prompt, session/cancel,
-  // session/set_model, etc.) are rejected with -32011, and attaching
-  // to a cold session does not resurrect or spawn an agent — just
-  // streams history from disk. Used by the TUI's view-only mode.
-  readonly: z.boolean().optional(),
-  // Debug-only replay pacing. When "drip", the daemon skips chunk
-  // coalescing and re-emits each recorded session/update individually,
-  // spacing them by their original recordedAt deltas (scaled by
-  // dripSpeed, with a per-gap cap) so a session's streaming render can
-  // be reproduced at its real granularity for flicker investigation.
-  // Omitted/"instant" preserves the normal coalesced, as-fast-as-possible
-  // replay.
-  replayMode: z.enum(["instant", "drip"]).optional(),
-  // Multiplier applied to original inter-entry gaps in drip mode. >1
-  // compresses time (faster), <1 stretches it. Defaults to 1.
-  dripSpeed: z.number().positive().optional(),
+  // Hydra-specific attach options (readonly, replayMode, dripSpeed) are
+  // NOT top-level — they ride under `_meta["hydra-acp"]` (read via
+  // extractHydraMeta) so session/attach carries only RFD #533's own
+  // fields at the top level.
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionAttachParams = z.infer<typeof SessionAttachParams>;
@@ -189,10 +179,54 @@ export interface PromptQueueEntry {
   enqueuedAt: number;
 }
 
+// Daemon prompt-surface capabilities, advertised under
+// `_meta["hydra-acp"].prompt` on the initialize response. Each flag gates
+// a hydra-acp/prompt/* method (or the streaming-input absorption path).
+export interface HydraPromptCapabilities {
+  // Accepts concurrent session/prompt requests, queueing the second
+  // behind the first — clients can stop running their own local queues.
+  queueing?: boolean;
+  // hydra-acp/prompt/cancel — cancel a queued (not-yet-running) prompt.
+  cancelling?: boolean;
+  // hydra-acp/prompt/update — edit the content of a queued prompt.
+  updating?: boolean;
+  // hydra-acp/prompt/amend — interrupt the in-flight head turn with a
+  // replacement (cancel-and-resubmit, partial response preserved).
+  amending?: boolean;
+  // Forwards concurrent session/prompt requests directly to the agent
+  // (only when the agent absorbs streaming input). Implies queueing.
+  pipelining?: boolean;
+}
+
+// Daemon agent-catalog capabilities, advertised under
+// `_meta["hydra-acp"].agents` on the initialize response.
+export interface HydraAgentCapabilities {
+  // hydra-acp/agents/list is available (entries carry install state).
+  list?: boolean;
+  // hydra-acp/agents/install_progress notifications are emitted while an
+  // agent is fetched during session/new or session/attach.
+  installProgress?: boolean;
+}
+
 export interface HydraMeta {
   upstreamSessionId?: string;
   agentId?: string;
   cwd?: string;
+  // The per-attachment client id the daemon bound to this connection.
+  // Surfaced on session/new and session/load responses under _meta (NOT
+  // top-level — those are core ACP spec methods). On the RFD-track
+  // session/attach response it stays top-level per that method's surface.
+  clientId?: string;
+  // Hydra-specific session/attach REQUEST options. Ride under _meta so
+  // session/attach keeps only RFD #533's own fields at the top level.
+  // `readonly`: observe-only attach (mutating methods rejected with
+  // -32011; cold sessions stream from disk instead of resurrecting).
+  // `replayMode`/`dripSpeed`: debug-only replay pacing.
+  readonly?: boolean;
+  replayMode?: "instant" | "drip";
+  dripSpeed?: number;
+  // Hydra-specific session/detach RESPONSE field (the detach outcome).
+  detachStatus?: "detached";
   // Session label (Session.title). Read off session/new params (the
   // `--name`/HYDRA_ACP_NAME label) and off the session-describing
   // responses. Spec-aligned with the top-level `title` on session/list.
@@ -224,29 +258,14 @@ export interface HydraMeta {
   // the busy banner already showing the right elapsed time rather
   // than waiting for the next live update.
   turnStartedAt?: number;
-  // Daemon advertises whether it accepts concurrent session/prompt
-  // requests for a given session (queueing the second behind the
-  // first). Surfaced on the initialize response so capability-aware
-  // clients can stop running their own local queues.
-  promptQueueing?: boolean;
-  // Daemon supports hydra-acp/cancel_prompt for cancelling queued
-  // (not-yet-running) prompts. Backfilled for consistency with the
-  // newer capability flags — clients that already call the method
-  // unconditionally aren't affected; future clients can gate UI
-  // surface on the flag instead of relying on method-not-found.
-  promptCancelling?: boolean;
-  // Daemon supports hydra-acp/update_prompt for editing the content
-  // of a queued (not-yet-running) prompt. Backfilled, same as
-  // promptCancelling.
-  promptUpdating?: boolean;
-  // Daemon supports hydra-acp/amend_prompt — interrupt the in-flight
-  // head turn with a replacement (cancel-and-resubmit, with the
-  // partial agent response preserved in conversation history).
-  promptAmending?: boolean;
-  // Daemon forwards concurrent session/prompt requests directly to
-  // the agent (true only when the agent supports streaming-input
-  // style absorption). Implies promptQueueing.
-  promptPipelining?: boolean;
+  // Daemon capability groups advertised on the initialize response so
+  // capability-aware clients can probe support before calling a method
+  // (rather than catching MethodNotFound). Grouped by resource to mirror
+  // the hydra-acp/<resource>/<action> method namespaces. Named `prompt`
+  // and `agents` — NOT `promptCapabilities`/`agentCapabilities`, which
+  // are ACP spec names with different meanings.
+  prompt?: HydraPromptCapabilities;
+  agents?: HydraAgentCapabilities;
   // Snapshot of the daemon-side prompt queue at attach time. Lets a
   // late-joining client paint queue chips for entries that landed
   // before it attached without waiting for new prompt_queue_added
@@ -308,6 +327,21 @@ export function extractHydraMeta(
   if (typeof obj.cwd === "string") {
     out.cwd = obj.cwd;
   }
+  if (typeof obj.clientId === "string") {
+    out.clientId = obj.clientId;
+  }
+  if (typeof obj.readonly === "boolean") {
+    out.readonly = obj.readonly;
+  }
+  if (obj.replayMode === "instant" || obj.replayMode === "drip") {
+    out.replayMode = obj.replayMode;
+  }
+  if (typeof obj.dripSpeed === "number" && obj.dripSpeed > 0) {
+    out.dripSpeed = obj.dripSpeed;
+  }
+  if (obj.detachStatus === "detached") {
+    out.detachStatus = obj.detachStatus;
+  }
   if (typeof obj.title === "string") {
     out.title = obj.title;
   }
@@ -361,14 +395,22 @@ export function extractHydraMeta(
       out.availableCommands = cmds;
     }
   }
-  if (typeof obj.promptQueueing === "boolean") {
-    out.promptQueueing = obj.promptQueueing;
+  if (obj.prompt && typeof obj.prompt === "object" && !Array.isArray(obj.prompt)) {
+    const p = obj.prompt as Record<string, unknown>;
+    const caps: HydraPromptCapabilities = {};
+    if (typeof p.queueing === "boolean") caps.queueing = p.queueing;
+    if (typeof p.cancelling === "boolean") caps.cancelling = p.cancelling;
+    if (typeof p.updating === "boolean") caps.updating = p.updating;
+    if (typeof p.amending === "boolean") caps.amending = p.amending;
+    if (typeof p.pipelining === "boolean") caps.pipelining = p.pipelining;
+    out.prompt = caps;
   }
-  if (typeof obj.promptCancelling === "boolean") {
-    out.promptCancelling = obj.promptCancelling;
-  }
-  if (typeof obj.promptUpdating === "boolean") {
-    out.promptUpdating = obj.promptUpdating;
+  if (obj.agents && typeof obj.agents === "object" && !Array.isArray(obj.agents)) {
+    const a = obj.agents as Record<string, unknown>;
+    const caps: HydraAgentCapabilities = {};
+    if (typeof a.list === "boolean") caps.list = a.list;
+    if (typeof a.installProgress === "boolean") caps.installProgress = a.installProgress;
+    out.agents = caps;
   }
   if (typeof obj.mcpStdin === "boolean") {
     out.mcpStdin = obj.mcpStdin;
@@ -378,12 +420,6 @@ export function extractHydraMeta(
   }
   if (typeof obj.ancillary === "boolean") {
     out.ancillary = obj.ancillary;
-  }
-  if (typeof obj.promptAmending === "boolean") {
-    out.promptAmending = obj.promptAmending;
-  }
-  if (typeof obj.promptPipelining === "boolean") {
-    out.promptPipelining = obj.promptPipelining;
   }
   if (Array.isArray(obj.queue)) {
     const entries: PromptQueueEntry[] = [];
@@ -567,7 +603,7 @@ export const SessionListEntry = z.object({
   importedFromUpstreamSessionId: z.string().optional(),
   // Set when this session was spawned as a child by a transformer.
   parentSessionId: z.string().optional(),
-  // Local-fork breadcrumbs set by hydra-acp/fork_session. Distinct from
+  // Local-fork breadcrumbs set by hydra-acp/session/fork. Distinct from
   // the imported* family above: a fork is a local branch off another
   // local session, an import is a cross-machine takeover.
   forkedFromSessionId: z.string().optional(),
@@ -627,6 +663,9 @@ export type SessionListResult = z.infer<typeof SessionListResult>;
 // separate from SessionListEntry lets one builder emit a consistent
 // superset across every response that carries session meta.
 export interface LiveSessionMetaExtras {
+  // Per-attachment client id. Set on session/new and session/load (where
+  // it can't ride top-level — those are core spec methods).
+  clientId?: string;
   currentMode?: string;
   agentArgs?: string[];
   availableCommands?: unknown[];
@@ -697,6 +736,9 @@ export function buildHydraSessionMeta(
     meta.interactive = entry.interactive;
   }
   if (extras) {
+    if (extras.clientId !== undefined) {
+      meta.clientId = extras.clientId;
+    }
     if (extras.currentMode !== undefined) {
       meta.currentMode = extras.currentMode;
     }
@@ -790,7 +832,7 @@ export const PromptQueueUpdatedParams = z.object({
 export type PromptQueueUpdatedParams = z.infer<typeof PromptQueueUpdatedParams>;
 
 // `started` = head transitioned to in-flight (the active turn begins).
-// `cancelled` = explicit hydra-acp/cancel_prompt. `abandoned` = session
+// `cancelled` = explicit hydra-acp/prompt/cancel. `abandoned` = session
 // tear-down with queued entries that never ran.
 export const PromptQueueRemovedParams = z.object({
   sessionId: z.string(),
@@ -826,7 +868,7 @@ export const UpdatePromptResult = z.object({
 });
 export type UpdatePromptResult = z.infer<typeof UpdatePromptResult>;
 
-// hydra-acp/amend_prompt — interrupt the in-flight head turn with a
+// hydra-acp/prompt/amend — interrupt the in-flight head turn with a
 // replacement prompt. Pin the prompt being amended via targetMessageId
 // so the daemon can resolve the race deterministically (the target
 // might finish naturally before the amend arrives). For a queued
@@ -855,7 +897,7 @@ export const AmendPromptResult = z.object({
 });
 export type AmendPromptResult = z.infer<typeof AmendPromptResult>;
 
-// hydra-acp/prompt_amended notification — dedicated linkage event
+// hydra-acp/prompt/amended notification — dedicated linkage event
 // fired after a successful amend. Carries both messageIds and the
 // amendment content so subscribers that want to render the M1→M2
 // relationship don't have to correlate turn_complete + prompt_received
@@ -949,7 +991,7 @@ export const StreamReadResult = z.object({
 });
 export type StreamReadResult = z.infer<typeof StreamReadResult>;
 
-// hydra-acp/agent_install_progress — daemon → client. Fires while the
+// hydra-acp/agents/install_progress — daemon → client. Fires while the
 // agent's binary or npm package is being fetched during session/new or
 // session/attach. The notification is *not* keyed by sessionId (the
 // session doesn't exist yet on session/new); the originating WS
@@ -981,7 +1023,7 @@ export const AgentInstallProgressParams = z.object({
 });
 export type AgentInstallProgressParams = z.infer<typeof AgentInstallProgressParams>;
 
-export const AGENT_INSTALL_PROGRESS_METHOD = "hydra-acp/agent_install_progress";
+export const AGENT_INSTALL_PROGRESS_METHOD = "hydra-acp/agents/install_progress";
 
 export interface SessionCapabilities {
   attach?: Record<string, never>;

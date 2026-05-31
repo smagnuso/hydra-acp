@@ -91,7 +91,7 @@ describe("wireShim forwarding", () => {
     });
   });
 
-  it("rewrites session/new with agentId in launcher mode", async () => {
+  it("injects agentId under _meta[\"hydra-acp\"] in launcher mode (never top-level)", async () => {
     const upstream = makeControlledStream();
     const downstream = makeControlledStream();
     const tracker = new SessionTracker();
@@ -113,8 +113,13 @@ describe("wireShim forwarding", () => {
     await new Promise((r) => setImmediate(r));
 
     expect(upstream.sent).toHaveLength(1);
-    const sent = upstream.sent[0] as { params: { cwd: string; agentId: string } };
-    expect(sent.params).toMatchObject({ cwd: "/work", agentId: "claude-acp" });
+    const sent = upstream.sent[0] as {
+      params: { cwd: string; agentId?: string; _meta: { "hydra-acp": { agentId: string } } };
+    };
+    // Spec-compliant: cwd stays top-level, agentId rides under _meta.
+    expect(sent.params.cwd).toBe("/work");
+    expect(sent.params.agentId).toBeUndefined();
+    expect(sent.params._meta["hydra-acp"].agentId).toBe("claude-acp");
   });
 
   it("injects name and agentArgs under _meta[\"hydra-acp\"] on first session/new", async () => {
@@ -144,12 +149,13 @@ describe("wireShim forwarding", () => {
 
     const sent = upstream.sent[0] as {
       params: {
-        agentId: string;
-        _meta: { "hydra-acp": { title: string; agentArgs: string[] } };
+        agentId?: string;
+        _meta: { "hydra-acp": { agentId: string; title: string; agentArgs: string[] } };
       };
     };
-    expect(sent.params.agentId).toBe("codex-acp");
+    expect(sent.params.agentId).toBeUndefined();
     expect(sent.params._meta["hydra-acp"]).toEqual({
+      agentId: "codex-acp",
       agentArgs: ["-c", "sandbox_mode=danger-full-access"],
       title: "feature-X",
     });
@@ -178,11 +184,12 @@ describe("wireShim forwarding", () => {
 
     const sent = upstream.sent[0] as {
       params: {
-        agentId: string;
-        _meta: { "hydra-acp": { model: string } };
+        agentId?: string;
+        _meta: { "hydra-acp": { agentId: string; model: string } };
       };
     };
-    expect(sent.params.agentId).toBe("opencode");
+    expect(sent.params.agentId).toBeUndefined();
+    expect(sent.params._meta["hydra-acp"].agentId).toBe("opencode");
     expect(sent.params._meta["hydra-acp"].model).toBe("openai/gpt-5");
   });
 

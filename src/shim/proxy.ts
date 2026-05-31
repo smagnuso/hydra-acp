@@ -164,7 +164,7 @@ export function wireShim({
       }
       let outgoing = msg;
       if (opts.agentId) {
-        outgoing = rewriteSessionNewWithAgent(outgoing, opts.agentId);
+        outgoing = injectHydraMeta(outgoing, { agentId: opts.agentId });
       }
       if (opts.agentArgs && opts.agentArgs.length > 0) {
         outgoing = injectHydraMeta(outgoing, { agentArgs: opts.agentArgs });
@@ -429,17 +429,6 @@ function buildAttachFromNew(
       sessionId,
       historyPolicy: "full",
     },
-  };
-}
-
-function rewriteSessionNewWithAgent(
-  msg: JsonRpcRequest,
-  agentId: string,
-): JsonRpcRequest {
-  const params = (msg.params ?? {}) as Record<string, unknown>;
-  return {
-    ...msg,
-    params: { ...params, agentId },
   };
 }
 

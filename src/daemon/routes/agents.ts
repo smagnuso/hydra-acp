@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import {
-  agentInstallState,
+  listAgents,
   planSpawn,
   type Registry,
 } from "../../core/registry.js";
@@ -14,22 +14,7 @@ export function registerAgentRoutes(
   opts: { npmRegistry?: string } = {},
 ): void {
   app.get("/v1/agents", async () => {
-    const doc = await registry.load();
-    const agents = await Promise.all(
-      doc.agents.map(async (a) => ({
-        id: a.id,
-        name: a.name,
-        version: a.version,
-        description: a.description,
-        distributions: Object.keys(a.distribution),
-        installed: await agentInstallState(a),
-      })),
-    );
-    return {
-      version: doc.version,
-      fetchedAt: registry.lastFetchedAt(),
-      agents,
-    };
+    return listAgents(registry);
   });
 
   app.get("/v1/registry", async () => {

@@ -7,8 +7,8 @@
  * — before prompts reach the agent and before responses reach clients.
  *
  * The transformer declares which message kinds it wants to intercept via
- * transformer/initialize. For each message the daemon delivers it via
- * transformer/message and waits for one of:
+ * hydra-acp/transformer/initialize. For each message the daemon delivers it via
+ * hydra-acp/transformer/message and waits for one of:
  *   { action: "continue" }  — pass through unchanged (Phase 2 only action)
  *   { action: "stop" }      — block the message (Phase 3+)
  *   { action: "processing" }— transformer will respond itself (Phase 3+)
@@ -32,8 +32,8 @@
  *   "defaultTransformers": ["debug"]
  *
  * Key differences from a client extension:
- *   - Uses transformer/initialize instead of (or after) initialize
- *   - Must respond to every transformer/message request it receives
+ *   - Uses hydra-acp/transformer/initialize instead of (or after) initialize
+ *   - Must respond to every hydra-acp/transformer/message request it receives
  *   - Sees traffic before state mutation — the daemon's world view only
  *     reflects what comes out of the chain
  *   - Token in each message is the daemon's chain correlation id
@@ -80,9 +80,9 @@ ws.on("open", async () => {
       clientInfo: { name: "debug-transformer", version: "0.0.1" },
     });
 
-    // Step 2: transformer/initialize declares which message kinds we want
+    // Step 2: hydra-acp/transformer/initialize declares which message kinds we want
     // to see. Only callable with a transformer process token.
-    await request(ws, "transformer/initialize", {
+    await request(ws, "hydra-acp/transformer/initialize", {
       intercepts: [
         "request:session/prompt",    // outbound: client → agent
         "response:session/update",   // inbound:  agent  → clients
@@ -101,7 +101,7 @@ ws.on("open", async () => {
 ws.on("message", (data) => {
   const msg = JSON.parse(data.toString());
 
-  // Responses to our own requests (initialize, transformer/initialize).
+  // Responses to our own requests (initialize, hydra-acp/transformer/initialize).
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
     const p = pending.get(msg.id);
     if (p) {
@@ -111,9 +111,9 @@ ws.on("message", (data) => {
     return;
   }
 
-  // transformer/message — the daemon is asking us to process an in-flight
+  // hydra-acp/transformer/message — the daemon is asking us to process an in-flight
   // message. We MUST respond to every one of these.
-  if (msg.method === "transformer/message" && msg.id !== undefined && msg.params) {
+  if (msg.method === "hydra-acp/transformer/message" && msg.id !== undefined && msg.params) {
     handleTransformerMessage(msg);
     return;
   }

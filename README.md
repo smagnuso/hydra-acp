@@ -405,7 +405,7 @@ A bare invocation (`hydra-acp` with no subcommand) auto-dispatches based on whet
 hydra-acp launch claude-code
 ```
 
-When the editor sends `session/new`, the shim rewrites the params to `{ ..., agentId: "claude-code" }` before forwarding to the daemon. The daemon resolves `claude-code` against the cached ACP Registry, downloads/installs the agent on first use under `~/.hydra-acp/agents/`, and spawns the subprocess. The editor sees a normal ACP agent. From then on, `hydra-acp session` lists the live session and any other client can `session/attach` to it.
+When the editor sends `session/new`, the shim injects the agent id under `_meta["hydra-acp"].agentId` (e.g. `"claude-code"`) before forwarding to the daemon — the spec `session/new` params stay clean. The daemon resolves `claude-code` against the cached ACP Registry, downloads/installs the agent on first use under `~/.hydra-acp/agents/`, and spawns the subprocess. The editor sees a normal ACP agent. From then on, `hydra-acp session` lists the live session and any other client can `session/attach` to it.
 
 `<agent>` is the registry ID — e.g. `claude-code`, `gemini-cli`, `codex`. Run `hydra-acp agent` to browse what's available, or fetch the registry CDN URL directly.
 
@@ -431,7 +431,7 @@ Sometimes you want to scroll through a session's transcript — usually one impo
 hydra-acp tui --resume <id> --readonly
 ```
 
-The daemon enforces the contract: a `readonly: true` attach to a *cold* session takes a viewer path that streams history straight from disk — no `manager.resurrect`, no agent process. Any mutating JSON-RPC method (`session/prompt`, `session/cancel`, `session/set_model`, and the `hydra-acp/*` prompt-mutation methods) sent from a read-only connection is refused with `-32011 PermissionDenied`. History replay and `session/update` deliveries are unchanged, so the existing scrollback search (`^R` when scrolled back) works over the full transcript.
+The daemon enforces the contract: a read-only attach to a *cold* session takes a viewer path that streams history straight from disk — no `manager.resurrect`, no agent process. Any mutating method sent from a read-only connection is refused. History replay and live updates are unchanged, so the existing scrollback search (`^R` when scrolled back) works over the full transcript. (Wire details — including how the read-only flag is carried — live in PROTOCOL.md.)
 
 The TUI suppresses the composer entirely — those rows go to scrollback so you see more of the conversation. The window title is suffixed `[VIEW ONLY]` so the mode is unambiguous. Prompt-shaped keys (Enter, Shift+Enter, Shift+Tab) are inert; `^P`, `^G`, `^L`, `^R`, `PgUp/PgDn`, `^C`, `^D` work as usual.
 
@@ -560,11 +560,11 @@ Each transformer receives:
 - the same env vars as extensions (`HYDRA_ACP_TOKEN`, `HYDRA_ACP_WS_URL`, etc.)
 - a `HYDRA_ACP_TRANSFORMER_NAME` env var with its config key
 
-A transformer process connects using its own token (same mechanism as extensions) and then calls `transformer/initialize` declaring the message kinds it wants to intercept. For each intercepted message the daemon calls `transformer/message` and waits for `{ action: "continue" }`. Future phases will add `stop` (block the message) and `processing` (transformer handles the request itself).
+A transformer process connects using its own token (same mechanism as extensions) and then registers the message kinds it wants to intercept. For each intercepted message the daemon hands it to the transformer and waits for a continue/stop/processing decision. (The exact JSON-RPC methods and payloads live in PROTOCOL.md.)
 
 See `cli/examples/transformer-observe.mjs` for a working reference that logs all traffic and always continues, `cli/examples/transformer-edit.mjs` for one that modifies prompts before they reach the agent, and `cli/examples/transformer-lifecycle.mjs` for one that reacts to session lifecycle events (`session.opened`, `session.idle`, `session.closed`) and optionally emits a follow-up prompt when a session goes quiet.
 
-**Trust model**: transformers receive the same per-process scoped token as extensions, but have structurally more access — they intercept traffic that no client ever sees. `transformer/initialize` and all transformer-specific methods are only callable with a transformer-kind token; an extension process that tries to call them receives `MethodNotFound`. Treat every entry in `transformers` as a higher-trust boundary than `extensions`.
+**Trust model**: transformers receive the same per-process scoped token as extensions, but have structurally more access — they intercept traffic that no client ever sees. The transformer-specific methods are only callable with a transformer-kind token; an extension process that tries to call them receives `MethodNotFound`. Treat every entry in `transformers` as a higher-trust boundary than `extensions`.
 
 The service token (stored at `~/.hydra-acp/auth-token`, mode 0600) is generated on `hydra-acp init` and required as `Authorization: Bearer <token>` for every REST call and as a WebSocket subprotocol or query parameter for `wss://.../acp`. The token never leaves `~/.hydra-acp/`.
 

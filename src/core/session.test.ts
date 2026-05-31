@@ -2019,7 +2019,7 @@ describe("Session", () => {
       expect(killMock).toHaveBeenCalledTimes(1);
       expect(closeSpy).toHaveBeenCalledWith({ deleteRecord: false });
       const closeMsg = stream.sent.find(
-        (m) => "method" in m && m.method === "hydra-acp/session_closed",
+        (m) => "method" in m && m.method === "hydra-acp/session/closed",
       );
       expect(closeMsg).toMatchObject({ params: { sessionId: "hydra_session_K" } });
       expect(session.attachedCount).toBe(0);
@@ -2182,7 +2182,7 @@ describe("Session", () => {
       }
     });
 
-    it("broadcasts hydra-acp/session_closed to attached clients on idle close", async () => {
+    it("broadcasts hydra-acp/session/closed to attached clients on idle close", async () => {
       // Pins the chain idle-timer → close() → markClosed → broadcast, the
       // exact path the TUI's cold-banner handler keys off when a session
       // is closed behind the user's back.
@@ -2203,7 +2203,7 @@ describe("Session", () => {
         await vi.advanceTimersByTimeAsync(1_001);
 
         const closeMsg = stream.sent.find(
-          (m) => "method" in m && m.method === "hydra-acp/session_closed",
+          (m) => "method" in m && m.method === "hydra-acp/session/closed",
         );
         expect(closeMsg).toMatchObject({
           params: { sessionId: "hydra_session_idle_broadcast" },
@@ -2379,7 +2379,7 @@ describe("Session", () => {
   });
 
   describe("agent exit", () => {
-    it("notifies clients with hydra-acp/session_closed and cleans up", () => {
+    it("notifies clients with hydra-acp/session/closed and cleans up", () => {
       const { session, mock } = makeSession("sess_x", "u");
       const { client, stream } = makeClient();
       session.attach(client, "full");
@@ -2387,7 +2387,7 @@ describe("Session", () => {
       mock.triggerExit(0, null);
 
       const closeMsg = stream.sent.find(
-        (m) => "method" in m && m.method === "hydra-acp/session_closed",
+        (m) => "method" in m && m.method === "hydra-acp/session/closed",
       );
       expect(closeMsg).toMatchObject({
         params: { sessionId: "sess_x" },
@@ -2438,7 +2438,7 @@ describe("Session", () => {
 
       const added = findQueueEvent(
         bobStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       );
       const received = bobStream.sent.find(
         (m) =>
@@ -2492,7 +2492,7 @@ describe("Session", () => {
       // server-assigned messageId to drive chip state.
       const added = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       );
       expect(added).toBeDefined();
       const promptReceived = aliceStream.sent.find(
@@ -2530,7 +2530,7 @@ describe("Session", () => {
       await new Promise((r) => setImmediate(r));
 
       const addedEvents = bobStream.sent.filter(
-        (m) => "method" in m && m.method === "hydra-acp/prompt_queue_added",
+        (m) => "method" in m && m.method === "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification[];
       expect(addedEvents).toHaveLength(2);
       const [first, second] = addedEvents;
@@ -2580,7 +2580,7 @@ describe("Session", () => {
       const startedEvents = bobStream.sent.filter(
         (m) =>
           "method" in m &&
-          m.method === "hydra-acp/prompt_queue_removed" &&
+          m.method === "hydra-acp/prompt_queue/removed" &&
           (m.params as { reason?: string }).reason === "started",
       );
       // Two prompts → two started events. Both prompts also resolved
@@ -2630,7 +2630,7 @@ describe("Session", () => {
       const bobAdded = bobStream.sent
         .filter(
           (m) =>
-            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+            "method" in m && m.method === "hydra-acp/prompt_queue/added",
         )
         .at(-1) as JsonRpcNotification;
       const bobMid = (bobAdded.params as { messageId: string }).messageId;
@@ -2641,7 +2641,7 @@ describe("Session", () => {
       // Broadcast for bob is on bob's own stream too.
       const removed = findQueueEvent(
         bobStream.sent,
-        "hydra-acp/prompt_queue_removed",
+        "hydra-acp/prompt_queue/removed",
         bobMid,
       );
       expect(removed).toBeDefined();
@@ -2684,7 +2684,7 @@ describe("Session", () => {
 
       const added = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const mid = (added.params as { messageId: string }).messageId;
 
@@ -2741,7 +2741,7 @@ describe("Session", () => {
       const bobAdded = bobStream.sent
         .filter(
           (m) =>
-            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+            "method" in m && m.method === "hydra-acp/prompt_queue/added",
         )
         .at(-1) as JsonRpcNotification;
       const bobMid = (bobAdded.params as { messageId: string }).messageId;
@@ -2752,7 +2752,7 @@ describe("Session", () => {
 
       const updated = findQueueEvent(
         bobStream.sent,
-        "hydra-acp/prompt_queue_updated",
+        "hydra-acp/prompt_queue/updated",
         bobMid,
       );
       expect(updated).toBeDefined();
@@ -2794,7 +2794,7 @@ describe("Session", () => {
 
       const added = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const mid = (added.params as { messageId: string }).messageId;
 
@@ -2856,7 +2856,7 @@ describe("Session", () => {
       // Find alice's messageId from her queue_added broadcast.
       const aliceAdded = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
 
@@ -2882,7 +2882,7 @@ describe("Session", () => {
       // amending hint pointing at alice's original messageId.
       const amendAdded = findQueueEvent(
         bobStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
         amendMid,
       );
       expect(amendAdded).toBeDefined();
@@ -2921,7 +2921,7 @@ describe("Session", () => {
       // The dedicated prompt_amended notification fires too.
       const promptAmended = bobStream.sent.find(
         (m) =>
-          "method" in m && m.method === "hydra-acp/prompt_amended",
+          "method" in m && m.method === "hydra-acp/prompt/amended",
       ) as JsonRpcNotification | undefined;
       expect(promptAmended).toBeDefined();
       const amendedParams = promptAmended!.params as {
@@ -2968,7 +2968,7 @@ describe("Session", () => {
 
       const aliceAdded = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
 
@@ -3024,7 +3024,7 @@ describe("Session", () => {
 
       const aliceAdded = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
 
@@ -3065,7 +3065,7 @@ describe("Session", () => {
       // No prompt_amended notification fired.
       const promptAmended = bobStream.sent.find(
         (m) =>
-          "method" in m && m.method === "hydra-acp/prompt_amended",
+          "method" in m && m.method === "hydra-acp/prompt/amended",
       );
       expect(promptAmended).toBeUndefined();
 
@@ -3101,7 +3101,7 @@ describe("Session", () => {
 
       const aliceAdded = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
 
@@ -3153,7 +3153,7 @@ describe("Session", () => {
       const bobAdded = bobStream.sent
         .filter(
           (m) =>
-            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+            "method" in m && m.method === "hydra-acp/prompt_queue/added",
         )
         .at(-1) as JsonRpcNotification;
       const bobMid = (bobAdded.params as { messageId: string }).messageId;
@@ -3172,7 +3172,7 @@ describe("Session", () => {
       // prompt_queue_updated fires (just like update_prompt).
       const queueUpdated = findQueueEvent(
         bobStream.sent,
-        "hydra-acp/prompt_queue_updated",
+        "hydra-acp/prompt_queue/updated",
         bobMid,
       );
       expect(queueUpdated).toBeDefined();
@@ -3209,7 +3209,7 @@ describe("Session", () => {
 
       const aliceAdded = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
 
@@ -3249,7 +3249,7 @@ describe("Session", () => {
 
       const aliceAdded = findQueueEvent(
         aliceStream.sent,
-        "hydra-acp/prompt_queue_added",
+        "hydra-acp/prompt_queue/added",
       ) as JsonRpcNotification;
       const aliceMid = (aliceAdded.params as { messageId: string }).messageId;
 
@@ -3462,7 +3462,7 @@ describe("Session", () => {
       ).toBe("from disk");
       const added = aliceStream.sent.find(
         (m): m is JsonRpcNotification =>
-          "method" in m && m.method === "hydra-acp/prompt_queue_added",
+          "method" in m && m.method === "hydra-acp/prompt_queue/added",
       );
       expect(added).toBeDefined();
       expect(
@@ -3496,7 +3496,7 @@ describe("Session", () => {
       const bobAdded = bobStream.sent
         .filter(
           (m) =>
-            "method" in m && m.method === "hydra-acp/prompt_queue_added",
+            "method" in m && m.method === "hydra-acp/prompt_queue/added",
         )
         .at(-1) as JsonRpcNotification;
       const bobMid = (bobAdded.params as { messageId: string }).messageId;
@@ -3508,7 +3508,7 @@ describe("Session", () => {
 
       const removed = findQueueEvent(
         bobStream.sent,
-        "hydra-acp/prompt_queue_removed",
+        "hydra-acp/prompt_queue/removed",
         bobMid,
       );
       expect(removed).toBeDefined();
@@ -3604,7 +3604,7 @@ describe("Session", () => {
       const bobAdded = bobStream.sent.find(
         (m): m is JsonRpcNotification =>
           "method" in m &&
-          m.method === "hydra-acp/prompt_queue_added" &&
+          m.method === "hydra-acp/prompt_queue/added" &&
           ((m.params as { originator?: { clientId?: string } }).originator
             ?.clientId === bob.clientId),
       );
@@ -3612,7 +3612,7 @@ describe("Session", () => {
       const bobRemoved = bobStream.sent.find(
         (m): m is JsonRpcNotification =>
           "method" in m &&
-          m.method === "hydra-acp/prompt_queue_removed" &&
+          m.method === "hydra-acp/prompt_queue/removed" &&
           (m.params as { messageId?: string }).messageId === bobMid,
       );
       expect(bobRemoved).toBeDefined();
@@ -3746,7 +3746,7 @@ describe("Session", () => {
       const bobAdded = bobStream.sent.find(
         (m): m is JsonRpcNotification =>
           "method" in m &&
-          m.method === "hydra-acp/prompt_queue_added" &&
+          m.method === "hydra-acp/prompt_queue/added" &&
           ((m.params as { originator?: { clientId?: string } }).originator
             ?.clientId === bob.clientId),
       );
@@ -3754,7 +3754,7 @@ describe("Session", () => {
       const bobRemoved = bobStream.sent.find(
         (m): m is JsonRpcNotification =>
           "method" in m &&
-          m.method === "hydra-acp/prompt_queue_removed" &&
+          m.method === "hydra-acp/prompt_queue/removed" &&
           (m.params as { messageId?: string }).messageId === bobMid,
       );
       expect(bobRemoved).toBeDefined();
@@ -3859,7 +3859,7 @@ describe("Session", () => {
       });
       expect(result).toEqual({ stopReason: "end_turn" });
 
-      expect(request).toHaveBeenCalledWith("hydra-acp/extension_command", {
+      expect(request).toHaveBeenCalledWith("hydra-acp/commands/invoke", {
         sessionId: "hydra_session_ext",
         verb: "reset",
         args: "",
@@ -3897,7 +3897,7 @@ describe("Session", () => {
         prompt: [{ type: "text", text: "/hydra hydra-acp-budgeter set hard 50" }],
       });
 
-      expect(request).toHaveBeenCalledWith("hydra-acp/extension_command", {
+      expect(request).toHaveBeenCalledWith("hydra-acp/commands/invoke", {
         sessionId: "hydra_session_ext",
         verb: "set",
         args: "hard 50",

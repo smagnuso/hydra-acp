@@ -136,9 +136,9 @@ export const SessionRecord = z.object({
   // memory. Cleared after that first resurrect completes.
   pendingHistorySync: z.boolean().optional(),
   // Set when this session was spawned as a child by a transformer via
-  // hydra-acp/spawn_child_session. Points to the spawning session's id.
+  // hydra-acp/child_session/spawn. Points to the spawning session's id.
   parentSessionId: z.string().optional(),
-  // Set when this session was created by hydra-acp/fork_session.
+  // Set when this session was created by hydra-acp/session/fork.
   // forkedFromSessionId points to the local source session; forkedFromMessageId
   // is the resolved forkAt — the messageId of the turn_complete the slice
   // ended at. Kept so future UI can show "branched from turn N of session X".

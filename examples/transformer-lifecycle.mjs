@@ -9,7 +9,7 @@
  *                     with no recordable activity
  *   session.closed  — fires when a session is closing
  *
- * Unlike transformer/message (which intercepts in-flight traffic), lifecycle
+ * Unlike hydra-acp/transformer/message (which intercepts in-flight traffic), lifecycle
  * events are fire-and-forget notifications — the daemon does not wait for a
  * response. They are declared in intercepts under the "lifecycle:" prefix.
  *
@@ -112,7 +112,7 @@ ws.on("open", async () => {
       clientCapabilities: {},
       clientInfo: { name: "transformer-lifecycle", version: "0.0.1" },
     });
-    await request(ws, "transformer/initialize", {
+    await request(ws, "hydra-acp/transformer/initialize", {
       // Lifecycle intercepts use the "lifecycle:" prefix.
       // No "request:" or "response:" intercepts — this transformer only
       // reacts to session events, not in-flight messages.
@@ -147,8 +147,8 @@ ws.on("message", (data) => {
     return;
   }
 
-  // transformer/session_event — lifecycle notification (no response expected).
-  if (msg.method === "transformer/session_event" && msg.params) {
+  // hydra-acp/transformer/session_event — lifecycle notification (no response expected).
+  if (msg.method === "hydra-acp/transformer/session_event" && msg.params) {
     handleLifecycleEvent(msg.params).catch((err) => {
       console.error("[lifecycle-demo] event handler error:", err.message);
     });
@@ -178,7 +178,7 @@ async function handleLifecycleEvent({ event, sessionId }) {
       if (idlePrompt) {
         console.log(`[lifecycle-demo]   → emitting idle prompt for …${sid}`);
         try {
-          await request(ws, "hydra-acp/emit_message", {
+          await request(ws, "hydra-acp/message/emit", {
             sessionId,
             method: "session/prompt",
             envelope: {

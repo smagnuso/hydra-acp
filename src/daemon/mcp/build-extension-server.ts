@@ -8,7 +8,7 @@
 // Two request handlers:
 //   tools/list  → returns the spec captured in the closure verbatim
 //   tools/call  → forwards via JSON-RPC to the owning extension's
-//                  connection as hydra-acp/invoke_mcp_tool, with a
+//                  connection as hydra-acp/mcp_tools/invoke, with a
 //                  timeout. Every error path (timeout, RPC reject,
 //                  malformed result) is converted to an MCP isError:true
 //                  response — the daemon never throws to the SDK.
@@ -115,7 +115,7 @@ async function invokeWithTimeout(
   });
   try {
     return await Promise.race([
-      connection.request("hydra-acp/invoke_mcp_tool", {
+      connection.request("hydra-acp/mcp_tools/invoke", {
         server,
         tool,
         args,

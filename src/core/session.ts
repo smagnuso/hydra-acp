@@ -162,7 +162,7 @@ export interface SessionInit {
   idleEventTimeoutMs?: number;
   parentSessionId?: string;
   // Local-fork breadcrumbs set when this session was created by
-  // hydra-acp/fork_session. Read-only on the live Session; persisted on
+  // hydra-acp/session/fork. Read-only on the live Session; persisted on
   // meta.json so list views can show "branched from <id>".
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
@@ -178,7 +178,7 @@ export interface SessionInit {
   // directly, in which case /sessions emits a not-available notice.
   listSessions?: () => Promise<{ sessionId: string; title?: string; cwd: string; agentId?: string; currentModel?: string }[]>;
   // Registry of commands that running extensions/transformers have
-  // registered via hydra-acp/register_commands. Read by
+  // registered via hydra-acp/commands/register. Read by
   // handleSlashCommand (to dispatch "/hydra <name> <verb>") and by
   // mergedAvailableCommands (to advertise the entries to clients).
   extensionCommands?: ExtensionCommandRegistry;
@@ -230,7 +230,7 @@ interface UserPromptQueueEntry {
   prompt: unknown[];
   enqueuedAt: number;
   cancelled: boolean;
-  // True when this entry was created via hydra-acp/amend_prompt rather
+  // True when this entry was created via hydra-acp/prompt/amend rather
   // than session/prompt. The originator has no awaiting session/prompt
   // promise to receive a stopReason on; broadcastTurnComplete therefore
   // includes the originator in the wire turn_complete (no exclusion) so
@@ -610,7 +610,7 @@ export class Session {
       const token = `t_${generateChainToken()}`;
       let result: { action: string; payload?: unknown } | undefined;
       try {
-        result = await t.connection.request("transformer/message", {
+        result = await t.connection.request("hydra-acp/transformer/message", {
           token,
           phase: "response",
           method: "session/update",
@@ -636,7 +636,7 @@ export class Session {
           const timer = setTimeout(() => {
             if (this.pendingClaims.delete(token)) {
               this.broadcastQueueNotification(
-                "hydra-acp/transformer_abandoned_request",
+                "hydra-acp/transformer/abandoned_request",
                 { sessionId: this.sessionId, token, transformerName: t.name },
               );
               // Fail-open: resume from the next transformer rather than dropping.
@@ -1106,7 +1106,7 @@ export class Session {
   // prompt_received a single, useful meaning ("the agent is now taking
   // a turn on this prompt"), which is how attached clients (notably
   // agent-shell) consume it. The accept-time signal that peers can use
-  // for queue chip rendering is hydra-acp/prompt_queue_added instead.
+  // for queue chip rendering is hydra-acp/prompt_queue/added instead.
   private broadcastPromptReceived(entry: UserPromptQueueEntry): void {
     const sentBy: Record<string, unknown> = { clientId: entry.originator.clientId };
     if (entry.originator.name) {
@@ -1193,7 +1193,7 @@ export class Session {
     if (promptMessageId !== undefined && stopReason !== undefined) {
       this.recordTerminal(promptMessageId, stopReason);
     }
-    // For amend-originated entries (sent via hydra-acp/amend_prompt, not
+    // For amend-originated entries (sent via hydra-acp/prompt/amend, not
     // session/prompt), the originator has no awaiting session/prompt
     // promise that would deliver the turn outcome — so include them in
     // the broadcast so their TUI can clear currentHeadMessageId and
@@ -1233,7 +1233,7 @@ export class Session {
     }
   }
 
-  // Fire hydra-acp/prompt_amended for the M1→M2 linkage. The amendment's
+  // Fire hydra-acp/prompt/amended for the M1→M2 linkage. The amendment's
   // current content is read live from the queue entry so any update_prompt
   // calls during the amend window are reflected. Best-effort: if M2 has
   // already been cancelled out of the queue by the time we get here, we
@@ -1256,7 +1256,7 @@ export class Session {
       amendedAt: Date.now(),
     };
     this.broadcastQueueNotification(
-      "hydra-acp/prompt_amended",
+      "hydra-acp/prompt/amended",
       params as unknown as Record<string, unknown>,
     );
   }
@@ -1319,14 +1319,14 @@ export class Session {
         "hydra-acp": { amending: options.amending },
       };
     }
-    this.broadcastQueueNotification("hydra-acp/prompt_queue_added", params);
+    this.broadcastQueueNotification("hydra-acp/prompt_queue/added", params);
   }
 
   private broadcastQueueUpdated(
     messageId: string,
     prompt: unknown[],
   ): void {
-    this.broadcastQueueNotification("hydra-acp/prompt_queue_updated", {
+    this.broadcastQueueNotification("hydra-acp/prompt_queue/updated", {
       sessionId: this.sessionId,
       messageId,
       prompt,
@@ -1337,7 +1337,7 @@ export class Session {
     messageId: string,
     reason: "started" | "cancelled" | "abandoned",
   ): void {
-    this.broadcastQueueNotification("hydra-acp/prompt_queue_removed", {
+    this.broadcastQueueNotification("hydra-acp/prompt_queue/removed", {
       sessionId: this.sessionId,
       messageId,
       reason,
@@ -1703,7 +1703,7 @@ export class Session {
     }
     if (ref.intercepts.has("lifecycle:session.opened")) {
       void ref.connection
-        .notify("transformer/session_event", {
+        .notify("hydra-acp/transformer/session_event", {
           event: "session.opened",
           sessionId: this.sessionId,
         })
@@ -1734,7 +1734,7 @@ export class Session {
       const token = `t_${generateChainToken()}`;
       let result: { action: string; payload?: unknown } | undefined;
       try {
-        result = await t.connection.request("transformer/message", {
+        result = await t.connection.request("hydra-acp/transformer/message", {
           token,
           phase: "request",
           method,
@@ -1761,7 +1761,7 @@ export class Session {
           const timer = setTimeout(() => {
             if (this.pendingClaims.delete(token)) {
               this.broadcastQueueNotification(
-                "hydra-acp/transformer_abandoned_request",
+                "hydra-acp/transformer/abandoned_request",
                 { sessionId: this.sessionId, token, transformerName: t.name },
               );
               // Fail-open: resume from the next transformer rather than stopping.
@@ -1808,7 +1808,7 @@ export class Session {
     return true;
   }
 
-  // Called by the WS handler on hydra-acp/keep_alive.
+  // Called by the WS handler on hydra-acp/connection/keep_alive.
   // Resets the abandonment timer for an outstanding processing claim.
   keepAliveClaim(
     token: string,
@@ -1825,7 +1825,7 @@ export class Session {
     const timer = setTimeout(() => {
       if (this.pendingClaims.delete(token)) {
         this.broadcastQueueNotification(
-          "hydra-acp/transformer_abandoned_request",
+          "hydra-acp/transformer/abandoned_request",
           { sessionId: this.sessionId, token, transformerName: claim.transformerName },
         );
         if (claim.side === "response") {
@@ -2570,7 +2570,7 @@ export class Session {
   // "/hydra <name> <verb> [args]" — name matches a registered extension
   // or transformer. We split the remainder into verb + args, validate the
   // verb against what the process advertised, and forward as a
-  // hydra-acp/extension_command request on the process's WS connection.
+  // hydra-acp/commands/invoke request on the process's WS connection.
   // The reply's text (if any) is broadcast as a synthetic
   // agent_message_chunk so it appears in the conversation alongside the
   // user's invocation.
@@ -2599,7 +2599,7 @@ export class Session {
       }
       let reply: unknown;
       try {
-        reply = await entry.connection.request("hydra-acp/extension_command", {
+        reply = await entry.connection.request("hydra-acp/commands/invoke", {
           sessionId: this.sessionId,
           verb,
           args,
@@ -2904,7 +2904,7 @@ export class Session {
   // down any in-flight request as a side effect. The record is kept
   // (deleteRecord:false) so the session goes cold and can be resurrected.
   // Returns end_turn so the prompt() caller's response resolves normally,
-  // but every attached client has already received hydra-acp/session_closed
+  // but every attached client has already received hydra-acp/session/closed
   // by the time this returns.
   private async runKillCommand(): Promise<unknown> {
     // Agent dies immediately. The cold record's synopsis is regenerated
@@ -3303,7 +3303,7 @@ export class Session {
   private requireStreamBuffer(): SessionStreamBuffer {
     if (this.streamBuffer === undefined) {
       const err = new Error(
-        `session ${this.sessionId} has no stream buffer; call hydra-acp/stream_open first`,
+        `session ${this.sessionId} has no stream buffer; call hydra-acp/stream/open first`,
       ) as Error & { code: number };
       err.code = JsonRpcErrorCodes.StreamNotEnabled;
       throw err;
@@ -3376,7 +3376,7 @@ export class Session {
       .then(() => deleteQueue(sessionId).catch(() => undefined));
     for (const client of this.clients.values()) {
       void client.connection
-        .notify("hydra-acp/session_closed", { sessionId: this.sessionId })
+        .notify("hydra-acp/session/closed", { sessionId: this.sessionId })
         .catch(() => undefined);
     }
     this.clients.clear();
@@ -3512,7 +3512,7 @@ export class Session {
         continue;
       }
       void t.connection
-        .notify("transformer/session_event", {
+        .notify("hydra-acp/transformer/session_event", {
           event,
           sessionId: this.sessionId,
           payload,

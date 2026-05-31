@@ -66,7 +66,7 @@ ws.on("open", async () => {
       clientCapabilities: {},
       clientInfo: { name: "prompt-modifier", version: "0.0.1" },
     });
-    await request(ws, "transformer/initialize", {
+    await request(ws, "hydra-acp/transformer/initialize", {
       intercepts: ["request:session/prompt"],
     });
     console.log(`[prompt-modifier] ready — prepending "${prepend}" to every prompt\n`);
@@ -90,7 +90,7 @@ ws.on("message", (data) => {
     return;
   }
 
-  if (msg.method === "transformer/message" && msg.id !== undefined && msg.params) {
+  if (msg.method === "hydra-acp/transformer/message" && msg.id !== undefined && msg.params) {
     handleMessage(msg);
   }
 });
@@ -116,7 +116,7 @@ async function handleMessage(msg) {
   // Step 3: re-emit the modified prompt into the chain. It resumes after
   // this transformer, so we won't intercept it again.
   try {
-    await request(ws, "hydra-acp/emit_message", {
+    await request(ws, "hydra-acp/message/emit", {
       sessionId,
       method: "session/prompt",
       envelope: modified,

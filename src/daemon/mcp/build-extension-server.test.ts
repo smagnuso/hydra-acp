@@ -178,7 +178,7 @@ describe("buildExtensionServer — tools/call success", () => {
     }
   });
 
-  it("forwards method=hydra-acp/invoke_mcp_tool with server+tool+args", async () => {
+  it("forwards method=hydra-acp/mcp_tools/invoke with server+tool+args", async () => {
     mock.setResponder(async () => ({
       content: [{ type: "text", text: "pong" }],
     }));
@@ -193,7 +193,7 @@ describe("buildExtensionServer — tools/call success", () => {
     client = await connect(server);
     await client.callTool({ name: "ping", arguments: { x: 42 } });
     expect(mock.calls).toHaveLength(1);
-    expect(mock.calls[0]!.method).toBe("hydra-acp/invoke_mcp_tool");
+    expect(mock.calls[0]!.method).toBe("hydra-acp/mcp_tools/invoke");
     expect(mock.calls[0]!.params).toEqual({
       server: "memory",
       tool: "ping",

@@ -418,7 +418,7 @@ Tail a session's recorded conversation as NDJSON. One-shot by default; `?follow=
 
 #### `GET /v1/agents`
 
-List known agents (registry + per-agent install state).
+List known agents (registry + per-agent install state). The same catalog is available over ACP via [`hydra-acp/agents/list`](#hydra-acplist_agents) for protocol-only clients.
 
 **Response — `200 OK`**
 
@@ -626,7 +626,7 @@ In-memory `hydra cat --stream` ring buffer, exposed as MCP tools (`head`, `tail`
 
 #### `POST/GET/DELETE /mcp/:name`
 
-Extension-contributed MCP server, registered via the [`hydra-acp/register_mcp_tools`](#request-process--daemon-hydra-acpregister_mcp_tools) JSON-RPC method. Same Streamable HTTP transport and per-session bearer model as `/mcp/hydra-acp-stdin`.
+Extension-contributed MCP server, registered via the [`hydra-acp/mcp_tools/register`](#request-process--daemon-hydra-acpregister_mcp_tools) JSON-RPC method. Same Streamable HTTP transport and per-session bearer model as `/mcp/hydra-acp-stdin`.
 
 Neither route is intended for human callers. They exist so spawned agents can talk MCP back into the daemon: the daemon injects the appropriate `mcpServers` descriptor into the agent's `session/new` params, and the agent calls these routes as it would any other MCP server.
 
@@ -640,10 +640,39 @@ The `/acp` WebSocket carries JSON-RPC 2.0 frames in both directions. After the W
 - two RFD-track additions Hydra implements (`session/attach`, `session/detach` per [RFD #533](https://github.com/agentclientprotocol/agent-client-protocol/pull/533)),
 - the Hydra-specific extensions documented below.
 
-Hydra additions use one of two prefixes:
+All Hydra additions live under a single vendor prefix, `hydra-acp/`, and follow ACP's own `resource/action` shape at the leaf (e.g. `hydra-acp/prompt/cancel`, `hydra-acp/stream/open`, `hydra-acp/agents/list`). The single prefix guarantees no collision with future ACP standard methods.
 
-- `hydra-acp/*` — the daemon's own extensions. Always namespaced; never collides with future ACP additions.
-- `transformer/*` — transformer-specific surface. Only callable on a connection that authenticated as a transformer; extensions and ordinary clients receive `MethodNotFound`.
+Resource groups: `prompt/*` (cancel, update, amend, amended), `prompt_queue/*` (added, updated, removed), `stream/*` (open, write, read), `child_session/*` (spawn, close, await), `session/*` (fork, closed), `commands/*` (register, invoke), `mcp_tools/*` (register, invoke), `message/*` (emit), `agents/*` (list, install_progress), `connection/*` (keep_alive), and `transformer/*` (initialize, message, session_event).
+
+The `hydra-acp/transformer/*` methods are transformer-specific: only callable on a connection that authenticated as a transformer; extensions and ordinary clients receive `MethodNotFound`.
+
+### Agent discovery
+
+#### Request: `hydra-acp/agents/list`
+
+Enumerate the agents a client can select when creating a session (the id goes in `_meta["hydra-acp"].agentId` on `session/new`). Mirror of the REST [`GET /v1/agents`](#get-v1agents) endpoint — both return the same shape — so a protocol-only ACP client can discover and pick agents without the REST surface. Hydra-specific; no ACP spec equivalent exists yet.
+
+```jsonc
+// params: none (empty object accepted)
+{}
+// result
+{
+  "version":   "<registry doc version>",
+  "fetchedAt": 1717012800000,            // epoch ms of last registry fetch, or null
+  "agents": [
+    {
+      "id":            "claude-acp",
+      "name":          "Claude Agent",
+      "version":       "0.38.0",
+      "description":   "ACP wrapper for Anthropic's Claude",
+      "distributions": [ "npx" ],
+      "installed":     "yes"             // "yes" | "no" | "lazy"
+    }
+  ]
+}
+```
+
+Returns `-32603 InternalError` if the daemon has no registry wired, or surfaces a registry-fetch failure when no cached catalog is available.
 
 ### The `hydra-acp` meta namespace
 
@@ -651,10 +680,11 @@ Standard ACP requests and responses carry an optional `_meta: Record<string, unk
 
 #### On `session/new` params (`_meta.hydra-acp`)
 
+The ACP spec `NewSessionRequest` carries only `cwd` and `mcpServers`. Everything hydra-specific — including **agent selection** — rides under `_meta["hydra-acp"]`; hydra emits **no** non-spec fields at the top level of `session/new`.
+
 | Field | Type | Semantics |
 |---|---|---|
-| `agentId` | `string` | Override `params.agentId`. Used by `hydra-acp launch <agent>` so the editor doesn't need to know how to pick agents. |
-| `cwd` | `string` | Override `params.cwd`. |
+| `agentId` | `string` | Which registry agent to spawn the session on. Falls back to `config.defaultAgent` when omitted. This is the only channel for agent selection — there is no top-level `agentId` param. Enumerate valid ids via [`hydra-acp/agents/list`](#hydra-acplist_agents) or REST `GET /v1/agents`. |
 | `title` | `string` | Session label (`Session.title`). Surfaces in `session/list`, the picker, slack-bridge thread titles. First write wins; replaced by the first user prompt unless the agent has emitted its own `session_info_update`. |
 | `agentArgs` | `string[]` | Forwarded to the underlying agent's command line. Stored in the resume hints so a resurrected session re-spawns the agent with the same args. |
 | `transformers` | `string[]` | Names of transformers to attach to the session chain. Resolves to live connections at session-creation time; missing names are silently skipped (fail-open). Falls back to `config.defaultTransformers`. |
@@ -702,8 +732,11 @@ Live-only extras (present on `session/new` and `session/attach`; the read-only v
 | `agentCapabilities` | `object?` | The underlying agent's own initialize-time capability claim, forwarded verbatim. |
 | `queue` | `PromptQueueEntry[]?` | Snapshot of the daemon-side queue at attach time, so late-joining clients can paint chips without waiting for new `prompt_queue_added` notifications. Omitted when empty. |
 | `mcpStdin` | `boolean?` | Echoed when stdin streaming was wired up. |
+| `clientId` | `string?` | The per-attachment client id bound to this connection. **Present in `_meta` only on `session/new` and `session/load`** — those are core ACP spec methods, so the id can't ride at the top level. On the RFD-track `session/attach` response, `clientId` is a top-level field instead (per that method's surface). Lets deferred-echo clients recognize their own `prompt_queue_added` broadcasts. |
 
-> Capability flags (`promptQueueing`, `promptCancelling`, `promptUpdating`, `promptAmending`, `promptPipelining`) are daemon-wide and ride on the **`initialize`** response's `_meta["hydra-acp"]`, not per-session.
+> Capability flags (the `prompt.*` and `agents.*` groups) are daemon-wide and ride on the **`initialize`** response's `_meta["hydra-acp"]`, not per-session — see [Capability discovery](#capability-discovery).
+
+> Spec-compliance note: `session/new` and `session/load` are core ACP methods, so their results carry only the spec fields (`sessionId`, `modes?`, `models?`) at the top level — every hydra-specific field, including `clientId`, rides under `_meta["hydra-acp"]`. `session/attach`/`session/detach` are RFD-track methods: only **RFD #533's own** fields sit at the top level (request: `sessionId`, `historyPolicy`, `afterMessageId`, `clientId`, `clientInfo`; response: `sessionId`, `clientId`, `connectedClients`, `historyPolicy`, `replayed`). Hydra's *own* additions on top of the RFD ride under `_meta["hydra-acp"]`: request `readonly`/`replayMode`/`dripSpeed`, and the `session/detach` response `detachStatus`.
 
 #### On `session/list` entries (`_meta.hydra-acp`)
 
@@ -757,15 +790,23 @@ Field reference for `_meta["hydra-acp"]` (always-present fields first, then opti
 | `originatingClient` | `object?` | `clientInfo` of the process that issued `session/new`: `{ name, version? }`. |
 | `interactive` | `boolean?` | Tristate filter signal; absent when undecided. |
 
-#### `SessionAttachParams.readonly` (Hydra-only flag)
+#### Hydra-only `session/attach` options (`_meta["hydra-acp"]`)
 
-Hydra accepts an optional `readonly: boolean` on `session/attach`. When `true`, the connection observes the session but can't mutate it: any state-changing JSON-RPC method (`session/prompt`, `session/cancel`, `session/set_model`, `hydra-acp/cancel_prompt`, `update_prompt`, `amend_prompt`) returns `-32011 PermissionDenied`. Attaching read-only to a cold session takes a viewer path that streams history straight from disk — no `resurrect`, no agent process.
+Hydra accepts these under `_meta["hydra-acp"]` on `session/attach` (not top-level — `session/attach` keeps only RFD #533's own fields there):
+
+| Field | Type | Semantics |
+|---|---|---|
+| `readonly` | `boolean` | Observe-only attach. Any state-changing JSON-RPC method (`session/prompt`, `session/cancel`, `session/set_model`, the `hydra-acp/*` prompt-mutation methods) returns `-32011 PermissionDenied`. A read-only attach to a *cold* session takes a viewer path that streams history straight from disk — no `resurrect`, no agent process. |
+| `replayMode` | `"instant" \| "drip"` | Debug-only replay pacing. `drip` re-emits each recorded `session/update` individually, spaced by their original `recordedAt` deltas, to reproduce a session's streaming render. Default `instant`. |
+| `dripSpeed` | `number` | Multiplier on the inter-entry gaps in drip mode (>1 faster, <1 slower). Default 1. |
+
+The `session/detach` response carries the detach outcome under `_meta["hydra-acp"].detachStatus` (`"detached"`), alongside the top-level `sessionId`.
 
 ### Prompt-queue surface
 
 The daemon owns a per-session prompt queue. Clients submit prompts via standard `session/prompt`; everything mutating the queue afterwards goes through the Hydra methods below. Peer clients stay in sync via the `hydra-acp/prompt_queue_*` notifications.
 
-#### Request: `hydra-acp/cancel_prompt`
+#### Request: `hydra-acp/prompt/cancel`
 
 Cancel a queued (not-yet-running) prompt. To cancel the currently-running head, use standard `session/cancel` instead.
 
@@ -780,7 +821,7 @@ Cancel a queued (not-yet-running) prompt. To cancel the currently-running head, 
 
 `already_running` means the messageId matched the in-flight head; the caller should fall back to `session/cancel`.
 
-#### Request: `hydra-acp/update_prompt`
+#### Request: `hydra-acp/prompt/update`
 
 Edit the content of a queued prompt before it runs.
 
@@ -793,9 +834,9 @@ Edit the content of a queued prompt before it runs.
 { "updated": false, "reason": "not_found" | "already_running" }
 ```
 
-Successful updates broadcast a `hydra-acp/prompt_queue_updated` notification so peer clients can refresh their chip text.
+Successful updates broadcast a `hydra-acp/prompt_queue/updated` notification so peer clients can refresh their chip text.
 
-#### Request: `hydra-acp/amend_prompt`
+#### Request: `hydra-acp/prompt/amend`
 
 Interrupt the in-flight head with a replacement prompt. The partial agent response is preserved in conversation history (cancel-and-resubmit). For a *queued* target, this behaves the same as `update_prompt` (in-place edit).
 
@@ -818,9 +859,9 @@ Interrupt the in-flight head with a replacement prompt. The partial agent respon
 
 The race between target completion and amend arrival is resolved deterministically via `targetMessageId`. When `onTargetCompleted: "send_anyway"` and the target completes first, the daemon forwards the amend as a regular follow-up prompt and returns the new id in `messageId`.
 
-Successful amends broadcast a `hydra-acp/prompt_amended` notification — see below.
+Successful amends broadcast a `hydra-acp/prompt/amended` notification — see below.
 
-#### Notification: `hydra-acp/prompt_queue_added`
+#### Notification: `hydra-acp/prompt_queue/added`
 
 Daemon → every attached client. Fires when a new prompt is enqueued (including new turns from any client).
 
@@ -836,7 +877,7 @@ Daemon → every attached client. Fires when a new prompt is enqueued (including
 }
 ```
 
-#### Notification: `hydra-acp/prompt_queue_updated`
+#### Notification: `hydra-acp/prompt_queue/updated`
 
 Fires when a queued prompt's content was changed via `update_prompt` (or by an `amend_prompt` against a queued target).
 
@@ -844,7 +885,7 @@ Fires when a queued prompt's content was changed via `update_prompt` (or by an `
 { "sessionId": "<id>", "messageId": "<id>", "prompt": [ /* new ACP prompt array */ ] }
 ```
 
-#### Notification: `hydra-acp/prompt_queue_removed`
+#### Notification: `hydra-acp/prompt_queue/removed`
 
 Fires when a queue entry leaves the queue.
 
@@ -857,10 +898,10 @@ Fires when a queue entry leaves the queue.
 ```
 
 - `started` — head transitioned to in-flight (the active turn begins).
-- `cancelled` — explicit `hydra-acp/cancel_prompt`.
+- `cancelled` — explicit `hydra-acp/prompt/cancel`.
 - `abandoned` — session tear-down with queued entries that never ran.
 
-#### Notification: `hydra-acp/prompt_amended`
+#### Notification: `hydra-acp/prompt/amended`
 
 Dedicated linkage event fired after a successful amend. Carries both messageIds so subscribers can render the M1 → M2 relationship without correlating `turn_complete` + `prompt_received` themselves.
 
@@ -875,7 +916,7 @@ Dedicated linkage event fired after a successful amend. Carries both messageIds 
 }
 ```
 
-#### Notification: `hydra-acp/session_closed`
+#### Notification: `hydra-acp/session/closed`
 
 Fires once when a session is closed (cold demotion, delete, daemon shutdown, import-replace). Lets attached clients paint a "session is gone" banner without waiting for the WS itself to drop.
 
@@ -889,7 +930,7 @@ Three RPCs implement an in-memory ring buffer per session, used by `hydra cat --
 
 All cursors are **absolute monotonic byte offsets**, never ring indices. Eviction is observable: a read whose `cursor` points before the oldest still-resident byte returns `gap: <count>` and advances `cursor` to the oldest resident position.
 
-#### Request: `hydra-acp/stream_open`
+#### Request: `hydra-acp/stream/open`
 
 Allocate the buffer.
 
@@ -911,7 +952,7 @@ Allocate the buffer.
 
 `mode: "memory"` keeps the ring in RAM only — required for the MCP tool surface. `mode: "file"` also writes to a tempfile so an agent without HTTP MCP can consume it via `tail -f` / `head` / `grep`.
 
-#### Request: `hydra-acp/stream_write`
+#### Request: `hydra-acp/stream/write`
 
 Append bytes to the ring (and the mirror file, if any).
 
@@ -926,7 +967,7 @@ Append bytes to the ring (and the mirror file, if any).
 { "writeCursor": 4096 }   // absolute byte offset after the append
 ```
 
-#### Request: `hydra-acp/stream_read`
+#### Request: `hydra-acp/stream/read`
 
 Read from the ring at an absolute cursor.
 
@@ -949,7 +990,7 @@ Read from the ring at an absolute cursor.
 
 ### Local fork
 
-#### Request: `hydra-acp/fork_session`
+#### Request: `hydra-acp/session/fork`
 
 Branch a local session into a new one that shares context up to a chosen turn boundary. Same machinery as `POST /v1/sessions/:id/fork`, exposed over the WS so transformers and TUIs can call it without leaving the protocol.
 
@@ -976,7 +1017,7 @@ The new session is minted with `upstreamSessionId=""` so its first attach trigge
 
 When `session/new` or `session/attach` requires downloading or installing an agent (npx pre-install or binary fetch), the daemon emits progress on the originating WS connection so clients can paint a download bar.
 
-#### Notification: `hydra-acp/agent_install_progress`
+#### Notification: `hydra-acp/agents/install_progress`
 
 ```jsonc
 {
@@ -1003,13 +1044,13 @@ Hydra extensions and transformers connect to the daemon as ordinary ACP clients 
 
 Once registered, three surfaces become available to that process:
 
-- **Slash-command verbs.** Register with `hydra-acp/register_commands`. Whenever a user types `/hydra <name> <verb> …` in any session, the daemon forwards a `hydra-acp/extension_command` request to the registered connection.
-- **MCP tools.** Register with `hydra-acp/register_mcp_tools`. Agents see a `/mcp/<extension-name>` HTTP MCP server; when they call a tool, the daemon forwards a `hydra-acp/invoke_mcp_tool` request to the registered connection.
-- **Transformer pipeline** (transformer-only). After `transformer/initialize`, the daemon calls `transformer/message` for each intercepted method and `transformer/session_event` for lifecycle ticks.
+- **Slash-command verbs.** Register with `hydra-acp/commands/register`. Whenever a user types `/hydra <name> <verb> …` in any session, the daemon forwards a `hydra-acp/commands/invoke` request to the registered connection.
+- **MCP tools.** Register with `hydra-acp/mcp_tools/register`. Agents see a `/mcp/<extension-name>` HTTP MCP server; when they call a tool, the daemon forwards a `hydra-acp/mcp_tools/invoke` request to the registered connection.
+- **Transformer pipeline** (transformer-only). After `hydra-acp/transformer/initialize`, the daemon calls `hydra-acp/transformer/message` for each intercepted method and `hydra-acp/transformer/session_event` for lifecycle ticks.
 
 Registrations drop on disconnect — the daemon clears the entry and evicts any cached MCP transports.
 
-#### Request (process → daemon): `hydra-acp/register_commands`
+#### Request (process → daemon): `hydra-acp/commands/register`
 
 Advertise slash-command verbs.
 
@@ -1029,7 +1070,7 @@ Advertise slash-command verbs.
 { "ok": true, "registered": 3 }
 ```
 
-#### Request (daemon → process): `hydra-acp/extension_command`
+#### Request (daemon → process): `hydra-acp/commands/invoke`
 
 Daemon dispatches a `/hydra <process-name> <verb> …` invocation. The process's response text (if any) is broadcast as a synthetic `agent_message_chunk` so it appears inline in the conversation.
 
@@ -1046,7 +1087,7 @@ Daemon dispatches a `/hydra <process-name> <verb> …` invocation. The process's
 {}   // silent acknowledgement
 ```
 
-#### Request (process → daemon): `hydra-acp/register_mcp_tools`
+#### Request (process → daemon): `hydra-acp/mcp_tools/register`
 
 Advertise MCP tools the process implements.
 
@@ -1070,7 +1111,7 @@ Advertise MCP tools the process implements.
 
 The daemon mints a per-session bearer at every `session/new` and injects `mcpServers` descriptors pointing at `/mcp/<process-name>` with that bearer. Re-calling overwrites the prior spec; the route's `onChange` listener evicts cached transports so agents reconnect against the fresh spec.
 
-#### Request (daemon → process): `hydra-acp/invoke_mcp_tool`
+#### Request (daemon → process): `hydra-acp/mcp_tools/invoke`
 
 The MCP `tools/call` from the agent, forwarded to the registered process.
 
@@ -1091,9 +1132,9 @@ The MCP `tools/call` from the agent, forwarded to the registered process.
 
 ### Transformer-only methods
 
-Transformers receive a higher-trust per-process token: they sit in the daemon's message pipeline and can observe (and ultimately rewrite) traffic that no client ever sees. The `transformer/*` methods and the transformer-specific `hydra-acp/*` outboxes are only callable on a transformer-kind connection; extension and client connections get `MethodNotFound` if they try.
+Transformers receive a higher-trust per-process token: they sit in the daemon's message pipeline and can observe (and ultimately rewrite) traffic that no client ever sees. The `hydra-acp/transformer/*` methods are only callable on a transformer-kind connection; extension and client connections get `MethodNotFound` if they try.
 
-#### Request (transformer → daemon): `transformer/initialize`
+#### Request (transformer → daemon): `hydra-acp/transformer/initialize`
 
 Declare which message kinds this transformer wants to intercept.
 
@@ -1114,7 +1155,7 @@ Declare which message kinds this transformer wants to intercept.
 
 Intercepts are matched against `request:<method>`, `response:<method>`, and `lifecycle:<event>` strings. Lifecycle events currently fired are `session.opened`, `session.idle`, and `session.closed`.
 
-#### Request (daemon → transformer): `transformer/message`
+#### Request (daemon → transformer): `hydra-acp/transformer/message`
 
 Called for every intercepted JSON-RPC request or response.
 
@@ -1137,9 +1178,9 @@ Called for every intercepted JSON-RPC request or response.
 
 - `continue` (default) — daemon proceeds with the envelope (rewritten if `payload` is present).
 - `stop` — daemon never sees this message. The optional `payload` is returned to the original caller (synthetic response).
-- `processing` — the transformer is taking ownership; the daemon parks the call until the transformer discharges the claim via `hydra-acp/emit_message` with `respondsTo: <token>`. If the transformer doesn't discharge within the claim timeout, the daemon broadcasts a `hydra-acp/transformer_abandoned_request` notification and resumes the chain from the next transformer (fail-open).
+- `processing` — the transformer is taking ownership; the daemon parks the call until the transformer discharges the claim via `hydra-acp/message/emit` with `respondsTo: <token>`. If the transformer doesn't discharge within the claim timeout, the daemon broadcasts a `hydra-acp/transformer/abandoned_request` notification and resumes the chain from the next transformer (fail-open).
 
-#### Notification (daemon → transformer): `transformer/session_event`
+#### Notification (daemon → transformer): `hydra-acp/transformer/session_event`
 
 Fires for lifecycle events the transformer declared an interest in.
 
@@ -1147,7 +1188,7 @@ Fires for lifecycle events the transformer declared an interest in.
 { "event": "session.opened" | "session.idle" | "session.closed", "sessionId": "<id>" }
 ```
 
-#### Request (transformer → daemon): `hydra-acp/emit_message`
+#### Request (transformer → daemon): `hydra-acp/message/emit`
 
 Transformer outbox: emit an ACP message back into the system, or discharge a pending `processing` claim.
 
@@ -1166,7 +1207,7 @@ Transformer outbox: emit an ACP message back into the system, or discharge a pen
 
 Setting `respondsTo` returns the envelope to the original caller and removes the parked claim. Otherwise, `route: "chain"` re-enters the transformer chain from the next position (loop-safe via the `originatedBy` lineage set).
 
-#### Request (transformer → daemon): `hydra-acp/spawn_child_session`
+#### Request (transformer → daemon): `hydra-acp/child_session/spawn`
 
 Create a child session whose `parentSessionId` is set.
 
@@ -1183,7 +1224,7 @@ Create a child session whose `parentSessionId` is set.
 
 Children start with an empty transformer chain by default.
 
-#### Request (transformer → daemon): `hydra-acp/await_child`
+#### Request (transformer → daemon): `hydra-acp/child_session/await`
 
 Block until the child session reaches a stop condition or the timeout elapses.
 
@@ -1198,7 +1239,7 @@ Block until the child session reaches a stop condition or the timeout elapses.
 { "entries": [ /* recorded session/update entries collected during the wait */ ] }
 ```
 
-#### Request (transformer → daemon): `hydra-acp/close_child_session`
+#### Request (transformer → daemon): `hydra-acp/child_session/close`
 
 ```jsonc
 // params
@@ -1209,7 +1250,7 @@ Block until the child session reaches a stop condition or the timeout elapses.
 
 Closes the child session (cold demotion; record preserved).
 
-#### Request (transformer → daemon): `hydra-acp/keep_alive`
+#### Request (transformer → daemon): `hydra-acp/connection/keep_alive`
 
 Reset the abandonment timer for an outstanding `processing` claim.
 
@@ -1224,7 +1265,7 @@ Reset the abandonment timer for an outstanding `processing` claim.
 { "ok": true }
 ```
 
-#### Notification: `hydra-acp/transformer_abandoned_request`
+#### Notification: `hydra-acp/transformer/abandoned_request`
 
 Daemon → every attached client. Fires when a transformer's `processing` claim times out before being discharged.
 
@@ -1240,12 +1281,30 @@ After the broadcast, the daemon resumes the chain from the next transformer (fai
 
 ### Capability discovery
 
-The `initialize` response carries Hydra's extension capability flags in two places:
+The `initialize` response carries Hydra's extension capabilities in two places:
 
 - **Standard `agentCapabilities.sessionCapabilities`** advertises the RFD #533 (`attach: {}`) and Session List (`list: {}`) extensions.
-- **`_meta["hydra-acp"]`** on the same response carries the prompt-mutation booleans (`promptQueueing`, `promptCancelling`, `promptUpdating`, `promptAmending`, `promptPipelining`).
+- **`_meta["hydra-acp"]`** on the same response carries hydra's own capability groups, keyed by resource to mirror the `hydra-acp/<resource>/<action>` method namespaces (and deliberately **not** named `promptCapabilities`/`agentCapabilities`, which are ACP spec names with different meanings):
 
-Clients can gate UI on those flags rather than relying on `MethodNotFound` round-trips. Older daemons that don't advertise a flag should be assumed to lack the corresponding capability.
+```jsonc
+"_meta": {
+  "hydra-acp": {
+    "prompt": {
+      "queueing":   true,   // accepts concurrent session/prompt (queues)
+      "cancelling": true,   // hydra-acp/prompt/cancel
+      "updating":   true,   // hydra-acp/prompt/update
+      "amending":   true,   // hydra-acp/prompt/amend
+      "pipelining": false   // forwards concurrent prompts to the agent
+    },
+    "agents": {
+      "list":            true,   // hydra-acp/agents/list (entries carry install state)
+      "installProgress": true    // hydra-acp/agents/install_progress notifications
+    }
+  }
+}
+```
+
+Clients gate UI on those flags rather than relying on `MethodNotFound` round-trips — e.g. probe `agents.list` before offering an agent picker, or `prompt.amending` before showing an Amend affordance. Older daemons that don't advertise a group/flag should be assumed to lack the corresponding capability.
 
 ---
 

@@ -250,6 +250,7 @@ export async function startDaemon(
     mcpTokenRegistry,
     extensionMcp,
     getDaemonOrigin,
+    registry,
   });
 
   await app.listen({ host: config.daemon.host, port: config.daemon.port });

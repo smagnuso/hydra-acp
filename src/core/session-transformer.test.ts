@@ -82,14 +82,14 @@ describe("Session transformer chain — forwardRequest", () => {
     expect(requestMock).toHaveBeenCalledWith("session/prompt", expect.anything());
   });
 
-  it("calls transformer/message for matching intercept then calls agent", async () => {
+  it("calls hydra-acp/transformer/message for matching intercept then calls agent", async () => {
     const t = fakeTransformerConn({ action: "continue" });
     const { session, requestMock } = makeSession([
       makeRef("t1", ["request:session/prompt"], t.conn),
     ]);
     await session.forwardRequest("session/prompt", { sessionId: "sess_test", prompt: [] });
     expect(t.requests).toHaveLength(1);
-    expect(t.requests[0]!.method).toBe("transformer/message");
+    expect(t.requests[0]!.method).toBe("hydra-acp/transformer/message");
     expect((t.requests[0]!.params as { phase: string }).phase).toBe("request");
     expect(requestMock).toHaveBeenCalledWith("session/prompt", expect.anything());
   });
@@ -453,7 +453,7 @@ describe("Session transformer chain — lifecycle events", () => {
     makeSession([makeRef("t1", ["lifecycle:session.opened"], t.conn)]);
     await flushMicrotasks();
     expect(t.notifications.some((n) =>
-      n.method === "transformer/session_event" &&
+      n.method === "hydra-acp/transformer/session_event" &&
       (n.params as { event: string }).event === "session.opened"
     )).toBe(true);
   });
@@ -744,7 +744,7 @@ describe("Session.addTransformer — retroactive wiring", () => {
     // Give the void notify promise a tick to settle.
     return new Promise<void>((resolve) => setImmediate(() => {
       expect(t.notifications).toHaveLength(1);
-      expect(t.notifications[0]!.method).toBe("transformer/session_event");
+      expect(t.notifications[0]!.method).toBe("hydra-acp/transformer/session_event");
       expect((t.notifications[0]!.params as { event: string }).event).toBe("session.opened");
       resolve();
     }));
