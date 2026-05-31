@@ -787,16 +787,18 @@ export class SessionManager {
       existing.add(`${rec.agentId}::${rec.upstreamSessionId}`);
     }
 
-    // Sessions whose cwd is under hydra's own data dir are internal
-    // ephemeral runs — the synopsis coordinator spawns claude-acp with
-    // cwd=~/.hydra-acp/sessions/<id>/ as a sandbox, which makes claude-acp
-    // persist that ephemeral session in its own per-project storage.
+    // Sessions whose cwd is under hydra's synopsis sandbox are internal
+    // ephemeral runs — the synopsis coordinator spawns its agent with
+    // cwd=~/.hydra-acp/sessions/<id>/, which makes the agent persist that
+    // ephemeral session in its own per-project storage.
     // sessionCapabilities.list then surfaces those back to syncFromAgent,
     // and without this guard we'd import them as real hydra sessions
-    // (cwd pointing into hydra's data dir, replaying the synopsis prompt
-    // as user input on first resurrect). Users never legitimately work
-    // out of ~/.hydra-acp/, so a prefix filter is safe.
-    const hydraHomeDir = paths.home();
+    // (replaying the synopsis prompt as user input on first resurrect).
+    // Scope the filter to exactly that sandbox dir — not the whole
+    // ~/.hydra-acp/ tree — so legitimate sessions that merely happen to
+    // sit under the data dir (e.g. an agent launched from its own install
+    // path) still sync.
+    const synopsisSandboxDir = paths.sessionsDir();
     const synced: SessionRecord[] = [];
     let skipped = 0;
     for (const entry of entries) {
@@ -805,7 +807,7 @@ export class SessionManager {
         skipped += 1;
         continue;
       }
-      if (isUnderHydraHome(entry.cwd, hydraHomeDir)) {
+      if (isSynopsisSession(entry.cwd, synopsisSandboxDir)) {
         skipped += 1;
         continue;
       }
@@ -1980,13 +1982,17 @@ export class SessionManager {
 // True when `cwd` lives under hydra's own data dir. Used by
 // syncFromAgent to skip importing ephemeral synopsis sessions (the
 // synopsis coordinator spawns agents with cwd=~/.hydra-acp/sessions/<id>/).
-function isUnderHydraHome(cwd: string, hydraHomeDir: string): boolean {
+// True when `cwd` sits under hydra's synopsis sandbox
+// (~/.hydra-acp/sessions/), i.e. the session is one the synopsis
+// coordinator spawned internally rather than a real user conversation.
+// Agent sync uses this to skip those so they don't pollute the picker.
+function isSynopsisSession(cwd: string, sandboxDir: string): boolean {
   if (typeof cwd !== "string" || cwd.length === 0) {
     return false;
   }
   const resolved = path.resolve(cwd);
-  const home = path.resolve(hydraHomeDir);
-  return resolved === home || resolved.startsWith(home + path.sep);
+  const base = path.resolve(sandboxDir);
+  return resolved === base || resolved.startsWith(base + path.sep);
 }
 
 // Build the record we'll persist to meta.json. Read-modify-write style:

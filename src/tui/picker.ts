@@ -32,6 +32,7 @@ import {
   regenSessionTitle,
   renameSession,
   searchSessions,
+  syncInstalledAgents,
   type DiscoveredSession,
   type SessionHits,
 } from "./discovery.js";
@@ -171,6 +172,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["h", "cycle host filter (local / <peer> / all)"],
   ["i", "toggle include-cat filter"],
   ["r", "refresh from daemon"],
+  ["s", "sync sessions from installed agents"],
   null,
   ["k", "kill the selected live session"],
   ["d", "delete the selected session (kills first if live)"],
@@ -1375,6 +1377,10 @@ export async function pickSession(
     let resolved = false;
     let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
     let autoRefreshInFlight = false;
+    // Guards the on-demand agent sync (`s`). Sync spawns a fresh process
+    // per installed agent and can run for several seconds; the guard
+    // keeps repeated `s` presses from launching overlapping syncs.
+    let syncInFlight = false;
 
     // ── Focus stack ────────────────────────────────────────────────────
     // Each interactive layer (picker, find, modals) is a FocusLayer.
@@ -1457,7 +1463,8 @@ export async function pickSession(
         focusStack.length > 1 ||
         mode !== "normal" ||
         searchActive ||
-        autoRefreshInFlight
+        autoRefreshInFlight ||
+        syncInFlight
       ) {
         return;
       }
@@ -1614,6 +1621,34 @@ export async function pickSession(
       } catch (err) {
         transientStatus = `regen failed: ${(err as Error).message}`;
         paintIndicator();
+      }
+    };
+    // On-demand agent sync (the `s` keystroke). Spawns each installed
+    // agent transiently to pull in sessions it remembers, then refreshes
+    // the list so freshly-imported rows (with their agent-generated
+    // titles) appear. Shows a transient status throughout since the
+    // round-trip can take a few seconds per agent.
+    const performSync = async (): Promise<void> => {
+      if (syncInFlight) {
+        return;
+      }
+      syncInFlight = true;
+      const currentId =
+        selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+      transientStatus = "syncing agents…";
+      paintIndicator();
+      try {
+        const { synced, skipped, agents } = await syncInstalledAgents(
+          opts.target,
+        );
+        await refresh(currentId);
+        transientStatus = `synced ${synced} new (${skipped} known) from ${agents} agent${agents === 1 ? "" : "s"}`;
+        paintIndicator();
+      } catch (err) {
+        transientStatus = `sync failed: ${(err as Error).message}`;
+        paintIndicator();
+      } finally {
+        syncInFlight = false;
       }
     };
     const performAction = async (kind: "kill" | "delete"): Promise<void> => {
@@ -2250,6 +2285,10 @@ export async function pickSession(
           const currentId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
           void refresh(currentId);
+          return;
+        }
+        if (name === "s" || name === "S") {
+          void performSync();
           return;
         }
         if ((name === "v" || name === "V") && selectedIdx > 0) {

@@ -126,6 +126,58 @@ export interface DiscoveredAgent {
   description?: string;
 }
 
+// Spawn each installed agent transiently and pull in any sessions it
+// remembers (across every cwd) as cold records via the daemon's
+// per-agent sync endpoint. Mirrors the background agent-sync scheduler
+// but on demand — the picker's `s` keystroke calls this so a user can
+// surface agent-side sessions without waiting for the schedule. Returns
+// aggregate counts; per-agent failures (no sessionCapabilities.list,
+// spawn failure) are swallowed so one bad agent can't wedge the rest.
+export async function syncInstalledAgents(
+  target: RemoteTarget,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ synced: number; skipped: number; agents: number }> {
+  const response = await fetchImpl(`${target.baseUrl}/v1/agents`, {
+    headers: { Authorization: `Bearer ${target.token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+  const body = (await response.json()) as {
+    agents?: Array<{ id: string; installed?: string }>;
+  };
+  const installed = Array.isArray(body.agents)
+    ? body.agents.filter((a) => a.installed === "yes")
+    : [];
+  let synced = 0;
+  let skipped = 0;
+  let agents = 0;
+  for (const agent of installed) {
+    try {
+      const res = await fetchImpl(
+        `${target.baseUrl}/v1/agents/${agent.id}/sync`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${target.token}` },
+        },
+      );
+      if (!res.ok) {
+        continue;
+      }
+      const result = (await res.json()) as {
+        synced?: unknown[];
+        skipped?: number;
+      };
+      synced += Array.isArray(result.synced) ? result.synced.length : 0;
+      skipped += typeof result.skipped === "number" ? result.skipped : 0;
+      agents += 1;
+    } catch {
+      void 0;
+    }
+  }
+  return { synced, skipped, agents };
+}
+
 // List the agents the daemon's registry knows about (GET /v1/agents),
 // routed through the active RemoteTarget so it works against local and
 // remote daemons alike. Used by the in-TUI agent picker shown when a new

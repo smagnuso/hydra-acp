@@ -5,15 +5,20 @@ import {
   listSessions,
   pickMostRecent,
   searchSessions,
+  syncInstalledAgents,
 } from "./discovery.js";
-import { DEFAULT_DAEMON_PORT } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 
+// Deliberately NOT the real daemon port (DEFAULT_DAEMON_PORT): every
+// test injects a fake fetch, but if one ever forgot to, we must not be
+// able to reach a live daemon. 1 is in the reserved range and never
+// bound by anything, so an accidental real fetch fails fast instead of
+// mutating an active daemon.
 const target: RemoteTarget = {
-  baseUrl: `http://127.0.0.1:${DEFAULT_DAEMON_PORT}`,
-  wsUrl: `ws://127.0.0.1:${DEFAULT_DAEMON_PORT}/acp`,
+  baseUrl: "http://127.0.0.1:1",
+  wsUrl: "ws://127.0.0.1:1/acp",
   token: "tok",
-  display: `127.0.0.1:${DEFAULT_DAEMON_PORT}`,
+  display: "127.0.0.1:1",
   isLocal: true,
 };
 
@@ -50,7 +55,7 @@ describe("listSessions", () => {
     }) as typeof fetch;
     const out = await listSessions(target, { cwd: "/x", all: true }, fetchImpl);
     expect(captured.url).toBe(
-      `http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions?cwd=%2Fx&all=true`,
+      `${target.baseUrl}/v1/sessions?cwd=%2Fx&all=true`,
     );
     expect(captured.auth).toBe("Bearer tok");
     expect(out).toEqual([
@@ -88,7 +93,7 @@ describe("killSession", () => {
       return new Response(null, { status: 204 });
     }) as typeof fetch;
     await killSession(target, "sess-1", fetchImpl);
-    expect(captured.url).toBe(`http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/sess-1/kill`);
+    expect(captured.url).toBe(`${target.baseUrl}/v1/sessions/sess-1/kill`);
     expect(captured.method).toBe("POST");
     expect(captured.auth).toBe("Bearer tok");
   });
@@ -115,7 +120,7 @@ describe("deleteSession", () => {
       return new Response(null, { status: 204 });
     }) as typeof fetch;
     await deleteSession(target, "sess-1", fetchImpl);
-    expect(captured.url).toBe(`http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/sess-1`);
+    expect(captured.url).toBe(`${target.baseUrl}/v1/sessions/sess-1`);
     expect(captured.method).toBe("DELETE");
     expect(captured.auth).toBe("Bearer tok");
   });
@@ -172,7 +177,7 @@ describe("searchSessions", () => {
     }) as typeof fetch;
     const out = await searchSessions(target, "needle", {}, fetchImpl);
     expect(captured.url).toBe(
-      `http://127.0.0.1:${DEFAULT_DAEMON_PORT}/v1/sessions/search`,
+      `${target.baseUrl}/v1/sessions/search`,
     );
     expect(captured.method).toBe("POST");
     expect(captured.auth).toBe("Bearer tok");
@@ -205,6 +210,77 @@ describe("searchSessions", () => {
     const fetchImpl = (async () => new Response("bad", { status: 400 })) as typeof fetch;
     await expect(searchSessions(target, "x", {}, fetchImpl)).rejects.toThrow(
       /HTTP 400/,
+    );
+  });
+});
+
+describe("syncInstalledAgents", () => {
+  it("syncs only installed agents and aggregates counts", async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.endsWith("/v1/agents")) {
+        return new Response(
+          JSON.stringify({
+            agents: [
+              { id: "opencode", installed: "yes" },
+              { id: "claude-acp", installed: "yes" },
+              { id: "codex-acp", installed: "no" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/v1/agents/opencode/sync")) {
+        return new Response(JSON.stringify({ synced: [{}, {}], skipped: 3 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/v1/agents/claude-acp/sync")) {
+        return new Response(JSON.stringify({ synced: [{}], skipped: 1 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("nope", { status: 404 });
+    }) as typeof fetch;
+
+    const out = await syncInstalledAgents(target, fetchImpl);
+    expect(out).toEqual({ synced: 3, skipped: 4, agents: 2 });
+    expect(calls).toContain(
+      `POST ${target.baseUrl}/v1/agents/opencode/sync`,
+    );
+    expect(calls).toContain(
+      `POST ${target.baseUrl}/v1/agents/claude-acp/sync`,
+    );
+    expect(calls).not.toContain(
+      `POST ${target.baseUrl}/v1/agents/codex-acp/sync`,
+    );
+  });
+
+  it("swallows per-agent sync failures", async () => {
+    const fetchImpl = (async (input: string) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents")) {
+        return new Response(
+          JSON.stringify({ agents: [{ id: "opencode", installed: "yes" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ error: "no list cap" }), {
+        status: 409,
+      });
+    }) as typeof fetch;
+    const out = await syncInstalledAgents(target, fetchImpl);
+    expect(out).toEqual({ synced: 0, skipped: 0, agents: 0 });
+  });
+
+  it("throws when the agents listing fails", async () => {
+    const fetchImpl = (async () => new Response("x", { status: 500 })) as typeof fetch;
+    await expect(syncInstalledAgents(target, fetchImpl)).rejects.toThrow(
+      /HTTP 500/,
     );
   });
 });
