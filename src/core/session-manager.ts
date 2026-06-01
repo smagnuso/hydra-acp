@@ -29,6 +29,10 @@ import {
   type PersistedUsage,
   type SessionRecord,
 } from "./session-store.js";
+import {
+  TombstoneStore,
+  shouldResurrectFromUpstream,
+} from "./tombstone-store.js";
 import type { SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator } from "./synopsis-coordinator.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
@@ -185,6 +189,8 @@ export interface SessionManagerOptions {
   // up, or a bundle imported from another machine). May be "~"/"$HOME";
   // expanded at use time. Defaults to "~".
   defaultCwd?: string;
+  // Override for tests; production code constructs its own.
+  tombstones?: TombstoneStore;
 }
 
 export class SessionManager {
@@ -192,6 +198,7 @@ export class SessionManager {
   private resurrectionInflight = new Map<string, Promise<Session>>();
   private spawner: AgentSpawner;
   private store: SessionStore;
+  private tombstones: TombstoneStore;
   private histories: HistoryStore;
   private idleTimeoutMs: number;
   private defaultModels: Record<string, string>;
@@ -231,6 +238,7 @@ export class SessionManager {
   ) {
     this.spawner = spawner ?? ((opts) => AgentInstance.spawn(opts));
     this.store = store ?? new SessionStore();
+    this.tombstones = options.tombstones ?? new TombstoneStore();
     this.sessionHistoryMaxEntries = options.sessionHistoryMaxEntries ?? 1000;
     this.histories = new HistoryStore({ maxEntries: this.sessionHistoryMaxEntries });
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
@@ -842,6 +850,25 @@ export class SessionManager {
         skipped += 1;
         continue;
       }
+      // Tombstone check: a session the user explicitly deleted stays
+      // gone unless the agent reports activity newer than what we
+      // recorded at delete time, which we take as "user revived this
+      // conversation in the agent" and resurrect.
+      const tombstone = await this.tombstones
+        .read(agentId, entry.sessionId)
+        .catch(() => undefined);
+      if (tombstone) {
+        if (!shouldResurrectFromUpstream(tombstone, entry.updatedAt)) {
+          skipped += 1;
+          continue;
+        }
+        await this.tombstones
+          .remove(agentId, entry.sessionId)
+          .catch(() => undefined);
+        this.logger?.info(
+          `syncFromAgent: resurrecting tombstoned ${agentId}/${entry.sessionId} (upstream updatedAt advanced past ${tombstone.upstreamUpdatedAt ?? "<unset>"})`,
+        );
+      }
       existing.add(dedupeKey);
       const newId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
       const now = new Date().toISOString();
@@ -1065,6 +1092,24 @@ export class SessionManager {
     session.onClose(({ deleteRecord }) => {
       this.sessions.delete(session.sessionId);
       if (deleteRecord) {
+        // Tombstone before unlink so the next agent sync doesn't
+        // reimport this upstream session. Snapshot updatedAt/cwd/title
+        // from the live Session (no extra fs read needed, and avoids
+        // racing the unlink) so syncFromAgent can tell whether the
+        // agent has progressed past our snapshot since deletion.
+        if (session.upstreamSessionId) {
+          void this.tombstones
+            .add({
+              agentId: session.agentId,
+              upstreamSessionId: session.upstreamSessionId,
+              deletedAt: new Date().toISOString(),
+              upstreamUpdatedAt: new Date(session.updatedAt).toISOString(),
+              cwd: session.cwd,
+              title: session.title,
+              reason: "user",
+            })
+            .catch(() => undefined);
+        }
         void this.store.delete(session.sessionId).catch(() => undefined);
         // History follows the same lifecycle as the session record —
         // an idle-close (deleteRecord: false) keeps both so the next
@@ -1771,6 +1816,24 @@ export class SessionManager {
     const record = await this.store.read(sessionId);
     if (!record) {
       return false;
+    }
+    // Tombstone before we drop the file so the next periodic
+    // syncFromAgent doesn't reimport the same upstream session under a
+    // fresh hydra id. Skipped for records with no upstream (shouldn't
+    // happen for cold records — upstreamSessionId is required by
+    // SessionRecord — but defensive in case the schema relaxes).
+    if (record.upstreamSessionId) {
+      await this.tombstones
+        .add({
+          agentId: record.agentId,
+          upstreamSessionId: record.upstreamSessionId,
+          deletedAt: new Date().toISOString(),
+          upstreamUpdatedAt: record.updatedAt,
+          cwd: record.cwd,
+          title: record.title,
+          reason: "user",
+        })
+        .catch(() => undefined);
     }
     await this.store.delete(sessionId).catch(() => undefined);
     return true;

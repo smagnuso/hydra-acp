@@ -2968,6 +2968,124 @@ describe("SessionManager.syncFromAgent", () => {
     expect(synced.map((r) => r.upstreamSessionId)).toEqual(["u_real"]);
     expect(skipped).toBe(1);
   });
+
+  it("skips entries that match a tombstone with an unchanged upstreamUpdatedAt", async () => {
+    const { TombstoneStore } = await import("./tombstone-store.js");
+    const tombstones = new TombstoneStore();
+    await tombstones.add({
+      agentId: "claude-code",
+      upstreamSessionId: "u_dead",
+      deletedAt: "2026-06-01T00:00:00.000Z",
+      upstreamUpdatedAt: "2026-05-31T00:00:00.000Z",
+      reason: "user",
+    });
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            {
+              sessionId: "u_dead",
+              cwd: "/projects/a",
+              updatedAt: "2026-05-31T00:00:00.000Z",
+            },
+            { sessionId: "u_new", cwd: "/projects/b" },
+          ],
+        },
+      ],
+    });
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(synced.map((r) => r.upstreamSessionId)).toEqual(["u_new"]);
+    expect(skipped).toBe(1);
+    expect(await tombstones.has("claude-code", "u_dead")).toBe(true);
+  });
+
+  it("resurrects (drops tombstone, reimports) when the agent reports newer updatedAt", async () => {
+    const { TombstoneStore } = await import("./tombstone-store.js");
+    const tombstones = new TombstoneStore();
+    await tombstones.add({
+      agentId: "claude-code",
+      upstreamSessionId: "u_revived",
+      deletedAt: "2026-06-01T00:00:00.000Z",
+      upstreamUpdatedAt: "2026-05-31T00:00:00.000Z",
+      reason: "user",
+    });
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [
+        {
+          sessions: [
+            {
+              sessionId: "u_revived",
+              cwd: "/projects/a",
+              updatedAt: "2026-06-02T00:00:00.000Z",
+              title: "back from the dead",
+            },
+          ],
+        },
+      ],
+    });
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(skipped).toBe(0);
+    expect(synced).toHaveLength(1);
+    expect(synced[0]?.upstreamSessionId).toBe("u_revived");
+    expect(synced[0]?.title).toBe("back from the dead");
+    expect(await tombstones.has("claude-code", "u_revived")).toBe(false);
+  });
+
+  it("does not resurrect when the agent reports no updatedAt", async () => {
+    const { TombstoneStore } = await import("./tombstone-store.js");
+    const tombstones = new TombstoneStore();
+    await tombstones.add({
+      agentId: "claude-code",
+      upstreamSessionId: "u_dead2",
+      deletedAt: "2026-06-01T00:00:00.000Z",
+      upstreamUpdatedAt: "2026-05-31T00:00:00.000Z",
+    });
+    const { manager } = makeSyncManager({
+      capability: {},
+      pages: [{ sessions: [{ sessionId: "u_dead2", cwd: "/a" }] }],
+    });
+    const { synced, skipped } = await manager.syncFromAgent("claude-code");
+    expect(synced).toHaveLength(0);
+    expect(skipped).toBe(1);
+    expect(await tombstones.has("claude-code", "u_dead2")).toBe(true);
+  });
+});
+
+describe("SessionManager.deleteRecord", () => {
+  it("writes a tombstone capturing upstream identity and updatedAt", async () => {
+    const { SessionStore } = await import("./session-store.js");
+    const { TombstoneStore } = await import("./tombstone-store.js");
+    const store = new SessionStore();
+    await store.write({
+      sessionId: "hydra_session_doomed",
+      lineageId: "hydra_lineage_xxxxxxxxxxxxxxxx",
+      upstreamSessionId: "u_doomed",
+      agentId: "claude-code",
+      cwd: "/work",
+      title: "rip",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-05-15T10:00:00.000Z",
+    });
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => makeMockAgent({ agentId: "claude-code" }).agent,
+    );
+    const removed = await manager.deleteRecord("hydra_session_doomed");
+    expect(removed).toBe(true);
+
+    const tombstones = new TombstoneStore();
+    const t = await tombstones.read("claude-code", "u_doomed");
+    expect(t).toMatchObject({
+      agentId: "claude-code",
+      upstreamSessionId: "u_doomed",
+      upstreamUpdatedAt: "2026-05-15T10:00:00.000Z",
+      title: "rip",
+      cwd: "/work",
+      reason: "user",
+    });
+  });
 });
 
 describe("SessionManager.resurrect: pendingHistorySync", () => {

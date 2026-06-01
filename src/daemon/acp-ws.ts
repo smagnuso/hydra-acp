@@ -454,6 +454,38 @@ export function registerAcpWsEndpoint(
         });
       });
 
+      // Delete a session record (and, if live, close the agent first).
+      // Mirror the HTTP DELETE /v1/sessions/:id route so ACP clients
+      // (TUI, slack, future extensions) can purge a session without
+      // dropping to the REST API. Persists a tombstone via
+      // SessionManager so the periodic agent sync doesn't reimport the
+      // upstream session under a fresh hydra id.
+      connection.onRequest("hydra-acp/session/delete", async (raw) => {
+        const params = (raw ?? {}) as { sessionId?: unknown };
+        if (typeof params.sessionId !== "string") {
+          throw Object.assign(
+            new Error("hydra-acp/session/delete requires sessionId"),
+            { code: JsonRpcErrorCodes.InvalidParams },
+          );
+        }
+        const id =
+          (await deps.manager.resolveCanonicalId(params.sessionId)) ??
+          params.sessionId;
+        const live = deps.manager.get(id);
+        if (live) {
+          await live.close({ deleteRecord: true });
+          return { deleted: true, sessionId: id };
+        }
+        const removed = await deps.manager.deleteRecord(id);
+        if (!removed) {
+          throw Object.assign(
+            new Error(`session ${id} not found`),
+            { code: JsonRpcErrorCodes.SessionNotFound },
+          );
+        }
+        return { deleted: true, sessionId: id };
+      });
+
       connection.onRequest("hydra-acp/child_session/await", async (raw) => {
         const params = (raw ?? {}) as {
           childSessionId?: unknown;

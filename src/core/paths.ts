@@ -91,6 +91,25 @@ export const paths = {
   // generation doesn't double-run on restart.
   queueFile: (id: string) =>
     path.join(hydraHome(), "sessions", id, "queue.ndjson"),
+  // Tombstones for sessions that were deleted locally but might still
+  // be reported by an agent's session/list at the next periodic sync.
+  // One file per (agentId, upstreamSessionId); existence is the source
+  // of truth, contents are a small JSON blob for diagnostics and the
+  // "agent advanced past our snapshot → resurrect" decision. Hidden
+  // under sessions/ because SessionStore.read() filters non-conforming
+  // dir names (the leading dot fails SESSION_ID_PATTERN) so the
+  // directory cohabits safely with real session directories.
+  tombstonesDir: () => path.join(hydraHome(), "sessions", ".tombstones"),
+  tombstoneAgentDir: (agentId: string) =>
+    path.join(hydraHome(), "sessions", ".tombstones", encodeURIComponent(agentId)),
+  tombstoneFile: (agentId: string, upstreamSessionId: string) =>
+    path.join(
+      hydraHome(),
+      "sessions",
+      ".tombstones",
+      encodeURIComponent(agentId),
+      encodeURIComponent(upstreamSessionId),
+    ),
   extensionsDir: () => path.join(hydraHome(), "extensions"),
   extensionLogFile: (name: string) =>
     path.join(hydraHome(), "extensions", `${name}.log`),
