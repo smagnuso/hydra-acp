@@ -81,6 +81,7 @@ function fakeConfig(): HydraConfig {
       defaultEnterAction: "amend" as const,
       showThoughts: true,
       ambiguousWidth: "narrow",
+      diffContextLines: 3,
       promptHistoryMaxEntries: 2_000,
       maxToolItems: 5,
       maxPlanItems: 5,

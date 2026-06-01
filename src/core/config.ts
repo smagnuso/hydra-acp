@@ -139,6 +139,12 @@ const TuiConfig = z.object({
   // bleeds past the margin on wide terminals. The thought gutter uses an
   // ASCII marker, so this no longer affects marker alignment either way.
   ambiguousWidth: z.enum(["narrow", "wide"]).default("wide"),
+  // Unchanged context lines shown around each change in an expanded Edited
+  // diff. Some agents (e.g. pi) report edits as full-file old/new text via
+  // ACP "diff" content blocks; without hunking a 1-line edit would render
+  // the entire file. This bounds the context so only the changed region (±N
+  // lines) shows, with runs of unchanged lines collapsed to a marker.
+  diffContextLines: z.number().int().min(0).default(3),
   // Cap on entries kept in the cross-session global prompt-history file
   // (~/.hydra-acp/prompt-history). This is the ^P / ^R recall list
   // shared across all sessions; it's append-only on disk, so long-lived
@@ -292,6 +298,7 @@ export const HydraConfig = z.object({
     defaultEnterAction: "amend",
     showThoughts: true,
     ambiguousWidth: "wide",
+    diffContextLines: 3,
     promptHistoryMaxEntries: 2_000,
     maxToolItems: 5,
     maxPlanItems: 5,

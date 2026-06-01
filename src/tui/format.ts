@@ -994,6 +994,17 @@ export function formatToolLine(
 // scrollback. Hunks past the cap are summarized with a dim trailer.
 const EDIT_DIFF_MAX_LINES = 40;
 
+// How many unchanged context lines to keep around each change when an edit
+// carries full-file old/new text (ACP "diff" content blocks, as pi emits).
+// Infinity = no hunking (render every context line — the historical
+// behavior, kept for the `hydra session diff` CLI path). The TUI sets a
+// finite value at startup via setDiffContextLines so a 1-line edit in a
+// big file shows a small hunk instead of the whole file.
+let diffContextLines = Number.POSITIVE_INFINITY;
+export function setDiffContextLines(n: number): void {
+  diffContextLines = n >= 0 ? n : 0;
+}
+
 // Mode for formatEditDiffBlock — mirrors the `tui.showFileUpdates`
 // config values that map to a non-empty block ("none" short-circuits
 // upstream in app.ts before we get here).
@@ -1102,36 +1113,88 @@ export interface BuildUnifiedDiffOptions {
   // EDIT_DIFF_MAX_LINES for the TUI scrollback path; callers like
   // `hydra session diff` pass Infinity to render the full body.
   maxLines?: number;
+  // Unchanged context lines kept around each change. Defaults to the
+  // module-level diffContextLines (Infinity unless setDiffContextLines was
+  // called). Finite values collapse the runs of unchanged lines between
+  // hunks into a "⋯ N unchanged lines" marker, so a 1-line edit in a big
+  // file (e.g. an ACP full-file diff) renders a small hunk, not the whole
+  // file.
+  contextLines?: number;
+}
+
+// Render one LCS op as a unified-diff body line.
+function renderDiffOp(op: DiffOp): string {
+  if (op.op === "=") {
+    return `  ${op.text}`;
+  }
+  return op.op === "-" ? `- ${op.text}` : `+ ${op.text}`;
 }
 
 // Build a unified-diff body for the given edit. Computes an LCS-based
 // line-level diff so context lines flow between +/- chunks rather than
 // painting every old line as removed and every new line as added.
-// Truncates with a "… N more" footer past the configured cap.
+// Collapses far-from-change context into hunks (contextLines) and
+// truncates with a "… N more" footer past the configured cap.
 export function buildUnifiedDiff(
   diff: EditDiff,
   opts: BuildUnifiedDiffOptions = {},
 ): string {
   const maxLines = opts.maxLines ?? EDIT_DIFF_MAX_LINES;
+  const ctx = opts.contextLines ?? diffContextLines;
   const { oldLines, newLines } = diffLinePair(diff);
   const ops = diffLines(oldLines, newLines);
+
+  // Hunking pass: with a finite context window, keep only changes and the
+  // `ctx` unchanged lines on either side; runs of dropped context collapse
+  // into a single gap marker. Infinite context (CLI path) renders every op.
+  const display: string[] = [];
+  if (!Number.isFinite(ctx)) {
+    for (const op of ops) {
+      display.push(renderDiffOp(op));
+    }
+  } else {
+    const hasChange = ops.some((o) => o.op !== "=");
+    if (!hasChange) {
+      return "";
+    }
+    const keep = new Array<boolean>(ops.length).fill(false);
+    for (let i = 0; i < ops.length; i++) {
+      if (ops[i]!.op !== "=") {
+        const lo = Math.max(0, i - ctx);
+        const hi = Math.min(ops.length - 1, i + ctx);
+        for (let k = lo; k <= hi; k++) {
+          keep[k] = true;
+        }
+      }
+    }
+    let i = 0;
+    while (i < ops.length) {
+      if (keep[i]) {
+        display.push(renderDiffOp(ops[i]!));
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j < ops.length && !keep[j]) {
+        j++;
+      }
+      const skipped = j - i;
+      display.push(`  ⋯ ${skipped} unchanged line${skipped === 1 ? "" : "s"}`);
+      i = j;
+    }
+  }
+
+  // Line-cap pass over the (possibly hunked) body.
   const rendered: string[] = [];
-  for (let idx = 0; idx < ops.length; idx++) {
-    const op = ops[idx]!;
+  for (let idx = 0; idx < display.length; idx++) {
     const wouldTruncate =
-      rendered.length >= maxLines - 1 && idx < ops.length - 1;
+      rendered.length >= maxLines - 1 && idx < display.length - 1;
     if (wouldTruncate) {
-      const remaining = ops.length - idx;
+      const remaining = display.length - idx;
       rendered.push(`… ${remaining} more line${remaining === 1 ? "" : "s"}`);
       break;
     }
-    if (op.op === "=") {
-      rendered.push(`  ${op.text}`);
-    } else if (op.op === "-") {
-      rendered.push(`- ${op.text}`);
-    } else {
-      rendered.push(`+ ${op.text}`);
-    }
+    rendered.push(display[idx]!);
   }
   return rendered.join("\n");
 }

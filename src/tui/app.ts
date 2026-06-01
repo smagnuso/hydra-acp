@@ -110,6 +110,7 @@ import {
   formatEditDiffBlock,
   formatEvent,
   formatExitPlanMode,
+  setDiffContextLines,
   formatToolLine,
   isTerminalToolStatus,
   parseAgentMarkdown,
@@ -1413,6 +1414,9 @@ async function runSession(
   // glyphs before any line is measured, so the column budget matches the
   // render (prevents right-margin bleed on ambiguous-wide terminals).
   setAmbiguousWide(config.tui.ambiguousWidth === "wide");
+  // Bound expanded-diff context so full-file edit payloads (e.g. pi's ACP
+  // diff blocks) render a hunk around the change, not the whole file.
+  setDiffContextLines(config.tui.diffContextLines);
 
   const screen: Screen = new Screen({
     term,

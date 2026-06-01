@@ -672,6 +672,56 @@ describe("buildUnifiedDiff", () => {
     expect(rendered.length).toBe(40);
     expect(rendered[rendered.length - 1]).toMatch(/^… \d+ more lines$/);
   });
+
+  it("hunks a full-file diff to contextLines around each change", () => {
+    // 1-line change in a 30-line file: with 3 lines of context the body is
+    // a small hunk, not the whole file.
+    const file = (changed: boolean): string =>
+      Array.from({ length: 30 }, (_, i) =>
+        i === 15 && changed ? "changed" : `line ${i}`,
+      ).join("\n");
+    const out = buildUnifiedDiff(
+      { oldText: file(false), newText: file(true) },
+      { maxLines: Infinity, contextLines: 3 },
+    );
+    const rows = out.split("\n");
+    // gap + 3 ctx + (- +) + 3 ctx + gap = 10 rows.
+    expect(rows).toEqual([
+      "  ⋯ 12 unchanged lines",
+      "  line 12",
+      "  line 13",
+      "  line 14",
+      "- line 15",
+      "+ changed",
+      "  line 16",
+      "  line 17",
+      "  line 18",
+      "  ⋯ 11 unchanged lines",
+    ]);
+  });
+
+  it("renders every context line when contextLines is Infinity (CLI path)", () => {
+    const file = (changed: boolean): string =>
+      Array.from({ length: 10 }, (_, i) =>
+        i === 5 && changed ? "changed" : `line ${i}`,
+      ).join("\n");
+    const out = buildUnifiedDiff(
+      { oldText: file(false), newText: file(true) },
+      { maxLines: Infinity, contextLines: Infinity },
+    );
+    // 9 unchanged context lines + 1 removed + 1 added, no gap markers.
+    expect(out.split("\n")).toHaveLength(11);
+    expect(out).not.toContain("⋯");
+  });
+
+  it("returns an empty body for a no-op edit when hunking", () => {
+    expect(
+      buildUnifiedDiff(
+        { oldText: "a\nb\nc\n", newText: "a\nb\nc\n" },
+        { contextLines: 3 },
+      ),
+    ).toBe("");
+  });
 });
 
 describe("formatExitPlanMode", () => {
