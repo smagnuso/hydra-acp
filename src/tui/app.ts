@@ -2127,6 +2127,12 @@ async function runSession(
         screen.resumeRepaint();
         return;
       }
+      if (choice.kind === "exit") {
+        // Current session was killed/deleted from inside the picker, so
+        // there's nothing to resume to. Exit hydra entirely.
+        stop(0);
+        return;
+      }
       if (choice.kind === "new") {
         resolvedChoice = { choice, sessions };
         break;
@@ -4576,7 +4582,7 @@ async function resolveSession(
         ? { initialPrompt: opts.initialPrompt }
         : {}),
     });
-    if (choice.kind === "abort") {
+    if (choice.kind === "abort" || choice.kind === "exit") {
       return null;
     }
     if (choice.kind === "new") {

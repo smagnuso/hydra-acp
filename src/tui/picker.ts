@@ -75,7 +75,8 @@ export type PickerResult =
       sourceUpstreamSessionId?: string;
     }
   | { kind: "new"; prompt?: string }
-  | { kind: "abort" };
+  | { kind: "abort" }
+  | { kind: "exit" };
 
 export interface PickOptions {
   cwd: string;
@@ -1491,17 +1492,12 @@ export async function pickSession(
     };
     // Abort returns the user to the session they opened the picker from.
     // If that session was killed/deleted in this picker session there's
-    // nothing live to return to, so we refuse the abort and keep the
-    // picker up. Returns true if the abort was handled (i.e. resolved).
+    // nothing live to return to, so we resolve with `exit` instead — the
+    // caller treats that as "exit hydra entirely" rather than re-attaching
+    // to a session that no longer exists. Returns true if handled.
     const tryAbort = (): boolean => {
-      if (currentSessionGone) {
-        transientStatus =
-          "current session ended — pick a session or start a new one";
-        paintIndicator();
-        return false;
-      }
       cleanup();
-      resolve({ kind: "abort" });
+      resolve({ kind: currentSessionGone ? "exit" : "abort" });
       return true;
     };
     // Refetch sessions from the daemon and re-render. When `preferredId`

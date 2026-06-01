@@ -636,7 +636,7 @@ describe("pickSession: killing the current session blocks abort", () => {
     await new Promise((r) => setTimeout(r, 0));
   };
 
-  it("refuses to abort back into the session that was just killed", async () => {
+  it("exits hydra on abort when the current session was just killed", async () => {
     const live = session({
       sessionId: "hydra-current",
       status: "live",
@@ -666,22 +666,11 @@ describe("pickSession: killing the current session blocks abort", () => {
     drv.press("k", { isCharacter: true });
     drv.press("y", { isCharacter: true });
     await flush();
-    // Escape must NOT resolve the picker — there's no live session to
-    // return to.
+    // There's no live session to return to, so escape resolves with
+    // `exit` — the caller treats that as "exit hydra entirely" instead
+    // of re-attaching to a session that no longer exists.
     drv.press("ESCAPE");
-    const settled = await Promise.race([
-      drv.resolveOnce.then(() => "resolved"),
-      new Promise((r) => setTimeout(() => r("pending"), 20)),
-    ]);
-    expect(settled).toBe("pending");
-    // Attaching to a different choice still works: start a new session.
-    drv.press("UP");
-    drv.type("fresh start");
-    drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
-      kind: "new",
-      prompt: "fresh start",
-    });
+    await expect(drv.resolveOnce).resolves.toEqual({ kind: "exit" });
   });
 
   it("still aborts normally when a non-current session is killed", async () => {
