@@ -3405,7 +3405,10 @@ async function runSession(
     if (text.length === 0)
       return;
     if (thoughtKey === null) {
-      screen.ensureSeparator();
+      // Tag the leading separator "thought" so the ^T hide-thoughts filter
+      // drops the gap above the block along with its body — otherwise the
+      // blank survives the filter and stacks up between visible content.
+      screen.ensureSeparator("thought");
       thoughtKey = `thought:${thoughtSeq}`;
       thoughtSeq += 1;
       thoughtBuffer = "";

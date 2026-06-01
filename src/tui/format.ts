@@ -253,7 +253,12 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     maxWidth,
   } = opts;
   const out: FormattedLine[] = [];
-  const lines = text.split("\n");
+  // Drop leading whitespace (blank lines + indentation) before the first
+  // content. Streamed reasoning/agent deltas frequently begin with a space,
+  // which would otherwise land between the gutter and the first word ("· "
+  // + " word" → "·  word") and push the first line one column right of the
+  // (whitespace-trimmed) continuation rows.
+  const lines = text.replace(/^\s+/, "").split("\n");
   let inCode = false;
   let codeLang = "";
   let codeBuffer: string[] = [];
@@ -417,6 +422,10 @@ export function parseAgentMarkdown(
 // (which keys on bodyStyle) catches every line. The "· " gutter appears on
 // the first non-blank line; both inline resets use "^-" (bold-off only) so
 // bold and code spans stay in the same gray register without a hue shift.
+//
+// The off-by-one drift that made the marker look misaligned was a leading
+// space in the streamed body (stripped now in parseMarkdown), not the dot's
+// width — so the U+00B7 MIDDLE DOT is fine here.
 export function parseThoughtMarkdown(text: string): FormattedLine[] {
   return parseMarkdown(text, {
     proseStyle: "thought",
@@ -859,7 +868,10 @@ function formatBlock(
   sentBy?: string,
   fillRow?: boolean,
 ): FormattedLine[] {
-  const lines = text.split("\n");
+  // Mirror parseMarkdown: strip leading whitespace so a streamed/replayed
+  // body that begins with a space doesn't push the first line one column
+  // past the gutter and out of alignment with later rows.
+  const lines = text.replace(/^\s+/, "").split("\n");
   const out: FormattedLine[] = [];
   if (sentBy) {
     out.push({

@@ -1599,7 +1599,11 @@ export class Screen {
   // plan to its eventual tail position, and the separator we're adding
   // here is for whatever content is *about* to be appended (which will
   // land at sticky.start and push the plan back via moveStickyToEnd).
-  ensureSeparator(): void {
+  // `bodyStyle` tags the inserted blank so a draw-time filter can drop it
+  // together with the block it precedes. Thoughts pass "thought" so the ^T
+  // hide-thoughts filter removes the gap above a hidden thought instead of
+  // leaving an orphaned blank line in scrollback.
+  ensureSeparator(bodyStyle?: Style): void {
     if (this.lines.length === 0) {
       return;
     }
@@ -1621,6 +1625,9 @@ export class Screen {
       return;
     }
     const sep: FormattedLine = { body: "" };
+    if (bodyStyle !== undefined) {
+      sep.bodyStyle = bodyStyle;
+    }
     if (stickyAtEnd) {
       this.lines.splice((sticky as { start: number }).start, 0, sep);
       (sticky as { start: number }).start += 1;
@@ -3128,11 +3135,11 @@ export class Screen {
     }
     const prefix = line.prefix ?? "";
     const room = Math.max(1, width - prefix.length);
-    // The "agent" and "heading-*" bodyStyles are routed through term-kit's
-    // markup-interpreting writer (see writeStyled); every other style emits
-    // text via .noFormat, so caret sequences are literal there and the wrap
-    // budget must include them. Keeping stripMarkup off by default
-    // preserves existing cwd/title/spec behavior.
+    // The "agent", "thought", and "heading-*" bodyStyles are routed through
+    // term-kit's markup-interpreting writer (see writeStyled); every other
+    // style emits text via .noFormat, so caret sequences are literal there
+    // and the wrap budget must include them. Keeping stripMarkup off by
+    // default preserves existing cwd/title/spec behavior.
     const stripMarkup = bodyStyleUsesMarkup(line.bodyStyle);
     const chunks = line.ansi
       ? wrapAnsiBody(line.body, room)
@@ -3464,6 +3471,12 @@ function writeBodyWithHighlight(
 function bodyStyleUsesMarkup(style: Style | undefined): boolean {
   return (
     style === "agent" ||
+    // Thoughts switched to the markup-interpreting writer (writeStyled's
+    // "thought" case uses term.brightBlack without .noFormat), so their
+    // caret spans (^ccode^K, ^+bold^-) are zero-width on screen. wrap/
+    // truncate must strip them too or thought lines wrap several columns
+    // short of the margin whenever they contain inline code/bold.
+    style === "thought" ||
     style === "heading-1" ||
     style === "heading-2" ||
     style === "heading-3"

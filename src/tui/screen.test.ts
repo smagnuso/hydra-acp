@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
+import { parseThoughtMarkdown } from "./format.js";
 import type { InputDispatcher } from "./input.js";
 import {
   Screen,
@@ -287,6 +288,103 @@ describe("Screen wrapTail bounded walk", () => {
     const { rows, exhausted } = wrapTail(screen, 80, 10);
     expect(rows).toEqual([]);
     expect(exhausted).toBe(true);
+  });
+
+  it("wraps thought lines flush to a 2-column gutter, ignoring caret markup in the width budget", () => {
+    const screen = makeScreen();
+    // `^c…^K` (inline code) and `^+…^-` (bold) are zero-width on screen —
+    // the wrap budget must skip them so the line fills to the margin, the
+    // same as agent text. The whole thought body left-aligns at column 2
+    // (the "· " gutter); wrapped rows match that indent.
+    screen.appendLine({
+      prefix: "· ",
+      bodyStyle: "thought",
+      body: "Let me check the ^csettings.json^K file and confirm the ^+banner^- source here",
+    });
+    const rows = wrapAll(screen, 40);
+    expect(rows.length).toBeGreaterThan(1);
+    // First row carries the bullet gutter; continuations match its width.
+    expect(rows[0]?.prefix).toBe("· ");
+    for (const row of rows.slice(1)) {
+      expect(row.prefix).toBe("  ");
+    }
+    // No row overflows the terminal once caret markup is discounted.
+    const visibleWidth = (s: string): number =>
+      s.replace(/\^(?:\^|[+\-:CcKY])/g, (m) => (m === "^^" ? "^" : "")).length;
+    for (const row of rows) {
+      expect((row.prefix ?? "").length + visibleWidth(row.body)).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it("uses the U+00B7 middle-dot bullet as the thought gutter", () => {
+    const [first] = parseThoughtMarkdown("hello");
+    expect(first?.prefix).toBe("· ");
+    expect(first?.prefix?.codePointAt(0)).toBe(0x00b7);
+  });
+
+  it("strips a leading space so the first thought line stays flush with the gutter", () => {
+    const screen = makeScreen();
+    // Streamed reasoning deltas often begin with a space; it must not land
+    // between the "· " gutter and the first word (which pushed the first
+    // line one column right of the continuations).
+    for (const l of parseThoughtMarkdown(
+      " I'm realizing the leading space in the body was the actual cause here.",
+    )) {
+      screen.appendLine(l);
+    }
+    const rows = wrapAll(screen, 40);
+    expect(rows[0]?.prefix).toBe("· ");
+    expect(rows[0]?.body.startsWith(" ")).toBe(false);
+    expect(rows[0]?.body.startsWith("I'm")).toBe(true);
+    for (const row of rows.slice(1)) {
+      expect(row.prefix).toBe("  ");
+    }
+  });
+
+  it("keeps every thought line aligned at the gutter across paragraphs", () => {
+    const screen = makeScreen();
+    // A multi-paragraph thought: the second paragraph's first line must
+    // stay aligned with the first paragraph's wrapped rows (no drop back to
+    // a narrower indent), which was the staggered-look regression.
+    for (const l of parseThoughtMarkdown(
+      "First paragraph that is long enough to wrap onto a second row here.\n\n" +
+        "Second paragraph also long enough to wrap onto another row of text.",
+    )) {
+      screen.appendLine(l);
+    }
+    const rows = wrapAll(screen, 50);
+    expect(rows[0]?.prefix).toBe("· ");
+    for (const row of rows.slice(1)) {
+      expect(row.prefix).toBe("  ");
+    }
+  });
+
+  it("hideThoughts drops a thought-tagged separator along with the thought body", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "before" });
+    // Mirrors appendThought: a thought block opens with a "thought"-tagged
+    // separator (the gap above it) followed by thought-styled body lines.
+    screen.ensureSeparator("thought");
+    screen.upsertLines("thought:0", [
+      { body: "thinking...", bodyStyle: "thought" },
+    ]);
+    screen.appendLine({ body: "after" });
+
+    // Shown: separator + thought body are both visible.
+    expect(wrapAll(screen, 80).map((l) => l.body)).toEqual([
+      "before",
+      "",
+      "thinking...",
+      "after",
+    ]);
+
+    // Hidden: the tagged separator AND the body collapse to nothing — no
+    // orphaned blank line left behind.
+    screen.setHideThoughts(true);
+    expect(wrapAll(screen, 80).map((l) => l.body)).toEqual([
+      "before",
+      "after",
+    ]);
   });
 });
 
