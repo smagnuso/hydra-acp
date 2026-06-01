@@ -293,6 +293,18 @@ export class InputDispatcher {
     }
   }
 
+  // Replace a [start, end) span on the current line with `text`, landing
+  // the cursor at the end of the inserted text. Used by file-path tab
+  // completion: the typed path token gets swapped for the completed one.
+  // Out-of-range bounds are clamped to the line length.
+  replaceRangeOnCurrentLine(start: number, end: number, text: string): void {
+    const line = this.currentLine();
+    const s = Math.max(0, Math.min(start, line.length));
+    const e = Math.max(s, Math.min(end, line.length));
+    this.setCurrentLine(line.slice(0, s) + text + line.slice(e));
+    this.col = s + text.length;
+  }
+
   // Public seed for the buffer (used for Escape pre-fill). Treated like a
   // fresh draft: nav state and any saved draft are cleared, cursor lands
   // at the end so the user can edit immediately. Attachments restore

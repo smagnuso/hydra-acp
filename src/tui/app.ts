@@ -87,6 +87,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
 import {
+  completePathToken,
+  extractPathToken,
+} from "./file-completion.js";
+import {
   computeAttachReconcile,
   parseReattachResponse,
   shouldDriftSnap,
@@ -267,7 +271,7 @@ function isReadonlyForbiddenEffect(effect: InputEffect): boolean {
 const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+Enter", "newline in prompt"],
   ["Shift+Tab", "cycle agent modes (plan / accept-edits / etc.)"],
-  ["Tab", "indent · slash-command completion"],
+  ["Tab", "indent · slash-command / file-path completion"],
   null,
   ["↑ / ↓", "prompt history · queue navigation"],
   ["←/→ Home/End", "cursor movement"],
@@ -1546,27 +1550,79 @@ async function runSession(
     return matches;
   };
 
+  // File-path completions surfaced after the last Tab press. Held in this
+  // closure (rather than recomputed by currentCompletions) because they're
+  // a one-shot reaction to Tab — refreshCompletions prefers slash-command
+  // matches, then these, and any non-Tab key clears them so the list doesn't
+  // linger as the user keeps typing.
+  let fileCompletions: AvailableCommand[] = [];
+
   const refreshCompletions = (): void => {
-    screen.setCompletions(currentCompletions());
+    const slash = currentCompletions();
+    if (slash.length > 0) {
+      fileCompletions = [];
+      screen.setCompletions(slash);
+      return;
+    }
+    screen.setCompletions(fileCompletions);
   };
 
   const tryHandleCompletionKey = (ev: KeyEvent): boolean => {
     if (ev.type !== "key" || ev.name !== "tab") {
+      // Any non-Tab key dismisses a lingering file-completion list.
+      if (fileCompletions.length > 0) {
+        fileCompletions = [];
+      }
       return false;
     }
+    // Slash-command completion takes precedence when the first line is a
+    // /command.
     const matches = currentCompletions();
-    if (matches.length === 0) {
-      return false;
-    }
-    const firstLine = dispatcher.state().buffer[0] ?? "";
-    const next = computeTabCompletion({
-      matches: matches.map((m) => m.name),
-      firstLine,
-    });
-    if (next === null) {
+    if (matches.length > 0) {
+      fileCompletions = [];
+      const firstLine = dispatcher.state().buffer[0] ?? "";
+      const next = computeTabCompletion({
+        matches: matches.map((m) => m.name),
+        firstLine,
+      });
+      if (next === null) {
+        return true;
+      }
+      dispatcher.replaceFirstLine(next);
       return true;
     }
-    dispatcher.replaceFirstLine(next);
+    // Otherwise, try completing a file path under the cursor. Falling
+    // through (returning false) lets the dispatcher handle Tab as indent.
+    return tryHandleFileCompletion();
+  };
+
+  // Complete a filesystem path token immediately before the cursor against
+  // the session cwd. Returns true when Tab was consumed (a path-like token
+  // was found and the directory was readable), false to let Tab indent.
+  const tryHandleFileCompletion = (): boolean => {
+    const st = dispatcher.state();
+    const line = st.buffer[st.row] ?? "";
+    const tok = extractPathToken(line, st.col);
+    if (tok === null) {
+      return false;
+    }
+    const result = completePathToken(tok.token, resolvedCwd);
+    if (result === null) {
+      return false;
+    }
+    if (result.replacement !== tok.token) {
+      dispatcher.replaceRangeOnCurrentLine(
+        tok.start,
+        st.col,
+        result.replacement,
+      );
+    }
+    // Show the candidate basenames when more than one matched; a unique
+    // match is already committed into the buffer so the list adds nothing.
+    fileCompletions =
+      result.candidates.length > 1
+        ? result.candidates.map((name) => ({ name }))
+        : [];
     return true;
   };
 
