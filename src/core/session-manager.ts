@@ -36,7 +36,8 @@ import {
 import type { SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator } from "./synopsis-coordinator.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
-import { getToolBlob } from "./tool-store.js";
+import { getToolBlob, readToolBlobGz, writeToolBlobGz } from "./tool-store.js";
+import { collectToolBlobHashes } from "./tool-content.js";
 import { paths } from "./paths.js";
 import { expandHome } from "./config.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
@@ -1508,11 +1509,15 @@ export class SessionManager {
   // disk. Backfills lineageId if the on-disk record pre-dates that
   // field. Returns undefined if the session doesn't exist. Callers
   // populate the bundle's exportedFrom metadata themselves.
-  async exportBundle(sessionId: string): Promise<
+  async exportBundle(
+    sessionId: string,
+    opts: { tools?: "inline" | "references" } = {},
+  ): Promise<
     | {
         record: SessionRecord & { lineageId: string };
         history: HistoryStoreEntry[];
         promptHistory: string[];
+        toolBlobs?: Record<string, string>;
       }
     | undefined
   > {
@@ -1540,9 +1545,24 @@ export class SessionManager {
       }).catch(() => undefined);
       withLineage = backfilled as SessionRecord & { lineageId: string };
     }
-    const history = await this.histories.load(sessionId).catch(() => []);
+    const tools = opts.tools ?? "inline";
+    const history = await this.histories
+      .load(sessionId, tools === "references" ? { tools: "references" } : {})
+      .catch(() => []);
     const promptHistory = await loadPromptHistorySafely(sessionId);
-    return { record: withLineage, history, promptHistory };
+    if (tools !== "references") {
+      return { record: withLineage, history, promptHistory };
+    }
+    // Assemble the referenced tool blobs (gzipped, base64) so the bundle is
+    // a complete, deduped, compressed backup the importer can hydrate from.
+    const toolBlobs: Record<string, string> = {};
+    for (const hash of collectToolBlobHashes(history)) {
+      const gz = await readToolBlobGz(sessionId, hash);
+      if (gz) {
+        toolBlobs[hash] = gz.toString("base64");
+      }
+    }
+    return { record: withLineage, history, promptHistory, toolBlobs };
   }
 
   // Create a local session from an imported bundle. Without `replace`,
@@ -1758,6 +1778,19 @@ export class SessionManager {
       args.sessionId,
       args.bundle.history as HistoryStoreEntry[],
     );
+    // Restore externalized tool blobs (tools=references bundles). The
+    // ref-form history written above points at these hashes; getToolBlob
+    // hydrates from them. Inline bundles carry no toolBlobs (rewrite
+    // re-externalizes their inline content locally instead).
+    if (args.bundle.toolBlobs) {
+      for (const [hash, b64] of Object.entries(args.bundle.toolBlobs)) {
+        await writeToolBlobGz(
+          args.sessionId,
+          hash,
+          Buffer.from(b64, "base64"),
+        ).catch(() => undefined);
+      }
+    }
     // Stamp the freshly-written history file with the source's last-turn
     // mtime so AGE on a passive mirror reflects when the conversation
     // last moved, not when we imported it. Without this, a cold import

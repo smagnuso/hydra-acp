@@ -144,6 +144,33 @@ export interface ToolBlobRef {
   bytes: number;
 }
 
+// Collect the unique blob hashes referenced by a ref-form history (loaded
+// with { tools: "references" }). Used to assemble a bundle's toolBlobs.
+export function collectToolBlobHashes(entries: HistoryEntry[]): Set<string> {
+  const out = new Set<string>();
+  const walk = (value: unknown): void => {
+    if (isToolBlobRef(value)) {
+      out.add(value.__hydraBlob);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        walk(item);
+      }
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const v of Object.values(value as Record<string, unknown>)) {
+        walk(v);
+      }
+    }
+  };
+  for (const entry of entries) {
+    walk(entry.params);
+  }
+  return out;
+}
+
 export function isToolBlobRef(value: unknown): value is ToolBlobRef {
   return (
     !!value &&

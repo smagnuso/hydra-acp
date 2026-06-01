@@ -259,22 +259,35 @@ export function registerSessionRoutes(
   app.get("/v1/sessions/:id/export", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
-    // `?tools=summary` sheds heavy tool payload (diff bodies, stdout) from
-    // the bundle; default `inline` is byte-for-byte the recorded history.
-    // Used by the archiver to keep sync bundles small.
-    const toolMode = parseToolContentMode(
-      (request.query as { tools?: unknown } | undefined)?.tools,
+    // `?tools=` shapes tool payload in the bundle:
+    //   inline (default) — byte-for-byte the recorded history.
+    //   references       — ref-form history + deduped, gzipped toolBlobs
+    //                      (complete + compact backup; archiver uses this).
+    //   summary          — shed bodies entirely (smallest, lossy).
+    const toolsRaw = (request.query as { tools?: unknown } | undefined)?.tools;
+    const toolMode =
+      toolsRaw === "references"
+        ? "references"
+        : parseToolContentMode(toolsRaw);
+    const exported = await manager.exportBundle(
+      id,
+      toolMode === "references" ? { tools: "references" } : {},
     );
-    const exported = await manager.exportBundle(id);
     if (!exported) {
       reply.code(404).send({ error: "session not found" });
       return;
     }
     const bundle = encodeBundle({
       record: exported.record,
-      history: applyToolContentMode(exported.history, toolMode),
+      history:
+        toolMode === "summary"
+          ? applyToolContentMode(exported.history, "summary")
+          : exported.history,
       promptHistory:
         exported.promptHistory.length > 0 ? exported.promptHistory : undefined,
+      ...(exported.toolBlobs !== undefined
+        ? { toolBlobs: exported.toolBlobs }
+        : {}),
       hydraVersion: HYDRA_VERSION,
       machine: os.hostname(),
       hydraHost: resolveHydraHost(defaults),

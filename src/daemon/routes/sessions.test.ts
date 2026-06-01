@@ -519,6 +519,58 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(summaryBody).toContain("/repo/foo.ts");
   });
 
+  it("GET /export?tools=references ships ref-form history + deduped gzipped toolBlobs", async () => {
+    const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const history = new HistoryStore();
+    const big = "K".repeat(30_000);
+    await history.append(s.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "e1",
+          status: "completed",
+          content: [{ type: "diff", path: "/repo/foo.ts", oldText: big, newText: big + "x" }],
+        },
+      },
+      recordedAt: 1,
+    });
+    const auth = { Authorization: "Bearer test" } as Record<string, string>;
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${s.sessionId}/export?tools=references`,
+      { headers: auth },
+    );
+    expect(res.status).toBe(200);
+    const bundle = (await res.json()) as {
+      history: Array<{ params: { update: { content: Array<Record<string, unknown>> } } }>;
+      toolBlobs?: Record<string, string>;
+    };
+    const body = JSON.stringify(bundle);
+    // History carries refs, not the full text; blobs travel in toolBlobs.
+    expect(body).not.toContain(big);
+    expect(bundle.toolBlobs).toBeDefined();
+    const hashes = Object.keys(bundle.toolBlobs!);
+    expect(hashes.length).toBe(2); // old + new, deduped by content
+    const block = bundle.history.find((e) =>
+      (e.params?.update?.content ?? []).some((b) => b.type === "diff"),
+    )!.params.update.content.find((b) => b.type === "diff")!;
+    expect((block.oldText as { __hydraBlob?: string }).__hydraBlob).toBeDefined();
+
+    // Re-import under a new lineage and confirm the blobs are restored so a
+    // hydrating load reconstructs the original inline content.
+    const imp = await fetch(`${harness.baseUrl}/v1/sessions/import`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ bundle, replace: true }),
+    });
+    expect(imp.status === 200 || imp.status === 201).toBe(true);
+    const hydrated = await harness.manager.loadHistory(s.sessionId);
+    const diff = (hydrated[0]!.params as { update: { content: Array<Record<string, unknown>> } })
+      .update.content[0]!;
+    expect(diff.oldText).toBe(big);
+    expect(diff.newText).toBe(big + "x");
+  });
+
   it("GET /tools/:hash returns an externalized blob, 404 for unknown", async () => {
     const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
     const history = new HistoryStore();

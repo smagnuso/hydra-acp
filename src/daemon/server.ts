@@ -6,6 +6,7 @@ import { selectAcpSubprotocol } from "./ws-protocol.js";
 import pino, { type Level } from "pino";
 import createPinoRoll from "pino-roll";
 import { type HydraConfig, extensionList, transformerList } from "../core/config.js";
+import { setToolBlobCompression } from "../core/tool-store.js";
 import { Registry } from "../core/registry.js";
 import { AgentInstance } from "../core/agent-instance.js";
 import { SessionManager, type AgentSpawner } from "../core/session-manager.js";
@@ -169,6 +170,8 @@ export async function startDaemon(
       stderrTailBytes: config.daemon.agentStderrTailBytes,
       logger: agentLogger,
     });
+  // Honor the tool-blob compression escape hatch before any history write.
+  setToolBlobCompression(config.compressToolContent);
   const extensionCommands = new ExtensionCommandRegistry();
   const manager = new SessionManager(registry, spawner, undefined, {
     idleTimeoutMs: config.daemon.sessionIdleTimeoutSeconds * 1_000,

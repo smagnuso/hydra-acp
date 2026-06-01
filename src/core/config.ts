@@ -284,6 +284,12 @@ export const HydraConfig = z.object({
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.
   defaultCwd: z.string().default("~"),
+  // Gzip externalized tool-content blobs at rest (tools/<sha256>.gz).
+  // Default true — text diffs/output compress ~3.5x and decompression is
+  // lazy (only on diff expand in references mode). Set false to write plain
+  // blobs instead, as an escape hatch if gzip CPU is ever a problem; reads
+  // transparently handle both, so flipping it only affects new writes.
+  compressToolContent: z.boolean().default(true),
   // Cap on cold sessions shown in CLI `sessions` listing and the TUI
   // picker. Live sessions are always included; cold are sorted by
   // recency and truncated to this count. `--all` overrides in the CLI.

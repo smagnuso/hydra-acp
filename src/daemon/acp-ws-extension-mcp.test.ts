@@ -29,6 +29,7 @@ function testConfig(): HydraConfig {
     defaultModels: {},
     synopsisOnClose: false,
     defaultCwd: os.homedir(),
+    compressToolContent: true,
     sessionListColdLimit: 20,
     agents: {},
     agentOverrides: {},

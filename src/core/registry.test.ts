@@ -65,6 +65,7 @@ function fakeConfig(): HydraConfig {
     defaultModels: {},
     synopsisOnClose: false,
     defaultCwd: homedir(),
+    compressToolContent: true,
     sessionListColdLimit: 20,
     agents: {},
     agentOverrides: {},

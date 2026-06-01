@@ -73,6 +73,11 @@ export const Bundle = z.object({
   session: BundleSession,
   history: z.array(HistoryEntrySchema),
   promptHistory: z.array(z.string()).optional(),
+  // Externalized tool-content blobs referenced by the history, present when
+  // the bundle was exported with tools=references. Map of sha256 → base64
+  // of the gzipped content. Restored to the session's tools/ store on
+  // import; the ref-form history hydrates from them.
+  toolBlobs: z.record(z.string()).optional(),
 });
 export type Bundle = z.infer<typeof Bundle>;
 
@@ -80,6 +85,7 @@ export interface EncodeBundleParams {
   record: SessionRecord & { lineageId: string };
   history: HistoryEntry[];
   promptHistory?: string[];
+  toolBlobs?: Record<string, string>;
   hydraVersion: string;
   machine: string;
   hydraHost?: string;
@@ -139,6 +145,9 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
   };
   if (params.promptHistory !== undefined) {
     bundle.promptHistory = params.promptHistory;
+  }
+  if (params.toolBlobs !== undefined && Object.keys(params.toolBlobs).length > 0) {
+    bundle.toolBlobs = params.toolBlobs;
   }
   return bundle;
 }
