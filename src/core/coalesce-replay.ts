@@ -24,6 +24,10 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
 
   const lastToolUpdateIndex = new Map<string, number>();
   const mergedToolContent = new Map<string, unknown[]>();
+  // The command/file path rides on intermediate updates and is gone by the
+  // terminal update we keep; carry the last non-empty rawInput forward so
+  // the replayed tool row can still show what it acted on.
+  const carriedRawInput = new Map<string, unknown>();
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     if (entry === undefined) {
@@ -38,6 +42,14 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
       continue;
     }
     lastToolUpdateIndex.set(id, i);
+    if (
+      upd.rawInput &&
+      typeof upd.rawInput === "object" &&
+      !Array.isArray(upd.rawInput) &&
+      Object.keys(upd.rawInput).length > 0
+    ) {
+      carriedRawInput.set(id, upd.rawInput);
+    }
     if (Array.isArray(upd.content) && upd.content.length > 0) {
       const buf = mergedToolContent.get(id);
       if (buf) {
@@ -93,11 +105,15 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
       if (id !== undefined && lastToolUpdateIndex.get(id) !== i) {
         continue;
       }
-      if (id !== undefined && mergedToolContent.has(id)) {
-        out.push(withReplacedContent(entry, mergedToolContent.get(id) ?? []));
-      } else {
-        out.push(entry);
+      let emitted =
+        id !== undefined && mergedToolContent.has(id)
+          ? withReplacedContent(entry, mergedToolContent.get(id) ?? [])
+          : entry;
+      // Restore the command/path detail dropped by the terminal update.
+      if (id !== undefined && carriedRawInput.has(id) && !hasRawInput(emitted)) {
+        emitted = withRawInput(emitted, carriedRawInput.get(id));
       }
+      out.push(emitted);
       continue;
     }
 
@@ -180,6 +196,29 @@ function withReplacedContent(
     params: {
       ...params,
       update: { ...update, content },
+    },
+  };
+}
+
+function hasRawInput(entry: HistoryEntry): boolean {
+  const update = readUpdate(entry);
+  const ri = update?.rawInput;
+  return (
+    !!ri &&
+    typeof ri === "object" &&
+    !Array.isArray(ri) &&
+    Object.keys(ri).length > 0
+  );
+}
+
+function withRawInput(entry: HistoryEntry, rawInput: unknown): HistoryEntry {
+  const params = (entry.params ?? {}) as Record<string, unknown>;
+  const update = (params.update ?? {}) as Record<string, unknown>;
+  return {
+    ...entry,
+    params: {
+      ...params,
+      update: { ...update, rawInput },
     },
   };
 }

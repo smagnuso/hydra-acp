@@ -36,6 +36,64 @@ describe("extractEditDiff with blob references", () => {
   });
 });
 
+describe("tool-call detail (rawInput hint)", () => {
+  it("derives a bash detail from rawInput.command, stripping a leading cd &&", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "bash",
+      kind: "other",
+      rawInput: { command: "cd /home/u/proj && grep -n foo src/x.ts" },
+    });
+    expect(ev).toMatchObject({ kind: "tool-call", detail: "grep -n foo src/x.ts" });
+  });
+
+  it("uses only the first line and clips long commands", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "bash",
+      rawInput: { command: `echo ${"x".repeat(200)}\nsecond line` },
+    });
+    const detail = (ev as { detail?: string }).detail!;
+    expect(detail.length).toBeLessThanOrEqual(64);
+    expect(detail.endsWith("…")).toBe(true);
+    expect(detail).not.toContain("second line");
+  });
+
+  it("derives a file path detail for edit/read, keeping the tail when long", () => {
+    const edit = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "edit",
+      kind: "edit",
+      rawInput: { path: "/repo/src/tui/format.ts" },
+    });
+    expect(edit).toMatchObject({ kind: "tool-call", detail: "/repo/src/tui/format.ts" });
+
+    const long = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t2",
+      title: "read",
+      rawInput: { path: "/very/deep/" + "dir/".repeat(40) + "thefile.ts" },
+    });
+    const detail = (long as { detail?: string }).detail!;
+    expect(detail.length).toBeLessThanOrEqual(64);
+    expect(detail.startsWith("…")).toBe(true);
+    expect(detail.endsWith("thefile.ts")).toBe(true);
+  });
+
+  it("omits detail when rawInput has neither command nor path", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "bash",
+      rawInput: {},
+    });
+    expect((ev as { detail?: string }).detail).toBeUndefined();
+  });
+});
+
 describe("mapUpdate", () => {
   it("handles agent_message_chunk with text content", () => {
     expect(
@@ -311,6 +369,7 @@ describe("mapUpdate", () => {
       kind: "tool-call",
       toolCallId: "tc1",
       title: "Edit",
+      detail: "/repo/src/foo.ts",
       editDiff: {
         path: "/repo/src/foo.ts",
         oldText: "before",
@@ -334,6 +393,7 @@ describe("mapUpdate", () => {
       kind: "tool-call",
       toolCallId: "tc1",
       title: "Write",
+      detail: "/repo/new.ts",
       editDiff: {
         path: "/repo/new.ts",
         oldText: "",
@@ -379,6 +439,7 @@ describe("mapUpdate", () => {
       kind: "tool-call",
       toolCallId: "tc1",
       title: "Read",
+      detail: "/repo/src/foo.ts",
     });
   });
 

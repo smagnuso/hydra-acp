@@ -930,6 +930,9 @@ export interface ToolLineState {
   // a refined label (e.g. the actual command, the file path). Falls back
   // to initialTitle.
   latestTitle: string;
+  // Short single-line hint of what the tool acts on (bash command / file
+  // path), shown after the verb so "bash"/"edit" rows say *which* one.
+  detail?: string;
   status: string;
   // Optional error text from a `failed` update. When present, rendered as
   // an indented continuation line under the tool row so the user sees
@@ -975,6 +978,12 @@ export function formatToolLine(
     title = initial;
   } else {
     title = `${initial} · ${latest}`;
+  }
+  // Append the detail hint (bash command / file path) after the verb, so a
+  // generic "bash"/"edit" row says which command/file — unless the title
+  // already carries it (e.g. an agent that refines the title to the path).
+  if (state.detail && !title.includes(state.detail)) {
+    title = `${title} · ${state.detail}`;
   }
   // Append a duration: a live "running for Xs" counter while in flight,
   // frozen as the total once the call hits a terminal status. Inherits the

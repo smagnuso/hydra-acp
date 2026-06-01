@@ -446,6 +446,36 @@ describe("formatToolLine", () => {
     expect(lines[0]?.body).toBe("Terminal · ls -la");
   });
 
+  it("appends the detail hint after the verb (bash command / file path)", () => {
+    expect(
+      formatToolLine({
+        initialTitle: "bash",
+        latestTitle: "bash",
+        detail: "grep -n foo src/x.ts",
+        status: "completed",
+      })[0]?.body,
+    ).toBe("bash · grep -n foo src/x.ts");
+    expect(
+      formatToolLine({
+        initialTitle: "edit",
+        latestTitle: "edit",
+        detail: "src/tui/format.ts",
+        status: "completed",
+      })[0]?.body,
+    ).toBe("edit · src/tui/format.ts");
+  });
+
+  it("doesn't duplicate the detail when the title already contains it", () => {
+    expect(
+      formatToolLine({
+        initialTitle: "src/x.ts",
+        latestTitle: "src/x.ts",
+        detail: "src/x.ts",
+        status: "completed",
+      })[0]?.body,
+    ).toBe("src/x.ts");
+  });
+
   it("appends an indented error line when status=failed and errorText present", () => {
     const lines = formatToolLine({
       initialTitle: "task",

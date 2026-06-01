@@ -154,6 +154,37 @@ describe("coalesceReplay", () => {
     expect(bUpd.content.map((c) => c.content.text)).toEqual(["b1", "b2"]);
   });
 
+  it("carries rawInput forward to the surviving tool_call_update", () => {
+    // The command/path rides on intermediate pending updates; the terminal
+    // update (which coalesce keeps) has no rawInput. Coalesce should splice
+    // the last non-empty rawInput onto the kept entry.
+    const mkUpd = (
+      status: string,
+      rawInput?: Record<string, unknown>,
+    ): HistoryEntry => ({
+      method: "session/update",
+      params: {
+        sessionId: SID,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          status,
+          ...(rawInput ? { rawInput } : {}),
+        },
+      },
+      recordedAt: 0,
+    });
+    const out = coalesceReplay([
+      mkUpd("pending", { command: "grep -n foo x.ts" }),
+      mkUpd("in_progress"),
+      mkUpd("completed"),
+    ]);
+    expect(out).toHaveLength(1);
+    const upd = (out[0]!.params as { update: { status: string; rawInput?: { command?: string } } }).update;
+    expect(upd.status).toBe("completed");
+    expect(upd.rawInput?.command).toBe("grep -n foo x.ts");
+  });
+
   it("keeps only the last plan within a turn", () => {
     const out = coalesceReplay([
       simpleUpdate("prompt_received", { messageId: "m_p1" }),

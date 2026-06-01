@@ -3684,6 +3684,7 @@ async function runSession(
     status: string | undefined,
     errorText: string | undefined,
     editDiff: EditDiff | undefined,
+    detail: string | undefined,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -3695,6 +3696,11 @@ async function runSession(
     };
     if (existing && title !== undefined) {
       state.latestTitle = title;
+    }
+    // Keep the first non-empty detail (the command/path from the initial
+    // tool_call); later "updated" pings rarely re-send it.
+    if (detail !== undefined && state.detail === undefined) {
+      state.detail = detail;
     }
     if (existing && status !== undefined) {
       state.status = status;
@@ -4152,6 +4158,7 @@ async function runSession(
         event.status,
         undefined,
         event.editDiff,
+        event.detail,
       );
       renderToolsBlock();
       maybeRenderEditDiff(event.toolCallId);
@@ -4201,6 +4208,7 @@ async function runSession(
         event.status,
         event.errorText,
         event.editDiff,
+        event.detail,
       );
       if (event.upstreamInterrupted) {
         upstreamInterruptedSeen = true;

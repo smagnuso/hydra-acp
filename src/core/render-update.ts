@@ -2,6 +2,7 @@
 // into `RenderEvent`s the screen layer knows how to render.
 
 import stripAnsi from "strip-ansi";
+import { shortenHomePath } from "./paths.js";
 
 import type { Attachment } from "../tui/input.js";
 import type { ConfigOption, ConfigOptionValue } from "./hydra-commands.js";
@@ -68,6 +69,11 @@ export type RenderEvent =
       status?: string;
       rawKind?: string;
       editDiff?: EditDiff;
+      // Short, single-line hint of what the tool is acting on, derived from
+      // rawInput (the bash command, the edited/read file path). The agent's
+      // title is usually just the generic verb ("bash"/"edit"), so this is
+      // what tells the user *which* command/file. Never the full body.
+      detail?: string;
     }
   | {
       kind: "tool-call-update";
@@ -75,6 +81,7 @@ export type RenderEvent =
       title?: string;
       status?: string;
       editDiff?: EditDiff;
+      detail?: string;
       // Best-effort error text extracted from a `failed` update. Pulled
       // from the first text payload in `content[]`, falling back to a
       // string `rawOutput.error`. Surfaced inline under the tool row.
@@ -554,7 +561,50 @@ function mapToolCall(u: UpdateLike): RenderEvent | null {
   if (diff !== null) {
     event.editDiff = diff;
   }
+  const detail = extractToolDetail(u);
+  if (detail !== undefined) {
+    event.detail = detail;
+  }
   return event;
+}
+
+// A short, single-line "what is this acting on" hint pulled from rawInput:
+// the bash command (first line, sans a leading `cd … &&`) or the file path
+// for edit/read/write. Clipped so the tool row stays compact and the
+// trailing duration survives. Never the full command output / file body.
+const TOOL_DETAIL_MAX = 64;
+
+function extractToolDetail(u: UpdateLike): string | undefined {
+  const rawInput = u.rawInput;
+  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
+    return undefined;
+  }
+  const r = rawInput as Record<string, unknown>;
+  if (typeof r.command === "string" && r.command.trim().length > 0) {
+    const firstLine = sanitizeSingleLine(r.command).trim();
+    // Strip a leading `cd <path> &&` so the meaningful command leads.
+    const cmd = firstLine.replace(/^cd\s+\S+\s+&&\s+/, "");
+    return clipHead(cmd, TOOL_DETAIL_MAX);
+  }
+  const path =
+    typeof r.file_path === "string"
+      ? r.file_path
+      : typeof r.path === "string"
+        ? r.path
+        : undefined;
+  if (path !== undefined && path.length > 0) {
+    // Keep the tail (filename) visible when the path is long.
+    return clipTail(shortenHomePath(sanitizeSingleLine(path)), TOOL_DETAIL_MAX);
+  }
+  return undefined;
+}
+
+function clipHead(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+function clipTail(s: string, max: number): string {
+  return s.length > max ? `…${s.slice(-(max - 1))}` : s;
 }
 
 function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
@@ -571,9 +621,14 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
   // updates that change the title or land on a terminal status; the
   // initial tool_call line already shows "[pending]".
   const diff = extractEditDiff(u);
+  // The command/file detail arrives on intermediate pending updates (the
+  // initial tool_call's rawInput is empty), so a detail-bearing update is
+  // meaningful — otherwise we'd suppress it and never learn what ran.
+  const detail = extractToolDetail(u);
   const meaningful =
     title !== undefined ||
     diff !== null ||
+    detail !== undefined ||
     status === "completed" ||
     status === "failed" ||
     status === "rejected" ||
@@ -596,6 +651,9 @@ function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
   const event: RenderEvent = { kind: "tool-call-update", toolCallId };
   if (title !== undefined) {
     event.title = title;
+  }
+  if (detail !== undefined) {
+    event.detail = detail;
   }
   if (status !== undefined) {
     event.status = status;
