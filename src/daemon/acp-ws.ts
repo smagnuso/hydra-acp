@@ -930,8 +930,23 @@ export function registerAcpWsEndpoint(
           }
         })();
       } else {
-        for (const note of replay) {
-          await connection.notify(note.method, note.params);
+        // Fire the replay notifications in order without awaiting each one
+        // (ws.send queues in call order, so ordering holds and the attach
+        // response below still lands last). Awaiting per-entry serialized a
+        // write-callback round-trip per notification, which on a long
+        // session (thousands of entries) stalled the attach handshake for
+        // seconds. We await only every REPLAY_FLUSH_EVERY entries to retain
+        // coarse backpressure so a slow/remote client can't make us buffer
+        // the whole replay in the ws send queue at once.
+        const REPLAY_FLUSH_EVERY = 200;
+        for (let i = 0; i < replay.length; i++) {
+          const note = replay[i]!;
+          const pending = connection
+            .notify(note.method, note.params)
+            .catch(() => undefined);
+          if ((i + 1) % REPLAY_FLUSH_EVERY === 0) {
+            await pending;
+          }
         }
       }
       session.replayPendingPermissions(client);
