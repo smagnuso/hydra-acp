@@ -130,6 +130,15 @@ const TuiConfig = z.object({
   // suppress them — the TUI hotkey ^T toggles this at runtime without
   // persisting back to config.
   showThoughts: z.boolean().default(true),
+  // How the terminal renders East-Asian "Ambiguous" width glyphs (em-dash
+  // —, smart quotes “ ”, ellipsis …, middle-dot ·). Most modern terminals
+  // draw them 1 col wide ("narrow"); CJK-locale / legacy setups draw them 2
+  // cols wide ("wide"). Defaults to "wide": counting ambiguous glyphs as 2
+  // cols never overflows the right margin (the worst case is wrapping a
+  // column early on narrow terminals, which is benign), whereas "narrow"
+  // bleeds past the margin on wide terminals. The thought gutter uses an
+  // ASCII marker, so this no longer affects marker alignment either way.
+  ambiguousWidth: z.enum(["narrow", "wide"]).default("wide"),
   // Cap on entries kept in the cross-session global prompt-history file
   // (~/.hydra-acp/prompt-history). This is the ^P / ^R recall list
   // shared across all sessions; it's append-only on disk, so long-lived
@@ -282,6 +291,7 @@ export const HydraConfig = z.object({
     progressIndicator: true,
     defaultEnterAction: "amend",
     showThoughts: true,
+    ambiguousWidth: "wide",
     promptHistoryMaxEntries: 2_000,
     maxToolItems: 5,
     maxPlanItems: 5,

@@ -80,6 +80,7 @@ function fakeConfig(): HydraConfig {
       progressIndicator: true,
       defaultEnterAction: "amend" as const,
       showThoughts: true,
+      ambiguousWidth: "narrow",
       promptHistoryMaxEntries: 2_000,
       maxToolItems: 5,
       maxPlanItems: 5,

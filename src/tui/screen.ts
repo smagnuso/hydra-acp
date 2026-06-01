@@ -3134,7 +3134,11 @@ export class Screen {
       }
     }
     const prefix = line.prefix ?? "";
-    const room = Math.max(1, width - prefix.length);
+    // Measure the gutter by visible columns (honoring ambiguous-width mode),
+    // not code-unit length, so an ambiguous-width marker like "· " reserves
+    // the columns it actually paints and the continuation indent matches.
+    const prefixCols = cellWidth(prefix);
+    const room = Math.max(1, width - prefixCols);
     // The "agent", "thought", and "heading-*" bodyStyles are routed through
     // term-kit's markup-interpreting writer (see writeStyled); every other
     // style emits text via .noFormat, so caret sequences are literal there
@@ -3153,7 +3157,7 @@ export class Screen {
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i] ?? "";
       const wrappedLine: FormattedLine = {
-        prefix: i === 0 ? line.prefix : " ".repeat(prefix.length),
+        prefix: i === 0 ? line.prefix : " ".repeat(prefixCols),
         body: chunk,
       };
       if (line.prefixStyle !== undefined) {
@@ -3205,7 +3209,7 @@ export class Screen {
     if (line.prefix) {
       writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle);
     }
-    const remaining = Math.max(0, width - (line.prefix?.length ?? 0));
+    const remaining = Math.max(0, width - cellWidth(line.prefix ?? ""));
     // ANSI lines are already wrapped to the visible-width budget by
     // wrap-ansi, so we don't truncate further — that would re-introduce
     // the char-counting bug the ansi path exists to avoid. Width for
@@ -3242,7 +3246,7 @@ export class Screen {
       writeStyled(this.term, bodyText, line.bodyStyle);
     }
     if (line.fillRow) {
-      const visible = line.ansi ? stringWidth(bodyText) : bodyText.length;
+      const visible = line.ansi ? stringWidth(bodyText) : cellWidth(bodyText);
       const pad = remaining - visible;
       if (pad > 0) {
         writeStyled(this.term, " ".repeat(pad), line.bodyStyle);
@@ -3634,6 +3638,23 @@ function wrapAnsiBody(text: string, width: number): string[] {
 const NON_ASCII = /[^\x20-\x7e]/;
 const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+// East-Asian "Ambiguous" width handling. string-width's default counts
+// ambiguous glyphs (em-dash —, smart quotes “ ”, ellipsis …, middle-dot ·)
+// as 1 col, which matches most modern terminals. Terminals configured for
+// CJK locales (or `setw -g utf8 on`-style setups) render them as 2 cols; on
+// those, the default under-counts and wrapped lines bleed past the right
+// margin. setAmbiguousWide(true) makes the whole wrap/truncate budget treat
+// ambiguous glyphs as 2 cols so the layout matches what the terminal draws.
+let ambiguousWide = false;
+export function setAmbiguousWide(wide: boolean): void {
+  ambiguousWide = wide;
+}
+// Single source of truth for visible-column measurement across the wrap and
+// truncate paths. Honors the ambiguous-width mode above.
+function cellWidth(text: string): number {
+  return stringWidth(text, { ambiguousIsNarrow: !ambiguousWide });
+}
+
 // terminal-kit caret-markup recognizer. applyInlineMarkup() in format.ts
 // rewrites markdown for the "agent" bodyStyle into terminal-kit's `^X`
 // markup so term(text) can render styled spans inline:
@@ -3723,7 +3744,7 @@ function* segmentForWidth(text: string): IterableIterator<WidthSegment> {
       continue;
     }
     for (const { segment } of SEGMENTER.segment(text.slice(i, runEnd))) {
-      yield { text: segment, width: stringWidth(segment) };
+      yield { text: segment, width: cellWidth(segment) };
     }
     i = runEnd;
   }
@@ -3872,7 +3893,7 @@ function wrapVisible(
 function graphemeSegments(text: string): WidthSegment[] {
   const out: WidthSegment[] = [];
   for (const { segment } of SEGMENTER.segment(text)) {
-    out.push({ text: segment, width: stringWidth(segment) });
+    out.push({ text: segment, width: cellWidth(segment) });
   }
   return out;
 }
@@ -3895,7 +3916,7 @@ export function truncate(
     return text;
   }
   if (!stripMarkup) {
-    const visible = stringWidth(text);
+    const visible = cellWidth(text);
     if (visible <= max) {
       return text;
     }
@@ -3928,7 +3949,7 @@ function takeByWidth(text: string, budget: number): string {
   let out = "";
   let used = 0;
   for (const { segment } of SEGMENTER.segment(text)) {
-    const w = stringWidth(segment);
+    const w = cellWidth(segment);
     if (used + w > budget) {
       break;
     }

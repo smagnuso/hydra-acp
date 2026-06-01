@@ -105,7 +105,7 @@ export function formatEvent(
     case "agent-text":
       return formatBlock(event.text, "  ", "agent");
     case "agent-thought":
-      return formatBlock(event.text, "· ", "thought", "thought");
+      return formatBlock(event.text, "  ", "thought", "thought");
     case "tool-call":
     case "tool-call-update":
       // Tool calls render as a single mutating line keyed by toolCallId —
@@ -255,8 +255,8 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
   const out: FormattedLine[] = [];
   // Drop leading whitespace (blank lines + indentation) before the first
   // content. Streamed reasoning/agent deltas frequently begin with a space,
-  // which would otherwise land between the gutter and the first word ("· "
-  // + " word" → "·  word") and push the first line one column right of the
+  // which would otherwise land between the gutter and the first word ("  "
+  // + " word" → "   word") and push the first line one column right of the
   // (whitespace-trimmed) continuation rows.
   const lines = text.replace(/^\s+/, "").split("\n");
   let inCode = false;
@@ -419,19 +419,17 @@ export function parseAgentMarkdown(
 }
 
 // Thoughts use proseStyle "thought" throughout so the ^T hide-thoughts filter
-// (which keys on bodyStyle) catches every line. The "· " gutter appears on
-// the first non-blank line; both inline resets use "^-" (bold-off only) so
-// bold and code spans stay in the same gray register without a hue shift.
-//
-// The off-by-one drift that made the marker look misaligned was a leading
-// space in the streamed body (stripped now in parseMarkdown), not the dot's
-// width — so the U+00B7 MIDDLE DOT is fine here.
+// (which keys on bodyStyle) catches every line. There is no marker glyph:
+// the dim gray "thought" color plus the indent set thoughts apart, and a
+// blank gutter keeps copy/paste clean (no leading "*"/"·" to strip). Both
+// inline resets use "^-" (bold-off only) so bold and code spans stay in the
+// same gray register without a hue shift.
 export function parseThoughtMarkdown(text: string): FormattedLine[] {
   return parseMarkdown(text, {
     proseStyle: "thought",
     highlightCode: false,
     prefixStyle: "thought",
-    firstPrefix: "· ",
+    firstPrefix: "  ",
     inlineOpts: { codeOpen: "^c", boldReset: "^-", codeReset: "^K" },
   });
 }

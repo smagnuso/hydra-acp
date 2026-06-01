@@ -3,6 +3,7 @@ import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import { parseThoughtMarkdown } from "./format.js";
+import { setAmbiguousWide } from "./screen.js";
 import type { InputDispatcher } from "./input.js";
 import {
   Screen,
@@ -295,16 +296,16 @@ describe("Screen wrapTail bounded walk", () => {
     // `^c…^K` (inline code) and `^+…^-` (bold) are zero-width on screen —
     // the wrap budget must skip them so the line fills to the margin, the
     // same as agent text. The whole thought body left-aligns at column 2
-    // (the "· " gutter); wrapped rows match that indent.
+    // (a blank 2-space gutter); wrapped rows match that indent.
     screen.appendLine({
-      prefix: "· ",
+      prefix: "  ",
       bodyStyle: "thought",
       body: "Let me check the ^csettings.json^K file and confirm the ^+banner^- source here",
     });
     const rows = wrapAll(screen, 40);
     expect(rows.length).toBeGreaterThan(1);
-    // First row carries the bullet gutter; continuations match its width.
-    expect(rows[0]?.prefix).toBe("· ");
+    // First row and continuations share the same blank gutter.
+    expect(rows[0]?.prefix).toBe("  ");
     for (const row of rows.slice(1)) {
       expect(row.prefix).toBe("  ");
     }
@@ -316,28 +317,60 @@ describe("Screen wrapTail bounded walk", () => {
     }
   });
 
-  it("uses the U+00B7 middle-dot bullet as the thought gutter", () => {
+  it("uses a blank gutter (no marker glyph) for thoughts", () => {
+    // No "*"/"·" marker: dim gray color + indent distinguish thoughts, and a
+    // blank gutter keeps copy/paste clean.
     const [first] = parseThoughtMarkdown("hello");
-    expect(first?.prefix).toBe("· ");
-    expect(first?.prefix?.codePointAt(0)).toBe(0x00b7);
+    expect(first?.prefix).toBe("  ");
   });
 
   it("strips a leading space so the first thought line stays flush with the gutter", () => {
     const screen = makeScreen();
     // Streamed reasoning deltas often begin with a space; it must not land
-    // between the "· " gutter and the first word (which pushed the first
-    // line one column right of the continuations).
+    // between the gutter and the first word (which pushed the first line one
+    // column right of the continuations).
     for (const l of parseThoughtMarkdown(
       " I'm realizing the leading space in the body was the actual cause here.",
     )) {
       screen.appendLine(l);
     }
     const rows = wrapAll(screen, 40);
-    expect(rows[0]?.prefix).toBe("· ");
+    expect(rows[0]?.prefix).toBe("  ");
     expect(rows[0]?.body.startsWith(" ")).toBe(false);
     expect(rows[0]?.body.startsWith("I'm")).toBe(true);
     for (const row of rows.slice(1)) {
       expect(row.prefix).toBe("  ");
+    }
+  });
+
+  it("treats ambiguous-width glyphs as 2 cols when ambiguous-wide is set, so lines don't bleed past the margin", () => {
+    // On a terminal that draws ambiguous glyphs (em-dash —, smart quotes,
+    // ellipsis, middle-dot) as 2 cells, the default narrow budget under-
+    // counts and rows overflow. setAmbiguousWide(true) makes the budget
+    // match the render. Measure each row the way that terminal would.
+    const renderCols = (s: string): number =>
+      stringWidth(s, { ambiguousIsNarrow: false });
+    const WIDTH = 50;
+    const text =
+      "A reasoning line with a leading space\u2014like \u201cthe user wants\u2026\u201d\u2014and more words to wrap.";
+    try {
+      setAmbiguousWide(true);
+      const screen = makeScreen();
+      for (const l of parseThoughtMarkdown(text)) screen.appendLine(l);
+      const rows = wrapAll(screen, WIDTH);
+      // Blank 2-space gutter (no marker), so all rows share it.
+      expect(rows[0]?.prefix).toBe("  ");
+      for (const row of rows.slice(1)) {
+        expect(row.prefix).toBe("  ");
+      }
+      // No row bleeds past the margin in the terminal's own measurement.
+      for (const row of rows) {
+        expect(renderCols((row.prefix ?? "") + row.body)).toBeLessThanOrEqual(
+          WIDTH,
+        );
+      }
+    } finally {
+      setAmbiguousWide(false);
     }
   });
 
@@ -353,7 +386,7 @@ describe("Screen wrapTail bounded walk", () => {
       screen.appendLine(l);
     }
     const rows = wrapAll(screen, 50);
-    expect(rows[0]?.prefix).toBe("· ");
+    expect(rows[0]?.prefix).toBe("  ");
     for (const row of rows.slice(1)) {
       expect(row.prefix).toBe("  ");
     }

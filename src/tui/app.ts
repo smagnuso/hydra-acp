@@ -69,7 +69,7 @@ import {
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
 import { promptForAgent } from "./agent-prompt.js";
-import { formatElapsed, Screen } from "./screen.js";
+import { formatElapsed, Screen, setAmbiguousWide } from "./screen.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -1408,6 +1408,11 @@ async function runSession(
   // meantime).
   let pendingPrefill: { text: string; attachments: Attachment[] } | null =
     null;
+
+  // Tell the wrap/truncate engine how this terminal draws ambiguous-width
+  // glyphs before any line is measured, so the column budget matches the
+  // render (prevents right-margin bleed on ambiguous-wide terminals).
+  setAmbiguousWide(config.tui.ambiguousWidth === "wide");
 
   const screen: Screen = new Screen({
     term,
