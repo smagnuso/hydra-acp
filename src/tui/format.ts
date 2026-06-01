@@ -894,6 +894,17 @@ function formatBlock(
   return out;
 }
 
+// Compact byte-size label for the deferred-diff size hint (e.g. "~12 KB").
+function formatDiffBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 // Humanize a millisecond span as "Xs" / "Ym Zs" / "Hh Mm". Shared by the
 // busy banner, the tools-block header, and per-tool durations.
 export function formatElapsed(ms: number): string {
@@ -1021,19 +1032,30 @@ export function formatEditDiffBlock(
   mode: FileUpdateMode,
 ): FormattedLine[] {
   const lines: FormattedLine[] = [];
-  // Summarize the change as (+added -removed) so the one-line mark conveys
-  // the edit's magnitude. Counts come from the same LCS op stream the diff
-  // body uses, so they always agree with the rendered hunk. Omitted when
-  // both are zero (e.g. a no-op or pure rename).
-  const counts = countDiffChanges(diff);
-  const summaryParts: string[] = [];
-  if (counts.added > 0) {
-    summaryParts.push(`+${counts.added}`);
+  // In "references" mode the body text hasn't been fetched yet (oldRef/
+  // newRef carry the blob sha256 + byte size). We can't compute +/- counts
+  // without the content, so the collapsed mark shows an approximate size
+  // hint instead; the app fetches the body when the diff is expanded.
+  const deferred = diff.oldRef !== undefined || diff.newRef !== undefined;
+  let summary: string;
+  if (deferred) {
+    const bytes = (diff.oldRef?.bytes ?? 0) + (diff.newRef?.bytes ?? 0);
+    summary = ` (~${formatDiffBytes(bytes)})`;
+  } else {
+    // Summarize the change as (+added -removed) so the one-line mark conveys
+    // the edit's magnitude. Counts come from the same LCS op stream the diff
+    // body uses, so they always agree with the rendered hunk. Omitted when
+    // both are zero (e.g. a no-op or pure rename).
+    const counts = countDiffChanges(diff);
+    const summaryParts: string[] = [];
+    if (counts.added > 0) {
+      summaryParts.push(`+${counts.added}`);
+    }
+    if (counts.removed > 0) {
+      summaryParts.push(`-${counts.removed}`);
+    }
+    summary = summaryParts.length > 0 ? ` (${summaryParts.join(" ")})` : "";
   }
-  if (counts.removed > 0) {
-    summaryParts.push(`-${counts.removed}`);
-  }
-  const summary = summaryParts.length > 0 ? ` (${summaryParts.join(" ")})` : "";
   // Build the header lazily so the marker reflects whether a diff body
   // actually follows: ▾ (open) when an expanded body is rendered below,
   // ▸ (closed) for the terse one-line "edit" mark or a header-only diff.
@@ -1045,6 +1067,21 @@ export function formatEditDiffBlock(
   if (mode === "edit") {
     if (diff.path) {
       lines.push(header(false));
+    }
+    return lines;
+  }
+  // Expanded but body not yet fetched (references mode): show the open
+  // header + a placeholder. app.ts fetches the blob(s) and re-renders this
+  // block with the real diff once they arrive.
+  if (deferred) {
+    if (diff.path) {
+      lines.push(header(true));
+      lines.push({
+        prefix: "  ",
+        body: "⋯ fetching diff…",
+        bodyStyle: "dim",
+      });
+      lines.unshift({ body: "" });
     }
     return lines;
   }

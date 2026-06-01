@@ -1362,6 +1362,7 @@ describe("Screen block-click routing", () => {
   function makeTallScreen(opts: {
     mouse?: boolean;
     onBlockClick?: (key: string) => void;
+    onBlockVisible?: (key: string) => void;
     width?: number;
     height?: number;
   }): Screen {
@@ -1397,10 +1398,15 @@ describe("Screen block-click routing", () => {
       dispatcher,
       onKey: () => {},
       onBlockClick: opts.onBlockClick,
+      onBlockVisible: opts.onBlockVisible,
       repaintThrottleMs: 0,
       progressIndicator: false,
       mouse: opts.mouse ?? false,
     });
+  }
+
+  function draw(screen: Screen): void {
+    (screen as unknown as { drawScrollback: () => void }).drawScrollback();
   }
 
   function callKeyAtRow(screen: Screen, y: number): string | null {
@@ -1422,6 +1428,39 @@ describe("Screen block-click routing", () => {
       screen as unknown as { scrollbackVisibleRows: () => number }
     ).scrollbackVisibleRows();
   }
+
+  it("notifyWhenVisible fires onBlockVisible once for an on-screen block", () => {
+    const shown: string[] = [];
+    const screen = makeTallScreen({ onBlockVisible: (k) => shown.push(k) });
+    screen.upsertLines("editdiff:abc", [{ body: "⋯ fetching diff…" }]);
+    screen.notifyWhenVisible("editdiff:abc");
+    draw(screen);
+    expect(shown).toEqual(["editdiff:abc"]);
+    // One-shot: a second paint doesn't fire again.
+    draw(screen);
+    expect(shown).toEqual(["editdiff:abc"]);
+  });
+
+  it("notifyWhenVisible does not fire while the block is scrolled out of view", () => {
+    const shown: string[] = [];
+    const screen = makeTallScreen({ onBlockVisible: (k) => shown.push(k) });
+    screen.upsertLines("editdiff:abc", [{ body: "⋯ fetching diff…" }]);
+    screen.notifyWhenVisible("editdiff:abc");
+    // Push the block far above the bottom-anchored visible window.
+    for (let i = 0; i < 100; i++) {
+      screen.appendLine({ body: `filler-${i}` });
+    }
+    draw(screen);
+    expect(shown).toEqual([]);
+  });
+
+  it("does not fire onBlockVisible for blocks that weren't registered", () => {
+    const shown: string[] = [];
+    const screen = makeTallScreen({ onBlockVisible: (k) => shown.push(k) });
+    screen.upsertLines("editdiff:abc", [{ body: "row" }]);
+    draw(screen);
+    expect(shown).toEqual([]);
+  });
 
   it("keyAtRow maps a click row to the keyed block painted there", () => {
     const screen = makeTallScreen({ mouse: true });

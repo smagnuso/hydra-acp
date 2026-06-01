@@ -1,10 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractEditDiff,
   isExitPlanModeTool,
   mapUpdate,
   sanitizeSingleLine,
   sanitizeWireText,
 } from "./render-update.js";
+
+describe("extractEditDiff with blob references", () => {
+  it("captures oldRef/newRef when text is delivered as refs", () => {
+    const diff = extractEditDiff({
+      content: [
+        {
+          type: "diff",
+          path: "/repo/a.ts",
+          oldText: { __hydraBlob: "a".repeat(64), bytes: 4000 },
+          newText: { __hydraBlob: "b".repeat(64), bytes: 4100 },
+        },
+      ],
+    });
+    expect(diff).toMatchObject({
+      path: "/repo/a.ts",
+      oldText: "",
+      newText: "",
+      oldRef: { hash: "a".repeat(64), bytes: 4000 },
+      newRef: { hash: "b".repeat(64), bytes: 4100 },
+    });
+  });
+
+  it("still handles inline string diffs (no refs)", () => {
+    const diff = extractEditDiff({
+      content: [{ type: "diff", path: "/a", oldText: "x", newText: "y" }],
+    });
+    expect(diff).toEqual({ path: "/a", oldText: "x", newText: "y" });
+  });
+});
 
 describe("mapUpdate", () => {
   it("handles agent_message_chunk with text content", () => {

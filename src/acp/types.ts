@@ -225,6 +225,10 @@ export interface HydraMeta {
   readonly?: boolean;
   replayMode?: "instant" | "drip";
   dripSpeed?: number;
+  // How tool payload is delivered on replay. "inline" (default) sends full
+  // content; "references" sends blob refs and the client fetches bodies on
+  // demand via GET /v1/sessions/:id/tools/:hash. Opt-in for lean clients.
+  toolContent?: "inline" | "references";
   // Hydra-specific session/detach RESPONSE field (the detach outcome).
   detachStatus?: "detached";
   // Session label (Session.title). Read off session/new params (the
@@ -338,6 +342,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.dripSpeed === "number" && obj.dripSpeed > 0) {
     out.dripSpeed = obj.dripSpeed;
+  }
+  if (obj.toolContent === "inline" || obj.toolContent === "references") {
+    out.toolContent = obj.toolContent;
   }
   if (obj.detachStatus === "detached") {
     out.detachStatus = obj.detachStatus;

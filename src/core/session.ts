@@ -836,11 +836,13 @@ export class Session {
   // Read the persisted history from disk. Returns [] if no history
   // file exists (fresh session, never prompted). Used by attach() and
   // the HTTP /history endpoint.
-  async getHistorySnapshot(): Promise<CachedNotification[]> {
+  async getHistorySnapshot(
+    tools: "inline" | "references" = "inline",
+  ): Promise<CachedNotification[]> {
     if (!this.historyStore) {
       return [];
     }
-    return this.historyStore.load(this.sessionId).catch(() => []);
+    return this.historyStore.load(this.sessionId, { tools }).catch(() => []);
   }
 
   // Subscribe to recordable broadcast entries — fires once per entry
@@ -867,7 +869,11 @@ export class Session {
   attach(
     client: AttachedClient,
     historyPolicy: HistoryPolicy,
-    opts: { afterMessageId?: string; raw?: boolean } = {},
+    opts: {
+      afterMessageId?: string;
+      raw?: boolean;
+      toolContent?: "inline" | "references";
+    } = {},
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     if (this.closed) {
       throw withCode(
@@ -903,7 +909,11 @@ export class Session {
 
   private async loadReplay(
     historyPolicy: HistoryPolicy,
-    opts: { afterMessageId?: string; raw?: boolean },
+    opts: {
+      afterMessageId?: string;
+      raw?: boolean;
+      toolContent?: "inline" | "references";
+    },
   ): Promise<{ entries: CachedNotification[]; appliedPolicy: HistoryPolicy }> {
     // Search the raw snapshot, coalesce the slice. Coalescing first would
     // drop the messageIds of every non-leading chunk in a run (and every
@@ -918,7 +928,7 @@ export class Session {
     // either way.
     const maybeCoalesce = (entries: CachedNotification[]): CachedNotification[] =>
       opts.raw ? entries : coalesceReplay(entries);
-    const raw = await this.getHistorySnapshot();
+    const raw = await this.getHistorySnapshot(opts.toolContent ?? "inline");
     const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
       const cutoff = opts.afterMessageId

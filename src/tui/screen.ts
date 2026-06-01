@@ -31,6 +31,11 @@ export interface ScreenOptions {
   // (e.g. "tools:3", "plan", "editdiff:<id>"). Lets the app toggle a
   // single block's expand/collapse. Clicks on unkeyed rows are ignored.
   onBlockClick?: (key: string) => void;
+  // Invoked once with a keyed-block key the first time any of its rows are
+  // painted in the visible window, for blocks registered via
+  // notifyWhenVisible(). Used to lazily load deferred content (e.g. fetch a
+  // diff body only when it scrolls into view).
+  onBlockVisible?: (key: string) => void;
   // Minimum ms between full-screen repaints driven by content events.
   // 0 disables throttling. User-action repaints (scroll, modal, resize,
   // /clear, ^L) bypass this regardless. Default 1000 (1 Hz).
@@ -171,6 +176,9 @@ export class Screen {
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
   private onBlockClick: ((key: string) => void) | undefined;
+  private onBlockVisible: ((key: string) => void) | undefined;
+  // Keyed blocks awaiting a one-shot "became visible" notification.
+  private pendingVisibleKeys = new Set<string>();
   private lines: FormattedLine[] = [];
   // Tracks contiguous blocks of lines that callers may want to mutate in
   // place (e.g. tool-call rows that update from "pending" to "completed",
@@ -328,6 +336,7 @@ export class Screen {
     this.dispatcher = opts.dispatcher;
     this.onKey = opts.onKey;
     this.onBlockClick = opts.onBlockClick;
+    this.onBlockVisible = opts.onBlockVisible;
     this.contentRepaintThrottleMs =
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
     this.maxScrollbackLines =
@@ -2328,6 +2337,41 @@ export class Screen {
         }
       });
     }
+    // Fire one-shot visibility callbacks for any registered keyed block
+    // whose rows are in the painted slice. Done after the paint loop so the
+    // callback (which typically upserts new content) doesn't mutate state
+    // mid-draw; the upsert schedules its own repaint.
+    if (this.onBlockVisible && this.pendingVisibleKeys.size > 0) {
+      const visible = new Set<string>();
+      for (const r of slice) {
+        if (r.blockKey !== undefined) {
+          visible.add(r.blockKey);
+        }
+      }
+      const fire: string[] = [];
+      for (const key of this.pendingVisibleKeys) {
+        if (visible.has(key)) {
+          fire.push(key);
+        }
+      }
+      for (const key of fire) {
+        this.pendingVisibleKeys.delete(key);
+        this.onBlockVisible(key);
+      }
+    }
+  }
+
+  // Register a keyed block to receive a single onBlockVisible callback the
+  // next time any of its rows are painted in the visible window. If it's
+  // already on screen the pending repaint fires it promptly; otherwise it
+  // waits until the block scrolls into view. No-op without an onBlockVisible
+  // handler.
+  notifyWhenVisible(key: string): void {
+    if (!this.onBlockVisible) {
+      return;
+    }
+    this.pendingVisibleKeys.add(key);
+    this.scheduleRepaint();
   }
 
   private queuedRows(): number {

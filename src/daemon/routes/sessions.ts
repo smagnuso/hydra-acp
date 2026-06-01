@@ -287,6 +287,22 @@ export function registerSessionRoutes(
     reply.code(200).send(bundle);
   });
 
+  // Fetch a single externalized tool-content blob by its sha256. Used by
+  // clients attached in `tools: "references"` mode to lazily pull a diff /
+  // stdout body when the user expands it. Content-addressed, so the body is
+  // immutable for a given hash.
+  app.get("/v1/sessions/:id/tools/:hash", async (request, reply) => {
+    const params = request.params as { id: string; hash: string };
+    const id = (await manager.resolveCanonicalId(params.id)) ?? params.id;
+    const blob = await manager.loadToolBlob(id, params.hash);
+    if (blob === null) {
+      reply.code(404).send({ error: "tool blob not found" });
+      return;
+    }
+    reply.header("Content-Type", "text/plain; charset=utf-8");
+    reply.code(200).send(blob);
+  });
+
   // Render a session as a markdown transcript. Shares the bundle
   // assembly with /export and pipes the result through
   // bundleToMarkdown — the same function the CLI's file-path branch

@@ -614,6 +614,37 @@ describe("formatEditDiffBlock", () => {
     ).toEqual([]);
   });
 
+  it("shows a size hint (not counts) for a deferred (references) diff in edit mode", () => {
+    const lines = formatEditDiffBlock(
+      {
+        path: "/repo/foo.ts",
+        oldText: "",
+        newText: "",
+        oldRef: { hash: "a".repeat(64), bytes: 6000 },
+        newRef: { hash: "b".repeat(64), bytes: 6500 },
+      },
+      "edit",
+    );
+    expect(lines).toHaveLength(1);
+    // ~12 KB total, rendered as an approximate size rather than +N/-M.
+    expect(lines[0]?.body).toBe("▸ Edited /repo/foo.ts (~12 KB)");
+  });
+
+  it("shows a fetching placeholder for a deferred diff expanded to 'diff'", () => {
+    const lines = formatEditDiffBlock(
+      {
+        path: "/repo/foo.ts",
+        oldText: "",
+        newText: "",
+        newRef: { hash: "c".repeat(64), bytes: 2048 },
+      },
+      "diff",
+    );
+    const bodies = lines.map((l) => l.body);
+    expect(bodies).toContain("▾ Edited /repo/foo.ts (~2 KB)");
+    expect(bodies).toContain("⋯ fetching diff…");
+  });
+
   it("contracts a home-prefixed path to ~ in the header", () => {
     const home = homedir();
     const lines = formatEditDiffBlock(

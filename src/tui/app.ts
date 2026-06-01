@@ -1270,6 +1270,14 @@ async function runSession(
     if (opts.readonly === true) {
       attachHydraMeta.readonly = true;
     }
+    // The lean ref form is a win regardless of showFileUpdates: tool stdout
+    // blobs are never fetched (nothing renders them), and only edit diffs
+    // are pulled — lazily on expand in "edit" mode, or as they render in
+    // "diff" mode. Either way it ships less than inline (which carries all
+    // stdout too).
+    if (config.tui.toolContent === "references") {
+      attachHydraMeta.toolContent = "references";
+    }
     if (opts.drip === true) {
       attachHydraMeta.replayMode = "drip";
       if (opts.dripSpeed !== undefined) {
@@ -1431,6 +1439,11 @@ async function runSession(
     // Routes by key prefix to the matching per-block override.
     onBlockClick: (key: string) => {
       handleBlockClick(key);
+    },
+    // Lazy-load deferred (references-mode) diff bodies only when the block
+    // scrolls into view.
+    onBlockVisible: (key: string) => {
+      handleBlockVisible(key);
     },
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
@@ -3728,56 +3741,133 @@ async function runSession(
   // pulled from ToolLineState, where recordToolCall stashes whatever
   // arrived via the initial tool_call's rawInput, so a completion update
   // with no content[] of its own still finds it.
-  const maybeRenderEditDiff = (toolCallId: string): void => {
-    const key = `editdiff:${toolCallId}`;
-    // Compute the lines this id should currently show under the active
-    // mode; null means "show nothing". Then converge the keyed block to
-    // that — including removing a previously-rendered block when the
-    // mode no longer warrants one (e.g. toggling diffs off, or flipping
-    // diff→edit on a path already marked). Without the removeKey path a
-    // live mode change would leave stale diff bodies painted.
-    const lines = ((): FormattedLine[] | null => {
-      const mode = viewPrefs.showFileUpdates;
-      if (mode === "none") {
-        return null;
+  // Fetch one externalized tool-content body over the WS connection (the
+  // lean "references" path). Null on any error so callers degrade to "".
+  const fetchToolContent = async (hash: string): Promise<string | null> => {
+    try {
+      const res = (await conn.request("hydra-acp/session/tool_content", {
+        sessionId: resolvedSessionId,
+        hash,
+      })) as { content?: unknown };
+      return typeof res?.content === "string" ? res.content : null;
+    } catch {
+      return null;
+    }
+  };
+
+  // In-flight guard so a deferred diff isn't fetched twice if the user
+  // toggles it rapidly.
+  const fetchingDiffs = new Set<string>();
+
+  // A diff delivered in references mode carries oldRef/newRef instead of
+  // body text. Fetch the blob(s), splice the content in, and re-render the
+  // block with the real diff.
+  const resolveDeferredDiff = (toolCallId: string, diff: EditDiff): void => {
+    if (fetchingDiffs.has(toolCallId)) {
+      return;
+    }
+    if (diff.oldRef === undefined && diff.newRef === undefined) {
+      return;
+    }
+    fetchingDiffs.add(toolCallId);
+    void (async () => {
+      const [oldText, newText] = await Promise.all([
+        diff.oldRef ? fetchToolContent(diff.oldRef.hash) : Promise.resolve(diff.oldText),
+        diff.newRef ? fetchToolContent(diff.newRef.hash) : Promise.resolve(diff.newText),
+      ]);
+      const resolved: EditDiff = {
+        ...(diff.path !== undefined ? { path: diff.path } : {}),
+        oldText: oldText ?? "",
+        newText: newText ?? "",
+      };
+      renderedEditDiffs.set(toolCallId, resolved);
+      const st = toolStates.get(toolCallId);
+      if (st?.editDiff) {
+        st.editDiff = resolved;
       }
-      const state = toolStates.get(toolCallId);
-      if (!state?.editDiff || state.status !== "completed") {
-        return null;
-      }
-      // A per-block click override forces this id's mode and skips the
-      // prose/dedup gating — the user explicitly asked to see it.
+      fetchingDiffs.delete(toolCallId);
+      // Re-render at whatever mode the block is currently showing.
       const override = editDiffOverrides.get(toolCallId);
-      if (override !== undefined) {
-        const out = formatEditDiffBlock(
-          state.editDiff,
-          override ? "diff" : "edit",
-        );
-        return out.length > 0 ? out : null;
+      const mode =
+        override === undefined
+          ? viewPrefs.showFileUpdates
+          : override
+            ? "diff"
+            : "edit";
+      if (mode !== "none") {
+        renderEditDiffBlock(toolCallId, resolved, mode === "diff" ? "diff" : "edit");
+        screen.repaintNow();
       }
-      if (mode === "diff") {
-        const out = formatEditDiffBlock(state.editDiff, "diff");
-        return out.length > 0 ? out : null;
-      }
-      // mode === "edit": every completed edit gets its own clickable
-      // "▸ Edited <path>" mark — including edits that finish before any
-      // agent prose, and repeated edits of the same path. Each mark
-      // expands to its own diff on click, so neither omission applies
-      // anymore.
-      const out = formatEditDiffBlock(state.editDiff, "edit");
-      return out.length > 0 ? out : null;
     })();
-    if (lines === null) {
+  };
+
+  // Upsert a diff block at the given mode, kicking off a lazy fetch when an
+  // expanded diff is still in deferred (references) form.
+  const renderEditDiffBlock = (
+    toolCallId: string,
+    diff: EditDiff,
+    mode: "edit" | "diff",
+  ): void => {
+    const key = `editdiff:${toolCallId}`;
+    const out = formatEditDiffBlock(diff, mode);
+    if (out.length === 0) {
       screen.removeKey(key);
       return;
     }
+    screen.upsertLines(key, out);
+    if (mode === "diff" && (diff.oldRef !== undefined || diff.newRef !== undefined)) {
+      // Don't fetch yet — register for a "became visible" callback so the
+      // body is pulled only when this diff is actually on screen (lazy even
+      // in showFileUpdates="diff", where many diffs render off-screen).
+      screen.notifyWhenVisible(key);
+    }
+  };
+
+  // Fired by the screen when a registered (deferred) diff block scrolls into
+  // view: pull its body and re-render. Guarded by resolveDeferredDiff's
+  // in-flight set + the diff turning non-deferred after the fetch.
+  const handleBlockVisible = (key: string): void => {
+    if (!key.startsWith("editdiff:")) {
+      return;
+    }
+    const id = key.slice("editdiff:".length);
+    const diff = renderedEditDiffs.get(id);
+    if (diff && (diff.oldRef !== undefined || diff.newRef !== undefined)) {
+      resolveDeferredDiff(id, diff);
+    }
+  };
+
+  const maybeRenderEditDiff = (toolCallId: string): void => {
+    const key = `editdiff:${toolCallId}`;
+    // Decide the mode this id should render at; null means "show nothing".
+    const globalMode = viewPrefs.showFileUpdates;
+    const state = toolStates.get(toolCallId);
+    let mode: "edit" | "diff" | null;
+    if (globalMode === "none" || !state?.editDiff || state.status !== "completed") {
+      mode = null;
+    } else {
+      // A per-block click override forces this id's mode; otherwise the
+      // global mode applies. Every completed edit gets its own clickable
+      // "▸ Edited <path>" mark that expands to its own diff.
+      const override = editDiffOverrides.get(toolCallId);
+      mode =
+        override !== undefined
+          ? override
+            ? "diff"
+            : "edit"
+          : globalMode === "diff"
+            ? "diff"
+            : "edit";
+    }
+    if (mode === null) {
+      screen.removeKey(key);
+      return;
+    }
+    const diff = state!.editDiff!;
     // Remember the payload so a later ^O mode toggle can re-render this
     // diff even after the turn boundary wipes toolStates/toolCallOrder.
-    const diff = toolStates.get(toolCallId)?.editDiff;
-    if (diff) {
-      renderedEditDiffs.set(toolCallId, diff);
-    }
-    screen.upsertLines(key, lines);
+    renderedEditDiffs.set(toolCallId, diff);
+    renderEditDiffBlock(toolCallId, diff, mode);
   };
 
   // Re-converge every diff ever rendered this scrollback to the current
@@ -3798,12 +3888,7 @@ async function runSession(
         screen.removeKey(key);
         continue;
       }
-      const out = formatEditDiffBlock(diff, mode);
-      if (out.length === 0) {
-        screen.removeKey(key);
-      } else {
-        screen.upsertLines(key, out);
-      }
+      renderEditDiffBlock(toolCallId, diff, mode === "diff" ? "diff" : "edit");
     }
   };
 
@@ -3827,12 +3912,7 @@ async function runSession(
       // payload. maybeRenderEditDiff handles the live turn, but using the
       // retained-payload path uniformly is simpler and correct for both.
       const next = !current ? "diff" : "edit";
-      const out = formatEditDiffBlock(diff, next);
-      if (out.length === 0) {
-        screen.removeKey(key);
-      } else {
-        screen.upsertLines(key, out);
-      }
+      renderEditDiffBlock(id, diff, next);
       screen.repaintNow();
       return;
     }
@@ -4438,19 +4518,22 @@ async function runSession(
         historyPolicy: useAfterMessage ? "after_message" : "none",
         ...(useAfterMessage ? { afterMessageId: lastSeenMessageId } : {}),
         clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
-        ...(upstreamSessionId !== undefined
-          ? {
-              _meta: {
-                [HYDRA_META_KEY]: {
-                  resume: {
-                    upstreamSessionId,
-                    agentId: resolvedAgentId,
-                    cwd: resolvedCwd,
-                  },
-                },
-              },
-            }
-          : {}),
+        ...(() => {
+          const meta: Record<string, unknown> = {};
+          if (upstreamSessionId !== undefined) {
+            meta.resume = {
+              upstreamSessionId,
+              agentId: resolvedAgentId,
+              cwd: resolvedCwd,
+            };
+          }
+          if (config.tui.toolContent === "references") {
+            meta.toolContent = "references";
+          }
+          return Object.keys(meta).length > 0
+            ? { _meta: { [HYDRA_META_KEY]: meta } }
+            : {};
+        })(),
       },
     };
     // Arm the buffer BEFORE we send attach. The daemon delivers replay via

@@ -36,6 +36,7 @@ import {
 import type { SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator } from "./synopsis-coordinator.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
+import { getToolBlob } from "./tool-store.js";
 import { paths } from "./paths.js";
 import { expandHome } from "./config.js";
 import { saveHistory as savePromptHistory } from "../tui/history.js";
@@ -1222,6 +1223,13 @@ export class SessionManager {
   // a cold session without spawning an agent.
   async loadHistory(sessionId: string): Promise<HistoryStoreEntry[]> {
     return this.histories.load(sessionId);
+  }
+
+  // Read a single externalized tool-content blob by sha256 (the lean
+  // `tools: "references"` fetch-on-expand path). Null if the session id or
+  // hash is malformed, or the blob isn't present.
+  async loadToolBlob(sessionId: string, hash: string): Promise<string | null> {
+    return getToolBlob(sessionId, hash);
   }
 
   async loadFromDisk(sessionId: string): Promise<ResurrectParams | undefined> {

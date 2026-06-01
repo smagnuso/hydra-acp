@@ -44,6 +44,12 @@ export interface EditDiff {
   path?: string;
   oldText: string;
   newText: string;
+  // When the session was attached in `toolContent: "references"` mode the
+  // body text arrives as blob refs instead of strings. oldText/newText are
+  // then "" and these carry the sha256 + byte size so the client can fetch
+  // the real content on demand (e.g. when the user expands the diff).
+  oldRef?: { hash: string; bytes: number };
+  newRef?: { hash: string; bytes: number };
 }
 
 export type RenderEvent =
@@ -420,6 +426,28 @@ export function isExitPlanModeTool(name: string | undefined): boolean {
 //      treated as oldText:"")
 // Returns null when none of those shapes are present so the format
 // layer keeps the row single-line for non-edit tools.
+// Read a diff block's old/new field, which is either an inline string or a
+// blob ref ({ __hydraBlob, bytes }) when delivered in references mode.
+function readDiffField(
+  value: unknown,
+): { text?: string; ref?: { hash: string; bytes: number } } | undefined {
+  if (typeof value === "string") {
+    return { text: value };
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const v = value as { __hydraBlob?: unknown; bytes?: unknown };
+    if (typeof v.__hydraBlob === "string") {
+      return {
+        ref: {
+          hash: v.__hydraBlob,
+          bytes: typeof v.bytes === "number" ? v.bytes : 0,
+        },
+      };
+    }
+  }
+  return undefined;
+}
+
 export function extractEditDiff(u: UpdateLike): EditDiff | null {
   const content = u.content;
   if (Array.isArray(content)) {
@@ -431,16 +459,21 @@ export function extractEditDiff(u: UpdateLike): EditDiff | null {
       if (b.type !== "diff") {
         continue;
       }
-      const oldText = typeof b.oldText === "string" ? b.oldText : undefined;
-      const newText = typeof b.newText === "string" ? b.newText : undefined;
-      if (oldText === undefined && newText === undefined) {
+      // In "references" mode oldText/newText arrive as blob refs
+      // ({ __hydraBlob, bytes }) rather than strings; capture them as
+      // oldRef/newRef so the client can fetch the body on demand.
+      const oldField = readDiffField(b.oldText);
+      const newField = readDiffField(b.newText);
+      if (oldField === undefined && newField === undefined) {
         continue;
       }
       const path = typeof b.path === "string" ? b.path : undefined;
       return {
         ...(path !== undefined ? { path } : {}),
-        oldText: oldText ?? "",
-        newText: newText ?? "",
+        oldText: oldField?.text ?? "",
+        newText: newField?.text ?? "",
+        ...(oldField?.ref ? { oldRef: oldField.ref } : {}),
+        ...(newField?.ref ? { newRef: newField.ref } : {}),
       };
     }
   }

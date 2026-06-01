@@ -518,6 +518,44 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(summaryBody.length).toBeLessThan(inlineBody.length / 10);
     expect(summaryBody).toContain("/repo/foo.ts");
   });
+
+  it("GET /tools/:hash returns an externalized blob, 404 for unknown", async () => {
+    const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const history = new HistoryStore();
+    const big = "Z".repeat(20_000);
+    await history.append(s.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "e1",
+          status: "completed",
+          content: [{ type: "diff", path: "/repo/foo.ts", oldText: big, newText: big }],
+        },
+      },
+      recordedAt: 1,
+    });
+    // Discover the blob hash from the lean (references) load.
+    const lean = await history.load(s.sessionId, { tools: "references" });
+    const block = (lean[0]!.params as { update: { content: Array<Record<string, unknown>> } })
+      .update.content[0]!;
+    const hash = (block.oldText as { __hydraBlob: string }).__hydraBlob;
+    expect(typeof hash).toBe("string");
+
+    const auth = { Authorization: "Bearer test" } as Record<string, string>;
+    const okRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/${s.sessionId}/tools/${hash}`,
+      { headers: auth },
+    );
+    expect(okRes.status).toBe(200);
+    expect(await okRes.text()).toBe(big);
+
+    const missRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/${s.sessionId}/tools/${"a".repeat(64)}`,
+      { headers: auth },
+    );
+    expect(missRes.status).toBe(404);
+  });
 });
 
 describe("session routes: POST /v1/sessions/:id/fork", () => {

@@ -139,6 +139,14 @@ const TuiConfig = z.object({
   // bleeds past the margin on wide terminals. The thought gutter uses an
   // ASCII marker, so this no longer affects marker alignment either way.
   ambiguousWidth: z.enum(["narrow", "wide"]).default("wide"),
+  // How the TUI receives tool payload on attach/replay.
+  //   "references" — the lean path (default): the daemon ships blob refs and
+  //                  the TUI fetches a diff/output body on demand when
+  //                  expanded, cutting replay size on tool-heavy sessions.
+  //                  Collapsed rows never fetch (they show a size hint), and
+  //                  old inline sessions/live turns are unaffected (no refs).
+  //   "inline"     — full content up front (the pre-externalization shape).
+  toolContent: z.enum(["inline", "references"]).default("references"),
   // Unchanged context lines shown around each change in an expanded Edited
   // diff. Some agents (e.g. pi) report edits as full-file old/new text via
   // ACP "diff" content blocks; without hunking a 1-line edit would render
@@ -298,6 +306,7 @@ export const HydraConfig = z.object({
     defaultEnterAction: "amend",
     showThoughts: true,
     ambiguousWidth: "wide",
+    toolContent: "references",
     diffContextLines: 3,
     promptHistoryMaxEntries: 2_000,
     maxToolItems: 5,

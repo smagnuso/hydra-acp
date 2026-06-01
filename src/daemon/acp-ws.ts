@@ -582,6 +582,32 @@ export function registerAcpWsEndpoint(
       });
     }
 
+    // Fetch one externalized tool-content body by sha256 (the lean
+    // `toolContent: "references"` fetch-on-expand path). Mirrors the REST
+    // GET /v1/sessions/:id/tools/:hash but over the client's existing WS
+    // connection, which is the channel the TUI has. Registered for every
+    // client connection (not just transformers).
+    connection.onRequest("hydra-acp/session/tool_content", async (raw) => {
+      const params = (raw ?? {}) as { sessionId?: unknown; hash?: unknown };
+      if (typeof params.sessionId !== "string" || typeof params.hash !== "string") {
+        throw Object.assign(
+          new Error("hydra-acp/session/tool_content requires sessionId and hash"),
+          { code: JsonRpcErrorCodes.InvalidParams },
+        );
+      }
+      const id =
+        (await deps.manager.resolveCanonicalId(params.sessionId)) ??
+        params.sessionId;
+      const content = await deps.manager.loadToolBlob(id, params.hash);
+      if (content === null) {
+        throw Object.assign(
+          new Error("tool content not found"),
+          { code: JsonRpcErrorCodes.SessionNotFound },
+        );
+      }
+      return { content };
+    });
+
     connection.onRequest("session/new", async (raw) => {
       const params = SessionNewParams.parse(raw);
       const hydraMeta = extractHydraMeta(
@@ -888,7 +914,15 @@ export function registerAcpWsEndpoint(
       const { entries: replay, appliedPolicy } = await session.attach(
         client,
         params.historyPolicy,
-        { afterMessageId: params.afterMessageId, raw: drip },
+        {
+          afterMessageId: params.afterMessageId,
+          raw: drip,
+          // Lean clients opt into ref-form tool content via _meta; default
+          // stays inline so existing/third-party clients are unaffected.
+          ...(hydraAttach.toolContent !== undefined
+            ? { toolContent: hydraAttach.toolContent }
+            : {}),
+        },
       );
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
