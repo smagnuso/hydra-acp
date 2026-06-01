@@ -1669,7 +1669,25 @@ export async function pickSession(
         if (session.sessionId === opts.currentSessionId) {
           currentSessionGone = true;
         }
-        await refresh(kind === "kill" ? session.sessionId : undefined);
+        // For delete: follow the next visible neighbor so the cursor
+        // stays at the deleted row's slot (occupied by whichever session
+        // shifts up). Falls back to the previous neighbor at the tail.
+        // Without this, refresh's default followId picks up the
+        // now-deleted session's id, fails to find it, and snaps the
+        // selection back to the composer.
+        let followId: string | undefined;
+        if (kind === "kill") {
+          followId = session.sessionId;
+        } else {
+          const idx = visible.findIndex(
+            (s) => s.sessionId === session.sessionId,
+          );
+          if (idx >= 0) {
+            followId =
+              visible[idx + 1]?.sessionId ?? visible[idx - 1]?.sessionId;
+          }
+        }
+        await refresh(followId);
       } catch (err) {
         mode = "normal";
         pendingAction = null;
