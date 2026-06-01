@@ -4,6 +4,7 @@
 import stripAnsi from "strip-ansi";
 
 import type { Attachment } from "../tui/input.js";
+import type { ConfigOption, ConfigOptionValue } from "./hydra-commands.js";
 
 // Strip ANSI escape sequences and dangerous C0 control characters from any
 // string we get from the wire before it lands in a RenderEvent. The render
@@ -105,6 +106,7 @@ export type RenderEvent =
   | { kind: "available-commands"; commands: AvailableCommand[] }
   | { kind: "available-modes"; modes: AvailableMode[] }
   | { kind: "session-info"; title?: string; agentId?: string }
+  | { kind: "config-options"; options: ConfigOption[] }
   | { kind: "unknown"; sessionUpdate: string; raw: unknown };
 
 export interface AvailableCommand {
@@ -171,9 +173,62 @@ export function mapUpdate(update: unknown): RenderEvent | null {
       return mapAvailableModes(u);
     case "session_info_update":
       return mapSessionInfo(u);
+    case "config_option_update":
+      return mapConfigOptions(u);
     default:
       return { kind: "unknown", sessionUpdate: tag, raw: update };
   }
+}
+
+// Parse a config_option_update notification (the spec-shaped unified
+// config snapshot) into a config-options event. Tolerant: malformed
+// entries are dropped rather than failing the whole snapshot, mirroring
+// how the daemon harvests opencode's flavor.
+function mapConfigOptions(u: UpdateLike): RenderEvent | null {
+  const list = u.configOptions;
+  if (!Array.isArray(list)) {
+    return null;
+  }
+  const options: ConfigOption[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const o = raw as Record<string, unknown>;
+    if (
+      typeof o.id !== "string" ||
+      typeof o.currentValue !== "string" ||
+      !Array.isArray(o.options)
+    ) {
+      continue;
+    }
+    const values: ConfigOptionValue[] = [];
+    for (const v of o.options) {
+      if (!v || typeof v !== "object") {
+        continue;
+      }
+      const vv = v as Record<string, unknown>;
+      if (typeof vv.value !== "string") {
+        continue;
+      }
+      values.push({
+        value: vv.value,
+        name: typeof vv.name === "string" ? vv.name : vv.value,
+        ...(typeof vv.description === "string"
+          ? { description: vv.description }
+          : {}),
+      });
+    }
+    options.push({
+      id: o.id,
+      name: typeof o.name === "string" ? o.name : o.id,
+      type: "select",
+      currentValue: o.currentValue,
+      options: values,
+      ...(typeof o.category === "string" ? { category: o.category } : {}),
+    });
+  }
+  return { kind: "config-options", options };
 }
 
 function mapSessionInfo(u: UpdateLike): RenderEvent | null {

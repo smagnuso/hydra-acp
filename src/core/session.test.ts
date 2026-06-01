@@ -704,6 +704,85 @@ describe("Session", () => {
       expect(session.currentModel).toBe("ncp-anthropic/claude-opus-4-7");
     });
 
+    it("captures availableModes + currentMode from a config_option_update (id=mode)", async () => {
+      // claude-acp advertises its permission modes ONLY via a
+      // config_option_update with id="mode" (no available_modes_update).
+      // Without harvesting it, availableModes() stays empty and the TUI's
+      // Shift+Tab cycle reports "no modes advertised".
+      const { session, mock } = makeSession("sess_ocm", "u_ocm");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ocm",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            {
+              id: "mode",
+              name: "Mode",
+              category: "mode",
+              currentValue: "plan",
+              options: [
+                { value: "default", name: "Default" },
+                { value: "plan", name: "Plan" },
+                { value: "bypassPermissions", name: "Bypass" },
+              ],
+            },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+
+      expect(session.availableModes()).toEqual([
+        { id: "default", name: "Default" },
+        { id: "plan", name: "Plan" },
+        { id: "bypassPermissions", name: "Bypass" },
+      ]);
+      expect(session.currentMode).toBe("plan");
+    });
+
+    it("appends the hydra agent option when broadcasting an agent-emitted config_option_update", async () => {
+      // opencode's config_option_update carries only mode/model (+ its own
+      // extras), never the hydra-native `agent` option. Broadcasting it raw
+      // would clobber the merged snapshot the load response gave a generic
+      // client (Zed), making the agent selector disappear. Hydra appends
+      // the agent option, preserving the agent's own options + order.
+      const { session, mock } = makeSession("sess_merge", "u_merge");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      const before = warm.stream.sent.length;
+      mock.triggerNotification("session/update", {
+        sessionId: "u_merge",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            { id: "model", currentValue: "haiku", options: [{ value: "haiku" }] },
+            { id: "mode", currentValue: "default", options: [{ value: "default" }] },
+            { id: "effort", currentValue: "low", options: [{ value: "low" }] },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+
+      const sent = warm.stream.sent.slice(before) as Array<{
+        params?: {
+          update?: {
+            sessionUpdate?: string;
+            configOptions?: Array<{ id?: string }>;
+          };
+        };
+      }>;
+      const broadcast = sent.find(
+        (m) =>
+          m.params?.update?.sessionUpdate === "config_option_update" &&
+          (m.params.update.configOptions ?? []).some((o) => o.id === "effort"),
+      );
+      expect(broadcast).toBeDefined();
+      const ids = broadcast!.params!.update!.configOptions!.map((o) => o.id);
+      // Agent's own options preserved in order, agent appended last.
+      expect(ids).toEqual(["model", "mode", "effort", "agent"]);
+    });
+
     it("broadcasts a synthetic current_model_update when a model change arrives via config_option_update", async () => {
       // opencode/claude-acp carry an agent-initiated model switch only in
       // the non-spec config_option_update. Clients that don't render that
@@ -1970,12 +2049,66 @@ describe("Session", () => {
               ?.content?.text ?? ""
           ).includes("(switched from `old` to `new`)"),
       );
-      expect(banner).toBeDefined();
+      expect(banner).toBeUndefined();
 
       expect(agentChangePayload).toEqual({
         agentId: "new",
         upstreamSessionId: "u_new",
       });
+    });
+
+    it("/hydra agent re-advertises the new agent's models/modes from its session/new response", async () => {
+      // Regression: opencode reports its model/mode list only in the
+      // session/new response (never via a follow-up current_model_update),
+      // so a switch that merely cleared the lists left the client dropdowns
+      // permanently empty. The switch must repopulate from the spawn result.
+      const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
+      const newMock = makeMockAgent({ agentId: "new", cwd: "/w" });
+      (newMock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+      const session = new Session({
+        sessionId: "hydra_session_SM",
+        cwd: "/w",
+        agentId: "old",
+        agent: oldMock.agent,
+        upstreamSessionId: "u_old",
+        historyStore: new HistoryStore(),
+        // Old agent starts with its own (different) list.
+        agentModels: [{ modelId: "old/model-1" }],
+        currentModel: "old/model-1",
+        spawnReplacementAgent: async () => ({
+          agent: newMock.agent,
+          upstreamSessionId: "u_new",
+          initialModel: "openai/gpt-5-codex",
+          initialModels: [
+            { modelId: "openai/gpt-5-codex", name: "GPT-5 Codex" },
+            { modelId: "anthropic/claude-opus", name: "Opus" },
+          ],
+          initialMode: "build",
+          initialModes: [
+            { id: "build", name: "Build" },
+            { id: "plan", name: "Plan" },
+          ],
+        }),
+      });
+      const { client } = makeClient();
+      await session.attach(client, "full");
+
+      await session.prompt(client.clientId, {
+        prompt: [{ type: "text", text: "/hydra agent new" }],
+      });
+
+      // The new agent's lists replaced the old agent's, rather than being
+      // cleared to empty.
+      expect(session.availableModels()).toEqual([
+        { modelId: "openai/gpt-5-codex", name: "GPT-5 Codex" },
+        { modelId: "anthropic/claude-opus", name: "Opus" },
+      ]);
+      expect(session.availableModes()).toEqual([
+        { id: "build", name: "Build" },
+        { id: "plan", name: "Plan" },
+      ]);
     });
 
     it("/hydra agent with no agent id rejects", async () => {
@@ -4088,6 +4221,163 @@ describe("Session", () => {
             ?.sessionUpdate === "current_mode_update",
       );
       expect(broadcast).toBeDefined();
+    });
+  });
+
+  describe("config options", () => {
+    function findConfigUpdate(stream: { sent: unknown[] }) {
+      return stream.sent.find(
+        (m) =>
+          !!m &&
+          typeof m === "object" &&
+          "method" in m &&
+          (m as { method?: string }).method === "session/update" &&
+          (m as { params?: { update?: { sessionUpdate?: string } } }).params
+            ?.update?.sessionUpdate === "config_option_update",
+      ) as JsonRpcNotification | undefined;
+    }
+
+    it("buildConfigOptions always includes the hydra-native agent option even with no modes/models/catalog", () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_co1",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u1",
+        historyStore: new HistoryStore(),
+      });
+      const opts = session.buildConfigOptions();
+      expect(opts).toHaveLength(1);
+      expect(opts[0]).toMatchObject({
+        id: "agent",
+        category: "_hydra_agent",
+        type: "select",
+        currentValue: "mock",
+      });
+      // currentValue is injected into options even with an empty catalog.
+      expect(opts[0]!.options.map((o) => o.value)).toContain("mock");
+    });
+
+    it("buildConfigOptions orders model, mode, then agent and uses spec categories", () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_co2",
+        cwd: "/work",
+        agentId: "claude-acp",
+        agent: mock.agent,
+        upstreamSessionId: "u2",
+        historyStore: new HistoryStore(),
+        currentModel: "model-2",
+        currentMode: "code",
+        agentModels: [
+          { modelId: "model-1", name: "One" },
+          { modelId: "model-2", name: "Two" },
+        ],
+        agentModes: [{ id: "ask" }, { id: "code", name: "Code" }],
+        availableAgents: () => [
+          { id: "claude-acp", name: "Claude" },
+          { id: "opencode", name: "opencode" },
+        ],
+      });
+      const opts = session.buildConfigOptions();
+      expect(opts.map((o) => o.id)).toEqual(["model", "mode", "agent"]);
+      expect(opts.map((o) => o.category)).toEqual(["model", "mode", "_hydra_agent"]);
+      const model = opts[0]!;
+      expect(model.currentValue).toBe("model-2");
+      const mode = opts[1]!;
+      expect(mode.currentValue).toBe("code");
+      // mode value falls back to id when the agent supplied no name.
+      expect(mode.options.find((o) => o.value === "ask")?.name).toBe("ask");
+      const agent = opts[2]!;
+      expect(agent.currentValue).toBe("claude-acp");
+      expect(agent.options.map((o) => o.value)).toEqual(["claude-acp", "opencode"]);
+    });
+
+    it("buildConfigOptions injects the live agent when the catalog omits it", () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_co3",
+        cwd: "/work",
+        agentId: "custom-local",
+        agent: mock.agent,
+        upstreamSessionId: "u3",
+        historyStore: new HistoryStore(),
+        availableAgents: () => [{ id: "opencode", name: "opencode" }],
+      });
+      const agent = session.buildConfigOptions().find((o) => o.id === "agent")!;
+      expect(agent.currentValue).toBe("custom-local");
+      expect(agent.options.map((o) => o.value)).toContain("custom-local");
+    });
+
+    it("applyModelChange also broadcasts a config_option_update snapshot", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_co4",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u4",
+        historyStore: new HistoryStore(),
+        agentModels: [{ modelId: "m1" }, { modelId: "m2" }],
+      });
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      stream.sent.length = 0;
+
+      session.applyModelChange("m2");
+
+      const update = findConfigUpdate(stream);
+      expect(update).toBeDefined();
+      const list = (update!.params as { update: { configOptions: Array<{ id: string; currentValue: string }> } })
+        .update.configOptions;
+      expect(list.find((o) => o.id === "model")?.currentValue).toBe("m2");
+    });
+
+    it("applyModeChange also broadcasts a config_option_update snapshot", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_co5",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u5",
+        historyStore: new HistoryStore(),
+        agentModes: [{ id: "ask" }, { id: "code" }],
+      });
+      const { client, stream } = makeClient();
+      await session.attach(client, "full");
+      stream.sent.length = 0;
+
+      session.applyModeChange("code");
+
+      const update = findConfigUpdate(stream);
+      expect(update).toBeDefined();
+      const list = (update!.params as { update: { configOptions: Array<{ id: string; currentValue: string }> } })
+        .update.configOptions;
+      expect(list.find((o) => o.id === "mode")?.currentValue).toBe("code");
+    });
+
+    it("config_option_update broadcasts are not recorded to history", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const store = new HistoryStore();
+      const session = new Session({
+        sessionId: "sess_co6",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u6",
+        historyStore: store,
+        agentModes: [{ id: "ask" }, { id: "code" }],
+      });
+      session.applyModeChange("code");
+      const snap = await session.getHistorySnapshot();
+      const hasConfigUpdate = snap.some(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } })?.update
+            ?.sessionUpdate === "config_option_update",
+      );
+      expect(hasConfigUpdate).toBe(false);
     });
   });
 });

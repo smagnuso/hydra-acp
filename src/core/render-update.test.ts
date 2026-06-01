@@ -537,12 +537,58 @@ describe("mapUpdate", () => {
 
   it("returns unknown for unrecognized sessionUpdate", () => {
     expect(
-      mapUpdate({ sessionUpdate: "config_option_update", foo: "bar" }),
+      mapUpdate({ sessionUpdate: "some_future_kind", foo: "bar" }),
     ).toEqual({
       kind: "unknown",
-      sessionUpdate: "config_option_update",
-      raw: { sessionUpdate: "config_option_update", foo: "bar" },
+      sessionUpdate: "some_future_kind",
+      raw: { sessionUpdate: "some_future_kind", foo: "bar" },
     });
+  });
+
+  it("maps config_option_update into a config-options event, dropping malformed entries", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "config_option_update",
+        configOptions: [
+          {
+            id: "agent",
+            name: "Agent",
+            category: "_hydra_agent",
+            type: "select",
+            currentValue: "claude-acp",
+            options: [
+              { value: "claude-acp", name: "Claude" },
+              { value: "opencode" },
+              "garbage",
+              { name: "no-value" },
+            ],
+          },
+          { id: "model" }, // missing currentValue/options → dropped
+          "not-an-object",
+        ],
+      }),
+    ).toEqual({
+      kind: "config-options",
+      options: [
+        {
+          id: "agent",
+          name: "Agent",
+          category: "_hydra_agent",
+          type: "select",
+          currentValue: "claude-acp",
+          options: [
+            { value: "claude-acp", name: "Claude" },
+            { value: "opencode", name: "opencode" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("returns null for config_option_update without a configOptions array", () => {
+    expect(
+      mapUpdate({ sessionUpdate: "config_option_update", foo: "bar" }),
+    ).toBeNull();
   });
 
   it("returns null for non-objects and missing tag", () => {

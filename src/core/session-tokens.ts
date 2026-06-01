@@ -68,8 +68,14 @@ export class SessionTokenStore {
   private records = new Map<string, SessionTokenRecord>(); // keyed by hash
   private writeTimer: NodeJS.Timeout | null = null;
   private writeInflight: Promise<void> | null = null;
+  // Bound at construction so a debounced write that fires after the
+  // process's HYDRA_ACP_HOME has changed (e.g. between tests) targets the
+  // path this store was loaded from rather than re-resolving paths.home()
+  // and clobbering an unrelated home's token file.
+  private readonly filePath: string;
 
-  private constructor(records: SessionTokenRecord[]) {
+  private constructor(records: SessionTokenRecord[], filePath: string) {
+    this.filePath = filePath;
     for (const r of records) {
       this.records.set(r.hash, r);
     }
@@ -77,13 +83,14 @@ export class SessionTokenStore {
 
   static async load(): Promise<SessionTokenStore> {
     let records: SessionTokenRecord[] = [];
+    const filePath = tokensFilePath();
     const parsed = await readJsonSafe<{ records?: SessionTokenRecord[] }>(
-      tokensFilePath(),
+      filePath,
     );
     if (parsed && Array.isArray(parsed.records)) {
       records = parsed.records.filter(isRecord);
     }
-    const store = new SessionTokenStore(records);
+    const store = new SessionTokenStore(records, filePath);
     const removed = store.sweepExpired(new Date());
     if (removed > 0) {
       await store.flush();
@@ -225,7 +232,7 @@ export class SessionTokenStore {
       .catch(() => undefined)
       .then(() =>
         writeJsonAtomic(
-          tokensFilePath(),
+          this.filePath,
           { records: Array.from(this.records.values()) },
           { mode: 0o600 },
         ),

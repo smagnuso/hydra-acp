@@ -142,7 +142,8 @@ export function formatEvent(
       return [];
     case "available-commands":
     case "available-modes":
-      // Stored as completion/mode data, not rendered to scrollback.
+    case "config-options":
+      // Stored as completion/selector data, not rendered to scrollback.
       return [];
     case "session-info":
       // Title is rendered in the header by the app, not in scrollback.

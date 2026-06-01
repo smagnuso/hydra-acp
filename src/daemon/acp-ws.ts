@@ -714,6 +714,7 @@ export function registerAcpWsEndpoint(
         sessionId: session.sessionId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
+        configOptions: session.buildConfigOptions(),
         // session/new is a core ACP spec method, so the per-attachment
         // clientId rides under _meta["hydra-acp"] rather than top-level.
         // Deferred-echo clients (TUI's queue work) read it from there to
@@ -916,6 +917,7 @@ export function registerAcpWsEndpoint(
         replayed: replay.length,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
+        configOptions: session.buildConfigOptions(),
         _meta: buildResponseMeta(deps.manager, session),
       };
     });
@@ -1193,6 +1195,7 @@ export function registerAcpWsEndpoint(
         sessionId: session.sessionId,
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
+        configOptions: session.buildConfigOptions(),
         // session/load is a core ACP spec method: clientId rides under
         // _meta["hydra-acp"] (not top-level), same as session/new. Lets
         // deferred-echo clients recognize their own broadcasts.
@@ -1293,6 +1296,94 @@ export function registerAcpWsEndpoint(
       // stay accurate.
       session.applyModeChange(params.modeId);
       return result;
+    });
+
+    // session/set_config_option: the spec-preferred unified config setter.
+    // hydra exposes mode/model (when known) and the hydra-native `agent`
+    // selector via configOptions, so this dispatches by configId onto the
+    // existing per-dimension machinery: agent → swap, mode → set_mode,
+    // model → set_model. Per spec the response carries the complete,
+    // updated configOptions snapshot.
+    connection.onRequest("session/set_config_option", async (rawParams) => {
+      const params = rawParams as
+        | { sessionId?: unknown; configId?: unknown; value?: unknown }
+        | undefined;
+      const invalid = (msg: string): Error & { code: number } => {
+        const err = new Error(msg) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.InvalidParams;
+        return err;
+      };
+      const sessionIdField = params?.sessionId;
+      if (typeof sessionIdField === "string") {
+        denyIfReadonly(sessionIdField, "session/set_config_option");
+      }
+      if (!params || typeof params.sessionId !== "string") {
+        throw invalid("session/set_config_option requires string sessionId");
+      }
+      if (typeof params.configId !== "string") {
+        throw invalid("session/set_config_option requires string configId");
+      }
+      if (typeof params.value !== "string") {
+        throw invalid("session/set_config_option requires string value");
+      }
+      const session = deps.manager.get(params.sessionId);
+      if (!session) {
+        const err = new Error(
+          `session ${params.sessionId} not found`,
+        ) as Error & { code: number };
+        err.code = JsonRpcErrorCodes.SessionNotFound;
+        throw err;
+      }
+      // Validate configId + value against the live snapshot so we never
+      // dispatch an option hydra isn't currently offering.
+      const option = session
+        .buildConfigOptions()
+        .find((o) => o.id === params.configId);
+      if (!option) {
+        throw invalid(
+          `unknown configId ${JSON.stringify(params.configId)} for this session`,
+        );
+      }
+      if (!option.options.some((v) => v.value === params.value)) {
+        throw invalid(
+          `value ${JSON.stringify(params.value)} is not valid for configId ${JSON.stringify(params.configId)}`,
+        );
+      }
+      switch (params.configId) {
+        case "model": {
+          if (params.value !== session.currentModel) {
+            await session.forwardRequest("session/set_model", {
+              sessionId: params.sessionId,
+              modelId: params.value,
+            });
+          }
+          session.applyModelChange(params.value);
+          break;
+        }
+        case "mode": {
+          if (params.value !== session.currentMode) {
+            await session.forwardRequest("session/set_mode", {
+              sessionId: params.sessionId,
+              modeId: params.value,
+            });
+          }
+          session.applyModeChange(params.value);
+          break;
+        }
+        case "agent": {
+          // No-op when already on the requested agent (a swap to the same
+          // id would throw); just resync the client with the full snapshot.
+          if (params.value !== session.agentId) {
+            await session.setAgent(params.value);
+          }
+          break;
+        }
+        default:
+          throw invalid(
+            `configId ${JSON.stringify(params.configId)} is not settable`,
+          );
+      }
+      return { configOptions: session.buildConfigOptions() };
     });
 
     connection.setDefaultHandler(async (rawParams, method) => {

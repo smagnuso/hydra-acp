@@ -5,6 +5,7 @@ import { customAlphabet } from "nanoid";
 import { AgentInstance, type AgentInstanceOptions, type AgentLogger } from "./agent-instance.js";
 import {
   Registry,
+  listAgents,
   planSpawn,
   type AgentInstallProgressCallback,
 } from "./registry.js";
@@ -15,6 +16,7 @@ import {
   findMessageIdIndex,
   firstLine,
   parseModelsList,
+  parseModesList,
   type UsageSnapshot,
 } from "./session.js";
 import {
@@ -211,6 +213,15 @@ export class SessionManager {
   // out-of-band so session close is instant; persists synopsis/title
   // via the same enqueueMetaWrite path the in-session handlers used.
   private synopsisCoordinator: SynopsisCoordinator;
+  // Cached agent catalog used to populate the `agent` config option's
+  // value list. Refreshed lazily (fire-and-forget) since the underlying
+  // registry load may hit the network; sessions read whatever snapshot is
+  // current and always inject their own live agent if it's missing.
+  private agentCatalog: Array<{
+    id: string;
+    name?: string;
+    description?: string;
+  }> = [];
 
   constructor(
     private registry: Registry,
@@ -259,6 +270,23 @@ export class SessionManager {
       logger: this.logger,
       npmRegistry: this.npmRegistry,
     });
+    void this.refreshAgentCatalog();
+  }
+
+  // Refresh the cached agent catalog from the registry. Fire-and-forget;
+  // failures leave the prior snapshot in place. Called at construction and
+  // after each session creation so the list tracks newly-installed agents.
+  private async refreshAgentCatalog(): Promise<void> {
+    try {
+      const { agents } = await listAgents(this.registry);
+      this.agentCatalog = agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        ...(a.description !== undefined ? { description: a.description } : {}),
+      }));
+    } catch {
+      // Keep the existing snapshot; sessions still inject their live agent.
+    }
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
@@ -314,6 +342,7 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       listSessions: () => this.list(),
+      availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: fresh.initialModel,
@@ -543,6 +572,7 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       listSessions: () => this.list(),
+      availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: effectiveModel,
@@ -633,6 +663,7 @@ export class SessionManager {
       spawnReplacementAgent: (p) =>
         this.bootstrapAgent({ ...p, mcpServers: [] }),
       listSessions: () => this.list(),
+      availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: effectiveModel,
@@ -2218,6 +2249,13 @@ export function extractInitialModel(
       }
     }
   }
+  const fromConfig = findConfigOptionEntry(result, "model");
+  if (fromConfig) {
+    const cv = asString(fromConfig.currentValue);
+    if (cv) {
+      return cv;
+    }
+  }
   return undefined;
 }
 
@@ -2227,6 +2265,33 @@ function asString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+// opencode 1.15.13+ moved its model/mode advertisement out of the spec
+// `availableModels` / `availableModes` fields and into a top-level
+// `configOptions` array on the session/new and session/load responses,
+// keyed by `id` ("model", "mode", "effort", …). Pull the matching entry
+// so the extractInitial* helpers below can fall back to it when the
+// agent doesn't use the spec shapes. Returns undefined if `configOptions`
+// is missing, malformed, or has no entry with the requested id.
+function findConfigOptionEntry(
+  result: Record<string, unknown>,
+  id: string,
+): { currentValue?: unknown; options?: unknown } | undefined {
+  const list = result.configOptions;
+  if (!Array.isArray(list)) {
+    return undefined;
+  }
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const entry = raw as Record<string, unknown>;
+    if (entry.id === id) {
+      return entry;
+    }
+  }
+  return undefined;
 }
 
 function nonEmptyOrUndefined<T>(arr: T[]): T[] | undefined {
@@ -2278,6 +2343,13 @@ export function extractInitialModels(
       }
     }
   }
+  const fromConfig = findConfigOptionEntry(result, "model");
+  if (fromConfig) {
+    const parsed = parseModelsList(fromConfig.options);
+    if (parsed.length > 0) {
+      return parsed;
+    }
+  }
   return [];
 }
 
@@ -2322,6 +2394,13 @@ export function extractInitialModes(
       }
     }
   }
+  const fromConfig = findConfigOptionEntry(result, "mode");
+  if (fromConfig) {
+    const parsed = parseModesList(fromConfig.options);
+    if (parsed.length > 0) {
+      return parsed;
+    }
+  }
   return [];
 }
 
@@ -2364,6 +2443,13 @@ export function extractInitialCurrentMode(
           return m;
         }
       }
+    }
+  }
+  const fromConfig = findConfigOptionEntry(result, "mode");
+  if (fromConfig) {
+    const cv = asString(fromConfig.currentValue);
+    if (cv) {
+      return cv;
     }
   }
   return undefined;
@@ -2479,34 +2565,6 @@ async function restoreCurrentModel(opts: {
     );
     return agentReportedModel;
   }
-}
-
-function parseModesList(list: unknown): AdvertisedMode[] {
-  if (!Array.isArray(list)) {
-    return [];
-  }
-  const out: AdvertisedMode[] = [];
-  for (const raw of list) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      continue;
-    }
-    const r = raw as Record<string, unknown>;
-    const id = asString(r.id) ?? asString(r.modeId);
-    if (!id) {
-      continue;
-    }
-    const mode: AdvertisedMode = { id };
-    const name = asString(r.name);
-    if (name) {
-      mode.name = name;
-    }
-    const description = asString(r.description);
-    if (description) {
-      mode.description = description;
-    }
-    out.push(mode);
-  }
-  return out;
 }
 
 // Walk history in reverse for the most recent turn_complete session/update

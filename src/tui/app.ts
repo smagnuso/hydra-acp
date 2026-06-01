@@ -101,6 +101,7 @@ import {
   type EditDiff,
   type RenderEvent,
 } from "../core/render-update.js";
+import type { ConfigOption } from "../core/hydra-commands.js";
 import {
   formatEditDiffBlock,
   formatEvent,
@@ -113,6 +114,23 @@ import {
   type FormattedLine,
   type ToolLineState,
 } from "./format.js";
+
+// Parse the top-level `configOptions` field off a session/new or
+// session/attach response by routing it through the same mapper used for
+// config_option_update notifications, so the response and live-update
+// paths share one shape. Returns undefined when the field is absent.
+function parseResponseConfigOptions(
+  raw: unknown,
+): ConfigOption[] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const event = mapUpdate({
+    sessionUpdate: "config_option_update",
+    configOptions: raw,
+  });
+  return event && event.kind === "config-options" ? event.options : undefined;
+}
 
 export interface TuiOptions {
   sessionId?: string;
@@ -1171,6 +1189,9 @@ async function runSession(
   let initialMode: string | undefined;
   let initialCommands: AvailableCommand[] | undefined;
   let initialModes: AvailableMode[] | undefined;
+  // PoC: configOptions is a top-level response field (not _meta), so it's
+  // captured directly from the response object alongside the _meta hints.
+  let initialConfigOptions: ConfigOption[] | undefined;
   // Snapshot of the daemon-owned prompt queue at attach time. Lets the
   // chip row paint stale-but-correct queue state right after the
   // dispatcher is constructed, without waiting for new
@@ -1202,6 +1223,7 @@ async function runSession(
         : {}),
     })) as {
       sessionId: string;
+      configOptions?: unknown;
       _meta?: Record<string, unknown>;
     };
     resolvedSessionId = created.sessionId;
@@ -1233,6 +1255,7 @@ async function runSession(
     if (hydraMeta.availableModes) {
       initialModes = hydraMeta.availableModes;
     }
+    initialConfigOptions = parseResponseConfigOptions(created.configOptions);
     initialQueue = hydraMeta.queue;
   } else {
     // Hydra-specific attach options (readonly / drip pacing) and the
@@ -1271,6 +1294,7 @@ async function runSession(
     })) as {
       sessionId: string;
       clientId?: string;
+      configOptions?: unknown;
       _meta?: Record<string, unknown>;
     };
     resolvedSessionId = attached.sessionId;
@@ -1300,6 +1324,7 @@ async function runSession(
     if (hydraMeta.availableModes) {
       initialModes = hydraMeta.availableModes;
     }
+    initialConfigOptions = parseResponseConfigOptions(attached.configOptions);
     initialQueue = hydraMeta.queue;
   }
 
@@ -1471,6 +1496,7 @@ async function runSession(
     { name: "/clear", description: "Clear scrollback" },
     { name: "/sessions", description: "List sessions" },
     { name: "/model", description: "Switch model: /model <model-id>" },
+    { name: "/agent", description: "Switch agent via config option: /agent <agent-id>" },
     { name: "/demo-plan", description: "Inject synthetic plan events (UI test)" },
     { name: "/demo-tool", description: "Inject a synthetic tool-call sequence (UI test)" },
   ];
@@ -1479,6 +1505,12 @@ async function runSession(
   let agentCommands: AvailableCommand[] = initialCommands ?? [];
   // Available modes advertised by the agent. Used by Shift+Tab to cycle.
   let agentModes: AvailableMode[] = initialModes ?? [];
+  // PoC: the unified config-options snapshot (model/mode/agent), seeded
+  // from the session/new + attach response and kept fresh by
+  // config_option_update notifications. Drives the `/agent` selector.
+  let agentConfigOptions: ConfigOption[] = initialConfigOptions ?? [];
+  const agentConfigOption = (): ConfigOption | undefined =>
+    agentConfigOptions.find((o) => o.id === "agent");
 
   const allCommands = (): AvailableCommand[] => {
     const seen = new Set<string>();
@@ -2941,6 +2973,59 @@ async function runSession(
         screen.appendLines(lines);
         return true;
       }
+      case "/agent": {
+        // PoC: drive an agent swap through the spec config-options surface
+        // (session/set_config_option) rather than the `/hydra agent` text
+        // command. With no arg, list the agent option's values; otherwise
+        // request the swap and let the resulting config_option_update
+        // repaint the sessionbar.
+        const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        const opt = agentConfigOption();
+        if (!opt) {
+          screen.appendLines([
+            {
+              prefix: "  ",
+              body: "no agent config option advertised for this session",
+              bodyStyle: "info",
+            },
+          ]);
+          return true;
+        }
+        if (!arg) {
+          const lines: FormattedLine[] = [
+            { prefix: "  ", body: "Available agents:", bodyStyle: "system" },
+          ];
+          for (const v of opt.options) {
+            const marker = v.value === opt.currentValue ? "* " : "  ";
+            lines.push({
+              prefix: "  ",
+              body: `${marker}${v.value.padEnd(16)} ${v.name}`,
+              bodyStyle: "info",
+            });
+          }
+          screen.appendLines(lines);
+          return true;
+        }
+        if (!opt.options.some((v) => v.value === arg)) {
+          screen.notify(`unknown agent: ${arg}`);
+          return true;
+        }
+        if (arg === opt.currentValue) {
+          screen.notify(`already on agent ${arg}`);
+          return true;
+        }
+        screen.notify(`switching to ${arg}…`);
+        void conn
+          .request("session/set_config_option", {
+            sessionId: resolvedSessionId,
+            configId: "agent",
+            value: arg,
+          })
+          .catch((err: Error) => {
+            screen.notify(`set_config_option failed: ${err.message}`);
+          });
+        return true;
+      }
       case "/sessions":
         // Defer to a future implementation — for now, hint that the daemon
         // CLI provides this view.
@@ -3708,6 +3793,35 @@ async function runSession(
     }
     if (event.kind === "available-modes") {
       agentModes = event.modes;
+      return;
+    }
+    if (event.kind === "config-options") {
+      // PoC: drive the agent indicator entirely from the unified config
+      // snapshot. The agent option's currentValue is authoritative; reflect
+      // it into the sessionbar the same way the session_info_update path
+      // does (the two arrive together today, so this is belt-and-braces).
+      agentConfigOptions = event.options;
+      const agentOpt = event.options.find((o) => o.id === "agent");
+      if (
+        agentOpt &&
+        agentOpt.currentValue &&
+        agentOpt.currentValue !== resolvedAgentId
+      ) {
+        resolvedAgentId = agentOpt.currentValue;
+        screen.setSessionbar({ agent: agentOpt.currentValue });
+      }
+      // opencode 1.15.13+ advertises its mode list inside the unified
+      // config snapshot rather than via available_modes_update. Map the
+      // `mode` option's value list into agentModes so Shift+Tab cycling
+      // works without relying on the spec-shape broadcast.
+      const modeOpt = event.options.find((o) => o.id === "mode");
+      if (modeOpt) {
+        agentModes = modeOpt.options.map((v) => ({
+          id: v.value,
+          name: v.name ?? v.value,
+          ...(v.description !== undefined ? { description: v.description } : {}),
+        }));
+      }
       return;
     }
     if (event.kind === "mode-changed") {

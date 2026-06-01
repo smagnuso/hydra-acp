@@ -76,6 +76,28 @@ export interface AdvertisedModel {
   description?: string;
 }
 
+// Spec shape for a single value of a session config option (ConfigOptionValue).
+export interface ConfigOptionValue {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+// Spec shape for a session config option (ConfigOption). Surfaced in the
+// session/new + session/load responses and in config_option_update
+// notifications. type is always "select" for now (the only spec type).
+// category is a reserved spec string (mode/model/thought_level) or an
+// `_`-prefixed custom category; hydra-native dimensions use `_hydra_*`.
+export interface ConfigOption {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  type: "select";
+  currentValue: string;
+  options: ConfigOptionValue[];
+}
+
 export function hydraCommandsAsAdvertised(): AdvertisedCommand[] {
   return HYDRA_COMMANDS.map((c) => ({
     name: c.argsHint ? `${c.name} ${c.argsHint}` : c.name,

@@ -41,6 +41,8 @@ import {
   type AdvertisedCommand,
   type AdvertisedMode,
   type AdvertisedModel,
+  type ConfigOption,
+  type ConfigOptionValue,
 } from "./hydra-commands.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
@@ -88,6 +90,16 @@ export interface SpawnReplacementAgentResult {
   upstreamSessionId: string;
   agentMeta?: Record<string, unknown>;
   agentCapabilities?: AgentCapabilities;
+  // The new agent's advertised model/mode lists and current selections,
+  // as reported in its session/new response. Carried through so an agent
+  // switch / restart can re-advertise the full set to clients rather than
+  // leaving the dropdowns empty — agents that advertise via the session/new
+  // response (e.g. opencode's configOptions) never emit a follow-up
+  // current_model_update notification to repopulate them.
+  initialModel?: string;
+  initialModels?: AdvertisedModel[];
+  initialMode?: string;
+  initialModes?: AdvertisedMode[];
 }
 
 export type SpawnReplacementAgent = (
@@ -182,6 +194,15 @@ export interface SessionInit {
   // handleSlashCommand (to dispatch "/hydra <name> <verb>") and by
   // mergedAvailableCommands (to advertise the entries to clients).
   extensionCommands?: ExtensionCommandRegistry;
+  // Synchronous snapshot of the agent catalog a client could swap to,
+  // used to populate the `agent` config option's value list. Provided by
+  // SessionManager (cached); omitted in tests, in which case the agent
+  // option lists only the current agent.
+  availableAgents?: () => Array<{
+    id: string;
+    name?: string;
+    description?: string;
+  }>;
 }
 
 export interface CloseOptions {
@@ -418,6 +439,11 @@ export class Session {
   > = [];
   private agentModesHandlers: Array<(modes: AdvertisedMode[]) => void> = [];
   private agentModelsHandlers: Array<(models: AdvertisedModel[]) => void> = [];
+  private availableAgentsFn?: () => Array<{
+    id: string;
+    name?: string;
+    description?: string;
+  }>;
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
   private interactiveHandlers: Array<(interactive: boolean) => void> = [];
@@ -498,6 +524,7 @@ export class Session {
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.availableAgentsFn = init.availableAgents;
     this.listSessions = init.listSessions;
     this.logger = init.logger;
     this.transformChain = init.transformChain ?? [];
@@ -732,7 +759,16 @@ export class Session {
       return;
     }
     if (this.maybeApplyAgentConfigOption(envelope)) {
-      this.recordAndBroadcast("session/update", envelope);
+      // The agent's own config_option_update carries only the dimensions
+      // it owns (mode/model/effort/…) — never the hydra-native `agent`
+      // selector. Append it before broadcasting so config-options-aware
+      // clients (Zed) see the agent option in the same snapshot rather
+      // than having the load-response's merged list clobbered by the
+      // agent's partial one.
+      this.recordAndBroadcast(
+        "session/update",
+        this.mergeAgentOptionIntoEnvelope(envelope),
+      );
       return;
     }
     if (this.maybeApplyAgentUsage(rawParams)) {
@@ -2083,19 +2119,21 @@ export class Session {
         void 0;
       }
     }
+    this.broadcastConfigOptions();
     return true;
   }
 
-  // Apply an opencode-style config_option_update. opencode emits this
-  // (not the spec-shaped current_model_update / available_models_update)
-  // to carry both the current model and the list of available models.
-  // The payload is `configOptions: [{ id: "model", currentValue, options:
-  // [{ value, name }] }, ...]`. We harvest only the entry whose id is
-  // "model" — other ids ("mode", "effort", etc.) are opencode-internal
-  // and not consumed by hydra. Returns true when we recognized and
-  // handled the notification so the wireAgent loop can stop trying
-  // further extractors (the broadcast still fires; clients that grok
-  // config_option_update render it directly).
+  // Apply an agent-emitted config_option_update. claude-acp and opencode
+  // emit this (not the spec-shaped current_model_update /
+  // available_modes_update) to carry the current value AND option list for
+  // model and mode. The payload is `configOptions: [{ id, currentValue,
+  // options: [{ value, name }] }, ...]`. We harvest the "model" and "mode"
+  // entries — other ids (e.g. "effort") are agent-internal and ignored.
+  // Harvesting the mode list here is what populates availableModes for
+  // agents that never send available_modes_update (so the TUI's Shift+Tab
+  // cycle has something to cycle through). Returns true when recognized so
+  // the wireAgent loop stops trying further extractors (the original frame
+  // still broadcasts; config-options-aware clients render it directly).
   private maybeApplyAgentConfigOption(params: unknown): boolean {
     const obj = (params ?? {}) as { update?: unknown };
     const update = (obj.update ?? {}) as {
@@ -2118,29 +2156,44 @@ export class Session {
         currentValue?: unknown;
         options?: unknown;
       };
-      if (opt.id !== "model") {
-        continue;
-      }
-      const models = parseModelsList(opt.options);
-      if (models.length > 0) {
-        this.setAgentAdvertisedModels(models);
-      }
-      const cv = opt.currentValue;
-      if (typeof cv === "string") {
-        const trimmed = cv.trim();
-        if (trimmed && trimmed !== this.currentModel) {
-          this.logger?.info(
-            `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
-          );
-          // Delegate to applyModelChange so the daemon also emits a
-          // spec-shaped current_model_update. opencode/claude-acp carry
-          // the new model only in this non-spec config_option_update;
-          // clients that don't render it (notably the TUI) would
-          // otherwise stay pinned to the agent's earlier stale value.
-          this.applyModelChange(trimmed);
+      if (opt.id === "model") {
+        const models = parseModelsList(opt.options);
+        if (models.length > 0) {
+          this.setAgentAdvertisedModels(models);
+        }
+        const cv = opt.currentValue;
+        if (typeof cv === "string") {
+          const trimmed = cv.trim();
+          if (trimmed && trimmed !== this.currentModel) {
+            this.logger?.info(
+              `live config_option_update(model): sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
+            );
+            // Delegate to applyModelChange so the daemon also emits a
+            // spec-shaped current_model_update. claude-acp/opencode carry
+            // the new model only in this non-spec config_option_update;
+            // clients that don't render it (notably the TUI) would
+            // otherwise stay pinned to the agent's earlier stale value.
+            this.applyModelChange(trimmed);
+          }
+        }
+      } else if (opt.id === "mode") {
+        const modes = parseModesList(opt.options);
+        if (modes.length > 0) {
+          this.setAgentAdvertisedModes(modes);
+        }
+        const cv = opt.currentValue;
+        if (typeof cv === "string") {
+          const trimmed = cv.trim();
+          if (trimmed && trimmed !== this.currentMode) {
+            this.logger?.info(
+              `live config_option_update(mode): sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
+            );
+            // Mirror the model branch: emit a spec-shaped
+            // current_mode_update so mode-only clients (the TUI) repaint.
+            this.applyModeChange(trimmed);
+          }
         }
       }
-      break;
     }
     return true;
   }
@@ -2182,6 +2235,7 @@ export class Session {
         void 0;
       }
     }
+    this.broadcastConfigOptions();
     return true;
   }
 
@@ -2431,6 +2485,7 @@ export class Session {
       sessionId: this.upstreamSessionId,
       update,
     });
+    this.broadcastConfigOptions();
   }
 
   // Apply a mode change initiated by a client request (session/set_mode)
@@ -2469,6 +2524,131 @@ export class Session {
       sessionId: this.upstreamSessionId,
       update,
     });
+    this.broadcastConfigOptions();
+  }
+
+  // Assemble the spec-shaped configOptions snapshot for this session.
+  // Order reflects the agent's preferred prominence: model and mode (the
+  // dimensions users toggle constantly) first, then the hydra-native
+  // `agent` selector. model/mode are included only when hydra actually
+  // knows that dimension for the connected agent; `agent` is always
+  // present since hydra owns the swap concept regardless of the backend.
+  buildConfigOptions(): ConfigOption[] {
+    const out: ConfigOption[] = [];
+    if (this.agentAdvertisedModels.length > 0) {
+      const options: ConfigOptionValue[] = this.agentAdvertisedModels.map(
+        (m) => ({
+          value: m.modelId,
+          name: m.name ?? m.modelId,
+          ...(m.description !== undefined ? { description: m.description } : {}),
+        }),
+      );
+      const currentValue =
+        this.currentModel && options.some((o) => o.value === this.currentModel)
+          ? this.currentModel
+          : options[0]!.value;
+      out.push({
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue,
+        options,
+      });
+    }
+    if (this.agentAdvertisedModes.length > 0) {
+      const options: ConfigOptionValue[] = this.agentAdvertisedModes.map(
+        (m) => ({
+          value: m.id,
+          name: m.name ?? m.id,
+          ...(m.description !== undefined ? { description: m.description } : {}),
+        }),
+      );
+      const currentValue =
+        this.currentMode && options.some((o) => o.value === this.currentMode)
+          ? this.currentMode
+          : options[0]!.value;
+      out.push({
+        id: "mode",
+        name: "Session Mode",
+        category: "mode",
+        type: "select",
+        currentValue,
+        options,
+      });
+    }
+    const agents = this.availableAgentsFn?.() ?? [];
+    const agentOptions: ConfigOptionValue[] = agents.map((a) => ({
+      value: a.id,
+      name: a.name ?? a.id,
+      ...(a.description !== undefined ? { description: a.description } : {}),
+    }));
+    // currentValue must be one of the listed options; inject the live
+    // agent when the catalog snapshot hasn't loaded it (or is empty).
+    if (!agentOptions.some((o) => o.value === this.agentId)) {
+      agentOptions.unshift({ value: this.agentId, name: this.agentId });
+    }
+    out.push({
+      id: "agent",
+      name: "Agent",
+      category: "_hydra_agent",
+      type: "select",
+      currentValue: this.agentId,
+      options: agentOptions,
+    });
+    return out;
+  }
+
+  // Broadcast a config_option_update carrying the full snapshot. Fired
+  // alongside the legacy current_mode_update / current_model_update and on
+  // agent swaps so config-options-aware clients stay in sync via the
+  // spec mechanism. config_option_update is a STATE_UPDATE_KIND, so this
+  // broadcasts live but is not recorded to history.
+  private broadcastConfigOptions(): void {
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: this.buildConfigOptions(),
+      },
+    });
+  }
+
+  // Return a shallow clone of an agent-emitted config_option_update
+  // envelope with the hydra-native `agent` option appended to its
+  // configOptions (unless the agent already advertised one). Preserves
+  // the agent's own options (mode/model/effort/…) and their order; the
+  // `agent` selector rides last, matching its lower prominence. The
+  // original envelope is not mutated.
+  private mergeAgentOptionIntoEnvelope(envelope: unknown): unknown {
+    if (!envelope || typeof envelope !== "object") {
+      return envelope;
+    }
+    const env = envelope as { update?: unknown };
+    if (!env.update || typeof env.update !== "object") {
+      return envelope;
+    }
+    const update = env.update as {
+      configOptions?: unknown;
+      [k: string]: unknown;
+    };
+    const list = Array.isArray(update.configOptions)
+      ? [...update.configOptions]
+      : [];
+    const hasAgent = list.some(
+      (o) => o && typeof o === "object" && (o as { id?: unknown }).id === "agent",
+    );
+    if (hasAgent) {
+      return envelope;
+    }
+    const agentOption = this.buildConfigOptions().find((o) => o.id === "agent");
+    if (!agentOption) {
+      return envelope;
+    }
+    return {
+      ...env,
+      update: { ...update, configOptions: [...list, agentOption] },
+    };
   }
 
   onUsageChange(handler: (usage: UsageSnapshot) => void): void {
@@ -2876,6 +3056,15 @@ export class Session {
   // record. Spawns the new agent first so a failure leaves the old one
   // intact; then injects a synthesized transcript so the new agent has
   // context for the next turn.
+  // Public entry for swapping the underlying agent from a client request
+  // (session/set_config_option with configId "agent"), the protocol twin
+  // of the `/hydra agent` text command. Delegates to the same swap
+  // machinery so both paths share validation, transcript replay, and the
+  // config_option_update broadcast.
+  setAgent(newAgentId: string): Promise<unknown> {
+    return this.runAgentCommand(newAgentId);
+  }
+
   private runAgentCommand(newAgentId: string): Promise<unknown> {
     if (!newAgentId) {
       throw withCode(
@@ -2919,16 +3108,17 @@ export class Session {
       // advertises its own.
       this.agentAdvertisedCommands = [];
       this.broadcastMergedCommands();
-      // Old agent's model list and modes no longer apply either; clear
-      // them so a session/set_model arriving before the new agent
-      // re-advertises doesn't validate against the dead agent's list.
-      // The persistence hooks fire so meta.json drops the stale snapshot.
-      if (this.agentAdvertisedModels.length > 0) {
-        this.setAgentAdvertisedModels([]);
-      }
-      if (this.agentAdvertisedModes.length > 0) {
-        this.setAgentAdvertisedModes([]);
-      }
+      // Re-advertise the new agent's model list and modes from its
+      // session/new response. Some agents (e.g. opencode) report these
+      // only in that response and never emit a follow-up
+      // current_model_update, so clearing-and-waiting would leave the
+      // clients' model/mode dropdowns permanently empty. Setting the new
+      // selections first means the broadcast carries the right current
+      // value; the persistence hooks fire so meta.json reflects the swap.
+      this.currentModel = fresh.initialModel;
+      this.currentMode = fresh.initialMode;
+      this.setAgentAdvertisedModels(fresh.initialModels ?? []);
+      this.setAgentAdvertisedModes(fresh.initialModes ?? []);
       await oldAgent.kill().catch(() => undefined);
 
       if (transcript) {
@@ -3033,12 +3223,13 @@ export class Session {
     this.agentCapabilities = fresh.agentCapabilities;
     this.agentAdvertisedCommands = [];
     this.broadcastMergedCommands();
-    if (this.agentAdvertisedModels.length > 0) {
-      this.setAgentAdvertisedModels([]);
-    }
-    if (this.agentAdvertisedModes.length > 0) {
-      this.setAgentAdvertisedModes([]);
-    }
+    // Re-advertise the restarted agent's models/modes from its session/new
+    // response (see runAgentCommand) so clients' dropdowns repopulate even
+    // when the agent doesn't emit a follow-up current_model_update.
+    this.currentModel = fresh.initialModel;
+    this.currentMode = fresh.initialMode;
+    this.setAgentAdvertisedModels(fresh.initialModels ?? []);
+    this.setAgentAdvertisedModes(fresh.initialModes ?? []);
     // Killing the old agent rejects any in-flight session/prompt bound to
     // its (already-captured) connection — that's how a stuck turn ends.
     await oldAgent.kill().catch(() => undefined);
@@ -3173,15 +3364,13 @@ export class Session {
     });
   }
 
-  // Tell every attached client (a) the agent identity has changed
-  // (session_info_update carrying agentId inside _meta["hydra-acp"] —
+  // Tell every attached client the agent identity has changed via
+  // session_info_update carrying agentId inside _meta["hydra-acp"] —
   // the ACP schema for session_info_update is just title/updatedAt/_meta,
   // so non-hydra clients harmlessly ignore the extension; hydra-aware
-  // ones read it and relabel) and (b) drop a visible banner into the
-  // transcript so users see the switch rather than just suddenly getting
-  // answers from a different agent. Both updates carry synthetic=true
-  // so a future /hydra agent's transcript builder filters them out.
-  private broadcastAgentSwitch(oldAgentId: string, newAgentId: string): void {
+  // ones read it and relabel. synthetic=true so a future /hydra agent's
+  // transcript builder filters it out.
+  private broadcastAgentSwitch(_oldAgentId: string, newAgentId: string): void {
     this.recordAndBroadcast("session/update", {
       sessionId: this.sessionId,
       update: {
@@ -3189,17 +3378,7 @@ export class Session {
         _meta: { "hydra-acp": { synthetic: true, agentId: newAgentId } },
       },
     });
-    this.recordAndBroadcast("session/update", {
-      sessionId: this.sessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: {
-          type: "text",
-          text: `\n_(switched from \`${oldAgentId}\` to \`${newAgentId}\`)_\n`,
-        },
-        _meta: { "hydra-acp": { synthetic: true } },
-      },
-    });
+    this.broadcastConfigOptions();
   }
 
   // stdin-stream lifecycle. Cat --stream calls openStream() once after
@@ -4138,6 +4317,40 @@ export function parseModelsList(list: unknown): AdvertisedModel[] {
       model.description = r.description;
     }
     out.push(model);
+  }
+  return out;
+}
+
+// Parse a config_option_update `mode` entry's `options` list into
+// AdvertisedMode[]. Accepts the config-option value shape
+// (`{ value, name?, description? }`) as well as the spec mode shape
+// (`{ id, ... }`). Mirrors parseModelsList: malformed entries are
+// dropped rather than failing the whole list.
+export function parseModesList(list: unknown): AdvertisedMode[] {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const out: AdvertisedMode[] = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const r = raw as Record<string, unknown>;
+    const id =
+      (typeof r.value === "string" && r.value.trim()) ||
+      (typeof r.id === "string" && r.id.trim()) ||
+      undefined;
+    if (!id) {
+      continue;
+    }
+    const mode: AdvertisedMode = { id };
+    if (typeof r.name === "string" && r.name.length > 0) {
+      mode.name = r.name;
+    }
+    if (typeof r.description === "string" && r.description.length > 0) {
+      mode.description = r.description;
+    }
+    out.push(mode);
   }
   return out;
 }
