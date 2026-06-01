@@ -645,6 +645,23 @@ describe("formatEditDiffBlock", () => {
     expect(bodies).toContain("⋯ fetching diff…");
   });
 
+  it("renders a failure line for a deferred diff whose fetch failed", () => {
+    const lines = formatEditDiffBlock(
+      {
+        path: "/repo/foo.ts",
+        oldText: "",
+        newText: "",
+        newRef: { hash: "c".repeat(64), bytes: 2048 },
+      },
+      "diff",
+      { deferredStatus: "error" },
+    );
+    const err = lines.find((l) => l.body === "⚠ failed to load diff");
+    expect(err).toBeDefined();
+    expect(err?.bodyStyle).toBe("tool-status-fail");
+    expect(lines.map((l) => l.body)).toContain("▾ Edited /repo/foo.ts (~2 KB)");
+  });
+
   it("contracts a home-prefixed path to ~ in the header", () => {
     const home = homedir();
     const lines = formatEditDiffBlock(

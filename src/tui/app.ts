@@ -3775,6 +3775,21 @@ async function runSession(
         diff.oldRef ? fetchToolContent(diff.oldRef.hash) : Promise.resolve(diff.oldText),
         diff.newRef ? fetchToolContent(diff.newRef.hash) : Promise.resolve(diff.newText),
       ]);
+      // A required blob came back null → the fetch failed. Show an error
+      // in place of the body but keep the diff deferred so a later click /
+      // scroll-into-view retries, rather than silently collapsing to empty.
+      const failed =
+        (diff.oldRef !== undefined && oldText === null) ||
+        (diff.newRef !== undefined && newText === null);
+      if (failed) {
+        fetchingDiffs.delete(toolCallId);
+        const out = formatEditDiffBlock(diff, "diff", { deferredStatus: "error" });
+        if (out.length > 0) {
+          screen.upsertLines(`editdiff:${toolCallId}`, out);
+          screen.repaintNow();
+        }
+        return;
+      }
       const resolved: EditDiff = {
         ...(diff.path !== undefined ? { path: diff.path } : {}),
         oldText: oldText ?? "",

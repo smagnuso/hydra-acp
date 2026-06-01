@@ -1030,6 +1030,7 @@ export type FileUpdateMode = "edit" | "diff";
 export function formatEditDiffBlock(
   diff: EditDiff,
   mode: FileUpdateMode,
+  opts: { deferredStatus?: "fetching" | "error" } = {},
 ): FormattedLine[] {
   const lines: FormattedLine[] = [];
   // In "references" mode the body text hasn't been fetched yet (oldRef/
@@ -1076,11 +1077,19 @@ export function formatEditDiffBlock(
   if (deferred) {
     if (diff.path) {
       lines.push(header(true));
-      lines.push({
-        prefix: "  ",
-        body: "⋯ fetching diff…",
-        bodyStyle: "dim",
-      });
+      lines.push(
+        opts.deferredStatus === "error"
+          ? {
+              prefix: "  ",
+              body: "⚠ failed to load diff",
+              bodyStyle: "tool-status-fail",
+            }
+          : {
+              prefix: "  ",
+              body: "⋯ fetching diff…",
+              bodyStyle: "dim",
+            },
+      );
       lines.unshift({ body: "" });
     }
     return lines;
