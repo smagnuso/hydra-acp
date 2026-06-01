@@ -2684,6 +2684,81 @@ describe("SessionManager: defaultModels", () => {
     ]);
   });
 
+  it("resolves a bare defaultModels id to the provider-prefixed advertised id", async () => {
+    // The motivating bug: defaultModels[pi-dev] = "claude-opus-4-7" but
+    // the agent advertises "anthropic/claude-opus-4-7". The bare id isn't
+    // an exact match, but it's the only trailing-segment match, so we
+    // resolve it and fire set_model with the advertised id.
+    const mock = makeMockAgent({ agentId: "pi-dev", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        models: {
+          currentModelId: "anthropic/claude-opus-4-8",
+          availableModels: [
+            { modelId: "anthropic/claude-opus-4-7" },
+            { modelId: "anthropic/claude-opus-4-8" },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({ ok: true });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("pi-dev")]),
+      () => mock.agent,
+      undefined,
+      { defaultModels: { "pi-dev": "claude-opus-4-7" } },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "pi-dev" });
+
+    // set_model fired with the resolved, fully-qualified id.
+    expect(requestMock.mock.calls[2]).toEqual([
+      "session/set_model",
+      { sessionId: "u_fresh", modelId: "anthropic/claude-opus-4-7" },
+    ]);
+    expect(session.currentModel).toBe("anthropic/claude-opus-4-7");
+  });
+
+  it("skips set_model when a bare defaultModels id is ambiguous across providers", async () => {
+    const mock = makeMockAgent({ agentId: "opencode", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({
+        sessionId: "u_fresh",
+        models: {
+          currentModelId: "openai/gpt-5",
+          availableModels: [
+            { modelId: "anthropic/claude-opus-4-7" },
+            { modelId: "ncp-anthropic/claude-opus-4-7" },
+            { modelId: "openai/gpt-5" },
+          ],
+        },
+      });
+
+    const warnMessages: string[] = [];
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("opencode")]),
+      () => mock.agent,
+      undefined,
+      {
+        defaultModels: { opencode: "claude-opus-4-7" },
+        logger: { info: () => {}, warn: (msg) => warnMessages.push(msg) },
+      },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "opencode" });
+
+    // No set_model — ambiguous match left untouched.
+    expect(requestMock.mock.calls.length).toBe(2);
+    expect(session.currentModel).toBe("openai/gpt-5");
+    expect(warnMessages.length).toBe(1);
+    expect(warnMessages[0]).toContain("ambiguous");
+  });
+
   it("still fires set_model when the agent didn't advertise an availableModels list (pass-through fallback)", async () => {
     // Some agents only announce their model via current_model_update
     // later, not in the session/new response. In that case we can't

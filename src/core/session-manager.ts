@@ -47,6 +47,7 @@ import type {
   AdvertisedMode,
   AdvertisedModel,
 } from "./hydra-commands.js";
+import { resolveModelId } from "./model-resolve.js";
 import type { AgentCapabilities, SessionListEntry } from "../acp/types.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
@@ -956,6 +957,31 @@ export class SessionManager {
     return out;
   }
 
+  // Issue session/set_model for a seed model (defaultModels / --model) at
+  // bootstrap, logging success or a non-fatal rejection. `where` is the
+  // human-readable provenance string used in log lines. A bad id in config
+  // shouldn't break session creation, so a rejection is swallowed.
+  private async applySeedModel(
+    agent: AgentInstance,
+    sessionId: string,
+    modelId: string,
+    where: string,
+  ): Promise<boolean> {
+    try {
+      await agent.connection.request("session/set_model", {
+        sessionId,
+        modelId,
+      });
+      this.logger?.info(`${where}: session/set_model accepted`);
+      return true;
+    } catch (err) {
+      this.logger?.warn(
+        `${where} rejected by agent (${(err as Error).message}); session will use the agent's own default`,
+      );
+      return false;
+    }
+  }
+
   // Bootstrap a fresh agent process: registry resolve → spawn → initialize
   // → session/new. Shared by create() and the /hydra agent path so both
   // go through the same env / capabilities / error-handling.
@@ -1033,36 +1059,50 @@ export class SessionManager {
       const initialModels = extractInitialModels(newResult);
       const desired = params.model ?? this.defaultModels[params.agentId];
       if (desired && desired !== initialModel) {
-        // Validate against the agent's advertised model list when we
-        // have one. Surfaces config typos (e.g. defaultModels[opencode]
-        // set to a claude-acp-shaped id) before they corrupt the
-        // session — opencode in particular silently splits an unknown
-        // modelId on `/` and stores garbage, which then makes every
-        // subsequent prompt return end_turn instantly. When the agent
-        // didn't advertise a list yet, we fall back to optimistic
+        // Resolve against the agent's advertised model list when we have
+        // one. Surfaces config typos (e.g. defaultModels[opencode] set to
+        // a claude-acp-shaped id) before they corrupt the session —
+        // opencode in particular silently splits an unknown modelId on `/`
+        // and stores garbage, which then makes every subsequent prompt
+        // return end_turn instantly. resolveModelId also bridges
+        // provider-prefix drift: a configured bare "claude-opus-4-7"
+        // resolves to the advertised "anthropic/claude-opus-4-7" when
+        // that's the only trailing-segment match. When the agent didn't
+        // advertise a list yet (kind "none"), we fall back to optimistic
         // forwarding (the previous behavior) so we don't block a
         // legitimate id we just can't see.
-        const validates =
-          initialModels.length === 0 ||
-          initialModels.some((m) => m.modelId === desired);
-        if (validates) {
-          try {
-            await agent.connection.request("session/set_model", {
-              sessionId: sessionIdRaw,
-              modelId: desired,
-            });
+        const resolution = resolveModelId(desired, initialModels);
+        const where =
+          params.model !== undefined
+            ? `model=${JSON.stringify(desired)}`
+            : `defaultModels[${params.agentId}]=${JSON.stringify(desired)}`;
+        if (resolution.kind === "exact" || resolution.kind === "none") {
+          // Only adopt the desired id if the agent actually accepted it;
+          // a rejection leaves the session on the agent's own default.
+          if (await this.applySeedModel(agent, sessionIdRaw, desired, where)) {
             initialModel = desired;
-          } catch (err) {
-            // Bad / unsupported model id in config shouldn't break session
-            // creation — fall back to whatever the agent picked itself.
-            this.logger?.warn(
-              `defaultModels[${params.agentId}]=${JSON.stringify(desired)} rejected by agent (${(err as Error).message}); session will use ${JSON.stringify(initialModel)}`,
-            );
           }
+        } else if (resolution.kind === "resolved") {
+          if (resolution.modelId === initialModel) {
+            initialModel = resolution.modelId;
+          } else if (
+            await this.applySeedModel(
+              agent,
+              sessionIdRaw,
+              resolution.modelId,
+              `${where} resolved to ${JSON.stringify(resolution.modelId)}`,
+            )
+          ) {
+            initialModel = resolution.modelId;
+          }
+        } else if (resolution.kind === "ambiguous") {
+          this.logger?.warn(
+            `${where} is ambiguous (trailing-segment matches [${resolution.candidates.join(", ")}]); skipping session/set_model, session will use ${JSON.stringify(initialModel)}`,
+          );
         } else {
           const known = initialModels.map((m) => m.modelId).join(", ");
           this.logger?.warn(
-            `defaultModels[${params.agentId}]=${JSON.stringify(desired)} not in agent's availableModels ([${known}]); skipping session/set_model, session will use ${JSON.stringify(initialModel)}`,
+            `${where} not in agent's availableModels ([${known}]); skipping session/set_model, session will use ${JSON.stringify(initialModel)}`,
           );
         }
       }

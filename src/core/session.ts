@@ -44,6 +44,7 @@ import {
   type ConfigOption,
   type ConfigOptionValue,
 } from "./hydra-commands.js";
+import { resolveModelId } from "./model-resolve.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import { coalesceReplay } from "./coalesce-replay.js";
@@ -2960,9 +2961,33 @@ export class Session {
       });
       return { stopReason: "end_turn" };
     }
+    // Resolve the requested id against the advertised list so a bare
+    // "claude-opus-4-7" maps to the agent's "anthropic/claude-opus-4-7",
+    // and an ambiguous/unknown id gets a friendly message instead of
+    // silently corrupting the session.
+    const resolution = resolveModelId(arg, this.agentAdvertisedModels);
+    let modelId = arg;
+    if (resolution.kind === "resolved") {
+      modelId = resolution.modelId;
+    } else if (resolution.kind === "ambiguous" || resolution.kind === "unknown") {
+      const known = this.agentAdvertisedModels.map((m) => m.modelId).join("\n  ");
+      const reason =
+        resolution.kind === "ambiguous"
+          ? `"${arg}" matches multiple models: ${resolution.candidates.join(", ")}`
+          : `"${arg}" is not an available model`;
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `\n${reason}.\nAvailable models:\n  ${known}\n` },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
     await this.forwardRequest("session/set_model", {
       sessionId: this.sessionId,
-      modelId: arg,
+      modelId,
     });
     return { stopReason: "end_turn" };
   }

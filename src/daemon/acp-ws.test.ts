@@ -260,6 +260,64 @@ describe("decideSetModel", () => {
     });
   });
 
+  it("resolves a bare requested id to the provider-prefixed advertised id and forwards that", async () => {
+    const session = makeSessionWithModels(
+      "sess_res",
+      "u_res",
+      [
+        { modelId: "anthropic/claude-opus-4-7" },
+        { modelId: "anthropic/claude-opus-4-8" },
+      ],
+      "anthropic/claude-opus-4-8",
+    );
+    const requestSpy = vi
+      .spyOn(session.agent.connection, "request")
+      .mockResolvedValueOnce({ ok: true });
+
+    const decision = decideSetModel(
+      { sessionId: "sess_res", modelId: "claude-opus-4-7" },
+      fakeManager({ sess_res: session }),
+    );
+    expect(decision.kind).toBe("ok");
+    if (decision.kind !== "ok") {
+      return;
+    }
+    // The decision carries the resolved (prefixed) id, not the request.
+    expect(decision.modelId).toBe("anthropic/claude-opus-4-7");
+    expect(decision.logMessage).toContain("resolved");
+
+    // The handler forwards decision.modelId, so the agent sees the
+    // fully-qualified id even though the client asked for the bare one.
+    await decision.session.forwardRequest("session/set_model", {
+      sessionId: "sess_res",
+      modelId: decision.modelId,
+    });
+    expect(requestSpy).toHaveBeenCalledWith("session/set_model", {
+      sessionId: "u_res",
+      modelId: "anthropic/claude-opus-4-7",
+    });
+  });
+
+  it("returns no_op for an ambiguous bare id when a current model exists", () => {
+    const session = makeSessionWithModels(
+      "sess_amb",
+      "u_amb",
+      [
+        { modelId: "anthropic/claude-opus-4-7" },
+        { modelId: "ncp-anthropic/claude-opus-4-7" },
+      ],
+      "anthropic/claude-opus-4-7",
+    );
+    const decision = decideSetModel(
+      { sessionId: "sess_amb", modelId: "claude-opus-4-7" },
+      fakeManager({ sess_amb: session }),
+    );
+    expect(decision.kind).toBe("no_op");
+    if (decision.kind === "no_op") {
+      expect(decision.logMessage).toContain("ambiguous");
+    }
+  });
+
   it("passes through when the agent has not advertised any models (no list to validate against)", () => {
     // The pass-through path matters for two real cases: (1) agents that
     // only announce their model via current_model_update later, not in

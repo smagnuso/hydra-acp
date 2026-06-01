@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
 import { SessionManager, type ResurrectParams } from "../core/session-manager.js";
+import { resolveModelId } from "../core/model-resolve.js";
 import { Session, type AttachedClient } from "../core/session.js";
 import {
   AmendPromptParams,
@@ -1334,8 +1335,13 @@ export function registerAcpWsEndpoint(
         return null;
       }
       app.log.info(decision.logMessage);
-      const { modelId } = rawParams as { modelId: string };
-      const result = await decision.session.forwardRequest("session/set_model", rawParams);
+      const { modelId } = decision;
+      // Forward the resolved modelId (may differ from the requested one
+      // when a bare id resolved to a provider-prefixed advertised id).
+      const result = await decision.session.forwardRequest("session/set_model", {
+        ...(rawParams as Record<string, unknown>),
+        modelId,
+      });
       // Mirror set_mode: apply the change daemon-side so all attached clients
       // (including the originator) receive a current_model_update immediately,
       // regardless of whether the agent emits one on its own.
@@ -1641,7 +1647,10 @@ function buildModelsPayload(
 // The handler in registerAcpWsEndpoint is the only production
 // consumer; tests drive it directly to avoid spinning a WebSocket.
 export type SetModelDecision =
-  | { kind: "ok"; session: Session; logMessage: string }
+  // `modelId` is the id to forward — equal to the requested id for an
+  // exact match or passthrough, or the advertised id a fuzzy request
+  // resolved to (e.g. "claude-opus-4-7" → "anthropic/claude-opus-4-7").
+  | { kind: "ok"; session: Session; modelId: string; logMessage: string }
   | {
       kind: "no_op";
       session: Session;
@@ -1690,47 +1699,62 @@ export function decideSetModel(
     };
   }
   const advertised = session.availableModels();
-  if (advertised.length === 0) {
+  const resolution = resolveModelId(params.modelId, advertised);
+  if (resolution.kind === "none") {
     // Agent never told us its model list. Forward and trust the agent's
     // own validation (or its silence). The log line lets the operator
     // distinguish pass-through events from validated ones when triaging.
     return {
       kind: "ok",
       session,
+      modelId: params.modelId,
       logMessage: `session/set_model passthrough (no availableModels) sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)}`,
     };
   }
-  const match = advertised.find((m) => m.modelId === params.modelId);
-  if (!match) {
-    const known = advertised.map((m) => m.modelId).join(", ");
-    // If the session already has a current model, fall back to no_op
-    // semantics: tell the client "ok" without forwarding, and have the
-    // handler resync the client's local view via a current_model_update
-    // notification. The session keeps working on whatever it was; no
-    // garbage gets persisted upstream.
-    if (session.currentModel !== undefined && session.currentModel.length > 0) {
-      return {
-        kind: "no_op",
-        session,
-        sessionId: params.sessionId,
-        currentModel: session.currentModel,
-        logMessage: `session/set_model no_op (resyncing client) sessionId=${params.sessionId} requested=${JSON.stringify(params.modelId)} actual=${JSON.stringify(session.currentModel)} agentId=${session.agentId} known=[${known}]`,
-      };
-    }
-    // No current model to fall back to — refusing here is the safest
-    // option. This is rare in practice: an agent that advertises an
-    // availableModels list but no current model is unusual.
+  if (resolution.kind === "exact") {
     return {
-      kind: "error",
-      code: JsonRpcErrorCodes.InvalidParams,
-      message: `model "${params.modelId}" is not in this session's availableModels (agent ${session.agentId}); known models: ${known}`,
-      logMessage: `session/set_model rejected sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)} agentId=${session.agentId} known=[${known}] (no current model to fall back to)`,
+      kind: "ok",
+      session,
+      modelId: params.modelId,
+      logMessage: `session/set_model accepted sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)}`,
     };
   }
+  if (resolution.kind === "resolved") {
+    return {
+      kind: "ok",
+      session,
+      modelId: resolution.modelId,
+      logMessage: `session/set_model resolved sessionId=${params.sessionId} requested=${JSON.stringify(params.modelId)} → ${JSON.stringify(resolution.modelId)}`,
+    };
+  }
+  // ambiguous or unknown: nothing safe to forward.
+  const known = advertised.map((m) => m.modelId).join(", ");
+  const detail =
+    resolution.kind === "ambiguous"
+      ? `ambiguous (trailing-segment matches [${resolution.candidates.join(", ")}])`
+      : `not in availableModels`;
+  // If the session already has a current model, fall back to no_op
+  // semantics: tell the client "ok" without forwarding, and have the
+  // handler resync the client's local view via a current_model_update
+  // notification. The session keeps working on whatever it was; no
+  // garbage gets persisted upstream.
+  if (session.currentModel !== undefined && session.currentModel.length > 0) {
+    return {
+      kind: "no_op",
+      session,
+      sessionId: params.sessionId,
+      currentModel: session.currentModel,
+      logMessage: `session/set_model no_op (resyncing client) sessionId=${params.sessionId} requested=${JSON.stringify(params.modelId)} ${detail} actual=${JSON.stringify(session.currentModel)} agentId=${session.agentId} known=[${known}]`,
+    };
+  }
+  // No current model to fall back to — refusing here is the safest
+  // option. This is rare in practice: an agent that advertises an
+  // availableModels list but no current model is unusual.
   return {
-    kind: "ok",
-    session,
-    logMessage: `session/set_model accepted sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)}`,
+    kind: "error",
+    code: JsonRpcErrorCodes.InvalidParams,
+    message: `model "${params.modelId}" is ${detail === "not in availableModels" ? "not in this session's availableModels" : detail} (agent ${session.agentId}); known models: ${known}`,
+    logMessage: `session/set_model rejected sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)} ${detail} agentId=${session.agentId} known=[${known}] (no current model to fall back to)`,
   };
 }
 
