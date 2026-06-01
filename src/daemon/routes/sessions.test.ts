@@ -479,6 +479,45 @@ describe("session routes: termination broadcasts session_closed", () => {
     });
     expect(blank.status).toBe(400);
   });
+
+  it("GET /export?tools=summary sheds diff bodies; default inline keeps them", async () => {
+    const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const history = new HistoryStore();
+    const big = "x".repeat(50_000);
+    await history.append(s.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "e1",
+          status: "completed",
+          content: [{ type: "diff", path: "/repo/foo.ts", oldText: big, newText: big + "\nadded" }],
+          rawOutput: { content: big, error: "" },
+        },
+      },
+      recordedAt: 1,
+    });
+
+    const auth = { Authorization: "Bearer test" } as Record<string, string>;
+    const inlineRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/${s.sessionId}/export`,
+      { headers: auth },
+    );
+    const summaryRes = await fetch(
+      `${harness.baseUrl}/v1/sessions/${s.sessionId}/export?tools=summary`,
+      { headers: auth },
+    );
+    expect(inlineRes.status).toBe(200);
+    expect(summaryRes.status).toBe(200);
+    const inlineBody = await inlineRes.text();
+    const summaryBody = await summaryRes.text();
+    // Inline carries the full file text; summary does not.
+    expect(inlineBody).toContain(big);
+    expect(summaryBody).not.toContain(big);
+    // Summary is dramatically smaller but still names the edited path.
+    expect(summaryBody.length).toBeLessThan(inlineBody.length / 10);
+    expect(summaryBody).toContain("/repo/foo.ts");
+  });
 });
 
 describe("session routes: POST /v1/sessions/:id/fork", () => {

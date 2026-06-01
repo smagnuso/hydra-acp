@@ -4,6 +4,10 @@ import type { FastifyInstance } from "fastify";
 import { expandHome } from "../../core/config.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
+import {
+  applyToolContentMode,
+  parseToolContentMode,
+} from "../../core/tool-content.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
@@ -255,6 +259,12 @@ export function registerSessionRoutes(
   app.get("/v1/sessions/:id/export", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    // `?tools=summary` sheds heavy tool payload (diff bodies, stdout) from
+    // the bundle; default `inline` is byte-for-byte the recorded history.
+    // Used by the archiver to keep sync bundles small.
+    const toolMode = parseToolContentMode(
+      (request.query as { tools?: unknown } | undefined)?.tools,
+    );
     const exported = await manager.exportBundle(id);
     if (!exported) {
       reply.code(404).send({ error: "session not found" });
@@ -262,7 +272,7 @@ export function registerSessionRoutes(
     }
     const bundle = encodeBundle({
       record: exported.record,
-      history: exported.history,
+      history: applyToolContentMode(exported.history, toolMode),
       promptHistory:
         exported.promptHistory.length > 0 ? exported.promptHistory : undefined,
       hydraVersion: HYDRA_VERSION,

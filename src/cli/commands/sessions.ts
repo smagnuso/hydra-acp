@@ -202,18 +202,22 @@ export async function runSessionsRemove(id: string | undefined): Promise<void> {
 export async function runSessionsExport(
   id: string | undefined,
   outPath: string | undefined,
+  tools?: string,
 ): Promise<void> {
   if (!id) {
     process.stderr.write(
-      "Usage: hydra-acp sessions export <session-id> [--out <file>]\n",
+      "Usage: hydra-acp sessions export <session-id> [--out <file>] [--tools inline|summary]\n",
     );
     process.exit(2);
   }
   const config = await loadConfig();
   const serviceToken = await loadServiceToken();
   const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  // `--tools summary` trims tool diff bodies / stdout from the bundle;
+  // default (inline) is the full recorded history.
+  const query = tools === "summary" ? "?tools=summary" : "";
   const response = await fetch(
-    `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export`,
+    `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export${query}`,
     {
       headers: { Authorization: `Bearer ${serviceToken}` },
     },

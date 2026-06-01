@@ -404,7 +404,8 @@ async function main(): Promise<void> {
       }
       if (sub === "export") {
         const out = resolveOption(flags, "out");
-        await runSessionsExport(positional[2], out);
+        const tools = resolveOption(flags, "tools");
+        await runSessionsExport(positional[2], out, tools);
         return;
       }
       if (sub === "transcript") {
