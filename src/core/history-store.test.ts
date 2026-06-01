@@ -172,4 +172,46 @@ describe("HistoryStore", () => {
     expect(loaded[0]?.recordedAt).toBe(150);
     expect(loaded[loaded.length - 1]?.recordedAt).toBe(199);
   });
+
+  it("externalizes heavy tool content to blobs and hydrates on load", async () => {
+    const store = new HistoryStore();
+    const sid = "hydra_session_blob";
+    const big = "x".repeat(20_000);
+    const entry = {
+      method: "session/update",
+      params: {
+        sessionId: sid,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "e1",
+          status: "completed",
+          content: [{ type: "diff", path: "/repo/foo.ts", oldText: big, newText: big + "z" }],
+        },
+      },
+      recordedAt: 1,
+    };
+    await store.append(sid, entry);
+
+    // On disk: history.jsonl is tiny (refs), blobs live under tools/.
+    const onDisk = await fs.readFile(paths.historyFile(sid), "utf8");
+    expect(onDisk).not.toContain(big);
+    expect(onDisk).toContain("__hydraBlob");
+    expect(onDisk.length).toBeLessThan(2000);
+    const blobFiles = await fs.readdir(paths.toolsDir(sid));
+    expect(blobFiles.length).toBeGreaterThan(0);
+
+    // load() hydrates back to the original inline shape.
+    const hydrated = await store.load(sid);
+    expect(hydrated).toEqual([entry]);
+
+    // Lean load leaves refs in place.
+    const lean = await store.load(sid, { tools: "references" });
+    const block = (lean[0]!.params as { update: { content: Array<Record<string, unknown>> } })
+      .update.content[0]!;
+    expect(typeof block.oldText).toBe("object");
+
+    // delete drops the blob store too.
+    await store.delete(sid);
+    await expect(fs.access(paths.toolsDir(sid))).rejects.toThrow();
+  });
 });

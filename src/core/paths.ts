@@ -84,6 +84,14 @@ export const paths = {
     path.join(hydraHome(), "sessions", id, "meta.json"),
   historyFile: (id: string) =>
     path.join(hydraHome(), "sessions", id, "history.jsonl"),
+  // Content-addressed store for heavy tool payload (diff bodies, stdout)
+  // externalized out of history.jsonl. One file per unique blob, named by
+  // its sha256, so repeated identical content (e.g. an agent re-emitting
+  // the same full-file diff on every status tick) dedupes to one file.
+  toolsDir: (id: string) =>
+    path.join(hydraHome(), "sessions", id, "tools"),
+  toolBlobFile: (id: string, hash: string) =>
+    path.join(hydraHome(), "sessions", id, "tools", hash),
   // Persisted prompt queue for a session. ndjson, one record per
   // entry. Survives daemon restarts so queued prompts get a chance to
   // run rather than being silently lost. Entries are removed BEFORE

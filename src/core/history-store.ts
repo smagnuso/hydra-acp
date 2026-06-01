@@ -1,5 +1,7 @@
 import * as fs from "node:fs/promises";
 import { paths } from "./paths.js";
+import { externalizeToolEntry, expandToolRefs } from "./tool-content.js";
+import { putToolBlob, getToolBlob, deleteToolBlobs } from "./tool-store.js";
 
 // One on-disk history.jsonl per session: the replay buffer of broadcast
 // notifications captured by Session.recordAndBroadcast. The point is to
@@ -43,7 +45,13 @@ export class HistoryStore {
     }
     return this.enqueue(sessionId, async () => {
       await fs.mkdir(paths.sessionDir(sessionId), { recursive: true });
-      const line = JSON.stringify(entry) + "\n";
+      // Offload heavy tool content to the blob store; the line written to
+      // history.jsonl carries refs instead. The in-memory `entry` is not
+      // mutated, so the live broadcast still sends full content.
+      const stored = await externalizeToolEntry(entry, (t) =>
+        putToolBlob(sessionId, t),
+      );
+      const line = JSON.stringify(stored) + "\n";
       await fs.appendFile(paths.historyFile(sessionId), line, {
         encoding: "utf8",
         mode: 0o600,
@@ -57,10 +65,17 @@ export class HistoryStore {
     }
     return this.enqueue(sessionId, async () => {
       await fs.mkdir(paths.sessionDir(sessionId), { recursive: true });
+      // Re-externalize on rewrite so heavy content stays offloaded — this
+      // also opportunistically migrates old inline entries (which arrive
+      // here hydrated from load()) into the blob store.
+      const stored: HistoryEntry[] = [];
+      for (const e of entries) {
+        stored.push(await externalizeToolEntry(e, (t) => putToolBlob(sessionId, t)));
+      }
       const body =
-        entries.length === 0
+        stored.length === 0
           ? ""
-          : entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
+          : stored.map((e) => JSON.stringify(e)).join("\n") + "\n";
       await fs.writeFile(paths.historyFile(sessionId), body, {
         encoding: "utf8",
         mode: 0o600,
@@ -99,10 +114,19 @@ export class HistoryStore {
     });
   }
 
-  async load(sessionId: string): Promise<HistoryEntry[]> {
+  // `tools` selects how externalized tool content is materialized:
+  //   "inline" (default) — expand blob refs back to full content, so every
+  //                        consumer sees the original recorded shape.
+  //   "references"       — leave references in place (the lean form) for
+  //                        clients that fetch tool content on demand.
+  async load(
+    sessionId: string,
+    opts: { tools?: "inline" | "references" } = {},
+  ): Promise<HistoryEntry[]> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return [];
     }
+    const expand = (opts.tools ?? "inline") === "inline";
     // Drain any pending writes so the read sees the latest contents.
     // We don't enqueue the read itself — appending happens concurrently
     // with reads in the wild (the read snapshot is consistent regardless),
@@ -149,10 +173,28 @@ export class HistoryStore {
         recordedAt: obj.recordedAt,
       });
     }
-    if (out.length > this.maxEntries) {
-      return out.slice(-this.maxEntries);
+    const kept =
+      out.length > this.maxEntries ? out.slice(-this.maxEntries) : out;
+    if (!expand) {
+      return kept;
     }
-    return out;
+    // Expand refs back to inline content, caching blob reads so an agent's
+    // repeated (deduped) content is read from disk once per load.
+    const blobCache = new Map<string, string | null>();
+    const get = async (hash: string): Promise<string | null> => {
+      const cached = blobCache.get(hash);
+      if (cached !== undefined) {
+        return cached;
+      }
+      const value = await getToolBlob(sessionId, hash);
+      blobCache.set(hash, value);
+      return value;
+    };
+    const inlined: HistoryEntry[] = [];
+    for (const entry of kept) {
+      inlined.push(await expandToolRefs(entry, get));
+    }
+    return inlined;
   }
 
   // Wait for every pending append/rewrite/compact across all sessions to
@@ -182,6 +224,8 @@ export class HistoryStore {
           throw err;
         }
       }
+      // Drop the externalized tool blobs alongside the history file.
+      await deleteToolBlobs(sessionId);
       // Best-effort cleanup: if no other tenant (meta.json, etc.) is
       // left in the session dir, drop it. Both this and
       // SessionStore.delete attempt this; whichever runs last is the
