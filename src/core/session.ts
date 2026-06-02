@@ -4160,14 +4160,19 @@ export class Session {
     // Intercept daemon built-in slash commands here — after the prompt has
     // gone through the queue (echo flushed, prompt_received broadcast) but
     // before forwarding to the agent.
-    const promptText = extractPromptText(entry.prompt).trim();
+    // Trim trailing whitespace only — a leading space or newline should
+    // escape the slash-command interception so users can send a literal
+    // prompt like " /model ..." or a paste that happens to start with
+    // "/model" on a non-first line.
+    const promptText = extractPromptText(entry.prompt).replace(/\s+$/, "");
     if (
-      promptText === "/model" ||
-      promptText.startsWith("/model ") ||
-      promptText === "/mode" ||
-      promptText.startsWith("/mode ") ||
-      promptText === "/sessions" ||
-      promptText === "/help"
+      !promptText.includes("\n") &&
+      (promptText === "/model" ||
+        promptText.startsWith("/model ") ||
+        promptText === "/mode" ||
+        promptText.startsWith("/mode ") ||
+        promptText === "/sessions" ||
+        promptText === "/help")
     ) {
       let result: unknown;
       if (promptText === "/sessions") {

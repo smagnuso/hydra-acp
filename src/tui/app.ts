@@ -1557,8 +1557,17 @@ async function runSession(
     if (!firstLine.startsWith("/")) {
       return [];
     }
+    // Multi-line buffer (typical of pastes) is never a slash command.
+    if (buf.length > 1) {
+      return [];
+    }
     const space = firstLine.indexOf(" ");
     const prefix = space === -1 ? firstLine : firstLine.slice(0, space);
+    // Paths like /tmp/foo or /usr/bin/x have a second slash in the first
+    // token; those are never command names, so don't pop completions.
+    if (prefix.lastIndexOf("/") > 0) {
+      return [];
+    }
     const matches = allCommands().filter((c) => c.name.startsWith(prefix));
     // If the user has typed an exact command name (no args yet), don't
     // bother showing a single-element list — they're done picking.
@@ -2951,8 +2960,11 @@ async function runSession(
   // Returns true if the input was a TUI built-in slash command and was
   // handled locally; the caller should skip enqueueing / sending it.
   const handleBuiltinCommand = (text: string): boolean => {
-    const trimmed = text.trim();
-    if (!trimmed.startsWith("/")) {
+    // Trim trailing whitespace only — a leading space (or a multi-line
+    // paste whose first line is blank) should escape slash-command
+    // handling so pasted paths like "/tmp/foo" go through as prompts.
+    const trimmed = text.replace(/\s+$/, "");
+    if (!trimmed.startsWith("/") || trimmed.includes("\n")) {
       return false;
     }
     const space = trimmed.indexOf(" ");
