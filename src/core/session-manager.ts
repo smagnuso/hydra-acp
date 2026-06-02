@@ -215,6 +215,17 @@ export class SessionManager {
   // concurrent snapshot updates (e.g. an agent emitting model + mode
   // back-to-back) don't lose writes via interleaved reads.
   private metaWriteQueues = new Map<string, Promise<unknown>>();
+  // Short-TTL cache for list(). Coalesces the extension polling storm
+  // (slack/browser/notifier/archiver each poll /v1/sessions every ~2s)
+  // into a single fs sweep. Keyed by filter so picker variants (cwd
+  // scope, includeNonInteractive) don't collide. 500ms is short enough
+  // that staleness is invisible in the picker / extension UIs but long
+  // enough that concurrent pollers share one read.
+  private listCache = new Map<
+    string,
+    { expiresAt: number; promise: Promise<SessionListEntry[]> }
+  >();
+  private static readonly LIST_CACHE_TTL_MS = 500;
   private logger?: AgentLogger;
   private npmRegistry?: string;
   private extensionCommands?: ExtensionCommandRegistry;
@@ -1133,6 +1144,7 @@ export class SessionManager {
   private async attachManagerHooks(session: Session): Promise<void> {
     session.onClose(({ deleteRecord }) => {
       this.sessions.delete(session.sessionId);
+      this.invalidateListCache();
       if (deleteRecord) {
         // Tombstone before unlink so the next agent sync doesn't
         // reimport this upstream session. Snapshot updatedAt/cwd/title
@@ -1228,6 +1240,7 @@ export class SessionManager {
       }).catch(() => undefined);
     });
     this.sessions.set(session.sessionId, session);
+    this.invalidateListCache();
     // Read-modify-write so a resurrect preserves fields the in-memory
     // Session doesn't know about (originally agentCommands, and
     // createdAt for sessions that pre-date this code path). For a
@@ -1445,6 +1458,35 @@ export class SessionManager {
   }
 
   async list(
+    filter: { cwd?: string; includeNonInteractive?: boolean } = {},
+  ): Promise<SessionListEntry[]> {
+    const key = `${filter.cwd ?? ""}|${filter.includeNonInteractive ? "1" : "0"}`;
+    const now = Date.now();
+    const cached = this.listCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      return cached.promise;
+    }
+    const promise = this.listUncached(filter);
+    this.listCache.set(key, {
+      expiresAt: now + SessionManager.LIST_CACHE_TTL_MS,
+      promise,
+    });
+    // If the read fails, drop the entry so the next caller retries
+    // immediately rather than waiting out the TTL on a broken result.
+    promise.catch(() => {
+      const current = this.listCache.get(key);
+      if (current && current.promise === promise) {
+        this.listCache.delete(key);
+      }
+    });
+    return promise;
+  }
+
+  private invalidateListCache(): void {
+    this.listCache.clear();
+  }
+
+  private async listUncached(
     filter: { cwd?: string; includeNonInteractive?: boolean } = {},
   ): Promise<SessionListEntry[]> {
     const entries: SessionListEntry[] = [];
@@ -1917,6 +1959,12 @@ export class SessionManager {
         .catch(() => undefined);
     }
     await this.store.delete(sessionId).catch(() => undefined);
+    // Drop history.jsonl + externalized tool blobs alongside the meta
+    // record, mirroring the live-session deleteRecord:true path
+    // (attachManagerHooks). Without this, deleting a cold record would
+    // leave its history file orphaned on disk indefinitely.
+    await this.histories.delete(sessionId).catch(() => undefined);
+    this.invalidateListCache();
     return true;
   }
 

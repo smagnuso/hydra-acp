@@ -249,6 +249,19 @@ export class SessionStore {
       }
       throw err;
     }
+    // Read all per-session meta.json files in parallel. The previous
+    // serial loop was O(N) sequential fs ops; on long-lived installs
+    // (1000+ sessions) that added ~100ms per list() call and got
+    // hammered by the extension pollers. Parallel reads keep the same
+    // ordering semantics (the caller doesn't depend on directory order)
+    // and let the kernel coalesce dirent stats.
+    const settled = await Promise.all(
+      entries.map((entry) =>
+        // Each session is a directory under sessions/; non-conforming
+        // names get filtered by assertSafeId via read().
+        this.read(entry).catch(() => undefined),
+      ),
+    );
     const records: SessionRecord[] = [];
     for (const entry of entries) {
       // Each session is a directory under sessions/; non-conforming
