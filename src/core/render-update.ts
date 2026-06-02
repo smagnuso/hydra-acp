@@ -604,7 +604,19 @@ function clipHead(s: string, max: number): string {
 }
 
 function clipTail(s: string, max: number): string {
-  return s.length > max ? `…${s.slice(-(max - 1))}` : s;
+  if (s.length <= max) {
+    return s;
+  }
+  const tail = s.slice(-(max - 1));
+  // Snap to a path separator so we don't chop mid-segment (e.g.
+  // "…ome/smagnuson/..." reads like a relative path). Look for the
+  // first '/' in the tail; if one exists within a reasonable window,
+  // start the visible portion there.
+  const slash = tail.indexOf("/");
+  if (slash >= 0 && slash < max / 2) {
+    return `…${tail.slice(slash)}`;
+  }
+  return `…${tail}`;
 }
 
 function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {

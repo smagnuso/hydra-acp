@@ -81,6 +81,8 @@ describe("tool-call detail (rawInput hint)", () => {
     expect(detail.length).toBeLessThanOrEqual(64);
     expect(detail.startsWith("…")).toBe(true);
     expect(detail.endsWith("thefile.ts")).toBe(true);
+    // Snaps to a path separator so we don't chop mid-segment.
+    expect(detail.startsWith("…/")).toBe(true);
   });
 
   it("omits detail when rawInput has neither command nor path", () => {

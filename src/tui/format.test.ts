@@ -465,6 +465,17 @@ describe("formatToolLine", () => {
     ).toBe("edit · src/tui/format.ts");
   });
 
+  it("strips a leading copy of the title from the detail before appending", () => {
+    expect(
+      formatToolLine({
+        initialTitle: "Read",
+        latestTitle: "Read",
+        detail: "Read /foo/bar.ts",
+        status: "completed",
+      })[0]?.body,
+    ).toBe("Read · /foo/bar.ts");
+  });
+
   it("doesn't duplicate the detail when the title already contains it", () => {
     expect(
       formatToolLine({

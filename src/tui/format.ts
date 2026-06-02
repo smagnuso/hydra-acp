@@ -982,8 +982,23 @@ export function formatToolLine(
   // Append the detail hint (bash command / file path) after the verb, so a
   // generic "bash"/"edit" row says which command/file — unless the title
   // already carries it (e.g. an agent that refines the title to the path).
-  if (state.detail && !title.includes(state.detail)) {
-    title = `${title} · ${state.detail}`;
+  if (state.detail) {
+    // Some adapters encode the tool verb into rawInput.command (e.g.
+    // `command: "Read /foo"` for a Read tool), which would otherwise
+    // double the verb: "Read · Read /foo". Strip a leading copy of the
+    // title from the detail before appending.
+    let detail = state.detail;
+    const titleLc = title.toLowerCase();
+    const detailLc = detail.toLowerCase();
+    if (
+      detailLc.startsWith(`${titleLc} `) ||
+      detailLc.startsWith(`${titleLc}\t`)
+    ) {
+      detail = detail.slice(title.length).trimStart();
+    }
+    if (detail.length > 0 && !title.includes(detail)) {
+      title = `${title} · ${detail}`;
+    }
   }
   // Append a duration: a live "running for Xs" counter while in flight,
   // frozen as the total once the call hits a terminal status. Inherits the
