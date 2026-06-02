@@ -234,7 +234,7 @@ export function aggregate(
 }
 
 // Extract file path candidates from a tool_call's rawInput plus its
-function formatSummary(d: SessionInfoData, verbose: boolean): string {
+export function formatSummary(d: SessionInfoData, verbose: boolean): string {
   const lines: string[] = [];
   const pad = (label: string): string => label.padEnd(14);
 

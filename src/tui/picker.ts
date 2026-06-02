@@ -49,6 +49,11 @@ import {
   type LaunchOrViewResult,
 } from "./import-action-prompt.js";
 import { withSync } from "./sync.js";
+import { decodeBundle } from "../core/bundle.js";
+import {
+  aggregate as aggregateSessionInfo,
+  formatSummary as formatSessionInfoSummary,
+} from "../cli/commands/sessions-info.js";
 
 export type PickerResult =
   | {
@@ -171,7 +176,8 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["^f", "find in session history (content + tool inputs)"],
   ["o", "toggle cwd-only filter"],
   ["h", "cycle host filter (local / <peer> / all)"],
-  ["i", "toggle include-cat filter"],
+  ["i", "show info for the selected session"],
+  ["I", "toggle include-cat filter"],
   ["r", "refresh from daemon"],
   ["s", "sync sessions from installed agents"],
   null,
@@ -1748,6 +1754,66 @@ export async function pickSession(
         onResize: () => renderHelp(),
       });
     };
+    const openInfoLayer = (session: DiscoveredSession): void => {
+      let lines: string[] | null = null;
+      let error: string | null = null;
+      let loading = true;
+
+      const renderInfo = (): void => {
+        withSync(() => {
+          term.hideCursor();
+          term.moveTo(1, 1).eraseDisplayBelow();
+          term.brightWhite.bold.noFormat(
+            `  Session info — ${stripHydraSessionPrefix(session.sessionId)}`,
+          )("\n\n");
+          if (loading) {
+            term.dim.noFormat("  loading…")("\n");
+          } else if (error !== null) {
+            term.brightRed.noFormat(`  ${error}`)("\n");
+          } else if (lines !== null) {
+            for (const line of lines) {
+              term.noFormat(`  ${line}`)("\n");
+            }
+          }
+          term("\n");
+          term.dim.noFormat("  Esc / ^C to return")("\n");
+        });
+      };
+
+      renderInfo();
+      pushLayer({
+        onKey: (name) => {
+          if (name === "ESCAPE" || name === "CTRL_C") {
+            popLayer();
+            return;
+          }
+        },
+        onResize: () => renderInfo(),
+      });
+
+      void (async () => {
+        try {
+          const resp = await fetch(
+            `${opts.target.baseUrl}/v1/sessions/${encodeURIComponent(session.sessionId)}/export`,
+            { headers: { Authorization: `Bearer ${opts.target.token}` } },
+          );
+          if (!resp.ok) {
+            throw new Error(`daemon returned HTTP ${resp.status}`);
+          }
+          const raw = await resp.json();
+          const bundle = decodeBundle(raw);
+          const data = aggregateSessionInfo(bundle, session.status);
+          const text = formatSessionInfoSummary(data, false);
+          lines = text.replace(/\n$/, "").split("\n");
+        } catch (err) {
+          error = `failed to load info: ${(err as Error).message}`;
+        } finally {
+          loading = false;
+          renderInfo();
+        }
+      })();
+    };
+
     const openFindLayer = (): void => {
       if (visible.length === 0) {
         transientStatus = "no sessions to search";
@@ -2285,7 +2351,15 @@ export async function pickSession(
           renderFromScratch();
           return;
         }
-        if (name === "i" || name === "I") {
+        if (name === "i" && selectedIdx > 0) {
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          openInfoLayer(session);
+          return;
+        }
+        if (name === "I") {
           const keepId =
             selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
           prefs.filters.includeNonInteractive =
