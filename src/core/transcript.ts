@@ -35,7 +35,7 @@ function collectEvents(bundle: Bundle): TimedEvent[] {
     if (!params || typeof params !== "object") {
       continue;
     }
-    const event = mapUpdate(params.update);
+    const event = mapUpdate(params.update, { cwd: bundle.session.cwd });
     if (event === null) {
       continue;
     }

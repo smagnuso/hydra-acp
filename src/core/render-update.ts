@@ -145,7 +145,19 @@ interface UpdateLike {
   [key: string]: unknown;
 }
 
-export function mapUpdate(update: unknown): RenderEvent | null {
+// Optional context passed alongside an update. `cwd` lets us resolve
+// pathy tool titles that arrive as relative paths (or as slashless-
+// absolute strings — see normalizePathTitle) into proper absolute /
+// `~`-prefixed paths, so the rendered row is unambiguous and copy-
+// pasteable into a shell.
+export interface MapUpdateOptions {
+  cwd?: string;
+}
+
+export function mapUpdate(
+  update: unknown,
+  options: MapUpdateOptions = {},
+): RenderEvent | null {
   if (!update || typeof update !== "object") {
     return null;
   }
@@ -167,9 +179,9 @@ export function mapUpdate(update: unknown): RenderEvent | null {
     case "prompt_received":
       return mapPromptReceived(u);
     case "tool_call":
-      return mapToolCall(u);
+      return mapToolCall(u, options);
     case "tool_call_update":
-      return mapToolCallUpdate(u);
+      return mapToolCallUpdate(u, options);
     case "plan":
       return mapPlan(u);
     case "current_mode_update":
@@ -523,7 +535,10 @@ function readExitPlanMarkdown(u: UpdateLike): string | null {
   return sanitizeWireText(plan);
 }
 
-function mapToolCall(u: UpdateLike): RenderEvent | null {
+function mapToolCall(
+  u: UpdateLike,
+  options: MapUpdateOptions = {},
+): RenderEvent | null {
   const toolCallId = readString(u, "toolCallId") ?? readString(u, "id");
   if (!toolCallId) {
     return null;
@@ -547,7 +562,7 @@ function mapToolCall(u: UpdateLike): RenderEvent | null {
     // Falls through to the generic tool-call rendering when rawInput.plan
     // is missing — better a one-line row than a vanished event.
   }
-  const title = sanitizeSingleLine(rawTitle);
+  const title = normalizePathTitle(sanitizeSingleLine(rawTitle), u, options);
   const status = readString(u, "status");
   const rawKind = readString(u, "kind");
   const event: RenderEvent = { kind: "tool-call", toolCallId, title };
@@ -586,17 +601,107 @@ function extractToolDetail(u: UpdateLike): string | undefined {
     const cmd = firstLine.replace(/^cd\s+\S+\s+&&\s+/, "");
     return clipHead(cmd, TOOL_DETAIL_MAX);
   }
+  // Recognize all three spellings agents use in the wild:
+  // - `file_path` (snake_case, common)
+  // - `path` (generic)
+  // - `filePath` (camelCase, Claude Code)
   const path =
     typeof r.file_path === "string"
       ? r.file_path
-      : typeof r.path === "string"
-        ? r.path
-        : undefined;
+      : typeof r.filePath === "string"
+        ? r.filePath
+        : typeof r.path === "string"
+          ? r.path
+          : undefined;
   if (path !== undefined && path.length > 0) {
     // Keep the tail (filename) visible when the path is long.
     return clipTail(shortenHomePath(sanitizeSingleLine(path)), TOOL_DETAIL_MAX);
   }
   return undefined;
+}
+
+// Top-level dirs that strongly indicate a slashless-absolute path —
+// some agents (notably Claude Code) emit titles like
+// `home/smagnuson/dev/...` with the leading "/" stripped. If a title
+// starts with one of these followed by "/", we re-prepend the slash.
+const SLASHLESS_ABSOLUTE_PREFIXES: ReadonlyArray<string> = [
+  "home/",
+  "Users/",
+  "root/",
+  "tmp/",
+  "var/",
+  "opt/",
+  "etc/",
+  "usr/",
+  "mnt/",
+  "private/",
+];
+
+function looksLikeSlashlessAbsolute(title: string): boolean {
+  for (const p of SLASHLESS_ABSOLUTE_PREFIXES) {
+    if (title.startsWith(p)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Normalize a pathy tool title so it renders as an unambiguous,
+// copy-pasteable path. Handles three cases:
+//   1. Title is a slashless-absolute path (e.g. "home/u/foo.ts") that
+//      matches an absolute path in `rawInput.{file_path,filePath,path}`
+//      — use the rawInput value (run through shortenHomePath).
+//   2. Title is a slashless-absolute path with a well-known top-level
+//      dir prefix (home/, Users/, …) — re-prepend "/" and shortenHomePath.
+//   3. Title is a relative path and we know the agent's cwd — resolve
+//      against cwd and shortenHomePath. Improves copy-paste even though
+//      the relative form may already be readable in context.
+// Non-pathy titles ("Read file foo", "bash", "task") are left alone.
+function normalizePathTitle(
+  title: string,
+  u: UpdateLike,
+  options: MapUpdateOptions = {},
+): string {
+  if (title.length === 0) {
+    return title;
+  }
+  if (title.startsWith("/")) {
+    // Already absolute — only shortenHomePath rewrite needed.
+    return shortenHomePath(title);
+  }
+  if (title.startsWith("~")) {
+    return title;
+  }
+  // Only intervene when the title actually looks like a path (has a
+  // separator and no whitespace), to avoid mangling agent titles like
+  // "Read file foo".
+  if (!title.includes("/") || /\s/.test(title)) {
+    return title;
+  }
+  // Case 1: rawInput corroboration.
+  const rawInput = u.rawInput;
+  if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
+    const r = rawInput as Record<string, unknown>;
+    const candidates = [r.file_path, r.filePath, r.path];
+    for (const c of candidates) {
+      if (typeof c !== "string" || c.length === 0) continue;
+      if (c === `/${title}` || c.endsWith(`/${title}`) || c === title) {
+        return shortenHomePath(c);
+      }
+    }
+  }
+  // Case 2: slashless-absolute by well-known prefix.
+  if (looksLikeSlashlessAbsolute(title)) {
+    return shortenHomePath(`/${title}`);
+  }
+  // Case 3: relative, resolve against cwd if available.
+  if (options.cwd && options.cwd.length > 0) {
+    const cwd = options.cwd.endsWith("/")
+      ? options.cwd.slice(0, -1)
+      : options.cwd;
+    return shortenHomePath(`${cwd}/${title}`);
+  }
+  return title;
 }
 
 function clipHead(s: string, max: number): string {
@@ -619,14 +724,19 @@ function clipTail(s: string, max: number): string {
   return `…${tail}`;
 }
 
-function mapToolCallUpdate(u: UpdateLike): RenderEvent | null {
+function mapToolCallUpdate(
+  u: UpdateLike,
+  options: MapUpdateOptions = {},
+): RenderEvent | null {
   const toolCallId = readString(u, "toolCallId") ?? readString(u, "id");
   if (!toolCallId) {
     return null;
   }
   const rawTitle = readString(u, "title");
   const title =
-    rawTitle !== undefined ? sanitizeSingleLine(rawTitle) : undefined;
+    rawTitle !== undefined
+      ? normalizePathTitle(sanitizeSingleLine(rawTitle), u, options)
+      : undefined;
   const status = readString(u, "status");
   // Suppress intermediate "updated" pings that carry nothing new —
   // they're a fan-out artifact, not user-visible signal. Render only

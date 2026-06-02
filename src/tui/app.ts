@@ -661,7 +661,7 @@ async function runSession(
   ]);
   const handleSessionUpdate = (params: unknown): void => {
     const { update } = (params ?? {}) as { update?: unknown };
-    const event = mapUpdate(update);
+    const event = mapUpdate(update, { cwd: resolvedCwd });
     debugLogUpdate(update, event);
     // Any wire activity counts as "upstream alive" for the stall
     // watchdog — state-kind updates (usage_update, current_model_update

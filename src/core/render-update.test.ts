@@ -85,6 +85,78 @@ describe("tool-call detail (rawInput hint)", () => {
     expect(detail.startsWith("…/")).toBe(true);
   });
 
+  it("recognizes camelCase filePath (Claude Code) as a path source", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "Read",
+      rawInput: { filePath: "/nowhere/proj/src/x.ts" },
+    }) as { detail?: string };
+    expect(ev.detail).toBe("/nowhere/proj/src/x.ts");
+  });
+
+  it("repairs a slashless path title using rawInput.filePath", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      title: "home/u/proj/src/x.ts",
+      rawInput: { filePath: "/home/u/proj/src/x.ts" },
+    }) as { title?: string };
+    expect(ev.title).toBe("/home/u/proj/src/x.ts");
+  });
+
+  it("repairs a slashless-absolute path title via well-known prefix", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      title: "home/u/proj/src/x.ts",
+    }) as { title?: string };
+    expect(ev.title).toBe("/home/u/proj/src/x.ts");
+  });
+
+  it("absolutizes a relative path title against cwd when supplied", () => {
+    const ev = mapUpdate(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        title: "src/foo.ts",
+      },
+      { cwd: "/some/project" },
+    ) as { title?: string };
+    expect(ev.title).toBe("/some/project/src/foo.ts");
+  });
+
+  it("strips a trailing slash on cwd when absolutizing", () => {
+    const ev = mapUpdate(
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        title: "src/foo.ts",
+      },
+      { cwd: "/some/project/" },
+    ) as { title?: string };
+    expect(ev.title).toBe("/some/project/src/foo.ts");
+  });
+
+  it("leaves a relative pathy title alone when no cwd is supplied", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      title: "src/foo.ts",
+    }) as { title?: string };
+    expect(ev.title).toBe("src/foo.ts");
+  });
+
+  it("leaves titles with whitespace alone (not a bare path)", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "Read file foo/bar.ts",
+      rawInput: { filePath: "/home/u/foo/bar.ts" },
+    }) as { title?: string };
+    expect(ev.title).toBe("Read file foo/bar.ts");
+  });
+
   it("omits detail when rawInput has neither command nor path", () => {
     const ev = mapUpdate({
       sessionUpdate: "tool_call",

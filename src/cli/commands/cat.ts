@@ -443,7 +443,7 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
 
   conn.onNotification("session/update", (params) => {
     const update = (params as { update?: unknown } | undefined)?.update;
-    const event = mapUpdate(update);
+    const event = mapUpdate(update, { cwd: opts.cwd });
     if (!event) {
       return;
     }
