@@ -199,6 +199,105 @@ export async function runSessionsRemove(id: string | undefined): Promise<void> {
   process.stdout.write(`Removed ${id}\n`);
 }
 
+// `hydra sessions collect` — manual trigger for the GC that the daemon
+// otherwise runs on a timer. Useful right after install on a long-lived
+// data dir, or any time you want to reclaim disk now rather than wait
+// for the next scheduled sweep. Same selection rules as the background
+// timer (only cold, only effectiveInteractive === false) — interactive
+// sessions are never touched.
+export async function runSessionsCollect(opts: {
+  maxAgeDays?: number;
+  limit?: number;
+  json?: boolean;
+  // When true, keep `interactive === undefined` rows (editor-spawned
+  // sessions that never sent a turn) and only collect explicit
+  // `interactive === false` rows. Default is to collect both — the
+  // user typed `collect`, so collect every row that was never
+  // promoted to a real conversation.
+  keepUndecided?: boolean;
+}): Promise<void> {
+  const config = await loadConfig();
+  const serviceToken = await loadServiceToken();
+  const baseUrl = httpBase(
+    config.daemon.host,
+    config.daemon.port,
+    !!config.daemon.tls,
+  );
+  // Default to 0 (collect everything that matches the interactivity
+  // filter, regardless of age) when --max-age-days isn't passed. The
+  // CLI is interactive — the user typed `sessions collect` because they
+  // want the backlog gone now, not "what the background timer would
+  // sweep on its next tick." Pass `--max-age-days N` to scope to
+  // anything older than N days (matching the background timer's
+  // behavior); the background sweep continues to read
+  // config.daemon.sessionGcMaxAgeDays.
+  const maxAgeDays = opts.maxAgeDays !== undefined ? opts.maxAgeDays : 0;
+  const body: Record<string, number | string> = { maxAgeDays };
+  if (opts.limit !== undefined) {
+    body.limit = opts.limit;
+  }
+  body.selection = opts.keepUndecided ? "explicit" : "unpromoted";
+  const response = await fetch(`${baseUrl}/v1/sessions/collect`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${serviceToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
+    process.exit(1);
+  }
+  const result = (await response.json()) as {
+    considered: number;
+    deleted: number;
+    failed: number;
+    deferred: number;
+    oldestLastUsedMs?: number;
+  };
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  const label = opts.keepUndecided
+    ? "non-interactive"
+    : "unpromoted (cat one-shots + editor ghosts)";
+  if (result.considered === 0) {
+    const cutoff = maxAgeDays > 0 ? ` older than ${maxAgeDays}d` : "";
+    process.stdout.write(`No ${label} sessions${cutoff} found.\n`);
+    return;
+  }
+  const ageNote =
+    result.oldestLastUsedMs !== undefined
+      ? ` (oldest: ${formatAgo(Date.now() - result.oldestLastUsedMs)} ago)`
+      : "";
+  process.stdout.write(
+    `Collected ${result.deleted} of ${result.considered} ${label} session(s)${ageNote}.\n`,
+  );
+  if (result.failed > 0) {
+    process.stdout.write(`  ${result.failed} failed (see daemon log).\n`);
+  }
+  if (result.deferred > 0) {
+    process.stdout.write(
+      `  ${result.deferred} deferred — re-run \`hydra sessions collect\` to drain.\n`,
+    );
+  }
+}
+
+function formatAgo(ms: number): string {
+  const days = ms / (24 * 60 * 60 * 1000);
+  if (days >= 1) {
+    return `${days.toFixed(days >= 10 ? 0 : 1)}d`;
+  }
+  const hours = ms / (60 * 60 * 1000);
+  if (hours >= 1) {
+    return `${hours.toFixed(hours >= 10 ? 0 : 1)}h`;
+  }
+  const minutes = ms / (60 * 1000);
+  return `${minutes.toFixed(0)}m`;
+}
+
 export async function runSessionsExport(
   id: string | undefined,
   outPath: string | undefined,

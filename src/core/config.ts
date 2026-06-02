@@ -43,6 +43,18 @@ const DaemonConfig = z.object({
   // are staggered across the window — N agents on a 60-minute interval
   // mean one agent spawn every 60/N minutes. Set 0 to disable entirely.
   agentSyncIntervalMinutes: z.number().nonnegative().default(60),
+  // How often (minutes) the daemon sweeps for non-interactive cold
+  // session records (one-shot `hydra cat` runs, mostly) that haven't
+  // been touched in `sessionGcMaxAgeDays`. Set 0 to disable. The sweep
+  // runs in the background, deletes the oldest matches first, and
+  // caps each pass at ~200 records to keep the event loop responsive
+  // when first enabled on a long-lived install with thousands of
+  // accumulated rows.
+  sessionGcIntervalMinutes: z.number().nonnegative().default(60),
+  // Age cutoff for the session GC. Records (and their history files)
+  // older than this are dropped on the next sweep. Live sessions and
+  // anything ever promoted to interactive are never touched.
+  sessionGcMaxAgeDays: z.number().positive().default(2),
 });
 
 const RegistryConfig = z.object({

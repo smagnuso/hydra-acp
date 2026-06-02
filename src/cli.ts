@@ -21,6 +21,7 @@ import {
   runDaemonStop,
 } from "./cli/commands/daemon.js";
 import {
+  runSessionsCollect,
   runSessionsExport,
   runSessionsImport,
   runSessionsKill,
@@ -400,6 +401,39 @@ async function main(): Promise<void> {
       }
       if (sub === "remove") {
         await runSessionsRemove(positional[2]);
+        return;
+      }
+      if (sub === "collect") {
+        const maxAgeRaw = resolveOption(flags, "max-age-days");
+        const limitRaw = resolveOption(flags, "limit");
+        const collectOpts: {
+          maxAgeDays?: number;
+          limit?: number;
+          json?: boolean;
+          keepUndecided?: boolean;
+        } = {
+          json: flags.json === true,
+          keepUndecided: flags["keep-undecided"] === true,
+        };
+        if (maxAgeRaw !== undefined) {
+          const n = Number(maxAgeRaw);
+          if (!Number.isFinite(n) || n < 0) {
+            process.stderr.write("--max-age-days must be a non-negative number\n");
+            process.exit(2);
+            return;
+          }
+          collectOpts.maxAgeDays = n;
+        }
+        if (limitRaw !== undefined) {
+          const n = Number(limitRaw);
+          if (!Number.isFinite(n) || n <= 0) {
+            process.stderr.write("--limit must be a positive number\n");
+            process.exit(2);
+            return;
+          }
+          collectOpts.limit = n;
+        }
+        await runSessionsCollect(collectOpts);
         return;
       }
       if (sub === "export") {
@@ -849,6 +883,8 @@ function printHelp(): void {
       "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses. --fold collapses sequential hunks that rewrite the same region into one net-effect hunk.",
       "  hydra-acp session kill <id>        Demote a live session to cold (keeps the on-disk record)",
       "  hydra-acp session remove <id>      Remove a session entirely (live or cold)",
+      "  hydra-acp session collect [--max-age-days <n>] [--limit <n>] [--keep-undecided] [--json]",
+      "                                     Delete cold sessions that were never promoted to a real conversation — `hydra cat` one-shots (interactive=false) AND editor-spawned panels that never had a turn (interactive=undefined). With no --max-age-days, collects every matching cold row regardless of age (you typed `collect`, so collect it all). Pass --max-age-days N to scope to anything older than N days; 0 is the same as omitting it. --keep-undecided narrows to only explicit interactive=false rows (matches what the background timer does). --limit caps deletions per call (default 1000); re-run to drain a larger backlog. The daemon also runs this on a timer using config.daemon.sessionGcMaxAgeDays (with the conservative explicit-only policy) — this is the manual trigger.",
       "  hydra-acp session export <id> [--out <file>|.]",
       "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout",
       "  hydra-acp session transcript <id>|<file> [--out <file>|.]",

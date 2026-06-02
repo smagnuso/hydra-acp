@@ -263,10 +263,7 @@ export class SessionStore {
       ),
     );
     const records: SessionRecord[] = [];
-    for (const entry of entries) {
-      // Each session is a directory under sessions/; non-conforming
-      // names get filtered by assertSafeId via read().
-      const record = await this.read(entry);
+    for (const record of settled) {
       if (record) {
         records.push(record);
       }

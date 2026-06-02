@@ -19,6 +19,8 @@ function testConfig(): HydraConfig {
       sessionHistoryMaxEntries: 1000,
       agentStderrTailBytes: 4096,
       agentSyncIntervalMinutes: 0,
+      sessionGcIntervalMinutes: 0,
+      sessionGcMaxAgeDays: 2,
     },
     registry: {
       url: "http://127.0.0.1:65535/never-reached",

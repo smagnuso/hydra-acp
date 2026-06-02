@@ -26,6 +26,12 @@ export const Tombstone = z.object({
   cwd: z.string().optional(),
   title: z.string().optional(),
   reason: z.enum(["user", "expired"]).optional(),
+  // Snapshot of the record's effective interactivity at deletion time.
+  // Diagnostic-only today (so post-hoc inspection of why a tombstone
+  // exists can distinguish "user pruned a real conversation" from
+  // "GC swept a cat one-shot"), but kept on the schema so future
+  // resurrect-policy work can lean on it without a migration.
+  interactive: z.boolean().optional(),
 });
 export type Tombstone = z.infer<typeof Tombstone>;
 

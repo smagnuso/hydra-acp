@@ -13,6 +13,7 @@ import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
 import { isLoopbackHost } from "../../core/remote-url.js";
 import { searchHistories } from "../../core/history-search.js";
+import { sweepNonInteractiveSessions } from "../../core/session-gc.js";
 
 export interface SessionRouteDefaults {
   agentId: string;
@@ -104,6 +105,42 @@ export function registerSessionRoutes(
         agentId: session.agentId,
         cwd: session.cwd,
       });
+    } catch (err) {
+      reply.code(500).send({ error: (err as Error).message });
+    }
+  });
+
+  // On-demand sweep of non-interactive cold session records. Mirrors
+  // what the background GC does, but driven by the user via
+  // `hydra sessions collect`. Body lets the caller override the daemon
+  // config defaults: `maxAgeDays` (0 / unset → "any age"), `limit`
+  // (per-call deletion cap; default 1000 — generous since the CLI is
+  // interactive and the daemon is the one doing the work).
+  app.post("/v1/sessions/collect", async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      maxAgeDays?: number;
+      limit?: number;
+      selection?: "explicit" | "unpromoted";
+    };
+    const maxAgeMs =
+      typeof body.maxAgeDays === "number" && body.maxAgeDays > 0
+        ? body.maxAgeDays * 24 * 60 * 60 * 1_000
+        : 0;
+    const maxDeletions =
+      typeof body.limit === "number" && body.limit > 0 ? body.limit : 1000;
+    const selection =
+      body.selection === "explicit" || body.selection === "unpromoted"
+        ? body.selection
+        : "unpromoted";
+    try {
+      const result = await sweepNonInteractiveSessions({
+        manager,
+        maxAgeMs,
+        maxDeletions,
+        selection,
+        verbose: false,
+      });
+      reply.code(200).send(result);
     } catch (err) {
       reply.code(500).send({ error: (err as Error).message });
     }

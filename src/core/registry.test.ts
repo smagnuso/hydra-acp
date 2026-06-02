@@ -55,6 +55,8 @@ function fakeConfig(): HydraConfig {
       sessionHistoryMaxEntries: 1000,
       agentStderrTailBytes: 4096,
       agentSyncIntervalMinutes: 0,
+      sessionGcIntervalMinutes: 0,
+      sessionGcMaxAgeDays: 2,
     },
     registry: {
       url: "http://example.invalid/never",

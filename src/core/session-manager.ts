@@ -1152,6 +1152,19 @@ export class SessionManager {
         // racing the unlink) so syncFromAgent can tell whether the
         // agent has progressed past our snapshot since deletion.
         if (session.upstreamSessionId) {
+          const liveInteractive = effectiveInteractive(
+            {
+              interactive: session.interactive,
+              ...(session.originatingClient
+                ? { originatingClient: session.originatingClient }
+                : {}),
+            },
+            // The session has been alive in-process so we don't know
+            // history presence here without a stat; pass true to fall
+            // through to the explicit-flag / originatingClient rules
+            // (the only branches that produce a defined boolean).
+            true,
+          );
           void this.tombstones
             .add({
               agentId: session.agentId,
@@ -1161,6 +1174,9 @@ export class SessionManager {
               cwd: session.cwd,
               title: session.title,
               reason: "user",
+              ...(liveInteractive !== undefined
+                ? { interactive: liveInteractive }
+                : {}),
             })
             .catch(() => undefined);
         }
@@ -1946,6 +1962,8 @@ export class SessionManager {
     // happen for cold records — upstreamSessionId is required by
     // SessionRecord — but defensive in case the schema relaxes).
     if (record.upstreamSessionId) {
+      const hist = await historyStatus(sessionId);
+      const recordInteractive = effectiveInteractive(record, hist.hasContent);
       await this.tombstones
         .add({
           agentId: record.agentId,
@@ -1955,6 +1973,9 @@ export class SessionManager {
           cwd: record.cwd,
           title: record.title,
           reason: "user",
+          ...(recordInteractive !== undefined
+            ? { interactive: recordInteractive }
+            : {}),
         })
         .catch(() => undefined);
     }
