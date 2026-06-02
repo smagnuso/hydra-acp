@@ -2512,31 +2512,29 @@ function formatComposerTitle(cwd: string, maxWidth: number): string {
 }
 
 // Order sessions for the picker. Tiers (highest first):
-//   6: live + awaiting input + cwd matches the picker's cwd
-//   5: live + awaiting input
-//   4: live + busy + cwd matches the picker's cwd
-//   3: live + busy
-//   2: live + cwd matches
+//   3: live + awaiting input
+//   2: live + busy
 //   1: live
 //   0: cold
 // Sessions blocked on the user float above merely-busy ones — they're
-// the ones that actually need your attention. Within a tier, newer
+// the ones that actually need your attention. The current cwd does not
+// influence ranking — users who want to focus on this directory can
+// press `o` to toggle the cwd-only filter. Within a tier, newer
 // updatedAt wins — but compared at minute precision so a streaming
 // session's per-chunk mtime churn doesn't keep flipping the sort order
 // between auto-refreshes.
 export function sortSessions(
   sessions: DiscoveredSession[],
-  cwd: string,
+  _cwd: string,
 ): DiscoveredSession[] {
   const score = (s: DiscoveredSession): number => {
     if (s.status !== "live") {
       return 0;
     }
-    const base = s.cwd === cwd ? 2 : 1;
     if (s.awaitingInput) {
-      return base + 4;
+      return 3;
     }
-    return s.busy ? base + 2 : base;
+    return s.busy ? 2 : 1;
   };
   return [...sessions].sort((a, b) => {
     const tier = score(b) - score(a);

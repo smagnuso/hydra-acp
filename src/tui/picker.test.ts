@@ -363,7 +363,7 @@ describe("sortSessions", () => {
     ]);
   });
 
-  it("prefers busy + cwd match over busy in a different cwd", () => {
+  it("does not prefer current cwd within the same tier — newer wins", () => {
     const busyHere = session({
       sessionId: "hydra-here",
       status: "live",
@@ -378,10 +378,10 @@ describe("sortSessions", () => {
       cwd: "/other/place",
       updatedAt: "2026-05-20T12:00:00Z",
     });
-    const out = sortSessions([busyElsewhere, busyHere], cwd);
+    const out = sortSessions([busyHere, busyElsewhere], cwd);
     expect(out.map((s) => s.sessionId)).toEqual([
-      "hydra-here",
       "hydra-elsewhere",
+      "hydra-here",
     ]);
   });
 
