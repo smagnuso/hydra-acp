@@ -1423,6 +1423,12 @@ describe("Screen block-click routing", () => {
     ).handleMouse(name, data);
   }
 
+  // A full click: press then release on the same cell.
+  function clickAt(screen: Screen, x: number, y: number): void {
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
+  }
+
   function visibleRows(screen: Screen): number {
     return (
       screen as unknown as { scrollbackVisibleRows: () => number }
@@ -1507,7 +1513,18 @@ describe("Screen block-click routing", () => {
     expect(callKeyAtRow(screen, visibleRows(screen) + 1)).toBeNull();
   });
 
-  it("left-click fires onBlockClick with the resolved key", () => {
+  it("a full click (press+release same cell) fires onBlockClick", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key) => clicks.push(key),
+    });
+    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    clickAt(screen, 3, visibleRows(screen));
+    expect(clicks).toEqual(["editdiff:xyz"]);
+  });
+
+  it("a press alone (no release) does not fire onBlockClick", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({
       mouse: true,
@@ -1515,12 +1532,28 @@ describe("Screen block-click routing", () => {
     });
     screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
     dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", {
+      x: 3,
       y: visibleRows(screen),
     });
-    expect(clicks).toEqual(["editdiff:xyz"]);
+    expect(clicks).toEqual([]);
   });
 
-  it("left-click on an unkeyed row does not fire onBlockClick", () => {
+  it("a press-drag-release (different cell) does not fire onBlockClick", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key) => clicks.push(key),
+    });
+    screen.upsertLines("editdiff:xyz", [{ body: "a-longer-diff-row" }]);
+    const y = visibleRows(screen);
+    // Drag horizontally within the same row (text selection): release on a
+    // different x must NOT toggle.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 9, y });
+    expect(clicks).toEqual([]);
+  });
+
+  it("a full click on an unkeyed row does not fire onBlockClick", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({
       mouse: true,
@@ -1528,7 +1561,7 @@ describe("Screen block-click routing", () => {
     });
     screen.upsertLines("tools:1", [{ body: "only-row" }]);
     // Top padding row — no block there.
-    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { y: 1 });
+    clickAt(screen, 3, 1);
     expect(clicks).toEqual([]);
   });
 
@@ -1539,8 +1572,8 @@ describe("Screen block-click routing", () => {
       onBlockClick: (key) => clicks.push(key),
     });
     screen.upsertLines("tools:1", [{ body: "only-row" }]);
-    dispatchMouse(screen, "MOUSE_WHEEL_UP", { y: visibleRows(screen) });
-    dispatchMouse(screen, "MOUSE_WHEEL_DOWN", { y: visibleRows(screen) });
+    dispatchMouse(screen, "MOUSE_WHEEL_UP", { x: 1, y: visibleRows(screen) });
+    dispatchMouse(screen, "MOUSE_WHEEL_DOWN", { x: 1, y: visibleRows(screen) });
     expect(clicks).toEqual([]);
   });
 });

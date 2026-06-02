@@ -289,6 +289,11 @@ export class Screen {
   private resizeHandler: () => void;
   private keyHandler: (name: string, _matches: string[], data: { isCharacter?: boolean }) => void;
   private mouseHandler: (name: string, data: unknown) => void;
+  // Cell of the most recent left-button press, used to qualify a block
+  // click: we only toggle a block when the release lands on the same cell
+  // (a clean click), so a press-drag-release (text selection, even within
+  // one block) never toggles. Cleared on release.
+  private pressCell: { x: number; y: number } | null = null;
   private started = false;
   // Bracketed-paste-mode state. terminal-kit doesn't natively support
   // bracketed paste, so on start() we enable the mode in the terminal
@@ -1709,22 +1714,50 @@ export class Screen {
       return;
     }
     // Left-click on a keyed scrollback block toggles that single block's
-    // expand/collapse via the app. Only consulted under full mouse
-    // capture (this path is unreachable in wheel-only/selective mode,
-    // which never reports button events). Clicks on unkeyed rows fall
-    // through silently so they don't disturb anything.
-    if (name === "MOUSE_LEFT_BUTTON_PRESSED" && this.onBlockClick) {
-      const y =
-        data && typeof data === "object" && "y" in data
-          ? Number((data as { y: unknown }).y)
-          : NaN;
-      if (Number.isFinite(y)) {
-        const key = this.keyAtRow(y);
+    // expand/collapse via the app. We require a full click — press and
+    // release on the SAME cell — so a press-drag-release (text selection,
+    // even within a single block) never toggles. Only reachable under full
+    // mouse capture (wheel-only/selective mode never reports button
+    // events). Clicks on unkeyed rows fall through silently.
+    const cell = this.mouseCell(data);
+    if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
+      this.pressCell = cell;
+      return;
+    }
+    if (
+      name === "MOUSE_LEFT_BUTTON_RELEASED" ||
+      name === "MOUSE_BUTTON_RELEASED"
+    ) {
+      const press = this.pressCell;
+      this.pressCell = null;
+      if (
+        this.onBlockClick &&
+        press !== null &&
+        cell !== null &&
+        cell.x === press.x &&
+        cell.y === press.y
+      ) {
+        const key = this.keyAtRow(cell.y);
         if (key !== null) {
           this.onBlockClick(key);
         }
       }
     }
+  }
+
+  // Extract the 1-based {x, y} cell from a terminal-kit mouse event's data
+  // payload, or null if absent/malformed.
+  private mouseCell(data: unknown): { x: number; y: number } | null {
+    if (!data || typeof data !== "object") {
+      return null;
+    }
+    const d = data as { x?: unknown; y?: unknown };
+    const x = Number(d.x);
+    const y = Number(d.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+    return { x, y };
   }
 
   // Map a 1-based terminal row to the key of the block whose line is
