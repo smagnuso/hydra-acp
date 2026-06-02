@@ -15,6 +15,9 @@ export interface AgentInstanceOptions {
   // failure. Defaults to 4096 — just enough to surface a typical
   // auth complaint or ENOENT without unbounded growth.
   stderrTailBytes?: number;
+  // Grace period (ms) between SIGTERM and SIGKILL in kill(). Exposed
+  // mainly so tests can shorten the default 2s wait.
+  killEscalationMs?: number;
   // Pino-style logger for diagnostic output. The daemon's stderr is
   // wired to /dev/null (spawnDaemonDetached), so raw process.stderr
   // writes are invisible — route stderr lines and unexpected exits
@@ -41,6 +44,7 @@ export class AgentInstance {
   private killed = false;
   private stderrTail = "";
   private stderrTailBytes: number;
+  private killEscalationMs: number;
   private logger?: AgentLogger;
   private fileLog?: fs.WriteStream;
   private exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
@@ -51,6 +55,7 @@ export class AgentInstance {
     this.cwd = opts.cwd;
     this.child = child;
     this.stderrTailBytes = opts.stderrTailBytes ?? DEFAULT_STDERR_TAIL_BYTES;
+    this.killEscalationMs = opts.killEscalationMs ?? DEFAULT_KILL_ESCALATION_MS;
     this.logger = opts.logger;
     this.fileLog = openAgentLog(opts.agentId);
     this.writeLog(
@@ -154,6 +159,11 @@ export class AgentInstance {
       // continues to terminate it cleanly on idle/close.
       detached: true,
     });
+    // detached:true alone makes Node's event loop wait for the child. We
+    // own the lifecycle explicitly via kill() and the connection's stdio,
+    // so unref the handle: a stuck or leaked agent must not pin the
+    // daemon (or a test runner) alive past its own exit.
+    child.unref();
     return new AgentInstance(opts, child);
   }
 
@@ -177,9 +187,65 @@ export class AgentInstance {
       `agent ${this.agentId} pid=${this.child.pid} kill requested signal=${signal}`,
     );
     await this.connection.close().catch(() => undefined);
-    this.child.kill(signal);
+    this.signalProcessGroup(signal);
+    // Escalate to SIGKILL if the agent ignores the graceful signal. Without
+    // this, agents that don't handle SIGTERM (codex-acp is the known
+    // offender) linger after the daemon stops tracking them and get
+    // reparented to systemd --user — a per-sync leak that accumulates
+    // forever.
+    await this.waitForExit(this.killEscalationMs);
+    if (this.exited) {
+      return;
+    }
+    this.writeLog(
+      `--- kill escalating signal=SIGKILL time=${new Date().toISOString()} ---\n`,
+    );
+    this.logger?.warn(
+      `agent ${this.agentId} pid=${this.child.pid} did not exit after ${signal}; sending SIGKILL`,
+    );
+    this.signalProcessGroup("SIGKILL");
+    await this.waitForExit(this.killEscalationMs);
+  }
+
+  // Spawned with detached:true, so the child is the leader of its own
+  // process group. Signal the group (negative pid) so any helper
+  // processes the agent forked off die with it; fall back to a direct
+  // pid kill if the group send fails (e.g. group already empty).
+  private signalProcessGroup(signal: NodeJS.Signals): void {
+    const pid = this.child.pid;
+    if (pid === undefined) {
+      return;
+    }
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      try {
+        this.child.kill(signal);
+      } catch {
+        void 0;
+      }
+    }
+  }
+
+  private waitForExit(timeoutMs: number): Promise<void> {
+    if (this.exited) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.child.off("exit", onExit);
+        resolve();
+      }, timeoutMs);
+      const onExit = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.child.once("exit", onExit);
+    });
   }
 }
+
+const DEFAULT_KILL_ESCALATION_MS = 2_000;
 
 function openAgentLog(agentId: string): fs.WriteStream | undefined {
   try {

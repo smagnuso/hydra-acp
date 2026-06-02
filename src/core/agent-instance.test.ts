@@ -146,4 +146,21 @@ describe("AgentInstance: spawn-level failures", () => {
     expect(err.message).not.toMatch(/exited before responding/);
     expect(err.message).toMatch(/closed/i);
   });
+
+  it("kill() escalates to SIGKILL when the agent ignores SIGTERM", async () => {
+    // Agent ignores SIGTERM and never exits on its own. Without the
+    // SIGKILL escalation in kill(), this would hang the daemon's sync
+    // path and leak the process to systemd.
+    const agent = AgentInstance.spawn({
+      agentId: "ignores-sigterm",
+      cwd: process.cwd(),
+      plan: nodeScript(
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
+      ),
+      killEscalationMs: 100,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    await agent.kill();
+    expect(agent.isAlive()).toBe(false);
+  });
 });
