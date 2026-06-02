@@ -2973,6 +2973,8 @@ async function runSession(
         editDiffOverrides.clear();
         renderedTools.clear();
         toolsOverrides.clear();
+        renderedThoughts.clear();
+        thoughtCollapsed.clear();
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -3365,6 +3367,14 @@ async function runSession(
   // viewPrefs.toolsExpanded for that one block. Cleared when the global ^O
   // Tools toggle fires (global wins).
   const toolsOverrides = new Map<string, boolean>();
+  // Retained thought text, keyed by thought block key, so a click can
+  // re-render the block collapsed/expanded even after closeThought wipes
+  // the live buffer (the lines stay painted in scrollback). Cleared on
+  // /clear. Mirrors renderedTools / renderedEditDiffs.
+  const renderedThoughts = new Map<string, string>();
+  // Thought blocks the user has clicked to collapse, keyed by block key.
+  // Collapsed = a single dim "Thinking" line; absent = fully expanded.
+  const thoughtCollapsed = new Set<string>();
   // Wall-clock bounds for the active tools block. startedAt is set on
   // the first tool call of the turn; endedAt is set when the turn
   // completes and freezes the block (header switches from "Xs" to
@@ -3470,13 +3480,42 @@ async function runSession(
   let thoughtKey: string | null = null;
   let thoughtSeq = 0;
 
+  // Build a thought block's lines: a single dim "Thinking" line when
+  // collapsed, the full parsed markdown otherwise. The collapsed line
+  // keeps bodyStyle "thought" so the ^T hide-thoughts filter still drops
+  // it, and a ▸ marker hints that a click expands it (▾ when expanded).
+  const buildThoughtLines = (text: string, collapsed: boolean): FormattedLine[] => {
+    if (collapsed) {
+      return [{ prefix: "  ", body: "▸ Thinking", bodyStyle: "thought" }];
+    }
+    return parseThoughtMarkdown(text);
+  };
+
   const renderThoughtBlock = (): void => {
     if (thoughtKey === null)
       return;
-    const lines = parseThoughtMarkdown(thoughtBuffer);
+    if (thoughtBuffer.length === 0)
+      return;
+    renderedThoughts.set(thoughtKey, thoughtBuffer);
+    const lines = buildThoughtLines(
+      thoughtBuffer,
+      thoughtCollapsed.has(thoughtKey),
+    );
     if (lines.length === 0)
       return;
     screen.upsertLines(thoughtKey, lines);
+  };
+
+  // Re-render a thought block from retained text (click-to-toggle on a
+  // block whose live buffer is long gone). No-op without a snapshot.
+  const renderThoughtBlockFor = (key: string): void => {
+    const text = renderedThoughts.get(key);
+    if (text === undefined)
+      return;
+    const lines = buildThoughtLines(text, thoughtCollapsed.has(key));
+    if (lines.length === 0)
+      return;
+    screen.upsertLines(key, lines);
   };
 
   const appendThought = (text: string): void => {
@@ -3954,6 +3993,25 @@ async function runSession(
         renderToolsBlock();
       } else {
         renderToolsBlockFor(key);
+      }
+      screen.repaintNow();
+      return;
+    }
+    if (key.startsWith("thought:")) {
+      if (!renderedThoughts.has(key)) {
+        return;
+      }
+      if (thoughtCollapsed.has(key)) {
+        thoughtCollapsed.delete(key);
+      } else {
+        thoughtCollapsed.add(key);
+      }
+      // The live block (still streaming) re-renders from its buffer; a
+      // frozen past block re-renders from retained text.
+      if (key === thoughtKey) {
+        renderThoughtBlock();
+      } else {
+        renderThoughtBlockFor(key);
       }
       screen.repaintNow();
       return;
