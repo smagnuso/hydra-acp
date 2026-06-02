@@ -31,7 +31,11 @@ import {
   resolveLocalTarget,
   type RemoteTarget,
 } from "../core/remote-target.js";
-import { ensureDaemonReachable } from "../core/daemon-bootstrap.js";
+import {
+  ensureDaemonReachable,
+  fetchDaemonHealth,
+} from "../core/daemon-bootstrap.js";
+import { computeConfigDigest } from "../core/config-digest.js";
 import { invokedBinName } from "../core/bin-name.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
@@ -401,6 +405,32 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const pendingUpdate = await getPendingUpdate();
   if (pendingUpdate) {
     process.stderr.write(`✨ ${formatUpdateNoticeLine(pendingUpdate)}\n`);
+  }
+  // Warn (post-TUI, in the host shell) when the running daemon is
+  // stale: either older/newer than this CLI, or booted from a config
+  // that has since been edited on disk. Both states are silently
+  // wrong-looking from inside a session, so surface them as the user
+  // returns to the shell. TTY-only — piped output shouldn't see this.
+  if (process.stdout.isTTY) {
+    const health = await fetchDaemonHealth(config);
+    if (health?.version !== undefined) {
+      const versionMismatch = health.version !== HYDRA_VERSION;
+      const localDigest = computeConfigDigest(config);
+      const configMismatch =
+        health.configDigest !== undefined &&
+        health.configDigest !== localDigest;
+      if (versionMismatch || configMismatch) {
+        const reason = versionMismatch
+          ? `daemon ${health.version} ≠ cli ${HYDRA_VERSION}`
+          : "config changed since daemon started";
+        const yellow = (s: string): string => `\x1b[33m${s}\x1b[0m`;
+        process.stderr.write(
+          yellow(
+            `! ${reason} — run \`${invokedBinName()} daemon restart\` to apply.`,
+          ) + "\n",
+        );
+      }
+    }
   }
   // Resume hint is only useful for humans — piped output (e.g. into
   // an editor's "run command" pane) treats this as noise. Skip when

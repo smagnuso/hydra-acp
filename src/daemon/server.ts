@@ -21,7 +21,9 @@ import {
   setAgentPruneLogger,
 } from "../core/agent-prune.js";
 import { startAgentSyncScheduler } from "../core/agent-sync-scheduler.js";
+import { startSessionGc } from "../core/session-gc.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
+import { computeConfigDigest } from "../core/config-digest.js";
 import { SessionTokenStore } from "../core/session-tokens.js";
 import {
   bearerAuth,
@@ -194,7 +196,7 @@ export async function startDaemon(
     tokenRegistry: processRegistry,
   });
 
-  registerHealthRoutes(app, HYDRA_VERSION);
+  registerHealthRoutes(app, HYDRA_VERSION, computeConfigDigest(config));
   registerSessionRoutes(app, manager, {
     agentId: config.defaultAgent,
     cwd: config.defaultCwd,
@@ -315,7 +317,29 @@ export async function startDaemon(
         })
       : undefined;
 
+  // Background sweep: delete non-interactive cold session records
+  // (mostly one-shot `hydra cat` runs) that haven't been touched in
+  // sessionGcMaxAgeDays. Keeps ~/.hydra-acp/sessions/ from growing
+  // unbounded — every cat invocation writes a meta.json + history.jsonl
+  // that no one ever lists by default, and on long-lived installs the
+  // accumulated rows slow every list() sweep. Disabled when interval
+  // is 0.
+  const gcIntervalMs = config.daemon.sessionGcIntervalMinutes * 60 * 1_000;
+  const gcMaxAgeMs = config.daemon.sessionGcMaxAgeDays * 24 * 60 * 60 * 1_000;
+  const stopSessionGc =
+    gcIntervalMs > 0
+      ? startSessionGc({
+          manager,
+          intervalMs: gcIntervalMs,
+          maxAgeMs: gcMaxAgeMs,
+          logger: agentLogger,
+        })
+      : undefined;
+
   const shutdown = async (): Promise<void> => {
+    if (stopSessionGc) {
+      stopSessionGc();
+    }
     if (stopAgentSync) {
       stopAgentSync();
     }

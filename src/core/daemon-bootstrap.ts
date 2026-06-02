@@ -24,6 +24,38 @@ export async function pingHealth(config: HydraConfig): Promise<boolean> {
   }
 }
 
+export interface DaemonHealth {
+  version?: string;
+  configDigest?: string;
+}
+
+export async function fetchDaemonHealth(
+  config: HydraConfig,
+  timeoutMs = 1_000,
+): Promise<DaemonHealth | undefined> {
+  const protocol = config.daemon.tls ? "https" : "http";
+  const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/v1/health`;
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      return undefined;
+    }
+    const body = (await response.json()) as {
+      version?: unknown;
+      configDigest?: unknown;
+    };
+    return {
+      version: typeof body.version === "string" ? body.version : undefined,
+      configDigest:
+        typeof body.configDigest === "string" ? body.configDigest : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function spawnDaemonDetached(): void {
   const cliPath = process.argv[1];
   if (!cliPath) {
