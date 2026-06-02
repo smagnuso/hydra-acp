@@ -11,4 +11,5 @@ export default defineConfig({
   clean: true,
   splitting: false,
   shims: false,
+  minify: true,
 });
