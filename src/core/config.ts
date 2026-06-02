@@ -448,20 +448,25 @@ export async function setTuiConfigValue<K extends keyof HydraConfig["tui"]>(
 // optionally its default model in one atomic write. Used by `hydra agent
 // set` and the TUI agent switch. Pass model=undefined to set only the
 // agent; pass a model to also record it under defaultModels[agent].
-export async function setDefaultAgent(
-  agentId: string,
-  modelId?: string,
-): Promise<void> {
+export async function setDefaultAgent(agentId: string): Promise<void> {
   await updateRawConfig((raw) => {
     raw.defaultAgent = agentId;
-    if (modelId !== undefined) {
-      const models =
-        raw.defaultModels && typeof raw.defaultModels === "object"
-          ? (raw.defaultModels as Record<string, unknown>)
-          : {};
-      models[agentId] = modelId;
-      raw.defaultModels = models;
-    }
+  });
+}
+
+// Set the default model for a specific agent without touching the
+// top-level defaultAgent. Used by `hydra agent set <agent> <model>`.
+export async function setDefaultModelForAgent(
+  agentId: string,
+  modelId: string,
+): Promise<void> {
+  await updateRawConfig((raw) => {
+    const models =
+      raw.defaultModels && typeof raw.defaultModels === "object"
+        ? (raw.defaultModels as Record<string, unknown>)
+        : {};
+    models[agentId] = modelId;
+    raw.defaultModels = models;
   });
 }
 

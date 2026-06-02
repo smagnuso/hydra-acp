@@ -2,6 +2,7 @@ import * as fsp from "node:fs/promises";
 import {
   loadConfig,
   setDefaultAgent,
+  setDefaultModelForAgent,
   setAgentOverride,
   setLocalAgent,
   setRegistryPinned,
@@ -364,8 +365,14 @@ export async function runAgentsSet(
 
   // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",
   // "openai/gpt-5-codex"), so we don't try to validate the model against
-  // the agent — setDefaultAgent writes it through under defaultModels.
-  await setDefaultAgent(agentId, modelId);
+  // the agent. When a modelId is provided we only update the per-agent
+  // default model; the top-level defaultAgent is only changed when the
+  // user runs `hydra agent set <agent>` without a model.
+  if (modelId !== undefined) {
+    await setDefaultModelForAgent(agentId, modelId);
+  } else {
+    await setDefaultAgent(agentId);
+  }
 
   const disk = readAgentDefaults(await readRawConfig());
   if (modelId !== undefined && agentId !== disk.agent) {
