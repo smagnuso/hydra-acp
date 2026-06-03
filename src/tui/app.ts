@@ -1456,7 +1456,45 @@ async function runSession(
   // diff blocks) render a hunk around the change, not the whole file.
   setDiffContextLines(config.tui.diffContextLines);
 
-  const screen: Screen = new Screen({
+  // ^Z (SIGTSTP) suspend support. Set up here so the onSuspend closure
+  // can call screen.stop() / screen.start() once `screen` is bound below.
+  // Wired into Screen via the onSuspend option. SIGCONT is listened on
+  // process and the teardown path removes both listeners.
+  // Skipped on Windows — no job-control signals there.
+  let suspendInProgress = false;
+  let screen!: Screen;
+  const onSigCont = (): void => {
+    if (!suspendInProgress) {
+      return;
+    }
+    suspendInProgress = false;
+    // Re-enter alt, re-grab input, repaint from model state. screen.start()
+    // is idempotent in the "already started" sense (it returns early if
+    // started=true), but at this point stop() has flipped it back to
+    // false, so this runs the full setup path.
+    screen.start();
+  };
+  const onSuspend = (): void => {
+    if (suspendInProgress) {
+      return;
+    }
+    suspendInProgress = true;
+    // Full tear-down: bracketed paste off, mouse off, grabInput(false),
+    // emergencyTerminalReset (which leaves the alt screen), fullscreen(false),
+    // and a trailing newline so we land cleanly under any host shell job-
+    // control message.
+    screen.stop();
+    // Raise SIGTSTP on ourselves. We don't have a handler installed for
+    // it (only for SIGCONT), so Node lets the kernel apply the default
+    // action and stop the process. When the user `fg`s us, SIGCONT
+    // delivery fires onSigCont() above.
+    process.kill(process.pid, "SIGTSTP");
+  };
+  if (process.platform !== "win32") {
+    process.on("SIGCONT", onSigCont);
+  }
+
+  screen = new Screen({
     term,
     dispatcher,
     repaintThrottleMs: config.tui.repaintThrottleMs,
@@ -1464,6 +1502,7 @@ async function runSession(
     mouse: viewPrefs.mouseEnabled,
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
+    onSuspend: process.platform !== "win32" ? onSuspend : undefined,
     // Click a collapsed/expanded scrollback block to toggle just that one
     // block (the ^O dialog toggles all blocks of a type session-wide).
     // Routes by key prefix to the matching per-block override.
@@ -2164,6 +2203,9 @@ async function runSession(
     // here and stream.close() bails before touching the screen.
     teardownStarted = true;
     process.off("SIGINT", sigintHandler);
+    if (process.platform !== "win32") {
+      process.off("SIGCONT", onSigCont);
+    }
     // The elapsed-time setInterval ticks every second and calls
     // screen.setBanner(), which writes raw cursor-position escapes to
     // stdout. Left running, it both keeps the event loop alive (so the

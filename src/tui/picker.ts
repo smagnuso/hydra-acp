@@ -1322,10 +1322,20 @@ export async function pickSession(
   let pasteActive = false;
   let pasteBuffer = "";
   let tkStdinHandler: ((chunk: Buffer) => void) | null = null;
+  // Assigned later (in the Promise body, after dispatch/grabInput state
+  // exists) so the suspend closure can refer to the same listeners /
+  // teardown bits cleanup() uses. Null on Windows (no SIGTSTP / SIGCONT).
+  let suspend: (() => void) | null = null;
   const PASTE_START = "\x1b[200~";
   const PASTE_END = "\x1b[201~";
   const rawStdinHandler = (chunk: Buffer): void => {
     let text = chunk.toString("binary");
+    // ^Z (SUB, 0x1a) — raw mode swallowed VSUSP. Only the bare byte
+    // counts; embedded 0x1a inside a longer chunk is treated as data.
+    if (!pasteActive && text === "\x1a" && suspend) {
+      suspend();
+      return;
+    }
     if (pasteActive) {
       const endIdx = text.indexOf(PASTE_END);
       if (endIdx === -1) {
@@ -2543,20 +2553,74 @@ export async function pickSession(
       onKey: (name, _matches, data) => onKey(name, _matches, data),
       onResize: () => { if (!resolved) renderFromScratch(); },
     });
-    term.grabInput({});
-    // Swap terminal-kit's stdin listener for our bracketed-paste interceptor.
-    const tSetup = term as unknown as {
-      stdin: NodeJS.ReadableStream;
-      onStdin: (chunk: Buffer) => void;
+    const installGrab = (): void => {
+      term.grabInput({});
+      const tSetup = term as unknown as {
+        stdin: NodeJS.ReadableStream;
+        onStdin: (chunk: Buffer) => void;
+      };
+      if (tSetup.stdin && typeof tSetup.onStdin === "function") {
+        tkStdinHandler = tSetup.onStdin;
+        tSetup.stdin.removeListener("data", tSetup.onStdin);
+        tSetup.stdin.on("data", rawStdinHandler);
+        process.stdout.write("\x1b[?2004h");
+      }
+      term.on("key", dispatch);
+      term.on("resize", dispatchResize);
     };
-    if (tSetup.stdin && typeof tSetup.onStdin === "function") {
-      tkStdinHandler = tSetup.onStdin;
-      tSetup.stdin.removeListener("data", tSetup.onStdin);
-      tSetup.stdin.on("data", rawStdinHandler);
-      process.stdout.write("\x1b[?2004h");
+    // Reverse of installGrab. Used both by cleanup (in resolve path) and
+    // by suspend (which then re-runs installGrab on SIGCONT).
+    const uninstallGrab = (): void => {
+      process.stdout.write("\x1b[?2004l");
+      const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
+      if (tClean.stdin && tkStdinHandler) {
+        tClean.stdin.removeListener("data", rawStdinHandler);
+        tClean.stdin.on("data", tkStdinHandler);
+        tkStdinHandler = null;
+      }
+      pasteActive = false;
+      pasteBuffer = "";
+      term.off("key", dispatch);
+      term.off("resize", dispatchResize);
+      term.grabInput(false);
+      term.hideCursor(false);
+    };
+    installGrab();
+    // ^Z suspend. Tears down terminal state (alt screen, raw mode, paste
+    // mode, grabInput), raises SIGTSTP on ourselves so the kernel stops
+    // the process, and re-installs everything on SIGCONT. The picker
+    // model state (selection, filters, find layer, composer buffer) is
+    // all closure-local so it survives the suspend; renderFromScratch()
+    // repaints the full layer state on resume.
+    if (process.platform !== "win32") {
+      let suspendInProgress = false;
+      const onCont = (): void => {
+        if (!suspendInProgress) {
+          return;
+        }
+        suspendInProgress = false;
+        // Re-enter alt screen, hide cursor (renderFromScratch repositions),
+        // re-grab input, repaint.
+        process.stdout.write("\x1b[?1049h");
+        installGrab();
+        if (!resolved) {
+          renderFromScratch();
+        }
+      };
+      suspend = (): void => {
+        if (suspendInProgress || resolved) {
+          return;
+        }
+        suspendInProgress = true;
+        uninstallGrab();
+        // Leave the alt-screen buffer so the host shell is visible while
+        // we're stopped. Re-enable cursor; restore auto-wrap so any
+        // shell job-control message renders cleanly.
+        process.stdout.write("\x1b[?1049l\x1b[?7h\x1b[?25h\n");
+        process.once("SIGCONT", onCont);
+        process.kill(process.pid, "SIGTSTP");
+      };
     }
-    term.on("key", dispatch);
-    term.on("resize", dispatchResize);
     // Low-frequency refresh so busy indicators, new titles, and
     // appearing/disappearing sessions track without the user mashing `r`.
     // Skip while a prompt or search is up so we don't trample a partially

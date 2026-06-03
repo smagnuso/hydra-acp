@@ -59,6 +59,13 @@ export interface ScreenOptions {
   // dispatcher.feed; the screen-side suppression is what removes the
   // visual affordance and frees the vertical real-estate.
   readonly?: boolean;
+  // Invoked when the user presses Ctrl+Z (raw 0x1a byte) while not in a
+  // bracketed paste. The Screen does not handle suspend itself — the
+  // host (app.ts) is responsible for calling screen.stop(), raising
+  // SIGTSTP, and screen.start()'ing on SIGCONT. Optional: when unset,
+  // ^Z is silently dropped (it would otherwise be passed through as
+  // a Ctrl+Z keystroke, which no current binding consumes).
+  onSuspend?: () => void;
 }
 
 interface BannerState {
@@ -177,6 +184,7 @@ export class Screen {
   private onKey: (events: KeyEvent[]) => void;
   private onBlockClick: ((key: string) => void) | undefined;
   private onBlockVisible: ((key: string) => void) | undefined;
+  private onSuspend: (() => void) | undefined;
   // Keyed blocks awaiting a one-shot "became visible" notification.
   private pendingVisibleKeys = new Set<string>();
   private lines: FormattedLine[] = [];
@@ -342,6 +350,7 @@ export class Screen {
     this.onKey = opts.onKey;
     this.onBlockClick = opts.onBlockClick;
     this.onBlockVisible = opts.onBlockVisible;
+    this.onSuspend = opts.onSuspend;
     this.contentRepaintThrottleMs =
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
     this.maxScrollbackLines =
@@ -698,6 +707,15 @@ export class Screen {
     // pasted content aren't misinterpreted as Ctrl+Enter.
     if (this.pasteActive) {
       this.handleRawStdinSegment(text);
+      return;
+    }
+    // ^Z (SUB, 0x1a) — raw mode swallowed VSUSP so the kernel never
+    // sent SIGTSTP. Only treat a chunk that is *exactly* the SUB byte
+    // as a suspend request, otherwise a 0x1a embedded in a paste/key
+    // burst would trip it. No current binding consumes Ctrl+Z, so
+    // dropping the byte when onSuspend is unset is harmless.
+    if (text === "\x1a" && this.onSuspend) {
+      this.onSuspend();
       return;
     }
     // Two families of "modified key" sequences leak through terminal-kit
