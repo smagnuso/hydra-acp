@@ -64,6 +64,12 @@ export interface FormattedLine {
   // keyedBlocks entry. Plain appended lines (appendLine/appendLines)
   // carry no key.
   blockKey?: string;
+  // When true, the line stays in scrollback but is skipped at draw/measure
+  // time (like a hidden thought). Used to fold a contiguous run of thought
+  // blocks behind a single "Thinking" line: the run's secondary lines and
+  // their separators are marked collapsed so only the lead line paints.
+  // Cleared to restore the original blocks.
+  collapsed?: boolean;
 }
 
 export interface FormatEventOptions {

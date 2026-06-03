@@ -1576,4 +1576,73 @@ describe("Screen block-click routing", () => {
     dispatchMouse(screen, "MOUSE_WHEEL_DOWN", { x: 1, y: visibleRows(screen) });
     expect(clicks).toEqual([]);
   });
+
+  // Visible (non-skipped) line bodies, top-to-bottom, via the same wrapTail
+  // path drawScrollback uses — so collapsed/hidden lines are excluded.
+  function visibleBodies(screen: Screen): string[] {
+    const { rows } = (
+      screen as unknown as {
+        wrapTail: (
+          w: number,
+          needed: number,
+        ) => { rows: FormattedLine[]; exhausted: boolean };
+      }
+    ).wrapTail(40, Number.POSITIVE_INFINITY);
+    return rows.map((r) => r.body);
+  }
+
+  it("contiguousRun groups thought blocks split only by an unkeyed separator", () => {
+    const screen = makeTallScreen({});
+    // A tools block above (keyed, but not a candidate) then two thoughts
+    // with an unkeyed separator between — the real-world layout.
+    screen.upsertLines("tools:1", [{ body: "tool-row" }]);
+    screen.upsertLines("thought:0", [{ body: "t0" }]);
+    screen.appendLine({ body: "", bodyStyle: "thought" }); // separator
+    screen.upsertLines("thought:1", [{ body: "t1" }]);
+    const cands = new Set(["thought:0", "thought:1"]);
+    expect(screen.contiguousRun("thought:0", cands)).toEqual([
+      "thought:0",
+      "thought:1",
+    ]);
+    expect(screen.contiguousRun("thought:1", cands)).toEqual([
+      "thought:0",
+      "thought:1",
+    ]);
+  });
+
+  it("contiguousRun breaks the run at a foreign keyed block between thoughts", () => {
+    const screen = makeTallScreen({});
+    screen.upsertLines("thought:0", [{ body: "t0" }]);
+    screen.upsertLines("agent:0", [{ body: "prose" }]);
+    screen.upsertLines("thought:1", [{ body: "t1" }]);
+    const cands = new Set(["thought:0", "thought:1"]);
+    expect(screen.contiguousRun("thought:0", cands)).toEqual(["thought:0"]);
+    expect(screen.contiguousRun("thought:1", cands)).toEqual(["thought:1"]);
+  });
+
+  it("setRunCollapsed folds a run to a single lead line and expands it back", () => {
+    const screen = makeTallScreen({});
+    screen.upsertLines("thought:0", [{ body: "t0-a" }, { body: "t0-b" }]);
+    screen.appendLine({ body: "", bodyStyle: "thought" });
+    screen.upsertLines("thought:1", [{ body: "t1-a" }]);
+    const run = ["thought:0", "thought:1"];
+    // Collapse → only the lead "Thinking" line is visible.
+    screen.setRunCollapsed(run, true, [{ body: "▸ Thinking" }]);
+    expect(visibleBodies(screen)).toEqual(["▸ Thinking"]);
+    // Expand → original blocks restored (lead content re-supplied).
+    screen.setRunCollapsed(run, false, [{ body: "t0-a" }, { body: "t0-b" }]);
+    expect(visibleBodies(screen)).toEqual(["t0-a", "t0-b", "", "t1-a"]);
+  });
+
+  it("a click on a collapsed run's lead line resolves to the lead key", () => {
+    const screen = makeTallScreen({ mouse: true });
+    screen.upsertLines("thought:0", [{ body: "t0" }]);
+    screen.appendLine({ body: "", bodyStyle: "thought" });
+    screen.upsertLines("thought:1", [{ body: "t1" }]);
+    screen.setRunCollapsed(["thought:0", "thought:1"], true, [
+      { body: "▸ Thinking" },
+    ]);
+    // Only one visible row now; it belongs to the lead key.
+    expect(callKeyAtRow(screen, visibleRows(screen))).toBe("thought:0");
+  });
 });

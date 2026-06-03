@@ -1505,6 +1505,107 @@ export class Screen {
     this.scheduleRepaint();
   }
 
+  // Among `candidates`, return the maximal run of keyed blocks that is
+  // visually contiguous with `key` — i.e. consecutive (sorted by scrollback
+  // position) with no OTHER keyed block lying between neighbours. Unkeyed
+  // lines between members (e.g. separators) don't break contiguity. Used to
+  // group thought blocks that were split by tool calls (the tools block
+  // updates in place elsewhere, so the thoughts stay adjacent in
+  // scrollback). Returns [] if `key` isn't a live keyed block.
+  contiguousRun(key: string, candidates: Set<string>): string[] {
+    if (!this.keyedBlocks.has(key)) {
+      return [];
+    }
+    // Candidate blocks that currently exist, sorted by scrollback position.
+    const members = [...candidates]
+      .map((k) => {
+        const b = this.keyedBlocks.get(k);
+        return b ? { key: k, start: b.start, count: b.count } : null;
+      })
+      .filter((m): m is { key: string; start: number; count: number } => m !== null)
+      .sort((a, b) => a.start - b.start);
+    const idx = members.findIndex((m) => m.key === key);
+    if (idx < 0) {
+      return [];
+    }
+    // Is there any keyed block (not in `candidates`) occupying a position
+    // strictly between the end of `a` and the start of `b`?
+    const foreignBetween = (aEnd: number, bStart: number): boolean => {
+      for (const [k, range] of this.keyedBlocks) {
+        if (candidates.has(k)) {
+          continue;
+        }
+        if (range.start >= aEnd && range.start < bStart) {
+          return true;
+        }
+      }
+      return false;
+    };
+    let lo = idx;
+    while (
+      lo > 0 &&
+      !foreignBetween(
+        members[lo - 1]!.start + members[lo - 1]!.count,
+        members[lo]!.start,
+      )
+    ) {
+      lo--;
+    }
+    let hi = idx;
+    while (
+      hi < members.length - 1 &&
+      !foreignBetween(
+        members[hi]!.start + members[hi]!.count,
+        members[hi + 1]!.start,
+      )
+    ) {
+      hi++;
+    }
+    return members.slice(lo, hi + 1).map((m) => m.key);
+  }
+
+  // Fold or unfold a contiguous run of blocks. When collapsing, the first
+  // block's content is replaced with `leadLines` (e.g. a single "Thinking"
+  // line) and every line after it through the end of the last block — the
+  // secondary blocks plus the separators between them — is marked
+  // `collapsed` so it's skipped at draw time (the keyed blocks and their
+  // lines stay in place, so nothing has to be re-inserted). When expanding,
+  // the first block is restored to `leadLines` (its full content) and the
+  // trailing range is un-marked. `runKeys` must be ordered by scrollback
+  // position (as returned by contiguousRun).
+  setRunCollapsed(
+    runKeys: string[],
+    collapsed: boolean,
+    leadLines: FormattedLine[],
+  ): void {
+    if (runKeys.length === 0) {
+      return;
+    }
+    const firstKey = runKeys[0]!;
+    if (!this.keyedBlocks.has(firstKey)) {
+      return;
+    }
+    // Replace the lead block's content first (handles splice + index shift
+    // + line tracking + blockKey stamping for the lead line).
+    this.upsertLines(firstKey, leadLines);
+    const first = this.keyedBlocks.get(firstKey)!;
+    // End of the last block in the run, after the lead-block resize.
+    let lastEnd = first.start + first.count;
+    for (const k of runKeys) {
+      const b = this.keyedBlocks.get(k);
+      if (b) {
+        lastEnd = Math.max(lastEnd, b.start + b.count);
+      }
+    }
+    for (let i = first.start + first.count; i < lastEnd; i++) {
+      const line = this.lines[i];
+      if (line) {
+        line.collapsed = collapsed;
+      }
+    }
+    this.scheduleRepaint();
+  }
+
   redraw(): void {
     this.repaint();
   }
@@ -3169,9 +3270,13 @@ export class Screen {
     // bodyStyle === "thought" is the source of truth for thought-rendered
     // lines (set by appendStreaming in the agent-thought path). When
     // hideThoughts is on, skip those entries at measure / draw time;
-    // they stay in this.lines so toggling back on restores them.
+    // they stay in this.lines so toggling back on restores them. Lines
+    // explicitly marked `collapsed` (a folded thought run's secondary
+    // lines + separators) are likewise skipped but always, regardless of
+    // hideThoughts.
     const isThought = (line: FormattedLine): boolean =>
-      this.hideThoughts && line.bodyStyle === "thought";
+      line.collapsed === true ||
+      (this.hideThoughts && line.bodyStyle === "thought");
     if (width <= 4) {
       const visible: FormattedLine[] = [];
       for (const line of this.lines) {

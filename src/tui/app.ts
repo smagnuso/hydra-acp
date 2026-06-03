@@ -3058,7 +3058,7 @@ async function runSession(
         renderedTools.clear();
         toolsOverrides.clear();
         renderedThoughts.clear();
-        thoughtCollapsed.clear();
+        collapsedThoughtRuns.clear();
         screen.clearScrollback();
         return true;
       case "/demo-plan": {
@@ -3456,9 +3456,13 @@ async function runSession(
   // the live buffer (the lines stay painted in scrollback). Cleared on
   // /clear. Mirrors renderedTools / renderedEditDiffs.
   const renderedThoughts = new Map<string, string>();
-  // Thought blocks the user has clicked to collapse, keyed by block key.
-  // Collapsed = a single dim "Thinking" line; absent = fully expanded.
-  const thoughtCollapsed = new Set<string>();
+  // Collapsed thought runs, keyed by the run's lead (first) thought key →
+  // the full ordered list of thought keys folded behind the single
+  // "▸ Thinking" line. A run is the maximal set of visually-contiguous
+  // thought blocks (split only by tool calls, which update in place
+  // elsewhere). Clicking the lead "Thinking" line expands it back to all
+  // its blocks. Cleared on /clear.
+  const collapsedThoughtRuns = new Map<string, string[]>();
   // Wall-clock bounds for the active tools block. startedAt is set on
   // the first tool call of the turn; endedAt is set when the turn
   // completes and freezes the block (header switches from "Xs" to
@@ -3564,16 +3568,14 @@ async function runSession(
   let thoughtKey: string | null = null;
   let thoughtSeq = 0;
 
-  // Build a thought block's lines: a single dim "Thinking" line when
-  // collapsed, the full parsed markdown otherwise. The collapsed line
-  // keeps bodyStyle "thought" so the ^T hide-thoughts filter still drops
-  // it, and a ▸ marker hints that a click expands it (▾ when expanded).
-  const buildThoughtLines = (text: string, collapsed: boolean): FormattedLine[] => {
-    if (collapsed) {
-      return [{ prefix: "  ", body: "▸ Thinking", bodyStyle: "thought" }];
-    }
-    return parseThoughtMarkdown(text);
-  };
+  // The single dim line a collapsed thought run folds down to. Keeps
+  // bodyStyle "thought" so the ^T hide-thoughts filter still drops it; the
+  // ▸ marker hints a click expands it back to the full thinking.
+  const thinkingLine = (): FormattedLine => ({
+    prefix: "  ",
+    body: "▸ Thinking",
+    bodyStyle: "thought",
+  });
 
   const renderThoughtBlock = (): void => {
     if (thoughtKey === null)
@@ -3581,25 +3583,18 @@ async function runSession(
     if (thoughtBuffer.length === 0)
       return;
     renderedThoughts.set(thoughtKey, thoughtBuffer);
-    const lines = buildThoughtLines(
-      thoughtBuffer,
-      thoughtCollapsed.has(thoughtKey),
-    );
+    const lines = parseThoughtMarkdown(thoughtBuffer);
     if (lines.length === 0)
       return;
     screen.upsertLines(thoughtKey, lines);
   };
 
-  // Re-render a thought block from retained text (click-to-toggle on a
-  // block whose live buffer is long gone). No-op without a snapshot.
-  const renderThoughtBlockFor = (key: string): void => {
+  // Full (expanded) lines for a thought block from retained text.
+  const expandedThoughtLines = (key: string): FormattedLine[] => {
     const text = renderedThoughts.get(key);
     if (text === undefined)
-      return;
-    const lines = buildThoughtLines(text, thoughtCollapsed.has(key));
-    if (lines.length === 0)
-      return;
-    screen.upsertLines(key, lines);
+      return [];
+    return parseThoughtMarkdown(text);
   };
 
   const appendThought = (text: string): void => {
@@ -4085,18 +4080,26 @@ async function runSession(
       if (!renderedThoughts.has(key)) {
         return;
       }
-      if (thoughtCollapsed.has(key)) {
-        thoughtCollapsed.delete(key);
-      } else {
-        thoughtCollapsed.add(key);
+      // Clicking the lead line of an already-collapsed run expands it:
+      // restore the lead block's full content and unfold the trailing
+      // (hidden) blocks back into view.
+      const collapsedRun = collapsedThoughtRuns.get(key);
+      if (collapsedRun !== undefined) {
+        collapsedThoughtRuns.delete(key);
+        screen.setRunCollapsed(collapsedRun, false, expandedThoughtLines(key));
+        screen.repaintNow();
+        return;
       }
-      // The live block (still streaming) re-renders from its buffer; a
-      // frozen past block re-renders from retained text.
-      if (key === thoughtKey) {
-        renderThoughtBlock();
-      } else {
-        renderThoughtBlockFor(key);
+      // Otherwise fold the whole visually-contiguous run of thoughts (split
+      // only by tool calls, which render elsewhere) behind a single
+      // "Thinking" line anchored at the run's first block.
+      const run = screen.contiguousRun(key, new Set(renderedThoughts.keys()));
+      if (run.length === 0) {
+        return;
       }
+      const anchor = run[0]!;
+      collapsedThoughtRuns.set(anchor, run);
+      screen.setRunCollapsed(run, true, [thinkingLine()]);
       screen.repaintNow();
       return;
     }
