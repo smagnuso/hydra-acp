@@ -266,6 +266,16 @@ hydra-acp extension start hydra-acp-archiver
 
 See the [package README](https://github.com/smagnuso/hydra-acp-archiver#readme) for backend setup (Drive OAuth, filesystem path).
 
+**[`@hydra-acp/planner`](https://github.com/smagnuso/hydra-acp-planner) — multi-agent project orchestrator.** Invoked via `/hydra planner create <description>` from any session: asks the host agent to decompose the project into a task DAG, then spawns N worker sessions and drives them in parallel by prompt management, with progress streaming back into your original chat. Boards persist under `~/.hydra-acp/planner/projects/<id>/` so plans survive daemon restarts. Strictly speaking it's a [transformer](#transformers), not an extension — it sits in the daemon's message pipeline rather than attaching as a client — but it installs and configures the same way.
+
+```sh
+npm install -g @hydra-acp/planner
+hydra-acp transformer add hydra-acp-planner
+hydra-acp transformer start hydra-acp-planner
+```
+
+See the [package README](https://github.com/smagnuso/hydra-acp-planner#readme) for the full set of `/hydra planner` verbs (status, retry, cancel, …) and the task-DAG format.
+
 ### Configuring extensions
 
 Configure in `~/.hydra-acp/config.json`:
