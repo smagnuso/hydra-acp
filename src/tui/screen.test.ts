@@ -1626,9 +1626,9 @@ describe("Screen block-click routing", () => {
     screen.appendLine({ body: "", bodyStyle: "thought" });
     screen.upsertLines("thought:1", [{ body: "t1-a" }]);
     const run = ["thought:0", "thought:1"];
-    // Collapse → only the lead "Thinking" line is visible.
-    screen.setRunCollapsed(run, true, [{ body: "▸ Thinking" }]);
-    expect(visibleBodies(screen)).toEqual(["▸ Thinking"]);
+    // Collapse → only the lead "Thoughts" line is visible.
+    screen.setRunCollapsed(run, true, [{ body: "▸ Thoughts" }]);
+    expect(visibleBodies(screen)).toEqual(["▸ Thoughts"]);
     // Expand → original blocks restored (lead content re-supplied).
     screen.setRunCollapsed(run, false, [{ body: "t0-a" }, { body: "t0-b" }]);
     expect(visibleBodies(screen)).toEqual(["t0-a", "t0-b", "", "t1-a"]);
@@ -1640,7 +1640,7 @@ describe("Screen block-click routing", () => {
     screen.appendLine({ body: "", bodyStyle: "thought" });
     screen.upsertLines("thought:1", [{ body: "t1" }]);
     screen.setRunCollapsed(["thought:0", "thought:1"], true, [
-      { body: "▸ Thinking" },
+      { body: "▸ Thoughts" },
     ]);
     // Only one visible row now; it belongs to the lead key.
     expect(callKeyAtRow(screen, visibleRows(screen))).toBe("thought:0");

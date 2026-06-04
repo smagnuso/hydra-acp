@@ -1565,7 +1565,7 @@ export class Screen {
   }
 
   // Fold or unfold a contiguous run of blocks. When collapsing, the first
-  // block's content is replaced with `leadLines` (e.g. a single "Thinking"
+  // block's content is replaced with `leadLines` (e.g. a single "Thoughts"
   // line) and every line after it through the end of the last block — the
   // secondary blocks plus the separators between them — is marked
   // `collapsed` so it's skipped at draw time (the keyed blocks and their

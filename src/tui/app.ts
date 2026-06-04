@@ -3458,9 +3458,9 @@ async function runSession(
   const renderedThoughts = new Map<string, string>();
   // Collapsed thought runs, keyed by the run's lead (first) thought key →
   // the full ordered list of thought keys folded behind the single
-  // "▸ Thinking" line. A run is the maximal set of visually-contiguous
+  // "▸ Thoughts" line. A run is the maximal set of visually-contiguous
   // thought blocks (split only by tool calls, which update in place
-  // elsewhere). Clicking the lead "Thinking" line expands it back to all
+  // elsewhere). Clicking the lead "Thoughts" line expands it back to all
   // its blocks. Cleared on /clear.
   const collapsedThoughtRuns = new Map<string, string[]>();
   // Wall-clock bounds for the active tools block. startedAt is set on
@@ -3573,7 +3573,7 @@ async function runSession(
   // ▸ marker hints a click expands it back to the full thinking.
   const thinkingLine = (): FormattedLine => ({
     prefix: "  ",
-    body: "▸ Thinking",
+    body: "▸ Thoughts",
     bodyStyle: "thought",
   });
 
@@ -4092,7 +4092,7 @@ async function runSession(
       }
       // Otherwise fold the whole visually-contiguous run of thoughts (split
       // only by tool calls, which render elsewhere) behind a single
-      // "Thinking" line anchored at the run's first block.
+      // "Thoughts" line anchored at the run's first block.
       const run = screen.contiguousRun(key, new Set(renderedThoughts.keys()));
       if (run.length === 0) {
         return;
