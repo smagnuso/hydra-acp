@@ -1,6 +1,7 @@
 // Pure (no I/O, no terminal-kit) mapper from ACP `session/update` notifications
 // into `RenderEvent`s the screen layer knows how to render.
 
+import { posix as posixPath } from "node:path";
 import stripAnsi from "strip-ansi";
 import { shortenHomePath } from "./paths.js";
 
@@ -694,12 +695,11 @@ function normalizePathTitle(
   if (looksLikeSlashlessAbsolute(title)) {
     return shortenHomePath(`/${title}`);
   }
-  // Case 3: relative, resolve against cwd if available.
+  // Case 3: relative, resolve against cwd if available. Use path.posix.resolve
+  // so `..` segments collapse (e.g. cwd=/a/b/c + title=../../x → /a/x)
+  // rather than producing `/a/b/c/../../x`.
   if (options.cwd && options.cwd.length > 0) {
-    const cwd = options.cwd.endsWith("/")
-      ? options.cwd.slice(0, -1)
-      : options.cwd;
-    return shortenHomePath(`${cwd}/${title}`);
+    return shortenHomePath(posixPath.resolve(options.cwd, title));
   }
   return title;
 }
