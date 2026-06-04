@@ -1963,12 +1963,17 @@ export class Session {
   // Called by the WS handler when a transformer emits via route:"chain".
   // Finds the emitter's position and re-enters the appropriate chain walk
   // from the next slot, with the emitter in originatedBy so it cannot see
-  // its own re-emission.
+  // its own re-emission. Returns the value the chain (and ultimately the
+  // agent) produced — `undefined` for session/update notifications (no
+  // return value), the agent's response for request methods. The WS
+  // handler surfaces this so a transformer can re-emit a modified
+  // request via the chain and capture the response (e.g. to discharge
+  // a parked processing claim).
   async emitToChain(
     emitterName: string,
     method: string,
     envelope: unknown,
-  ): Promise<void> {
+  ): Promise<unknown> {
     const emitterIdx = this.transformChain.findIndex((t) => t.name === emitterName);
     const startIdx = emitterIdx >= 0 ? emitterIdx + 1 : 0;
     const originatedBy = new Set([emitterName]);
@@ -1976,11 +1981,11 @@ export class Session {
     // session/update is a notification — run the response-side chain.
     if (method === "session/update") {
       await this.runResponseChain(envelope, originatedBy, startIdx);
-      return;
+      return undefined;
     }
     // Everything else is treated as a request — forward to the agent if the
     // chain doesn't stop it.
-    await this.forwardRequest(method, envelope, originatedBy, startIdx);
+    return this.forwardRequest(method, envelope, originatedBy, startIdx);
   }
 
   private rewriteForAgent(params: unknown): unknown {

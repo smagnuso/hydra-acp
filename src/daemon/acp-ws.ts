@@ -383,13 +383,17 @@ export function registerAcpWsEndpoint(
         }
 
         if (route === "chain") {
-          await session.emitToChain(processIdentity.name, method, envelope);
-          return { ok: true };
+          const response = await session.emitToChain(processIdentity.name, method, envelope);
+          // Surface the agent's response (for request methods) so the
+          // transformer can use it — typically to discharge a parked
+          // processing claim with the modified prompt's actual result.
+          // `undefined` for session/update notifications.
+          return { ok: true, response };
         }
 
         if (route === "daemon") {
-          await session.emitToChain(processIdentity.name, method, envelope);
-          return { ok: true };
+          const response = await session.emitToChain(processIdentity.name, method, envelope);
+          return { ok: true, response };
         }
 
         throw Object.assign(new Error(`unsupported route: ${JSON.stringify(route)}`), { code: -32602 });

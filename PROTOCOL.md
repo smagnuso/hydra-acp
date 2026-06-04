@@ -1187,10 +1187,15 @@ Transformer outbox: emit an ACP message back into the system, or discharge a pen
   "respondsTo":  "<chain token>"      // optional; discharges a processing claim
 }
 // result
-{ "ok": true }
+{
+  "ok":       true,
+  "response": { /* the agent's response, when route was chain/daemon */ }
+}
 ```
 
 Setting `respondsTo` returns the envelope to the original caller and removes the parked claim. Otherwise, `route: "chain"` re-enters the transformer chain from the next position (loop-safe via the `originatedBy` lineage set).
+
+**The `response` field.** When `route` is `"chain"` or `"daemon"` and `method` is a request (e.g. `session/prompt`, `session/set_model`), the daemon awaits the chain run to completion and includes the agent's response in `response`. This is the canonical primitive for **modify-and-continue**: a transformer parks the original call with `{action: "processing"}`, emits a rewritten envelope via `route: "chain"`, captures `response`, and discharges the parked claim with that response (via a second `message/emit` call with `respondsTo: <token>`). The wire-level turn boundary is preserved — the user's original request stays in flight throughout, and `broadcastTurnComplete` fires once with the agent's actual `stopReason`. For `session/update` notifications and the rare cases where the chain produces no return value, `response` is `undefined`.
 
 **End-of-turn detection.** For `method: "session/prompt"` with `route: "chain"`, the emit's returned promise resolves when the agent's underlying `session/prompt` response comes back — i.e. when the synthetic turn actually completes. **Ride this promise to detect end-of-turn**; do not rely on a `response:session/update` intercept for `sessionUpdate: "turn_complete"`, because that update is published via `recordAndBroadcast` (not the response chain) and never reaches transformers. The agent's `agent_message_chunk` updates _do_ flow through the response chain during the turn, so accumulate text from those intercepts; by the time the emit promise resolves, the accumulated text is complete and ready to parse.
 
