@@ -1785,7 +1785,12 @@ export interface TransformerAttachDeps {
 // connection.onRequest registration so it's directly unit-testable. A
 // transformer can only attach itself: callerName is wired in from the
 // authenticated processIdentity at the call site, never read from the
-// request payload. See PROTOCOL.md for the spec.
+// request payload. The target session must be live (`SessionNotFound`
+// is returned for cold sessions). Transformers that need to operate on
+// a cold session should wait for it to come live via natural client
+// interaction, or wake it with `hydra-acp/session/load`.
+//
+// See PROTOCOL.md for the spec.
 export async function handleTransformerAttach(
   rawParams: unknown,
   callerName: string,

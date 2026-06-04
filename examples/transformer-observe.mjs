@@ -125,14 +125,17 @@ function handleTransformerMessage(msg) {
   const sid = sessionId?.slice(-8) ?? "?";
   const tok = chainToken?.slice(-8) ?? "?";
 
+  // envelope is the FLAT ACP params shape — { sessionId, prompt } or
+  // { sessionId, update } directly, NOT wrapped in another { params: ... }.
+  // See PROTOCOL.md → "Envelope shape" on hydra-acp/transformer/message.
   if (phase === "request" && method === "session/prompt") {
     // Outbound prompt: client → agent.
-    const text = extractPromptText(envelope?.params?.prompt);
+    const text = extractPromptText(envelope?.prompt);
     console.log(`  ${arrow} session/prompt   session=…${sid}  token=…${tok}`);
     if (text) console.log(`     "${text.slice(0, 80)}${text.length > 80 ? "…" : ""}"`);
   } else if (phase === "response" && method === "session/update") {
     // Inbound update: agent → clients.
-    const updateType = envelope?.params?.update?.sessionUpdate ?? "?";
+    const updateType = envelope?.update?.sessionUpdate ?? "?";
     console.log(`  ${arrow} session/update   [${updateType}]  session=…${sid}  token=…${tok}`);
   }
 

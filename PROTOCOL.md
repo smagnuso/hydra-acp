@@ -1126,6 +1126,8 @@ Declare which message kinds this transformer wants to intercept.
 
 Intercepts are matched against `request:<method>`, `response:<method>`, and `lifecycle:<event>` strings. Lifecycle events currently fired are `session.opened`, `session.idle`, and `session.closed`.
 
+**Response-side scope.** Declaring `response:<method>` is only effective for `response:session/update` today — the daemon's response chain (`Session.runResponseChain`) only iterates transformers for `session/update` notifications, since those are the only thing the agent emits that flows agent → clients. There is no `response:session/prompt` event: the session/prompt RPC result is consumed by the daemon's `runQueueEntry` and translated into a synthesized `turn_complete` `session/update` via `broadcastTurnComplete`, which is published with `recordAndBroadcast` and therefore bypasses the transformer chain entirely. **A transformer cannot observe `turn_complete` through the intercept stream.** If you need an end-of-turn signal for a sub-prompt you originated via `hydra-acp/message/emit`, await the emit promise instead — see the note on `message/emit` below.
+
 #### Request (daemon → transformer): `hydra-acp/transformer/message`
 
 Called for every intercepted JSON-RPC request or response.
@@ -1150,6 +1152,18 @@ Called for every intercepted JSON-RPC request or response.
 - `continue` (default) — daemon proceeds with the envelope (rewritten if `payload` is present).
 - `stop` — daemon never sees this message. The optional `payload` is returned to the original caller (synthetic response).
 - `processing` — the transformer is taking ownership; the daemon parks the call until the transformer discharges the claim via `hydra-acp/message/emit` with `respondsTo: <token>`. If the transformer doesn't discharge within the claim timeout, the daemon broadcasts a `hydra-acp/transformer/abandoned_request` notification and resumes the chain from the next transformer (fail-open).
+
+**Envelope shape.** `envelope` is the **flat ACP params object** for the intercepted method, _not_ a JSON-RPC message wrapper. For example, a `request:session/prompt` intercept receives:
+
+```jsonc
+"envelope": {
+  "sessionId": "<id>",
+  "prompt":    [ /* ContentBlock[] */ ],
+  "_meta":     { … }
+}
+```
+
+— accessed as `envelope.sessionId` / `envelope.prompt`, **not** `envelope.params.sessionId`. Likewise a `response:session/update` intercept receives `{ sessionId, update: { sessionUpdate, … } }` directly; read `envelope.update.sessionUpdate`. When re-emitting via `hydra-acp/message/emit`, the value of `envelope` in the emit body must follow the same flat shape. Double-wrapping (passing `{ params: { … } }`) produces an agent-side validation error (`-32602`) because the daemon forwards the envelope verbatim as the JSON-RPC `params` field on its outgoing request.
 
 #### Notification (daemon → transformer): `hydra-acp/transformer/session_event`
 
@@ -1178,6 +1192,8 @@ Transformer outbox: emit an ACP message back into the system, or discharge a pen
 
 Setting `respondsTo` returns the envelope to the original caller and removes the parked claim. Otherwise, `route: "chain"` re-enters the transformer chain from the next position (loop-safe via the `originatedBy` lineage set).
 
+**End-of-turn detection.** For `method: "session/prompt"` with `route: "chain"`, the emit's returned promise resolves when the agent's underlying `session/prompt` response comes back — i.e. when the synthetic turn actually completes. **Ride this promise to detect end-of-turn**; do not rely on a `response:session/update` intercept for `sessionUpdate: "turn_complete"`, because that update is published via `recordAndBroadcast` (not the response chain) and never reaches transformers. The agent's `agent_message_chunk` updates _do_ flow through the response chain during the turn, so accumulate text from those intercepts; by the time the emit promise resolves, the accumulated text is complete and ready to parse.
+
 #### Request (transformer → daemon): `hydra-acp/transformer/attach`
 
 Insert the calling transformer into a live session's chain. Lets a transformer self-install on demand — e.g. when its `/hydra <name> <verb>` slash command fires on a session that was not configured to include it in `defaultTransformers`. The invocation itself becomes the opt-in signal; sessions where the transformer is never invoked stay free of its intercepts.
@@ -1193,6 +1209,8 @@ Insert the calling transformer into a live session's chain. Lets a transformer s
 
 **Idempotent.** If the transformer is already in the session's chain, the existing ref is updated in place (covers transformer restarts where the WS connection is fresh but the name unchanged); duplicate entries are never created. A `session.opened` lifecycle event is emitted to the transformer when it joins, matching the signal it would have received at session creation.
 
+**Live-only.** The target session must be live; cold sessions yield `SessionNotFound`. Transformers rehydrating from their own persisted state should wait for natural client interaction to wake the session, or explicitly resurrect it via `hydra-acp/session/load` before attaching.
+
 **Errors.** `InvalidParams` if `sessionId` is missing or non-string. `SessionNotFound` if no live session matches. `InternalError` if the transformer has not yet completed `hydra-acp/transformer/initialize` (no ref to attach).
 
 #### Request (transformer → daemon): `hydra-acp/child_session/spawn`
@@ -1203,14 +1221,17 @@ Create a child session whose `parentSessionId` is set.
 // params
 {
   "agentId":         "<id>",     // optional; defaults to daemon's defaultAgent
-  "cwd":             "<path>",   // required
-  "parentSessionId": "<id>"      // optional
+  "cwd":             "<path>",   // optional if parentSessionId resolves to a live session (cwd inherits)
+  "parentSessionId": "<id>",     // optional
+  "interactive":     false        // optional; defaults to false for transformer-spawned children
 }
 // result
 { "childSessionId": "<new id>" }
 ```
 
-Children start with an empty transformer chain by default.
+Children start with an empty transformer chain by default. When `cwd` is omitted, the daemon inherits the parent session's cwd — covers the common transformer pattern of "spawn this worker in the same place as my parent" without forcing a separate round-trip to look up the parent's cwd. An explicit `cwd` always wins. If both are missing (no `cwd`, and no `parentSessionId` pointing at a live session), the call rejects with `InvalidParams`.
+
+**Interactive default.** `interactive` defaults to `false` for transformer-spawned children — they exist to do automated work driven by the transformer, not to host a human at a composer, so the default keeps them out of the front-door `hydra-acp session` listing (visible only with `--all`). Pass `interactive: true` if the transformer wants the child to behave like a normal session.
 
 #### Request (transformer → daemon): `hydra-acp/child_session/await`
 

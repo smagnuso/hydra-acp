@@ -175,6 +175,9 @@ async function handleLifecycleEvent({ event, sessionId }) {
       console.log(`[lifecycle-demo] session.idle     …${sid}  idleCount=${state.idleCount}`);
 
       // Optional: emit a follow-up prompt so the session auto-continues.
+      // The envelope is the FLAT ACP params shape — { sessionId, prompt }
+      // directly, NOT wrapped in another { params: ... }. See PROTOCOL.md
+      // → "Envelope shape" on hydra-acp/transformer/message.
       if (idlePrompt) {
         console.log(`[lifecycle-demo]   → emitting idle prompt for …${sid}`);
         try {
@@ -182,10 +185,8 @@ async function handleLifecycleEvent({ event, sessionId }) {
             sessionId,
             method: "session/prompt",
             envelope: {
-              params: {
-                sessionId,
-                prompt: [{ type: "text", text: idlePrompt }],
-              },
+              sessionId,
+              prompt: [{ type: "text", text: idlePrompt }],
             },
             route: "chain",
           });

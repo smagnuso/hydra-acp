@@ -129,12 +129,15 @@ async function handleMessage(msg) {
 
 // ── Prompt modification ───────────────────────────────────────────────────────
 
+// The intercept envelope (and the envelope expected by hydra-acp/message/emit)
+// is the FLAT ACP params shape — i.e. `{ sessionId, prompt, _meta? }` directly,
+// NOT `{ params: { sessionId, prompt } }`. See PROTOCOL.md → "Envelope shape"
+// on hydra-acp/transformer/message.
 function modifyPrompt(envelope, prefix) {
   if (!envelope || typeof envelope !== "object") {
     return envelope;
   }
-  const env = envelope;
-  const prompt = env.params?.prompt;
+  const prompt = envelope.prompt;
   if (!prompt) {
     return envelope;
   }
@@ -160,10 +163,7 @@ function modifyPrompt(envelope, prefix) {
     modifiedPrompt = prompt;
   }
 
-  return {
-    ...env,
-    params: { ...env.params, prompt: modifiedPrompt },
-  };
+  return { ...envelope, prompt: modifiedPrompt };
 }
 
 // ── Teardown ──────────────────────────────────────────────────────────────────
