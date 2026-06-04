@@ -72,6 +72,7 @@ import {
 } from "./cli/commands/auth.js";
 import { runShim } from "./shim/proxy.js";
 import { runCat } from "./cli/commands/cat.js";
+import { maybeDispatchExternal } from "./cli/external-subcommand.js";
 import {
   buildTitleFromArgv,
   setHydraProcessTitle,
@@ -160,6 +161,21 @@ async function main(): Promise<void> {
     }
     await runShim(shimOpts);
     return;
+  }
+
+  // Git-style fallback: if the first positional is unknown to us and a
+  // `hydra-acp-<name>` binary exists on PATH, exec it with the remaining
+  // argv and exit with its status. Runs before parseArgs/flag validation
+  // so the external command's own flags pass through untouched.
+  // Suppressed when the caller used the -p / --prompt shorthand without
+  // a subcommand — in that case the first non-flag token is the prompt
+  // text, not a subcommand candidate, and we don't want to PATH-shop it.
+  // maybeDispatchExternal returns false (no match) or never (exec'd).
+  if (
+    readShortPrompt(argv) === undefined &&
+    !argv.some((t) => t === "--prompt" || t.startsWith("--prompt="))
+  ) {
+    maybeDispatchExternal(argv);
   }
 
   const { positional, flags } = parseArgs(argv);
@@ -920,6 +936,11 @@ function printHelp(): void {
       "                                     Smart default (no flags): shows a picker when sessions exist, else new.",
       "  hydra-acp --version                Print version",
       "  hydra-acp --help                   Show this help",
+      "",
+      "External subcommands:",
+      "  Any `hydra-acp <name>` whose <name> is not built-in is exec'd as",
+      "  `hydra-acp-<name>` from PATH (git-style). Ecosystem packages like",
+      "  @hydra-acp/planner expose themselves through this mechanism.",
       "",
       "Config knob flags accept env-var equivalents (flag wins):",
       "  --agent                 HYDRA_ACP_AGENT",
