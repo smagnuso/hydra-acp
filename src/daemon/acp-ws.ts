@@ -38,7 +38,7 @@ import {
   type ProcessTokenRegistry,
   type ProcessIdentity,
 } from "./auth.js";
-import type { TransformerManager } from "../core/transformer-manager.js";
+import type { TransformerManager, TransformerRef } from "../core/transformer-manager.js";
 import type {
   ExtensionCommandRegistry,
   ExtensionCommandSpec,
@@ -394,6 +394,24 @@ export function registerAcpWsEndpoint(
 
         throw Object.assign(new Error(`unsupported route: ${JSON.stringify(route)}`), { code: -32602 });
       });
+
+      // Attach the calling transformer to an existing session's chain.
+      // Mirror of the `transformers` field in `session/new`'s _meta, but
+      // as a runtime call. Lets transformers self-install when their
+      // slash command fires on a session that wasn't configured to
+      // include them in defaultTransformers — the invocation itself is
+      // the opt-in.
+      //
+      // A transformer can ONLY attach itself. The ref is resolved from
+      // processIdentity.name (set at connection time), not from any
+      // field in the request — so a transformer cannot inject a
+      // different transformer into a session's chain via this method.
+      //
+      // Idempotent: addTransformer checks for existing entries by name
+      // and updates rather than duplicating.
+      connection.onRequest("hydra-acp/transformer/attach", async (raw) =>
+        handleTransformerAttach(raw, processIdentity.name, deps),
+      );
 
       // Spawn a child session on behalf of the transformer. Returns the new
       // session's hydra id so the transformer can await or close it later.
@@ -1756,6 +1774,57 @@ export function decideSetModel(
     message: `model "${params.modelId}" is ${detail === "not in availableModels" ? "not in this session's availableModels" : detail} (agent ${session.agentId}); known models: ${known}`,
     logMessage: `session/set_model rejected sessionId=${params.sessionId} modelId=${JSON.stringify(params.modelId)} ${detail} agentId=${session.agentId} known=[${known}] (no current model to fall back to)`,
   };
+}
+
+export interface TransformerAttachDeps {
+  manager: { get(sessionId: string): Session | undefined };
+  transformers?: { resolveChain(names: string[]): TransformerRef[] };
+}
+
+// Handler for `hydra-acp/transformer/attach`. Extracted from the inline
+// connection.onRequest registration so it's directly unit-testable. A
+// transformer can only attach itself: callerName is wired in from the
+// authenticated processIdentity at the call site, never read from the
+// request payload. See PROTOCOL.md for the spec.
+export async function handleTransformerAttach(
+  rawParams: unknown,
+  callerName: string,
+  deps: TransformerAttachDeps,
+): Promise<{ ok: true }> {
+  const params = (rawParams ?? {}) as { sessionId?: unknown };
+  const sessionId = typeof params.sessionId === "string"
+    ? params.sessionId
+    : undefined;
+  if (!sessionId) {
+    throw Object.assign(
+      new Error("transformer/attach requires sessionId"),
+      { code: JsonRpcErrorCodes.InvalidParams },
+    );
+  }
+  if (!deps.transformers) {
+    throw Object.assign(
+      new Error("transformer manager not configured"),
+      { code: JsonRpcErrorCodes.InternalError },
+    );
+  }
+  const ref = deps.transformers.resolveChain([callerName])[0];
+  if (!ref) {
+    throw Object.assign(
+      new Error(
+        `transformer ${callerName} is not connected (call hydra-acp/transformer/initialize first)`,
+      ),
+      { code: JsonRpcErrorCodes.InternalError },
+    );
+  }
+  const session = deps.manager.get(sessionId);
+  if (!session) {
+    throw Object.assign(
+      new Error(`session ${sessionId} not found`),
+      { code: JsonRpcErrorCodes.SessionNotFound },
+    );
+  }
+  session.addTransformer(ref);
+  return { ok: true };
 }
 
 // Viewer-mode _meta builder. Mirrors buildResponseMeta but reads from the

@@ -677,7 +677,7 @@ The `/acp` WebSocket carries JSON-RPC 2.0 frames in both directions. After the W
 
 All Hydra additions live under a single vendor prefix, `hydra-acp/`, and follow ACP's own `resource/action` shape at the leaf (e.g. `hydra-acp/prompt/cancel`, `hydra-acp/agents/list`). The single prefix guarantees no collision with future ACP standard methods.
 
-Resource groups: `prompt/*` (cancel, update, amend, amended), `prompt_queue/*` (added, updated, removed), `child_session/*` (spawn, close, await), `session/*` (fork, closed), `commands/*` (register, invoke), `mcp_tools/*` (register, invoke), `message/*` (emit), `agents/*` (list, install_progress), `connection/*` (keep_alive), and `transformer/*` (initialize, message, session_event).
+Resource groups: `prompt/*` (cancel, update, amend, amended), `prompt_queue/*` (added, updated, removed), `child_session/*` (spawn, close, await), `session/*` (fork, closed), `commands/*` (register, invoke), `mcp_tools/*` (register, invoke), `message/*` (emit), `agents/*` (list, install_progress), `connection/*` (keep_alive), and `transformer/*` (initialize, attach, message, session_event).
 
 The `hydra-acp/transformer/*` methods are transformer-specific: only callable on a connection that authenticated as a transformer; extensions and ordinary clients receive `MethodNotFound`.
 
@@ -1177,6 +1177,23 @@ Transformer outbox: emit an ACP message back into the system, or discharge a pen
 ```
 
 Setting `respondsTo` returns the envelope to the original caller and removes the parked claim. Otherwise, `route: "chain"` re-enters the transformer chain from the next position (loop-safe via the `originatedBy` lineage set).
+
+#### Request (transformer → daemon): `hydra-acp/transformer/attach`
+
+Insert the calling transformer into a live session's chain. Lets a transformer self-install on demand — e.g. when its `/hydra <name> <verb>` slash command fires on a session that was not configured to include it in `defaultTransformers`. The invocation itself becomes the opt-in signal; sessions where the transformer is never invoked stay free of its intercepts.
+
+```jsonc
+// params
+{ "sessionId": "<id>" }
+// result
+{ "ok": true }
+```
+
+**Authorization.** A transformer may only attach **itself**. The ref is resolved server-side from the calling connection's `processIdentity.name`; the request body carries no `name` field, and any attempt to spoof one is ignored. The handler is gated to transformer-kind connections — extension-kind connections receive `MethodNotFound`.
+
+**Idempotent.** If the transformer is already in the session's chain, the existing ref is updated in place (covers transformer restarts where the WS connection is fresh but the name unchanged); duplicate entries are never created. A `session.opened` lifecycle event is emitted to the transformer when it joins, matching the signal it would have received at session creation.
+
+**Errors.** `InvalidParams` if `sessionId` is missing or non-string. `SessionNotFound` if no live session matches. `InternalError` if the transformer has not yet completed `hydra-acp/transformer/initialize` (no ref to attach).
 
 #### Request (transformer → daemon): `hydra-acp/child_session/spawn`
 
