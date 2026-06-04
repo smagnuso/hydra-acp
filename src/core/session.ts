@@ -2697,7 +2697,9 @@ export class Session {
     ];
     if (this.extensionCommands) {
       for (const { name, command } of this.extensionCommands.list()) {
-        const head = `hydra ${name} ${command.verb}`;
+        // An empty verb means "advertise the bare `/hydra <name>`
+        // form" — render with no trailing space.
+        const head = command.verb ? `hydra ${name} ${command.verb}` : `hydra ${name}`;
         const display = command.argsHint ? `${head} ${command.argsHint}` : head;
         const entry: AdvertisedCommand = { name: display };
         if (command.description) {
@@ -2712,7 +2714,7 @@ export class Session {
         if (name.startsWith("hydra-acp-")) {
           const short = name.slice("hydra-acp-".length);
           if (short.length > 0) {
-            const shortHead = `hydra ${short} ${command.verb}`;
+            const shortHead = command.verb ? `hydra ${short} ${command.verb}` : `hydra ${short}`;
             const shortDisplay = command.argsHint
               ? `${shortHead} ${command.argsHint}`
               : shortHead;
@@ -2868,16 +2870,14 @@ export class Session {
       const m = remainder.match(/^(\S+)(?:\s+([\s\S]*))?$/);
       const verb = m?.[1] ?? "";
       const args = (m?.[2] ?? "").trim();
-      if (verb === "") {
-        const verbs = entry.commands.map((c) => c.verb).join(", ");
-        return this.emitExtensionReply(
-          `/hydra ${name} requires a verb (known: ${verbs || "(none)"})`,
-        );
-      }
+      // The verb (possibly "") must be one the extension advertised.
+      // An extension that registers a `""` verb opts into receiving
+      // `/hydra <name>` with no following word; otherwise the user
+      // gets the "unknown verb" error below.
       if (!entry.commands.some((c) => c.verb === verb)) {
         const verbs = entry.commands.map((c) => c.verb).join(", ");
         return this.emitExtensionReply(
-          `unknown verb "${verb}" for ${name} (known: ${verbs || "(none)"})`,
+          `/hydra ${name}${verb ? ` ${verb}` : ""}: unknown verb (known: ${verbs || "(none)"})`,
         );
       }
       let reply: unknown;

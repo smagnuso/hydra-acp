@@ -216,7 +216,12 @@ export function registerAcpWsEndpoint(
                   argsHint?: unknown;
                   description?: unknown;
                 };
-                if (typeof obj.verb !== "string" || obj.verb.length === 0) {
+                // An empty `verb` is allowed: it lets an extension opt
+                // into bare `/hydra <name>` invocation (no following
+                // word). The session-side dispatcher validates against
+                // the registered set, so the empty verb only routes
+                // when the extension actually advertised it.
+                if (typeof obj.verb !== "string") {
                   return undefined;
                 }
                 const spec: ExtensionCommandSpec = { verb: obj.verb };
