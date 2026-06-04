@@ -1167,17 +1167,24 @@ export class Session {
     // as "had no prompt." Promotion to true is unconditional here.
     this.maybeSeedTitleFromPrompt(params);
     this._firstPromptSeeded = true;
-    // First human-driven prompt promotes an undecided session to
-    // interactive. Ancillary turns (e.g. `hydra cat`, which sets
-    // _meta.ancillary) deliberately skip promotion, so a cat-spawned
-    // session stays undefined/hidden — but remains promotable if a real
-    // turn ever lands. We only ever go undefined → true here, never
-    // write false, so nothing gets frozen as non-interactive.
+    // Any non-ancillary prompt promotes the session to interactive,
+    // regardless of prior state. Three cases this handles:
+    //   - undefined → true: editor-spawned session sees its first real
+    //                       prompt, flips into the default listing
+    //   - false     → true: a transformer-spawned worker (created with
+    //                       interactive:false) gets attached and the
+    //                       user types something — they've taken
+    //                       interest, the session becomes a real one
+    //   - true      → true: no-op
+    // Ancillary turns (`_meta["hydra-acp"].ancillary = true`, used by
+    // `hydra cat` and transformer-driven worker prompts) deliberately
+    // skip promotion so they don't accidentally lift a behind-the-scenes
+    // session into the default UI.
     const ancillary =
       extractHydraMeta(
         ((params ?? {}) as { _meta?: Record<string, unknown> })._meta,
       ).ancillary === true;
-    if (!ancillary && this._interactive === undefined) {
+    if (!ancillary && this._interactive !== true) {
       this._interactive = true;
       for (const handler of this.interactiveHandlers) {
         try {

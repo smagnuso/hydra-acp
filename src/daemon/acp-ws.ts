@@ -420,25 +420,53 @@ export function registerAcpWsEndpoint(
           agentId?: unknown;
           cwd?: unknown;
           parentSessionId?: unknown;
+          interactive?: unknown;
         };
         const agentId = typeof params.agentId === "string"
           ? params.agentId
           : deps.defaultAgent;
-        const cwd = typeof params.cwd === "string"
+        let cwd = typeof params.cwd === "string"
           ? params.cwd
           : undefined;
         const parentSessionId = typeof params.parentSessionId === "string"
           ? params.parentSessionId
           : undefined;
 
-        if (!cwd) {
-          throw Object.assign(new Error("spawn_child_session requires cwd"), { code: -32602 });
+        // Inherit cwd from the parent when omitted. The common transformer
+        // pattern is "spawn a child in the same place as my parent"; the
+        // alternative forces the transformer to fetch the parent's cwd
+        // through a separate round-trip just to echo it back.
+        if (!cwd && parentSessionId) {
+          const parent = deps.manager.get(parentSessionId);
+          if (parent) {
+            cwd = parent.cwd;
+          }
         }
 
+        if (!cwd) {
+          throw Object.assign(
+            new Error(
+              "child_session/spawn requires cwd (or a parentSessionId pointing at a live session whose cwd we can inherit)",
+            ),
+            { code: -32602 },
+          );
+        }
+
+        // Children spawned by transformers are non-interactive by default:
+        // they exist to do automated work driven by the transformer, not
+        // to host a human at a composer. This keeps them out of the
+        // default `hydra-acp session` listing (visible only via --all).
+        // The transformer can override via the `interactive` param if it
+        // wants the child to be promotable to a normal session.
+        const interactive =
+          typeof params.interactive === "boolean"
+            ? params.interactive
+            : false;
         const child = await deps.manager.create({
           agentId,
           cwd,
           parentSessionId,
+          interactive,
           transformChain: [], // children start with no chain by default
         });
         return { childSessionId: child.sessionId };
