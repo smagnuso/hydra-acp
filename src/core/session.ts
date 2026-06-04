@@ -2692,6 +2692,25 @@ export class Session {
           entry.description = command.description;
         }
         out.push(entry);
+        // Convention: names starting with `hydra-acp-` are surfaced under
+        // the elided short form too, matching the dispatch fallback in
+        // handleSlashCommand. Both forms work; the short form is the
+        // recommended UX, the long form is preserved for explicit usage
+        // and backward compatibility.
+        if (name.startsWith("hydra-acp-")) {
+          const short = name.slice("hydra-acp-".length);
+          if (short.length > 0) {
+            const shortHead = `hydra ${short} ${command.verb}`;
+            const shortDisplay = command.argsHint
+              ? `${shortHead} ${command.argsHint}`
+              : shortHead;
+            const shortEntry: AdvertisedCommand = { name: shortDisplay };
+            if (command.description) {
+              shortEntry.description = command.description;
+            }
+            out.push(shortEntry);
+          }
+        }
       }
     }
     out.push(...this.agentAdvertisedCommands);
@@ -2793,6 +2812,14 @@ export class Session {
     }
     if (this.extensionCommands?.has(first)) {
       return this.runExtensionCommand(first, remainder);
+    }
+    // Convention: ecosystem packages are named `hydra-acp-<foo>`. Allow
+    // the user to elide the prefix so `/hydra planner ...` routes the
+    // same as `/hydra hydra-acp-planner ...`. Built-ins and exact-name
+    // matches above still win — this is strictly the fallback.
+    const eliprefixed = `hydra-acp-${first}`;
+    if (this.extensionCommands?.has(eliprefixed)) {
+      return this.runExtensionCommand(eliprefixed, remainder);
     }
     const known = HYDRA_COMMANDS.map((c) => c.verb);
     if (this.extensionCommands) {

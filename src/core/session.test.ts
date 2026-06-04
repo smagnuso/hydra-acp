@@ -4139,6 +4139,70 @@ describe("Session", () => {
       expect(request).not.toHaveBeenCalled();
       expect(session.title).toBe("my title");
     });
+
+    it("routes the elided short form `/hydra <short> <verb>` to a `hydra-acp-<short>` registration", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request } = makeFakeExtensionConnection();
+      request.mockResolvedValue({ text: "ok" });
+      registry.register("hydra-acp-planner", connection, [{ verb: "plan" }]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      const result = await session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra planner plan build a thing" }],
+      });
+      expect(result).toEqual({ stopReason: "end_turn" });
+      expect(request).toHaveBeenCalledWith("hydra-acp/commands/invoke", {
+        sessionId: "hydra_session_ext",
+        verb: "plan",
+        args: "build a thing",
+      });
+    });
+
+    it("exact-name match wins over the prefix-elision fallback", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const shortConn = makeFakeExtensionConnection();
+      const longConn = makeFakeExtensionConnection();
+      shortConn.request.mockResolvedValue({ text: "short wins" });
+      longConn.request.mockResolvedValue({ text: "long wins" });
+      // Register both: a literal "planner" name AND "hydra-acp-planner".
+      // The literal short name must take precedence — the elision is
+      // strictly a fallback for when no exact match exists.
+      registry.register("planner", shortConn.connection, [{ verb: "go" }]);
+      registry.register("hydra-acp-planner", longConn.connection, [{ verb: "go" }]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      await session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra planner go" }],
+      });
+      expect(shortConn.request).toHaveBeenCalledTimes(1);
+      expect(longConn.request).not.toHaveBeenCalled();
+    });
+
+    it("advertises both long and short forms for hydra-acp-* names", () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection } = makeFakeExtensionConnection();
+      registry.register("hydra-acp-planner", connection, [{ verb: "plan" }]);
+      const names = session.mergedAvailableCommands().map((c) => c.name);
+      expect(names).toContain("hydra hydra-acp-planner plan");
+      expect(names).toContain("hydra planner plan");
+    });
+
+    it("does not synthesize a short form for names without the hydra-acp- prefix", () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection } = makeFakeExtensionConnection();
+      registry.register("my-custom-tool", connection, [{ verb: "go" }]);
+      const names = session.mergedAvailableCommands().map((c) => c.name);
+      expect(names).toContain("hydra my-custom-tool go");
+      expect(names).not.toContain("hydra go");
+    });
   });
 
   describe("applyModelChange / applyModeChange broadcast", () => {
