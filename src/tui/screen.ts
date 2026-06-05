@@ -20,7 +20,27 @@ import type {
   KeyEvent,
   KeyName,
 } from "./input.js";
+import {
+  columnToOffset,
+  columnToOffsetFromSegments,
+} from "./column-mapping.js";
+import { writeClipboard } from "./clipboard.js";
 import { withSync } from "./sync.js";
+
+// Maximum gap, in milliseconds, between two left-button presses on the
+// same cell that still counts as a double-click for word-snap selection.
+const DOUBLE_CLICK_MAX_MS = 500;
+// Same-cell tolerance for double-click: presses within this many cells
+// (Chebyshev distance) of the prior release still qualify. A strict 0
+// would defeat the gesture on terminals that wobble by a single column.
+const DOUBLE_CLICK_MAX_DIST = 1;
+// ASCII-word-character regex for double-click word snap. We deliberately
+// restrict to ASCII for this version (per spec) — Unicode word boundary
+// expansion would require ICU or per-codepoint category tables.
+const ASCII_WORD_RE = /[A-Za-z0-9_]/;
+// ANSI SGR pattern used when stripping styling escapes from extracted
+// selection text so the clipboard payload is clean plaintext.
+const ANSI_STRIP_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
 
 export interface ScreenOptions {
   term: Terminal;
@@ -31,6 +51,20 @@ export interface ScreenOptions {
   // (e.g. "tools:3", "plan", "editdiff:<id>"). Lets the app toggle a
   // single block's expand/collapse. Clicks on unkeyed rows are ignored.
   onBlockClick?: (key: string) => void;
+  // Invoked for every mouse button-press, drag-motion, and button-release
+  // event while mouse capture is on. Wheel events are NOT routed here —
+  // they continue to drive scrollback internally. Coordinates are 1-based
+  // (terminal-kit native: top-left is x=1, y=1) and refer to the
+  // physical terminal cell under the pointer. The caller maps that
+  // cell back to scrollback content via the screen's row→line mapping
+  // (see keyAtRow / mouseCellToScrollback).
+  //
+  // Press/release for buttons other than the left button are still
+  // reported (kind "press" / "release" with button !== "left") so a
+  // future right-click menu can hook in without further plumbing.
+  // When mouse capture is off (selective wheel-only mode or no mouse),
+  // this callback is never invoked.
+  onMouse?: (ev: MouseEvent) => void;
   // Invoked once with a keyed-block key the first time any of its rows are
   // painted in the visible window, for blocks registered via
   // notifyWhenVisible(). Used to lazily load deferred content (e.g. fetch a
@@ -47,6 +81,12 @@ export interface ScreenOptions {
   // scrollback. When false (default), the wheel does nothing but text
   // selection works with plain click-drag (no shift required).
   mouse?: boolean;
+  // Whether the in-app text-selection feature is enabled. Independent
+  // of `mouse` so users with conflicting muscle memory can opt out
+  // even when mouse capture is on. When undefined, defaults to the
+  // resolved value of `mouse` (selection follows capture). Downstream
+  // interaction code reads this via isInAppSelectionEnabled().
+  inAppSelection?: boolean;
   // When true (default), emit OSC 9;4 progress-bar codes so the host
   // terminal can render an indeterminate busy indicator while a turn is
   // running (taskbar pulse on Windows Terminal, dock badge on Konsole,
@@ -142,6 +182,29 @@ export interface HelpPromptSpec {
   hint: string;
 }
 
+// Mouse event surfaced to the app via ScreenOptions.onMouse. Coordinates
+// are 1-based (top-left cell is x=1, y=1) and refer to the physical
+// terminal cell under the pointer. `kind` is normalized:
+//   - "press"   button just went down
+//   - "move"    pointer moved while a button was held (drag motion);
+//               not emitted for hover-without-button (we use xterm's
+//               ?1002 drag-tracking mode, not ?1003 any-motion)
+//   - "release" button just came up
+// `button` is the button involved ("left" | "middle" | "right" | "other").
+// For "move" events, `button` reflects the button being held during the
+// drag as reported by the terminal. `name` is the raw terminal-kit
+// event name in case the caller wants to disambiguate further.
+export interface MouseEvent {
+  kind: "press" | "move" | "release";
+  button: "left" | "middle" | "right" | "other";
+  // 1-based terminal cell (top-left is {x:1, y:1}).
+  x: number;
+  y: number;
+  // Raw terminal-kit event name, e.g. "MOUSE_LEFT_BUTTON_PRESSED",
+  // "MOUSE_DRAG", "MOUSE_LEFT_BUTTON_RELEASED".
+  name: string;
+}
+
 export interface CompletionItem {
   name: string;
   description?: string;
@@ -178,11 +241,34 @@ function matchBareUrl(text: string): string | null {
   return BARE_URL_RE.test(stripped) ? stripped : null;
 }
 
+// Map a terminal-kit mouse-event name to its MouseEvent.button label.
+// Drag/release-without-button (MOUSE_BUTTON_RELEASED, MOUSE_DRAG) default
+// to "left" because that's overwhelmingly the held button — terminals
+// report drag with the original button encoded in the SGR byte but
+// terminal-kit collapses unknown buttons; refining this would require
+// parsing the raw sequence ourselves.
+function mouseButtonFromEventName(name: string): MouseEvent["button"] {
+  if (name.includes("LEFT")) {
+    return "left";
+  }
+  if (name.includes("RIGHT")) {
+    return "right";
+  }
+  if (name.includes("MIDDLE")) {
+    return "middle";
+  }
+  if (name === "MOUSE_DRAG" || name === "MOUSE_BUTTON_RELEASED") {
+    return "left";
+  }
+  return "other";
+}
+
 export class Screen {
   private term: Terminal;
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
   private onBlockClick: ((key: string) => void) | undefined;
+  private onMouse: ((ev: MouseEvent) => void) | undefined;
   private onBlockVisible: ((key: string) => void) | undefined;
   private onSuspend: (() => void) | undefined;
   // Keyed blocks awaiting a one-shot "became visible" notification.
@@ -276,6 +362,29 @@ export class Screen {
   // highlight rendering. Mirrors scrollbackSearch?.term but cached as a
   // separate field so the per-row signature can include it cheaply.
   private scrollbackHighlight: string | null = null;
+  // Source-anchored selection region. Stored in normalized form
+  // (start <= end by sourceLineId, then by offset) so renderers don't
+  // re-normalize on every row. Selection points are {sourceLineId,
+  // offset} (T5 model) — stable across scroll and re-wrap, so the
+  // highlight stays attached to the same characters as the viewport
+  // moves. Cleared only by clearSelection(); scroll/resize do not
+  // disturb it.
+  private selection: {
+    startLineId: number;
+    startOffset: number;
+    endLineId: number;
+    endOffset: number;
+  } | null = null;
+  // Per-paint cache mapping each selected source line's id to the
+  // selected [start,end) offset window within that line (full body for
+  // interior lines) plus whether the selection continues past it.
+  // Rebuilt at the top of drawScrollback so selectionRangeForChunk is an
+  // O(1) lookup that never orders by raw line id — ids are NOT monotonic
+  // with display order (upsertLines reassigns higher ids to re-rendered
+  // streaming blocks that keep their original, higher-up slot).
+  private selectionRenderBounds:
+    | Map<number, { start: number; end: number; toEnd: boolean }>
+    | null = null;
   // Right-side banner slot. Three sources, in priority order:
   //   1. Active scrollback search term (auto, from this.scrollbackSearch)
   //   2. External search indicator pushed by the app while prompt-
@@ -302,6 +411,22 @@ export class Screen {
   // (a clean click), so a press-drag-release (text selection, even within
   // one block) never toggles. Cleared on release.
   private pressCell: { x: number; y: number } | null = null;
+  // Source-anchored origin of the active drag gesture. Set on left-button
+  // press when in-app selection is on, used as the anchor passed to
+  // setSelection on every subsequent drag motion. Cleared on release.
+  private selectionAnchor: { sourceLineId: number; offset: number } | null = null;
+  // True iff a drag motion arrived between press and release. Drives
+  // the finalize-vs-dismiss decision: dragStarted → copy; otherwise a
+  // plain click clears any prior selection.
+  private selectionDragStarted = false;
+  // Set when a press is recognised as the second click of a double-click
+  // and the anchor lands on a word character. Causes release to finalize
+  // (copy) without requiring a drag, and suppresses the block-click
+  // toggle that would otherwise fire for a press+release on the same cell.
+  private doubleClickPending = false;
+  // Timestamp + cell of the most recent left-button release, used to
+  // decide whether the next press qualifies as a double-click.
+  private lastLeftClick: { x: number; y: number; t: number } | null = null;
   private started = false;
   // Bracketed-paste-mode state. terminal-kit doesn't natively support
   // bracketed paste, so on start() we enable the mode in the terminal
@@ -315,6 +440,10 @@ export class Screen {
   private pasteBuffer = "";
   private rawStdinHandler: (chunk: Buffer) => void;
   private mouseEnabled: boolean;
+  // In-app selection feature flag. Mirrors the resolved config value
+  // (see resolveInAppSelection in core/config.ts). Independent of
+  // mouseEnabled; flipping mouse capture does NOT auto-flip this.
+  private inAppSelectionEnabled: boolean;
   private progressIndicatorEnabled: boolean;
   // Listeners registered on process via installEmergencyCleanup so an
   // ungraceful exit (SIGTERM, SIGHUP, uncaughtException) still restores
@@ -347,8 +476,19 @@ export class Screen {
   constructor(opts: ScreenOptions) {
     this.term = opts.term;
     this.dispatcher = opts.dispatcher;
-    this.onKey = opts.onKey;
+    // Wrap the host's onKey so any keystroke (including pastes and
+    // attachment drops, which arrive on the same channel) dismisses
+    // the live selection before the dispatcher sees the event.
+    // Spec: selection must clear on any keystroke.
+    const hostOnKey = opts.onKey;
+    this.onKey = (events) => {
+      if (this.selection !== null && events.length > 0) {
+        this.clearSelection();
+      }
+      hostOnKey(events);
+    };
     this.onBlockClick = opts.onBlockClick;
+    this.onMouse = opts.onMouse;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
     this.contentRepaintThrottleMs =
@@ -356,6 +496,7 @@ export class Screen {
     this.maxScrollbackLines =
       opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
     this.mouseEnabled = opts.mouse ?? false;
+    this.inAppSelectionEnabled = opts.inAppSelection ?? this.mouseEnabled;
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
     this.readonly = opts.readonly ?? false;
     this.resizeHandler = () => this.repaint();
@@ -398,13 +539,18 @@ export class Screen {
     // our wrap budget would bleed onto the row below, and paintRow's
     // sig-based skip can leave that bleed uncleared indefinitely.
     process.stdout.write("\x1b[?7l");
-    // mouse: "button" enables wheel + click reporting so we can intercept
-    // mouse-wheel events for scrollback. terminal-kit emits these through
-    // the same "key" channel as MOUSE_WHEEL_UP / MOUSE_WHEEL_DOWN names.
+    // mouse: "drag" enables wheel + button-press/release reporting AND
+    // motion-during-drag (xterm DEC mode ?1002). The drag stream is what
+    // makes click-drag text selection work inside the app: handleMouse
+    // surfaces press / move / release to onMouse with 1-based cell
+    // coordinates, and the wheel still feeds scrollback unchanged.
+    // Plain hover-without-button is NOT reported (that would be the
+    // ?1003 any-motion mode, which floods the wire on every cursor
+    // tick — we don't need it for selection).
     // Skip mouse capture when disabled via config so click-drag text
     // selection works without shift; the trade-off is wheel scrollback.
     if (this.mouseEnabled) {
-      this.term.grabInput({ mouse: "button" });
+      this.term.grabInput({ mouse: "drag" });
     } else {
       this.term.grabInput(true);
     }
@@ -994,6 +1140,7 @@ export class Screen {
     for (const line of removed) {
       this.forgetLine(line);
     }
+    this.invalidateSelectionIfTouches(removed);
     for (const [key, range] of [...this.keyedBlocks.entries()]) {
       range.start -= overflow;
       if (range.start < 0) {
@@ -1047,6 +1194,7 @@ export class Screen {
         this.forgetLine(line);
       }
       this.trackLines(newLines);
+      this.invalidateSelectionIfTouches(removed);
       existing.count = newLines.length;
       if (delta !== 0) {
         for (const [k, range] of this.keyedBlocks) {
@@ -1283,7 +1431,7 @@ export class Screen {
       return;
     }
     if (enabled) {
-      this.term.grabInput({ mouse: "button" });
+      this.term.grabInput({ mouse: "drag" });
       this.term.on("mouse", this.mouseHandler);
     } else {
       this.term.off("mouse", this.mouseHandler);
@@ -1321,6 +1469,245 @@ export class Screen {
 
   isMouseEnabled(): boolean {
     return this.mouseEnabled;
+  }
+
+  // Runtime toggle for the in-app selection feature. Independent of
+  // mouse capture: downstream interaction code consults this flag
+  // before treating press/drag/release as a selection gesture, so
+  // turning it off restores native terminal selection (when mouse
+  // capture is off) or shift+drag (when mouse capture is on)
+  // without disturbing wheel-scrollback or any other mouse plumbing.
+  setInAppSelectionEnabled(enabled: boolean): void {
+    this.inAppSelectionEnabled = enabled;
+  }
+
+  isInAppSelectionEnabled(): boolean {
+    return this.inAppSelectionEnabled;
+  }
+
+  // Set the active source-anchored selection. Endpoints are
+  // {sourceLineId, offset} as produced by resolveCellToSource (T5).
+  // The pair is normalized so the caller can pass them in either
+  // order — useful for click+drag where anchor/focus order depends on
+  // drag direction. A degenerate selection (anchor === focus) is
+  // dropped: a zero-width highlight has nothing to paint and only
+  // costs a repaint.
+  setSelection(
+    a: { sourceLineId: number; offset: number },
+    b: { sourceLineId: number; offset: number },
+  ): void {
+    // Order by DISPLAY position (array index), not raw id — ids aren't
+    // monotonic with on-screen order once a block has been re-rendered.
+    const ia = this.lineIndexById(a.sourceLineId);
+    const ib = this.lineIndexById(b.sourceLineId);
+    const before = ia < ib || (ia === ib && a.offset <= b.offset);
+    const start = before ? a : b;
+    const end = before ? b : a;
+    if (start.sourceLineId === end.sourceLineId && start.offset === end.offset) {
+      this.clearSelection();
+      return;
+    }
+    const next = {
+      startLineId: start.sourceLineId,
+      startOffset: start.offset,
+      endLineId: end.sourceLineId,
+      endOffset: end.offset,
+    };
+    const cur = this.selection;
+    if (
+      cur &&
+      cur.startLineId === next.startLineId &&
+      cur.startOffset === next.startOffset &&
+      cur.endLineId === next.endLineId &&
+      cur.endOffset === next.endOffset
+    ) {
+      return;
+    }
+    this.selection = next;
+    this.repaint();
+  }
+
+  clearSelection(): void {
+    if (this.selection === null) {
+      return;
+    }
+    this.selection = null;
+    this.repaint();
+  }
+
+  hasSelection(): boolean {
+    return this.selection !== null;
+  }
+
+  getSelection(): {
+    start: { sourceLineId: number; offset: number };
+    end: { sourceLineId: number; offset: number };
+  } | null {
+    if (this.selection === null) {
+      return null;
+    }
+    return {
+      start: { sourceLineId: this.selection.startLineId, offset: this.selection.startOffset },
+      end: { sourceLineId: this.selection.endLineId, offset: this.selection.endOffset },
+    };
+  }
+
+  // Extract the active selection as plain text suitable for the
+  // clipboard: slice each covered source line at the selection's
+  // start/end offsets (partial first/last, full middle lines), join
+  // with '\n', strip ANSI styling escapes so a highlighted code-block
+  // body doesn't leak SGR bytes into the clipboard. Returns "" when
+  // there is no active selection or the selection's lines are no
+  // longer in scrollback (e.g. pruned by trimScrollback between
+  // setSelection and the extract). The returned string contains no
+  // trailing newline.
+  getSelectionText(): string {
+    const ext = this.selectionLineBounds();
+    if (ext === null) {
+      return "";
+    }
+    const out: string[] = [];
+    // Walk in DISPLAY order (array index), not id order: a re-rendered
+    // block sits at a low index but carries high ids, so an id-range scan
+    // would pull in unrelated lines and miss selected ones.
+    for (let i = ext.loIdx; i <= ext.hiIdx; i++) {
+      const line = this.lines[i];
+      if (!line) {
+        continue;
+      }
+      const id = this.lineIds.get(line);
+      const bounds = id === undefined ? undefined : ext.byId.get(id);
+      if (!bounds) {
+        continue;
+      }
+      const rawBody = line.body ?? "";
+      let piece: string;
+      if (line.ansi) {
+        // ANSI bodies aren't selectable per-char; only their FULL body
+        // appears here as an interior line. Partial-ansi endpoints are
+        // skipped rather than emit a garbled half-stripped slice.
+        piece =
+          i === ext.loIdx || i === ext.hiIdx
+            ? ""
+            : rawBody.replace(ANSI_STRIP_RE, "");
+      } else {
+        piece = rawBody.slice(bounds.start, bounds.end);
+        // Styled bodies route through the markup-interpreting writer, so
+        // `^X` / `^[...]` style spans are visually zero-width but sit in
+        // the source as code units. Offsets already land on markup
+        // boundaries (segment-aware), so the slice contains whole markup
+        // sequences only; strip them so the clipboard carries the visible
+        // characters alone.
+        if (bodyStyleUsesMarkup(line.bodyStyle)) {
+          piece = stripTkMarkup(piece);
+        }
+      }
+      out.push(piece);
+    }
+    return out.join("\n");
+  }
+
+  // Resolve the active selection into display order. Line ids are stable
+  // identifiers but NOT ordered by display position (a streaming block
+  // re-rendered via upsertLines is reassigned higher ids while keeping its
+  // original, higher-up array slot), so the selection extent must be
+  // computed from array indices. Returns the inclusive index range plus a
+  // per-line-id map of the selected [start,end) offset window (full body
+  // for interior lines) and whether the selection continues past it.
+  private selectionLineBounds(): {
+    loIdx: number;
+    hiIdx: number;
+    byId: Map<number, { start: number; end: number; toEnd: boolean }>;
+  } | null {
+    const sel = this.selection;
+    if (sel === null) {
+      return null;
+    }
+    const i1 = this.lineIndexById(sel.startLineId);
+    const i2 = this.lineIndexById(sel.endLineId);
+    if (i1 === -1 || i2 === -1) {
+      return null;
+    }
+    let loIdx = i1;
+    let hiIdx = i2;
+    let loOff = sel.startOffset;
+    let hiOff = sel.endOffset;
+    if (i1 > i2) {
+      loIdx = i2;
+      hiIdx = i1;
+      loOff = sel.endOffset;
+      hiOff = sel.startOffset;
+    }
+    const byId = new Map<
+      number,
+      { start: number; end: number; toEnd: boolean }
+    >();
+    for (let i = loIdx; i <= hiIdx; i++) {
+      const line = this.lines[i];
+      if (!line) {
+        continue;
+      }
+      const id = this.lineIds.get(line);
+      if (id === undefined) {
+        continue;
+      }
+      const bodyLen = (line.body ?? "").length;
+      const start = i === loIdx ? Math.max(0, Math.min(bodyLen, loOff)) : 0;
+      const end = i === hiIdx ? Math.max(0, Math.min(bodyLen, hiOff)) : bodyLen;
+      byId.set(id, { start, end, toEnd: i < hiIdx });
+    }
+    return { loIdx, hiIdx, byId };
+  }
+
+  // For a wrapped chunk, returns the [start, end) code-unit range
+  // within chunk.body that the active selection covers, plus a flag
+  // indicating the selection extends to (or past) the end of this
+  // chunk's source-line tail. Returns null when the chunk is outside
+  // the selection or when no selection is active. ANSI-bodied chunks
+  // are skipped — escape bytes inflate code-unit math and would land
+  // the highlight in the wrong cells.
+  private selectionRangeForChunk(
+    line: FormattedLine,
+  ): { start: number; end: number; toEndOfLine: boolean } | null {
+    if (this.selection === null || line.ansi) {
+      return null;
+    }
+    // Membership + per-line offset window come from the display-ordered
+    // map — never compare raw line ids for order. drawScrollback caches it
+    // once per paint; fall back to computing it if we're called outside a
+    // paint (e.g. directly in tests).
+    const bounds =
+      this.selectionRenderBounds ?? this.selectionLineBounds()?.byId ?? null;
+    if (bounds === null) {
+      return null;
+    }
+    const origin = this.wrapOrigin.get(line);
+    if (!origin) {
+      return null;
+    }
+    const lineSel = bounds.get(origin.sourceLineId);
+    if (!lineSel) {
+      return null;
+    }
+    // Intersect the line's selected window with this chunk's window
+    // [sourceColOffset, sourceColOffset + chunk.body.length).
+    const chunkStart = origin.sourceColOffset;
+    const chunkEnd = chunkStart + line.body.length;
+    const interStart = Math.max(lineSel.start, chunkStart);
+    const interEnd = Math.min(lineSel.end, chunkEnd);
+    if (interEnd <= interStart) {
+      return null;
+    }
+    return {
+      start: interStart - chunkStart,
+      end: interEnd - chunkStart,
+      // True iff the selection extends past this chunk's end into
+      // continuation chunks or to a later source line. drives whether
+      // the fillRow padding should also be highlighted so a multi-row
+      // selection reads as a continuous band rather than a jagged
+      // right edge.
+      toEndOfLine: lineSel.toEnd || lineSel.end > chunkEnd,
+    };
   }
 
   // Pushed by the app each onKey tick to reflect prompt-history
@@ -1367,7 +1754,31 @@ export class Screen {
     this.wrapCacheWidth = 0;
     this.streamingActive = false;
     this.scrollOffset = 0;
+    if (this.selection !== null) {
+      this.selection = null;
+    }
     this.repaint();
+  }
+
+  // After a mutation that removed FormattedLines from this.lines, drop
+  // the active selection if either endpoint pointed at one of the
+  // removed lines — keeps "selection becomes invalid when source lines
+  // are pruned or edited in place" honest. Cheap: O(removed) WeakMap
+  // lookups, no full-scrollback scan.
+  private invalidateSelectionIfTouches(removed: FormattedLine[]): void {
+    if (this.selection === null) {
+      return;
+    }
+    for (const line of removed) {
+      const id = this.lineIds.get(line);
+      if (
+        id !== undefined &&
+        (id === this.selection.startLineId || id === this.selection.endLineId)
+      ) {
+        this.selection = null;
+        return;
+      }
+    }
   }
 
   // Toggle visibility of agent-thought lines without removing them from
@@ -1413,6 +1824,7 @@ export class Screen {
     for (const line of removed) {
       this.forgetLine(line);
     }
+    this.invalidateSelectionIfTouches(removed);
     this.keyedBlocks.delete(key);
     for (const [k, range] of this.keyedBlocks) {
       if (k !== key && range.start > block.start) {
@@ -1492,6 +1904,7 @@ export class Screen {
     for (const line of removed) {
       this.forgetLine(line);
     }
+    this.invalidateSelectionIfTouches(removed);
     this.keyedBlocks.delete(key);
     for (const [, range] of this.keyedBlocks) {
       if (range.start > existing.start) {
@@ -1662,6 +2075,9 @@ export class Screen {
   // While a permission prompt is active, the prompt area is replaced with
   // an interactive options list. Pass null to dismiss.
   setPermissionPrompt(spec: PermissionPromptSpec | null): void {
+    if (spec !== null && this.permissionPrompt === null) {
+      this.clearSelection();
+    }
     this.permissionPrompt = spec ? { ...spec } : null;
     this.repaint();
   }
@@ -1669,6 +2085,9 @@ export class Screen {
   // Interactive session-options modal (^O). Takes over the prompt area
   // like the permission modal. Pass null to dismiss.
   setOptionsPrompt(spec: OptionsPromptSpec | null): void {
+    if (spec !== null && this.optionsPrompt === null) {
+      this.clearSelection();
+    }
     this.optionsPrompt = spec
       ? { ...spec, options: spec.options.map((o) => ({ ...o })) }
       : null;
@@ -1683,6 +2102,9 @@ export class Screen {
   // null to dismiss. Currently unused — kept as a generic primitive for
   // any future modal that needs a question + hint footer.
   setConfirmPrompt(spec: ConfirmPromptSpec | null): void {
+    if (spec !== null && this.confirmPrompt === null) {
+      this.clearSelection();
+    }
     this.confirmPrompt = spec ? { ...spec } : null;
     this.repaint();
   }
@@ -1691,6 +2113,9 @@ export class Screen {
   // the ^G hotkey to surface every binding without dropping the user
   // out of the session. Pass null to dismiss.
   setHelpPrompt(spec: HelpPromptSpec | null): void {
+    if (spec !== null && this.helpPrompt === null) {
+      this.clearSelection();
+    }
     this.helpPrompt = spec
       ? { ...spec, entries: [...spec.entries] }
       : null;
@@ -1821,9 +2246,11 @@ export class Screen {
   }
 
   private handleMouse(name: string, data?: unknown): void {
-    // terminal-kit emits MOUSE_WHEEL_{UP,DOWN} (and MOUSE_LEFT_BUTTON_*,
-    // etc.) on the "mouse" event channel, not "key", when grabInput's
-    // mouse: "button" is set.
+    // terminal-kit emits MOUSE_WHEEL_{UP,DOWN}, MOUSE_LEFT_BUTTON_*,
+    // MOUSE_RIGHT_BUTTON_*, MOUSE_MIDDLE_BUTTON_*, and (with grabInput
+    // mouse: "drag") MOUSE_DRAG on the "mouse" event channel, not "key".
+    // Wheel events keep their existing scrollback behaviour and are NOT
+    // forwarded to onMouse.
     if (name === "MOUSE_WHEEL_UP") {
       this.scrollBy(3);
       return;
@@ -1832,15 +2259,34 @@ export class Screen {
       this.scrollBy(-3);
       return;
     }
+    const cell = this.mouseCell(data);
+    // Classify the event for the public onMouse surface. Coordinates are
+    // 1-based (terminal-kit native) — see MouseEvent docstring.
+    const button = mouseButtonFromEventName(name);
+    let kind: MouseEvent["kind"] | null = null;
+    if (name === "MOUSE_DRAG" || name === "MOUSE_MOTION") {
+      kind = "move";
+    } else if (name.endsWith("_PRESSED")) {
+      kind = "press";
+    } else if (name.endsWith("_RELEASED")) {
+      kind = "release";
+    }
+    if (kind !== null && cell !== null && this.onMouse) {
+      this.onMouse({ kind, button, x: cell.x, y: cell.y, name });
+    }
     // Left-click on a keyed scrollback block toggles that single block's
     // expand/collapse via the app. We require a full click — press and
     // release on the SAME cell — so a press-drag-release (text selection,
     // even within a single block) never toggles. Only reachable under full
     // mouse capture (wheel-only/selective mode never reports button
     // events). Clicks on unkeyed rows fall through silently.
-    const cell = this.mouseCell(data);
     if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
       this.pressCell = cell;
+      this.handleSelectionPress(cell);
+      return;
+    }
+    if (name === "MOUSE_DRAG" && cell !== null) {
+      this.handleSelectionDrag(cell);
       return;
     }
     if (
@@ -1849,19 +2295,213 @@ export class Screen {
     ) {
       const press = this.pressCell;
       this.pressCell = null;
+      const selectionFinalize = this.inAppSelectionEnabled &&
+        (this.selectionDragStarted || this.doubleClickPending);
       if (
         this.onBlockClick &&
         press !== null &&
         cell !== null &&
         cell.x === press.x &&
-        cell.y === press.y
+        cell.y === press.y &&
+        !selectionFinalize
       ) {
         const key = this.keyAtRow(cell.y);
         if (key !== null) {
           this.onBlockClick(key);
         }
       }
+      this.handleSelectionRelease(cell);
     }
+  }
+
+  // Left-button-press half of the selection gesture. Resolves the press
+  // cell to a source anchor when the in-app selection feature is on
+  // and qualifies a double-click candidate by comparing against the
+  // previous release timestamp/cell. A double-click on an ASCII word
+  // character immediately snaps the selection to that word's
+  // boundaries; double-click on whitespace/punctuation is a no-op and
+  // falls through to plain-click semantics. Bypassed entirely when the
+  // feature is disabled so the existing wheel/block-click behaviour
+  // stays unchanged.
+  private handleSelectionPress(cell: { x: number; y: number } | null): void {
+    this.selectionAnchor = null;
+    this.selectionDragStarted = false;
+    this.doubleClickPending = false;
+    if (!this.inAppSelectionEnabled || cell === null) {
+      return;
+    }
+    const anchor = this.resolveCellToSource(cell.x, cell.y);
+    if (anchor === null) {
+      // Press outside the scrollback area (banner, prompt, etc.) —
+      // don't anchor; a drag from here can't produce a coherent
+      // selection. Still dismiss any prior selection on the upcoming
+      // release via the dragStarted=false path.
+      this.lastLeftClick = null;
+      return;
+    }
+    this.selectionAnchor = anchor;
+    const now = Date.now();
+    const last = this.lastLeftClick;
+    const isDoubleClickCandidate =
+      last !== null &&
+      now - last.t <= DOUBLE_CLICK_MAX_MS &&
+      Math.abs(cell.x - last.x) <= DOUBLE_CLICK_MAX_DIST &&
+      Math.abs(cell.y - last.y) <= DOUBLE_CLICK_MAX_DIST;
+    if (isDoubleClickCandidate) {
+      const word = this.wordBoundsAt(anchor);
+      if (word !== null) {
+        this.setSelection(
+          { sourceLineId: anchor.sourceLineId, offset: word.start },
+          { sourceLineId: anchor.sourceLineId, offset: word.end },
+        );
+        this.doubleClickPending = true;
+      }
+      // Reset chain so a triple-click is treated as a fresh single
+      // click rather than another double — keeps the gesture simple
+      // and predictable.
+      this.lastLeftClick = null;
+    }
+  }
+
+  // Drag-motion half of the gesture: extends the selection from the
+  // recorded anchor to the cell currently under the pointer. Honors
+  // the feature flag and ignores motion that doesn't resolve into the
+  // scrollback area (e.g. drag into the prompt row).
+  private handleSelectionDrag(cell: { x: number; y: number }): void {
+    if (!this.inAppSelectionEnabled || this.selectionAnchor === null) {
+      return;
+    }
+    if (this.doubleClickPending) {
+      // A drag during a double-click would muddle the word-snap; the
+      // word-grab gesture is intentionally release-only here.
+      return;
+    }
+    const focus = this.resolveCellToSource(cell.x, cell.y);
+    if (focus === null) {
+      return;
+    }
+    this.selectionDragStarted = true;
+    this.setSelection(this.selectionAnchor, focus);
+  }
+
+  // Release half of the gesture. Finalizes (extract + clipboard +
+  // notify) when a real drag occurred or a word-grab double-click is
+  // pending; otherwise treats the gesture as a plain click and
+  // dismisses any prior selection. Always records the release for the
+  // next press's double-click timing check.
+  private handleSelectionRelease(cell: { x: number; y: number } | null): void {
+    const dragStarted = this.selectionDragStarted;
+    const doubleClick = this.doubleClickPending;
+    this.selectionAnchor = null;
+    this.selectionDragStarted = false;
+    this.doubleClickPending = false;
+    if (cell !== null) {
+      this.lastLeftClick = { x: cell.x, y: cell.y, t: Date.now() };
+    }
+    if (!this.inAppSelectionEnabled) {
+      return;
+    }
+    if (dragStarted || doubleClick) {
+      this.finalizeSelection();
+      return;
+    }
+    // Plain click (no drag, no word-grab): per spec, dismiss any prior
+    // selection. Block-click toggle already ran above.
+    if (this.selection !== null) {
+      this.clearSelection();
+    }
+  }
+
+  // ASCII word-boundary scan around the given source-line offset. Walks
+  // left and right while ASCII_WORD_RE matches, returning the half-open
+  // range [start, end). Returns null when the line is not in scrollback,
+  // when the body is ANSI-escaped (offsets would be unreliable), or
+  // when the character at the offset isn't a word character — matching
+  // the spec's "double-click on whitespace/punctuation does nothing
+  // beyond a normal click."
+  private wordBoundsAt(
+    pos: { sourceLineId: number; offset: number },
+  ): { start: number; end: number } | null {
+    const line = this.lineById(pos.sourceLineId);
+    if (line === null || line.ansi) {
+      return null;
+    }
+    const body = line.body ?? "";
+    if (body.length === 0) {
+      return null;
+    }
+    let idx = Math.max(0, Math.min(body.length - 1, pos.offset));
+    if (pos.offset >= body.length) {
+      idx = body.length - 1;
+    }
+    if (!ASCII_WORD_RE.test(body[idx]!)) {
+      return null;
+    }
+    let start = idx;
+    while (start > 0 && ASCII_WORD_RE.test(body[start - 1]!)) {
+      start--;
+    }
+    let end = idx + 1;
+    while (end < body.length && ASCII_WORD_RE.test(body[end]!)) {
+      end++;
+    }
+    return { start, end };
+  }
+
+  // Reverse lookup: source line id → FormattedLine. O(n) over the
+  // scrollback array; only used by infrequent gesture paths (double-
+  // click word snap, selection-text extraction), so a Set/Map mirror
+  // would be overkill here.
+  private lineById(sourceLineId: number): FormattedLine | null {
+    for (const line of this.lines) {
+      if (this.lineIds.get(line) === sourceLineId) {
+        return line;
+      }
+    }
+    return null;
+  }
+
+  // Display-order index of the line carrying `sourceLineId`, or -1. Used
+  // to order/bound the selection by on-screen position rather than by raw
+  // id (ids are reassigned on re-render and aren't monotonic with order).
+  private lineIndexById(sourceLineId: number): number {
+    for (let i = 0; i < this.lines.length; i++) {
+      const line = this.lines[i];
+      if (line && this.lineIds.get(line) === sourceLineId) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  // Hand a finalized selection to the system clipboard and surface a
+  // brief notification indicating how much was captured. Fire-and-
+  // forget: the gesture stays responsive; failures are reported via
+  // notify() so the user knows when nothing landed. The highlight is
+  // left on screen after copy — the user can scroll and inspect the
+  // captured range, then dismiss it with any keystroke.
+  private finalizeSelection(): void {
+    const text = this.getSelectionText();
+    if (text.length === 0) {
+      // Could happen when the selection's source lines were pruned
+      // between drag and release — silently do nothing.
+      return;
+    }
+    void writeClipboard(text).then(
+      (result) => {
+        if (result.ok) {
+          const chars = text.length;
+          this.notify(
+            `copied ${chars} char${chars === 1 ? "" : "s"} to clipboard`,
+          );
+        } else {
+          this.notify(`clipboard copy failed: ${result.reason}`);
+        }
+      },
+      (err) => {
+        this.notify(`clipboard copy failed: ${(err as Error).message}`);
+      },
+    );
   }
 
   // Extract the 1-based {x, y} cell from a terminal-kit mouse event's data
@@ -1909,6 +2549,76 @@ export class Screen {
     }
     const clicked = slice[sliceIdx];
     return clicked?.blockKey ?? null;
+  }
+
+  // Resolve a 1-based terminal cell (x, y) to a stable position in the
+  // logical scrollback: the source line's monotonic id and a code-unit
+  // offset into that line's body. Returns null for any cell outside the
+  // scrollback region (banner, session bar, separators, chip zone,
+  // completions, prompt, queued rows, modals) or for padding rows above
+  // shorter histories. The mapping is anchored to source content via
+  // wrapOrigin (populated by wrapOne), so a position survives scrolling
+  // and re-wrapping at a new terminal width — callers can re-resolve
+  // the same {sourceLineId, offset} after a repaint and find the same
+  // character. Column-to-offset uses the width-aware helper from T2 and
+  // snaps inside wide / composed glyphs to their cluster start.
+  resolveCellToSource(
+    x: number,
+    y: number,
+  ): { sourceLineId: number; offset: number } | null {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+    const w = this.term.width;
+    const top = 1;
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0) {
+      return null;
+    }
+    const rowIdx = y - top;
+    if (rowIdx < 0 || rowIdx >= visibleRows) {
+      return null;
+    }
+    if (x < 1 || x > w) {
+      return null;
+    }
+    const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
+    const end = wrapped.length - this.scrollOffset;
+    const start = Math.max(0, end - visibleRows);
+    const slice = wrapped.slice(start, end);
+    const padTop = Math.max(0, visibleRows - slice.length);
+    const sliceIdx = rowIdx - padTop;
+    if (sliceIdx < 0 || sliceIdx >= slice.length) {
+      return null;
+    }
+    const chunk = slice[sliceIdx];
+    if (!chunk) {
+      return null;
+    }
+    const origin = this.wrapOrigin.get(chunk);
+    if (!origin) {
+      return null;
+    }
+    const prefixCols = cellWidth(chunk.prefix ?? "");
+    const colInBody = x - 1 - prefixCols;
+    if (colInBody < 0) {
+      // Click landed in the gutter / continuation indent: anchor to the
+      // chunk's start in the source rather than reporting non-selectable.
+      return { sourceLineId: origin.sourceLineId, offset: origin.sourceColOffset };
+    }
+    // Styled bodies (agent / thoughts / headings) carry zero-width
+    // caret-markup spans. The pure column→offset helper has no notion
+    // of markup, so feed it a pre-segmented stream where `^X` / `^[...]`
+    // spans are tagged as zero-width — the offset then lands at a
+    // segment boundary and never inside a styling sequence. Plain
+    // bodies stay on the grapheme-only fast path.
+    const localOffset = bodyStyleUsesMarkup(chunk.bodyStyle)
+      ? columnToOffsetFromSegments(segmentForWidth(chunk.body), colInBody)
+      : columnToOffset(chunk.body, colInBody);
+    return {
+      sourceLineId: origin.sourceLineId,
+      offset: origin.sourceColOffset + localOffset,
+    };
   }
 
   scrollBy(delta: number): void {
@@ -2471,21 +3181,26 @@ export class Screen {
     const padTop = Math.max(0, visibleRows - slice.length);
     const matchInfo = this.currentMatchInfo();
     const activeLength = matchInfo?.length ?? 0;
+    // Rebuild the display-ordered selection bounds once per paint so each
+    // selectionRangeForChunk lookup below is O(1) and order-correct.
+    this.selectionRenderBounds = this.selectionLineBounds()?.byId ?? null;
     for (let i = 0; i < visibleRows; i++) {
       const row = top + i;
       const sliceIdx = i - padTop;
       const line = sliceIdx >= 0 ? slice[sliceIdx] : undefined;
       const activeCol = this.activeMatchCol(line, matchInfo);
+      const selRange = line ? this.selectionRangeForChunk(line) : null;
       const sig = formattedLineSig(
         "sb",
         w,
         line,
         this.scrollbackHighlight,
         activeCol,
+        selRange,
       );
       this.paintRow(row, sig, () => {
         if (line) {
-          this.writeFormattedLine(line, w, activeCol, activeLength);
+          this.writeFormattedLine(line, w, activeCol, activeLength, selRange);
         }
       });
     }
@@ -3405,6 +4120,7 @@ export class Screen {
     width: number,
     activeMatchCol: number | null = null,
     activeMatchLength: number = 0,
+    selectionRange: { start: number; end: number; toEndOfLine: boolean } | null = null,
   ): void {
     if (line.prefix) {
       writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle);
@@ -3433,7 +4149,43 @@ export class Screen {
     // spans). When activeMatchCol is set, the occurrence at that
     // exact col renders with the louder "search-highlight-active"
     // style so the user knows which match ^r/^s is pointing at.
-    if (this.scrollbackHighlight !== null && !line.ansi) {
+    // Selection highlight layers on top of the base style and on top
+    // of search-match highlighting. Split bodyText into [before, sel,
+    // after]; each piece falls through to the search-highlight writer
+    // when search is active, otherwise to plain writeStyled. The sel
+    // piece always renders as "selection-highlight" so the inverse
+    // band is unmistakable regardless of base style or whether a
+    // search match also lands inside the range.
+    const renderPiece = (text: string, baseOffset: number) => {
+      if (text.length === 0) {
+        return;
+      }
+      if (this.scrollbackHighlight !== null && !line.ansi) {
+        const adjustedActive =
+          activeMatchCol !== null && activeMatchCol >= baseOffset
+            ? activeMatchCol - baseOffset
+            : null;
+        writeBodyWithHighlight(
+          this.term,
+          text,
+          line.bodyStyle,
+          this.scrollbackHighlight,
+          adjustedActive,
+          activeMatchLength,
+        );
+      } else {
+        writeStyled(this.term, text, line.bodyStyle);
+      }
+    };
+    if (selectionRange !== null && !line.ansi) {
+      const selStart = Math.max(0, Math.min(bodyText.length, selectionRange.start));
+      const selEnd = Math.max(selStart, Math.min(bodyText.length, selectionRange.end));
+      renderPiece(bodyText.slice(0, selStart), 0);
+      if (selEnd > selStart) {
+        writeStyled(this.term, bodyText.slice(selStart, selEnd), "selection-highlight");
+      }
+      renderPiece(bodyText.slice(selEnd), selEnd);
+    } else if (this.scrollbackHighlight !== null && !line.ansi) {
       writeBodyWithHighlight(
         this.term,
         bodyText,
@@ -3449,7 +4201,15 @@ export class Screen {
       const visible = line.ansi ? stringWidth(bodyText) : cellWidth(bodyText);
       const pad = remaining - visible;
       if (pad > 0) {
-        writeStyled(this.term, " ".repeat(pad), line.bodyStyle);
+        // When the selection extends past this chunk's body (multi-
+        // row selection), paint the padding with the same highlight
+        // so the band reads as a continuous rectangle across wraps
+        // and lines instead of stopping at the end of each text run.
+        const fillStyle: Style | undefined =
+          selectionRange !== null && selectionRange.toEndOfLine
+            ? "selection-highlight"
+            : line.bodyStyle;
+        writeStyled(this.term, " ".repeat(pad), fillStyle);
       }
     }
     // Defensive reset: if the body contained terminal-kit markup
@@ -3488,10 +4248,14 @@ function formattedLineSig(
   line: FormattedLine | undefined,
   highlight: string | null = null,
   activeCol: number | null = null,
+  selectionRange: { start: number; end: number; toEndOfLine: boolean } | null = null,
 ): string {
   const active = activeCol === null ? "" : `a${activeCol}`;
+  const sel = selectionRange === null
+    ? ""
+    : `s${selectionRange.start}:${selectionRange.end}${selectionRange.toEndOfLine ? "f" : ""}`;
   if (!line) {
-    return `${zone}|${width}|empty|${highlight ?? ""}|${active}`;
+    return `${zone}|${width}|empty|${highlight ?? ""}|${active}|${sel}`;
   }
   // iTerm2 image fingerprint: heightCells + base64 length is enough —
   // identical base64s of the same length are de-facto identical images
@@ -3505,7 +4269,7 @@ function formattedLineSig(
     `${line.prefix ?? ""}|${line.prefixStyle ?? ""}|` +
     `${line.body}|${line.bodyStyle ?? ""}|` +
     `${line.ansi ? "1" : "0"}|${line.fillRow ? "1" : "0"}|` +
-    `${highlight ?? ""}|${active}|${img}`
+    `${highlight ?? ""}|${active}|${sel}|${img}`
   );
 }
 
@@ -3803,6 +4567,15 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       // without being unreadable on light terminal themes.
       term.bgBrightYellow.black.noFormat(text);
       return;
+    case "selection-highlight":
+      // Classic inverse-video band for the active text selection.
+      // Reads as a selection across every base style (agent markup,
+      // code blocks, dim, thoughts) and stays distinct from the
+      // yellow-bg search-highlight / red-bg search-highlight-active
+      // treatments so the two layers don't collide visually when both
+      // are active on the same row.
+      term.inverse.noFormat(text);
+      return;
     case "search-highlight-active":
       // The single "current" match — visually distinct from the
       // generic yellow-bg highlight so the user can spot which match
@@ -3872,7 +4645,7 @@ interface MarkupMatch {
   width: number;
 }
 
-function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
+export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
   if (text.charCodeAt(i) !== 0x5e /* ^ */) {
     return null;
   }
@@ -3893,6 +4666,30 @@ function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
     return { text: text.slice(i, i + 2), width: 0 };
   }
   return null;
+}
+
+// Drop every terminal-kit caret-markup span from `text`, leaving only the
+// visible characters. Escaped carets (`^^`) collapse back to a single `^`.
+// Used when copying a styled scrollback line to the clipboard so the
+// payload is plain text — the same grammar that wrap/truncate already
+// recognize, with no parallel definition.
+export function stripTkMarkup(text: string): string {
+  if (!text.includes("^"))
+    return text;
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const m = matchTkMarkupAt(text, i);
+    if (m) {
+      if (m.width > 0)
+        out += "^";
+      i += m.text.length;
+      continue;
+    }
+    out += text[i];
+    i += 1;
+  }
+  return out;
 }
 
 function hasTkMarkup(text: string): boolean {
@@ -3917,7 +4714,7 @@ interface WidthSegment {
 // via string-width). Used by the markup-aware wrap/truncate paths so a
 // `^Cfoo^:` span is never split across rows and is excluded from the
 // visible-column budget.
-function* segmentForWidth(text: string): IterableIterator<WidthSegment> {
+export function* segmentForWidth(text: string): IterableIterator<WidthSegment> {
   let i = 0;
   while (i < text.length) {
     const m = matchTkMarkupAt(text, i);

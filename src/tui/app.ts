@@ -24,6 +24,7 @@ import {
   setTuiConfigValue,
   setDefaultAgent,
   hasConfiguredDefaultAgent,
+  resolveInAppSelection,
   type HydraConfig,
 } from "../core/config.js";
 import { validateLocalCwd } from "../core/cwd.js";
@@ -219,6 +220,10 @@ interface ViewPrefs {
   showFileUpdates: "none" | "edit" | "diff";
   // Whether mouse capture is on (wheel scrolls vs. native text select).
   mouseEnabled: boolean;
+  // Whether the in-app text-selection feature is on. Independent of
+  // mouseEnabled — see core/config.ts resolveInAppSelection for the
+  // default (follows mouse capture) and the override semantics.
+  inAppSelectionEnabled: boolean;
   // What unmodified Enter does in the composer. Mirrors
   // config.tui.defaultEnterAction; the options dialog flips it live.
   defaultEnterAction: "enqueue" | "amend";
@@ -336,6 +341,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     planExpanded: false,
     showFileUpdates: config.tui.showFileUpdates,
     mouseEnabled: config.tui.mouse,
+    inAppSelectionEnabled: resolveInAppSelection(config),
     defaultEnterAction: config.tui.defaultEnterAction,
   };
   // Picker filter toggles (cwd-only, host) are mutated in place by the
@@ -1500,6 +1506,7 @@ async function runSession(
     repaintThrottleMs: config.tui.repaintThrottleMs,
     maxScrollbackLines: config.tui.maxScrollbackLines,
     mouse: viewPrefs.mouseEnabled,
+    inAppSelection: viewPrefs.inAppSelectionEnabled,
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
     onSuspend: process.platform !== "win32" ? onSuspend : undefined,

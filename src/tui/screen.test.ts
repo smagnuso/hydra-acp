@@ -4,7 +4,7 @@ import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import { parseThoughtMarkdown } from "./format.js";
 import { setAmbiguousWide } from "./screen.js";
-import type { InputDispatcher } from "./input.js";
+import type { InputDispatcher, KeyEvent } from "./input.js";
 import {
   Screen,
   buildIterm2ImageEscape,
@@ -1644,5 +1644,374 @@ describe("Screen block-click routing", () => {
     ]);
     // Only one visible row now; it belongs to the lead key.
     expect(callKeyAtRow(screen, visibleRows(screen))).toBe("thought:0");
+  });
+
+  function resolve(
+    screen: Screen,
+    x: number,
+    y: number,
+  ): { sourceLineId: number; offset: number } | null {
+    return (
+      screen as unknown as {
+        resolveCellToSource: (
+          x: number,
+          y: number,
+        ) => { sourceLineId: number; offset: number } | null;
+      }
+    ).resolveCellToSource(x, y);
+  }
+
+  it("resolveCellToSource maps clicks to source line + offset", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    screen.appendLine({ body: "hello world" });
+    screen.appendLine({ body: "second line text" });
+    const rows = visibleRows(screen);
+    // Bottom row is "second line text"; click on 't' of "text" (col 13, 0-based 12).
+    const r = resolve(screen, 13, rows);
+    expect(r).not.toBeNull();
+    expect(r!.offset).toBe(12);
+    // Row above is "hello world"; column 1 -> offset 0.
+    const r2 = resolve(screen, 1, rows - 1);
+    expect(r2).not.toBeNull();
+    expect(r2!.offset).toBe(0);
+    expect(r2!.sourceLineId).not.toBe(r!.sourceLineId);
+  });
+
+  it("resolveCellToSource returns null outside the scrollback region", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    screen.appendLine({ body: "hello" });
+    const rows = visibleRows(screen);
+    expect(resolve(screen, 1, 0)).toBeNull();
+    expect(resolve(screen, 1, rows + 1)).toBeNull();
+    expect(resolve(screen, 0, rows)).toBeNull();
+    expect(resolve(screen, 1000, rows)).toBeNull();
+    // Padding rows above a short history return null.
+    expect(resolve(screen, 1, 1)).toBeNull();
+  });
+
+  it("resolveCellToSource is width-aware (CJK / wide glyphs)", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    // Each Chinese char is width 2. Cols: 你=0..2, 好=2..4, 世=4..6, 界=6..8
+    screen.appendLine({ body: "你好世界" });
+    const rows = visibleRows(screen);
+    // x=3 -> col 2 -> start of 好 (offset 1 in JS string).
+    const r = resolve(screen, 3, rows);
+    expect(r).not.toBeNull();
+    expect(r!.offset).toBe(1);
+    // x=2 -> col 1 -> inside 你; snaps left to offset 0.
+    const r2 = resolve(screen, 2, rows);
+    expect(r2!.offset).toBe(0);
+  });
+
+  function selectionRangeFor(
+    screen: Screen,
+    line: FormattedLine,
+  ): { start: number; end: number; toEndOfLine: boolean } | null {
+    return (
+      screen as unknown as {
+        selectionRangeForChunk: (
+          l: FormattedLine,
+        ) => { start: number; end: number; toEndOfLine: boolean } | null;
+      }
+    ).selectionRangeForChunk(line);
+  }
+
+  it("setSelection normalizes anchor/focus order and clears on degenerate range", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    screen.appendLine({ body: "hello world" });
+    const a = resolve(screen, 1, visibleRows(screen))!;
+    const b = resolve(screen, 5, visibleRows(screen))!;
+    // Pass in reversed order — should normalize.
+    screen.setSelection(b, a);
+    const sel = screen.getSelection();
+    expect(sel).not.toBeNull();
+    expect(sel!.start.offset).toBe(0);
+    expect(sel!.end.offset).toBe(4);
+    // Same point clears.
+    screen.setSelection(a, a);
+    expect(screen.getSelection()).toBeNull();
+  });
+
+  it("selectionRangeForChunk maps single-line selection to chunk offsets", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    screen.appendLine({ body: "hello world" });
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 3, rows)!; // offset 2
+    const b = resolve(screen, 8, rows)!; // offset 7
+    screen.setSelection(a, b);
+    const wrapped = wrapAll(screen, 40);
+    // Single chunk for short line.
+    const chunk = wrapped[wrapped.length - 1]!;
+    const range = selectionRangeFor(screen, chunk);
+    expect(range).not.toBeNull();
+    expect(range!.start).toBe(2);
+    expect(range!.end).toBe(7);
+    expect(range!.toEndOfLine).toBe(false);
+  });
+
+  it("selectionRangeForChunk spans multiple source lines (full middle, partial ends)", () => {
+    const screen = makeTallScreen({ width: 80, height: 24 });
+    screen.appendLine({ body: "first line" });
+    screen.appendLine({ body: "middle line" });
+    screen.appendLine({ body: "last line" });
+    const wrapped = wrapAll(screen, 80);
+    const firstChunk = wrapped[wrapped.length - 3]!;
+    const midChunk = wrapped[wrapped.length - 2]!;
+    const lastChunk = wrapped[wrapped.length - 1]!;
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 4, rows - 2)!; // "first line" col 3 -> offset 3
+    const b = resolve(screen, 5, rows)!; // "last line" col 4 -> offset 4
+    screen.setSelection(a, b);
+    const r1 = selectionRangeFor(screen, firstChunk);
+    expect(r1).not.toBeNull();
+    expect(r1!.start).toBe(3);
+    expect(r1!.end).toBe(firstChunk.body.length);
+    expect(r1!.toEndOfLine).toBe(true);
+    const r2 = selectionRangeFor(screen, midChunk);
+    expect(r2).not.toBeNull();
+    expect(r2!.start).toBe(0);
+    expect(r2!.end).toBe(midChunk.body.length);
+    expect(r2!.toEndOfLine).toBe(true);
+    const r3 = selectionRangeFor(screen, lastChunk);
+    expect(r3).not.toBeNull();
+    expect(r3!.start).toBe(0);
+    expect(r3!.end).toBe(4);
+    expect(r3!.toEndOfLine).toBe(false);
+  });
+
+  it("selectionRangeForChunk returns null for chunks outside the selection", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    screen.appendLine({ body: "above" });
+    screen.appendLine({ body: "selected" });
+    screen.appendLine({ body: "below" });
+    const wrapped = wrapAll(screen, 40);
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 1, rows - 1)!;
+    const b = resolve(screen, 5, rows - 1)!;
+    screen.setSelection(a, b);
+    expect(selectionRangeFor(screen, wrapped[wrapped.length - 3]!)).toBeNull();
+    expect(selectionRangeFor(screen, wrapped[wrapped.length - 1]!)).toBeNull();
+    expect(selectionRangeFor(screen, wrapped[wrapped.length - 2]!)).not.toBeNull();
+  });
+
+  it("selection survives scroll: range still resolves after scrollBy", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    for (let i = 0; i < 200; i++) {
+      screen.appendLine({ body: `line-${i}` });
+    }
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 1, rows)!;
+    const b = resolve(screen, 4, rows)!;
+    screen.setSelection(a, b);
+    const before = screen.getSelection()!;
+    (screen as unknown as { scrollBy: (n: number) => void }).scrollBy(20);
+    const after = screen.getSelection();
+    expect(after).not.toBeNull();
+    expect(after!.start.sourceLineId).toBe(before.start.sourceLineId);
+    expect(after!.start.offset).toBe(before.start.offset);
+    expect(after!.end.sourceLineId).toBe(before.end.sourceLineId);
+    expect(after!.end.offset).toBe(before.end.offset);
+  });
+
+  it("selection range is width-aware (multi-byte / wide chars)", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    // 你好世界 — each 2 cols wide, JS string length 4.
+    screen.appendLine({ body: "你好世界" });
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 3, rows)!; // start of 好 -> offset 1
+    const b = resolve(screen, 7, rows)!; // start of 界 -> offset 3
+    screen.setSelection(a, b);
+    const wrapped = wrapAll(screen, 40);
+    const range = selectionRangeFor(screen, wrapped[wrapped.length - 1]!);
+    expect(range).not.toBeNull();
+    expect(range!.start).toBe(1);
+    expect(range!.end).toBe(3);
+  });
+
+  it("press-drag-release establishes a selection and copies via clipboard fallback", async () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "hello world" });
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 6, y });
+    expect(screen.hasSelection()).toBe(true);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y });
+    expect(screen.getSelectionText()).toBe("hello");
+    // After release, selection remains intact (user may want to scroll
+    // to look around before dismissing with a keystroke).
+    expect(screen.hasSelection()).toBe(true);
+  });
+
+  it("a plain click with no drag dismisses any prior selection", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "hello world" });
+    const y = visibleRows(screen);
+    const a = resolve(screen, 1, y)!;
+    const b = resolve(screen, 6, y)!;
+    screen.setSelection(a, b);
+    expect(screen.hasSelection()).toBe(true);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+    expect(screen.hasSelection()).toBe(false);
+  });
+
+  it("double-click on a word snaps the selection to its ASCII bounds", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "alpha beta gamma" });
+    const y = visibleRows(screen);
+    // Click on the 'e' in "beta" (column 8 -> offset 7).
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    // Second click within the double-click window.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    expect(screen.getSelectionText()).toBe("beta");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    expect(screen.getSelectionText()).toBe("beta");
+  });
+
+  it("double-click on whitespace does not create a selection", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "alpha beta" });
+    const y = visibleRows(screen);
+    // Column 6 is the space between alpha and beta.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 6, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 6, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y });
+    expect(screen.hasSelection()).toBe(false);
+  });
+
+  it("any keystroke clears an active selection before the host onKey runs", () => {
+    const seen: KeyEvent[] = [];
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Re-install the host onKey through the constructor wrapper by
+    // re-running the wrap closure: capture the wrapper's selection-
+    // clear behaviour while observing host events.
+    const wrapper = (screen as unknown as { onKey: (e: KeyEvent[]) => void }).onKey;
+    (screen as unknown as { onKey: (e: KeyEvent[]) => void }).onKey = (e) => {
+      seen.push(...e);
+      wrapper(e);
+    };
+    screen.appendLine({ body: "hello world" });
+    const y = visibleRows(screen);
+    const a = resolve(screen, 1, y)!;
+    const b = resolve(screen, 6, y)!;
+    screen.setSelection(a, b);
+    expect(screen.hasSelection()).toBe(true);
+    (screen as unknown as {
+      handleKey: (n: string, d: { isCharacter?: boolean }) => void;
+    }).handleKey("a", { isCharacter: true });
+    expect(screen.hasSelection()).toBe(false);
+    expect(seen.length).toBe(1);
+  });
+
+  it("opening a modal clears any active selection", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "hello world" });
+    const y = visibleRows(screen);
+    const a = resolve(screen, 1, y)!;
+    const b = resolve(screen, 6, y)!;
+    screen.setSelection(a, b);
+    screen.setOptionsPrompt({
+      title: "Options",
+      options: [],
+      hint: "",
+      cursor: 0,
+    } as unknown as Parameters<Screen["setOptionsPrompt"]>[0] extends infer T
+      ? T extends null ? never : T : never);
+    expect(screen.hasSelection()).toBe(false);
+  });
+
+  it("getSelectionText slices partial first/last lines and joins with newlines", () => {
+    const screen = makeTallScreen({ width: 80, height: 24 });
+    screen.appendLine({ body: "first line" });
+    screen.appendLine({ body: "middle line" });
+    screen.appendLine({ body: "last line" });
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 4, rows - 2)!; // 'first line' offset 3
+    const b = resolve(screen, 5, rows)!; // 'last line' offset 4
+    screen.setSelection(a, b);
+    expect(screen.getSelectionText()).toBe("st line\nmiddle line\nlast");
+  });
+
+  it("selection orders by display position when line ids are non-monotonic", () => {
+    // Re-rendering a block via upsertLines reassigns it a FRESH (higher)
+    // line id while it keeps its original, higher-up slot — so the line
+    // ABOVE can carry a higher id than the line BELOW. Selection extent
+    // and extraction must follow display order, not id order, or a small
+    // visual selection copies the wrong (or empty) range.
+    const screen = makeTallScreen({ width: 80, height: 24 });
+    screen.upsertLines("top", [{ body: "alpha" }]); // id 1, row 0
+    screen.appendLine({ body: "bravo" }); // id 2, row 1
+    screen.upsertLines("top", [{ body: "alpha" }]); // re-render: id 3, still row 0
+    const rows = visibleRows(screen);
+    const top = resolve(screen, 1, rows - 1)!; // 'alpha' offset 0 (higher id)
+    const bottom = resolve(screen, 6, rows)!; // 'bravo' end (lower id)
+    expect(top.sourceLineId).toBeGreaterThan(bottom.sourceLineId);
+    screen.setSelection(top, bottom);
+    expect(screen.getSelectionText()).toBe("alpha\nbravo");
+    // Anchor order shouldn't matter — reversed drag yields the same text.
+    screen.setSelection(bottom, top);
+    expect(screen.getSelectionText()).toBe("alpha\nbravo");
+  });
+
+  it("getSelectionText returns empty after the selection's source lines are pruned", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    (screen as unknown as { maxScrollbackLines: number }).maxScrollbackLines = 50;
+    for (let i = 0; i < 50; i++) {
+      screen.appendLine({ body: `line-${i}` });
+    }
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 1, rows)!;
+    const b = resolve(screen, 4, rows)!;
+    screen.setSelection(a, b);
+    expect(screen.hasSelection()).toBe(true);
+    // Push the selected line off the head.
+    for (let i = 0; i < 200; i++) {
+      screen.appendLine({ body: `flood-${i}` });
+    }
+    expect(screen.hasSelection()).toBe(false);
+    expect(screen.getSelectionText()).toBe("");
+  });
+
+  it("scroll mid-interaction or after release preserves the selection", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    for (let i = 0; i < 200; i++) {
+      screen.appendLine({ body: `line-${i}` });
+    }
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 4, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 4, y });
+    expect(screen.hasSelection()).toBe(true);
+    (screen as unknown as { scrollBy: (n: number) => void }).scrollBy(20);
+    expect(screen.hasSelection()).toBe(true);
+  });
+
+  it("opt-out: in-app selection disabled means no drag selection", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.setInAppSelectionEnabled(false);
+    screen.appendLine({ body: "hello world" });
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 6, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y });
+    expect(screen.hasSelection()).toBe(false);
+  });
+
+  it("resolveCellToSource survives wrapping at different widths", () => {
+    const screen = makeTallScreen({ width: 40, height: 24 });
+    // Long line will wrap at narrow width into multiple chunks.
+    const body = "abcdefghij klmnopqrst uvwxyz0123 456789";
+    screen.appendLine({ body });
+    const rows = visibleRows(screen);
+    // Click somewhere in the middle row, recover an offset, and verify it
+    // points to the same code-unit content. We can't easily compare offsets
+    // across width changes without rewrapping the mock, but we can assert
+    // the offset points into the original body and is within range.
+    const r = resolve(screen, 5, rows);
+    expect(r).not.toBeNull();
+    expect(r!.offset).toBeGreaterThanOrEqual(0);
+    expect(r!.offset).toBeLessThan(body.length);
   });
 });

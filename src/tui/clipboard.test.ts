@@ -1,4 +1,4 @@
-import { EventEmitter, Readable } from "node:stream";
+import { EventEmitter, PassThrough, Readable } from "node:stream";
 import fs from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import os from "node:os";
@@ -6,7 +6,11 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readClipboard, type SpawnLike } from "./clipboard.js";
+import {
+  readClipboard,
+  writeClipboard,
+  type SpawnLike,
+} from "./clipboard.js";
 
 // A spawn fake that walks through a queue of pre-staged outcomes. Each
 // outcome models a single child process: stdout bytes, optional stderr,
@@ -19,16 +23,27 @@ interface SpawnOutcome {
   // If set, the file at this path is written before exit. Used to
   // simulate osascript dropping a PNG into the temp file we passed it.
   writeFile?: { path: string; bytes: Buffer };
+  // If set, bytes piped to stdin are appended here so writer tests
+  // can assert what was forwarded to pbcopy / wl-copy / xclip.
+  stdinSink?: Buffer[];
 }
 
 function makeSpawnFake(outcomes: SpawnOutcome[]): {
   spawn: SpawnLike;
-  calls: Array<{ cmd: string; args: string[] }>;
+  calls: Array<{ cmd: string; args: string[]; options?: { stdio?: Array<"pipe" | "ignore"> } }>;
 } {
-  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const calls: Array<{
+    cmd: string;
+    args: string[];
+    options?: { stdio?: Array<"pipe" | "ignore"> };
+  }> = [];
   let i = 0;
-  const spawn: SpawnLike = (cmd: string, args: string[]) => {
-    calls.push({ cmd, args });
+  const spawn: SpawnLike = (
+    cmd: string,
+    args: string[],
+    options?: { stdio?: Array<"pipe" | "ignore"> },
+  ) => {
+    calls.push({ cmd, args, options });
     const outcome = outcomes[i++];
     if (!outcome) {
       throw new Error(`unexpected spawn(${cmd} ${args.join(" ")})`);
@@ -42,6 +57,16 @@ function makeSpawnFake(outcomes: SpawnOutcome[]): {
     const proc = emitter as unknown as ReturnType<SpawnLike> & EventEmitter;
     (proc as unknown as { stdout: Readable }).stdout = stdout;
     (proc as unknown as { stderr: Readable }).stderr = stderr;
+    const stdin = new PassThrough();
+    if (outcome.stdinSink) {
+      const sink = outcome.stdinSink;
+      stdin.on("data", (chunk: Buffer) => {
+        sink.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+    } else {
+      stdin.on("data", () => undefined);
+    }
+    (proc as unknown as { stdin: PassThrough }).stdin = stdin;
     queueMicrotask(async () => {
       if (outcome.writeFile) {
         await fs.writeFile(outcome.writeFile.path, outcome.writeFile.bytes);
@@ -394,6 +419,229 @@ describe("readClipboard — Linux", () => {
       tmpdir: () => "/tmp",
     });
     expect(result).toEqual({ ok: false, reason: "clipboard is empty" });
+  });
+});
+
+describe("writeClipboard", () => {
+  it("pipes text to pbcopy on macOS", async () => {
+    const sink: Buffer[] = [];
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "pbcopy", args: [], code: 0, stdinSink: sink },
+    ]);
+    const result = await writeClipboard("hello mac", {
+      platform: "darwin",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result).toEqual({ ok: true, method: "pbcopy" });
+    expect(calls[0]?.cmd).toBe("pbcopy");
+    expect(Buffer.concat(sink).toString("utf-8")).toBe("hello mac");
+  });
+
+  it("falls back to OSC 52 when pbcopy exits non-zero and a TTY is available", async () => {
+    const { spawn } = makeSpawnFake([
+      { cmd: "pbcopy", args: [], code: 1 },
+    ]);
+    let captured = "";
+    const result = await writeClipboard("payload", {
+      platform: "darwin",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: (d) => {
+        captured = d;
+        return true;
+      },
+    });
+    expect(result).toEqual({ ok: true, method: "osc52" });
+    const expected = Buffer.from("payload", "utf-8").toString("base64");
+    expect(captured).toBe(`\x1b]52;c;${expected}\x07`);
+  });
+
+  it("pipes text to wl-copy on Wayland Linux, mirroring into PRIMARY", async () => {
+    const sink: Buffer[] = [];
+    const primarySink: Buffer[] = [];
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["wl-copy"], code: 0 },
+      { cmd: "wl-copy", args: [], code: 0, stdinSink: sink },
+      { cmd: "wl-copy", args: ["--primary"], code: 0, stdinSink: primarySink },
+    ]);
+    const result = await writeClipboard("wayland-text", {
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "wayland-0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result).toEqual({ ok: true, method: "wl-copy" });
+    expect(calls.map((c) => c.cmd)).toEqual(["which", "wl-copy", "wl-copy"]);
+    expect(calls[2]?.args).toEqual(["--primary"]);
+    expect(Buffer.concat(sink).toString("utf-8")).toBe("wayland-text");
+    expect(Buffer.concat(primarySink).toString("utf-8")).toBe("wayland-text");
+  });
+
+  it("pipes text to xclip on X11 Linux, mirroring into PRIMARY", async () => {
+    const sink: Buffer[] = [];
+    const primarySink: Buffer[] = [];
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 0 },
+      {
+        cmd: "xclip",
+        args: ["-selection", "clipboard", "-i"],
+        code: 0,
+        stdinSink: sink,
+      },
+      {
+        cmd: "xclip",
+        args: ["-selection", "primary", "-i"],
+        code: 0,
+        stdinSink: primarySink,
+      },
+    ]);
+    const result = await writeClipboard("x11-text", {
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result).toEqual({ ok: true, method: "xclip" });
+    expect(Buffer.concat(sink).toString("utf-8")).toBe("x11-text");
+    expect(Buffer.concat(primarySink).toString("utf-8")).toBe("x11-text");
+    // Writers must ignore stdout/stderr: xclip/wl-copy daemonize to serve
+    // the selection, and piping their stdio makes node's "close" wait for
+    // the daemon to die — serializing writes and lagging PRIMARY a full
+    // selection behind (the off-by-one paste bug).
+    const xclipCalls = calls.filter((c) => c.cmd === "xclip");
+    expect(xclipCalls.length).toBe(2);
+    for (const c of xclipCalls) {
+      expect(c.options?.stdio).toEqual(["pipe", "ignore", "ignore"]);
+    }
+  });
+
+  it("still succeeds when the PRIMARY mirror write fails (best-effort)", async () => {
+    const sink: Buffer[] = [];
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 0 },
+      {
+        cmd: "xclip",
+        args: ["-selection", "clipboard", "-i"],
+        code: 0,
+        stdinSink: sink,
+      },
+      { cmd: "xclip", args: ["-selection", "primary", "-i"], code: 1 },
+    ]);
+    const result = await writeClipboard("x11-text", {
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result).toEqual({ ok: true, method: "xclip" });
+    expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip", "xclip"]);
+    expect(Buffer.concat(sink).toString("utf-8")).toBe("x11-text");
+  });
+
+  it("uses OSC 52 on Linux with no display and no tools, when a TTY is available", async () => {
+    const { spawn } = makeSpawnFake([]);
+    let captured = "";
+    const result = await writeClipboard("remote payload", {
+      platform: "linux",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: (d) => {
+        captured = d;
+        return true;
+      },
+    });
+    expect(result).toEqual({ ok: true, method: "osc52" });
+    expect(captured.startsWith("\x1b]52;c;")).toBe(true);
+    expect(captured.endsWith("\x07")).toBe(true);
+    const b64 = captured.slice("\x1b]52;c;".length, -1);
+    expect(Buffer.from(b64, "base64").toString("utf-8")).toBe("remote payload");
+  });
+
+  it("wraps OSC 52 in tmux passthrough when TMUX is set", async () => {
+    const { spawn } = makeSpawnFake([]);
+    let captured = "";
+    const result = await writeClipboard("tmuxed", {
+      platform: "linux",
+      env: { TMUX: "/tmp/tmux-1000/default,1234,0" },
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: (d) => {
+        captured = d;
+        return true;
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(captured.startsWith("\x1bPtmux;\x1b\x1b]52;c;")).toBe(true);
+    expect(captured.endsWith("\x1b\\")).toBe(true);
+  });
+
+  it("returns the native platform reason when both native and OSC 52 are unavailable", async () => {
+    const { spawn } = makeSpawnFake([]);
+    const result = await writeClipboard("x", {
+      platform: "linux",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: () => false,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/wl-clipboard.*xclip/);
+    }
+  });
+
+  it("returns a structured error on Windows when no TTY is available", async () => {
+    const { spawn } = makeSpawnFake([]);
+    const result = await writeClipboard("x", {
+      platform: "win32",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: () => false,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/win32/);
+    }
+  });
+
+  it("uses OSC 52 on Windows when a capable terminal TTY is available", async () => {
+    const { spawn } = makeSpawnFake([]);
+    let captured = "";
+    const result = await writeClipboard("winpayload", {
+      platform: "win32",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: (d) => {
+        captured = d;
+        return true;
+      },
+    });
+    expect(result.ok && result.method).toBe("osc52");
+    expect(captured).toContain(
+      Buffer.from("winpayload", "utf-8").toString("base64"),
+    );
+  });
+
+  it("rejects payloads too large for OSC 52", async () => {
+    const { spawn } = makeSpawnFake([]);
+    const huge = "a".repeat(100000);
+    const result = await writeClipboard(huge, {
+      platform: "win32",
+      env: {},
+      spawn,
+      tmpdir: () => "/tmp",
+      ttyWrite: () => true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/too large/);
+    }
   });
 });
 

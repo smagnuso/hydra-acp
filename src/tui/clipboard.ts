@@ -45,9 +45,14 @@ export interface SpawnLike {
   (
     cmd: string,
     args: string[],
+    options?: { stdio?: Array<"pipe" | "ignore"> },
   ): {
     stdout: NodeJS.ReadableStream | null;
     stderr: NodeJS.ReadableStream | null;
+    // Optional stdin sink. Writers (pbcopy / wl-copy / xclip) need to
+    // pipe the payload in; readers don't touch it. Marked optional so
+    // existing readers and test fakes that omit it still typecheck.
+    stdin?: NodeJS.WritableStream | null;
     on(event: "error", cb: (err: Error) => void): void;
     on(event: "close", cb: (code: number | null) => void): void;
   };
@@ -58,6 +63,11 @@ export interface ClipboardEnv {
   env: NodeJS.ProcessEnv;
   spawn: SpawnLike;
   tmpdir: () => string;
+  // OSC 52 sink for the SSH-remote path. When set, write() receives a
+  // ready-to-emit escape sequence; return value indicates whether the
+  // write was accepted (i.e., the sink is a usable TTY). Defaults to
+  // probing process.stderr / process.stdout for a TTY at call time.
+  ttyWrite?: (data: string) => boolean;
 }
 
 const defaultEnv: ClipboardEnv = {
@@ -81,6 +91,171 @@ export async function readClipboard(
     ok: false,
     reason: `clipboard paste is not supported on ${env.platform}`,
   };
+}
+
+export type ClipboardWriteMethod =
+  | "pbcopy"
+  | "wl-copy"
+  | "xclip"
+  | "osc52";
+
+export type ClipboardWriteResult =
+  | { ok: true; method: ClipboardWriteMethod }
+  | { ok: false; reason: string };
+
+// OSC 52 payload size cap. xterm's documented limit is 100000 bytes of
+// base64; many terminals enforce smaller. We pick a conservative cap
+// so a giant selection doesn't silently truncate in the terminal.
+const OSC52_MAX_BYTES = 74994;
+
+export async function writeClipboard(
+  text: string,
+  envIn: Partial<ClipboardEnv> = {},
+): Promise<ClipboardWriteResult> {
+  const env: ClipboardEnv = { ...defaultEnv, ...envIn };
+  // Try the native tool first — it's the most reliable and works for
+  // local sessions. OSC 52 is the SSH-remote fallback: when the user
+  // is on a remote host with no DISPLAY/WAYLAND_DISPLAY and no pbcopy,
+  // the only way to reach the user's actual clipboard is through the
+  // terminal emulator they're sitting in front of.
+  const native = await writeNative(env, text);
+  if (native.ok) {
+    return native;
+  }
+  const osc = writeOsc52(env, text);
+  if (osc.ok) {
+    return osc;
+  }
+  // OSC 52's "no TTY" reason is rarely the real story when the native
+  // path also failed (the user probably wanted pbcopy / wl-copy /
+  // xclip). Other OSC 52 reasons (e.g. payload too large) are specific
+  // and should win — those tell the user something actionable about
+  // the only fallback path that exists.
+  if (osc.reason !== NO_TTY_REASON) {
+    return osc;
+  }
+  return native;
+}
+
+const NO_TTY_REASON = "no TTY available for OSC 52 clipboard write";
+
+async function writeNative(
+  env: ClipboardEnv,
+  text: string,
+): Promise<ClipboardWriteResult> {
+  if (env.platform === "darwin") {
+    try {
+      await runWithStdin(env.spawn, "pbcopy", [], Buffer.from(text, "utf-8"));
+      return { ok: true, method: "pbcopy" };
+    } catch {
+      return { ok: false, reason: "pbcopy failed" };
+    }
+  }
+  if (env.platform === "linux") {
+    const buf = Buffer.from(text, "utf-8");
+    if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-copy"))) {
+      try {
+        await runWithStdin(env.spawn, "wl-copy", [], buf);
+        // Mirror into the PRIMARY selection so middle-click paste matches
+        // native terminal select-to-copy. Best-effort: a PRIMARY failure
+        // must not fail the copy the user actually asked for.
+        await writePrimaryBestEffort(env, "wl-copy", ["--primary"], buf);
+        return { ok: true, method: "wl-copy" };
+      } catch {
+        return { ok: false, reason: "wl-copy failed" };
+      }
+    }
+    if (env.env.DISPLAY && (await which(env, "xclip"))) {
+      try {
+        await runWithStdin(
+          env.spawn,
+          "xclip",
+          ["-selection", "clipboard", "-i"],
+          buf,
+        );
+        await writePrimaryBestEffort(
+          env,
+          "xclip",
+          ["-selection", "primary", "-i"],
+          buf,
+        );
+        return { ok: true, method: "xclip" };
+      } catch {
+        return { ok: false, reason: "xclip failed" };
+      }
+    }
+    return {
+      ok: false,
+      reason:
+        "install wl-clipboard (Wayland) or xclip (X11) to copy to the clipboard",
+    };
+  }
+  return {
+    ok: false,
+    reason: `clipboard copy is not supported on ${env.platform}`,
+  };
+}
+
+// Write the same payload into the X11/Wayland PRIMARY selection (the
+// middle-click paste buffer). Failures are swallowed: PRIMARY is a
+// nice-to-have that mirrors native select-to-copy, and the CLIPBOARD
+// write has already succeeded by the time we get here.
+async function writePrimaryBestEffort(
+  env: ClipboardEnv,
+  cmd: string,
+  args: string[],
+  payload: Buffer,
+): Promise<void> {
+  try {
+    await runWithStdin(env.spawn, cmd, args, payload);
+  } catch {
+    // ignore — PRIMARY is best-effort
+  }
+}
+
+// OSC 52 ("manipulate selection data") is the only way a process can
+// poke the *user's* clipboard when it lives on the other side of an
+// SSH connection. Most modern terminals (iTerm2, kitty, WezTerm,
+// Alacritty, foot, recent xterm) honor it; tmux requires an extra
+// passthrough wrap and `set -g set-clipboard on` to forward it.
+function writeOsc52(env: ClipboardEnv, text: string): ClipboardWriteResult {
+  const b64 = Buffer.from(text, "utf-8").toString("base64");
+  if (b64.length > OSC52_MAX_BYTES) {
+    return {
+      ok: false,
+      reason: `selection is too large for terminal clipboard escape (${b64.length} > ${OSC52_MAX_BYTES} bytes)`,
+    };
+  }
+  // BEL terminator is more widely accepted than ST across emulators.
+  let seq = `\x1b]52;c;${b64}\x07`;
+  if (env.env.TMUX) {
+    // tmux passthrough: wrap in DCS tmux; ... ST. Inner ESC bytes
+    // must be doubled so tmux forwards the literal escape to the
+    // outer terminal instead of consuming it as its own command.
+    seq = `\x1bPtmux;${seq.replace(/\x1b/g, "\x1b\x1b")}\x1b\\`;
+  }
+  const writer = env.ttyWrite ?? defaultTtyWrite;
+  if (writer(seq)) {
+    return { ok: true, method: "osc52" };
+  }
+  return { ok: false, reason: NO_TTY_REASON };
+}
+
+function defaultTtyWrite(data: string): boolean {
+  // Prefer stderr so we don't pollute stdout pipelines; fall back to
+  // stdout. The terminal multiplexes both, so either works for OSC 52.
+  const streams = [process.stderr, process.stdout] as const;
+  for (const s of streams) {
+    if (s && (s as NodeJS.WriteStream).isTTY) {
+      try {
+        (s as NodeJS.WriteStream).write(data);
+        return true;
+      } catch {
+        // try next
+      }
+    }
+  }
+  return false;
 }
 
 async function readMacOS(env: ClipboardEnv): Promise<ClipboardReadResult> {
@@ -314,6 +489,45 @@ function run(spawn: SpawnLike, cmd: string, args: string[]): Promise<void> {
         reject(new Error(`${cmd} exited ${code}`));
       }
     });
+  });
+}
+
+// Spawn-and-await with a payload piped to stdin. Used by the writers
+// (pbcopy / wl-copy / xclip) — each reads the clipboard content from
+// stdin and exits 0 on success.
+//
+// stdout/stderr are IGNORED rather than piped: xclip and wl-copy fork a
+// daemon to keep serving the X/Wayland selection, and that child inherits
+// the stdio pipes. If we pipe them, node's "close" event waits for the
+// daemon to die (i.e. until the *next* copy displaces it), so the await
+// hangs and serializes writes — making the PRIMARY mirror lag a full
+// selection behind. With stdio ignored, the foreground process exits as
+// soon as it has acquired the selection (~ms) and "close" fires promptly.
+function runWithStdin(
+  spawn: SpawnLike,
+  cmd: string,
+  args: string[],
+  payload: Buffer,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, { stdio: ["pipe", "ignore", "ignore"] });
+    proc.stdout?.on("data", () => undefined);
+    proc.stderr?.on("data", () => undefined);
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${cmd} exited ${code}`));
+      }
+    });
+    const stdin = proc.stdin;
+    if (!stdin) {
+      reject(new Error(`${cmd} has no stdin`));
+      return;
+    }
+    stdin.on("error", reject);
+    stdin.end(payload);
   });
 }
 

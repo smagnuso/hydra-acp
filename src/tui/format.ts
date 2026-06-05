@@ -35,7 +35,8 @@ export type Style =
   | "heading-2"
   | "heading-3"
   | "search-highlight"
-  | "search-highlight-active";
+  | "search-highlight-active"
+  | "selection-highlight";
 
 export interface FormattedLine {
   prefix?: string;

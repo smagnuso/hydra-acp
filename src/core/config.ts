@@ -116,6 +116,15 @@ const TuiConfig = z.object({
   // false — wheel scrollback stops working, but plain click-drag
   // selects text via the terminal emulator. Set true to opt back in.
   mouse: z.boolean().default(false),
+  // Whether the TUI's in-app text selection feature is enabled. This
+  // is an independent escape hatch for users whose muscle memory
+  // conflicts with the in-app selector, separate from `mouse` capture
+  // itself. Unset (the default) means "follow `mouse`" — selection is
+  // on when mouse capture is on, off when it's off, so terminals fall
+  // back to native click-drag selection. Set explicitly to true or
+  // false to pin the behavior regardless of mouse capture. Resolve
+  // via resolveInAppSelection(config).
+  inAppSelection: z.boolean().optional(),
   // Size at which the TUI's session/update debug log (tui.log) rotates
   // to tui.log.0 and resets. Bounds on-disk use at ~2x this value.
   logMaxBytes: z.number().int().positive().default(5 * 1024 * 1024),
@@ -334,6 +343,15 @@ export const HydraConfig = z.object({
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;
+
+// Resolve the effective in-app selection setting. When the user has
+// explicitly set tui.inAppSelection, honor it. Otherwise default to
+// the value of tui.mouse so selection is on with mouse capture (the
+// natural pairing) and off without it (so native terminal selection
+// keeps working).
+export function resolveInAppSelection(config: HydraConfig): boolean {
+  return config.tui.inAppSelection ?? config.tui.mouse;
+}
 
 export function extensionList(config: HydraConfig): ExtensionConfig[] {
   return Object.entries(config.extensions).map(([name, body]) => ({
