@@ -1153,6 +1153,15 @@ Called for every intercepted JSON-RPC request or response.
 - `stop` — daemon never sees this message. The optional `payload` is returned to the original caller (synthetic response).
 - `processing` — the transformer is taking ownership; the daemon parks the call until the transformer discharges the claim via `hydra-acp/message/emit` with `respondsTo: <token>`. If the transformer doesn't discharge within the claim timeout, the daemon broadcasts a `hydra-acp/transformer/abandoned_request` notification and resumes the chain from the next transformer (fail-open).
 
+**Notification-tailed intercepts.** Most intercepted methods are JSON-RPC requests whose chain tail dispatches as a request to the agent. The exception is `request:session/cancel` — ACP cancel is a notification, so the chain tail dispatches via `agent.notify(...)` and the `payload` field on `stop`/`processing` discharge is irrelevant (no value is returned to the originator). Concretely:
+
+- `continue` → daemon forwards `session/cancel` to the agent as a notification after the chain settles.
+- `stop` → daemon suppresses the agent-side notification entirely. Useful when the transformer wholly owns the in-flight state and the agent has nothing to cancel.
+- `processing` + discharge → identical to `stop` (the agent is **not** notified). To do async cleanup and *then* let the agent see cancel, the transformer should re-emit `session/cancel` via `hydra-acp/message/emit` with `route: "chain"` before/after discharge.
+- `processing` + abandonment timeout → the daemon resumes the chain with notification-tailed semantics; if no downstream transformer stops, the agent is notified (fail-open).
+
+This is the primitive that lets a transformer holding a `session/prompt` `processing`-claim (e.g. the planner holding the orchestrator's turn open across worker dispatch) absorb a user `session/cancel` by discharging the held prompt with `{stopReason: "cancelled"}` and stopping its own background work, without the cancel reaching the agent — which never received the held prompt in the first place.
+
 **Envelope shape.** `envelope` is the **flat ACP params object** for the intercepted method, _not_ a JSON-RPC message wrapper. For example, a `request:session/prompt` intercept receives:
 
 ```jsonc

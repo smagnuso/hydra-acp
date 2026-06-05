@@ -686,6 +686,131 @@ describe("Session transformer chain — processing claims", () => {
   });
 });
 
+// ── session/cancel chain dispatch ────────────────────────────────────────────
+
+describe("Session transformer chain — session/cancel", () => {
+  it("walks the chain on cancel; agent receives notification after continue", async () => {
+    const t = fakeTransformerConn({ action: "continue" });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/cancel"], t.conn),
+    ]);
+    const { client } = makeClient();
+    session.attach(client, "full");
+
+    await session.cancel(client.clientId);
+
+    // Transformer was consulted on the request side.
+    expect(t.requests).toHaveLength(1);
+    expect(t.requests[0]!.method).toBe("hydra-acp/transformer/message");
+    expect((t.requests[0]!.params as { phase: string; method: string }).phase).toBe("request");
+    expect((t.requests[0]!.params as { phase: string; method: string }).method).toBe("session/cancel");
+
+    // Agent received the notification (NOT a request).
+    const notifyMock = mock.agent.connection.notify as ReturnType<typeof vi.fn>;
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    expect(notifyMock).toHaveBeenCalledWith("session/cancel", { sessionId: "u1" });
+    expect(requestMock).not.toHaveBeenCalledWith("session/cancel", expect.anything());
+  });
+
+  it("stop suppresses the agent-side notification", async () => {
+    const t = fakeTransformerConn({ action: "stop" });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/cancel"], t.conn),
+    ]);
+    const { client } = makeClient();
+    session.attach(client, "full");
+
+    await session.cancel(client.clientId);
+
+    expect(t.requests).toHaveLength(1);
+    const notifyMock = mock.agent.connection.notify as ReturnType<typeof vi.fn>;
+    expect(notifyMock).not.toHaveBeenCalledWith("session/cancel", expect.anything());
+  });
+
+  it("processing parks the cancel; discharge ends the chain (agent not notified)", async () => {
+    // Discharge resolves the forwardRequest promise without resuming
+    // the chain — symmetric with the discharge-then-end semantics used
+    // by transformers that fully absorb a request (e.g. the planner
+    // holding session/prompt for the duration of a project). For
+    // session/cancel this is the canonical "transformer handled it"
+    // path: it cancels its own background work and discharges, and the
+    // agent — which never received the held prompt — needs no notify.
+    let capturedToken = "";
+    const t = fakeTransformerConn();
+    (t.conn.request as ReturnType<typeof vi.fn>).mockImplementation(
+      (_m: string, params: unknown) => {
+        capturedToken = (params as { token: string }).token;
+        return Promise.resolve({ action: "processing" });
+      },
+    );
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/cancel"], t.conn),
+    ]);
+    const { client } = makeClient();
+    session.attach(client, "full");
+
+    const cancelPromise = session.cancel(client.clientId);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(capturedToken).toBeTruthy();
+
+    const notifyMock = mock.agent.connection.notify as ReturnType<typeof vi.fn>;
+    expect(notifyMock).not.toHaveBeenCalledWith("session/cancel", expect.anything());
+
+    expect(session.dischargeClaim(capturedToken, undefined)).toBe(true);
+    await cancelPromise;
+    // After discharge the chain ends — agent is NOT notified.
+    expect(notifyMock).not.toHaveBeenCalledWith("session/cancel", expect.anything());
+  });
+
+  it("transformer without the intercept is skipped; agent still notified", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t.conn), // unrelated intercept
+    ]);
+    const { client } = makeClient();
+    session.attach(client, "full");
+
+    await session.cancel(client.clientId);
+
+    expect(t.requests).toHaveLength(0);
+    const notifyMock = mock.agent.connection.notify as ReturnType<typeof vi.fn>;
+    expect(notifyMock).toHaveBeenCalledWith("session/cancel", { sessionId: "u1" });
+  });
+
+  it("abandonment fail-open resumes the chain and tails as notification", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = fakeTransformerConn();
+      (t.conn.request as ReturnType<typeof vi.fn>).mockImplementation(
+        () => Promise.resolve({ action: "processing" }),
+      );
+      const { session, mock } = makeSession([
+        makeRef("t1", ["request:session/cancel"], t.conn),
+      ]);
+      const { client } = makeClient();
+      session.attach(client, "full");
+
+      const cancelPromise = session.cancel(client.clientId);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Advance past the 5-minute abandonment timeout.
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+      await cancelPromise;
+
+      const notifyMock = mock.agent.connection.notify as ReturnType<typeof vi.fn>;
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      // Fail-open: chain resumed and tailed out as a notification.
+      expect(notifyMock).toHaveBeenCalledWith("session/cancel", { sessionId: "u1" });
+      expect(requestMock).not.toHaveBeenCalledWith("session/cancel", expect.anything());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ── parentSessionId ───────────────────────────────────────────────────────────
 
 describe("Session — parentSessionId", () => {

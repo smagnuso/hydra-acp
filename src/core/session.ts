@@ -226,6 +226,11 @@ interface TransformerClaim {
   chainIdx: number;           // index of the transformer that claimed processing
   originatedBy: Set<string>;  // snapshot so resume routing is correct
   side: "request" | "response";
+  // For request-side claims, whether the chain's tail dispatches as an
+  // agent request or as an agent notification. Used by the keep-alive
+  // fail-open path to resume the chain with the correct tail. Unused
+  // for response-side claims.
+  tailKind?: "request" | "notification";
 }
 
 // Cap on the recently-terminal messageId LRU. Bounds memory growth on
@@ -1793,9 +1798,23 @@ export class Session {
     // observer in wireAgent can attribute a closely-following error to this
     // cancel and surface it to clients via hydra-acp/cancel_failed.
     this.lastCancelAt = Date.now();
-    await this.agent.connection.notify("session/cancel", {
-      sessionId: this.upstreamSessionId,
-    });
+    // Walk the request-side transformer chain with tailKind=notification:
+    // transformers that declared "request:session/cancel" intercept get
+    // a chance to observe (continue), suppress (stop), or do async
+    // cleanup before agent dispatch (processing + discharge). This is
+    // the primitive that lets a transformer holding a session/prompt
+    // processing-claim release the claim with stopReason "cancelled"
+    // and unwind its own background work before cancel reaches the
+    // agent — and, when the held prompt never reached the agent at
+    // all, lets the transformer fully absorb the cancel via "stop".
+    // forwardRequest handles rewriteForAgent (sessionId → upstreamSessionId).
+    await this.forwardRequest(
+      "session/cancel",
+      { sessionId: this.sessionId },
+      new Set<string>(),
+      0,
+      "notification",
+    );
   }
 
   // Add a transformer to this session's chain retroactively. No-ops if it's
@@ -1822,11 +1841,15 @@ export class Session {
   // originatedBy: transformer names already in the lineage — skipped for loop
   //   prevention and to implement resume-routing on re-entry from emit_message.
   // startIdx: chain position to start from (0 for normal, emitterIdx+1 for re-entry).
+  // tailKind: how the chain tail dispatches to the agent — "request" (default)
+  //   for request methods, "notification" for fire-and-forget methods like
+  //   session/cancel. Notifications return undefined and ignore stop payloads.
   async forwardRequest(
     method: string,
     params: unknown,
     originatedBy = new Set<string>(),
     startIdx = 0,
+    tailKind: "request" | "notification" = "request",
   ): Promise<unknown> {
     let envelope = this.rewriteForAgent(params);
     for (let i = startIdx; i < this.transformChain.length; i++) {
@@ -1857,6 +1880,9 @@ export class Session {
       }
       const action = result?.action ?? "continue";
       if (action === "stop") {
+        if (tailKind === "notification") {
+          return undefined;
+        }
         return (result?.payload as Record<string, unknown> | undefined) ??
           defaultStopPayload(method);
       }
@@ -1877,9 +1903,12 @@ export class Session {
                 claimEnvelope,
                 new Set([...claimOriginatedBy, t.name]),
                 claimIdx + 1,
+                tailKind,
               )
                 .then(resolve)
-                .catch(() => resolve(defaultStopPayload(method)));
+                .catch(() =>
+                  resolve(tailKind === "notification" ? undefined : defaultStopPayload(method)),
+                );
             }
           }, TRANSFORMER_CLAIM_TIMEOUT_MS);
           if (typeof timer.unref === "function") {
@@ -1894,10 +1923,15 @@ export class Session {
             chainIdx: claimIdx,
             originatedBy: claimOriginatedBy,
             side: "request",
+            tailKind,
           });
         });
       }
       originatedBy.add(t.name);
+    }
+    if (tailKind === "notification") {
+      await this.agent.connection.notify(method, envelope);
+      return undefined;
     }
     return this.agent.connection.request(method, envelope);
   }
@@ -1942,14 +1976,18 @@ export class Session {
             claim.chainIdx + 1,
           ).then(() => claim.resolve(undefined));
         } else {
+          const tailKind = claim.tailKind ?? "request";
           void this.forwardRequest(
             claim.method,
             claim.envelope,
             new Set([...claim.originatedBy, claim.transformerName]),
             claim.chainIdx + 1,
+            tailKind,
           )
             .then(claim.resolve)
-            .catch(() => claim.resolve(defaultStopPayload(claim.method)));
+            .catch(() =>
+              claim.resolve(tailKind === "notification" ? undefined : defaultStopPayload(claim.method)),
+            );
         }
       }
     }, timeout);
