@@ -17,6 +17,7 @@ export async function pingHealth(config: HydraConfig): Promise<boolean> {
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(500),
+      headers: { Connection: "close" },
     });
     return response.ok;
   } catch {
@@ -36,8 +37,13 @@ export async function fetchDaemonHealth(
   const protocol = config.daemon.tls ? "https" : "http";
   const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/v1/health`;
   try {
+    // Connection: close prevents undici from pooling the socket on
+    // keep-alive. The post-TUI exit path calls this right before
+    // returning, and a pooled socket keeps the event loop alive long
+    // enough to leave the shell hung after the "Continue:" line prints.
     const response = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
+      headers: { Connection: "close" },
     });
     if (!response.ok) {
       return undefined;
