@@ -1050,13 +1050,18 @@ Daemon dispatches a `/hydra <process-name> <verb> …` invocation. The process's
 {
   "sessionId": "<id>",
   "verb":      "<name>",
-  "args":      [ "<arg1>", … ]
+  "args":      "<args string>",
+  "messageId": "<queue entry id>"   // optional; present when dispatched from a user-prompt queue entry
 }
 // result — at most one of these:
 { "text": "<reply rendered into the conversation>" }
 // or
 {}   // silent acknowledgement
 ```
+
+**Slash commands as user-kind queue entries.** `/hydra <name> <verb> …` invocations flow through the same prompt queue as regular user prompts — they fire `hydra-acp/prompt_queue/added`, `hydra-acp/prompt_queue/removed{started}`, `prompt_received`, and `turn_complete` notifications in the same order, so the conversation surface stays consistent regardless of whether a prompt routes to the agent or a slash handler. The `messageId` field carries the queue entry's id; extensions can correlate it with `prompt_queue/removed`, `prompt/amend`, and `prompt/cancel` notifications scoped to the same id to detect mid-flight cancellation or amend.
+
+**Slash text is excluded from the title heuristic.** The session-title first-prompt heuristic skips any prompt whose first line starts with `/` so administrative prompts like `/hydra title …`, `/model gpt-5`, `/hydra planner create …` don't become the session title. The next non-slash prompt seeds normally.
 
 #### Request (process → daemon): `hydra-acp/mcp_tools/register`
 

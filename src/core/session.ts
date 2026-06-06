@@ -1147,18 +1147,15 @@ export class Session {
         JsonRpcErrorCodes.SessionClosing,
       );
     }
-    // Slash commands (e.g. "/hydra title", "/hydra title some name")
-    // are intercepted before any broadcasting or first-prompt seeding.
-    // They never reach the agent as a normal turn — hydra dispatches
-    // them, optionally runs a side-channel sub-prompt, and emits
-    // whatever notifications the verb implies (e.g. session_info_update
-    // for /hydra title). The conversation log stays clean.
-    const promptText = extractPromptText(
-      ((params ?? {}) as { prompt?: unknown }).prompt,
-    ).trim();
-    if (promptText.startsWith("/hydra")) {
-      return this.handleSlashCommand(promptText);
-    }
+    // Slash commands (`/hydra ...`, `/model`, `/mode`, `/sessions`,
+    // `/help`) flow through the same enqueueUserPrompt path as
+    // regular prompts. They surface as user-kind queue entries that
+    // broadcast prompt_queue_added/removed and prompt_received,
+    // anchor the TUI's "thinking" placeholder, and can be amended/
+    // cancelled like any other prompt. runQueueEntry dispatches them
+    // by inspecting the prompt text after broadcastPromptReceived
+    // — so the conversation surface stays consistent regardless of
+    // whether a prompt goes to the agent or a slash handler.
     // Mint the messageId once; it's the stable identifier for the
     // prompt across both prompt_queue_added (fires now, on accept) and
     // prompt_received (fires later, when the entry leaves the queue
@@ -2131,6 +2128,15 @@ export class Session {
     if (!seed) {
       return;
     }
+    // Skip slash commands as title seeds. `/hydra planner create`,
+    // `/model gpt-5`, etc. are administrative or routing prompts —
+    // not the conversational summary a session title is meant to
+    // capture. Subsequent non-slash prompts can still seed (the
+    // _firstPromptSeeded flag stays false for slash-only flows so
+    // the next real prompt wins).
+    if (seed.startsWith("/")) {
+      return;
+    }
     this._firstPromptSeeded = true;
     this.setTitle(seed);
   }
@@ -2832,7 +2838,14 @@ export class Session {
   // ExtensionCommandRegistry: "/hydra <process-name> <verb> [args]" routes
   // to that process's WS connection. Built-in hydra verbs win on name
   // collision so an extension can never shadow them.
-  private async handleSlashCommand(text: string): Promise<unknown> {
+  // Dispatch a /hydra <verb> [args] slash command. `messageId` is the
+  // queue entry's id when called from runQueueEntry (so extensions can
+  // correlate amends); undefined when called from out-of-band entry
+  // points like the REST retitle API.
+  private async handleSlashCommand(
+    text: string,
+    messageId?: string,
+  ): Promise<unknown> {
     const rest = text.slice("/hydra".length).trim();
     const match = rest.match(/^(\S+)(?:\s+([\s\S]*))?$/);
     const first = match?.[1] ?? "";
@@ -2842,18 +2855,25 @@ export class Session {
       // composer doesn't show an error.
       return { stopReason: "end_turn" };
     }
+    // Dispatch directly to the inline variants when we're called
+    // from runQueueEntry (messageId is set — the calling user-kind
+    // entry already provides serialization). When called from
+    // out-of-band paths (REST retitle, setAgent), messageId is
+    // undefined and we wrap in enqueuePrompt to preserve ordering.
+    const inline = messageId !== undefined;
     if (HYDRA_COMMANDS.some((c) => c.verb === first)) {
       switch (first) {
         case "title":
-          return this.runTitleCommand(remainder);
+          return inline ? this.runTitleCommandInline(remainder) : this.runTitleCommand(remainder);
         case "agent":
-          return this.runAgentCommand(remainder);
+          return inline ? this.runAgentCommandInline(remainder) : this.runAgentCommand(remainder);
         case "kill":
+          // Kill is intentionally not queued (see runKillCommand
+          // comment) — fire directly in both paths.
           return this.runKillCommand();
         case "restart":
-          return this.runRestartCommand();
+          return inline ? this.runRestartCommandInline() : this.runRestartCommand();
         default: {
-          // Listed in HYDRA_COMMANDS but no dispatch case — wired up wrong.
           const err = new Error(
             `no dispatcher for /hydra verb ${first}`,
           ) as Error & { code: number };
@@ -2863,7 +2883,9 @@ export class Session {
       }
     }
     if (this.extensionCommands?.has(first)) {
-      return this.runExtensionCommand(first, remainder);
+      return inline
+        ? this.runExtensionCommandInline(first, remainder, messageId)
+        : this.runExtensionCommand(first, remainder);
     }
     // Convention: ecosystem packages are named `hydra-acp-<foo>`. Allow
     // the user to elide the prefix so `/hydra planner ...` routes the
@@ -2871,7 +2893,9 @@ export class Session {
     // matches above still win — this is strictly the fallback.
     const eliprefixed = `hydra-acp-${first}`;
     if (this.extensionCommands?.has(eliprefixed)) {
-      return this.runExtensionCommand(eliprefixed, remainder);
+      return inline
+        ? this.runExtensionCommandInline(eliprefixed, remainder, messageId)
+        : this.runExtensionCommand(eliprefixed, remainder);
     }
     const known = HYDRA_COMMANDS.map((c) => c.verb);
     if (this.extensionCommands) {
@@ -2898,48 +2922,65 @@ export class Session {
   // agent_message_chunk so it appears in the conversation alongside the
   // user's invocation.
   private runExtensionCommand(name: string, remainder: string): Promise<unknown> {
-    return this.enqueuePrompt(async () => {
-      const entry = this.extensionCommands?.get(name);
-      if (!entry) {
-        return this.emitExtensionReply(
-          `extension "${name}" is no longer connected`,
-        );
+    return this.enqueuePrompt(() =>
+      this.runExtensionCommandInline(name, remainder, undefined),
+    );
+  }
+
+  // Inline core, callable from runQueueEntry where the calling entry
+  // is already serialized by drainQueue. `messageId` is the user-kind
+  // queue entry's id; we pass it through to commands/invoke so the
+  // extension can correlate its in-flight dispatch with prompt-queue
+  // events (amend, cancel) that target the same id.
+  private async runExtensionCommandInline(
+    name: string,
+    remainder: string,
+    messageId: string | undefined,
+  ): Promise<unknown> {
+    const entry = this.extensionCommands?.get(name);
+    if (!entry) {
+      return this.emitExtensionReply(
+        `extension "${name}" is no longer connected`,
+      );
+    }
+    const m = remainder.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+    const verb = m?.[1] ?? "";
+    const args = (m?.[2] ?? "").trim();
+    // The verb (possibly "") must be one the extension advertised.
+    // An extension that registers a `""` verb opts into receiving
+    // `/hydra <name>` with no following word; otherwise the user
+    // gets the "unknown verb" error below.
+    if (!entry.commands.some((c) => c.verb === verb)) {
+      const verbs = entry.commands.map((c) => c.verb).join(", ");
+      return this.emitExtensionReply(
+        `/hydra ${name}${verb ? ` ${verb}` : ""}: unknown verb (known: ${verbs || "(none)"})`,
+      );
+    }
+    let reply: unknown;
+    try {
+      const params: Record<string, unknown> = {
+        sessionId: this.sessionId,
+        verb,
+        args,
+      };
+      if (messageId !== undefined) {
+        params.messageId = messageId;
       }
-      const m = remainder.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-      const verb = m?.[1] ?? "";
-      const args = (m?.[2] ?? "").trim();
-      // The verb (possibly "") must be one the extension advertised.
-      // An extension that registers a `""` verb opts into receiving
-      // `/hydra <name>` with no following word; otherwise the user
-      // gets the "unknown verb" error below.
-      if (!entry.commands.some((c) => c.verb === verb)) {
-        const verbs = entry.commands.map((c) => c.verb).join(", ");
-        return this.emitExtensionReply(
-          `/hydra ${name}${verb ? ` ${verb}` : ""}: unknown verb (known: ${verbs || "(none)"})`,
-        );
-      }
-      let reply: unknown;
-      try {
-        reply = await entry.connection.request("hydra-acp/commands/invoke", {
-          sessionId: this.sessionId,
-          verb,
-          args,
-        });
-      } catch (err) {
-        return this.emitExtensionReply(
-          `${name} ${verb}: ${(err as Error).message}`,
-        );
-      }
-      const text =
-        reply && typeof reply === "object" &&
-        typeof (reply as { text?: unknown }).text === "string"
-          ? ((reply as { text: string }).text)
-          : "";
-      if (text.length > 0) {
-        return this.emitExtensionReply(text);
-      }
-      return { stopReason: "end_turn" };
-    });
+      reply = await entry.connection.request("hydra-acp/commands/invoke", params);
+    } catch (err) {
+      return this.emitExtensionReply(
+        `${name} ${verb}: ${(err as Error).message}`,
+      );
+    }
+    const text =
+      reply && typeof reply === "object" &&
+      typeof (reply as { text?: unknown }).text === "string"
+        ? ((reply as { text: string }).text)
+        : "";
+    if (text.length > 0) {
+      return this.emitExtensionReply(text);
+    }
+    return { stopReason: "end_turn" };
   }
 
   private emitExtensionReply(text: string): unknown {
@@ -3133,14 +3174,19 @@ export class Session {
   // returns end_turn immediately; the new title (and synopsis) land on
   // the cold record asynchronously.
   private runTitleCommand(arg: string): Promise<unknown> {
-    return this.enqueuePrompt(async () => {
-      if (arg) {
-        this.setTitle(arg);
-        return { stopReason: "end_turn" };
-      }
-      this.scheduleSynopsisHook?.();
+    return this.enqueuePrompt(() => this.runTitleCommandInline(arg));
+  }
+
+  // Inline core for /hydra title — dispatchable directly from
+  // runQueueEntry without an extra enqueuePrompt wrap (the calling
+  // entry is already serialized by drainQueue).
+  private async runTitleCommandInline(arg: string): Promise<unknown> {
+    if (arg) {
+      this.setTitle(arg);
       return { stopReason: "end_turn" };
-    });
+    }
+    this.scheduleSynopsisHook?.();
+    return { stopReason: "end_turn" };
   }
 
   // Send a prompt to the underlying agent and capture its reply chunks
@@ -3178,6 +3224,10 @@ export class Session {
   }
 
   private runAgentCommand(newAgentId: string): Promise<unknown> {
+    return this.enqueuePrompt(() => this.runAgentCommandInline(newAgentId));
+  }
+
+  private async runAgentCommandInline(newAgentId: string): Promise<unknown> {
     if (!newAgentId) {
       throw withCode(
         new Error("/hydra agent requires an agent id"),
@@ -3197,61 +3247,59 @@ export class Session {
       );
     }
     const spawnAgent = this.spawnReplacementAgent;
-    return this.enqueuePrompt(async () => {
-      const oldAgentId = this.agentId;
-      const transcript = await this.buildSwitchTranscript(oldAgentId);
+    const oldAgentId = this.agentId;
+    const transcript = await this.buildSwitchTranscript(oldAgentId);
 
-      const fresh = await spawnAgent({
-        agentId: newAgentId,
-        cwd: this.cwd,
-        agentArgs: this.agentArgs,
-      });
-      this.accumulateAndResetCost();
-      this.wireAgent(fresh.agent);
-
-      const oldAgent = this.agent;
-      this.agent = fresh.agent;
-      this.agentId = newAgentId;
-      this.upstreamSessionId = fresh.upstreamSessionId;
-      this.agentMeta = fresh.agentMeta;
-      this.agentCapabilities = fresh.agentCapabilities;
-      // Old agent's commands no longer apply; clear and re-broadcast
-      // a merged update with just /hydra verbs until the new agent
-      // advertises its own.
-      this.agentAdvertisedCommands = [];
-      this.broadcastMergedCommands();
-      // Re-advertise the new agent's model list and modes from its
-      // session/new response. Some agents (e.g. opencode) report these
-      // only in that response and never emit a follow-up
-      // current_model_update, so clearing-and-waiting would leave the
-      // clients' model/mode dropdowns permanently empty. Setting the new
-      // selections first means the broadcast carries the right current
-      // value; the persistence hooks fire so meta.json reflects the swap.
-      this.currentModel = fresh.initialModel;
-      this.currentMode = fresh.initialMode;
-      this.setAgentAdvertisedModels(fresh.initialModels ?? []);
-      this.setAgentAdvertisedModes(fresh.initialModes ?? []);
-      await oldAgent.kill().catch(() => undefined);
-
-      if (transcript) {
-        await this.runInternalPrompt(transcript).catch(() => undefined);
-      }
-
-      this.broadcastAgentSwitch(oldAgentId, newAgentId);
-
-      const info = {
-        agentId: this.agentId,
-        upstreamSessionId: this.upstreamSessionId,
-      };
-      for (const handler of this.agentChangeHandlers) {
-        try {
-          handler(info);
-        } catch {
-          void 0;
-        }
-      }
-      return { stopReason: "end_turn" };
+    const fresh = await spawnAgent({
+      agentId: newAgentId,
+      cwd: this.cwd,
+      agentArgs: this.agentArgs,
     });
+    this.accumulateAndResetCost();
+    this.wireAgent(fresh.agent);
+
+    const oldAgent = this.agent;
+    this.agent = fresh.agent;
+    this.agentId = newAgentId;
+    this.upstreamSessionId = fresh.upstreamSessionId;
+    this.agentMeta = fresh.agentMeta;
+    this.agentCapabilities = fresh.agentCapabilities;
+    // Old agent's commands no longer apply; clear and re-broadcast
+    // a merged update with just /hydra verbs until the new agent
+    // advertises its own.
+    this.agentAdvertisedCommands = [];
+    this.broadcastMergedCommands();
+    // Re-advertise the new agent's model list and modes from its
+    // session/new response. Some agents (e.g. opencode) report these
+    // only in that response and never emit a follow-up
+    // current_model_update, so clearing-and-waiting would leave the
+    // clients' model/mode dropdowns permanently empty. Setting the new
+    // selections first means the broadcast carries the right current
+    // value; the persistence hooks fire so meta.json reflects the swap.
+    this.currentModel = fresh.initialModel;
+    this.currentMode = fresh.initialMode;
+    this.setAgentAdvertisedModels(fresh.initialModels ?? []);
+    this.setAgentAdvertisedModes(fresh.initialModes ?? []);
+    await oldAgent.kill().catch(() => undefined);
+
+    if (transcript) {
+      await this.runInternalPrompt(transcript).catch(() => undefined);
+    }
+
+    this.broadcastAgentSwitch(oldAgentId, newAgentId);
+
+    const info = {
+      agentId: this.agentId,
+      upstreamSessionId: this.upstreamSessionId,
+    };
+    for (const handler of this.agentChangeHandlers) {
+      try {
+        handler(info);
+      } catch {
+        void 0;
+      }
+    }
+    return { stopReason: "end_turn" };
   }
 
   // Close this session in-place. Bypasses enqueuePrompt deliberately so a
@@ -3275,6 +3323,10 @@ export class Session {
   // available after a quota reset) and the resumed session is locked to a
   // stale model list.
   private runRestartCommand(): Promise<unknown> {
+    return this.enqueuePrompt(() => this.runRestartCommandInline());
+  }
+
+  private async runRestartCommandInline(): Promise<unknown> {
     if (!this.spawnReplacementAgent) {
       throw withCode(
         new Error("agent restart not configured for this session"),
@@ -3283,10 +3335,8 @@ export class Session {
     }
     // Queued: waits for any in-flight turn to finish naturally, then
     // respawns. Use forceCancel() to abort a stuck turn immediately.
-    return this.enqueuePrompt(async () => {
-      await this.respawnAgent();
-      return { stopReason: "end_turn" };
-    });
+    await this.respawnAgent();
+    return { stopReason: "end_turn" };
   }
 
   // Last-resort cancellation. When an agent ignores session/cancel (current
@@ -4234,32 +4284,43 @@ export class Session {
       return entry.task();
     }
     this.broadcastPromptReceived(entry);
-    // Intercept daemon built-in slash commands here — after the prompt has
-    // gone through the queue (echo flushed, prompt_received broadcast) but
-    // before forwarding to the agent.
-    // Trim trailing whitespace only — a leading space or newline should
-    // escape the slash-command interception so users can send a literal
-    // prompt like " /model ..." or a paste that happens to start with
-    // "/model" on a non-first line.
+    // Intercept daemon built-in slash commands here — after the prompt
+    // has gone through the queue (echo flushed, prompt_received
+    // broadcast) but before forwarding to the agent. This includes
+    // `/hydra ...` which routes to handleSlashCommand for built-in
+    // /hydra verbs and extension-registered commands.
+    //
+    // Trim trailing whitespace only — a leading space or newline
+    // should escape the slash interception so users can send a
+    // literal prompt like " /model ..." or a paste that happens to
+    // start with a slash on a non-first line.
     const promptText = extractPromptText(entry.prompt).replace(/\s+$/, "");
+    const slashFirstWord =
+      !promptText.includes("\n") && promptText.startsWith("/")
+        ? promptText.split(/\s+/)[0]
+        : "";
     if (
-      !promptText.includes("\n") &&
-      (promptText === "/model" ||
-        promptText.startsWith("/model ") ||
-        promptText === "/mode" ||
-        promptText.startsWith("/mode ") ||
-        promptText === "/sessions" ||
-        promptText === "/help")
+      slashFirstWord === "/model" ||
+      slashFirstWord === "/mode" ||
+      slashFirstWord === "/sessions" ||
+      slashFirstWord === "/help" ||
+      slashFirstWord === "/hydra"
     ) {
       let result: unknown;
-      if (promptText === "/sessions") {
+      if (slashFirstWord === "/sessions") {
         result = await this.handleSessionsCommand();
-      } else if (promptText === "/help") {
+      } else if (slashFirstWord === "/help") {
         result = await this.handleHelpCommand();
-      } else if (promptText === "/mode" || promptText.startsWith("/mode ")) {
+      } else if (slashFirstWord === "/mode") {
         result = await this.handleModeCommand(promptText);
-      } else {
+      } else if (slashFirstWord === "/model") {
         result = await this.handleModelCommand(promptText);
+      } else {
+        // /hydra ... — dispatch via the shared handler, passing the
+        // queue entry's messageId so extension commands can correlate
+        // amends and other queue events back to their in-flight
+        // dispatch.
+        result = await this.handleSlashCommand(promptText, entry.messageId);
       }
       if (!this.closed) {
         this.broadcastTurnComplete(entry.clientId, result, entry.messageId, entry.wasAmend);
