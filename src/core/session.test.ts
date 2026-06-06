@@ -4030,10 +4030,18 @@ describe("Session", () => {
     function makeFakeExtensionConnection(): {
       connection: JsonRpcConnection;
       request: ReturnType<typeof vi.fn>;
+      notifications: Array<{ method: string; params: unknown }>;
     } {
       const request = vi.fn();
-      const connection = { request } as unknown as JsonRpcConnection;
-      return { connection, request };
+      const notifications: Array<{ method: string; params: unknown }> = [];
+      const notify = vi.fn((method: string, params: unknown) => {
+        notifications.push({ method, params });
+      });
+      const connection = {
+        request,
+        notify,
+      } as unknown as JsonRpcConnection;
+      return { connection, request, notifications };
     }
 
     it("advertises registered verbs via mergedAvailableCommands", () => {
@@ -4253,6 +4261,130 @@ describe("Session", () => {
           messageId: expect.any(String),
         }),
       );
+    });
+
+    it("amend on an in-flight extension command fires hydra-acp/commands/cancel and unsticks the queue", async () => {
+      // Stage B: when amend lands on an extension-bound user prompt
+      // (the planner's `/hydra planner create` is the canonical
+      // case), the daemon must signal the extension to release its
+      // commands/invoke so drainQueue can advance. Without this the
+      // queue stalls forever because amendOnHead's session/cancel
+      // fires to the agent — which never had a turn for the slash
+      // command — and the extension never learns about the amend.
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request, notifications } = makeFakeExtensionConnection();
+      // Park the commands/invoke promise so it never resolves on its
+      // own — we want to prove the race against the cancel signal is
+      // what unsticks the queue.
+      const requestStartedAt = vi.fn();
+      let neverResolves: (v: unknown) => void = () => undefined;
+      request.mockImplementation(() => {
+        requestStartedAt();
+        return new Promise(() => {
+          // Hold reference so it can't be GC'd; the daemon should
+          // abandon this and move on.
+          neverResolves = () => undefined;
+        });
+      });
+      registry.register("hydra-acp-planner", connection, [{ verb: "create" }]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      const slashPromise = session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra planner create build X" }],
+      });
+
+      // Let the slash dispatch reach the extension.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(request).toHaveBeenCalledTimes(1);
+      const slashCallParams = request.mock.calls[0]![1] as { messageId?: unknown };
+      const slashMessageId = slashCallParams.messageId;
+      expect(typeof slashMessageId).toBe("string");
+
+      // User amends.
+      const amendResult = await session.amendPrompt(client.clientId, {
+        targetMessageId: slashMessageId as string,
+        prompt: [{ type: "text", text: "actually build Y" }],
+      });
+      expect(amendResult).toMatchObject({ amended: true, reason: "ok" });
+
+      // The slash dispatch settles cancelled — the daemon raced its
+      // own cancel signal against the never-resolving commands/invoke.
+      const slashResult = await slashPromise;
+      expect(slashResult).toMatchObject({ stopReason: "cancelled" });
+
+      // Extension received hydra-acp/commands/cancel with the right
+      // messageId and reason="amended".
+      const cancelNotify = notifications.find(
+        (n) => n.method === "hydra-acp/commands/cancel",
+      );
+      expect(cancelNotify).toBeDefined();
+      expect(cancelNotify!.params).toMatchObject({
+        sessionId: "hydra_session_ext",
+        messageId: slashMessageId,
+        reason: "amended",
+      });
+
+      // Silence the "neverResolves" reference warning.
+      neverResolves;
+    });
+
+    it("session/cancel on an in-flight extension command fires commands/cancel with reason='cancelled'", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request, notifications } = makeFakeExtensionConnection();
+      request.mockImplementation(() => new Promise(() => undefined));
+      registry.register("hydra-acp-planner", connection, [{ verb: "create" }]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      const slashPromise = session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra planner create build X" }],
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      await session.cancel(client.clientId);
+
+      const slashResult = await slashPromise;
+      expect(slashResult).toMatchObject({ stopReason: "cancelled" });
+
+      const cancelNotify = notifications.find(
+        (n) => n.method === "hydra-acp/commands/cancel",
+      );
+      expect(cancelNotify).toBeDefined();
+      expect(cancelNotify!.params).toMatchObject({ reason: "cancelled" });
+    });
+
+    it("session close fires commands/cancel with reason='abandoned' to all in-flight extension dispatches", async () => {
+      const registry = new ExtensionCommandRegistry();
+      const { session } = makeSessionWithRegistry(registry);
+      const { connection, request, notifications } = makeFakeExtensionConnection();
+      request.mockImplementation(() => new Promise(() => undefined));
+      registry.register("hydra-acp-planner", connection, [{ verb: "create" }]);
+
+      const { client } = makeClient();
+      await session.attach(client, "full");
+      const slashPromise = session.prompt(client.clientId, {
+        sessionId: "hydra_session_ext",
+        prompt: [{ type: "text", text: "/hydra planner create build X" }],
+      });
+      await new Promise((r) => setTimeout(r, 0));
+
+      await session.close();
+      // close drives markClosed which fires the abandoned cancel.
+      // slashPromise may reject with a connection-closed error or
+      // resolve with cancelled — either way, the extension received
+      // the notification.
+      await slashPromise.catch(() => undefined);
+
+      const cancelNotify = notifications.find(
+        (n) => n.method === "hydra-acp/commands/cancel",
+      );
+      expect(cancelNotify).toBeDefined();
+      expect(cancelNotify!.params).toMatchObject({ reason: "abandoned" });
     });
 
     it("exact-name match wins over the prefix-elision fallback", async () => {

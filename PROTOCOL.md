@@ -1059,7 +1059,29 @@ Daemon dispatches a `/hydra <process-name> <verb> …` invocation. The process's
 {}   // silent acknowledgement
 ```
 
-**Slash commands as user-kind queue entries.** `/hydra <name> <verb> …` invocations flow through the same prompt queue as regular user prompts — they fire `hydra-acp/prompt_queue/added`, `hydra-acp/prompt_queue/removed{started}`, `prompt_received`, and `turn_complete` notifications in the same order, so the conversation surface stays consistent regardless of whether a prompt routes to the agent or a slash handler. The `messageId` field carries the queue entry's id; extensions can correlate it with `prompt_queue/removed`, `prompt/amend`, and `prompt/cancel` notifications scoped to the same id to detect mid-flight cancellation or amend.
+**Slash commands as user-kind queue entries.** `/hydra <name> <verb> …` invocations flow through the same prompt queue as regular user prompts — they fire `hydra-acp/prompt_queue/added`, `hydra-acp/prompt_queue/removed{started}`, `prompt_received`, and `turn_complete` notifications in the same order, so the conversation surface stays consistent regardless of whether a prompt routes to the agent or a slash handler. The `messageId` field carries the queue entry's id; extensions correlate it with `hydra-acp/commands/cancel` notifications scoped to the same id (see below) to detect mid-flight cancellation or amend.
+
+#### Notification (daemon → process): `hydra-acp/commands/cancel`
+
+Fires on the extension's WS connection when an in-flight `commands/invoke` dispatch is being cancelled by the daemon — extensions live outside the client broadcast fanout (`prompt_queue/*` and `prompt/amended` only reach attached clients), so they need a dedicated channel to learn about amends and cancels targeting their slash commands.
+
+```jsonc
+{
+  "sessionId": "<id>",
+  "messageId": "<queue entry id matching commands/invoke params.messageId>",
+  "reason":    "amended" | "cancelled" | "abandoned"
+}
+```
+
+| `reason` | Trigger | Extension should typically |
+|---|---|---|
+| `amended` | `hydra-acp/prompt/amend` cancelled this slash command in favor of a new prompt | release `commands/invoke` quickly so `drainQueue` can advance to the amended prompt; keep any background work running if it's still meaningful (the planner yields its live view but keeps workers going) |
+| `cancelled` | `session/cancel` (^C / Esc / `hydra-acp/session/force_cancel`) | full cleanup, force-stop background work, release `commands/invoke` |
+| `abandoned` | session is closing (kill, idle close, daemon shutdown) | cleanup; no need to respond to `commands/invoke` — the WS may already be tearing down |
+
+**The daemon races the cancel against the extension's `commands/invoke` response** — once `cancelExtensionDispatch` fires for a `messageId`, the daemon immediately synthesizes `{stopReason: "cancelled"}` and advances `drainQueue`. If the extension still responds to `commands/invoke` after that, the response is dropped. Extensions don't need to "respond promptly"; the daemon doesn't wait for them. The notification is purely for the extension's own cleanup.
+
+**Idempotent.** Multiple cancel triggers (e.g. amend then session-close before the race settles) only fire the notification once per `messageId` — the daemon clears its tracking on the first call.
 
 **Slash text is excluded from the title heuristic.** The session-title first-prompt heuristic skips any prompt whose first line starts with `/` so administrative prompts like `/hydra title …`, `/model gpt-5`, `/hydra planner create …` don't become the session title. The next non-slash prompt seeds normally.
 

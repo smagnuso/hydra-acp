@@ -483,6 +483,29 @@ export class Session {
   private amendInProgress:
     | { cancelledMessageId: string; newMessageId: string }
     | undefined;
+
+  // Per-messageId record of an in-flight extension `commands/invoke`
+  // dispatch. Populated when runExtensionCommandInline starts the
+  // request to the extension's connection, cleared on settle.
+  // amendOnHead / Session.cancel / markClosed consult this to send
+  // `hydra-acp/commands/cancel` directly to the owning extension's
+  // connection when the entry is being cancelled — extensions live
+  // outside the client broadcast fanout, so they need a dedicated
+  // notification channel.
+  //
+  // `cancel(reason)` triggers the extension's cancel notification
+  // (best-effort) and resolves the in-flight race in
+  // runExtensionCommandInline with a synthesized cancelled
+  // response — so drainQueue advances even if the extension is slow
+  // to release its commands/invoke.
+  private inFlightExtensionDispatches = new Map<
+    string,
+    {
+      extensionName: string;
+      connection: JsonRpcConnection;
+      cancel: (reason: "amended" | "cancelled" | "abandoned") => void;
+    }
+  >();
   // LRU of recently-terminal messageIds → stopReason. Used by
   // amendPrompt to resolve targets that completed/cancelled before
   // the amend arrived. Capped at RECENTLY_TERMINAL_LIMIT entries;
@@ -1731,6 +1754,14 @@ export class Session {
       newMessageId,
     };
 
+    // If M1 is an in-flight extension command dispatch (e.g. the
+    // planner's `/hydra planner create`), the agent.connection cancel
+    // below is a no-op for it — no agent.session/prompt is parked.
+    // Tell the extension directly so it can release its
+    // commands/invoke and drainQueue can advance to M2. Extensions
+    // outside this dispatch see nothing.
+    this.cancelExtensionDispatch(targetMessageId, "amended");
+
     // Fire-and-forget the cancel notification. The agent's session/prompt
     // for M1 will return with stopReason cancelled; drainQueue's await
     // resolves and we advance to M2 naturally.
@@ -1795,6 +1826,18 @@ export class Session {
     // observer in wireAgent can attribute a closely-following error to this
     // cancel and surface it to clients via hydra-acp/cancel_failed.
     this.lastCancelAt = Date.now();
+    // If the in-flight currentEntry is an extension command dispatch
+    // (e.g. a `/hydra planner ...` slash command held open by the
+    // planner's commands/invoke), the downstream agent.session/cancel
+    // is a no-op for it — no agent turn is parked. Tell the extension
+    // directly so it can release its commands/invoke and drainQueue
+    // can advance.
+    if (
+      this.currentEntry?.kind === "user" &&
+      this.currentEntry.messageId !== undefined
+    ) {
+      this.cancelExtensionDispatch(this.currentEntry.messageId, "cancelled");
+    }
     // Walk the request-side transformer chain with tailKind=notification:
     // transformers that declared "request:session/cancel" intercept get
     // a chance to observe (continue), suppress (stop), or do async
@@ -2956,21 +2999,69 @@ export class Session {
         `/hydra ${name}${verb ? ` ${verb}` : ""}: unknown verb (known: ${verbs || "(none)"})`,
       );
     }
+    const params: Record<string, unknown> = {
+      sessionId: this.sessionId,
+      verb,
+      args,
+    };
+    if (messageId !== undefined) {
+      params.messageId = messageId;
+    }
+
+    // Race the extension's commands/invoke against an externally-
+    // triggered cancel signal so we can unstick the queue when an
+    // entry is amended/cancelled mid-flight. The extension lives
+    // outside the daemon's broadcast fanout (it's not an attached
+    // client), so we need to fire it a dedicated notification AND
+    // resolve the await internally — see cancelExtensionDispatch.
+    let cancelResolve: (
+      payload: { stopReason: "cancelled"; reason: "amended" | "cancelled" | "abandoned" },
+    ) => void = () => undefined;
+    const cancelPromise = new Promise<{
+      stopReason: "cancelled";
+      reason: "amended" | "cancelled" | "abandoned";
+    }>((resolve) => {
+      cancelResolve = resolve;
+    });
+
+    if (messageId !== undefined) {
+      this.inFlightExtensionDispatches.set(messageId, {
+        extensionName: name,
+        connection: entry.connection,
+        cancel: (reason) =>
+          cancelResolve({ stopReason: "cancelled", reason }),
+      });
+    }
+
     let reply: unknown;
+    let wasCancelled = false;
     try {
-      const params: Record<string, unknown> = {
-        sessionId: this.sessionId,
-        verb,
-        args,
-      };
-      if (messageId !== undefined) {
-        params.messageId = messageId;
+      const requestPromise = entry.connection.request(
+        "hydra-acp/commands/invoke",
+        params,
+      );
+      const result = await Promise.race([requestPromise, cancelPromise]);
+      if (
+        result &&
+        typeof result === "object" &&
+        (result as { stopReason?: unknown }).stopReason === "cancelled" &&
+        "reason" in (result as Record<string, unknown>)
+      ) {
+        wasCancelled = true;
+        this.logger?.info(
+          `extension ${name} ${verb} cancelled (cancelExtensionDispatch); abandoning in-flight commands/invoke`,
+        );
+        return { stopReason: "cancelled" };
       }
-      reply = await entry.connection.request("hydra-acp/commands/invoke", params);
+      reply = result;
     } catch (err) {
       return this.emitExtensionReply(
         `${name} ${verb}: ${(err as Error).message}`,
       );
+    } finally {
+      if (messageId !== undefined && !wasCancelled) {
+        this.inFlightExtensionDispatches.delete(messageId);
+      }
     }
     const text =
       reply && typeof reply === "object" &&
@@ -2981,6 +3072,48 @@ export class Session {
       return this.emitExtensionReply(text);
     }
     return { stopReason: "end_turn" };
+  }
+
+  // Trigger the cancel race for an in-flight extension dispatch keyed
+  // by the user-prompt queue messageId. Fires the
+  // `hydra-acp/commands/cancel` notification to the extension's
+  // connection up front (so a fast extension can respond before the
+  // race fallback fires) and resolves the internal cancel promise so
+  // runExtensionCommandInline returns immediately with stopReason
+  // "cancelled". Idempotent — multiple calls for the same messageId
+  // (e.g. amend then cancel before the race settles) are no-ops
+  // after the first.
+  //
+  // Called from amendOnHead (reason: "amended"), Session.cancel chain
+  // walk for extension-bound currentEntry (reason: "cancelled"), and
+  // markClosed teardown (reason: "abandoned").
+  private cancelExtensionDispatch(
+    messageId: string,
+    reason: "amended" | "cancelled" | "abandoned",
+  ): boolean {
+    const dispatch = this.inFlightExtensionDispatches.get(messageId);
+    if (!dispatch) {
+      return false;
+    }
+    this.inFlightExtensionDispatches.delete(messageId);
+    // Fire the notification synchronously so the extension can begin
+    // its own cleanup; the cancel.resolve below is what unblocks
+    // drainQueue. If the extension responds to commands/invoke
+    // before the race resolves, that response is dropped because
+    // wasCancelled is already true.
+    try {
+      dispatch.connection.notify("hydra-acp/commands/cancel", {
+        sessionId: this.sessionId,
+        messageId,
+        reason,
+      });
+    } catch (err) {
+      this.logger?.warn(
+        `notify commands/cancel to ${dispatch.extensionName} failed: ${(err as Error).message}`,
+      );
+    }
+    dispatch.cancel(reason);
+    return true;
   }
 
   private emitExtensionReply(text: string): unknown {
@@ -3749,6 +3882,12 @@ export class Session {
     if (this.extensionCommandsUnsub) {
       this.extensionCommandsUnsub();
       this.extensionCommandsUnsub = undefined;
+    }
+    // Tell every in-flight extension command dispatch to release —
+    // the session is going down, their commands/invoke will never
+    // get a useful response, and their cleanup hooks need to fire.
+    for (const messageId of [...this.inFlightExtensionDispatches.keys()]) {
+      this.cancelExtensionDispatch(messageId, "abandoned");
     }
     // If a user-prompt turn is currently in-flight, synthesize a
     // turn_complete before clearing clients. This writes a proper close
