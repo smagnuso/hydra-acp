@@ -4270,6 +4270,23 @@ export class Session {
     if (client.clientInfo?.name) originator.name = client.clientInfo.name;
     if (client.clientInfo?.version)
       originator.version = client.clientInfo.version;
+    // Read `_meta["hydra-acp"].queuePosition` to let callers select
+    // where in the queue this entry lands. Defaults to "tail" (the
+    // historical behavior — every prompt was pushed to the end).
+    //
+    //   "tail"  → push at the end (default).
+    //   "head"  → unshift onto the front of the waiting queue (runs
+    //             next, right after the in-flight currentEntry).
+    //   { afterMessageId } → splice in immediately after a specific
+    //             entry's messageId. Useful when an extension wants
+    //             to schedule follow-up work tied to a user prompt's
+    //             outcome. Falls back to "tail" if the id isn't in
+    //             the queue.
+    //
+    // ACP-extensibility-compliant: lives under the vendor `hydra-acp`
+    // key inside the standard `_meta`. Spec-compliant clients that
+    // don't set it behave identically to before.
+    const queuePosition = this.parseQueuePosition(params);
     return new Promise<unknown>((resolve, reject) => {
       const entry: UserPromptQueueEntry = {
         kind: "user",
@@ -4282,11 +4299,66 @@ export class Session {
         resolve,
         reject,
       };
-      this.promptQueue.push(entry);
+      const insertedAt = this.insertEntryAt(entry, queuePosition);
       this.persistRewrite();
-      this.broadcastQueueAdded(entry);
+      this.broadcastQueueAdded(entry, { position: insertedAt });
       void this.drainQueue();
     });
+  }
+
+  // Parse the optional `_meta["hydra-acp"].queuePosition` field from
+  // session/prompt params. Returns a normalized position descriptor
+  // the queue-insertion code can act on. Defaults to "tail" when the
+  // field is missing or malformed.
+  private parseQueuePosition(
+    params: unknown,
+  ): "head" | "tail" | { afterMessageId: string } {
+    if (!params || typeof params !== "object") return "tail";
+    const meta = (params as { _meta?: unknown })._meta;
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) return "tail";
+    const hydra = (meta as Record<string, unknown>)["hydra-acp"];
+    if (!hydra || typeof hydra !== "object" || Array.isArray(hydra)) return "tail";
+    const raw = (hydra as Record<string, unknown>).queuePosition;
+    if (raw === "head" || raw === "tail") return raw;
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const id = (raw as Record<string, unknown>).afterMessageId;
+      if (typeof id === "string" && id.length > 0) {
+        return { afterMessageId: id };
+      }
+    }
+    return "tail";
+  }
+
+  // Insert `entry` into promptQueue at the requested position.
+  // Returns the VISIBLE position the entry now occupies — that is,
+  // counting currentEntry as position 0 if it exists and is user-
+  // kind, then waiting entries from position 1 onward. Used for the
+  // prompt_queue_added broadcast so peer clients render the chip
+  // in the right slot.
+  private insertEntryAt(
+    entry: UserPromptQueueEntry,
+    position: "head" | "tail" | { afterMessageId: string },
+  ): number {
+    const currentOffset =
+      this.currentEntry?.kind === "user" && !this.currentEntry.cancelled
+        ? 1
+        : 0;
+    if (position === "head") {
+      this.promptQueue.unshift(entry);
+      return currentOffset;
+    }
+    if (typeof position === "object") {
+      const targetId = position.afterMessageId;
+      const idx = this.promptQueue.findIndex((e) => e.messageId === targetId);
+      if (idx >= 0) {
+        this.promptQueue.splice(idx + 1, 0, entry);
+        return currentOffset + idx + 1;
+      }
+      // Fall through to tail if the target wasn't found — better
+      // than erroring out, since the target may have just completed.
+    }
+    this.promptQueue.push(entry);
+    return currentOffset + this.promptQueue.length - 1;
   }
 
   // Rewrite the on-disk queue to reflect the current set of WAITING

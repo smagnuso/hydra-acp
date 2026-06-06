@@ -2741,6 +2741,162 @@ describe("Session", () => {
       expect(promptReceived).toBeUndefined();
     });
 
+    it("`_meta.hydra-acp.queuePosition: \"head\"` splices the new entry in front of waiting entries", async () => {
+      const { session, mock } = makeSession("hydra_session_QH", "u_QH");
+      const { client: alice } = makeClient();
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      // First prompt: hangs upstream so subsequent prompts queue.
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_QH",
+        prompt: [{ type: "text", text: "running" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      // Second prompt: regular tail-queued.
+      void session.prompt(alice.clientId, {
+        sessionId: "hydra_session_QH",
+        prompt: [{ type: "text", text: "tail one" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      // Third prompt: requests head insertion via _meta.hydra-acp.queuePosition.
+      void session.prompt(bob.clientId, {
+        sessionId: "hydra_session_QH",
+        prompt: [{ type: "text", text: "head one" }],
+        _meta: { "hydra-acp": { queuePosition: "head" } },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const addedEvents = bobStream.sent.filter(
+        (m) => "method" in m && m.method === "hydra-acp/prompt_queue/added",
+      ) as JsonRpcNotification[];
+      expect(addedEvents).toHaveLength(3);
+      const third = addedEvents[2]!.params as {
+        position: number;
+        queueDepth: number;
+      };
+      // The head-positioned entry sits at visible position 1 — right
+      // after the in-flight currentEntry (position 0) — pushing the
+      // previously-queued tail entry to position 2. queueDepth counts
+      // the currentEntry too: in-flight + 2 waiting = 3.
+      expect(third.position).toBe(1);
+      expect(third.queueDepth).toBe(3);
+    });
+
+    it("`_meta.hydra-acp.queuePosition: { afterMessageId }` splices after a specific entry", async () => {
+      const { session, mock } = makeSession("hydra_session_QA", "u_QA");
+      const { client } = makeClient();
+      session.attach(client, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      // First: in-flight head.
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_QA",
+        prompt: [{ type: "text", text: "running" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      // Second: tail (becomes queue position 0).
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_QA",
+        prompt: [{ type: "text", text: "A" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      // Third: tail (becomes queue position 1).
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_QA",
+        prompt: [{ type: "text", text: "B" }],
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // Capture the messageId of entry A from queueSnapshot.
+      const snapshot = session.queueSnapshot();
+      const aEntry = snapshot.find((e) => e.position === 1);
+      expect(aEntry).toBeDefined();
+      const aMessageId = aEntry!.messageId;
+
+      // Fourth: insert AFTER A. Should land at position 2 (A, here, B).
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_QA",
+        prompt: [{ type: "text", text: "after-A" }],
+        _meta: { "hydra-acp": { queuePosition: { afterMessageId: aMessageId } } },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const post = session.queueSnapshot();
+      // The queue ordering should be: [running, A, after-A, B].
+      // queueSnapshot's positions are relative to the queue including
+      // currentEntry at 0 — verify the texts in order.
+      const texts = post.map((e) => {
+        const block = (e.prompt as Array<{ text?: string }>)[0];
+        return block?.text;
+      });
+      expect(texts).toEqual(["running", "A", "after-A", "B"]);
+    });
+
+    it("an unknown afterMessageId falls back to tail (no error)", async () => {
+      const { session, mock } = makeSession("hydra_session_QF", "u_QF");
+      const { client } = makeClient();
+      session.attach(client, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_QF",
+        prompt: [{ type: "text", text: "running" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_QF",
+        prompt: [{ type: "text", text: "tail-fallback" }],
+        _meta: { "hydra-acp": { queuePosition: { afterMessageId: "ghost" } } },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      const snapshot = session.queueSnapshot();
+      expect(snapshot).toHaveLength(2);
+      const block = (snapshot[1]!.prompt as Array<{ text?: string }>)[0];
+      expect(block?.text).toBe("tail-fallback");
+    });
+
+    it("malformed queuePosition meta is ignored — defaults to tail", async () => {
+      const { session, mock } = makeSession("hydra_session_QM", "u_QM");
+      const { client } = makeClient();
+      session.attach(client, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockImplementation(() => new Promise(() => undefined));
+
+      void session.prompt(client.clientId, {
+        sessionId: "hydra_session_QM",
+        prompt: [{ type: "text", text: "running" }],
+      });
+      await new Promise((r) => setImmediate(r));
+      for (const bad of [123, "header", { wrongKey: "x" }, null]) {
+        void session.prompt(client.clientId, {
+          sessionId: "hydra_session_QM",
+          prompt: [{ type: "text", text: `bad-${typeof bad}` }],
+          _meta: { "hydra-acp": { queuePosition: bad } },
+        });
+        await new Promise((r) => setImmediate(r));
+      }
+      // All four bad-meta prompts ended up tail-queued in order.
+      const snapshot = session.queueSnapshot();
+      expect(snapshot).toHaveLength(5);
+      const textsAfterHead = snapshot.slice(1).map((e) => {
+        const block = (e.prompt as Array<{ text?: string }>)[0];
+        return block?.text;
+      });
+      expect(textsAfterHead).toEqual([
+        "bad-number",
+        "bad-string",
+        "bad-object",
+        "bad-object",
+      ]);
+    });
+
     it("a second concurrent prompt enqueues with position=1 and queueDepth=2", async () => {
       const { session, mock } = makeSession("hydra_session_Q3", "u_Q3");
       const { client: alice } = makeClient();

@@ -713,6 +713,12 @@ Returns `-32603 InternalError` if the daemon has no registry wired, or surfaces 
 
 Standard ACP requests and responses carry an optional `_meta: Record<string, unknown>`. Hydra-specific fields ride under the `hydra-acp` key inside that object per the ACP [Extensibility convention](https://agentclientprotocol.com/protocol/extensibility). Generic ACP clients ignore the field, so the additions are strictly additive.
 
+#### On `session/prompt` params (`_meta.hydra-acp`)
+
+| Field | Type | Semantics |
+|---|---|---|
+| `queuePosition` | `"head" \| "tail" \| { afterMessageId: string }` | Where in the per-session prompt queue this entry lands. Default `"tail"` matches historical behavior (push to the end). `"head"` splices it onto the front of the waiting queue — runs next, right after the in-flight `currentEntry`. `{ afterMessageId }` splices immediately after the named entry; if the id isn't in the queue (already completed, never existed), falls back to `"tail"`. Useful for extensions submitting follow-up prompts that should run before any other queued user prompts (e.g. the planner injecting `/hydra planner status` after an amend to re-acquire its live view), and for future UI features like drag-to-reorder queue chips. Honors are session-local — multiple entries inserted at `"head"` in quick succession are processed FIFO. |
+
 #### On `session/new` params (`_meta.hydra-acp`)
 
 The ACP spec `NewSessionRequest` carries only `cwd` and `mcpServers`. Everything hydra-specific — including **agent selection** — rides under `_meta["hydra-acp"]`; hydra emits **no** non-spec fields at the top level of `session/new`.
