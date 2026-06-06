@@ -90,6 +90,7 @@ function fakeConfig(): HydraConfig {
       maxToolItems: 5,
       maxPlanItems: 5,
       showFileUpdates: "none" as const,
+      selectionClipboard: "both" as const,
     },
   };
 }

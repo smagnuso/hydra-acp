@@ -87,7 +87,7 @@ import {
   mimeFromExtension,
   parseDataUriImage,
 } from "./attachments.js";
-import { readClipboard } from "./clipboard.js";
+import { readClipboard, readPrimarySelection } from "./clipboard.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
@@ -299,6 +299,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^R", "history reverse search (^S walks forward once engaged)"],
   ["PgUp / PgDn", "scroll scrollback"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
+  ["Middle-click", "paste PRIMARY selection (terminal-style)"],
   ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
   null,
   ["^C", "cancel turn (twice to exit)"],
@@ -1507,6 +1508,7 @@ async function runSession(
     maxScrollbackLines: config.tui.maxScrollbackLines,
     mouse: viewPrefs.mouseEnabled,
     inAppSelection: viewPrefs.inAppSelectionEnabled,
+    selectionClipboard: config.tui.selectionClipboard,
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
     onSuspend: process.platform !== "win32" ? onSuspend : undefined,
@@ -1520,6 +1522,24 @@ async function runSession(
     // scrolls into view.
     onBlockVisible: (key: string) => {
       handleBlockVisible(key);
+    },
+    // Middle-click pastes the PRIMARY selection, matching native terminal
+    // behavior: when mouse capture is on, the terminal can't do its own
+    // middle-click paste, so we read PRIMARY and paste text into the
+    // prompt. Fires on press to match the X11 middle-down convention and
+    // reuses the same effect + read-only gate as the ^V keybinding.
+    onMouse: (ev) => {
+      if (ev.kind !== "press" || ev.button !== "middle") {
+        return;
+      }
+      const effect: InputEffect = {
+        type: "attachment-request",
+        source: "primary",
+      };
+      if (opts.readonly === true && isReadonlyForbiddenEffect(effect)) {
+        return;
+      }
+      handleEffect(effect);
     },
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
@@ -2649,7 +2669,7 @@ async function runSession(
         screen.updateScrollbackSearchTerm(effect.query);
         return;
       case "attachment-request":
-        void handleClipboardAttachment();
+        void handleClipboardAttachment(effect.source);
         return;
     }
   };
@@ -2718,8 +2738,15 @@ async function runSession(
     }
   };
 
-  const handleClipboardAttachment = async (): Promise<void> => {
-    const result = await readClipboard();
+  const handleClipboardAttachment = async (
+    source: "clipboard" | "primary" = "clipboard",
+  ): Promise<void> => {
+    // PRIMARY (middle-click) is text-only and mirrors a terminal's
+    // select-to-paste; CLIPBOARD (ctrl-v) tries an image first.
+    const result =
+      source === "primary"
+        ? await readPrimarySelection()
+        : await readClipboard();
     if (!result.ok) {
       screen.notify(result.reason);
       return;

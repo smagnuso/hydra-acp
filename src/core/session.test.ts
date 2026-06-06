@@ -4305,6 +4305,7 @@ describe("Session", () => {
 
       // User amends.
       const amendResult = await session.amendPrompt(client.clientId, {
+        sessionId: "hydra_session_ext",
         targetMessageId: slashMessageId as string,
         prompt: [{ type: "text", text: "actually build Y" }],
       });

@@ -93,6 +93,50 @@ export async function readClipboard(
   };
 }
 
+// Read the PRIMARY selection (the middle-click paste buffer) as text.
+// Text-only by design: PRIMARY never carries images, and middle-click
+// paste mirrors a terminal's select-to-paste. macOS has no PRIMARY, so
+// it falls back to the regular clipboard (pbpaste).
+export async function readPrimarySelection(
+  envIn: Partial<ClipboardEnv> = {},
+): Promise<ClipboardReadResult> {
+  const env: ClipboardEnv = { ...defaultEnv, ...envIn };
+  let cmd: string;
+  let args: string[];
+  if (env.platform === "darwin") {
+    cmd = "pbpaste";
+    args = [];
+  } else if (env.platform === "linux") {
+    if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-paste"))) {
+      cmd = "wl-paste";
+      args = ["--primary", "-n"];
+    } else if (env.env.DISPLAY && (await which(env, "xclip"))) {
+      cmd = "xclip";
+      args = ["-selection", "primary", "-o"];
+    } else {
+      return {
+        ok: false,
+        reason:
+          "install wl-clipboard (Wayland) or xclip (X11) to paste the selection",
+      };
+    }
+  } else {
+    return {
+      ok: false,
+      reason: `selection paste is not supported on ${env.platform}`,
+    };
+  }
+  try {
+    const buf = await runCapture(env.spawn, cmd, args);
+    if (buf.length === 0) {
+      return { ok: false, reason: "selection is empty" };
+    }
+    return { ok: true, kind: "text", text: normalizeText(buf.toString("utf-8")) };
+  } catch {
+    return { ok: false, reason: "selection read failed" };
+  }
+}
+
 export type ClipboardWriteMethod =
   | "pbcopy"
   | "wl-copy"
@@ -103,6 +147,12 @@ export type ClipboardWriteResult =
   | { ok: true; method: ClipboardWriteMethod }
   | { ok: false; reason: string };
 
+// Which selection buffer(s) a copy targets. "both" writes the CLIPBOARD
+// (Ctrl/Cmd+V) and the PRIMARY selection (middle-click paste); the others
+// write just one. macOS has no PRIMARY, so all values behave as
+// "clipboard" there.
+export type ClipboardTarget = "primary" | "clipboard" | "both";
+
 // OSC 52 payload size cap. xterm's documented limit is 100000 bytes of
 // base64; many terminals enforce smaller. We pick a conservative cap
 // so a giant selection doesn't silently truncate in the terminal.
@@ -110,19 +160,20 @@ const OSC52_MAX_BYTES = 74994;
 
 export async function writeClipboard(
   text: string,
-  envIn: Partial<ClipboardEnv> = {},
+  opts: { target?: ClipboardTarget } & Partial<ClipboardEnv> = {},
 ): Promise<ClipboardWriteResult> {
+  const { target = "both", ...envIn } = opts;
   const env: ClipboardEnv = { ...defaultEnv, ...envIn };
   // Try the native tool first — it's the most reliable and works for
   // local sessions. OSC 52 is the SSH-remote fallback: when the user
   // is on a remote host with no DISPLAY/WAYLAND_DISPLAY and no pbcopy,
   // the only way to reach the user's actual clipboard is through the
   // terminal emulator they're sitting in front of.
-  const native = await writeNative(env, text);
+  const native = await writeNative(env, text, target);
   if (native.ok) {
     return native;
   }
-  const osc = writeOsc52(env, text);
+  const osc = writeOsc52(env, text, target);
   if (osc.ok) {
     return osc;
   }
@@ -142,47 +193,43 @@ const NO_TTY_REASON = "no TTY available for OSC 52 clipboard write";
 async function writeNative(
   env: ClipboardEnv,
   text: string,
+  target: ClipboardTarget,
 ): Promise<ClipboardWriteResult> {
+  const buf = Buffer.from(text, "utf-8");
   if (env.platform === "darwin") {
+    // macOS has a single clipboard and no PRIMARY selection, so every
+    // target collapses to pbcopy.
     try {
-      await runWithStdin(env.spawn, "pbcopy", [], Buffer.from(text, "utf-8"));
+      await runWithStdin(env.spawn, "pbcopy", [], buf);
       return { ok: true, method: "pbcopy" };
     } catch {
       return { ok: false, reason: "pbcopy failed" };
     }
   }
   if (env.platform === "linux") {
-    const buf = Buffer.from(text, "utf-8");
+    const wantClip = target === "clipboard" || target === "both";
+    const wantPrim = target === "primary" || target === "both";
     if (env.env.WAYLAND_DISPLAY && (await which(env, "wl-copy"))) {
-      try {
-        await runWithStdin(env.spawn, "wl-copy", [], buf);
-        // Mirror into the PRIMARY selection so middle-click paste matches
-        // native terminal select-to-copy. Best-effort: a PRIMARY failure
-        // must not fail the copy the user actually asked for.
-        await writePrimaryBestEffort(env, "wl-copy", ["--primary"], buf);
-        return { ok: true, method: "wl-copy" };
-      } catch {
-        return { ok: false, reason: "wl-copy failed" };
-      }
+      return writeLinuxSelections(
+        env,
+        buf,
+        "wl-copy",
+        [],
+        ["--primary"],
+        wantClip,
+        wantPrim,
+      );
     }
     if (env.env.DISPLAY && (await which(env, "xclip"))) {
-      try {
-        await runWithStdin(
-          env.spawn,
-          "xclip",
-          ["-selection", "clipboard", "-i"],
-          buf,
-        );
-        await writePrimaryBestEffort(
-          env,
-          "xclip",
-          ["-selection", "primary", "-i"],
-          buf,
-        );
-        return { ok: true, method: "xclip" };
-      } catch {
-        return { ok: false, reason: "xclip failed" };
-      }
+      return writeLinuxSelections(
+        env,
+        buf,
+        "xclip",
+        ["-selection", "clipboard", "-i"],
+        ["-selection", "primary", "-i"],
+        wantClip,
+        wantPrim,
+      );
     }
     return {
       ok: false,
@@ -196,20 +243,42 @@ async function writeNative(
   };
 }
 
-// Write the same payload into the X11/Wayland PRIMARY selection (the
-// middle-click paste buffer). Failures are swallowed: PRIMARY is a
-// nice-to-have that mirrors native select-to-copy, and the CLIPBOARD
-// write has already succeeded by the time we get here.
-async function writePrimaryBestEffort(
+// Write the requested X11/Wayland selections via `cmd`. When CLIPBOARD is
+// wanted it is the required write (its failure fails the copy) and PRIMARY
+// is mirrored best-effort; when only PRIMARY is wanted, PRIMARY is the
+// required write.
+async function writeLinuxSelections(
   env: ClipboardEnv,
-  cmd: string,
-  args: string[],
-  payload: Buffer,
-): Promise<void> {
+  buf: Buffer,
+  cmd: "wl-copy" | "xclip",
+  clipArgs: string[],
+  primArgs: string[],
+  wantClip: boolean,
+  wantPrim: boolean,
+): Promise<ClipboardWriteResult> {
+  const method: ClipboardWriteMethod = cmd;
+  if (wantClip) {
+    try {
+      await runWithStdin(env.spawn, cmd, clipArgs, buf);
+    } catch {
+      return { ok: false, reason: `${cmd} failed` };
+    }
+    if (wantPrim) {
+      // PRIMARY mirror is best-effort once CLIPBOARD has landed.
+      try {
+        await runWithStdin(env.spawn, cmd, primArgs, buf);
+      } catch {
+        // ignore — PRIMARY is a nice-to-have here
+      }
+    }
+    return { ok: true, method };
+  }
+  // PRIMARY-only.
   try {
-    await runWithStdin(env.spawn, cmd, args, payload);
+    await runWithStdin(env.spawn, cmd, primArgs, buf);
+    return { ok: true, method };
   } catch {
-    // ignore — PRIMARY is best-effort
+    return { ok: false, reason: `${cmd} failed` };
   }
 }
 
@@ -218,7 +287,11 @@ async function writePrimaryBestEffort(
 // SSH connection. Most modern terminals (iTerm2, kitty, WezTerm,
 // Alacritty, foot, recent xterm) honor it; tmux requires an extra
 // passthrough wrap and `set -g set-clipboard on` to forward it.
-function writeOsc52(env: ClipboardEnv, text: string): ClipboardWriteResult {
+function writeOsc52(
+  env: ClipboardEnv,
+  text: string,
+  target: ClipboardTarget,
+): ClipboardWriteResult {
   const b64 = Buffer.from(text, "utf-8").toString("base64");
   if (b64.length > OSC52_MAX_BYTES) {
     return {
@@ -226,8 +299,10 @@ function writeOsc52(env: ClipboardEnv, text: string): ClipboardWriteResult {
       reason: `selection is too large for terminal clipboard escape (${b64.length} > ${OSC52_MAX_BYTES} bytes)`,
     };
   }
-  // BEL terminator is more widely accepted than ST across emulators.
-  let seq = `\x1b]52;c;${b64}\x07`;
+  // OSC 52 selection codes: "c" = CLIPBOARD, "p" = PRIMARY. Emit one per
+  // requested buffer. BEL terminator is more widely accepted than ST.
+  const codes = target === "both" ? "cp" : target === "primary" ? "p" : "c";
+  let seq = `\x1b]52;${codes};${b64}\x07`;
   if (env.env.TMUX) {
     // tmux passthrough: wrap in DCS tmux; ... ST. Inner ESC bytes
     // must be doubled so tmux forwards the literal escape to the

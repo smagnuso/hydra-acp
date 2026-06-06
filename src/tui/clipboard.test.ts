@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   readClipboard,
+  readPrimarySelection,
   writeClipboard,
   type SpawnLike,
 } from "./clipboard.js";
@@ -456,7 +457,8 @@ describe("writeClipboard", () => {
     });
     expect(result).toEqual({ ok: true, method: "osc52" });
     const expected = Buffer.from("payload", "utf-8").toString("base64");
-    expect(captured).toBe(`\x1b]52;c;${expected}\x07`);
+    // Default target is "both" → CLIPBOARD + PRIMARY selection codes.
+    expect(captured).toBe(`\x1b]52;cp;${expected}\x07`);
   });
 
   it("pipes text to wl-copy on Wayland Linux, mirroring into PRIMARY", async () => {
@@ -541,6 +543,54 @@ describe("writeClipboard", () => {
     expect(Buffer.concat(sink).toString("utf-8")).toBe("x11-text");
   });
 
+  it("target 'clipboard' writes only the CLIPBOARD selection (no PRIMARY)", async () => {
+    const sink: Buffer[] = [];
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 0 },
+      {
+        cmd: "xclip",
+        args: ["-selection", "clipboard", "-i"],
+        code: 0,
+        stdinSink: sink,
+      },
+    ]);
+    const result = await writeClipboard("only-clip", {
+      target: "clipboard",
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result).toEqual({ ok: true, method: "xclip" });
+    expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip"]);
+    expect(calls[1]?.args).toEqual(["-selection", "clipboard", "-i"]);
+    expect(Buffer.concat(sink).toString("utf-8")).toBe("only-clip");
+  });
+
+  it("target 'primary' writes only the PRIMARY selection", async () => {
+    const sink: Buffer[] = [];
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 0 },
+      {
+        cmd: "xclip",
+        args: ["-selection", "primary", "-i"],
+        code: 0,
+        stdinSink: sink,
+      },
+    ]);
+    const result = await writeClipboard("only-prim", {
+      target: "primary",
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result).toEqual({ ok: true, method: "xclip" });
+    expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip"]);
+    expect(calls[1]?.args).toEqual(["-selection", "primary", "-i"]);
+    expect(Buffer.concat(sink).toString("utf-8")).toBe("only-prim");
+  });
+
   it("uses OSC 52 on Linux with no display and no tools, when a TTY is available", async () => {
     const { spawn } = makeSpawnFake([]);
     let captured = "";
@@ -555,9 +605,9 @@ describe("writeClipboard", () => {
       },
     });
     expect(result).toEqual({ ok: true, method: "osc52" });
-    expect(captured.startsWith("\x1b]52;c;")).toBe(true);
+    expect(captured.startsWith("\x1b]52;cp;")).toBe(true);
     expect(captured.endsWith("\x07")).toBe(true);
-    const b64 = captured.slice("\x1b]52;c;".length, -1);
+    const b64 = captured.slice("\x1b]52;cp;".length, -1);
     expect(Buffer.from(b64, "base64").toString("utf-8")).toBe("remote payload");
   });
 
@@ -575,7 +625,7 @@ describe("writeClipboard", () => {
       },
     });
     expect(result.ok).toBe(true);
-    expect(captured.startsWith("\x1bPtmux;\x1b\x1b]52;c;")).toBe(true);
+    expect(captured.startsWith("\x1bPtmux;\x1b\x1b]52;cp;")).toBe(true);
     expect(captured.endsWith("\x1b\\")).toBe(true);
   });
 
@@ -658,5 +708,42 @@ describe("readClipboard — unsupported platforms", () => {
     if (!result.ok) {
       expect(result.reason).toMatch(/win32/);
     }
+  });
+});
+
+describe("readPrimarySelection", () => {
+  it("reads the PRIMARY selection via xclip on X11", async () => {
+    const { spawn, calls } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 0 },
+      {
+        cmd: "xclip",
+        args: ["-selection", "primary", "-o"],
+        code: 0,
+        stdout: Buffer.from("primary text", "utf-8"),
+      },
+    ]);
+    const result = await readPrimarySelection({
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result).toEqual({ ok: true, kind: "text", text: "primary text" });
+    expect(calls.map((c) => c.cmd)).toEqual(["which", "xclip"]);
+    expect(calls[1]?.args).toEqual(["-selection", "primary", "-o"]);
+  });
+
+  it("reports empty when the PRIMARY selection has no content", async () => {
+    const { spawn } = makeSpawnFake([
+      { cmd: "which", args: ["xclip"], code: 0 },
+      { cmd: "xclip", args: ["-selection", "primary", "-o"], code: 0 },
+    ]);
+    const result = await readPrimarySelection({
+      platform: "linux",
+      env: { DISPLAY: ":0" },
+      spawn,
+      tmpdir: () => "/tmp",
+    });
+    expect(result.ok).toBe(false);
   });
 });

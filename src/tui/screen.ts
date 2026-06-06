@@ -24,7 +24,7 @@ import {
   columnToOffset,
   columnToOffsetFromSegments,
 } from "./column-mapping.js";
-import { writeClipboard } from "./clipboard.js";
+import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
 import { withSync } from "./sync.js";
 
 // Maximum gap, in milliseconds, between two left-button presses on the
@@ -87,6 +87,10 @@ export interface ScreenOptions {
   // resolved value of `mouse` (selection follows capture). Downstream
   // interaction code reads this via isInAppSelectionEnabled().
   inAppSelection?: boolean;
+  // Which selection buffer(s) an in-app copy targets ("primary" |
+  // "clipboard" | "both"). Defaults to "both". Passed straight to
+  // writeClipboard when a selection is finalized.
+  selectionClipboard?: ClipboardTarget;
   // When true (default), emit OSC 9;4 progress-bar codes so the host
   // terminal can render an indeterminate busy indicator while a turn is
   // running (taskbar pulse on Windows Terminal, dock badge on Konsole,
@@ -444,6 +448,8 @@ export class Screen {
   // (see resolveInAppSelection in core/config.ts). Independent of
   // mouseEnabled; flipping mouse capture does NOT auto-flip this.
   private inAppSelectionEnabled: boolean;
+  // Which selection buffer(s) a finalized copy targets. See ScreenOptions.
+  private selectionClipboard: ClipboardTarget;
   private progressIndicatorEnabled: boolean;
   // Listeners registered on process via installEmergencyCleanup so an
   // ungraceful exit (SIGTERM, SIGHUP, uncaughtException) still restores
@@ -497,6 +503,7 @@ export class Screen {
       opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
     this.mouseEnabled = opts.mouse ?? false;
     this.inAppSelectionEnabled = opts.inAppSelection ?? this.mouseEnabled;
+    this.selectionClipboard = opts.selectionClipboard ?? "both";
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
     this.readonly = opts.readonly ?? false;
     this.resizeHandler = () => this.repaint();
@@ -2487,7 +2494,7 @@ export class Screen {
       // between drag and release — silently do nothing.
       return;
     }
-    void writeClipboard(text).then(
+    void writeClipboard(text, { target: this.selectionClipboard }).then(
       (result) => {
         if (result.ok) {
           const chars = text.length;

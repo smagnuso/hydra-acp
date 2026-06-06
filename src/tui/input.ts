@@ -113,11 +113,12 @@ export type InputEffect =
   | { type: "toggle-thoughts" }
   | { type: "toggle-mouse" }
   | { type: "show-help" }
-  // Dispatcher → app: please acquire an image from the named source
-  // (currently only the system clipboard) and call addAttachment().
-  // Emitted by ctrl-v. The dispatcher stays synchronous; the app owns
-  // the shell-out and the file I/O.
-  | { type: "attachment-request"; source: "clipboard" }
+  // Dispatcher → app: please acquire content from the named source and
+  // either add an attachment (image) or paste text. "clipboard" is the
+  // CLIPBOARD buffer (image-first; emitted by ctrl-v); "primary" is the
+  // X11/Wayland PRIMARY selection (text-only; emitted by middle-click).
+  // The dispatcher stays synchronous; the app owns the shell-out + I/O.
+  | { type: "attachment-request"; source: "clipboard" | "primary" }
   // Emitted when prompt-history reverse-search runs out — either no
   // history entry matched the query, or the user advanced ^R past the
   // oldest match. The app hands the query off to the screen's

@@ -125,6 +125,16 @@ const TuiConfig = z.object({
   // false to pin the behavior regardless of mouse capture. Resolve
   // via resolveInAppSelection(config).
   inAppSelection: z.boolean().optional(),
+  // Where an in-app text selection is copied. X11/Wayland expose two
+  // independent buffers: the CLIPBOARD (Ctrl/Cmd+V) and the PRIMARY
+  // selection (middle-click paste). Native terminal select-to-copy
+  // populates PRIMARY; most apps' explicit copy populates CLIPBOARD.
+  //   "both"      — write both, matching what users expect from either
+  //                 paste gesture (default)
+  //   "clipboard" — only the CLIPBOARD buffer
+  //   "primary"   — only the PRIMARY selection
+  // macOS has no PRIMARY concept, so all values behave as "clipboard".
+  selectionClipboard: z.enum(["primary", "clipboard", "both"]).default("both"),
   // Size at which the TUI's session/update debug log (tui.log) rotates
   // to tui.log.0 and resets. Bounds on-disk use at ~2x this value.
   logMaxBytes: z.number().int().positive().default(5 * 1024 * 1024),
@@ -339,6 +349,7 @@ export const HydraConfig = z.object({
     maxToolItems: 5,
     maxPlanItems: 5,
     showFileUpdates: "edit",
+    selectionClipboard: "both",
   }),
 });
 
