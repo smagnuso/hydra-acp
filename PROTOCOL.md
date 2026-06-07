@@ -1273,7 +1273,12 @@ Create a child session whose `parentSessionId` is set.
   "agentId":         "<id>",     // optional; defaults to daemon's defaultAgent
   "cwd":             "<path>",   // optional if parentSessionId resolves to a live session (cwd inherits)
   "parentSessionId": "<id>",     // optional
-  "interactive":     false        // optional; defaults to false for transformer-spawned children
+  "interactive":     false,       // optional; defaults to false for transformer-spawned children
+  "_meta": {
+    "hydra-acp": {
+      "title": "<label>"        // optional; pre-seeds Session.title so the first user prompt doesn't clobber it
+    }
+  }
 }
 // result
 { "childSessionId": "<new id>" }
@@ -1282,6 +1287,8 @@ Create a child session whose `parentSessionId` is set.
 Children start with an empty transformer chain by default. When `cwd` is omitted, the daemon inherits the parent session's cwd — covers the common transformer pattern of "spawn this worker in the same place as my parent" without forcing a separate round-trip to look up the parent's cwd. An explicit `cwd` always wins. If both are missing (no `cwd`, and no `parentSessionId` pointing at a live session), the call rejects with `InvalidParams`.
 
 **Interactive default.** `interactive` defaults to `false` for transformer-spawned children — they exist to do automated work driven by the transformer, not to host a human at a composer, so the default keeps them out of the front-door `hydra-acp session` listing (visible only with `--all`). Pass `interactive: true` if the transformer wants the child to behave like a normal session.
+
+**Title seed.** `_meta["hydra-acp"].title`, when present, sets `Session.title` at create time using the same path as `session/new`. Marks `_firstPromptSeeded=true` so the first user prompt doesn't replace the label. Same shape as the `title` field on [`session/new` params](#on-sessionnew-params-_metahydra-acp) — transformers labelling their children (e.g. the planner naming workers after their tasks) avoid a post-spawn `session_info_update` round-trip.
 
 #### Request (transformer → daemon): `hydra-acp/child_session/await`
 

@@ -430,6 +430,7 @@ export function registerAcpWsEndpoint(
           cwd?: unknown;
           parentSessionId?: unknown;
           interactive?: unknown;
+          _meta?: unknown;
         };
         const agentId = typeof params.agentId === "string"
           ? params.agentId
@@ -440,6 +441,24 @@ export function registerAcpWsEndpoint(
         const parentSessionId = typeof params.parentSessionId === "string"
           ? params.parentSessionId
           : undefined;
+        // Optional title under _meta["hydra-acp"].title — mirrors the
+        // shape used by session/new so transformers don't have to
+        // post-spawn emit a session_info_update to label their
+        // children. Pre-seeds Session.title before the first prompt
+        // lands; the daemon's "first user prompt becomes the title"
+        // heuristic respects this seed via _firstPromptSeeded.
+        const metaObj =
+          params._meta && typeof params._meta === "object"
+            ? (params._meta as Record<string, unknown>)
+            : undefined;
+        const hydraMeta =
+          metaObj && metaObj["hydra-acp"] && typeof metaObj["hydra-acp"] === "object"
+            ? (metaObj["hydra-acp"] as Record<string, unknown>)
+            : undefined;
+        const title =
+          hydraMeta && typeof hydraMeta.title === "string"
+            ? hydraMeta.title
+            : undefined;
 
         // Inherit cwd from the parent when omitted. The common transformer
         // pattern is "spawn a child in the same place as my parent"; the
@@ -477,6 +496,7 @@ export function registerAcpWsEndpoint(
           parentSessionId,
           interactive,
           transformChain: [], // children start with no chain by default
+          title,
         });
         return { childSessionId: child.sessionId };
       });
