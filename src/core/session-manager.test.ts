@@ -90,6 +90,37 @@ describe("SessionManager.resurrect", () => {
     void mockIndex;
   });
 
+  it("forwards params.mcpServers into the agent's session/load call", async () => {
+    // Resurrect used to hardcode `mcpServers: []`, which left cold sessions
+    // without the extension MCP servers they had at original create time
+    // (the daemon's per-session bearer tokens are in-memory and die on
+    // restart, so the descriptors baked into the agent's session snapshot
+    // stop authenticating). The WS layer now mints fresh descriptors and
+    // passes them through ResurrectParams; this asserts the manager
+    // forwards them rather than silently dropping them.
+    const realCwd = process.cwd();
+    const descriptors = [
+      {
+        name: "hydra-acp-planner",
+        type: "http",
+        url: "http://127.0.0.1:0/mcp/hydra-acp-planner",
+        headers: [{ name: "Authorization", value: "Bearer test" }],
+      },
+    ];
+    await manager.resurrect({
+      hydraSessionId: "sess_hyd_mcp",
+      upstreamSessionId: "u_loaded",
+      agentId: "claude-code",
+      cwd: realCwd,
+      mcpServers: descriptors,
+    });
+    const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    expect(requestMock.mock.calls[1]).toMatchObject([
+      "session/load",
+      { sessionId: "u_loaded", cwd: realCwd, mcpServers: descriptors },
+    ]);
+  });
+
   it("returns the existing session if hydraSessionId is already known", async () => {
     const first = await manager.resurrect({
       hydraSessionId: "sess_hyd",

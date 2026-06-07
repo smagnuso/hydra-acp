@@ -736,34 +736,14 @@ export function registerAcpWsEndpoint(
       // initializes mcpServers during session/new, so the agent's first
       // /mcp/<extname> request can land before manager.create returns.
       // Late-registered extensions are invisible to this session — same
-      // posture as register_commands today.
-      let extMcpToken: string | undefined;
-      let extMcpReservation:
-        | { complete: (s: Session) => void; abandon: (e?: Error) => void }
-        | undefined;
-      if (
-        deps.extensionMcp !== undefined &&
-        deps.mcpTokenRegistry !== undefined &&
-        deps.getDaemonOrigin !== undefined
-      ) {
-        const extNames = deps.extensionMcp.list();
-        if (extNames.length > 0) {
-          extMcpToken = randomBytes(32).toString("hex");
-          extMcpReservation = deps.mcpTokenRegistry.reserve(extMcpToken);
-          const origin = deps.getDaemonOrigin();
-          const descriptors = extNames.map((name) => ({
-            name,
-            type: "http",
-            url: `${origin}/mcp/${name}`,
-            headers: [
-              { name: "Authorization", value: `Bearer ${extMcpToken}` },
-            ],
-          }));
-          augmentedMcpServers = [
-            ...(augmentedMcpServers ?? []),
-            ...descriptors,
-          ];
-        }
+      // posture as register_commands today. Resurrect paths use the same
+      // helper so cold sessions regain MCP tools on wake.
+      const extMcpMint = mintExtensionMcpDescriptors(deps);
+      if (extMcpMint !== undefined) {
+        augmentedMcpServers = [
+          ...(augmentedMcpServers ?? []),
+          ...extMcpMint.descriptors,
+        ];
       }
       let session: Session;
       try {
@@ -785,8 +765,8 @@ export function registerAcpWsEndpoint(
         if (stdinReservation !== undefined) {
           stdinReservation.abandon(err instanceof Error ? err : undefined);
         }
-        if (extMcpReservation !== undefined) {
-          extMcpReservation.abandon(err instanceof Error ? err : undefined);
+        if (extMcpMint !== undefined) {
+          extMcpMint.abandon(err instanceof Error ? err : undefined);
         }
         throw err;
       }
@@ -802,17 +782,8 @@ export function registerAcpWsEndpoint(
           void registry.unbind(token);
         });
       }
-      if (
-        extMcpToken !== undefined &&
-        extMcpReservation !== undefined &&
-        deps.mcpTokenRegistry !== undefined
-      ) {
-        const token = extMcpToken;
-        const registry = deps.mcpTokenRegistry;
-        extMcpReservation.complete(session);
-        session.onClose(() => {
-          void registry.unbind(token);
-        });
+      if (extMcpMint !== undefined) {
+        extMcpMint.bindToSession(session);
       }
       const client = bindClientToSession(connection, session, state);
       // No conversation history to replay on a fresh session, but
@@ -973,10 +944,22 @@ export function registerAcpWsEndpoint(
         const resurrectWithOriginator = resurrectParams.originatingClient
           ? resurrectParams
           : { ...resurrectParams, originatingClient: state.clientInfo };
-        session = await deps.manager.resurrect({
-          ...resurrectWithOriginator,
-          onInstallProgress: makeInstallProgressForwarder(connection),
-        });
+        const extMcpMint = mintExtensionMcpDescriptors(deps);
+        try {
+          session = await deps.manager.resurrect({
+            ...resurrectWithOriginator,
+            mcpServers: extMcpMint?.descriptors,
+            onInstallProgress: makeInstallProgressForwarder(connection),
+          });
+        } catch (err) {
+          if (extMcpMint !== undefined) {
+            extMcpMint.abandon(err instanceof Error ? err : undefined);
+          }
+          throw err;
+        }
+        if (extMcpMint !== undefined) {
+          extMcpMint.bindToSession(session);
+        }
         wireDefaultTransformers(session, deps);
       }
       const client = bindClientToSession(
@@ -1178,7 +1161,21 @@ export function registerAcpWsEndpoint(
         app.log.info(
           `session/prompt auto-resurrecting cold sessionId=${params.sessionId}`,
         );
-        session = await deps.manager.resurrect(fromDisk);
+        const extMcpMint = mintExtensionMcpDescriptors(deps);
+        try {
+          session = await deps.manager.resurrect({
+            ...fromDisk,
+            mcpServers: extMcpMint?.descriptors,
+          });
+        } catch (err) {
+          if (extMcpMint !== undefined) {
+            extMcpMint.abandon(err instanceof Error ? err : undefined);
+          }
+          throw err;
+        }
+        if (extMcpMint !== undefined) {
+          extMcpMint.bindToSession(session);
+        }
         wireDefaultTransformers(session, deps);
         const client = bindClientToSession(
           connection,
@@ -1332,7 +1329,21 @@ export function registerAcpWsEndpoint(
           err.code = JsonRpcErrorCodes.SessionNotFound;
           throw err;
         }
-        session = await deps.manager.resurrect(fromDisk);
+        const extMcpMint = mintExtensionMcpDescriptors(deps);
+        try {
+          session = await deps.manager.resurrect({
+            ...fromDisk,
+            mcpServers: extMcpMint?.descriptors,
+          });
+        } catch (err) {
+          if (extMcpMint !== undefined) {
+            extMcpMint.abandon(err instanceof Error ? err : undefined);
+          }
+          throw err;
+        }
+        if (extMcpMint !== undefined) {
+          extMcpMint.bindToSession(session);
+        }
         wireDefaultTransformers(session, deps);
       }
       const client = bindClientToSession(connection, session, state);
@@ -2058,5 +2069,57 @@ function bindClientToSession(
     clientId: callerClientId ?? `cli_${nanoid(8)}`,
     connection,
     clientInfo,
+  };
+}
+
+// Mint a per-session bearer token covering every currently-registered
+// extension MCP server and produce HTTP descriptors for them. Used by
+// session/new and the three resurrect paths (session/attach,
+// session/prompt auto-resurrect, session/load) so a resurrected session
+// regains the MCP tools it had at original create time — without this,
+// the daemon's in-memory token registry is wiped on restart and resurrect
+// passes no mcpServers, leaving the agent's tool registry empty.
+//
+// Returns undefined when there are no extensions registered or the deps
+// needed for token minting aren't wired up. On success the caller must
+// invoke bindToSession(session) once the session exists (binds the bearer
+// + arranges unbind on close) or abandon(err) if session creation fails.
+function mintExtensionMcpDescriptors(deps: AcpWsDeps):
+  | {
+      descriptors: unknown[];
+      bindToSession: (session: Session) => void;
+      abandon: (err?: Error) => void;
+    }
+  | undefined {
+  if (
+    deps.extensionMcp === undefined ||
+    deps.mcpTokenRegistry === undefined ||
+    deps.getDaemonOrigin === undefined
+  ) {
+    return undefined;
+  }
+  const extNames = deps.extensionMcp.list();
+  if (extNames.length === 0) {
+    return undefined;
+  }
+  const token = randomBytes(32).toString("hex");
+  const reservation = deps.mcpTokenRegistry.reserve(token);
+  const origin = deps.getDaemonOrigin();
+  const descriptors = extNames.map((name) => ({
+    name,
+    type: "http",
+    url: `${origin}/mcp/${name}`,
+    headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+  }));
+  const registry = deps.mcpTokenRegistry;
+  return {
+    descriptors,
+    bindToSession: (session) => {
+      reservation.complete(session);
+      session.onClose(() => {
+        void registry.unbind(token);
+      });
+    },
+    abandon: (err) => reservation.abandon(err),
   };
 }

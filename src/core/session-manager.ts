@@ -141,6 +141,13 @@ export interface ResurrectParams {
   // Session; surfaced in list views so future UI can show "branched from <id>".
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  // MCP server descriptors to inject at session/load time. Mirrors
+  // CreateSessionParams.mcpServers — the WS layer mints fresh per-session
+  // bearer tokens and builds descriptors for currently-registered extension
+  // MCP servers, then passes them here so resurrected sessions regain the
+  // tools they had at original create time. Empty/undefined means the agent
+  // gets no MCP servers (legacy behavior).
+  mcpServers?: unknown[];
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -482,7 +489,7 @@ export class SessionManager {
         {
           sessionId: params.upstreamSessionId,
           cwd: params.cwd,
-          mcpServers: [],
+          mcpServers: params.mcpServers ?? [],
           ...(loadMeta && { _meta: loadMeta }),
         },
       );
@@ -592,7 +599,7 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: [] }),
+        this.bootstrapAgent({ ...p, mcpServers: params.mcpServers ?? [] }),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
@@ -643,7 +650,7 @@ export class SessionManager {
       agentId: params.agentId,
       cwd,
       agentArgs: params.agentArgs,
-      mcpServers: [],
+      mcpServers: params.mcpServers ?? [],
       onInstallProgress: params.onInstallProgress,
       // Pass the persisted model so bootstrapAgent calls session/set_model
       // during session/new — the only context where the agent reliably
@@ -683,7 +690,7 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: [] }),
+        this.bootstrapAgent({ ...p, mcpServers: params.mcpServers ?? [] }),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
