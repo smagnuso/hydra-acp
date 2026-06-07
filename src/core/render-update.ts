@@ -5,6 +5,7 @@ import { posix as posixPath } from "node:path";
 import stripAnsi from "strip-ansi";
 import { shortenHomePath } from "./paths.js";
 
+import { getWorkerTaskId } from "../tui/worker-id.js";
 import type { Attachment } from "../tui/input.js";
 import type { ConfigOption, ConfigOptionValue } from "./hydra-commands.js";
 
@@ -55,8 +56,8 @@ export interface EditDiff {
 }
 
 export type RenderEvent =
-  | { kind: "agent-text"; text: string }
-  | { kind: "agent-thought"; text: string }
+  | { kind: "agent-text"; text: string; workerTaskId?: string }
+  | { kind: "agent-thought"; text: string; workerTaskId?: string }
   | {
       kind: "user-text";
       text: string;
@@ -75,6 +76,7 @@ export type RenderEvent =
       // title is usually just the generic verb ("bash"/"edit"), so this is
       // what tells the user *which* command/file. Never the full body.
       detail?: string;
+      workerTaskId?: string;
     }
   | {
       kind: "tool-call-update";
@@ -93,6 +95,7 @@ export type RenderEvent =
       // turn-complete handler to override a misleadingly clean
       // `end_turn` stopReason from the upstream agent.
       upstreamInterrupted?: boolean;
+      workerTaskId?: string;
     }
   | {
       // Claude's ExitPlanMode tool carries the plan as markdown in its
@@ -105,6 +108,7 @@ export type RenderEvent =
       toolCallId: string;
       plan?: string;
       status?: string;
+      workerTaskId?: string;
     }
   | { kind: "plan"; entries: PlanEntry[]; stopped?: boolean; amended?: boolean }
   | { kind: "mode-changed"; mode: string }
@@ -376,7 +380,7 @@ function mapAgentText(u: UpdateLike): RenderEvent | null {
   if (text === null) {
     return null;
   }
-  return { kind: "agent-text", text };
+  return { kind: "agent-text", text, workerTaskId: getWorkerTaskId(u) };
 }
 
 function mapAgentThought(u: UpdateLike): RenderEvent | null {
@@ -387,7 +391,7 @@ function mapAgentThought(u: UpdateLike): RenderEvent | null {
   if (text === null) {
     return null;
   }
-  return { kind: "agent-thought", text };
+  return { kind: "agent-thought", text, workerTaskId: getWorkerTaskId(u) };
 }
 
 function mapUserText(u: UpdateLike): RenderEvent | null {
@@ -580,6 +584,10 @@ function mapToolCall(
   const detail = extractToolDetail(u);
   if (detail !== undefined) {
     event.detail = detail;
+  }
+  const wtid = getWorkerTaskId(u);
+  if (wtid !== undefined) {
+    event.workerTaskId = wtid;
   }
   return event;
 }
@@ -791,6 +799,10 @@ function mapToolCallUpdate(
     if (isUpstreamInterrupted(u, errorText)) {
       event.upstreamInterrupted = true;
     }
+  }
+  const wtid = getWorkerTaskId(u);
+  if (wtid !== undefined) {
+    event.workerTaskId = wtid;
   }
   return event;
 }

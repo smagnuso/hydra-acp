@@ -959,6 +959,9 @@ export interface ToolLineState {
   // Set the first time status flips to a terminal value (completed /
   // failed / etc.). Once set, the duration is frozen.
   endedAt?: number;
+  // Identifier for the worker task that produced this tool call, forwarded
+  // from the session update's workerTaskId field when present.
+  workerTaskId?: string;
 }
 
 // One tool call → one or more FormattedLines. The primary row is the

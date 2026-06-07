@@ -559,6 +559,25 @@ async function runSession(
     }
   };
 
+  // Last worker task id observed when opening an agent/thought/tool block.
+  // Used to emit a single "── Tn ──" header line whenever the active
+  // worker changes (or transitions to/from undefined), so consecutive
+  // blocks from the same worker don't repeat the label.
+  let lastWorkerTaskId: string | undefined;
+
+  const maybeEmitWorkerHeader = (workerTaskId: string | undefined): void => {
+    if (workerTaskId === lastWorkerTaskId) {
+      return;
+    }
+    lastWorkerTaskId = workerTaskId;
+    if (workerTaskId === undefined) {
+      return;
+    }
+    screen.appendLines([
+      { prefix: "  ", body: `── T${workerTaskId} ──`, bodyStyle: "dim" },
+    ]);
+  };
+
   // Count of prompts currently in flight on the daemon — across ALL
   // clients, not just ours. Incremented when we observe a peer's
   // prompt_received (the daemon excludes us from our own broadcasts, so
@@ -3489,7 +3508,7 @@ async function runSession(
   // re-render the block collapsed/expanded even after closeThought wipes
   // the live buffer (the lines stay painted in scrollback). Cleared on
   // /clear. Mirrors renderedTools / renderedEditDiffs.
-  const renderedThoughts = new Map<string, string>();
+  const renderedThoughts = new Map<string, { text: string; workerTaskId?: string }>();
   // Collapsed thought runs, keyed by the run's lead (first) thought key →
   // the full ordered list of thought keys folded behind the single
   // "▸ Thoughts" line. A run is the maximal set of visually-contiguous
@@ -3616,7 +3635,6 @@ async function runSession(
       return;
     if (thoughtBuffer.length === 0)
       return;
-    renderedThoughts.set(thoughtKey, thoughtBuffer);
     const lines = parseThoughtMarkdown(thoughtBuffer);
     if (lines.length === 0)
       return;
@@ -3625,13 +3643,21 @@ async function runSession(
 
   // Full (expanded) lines for a thought block from retained text.
   const expandedThoughtLines = (key: string): FormattedLine[] => {
-    const text = renderedThoughts.get(key);
-    if (text === undefined)
+    const entry = renderedThoughts.get(key);
+    if (entry === undefined)
       return [];
-    return parseThoughtMarkdown(text);
+    const lines = parseThoughtMarkdown(entry.text);
+    if (entry.workerTaskId) {
+      lines.unshift({
+        prefix: "  ",
+        body: `[T${entry.workerTaskId}] `,
+        bodyStyle: "dim",
+      });
+    }
+    return lines;
   };
 
-  const appendThought = (text: string): void => {
+  const appendThought = (text: string, workerTaskId?: string): void => {
     if (text.length === 0)
       return;
     if (thoughtKey === null) {
@@ -3644,6 +3670,7 @@ async function runSession(
       thoughtBuffer = "";
     }
     thoughtBuffer += text;
+    renderedThoughts.set(thoughtKey, { text: thoughtBuffer, workerTaskId });
     renderThoughtBlock();
   };
 
@@ -3837,6 +3864,7 @@ async function runSession(
     errorText: string | undefined,
     editDiff: EditDiff | undefined,
     detail: string | undefined,
+    workerTaskId?: string,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -3846,6 +3874,9 @@ async function runSession(
       status: status ?? "pending",
       startedAt: Date.now(),
     };
+    if (!existing && workerTaskId !== undefined) {
+      state.workerTaskId = workerTaskId;
+    }
     if (existing && title !== undefined) {
       state.latestTitle = title;
     }
@@ -4294,6 +4325,9 @@ async function runSession(
     }
     if (event.kind === "agent-text") {
       closeThought();
+      if (agentKey === null) {
+        maybeEmitWorkerHeader(event.workerTaskId);
+      }
       appendAgentText(event.text);
       return;
     }
@@ -4304,7 +4338,10 @@ async function runSession(
       // setHideThoughts() filters at draw time so toggling ^T reveals lines
       // that streamed in while hidden.
       closeAgentText();
-      appendThought(event.text);
+      if (thoughtKey === null) {
+        maybeEmitWorkerHeader(event.workerTaskId);
+      }
+      appendThought(event.text, event.workerTaskId);
       return;
     }
     if (event.kind === "exit-plan-mode") {
@@ -4331,6 +4368,9 @@ async function runSession(
     if (event.kind === "tool-call") {
       closeAgentText();
       closeThought();
+      if (!toolStates.has(event.toolCallId)) {
+        maybeEmitWorkerHeader(event.workerTaskId);
+      }
       recordToolCall(
         event.toolCallId,
         event.title,
@@ -4338,6 +4378,7 @@ async function runSession(
         undefined,
         event.editDiff,
         event.detail,
+        event.workerTaskId,
       );
       renderToolsBlock();
       maybeRenderEditDiff(event.toolCallId);
@@ -4388,6 +4429,7 @@ async function runSession(
         event.errorText,
         event.editDiff,
         event.detail,
+        event.workerTaskId,
       );
       if (event.upstreamInterrupted) {
         upstreamInterruptedSeen = true;

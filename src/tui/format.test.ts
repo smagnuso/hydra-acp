@@ -1097,3 +1097,4 @@ describe("formatEvent plan windowing", () => {
     expect(lines[0]?.body).toBe("Plan · 2 done · 5 left");
   });
 });
+
