@@ -36,6 +36,14 @@ export interface BuildExtensionServerOptions {
 export function buildExtensionServer(
   extensionName: string,
   entry: ExtensionMcpEntry,
+  // Hydra sessionId this server instance is bound to. Forwarded to
+  // the extension on every hydra-acp/mcp_tools/invoke so the
+  // extension knows which session originated the call — agents don't
+  // see hydra session ids, so the extension can't get this from the
+  // agent's tool args. Without this an extension that needs to
+  // operate on per-session state (like the planner managing a per-
+  // session project board) wouldn't know which board to touch.
+  sessionId: string,
   options: BuildExtensionServerOptions = {},
 ): Server {
   const invokeTimeoutMs =
@@ -85,6 +93,7 @@ export function buildExtensionServer(
           extensionName,
           toolName,
           req.params.arguments ?? {},
+          sessionId,
           invokeTimeoutMs,
         );
         return normalizeToolResult(raw, toolName);
@@ -104,6 +113,7 @@ async function invokeWithTimeout(
   server: string,
   tool: string,
   args: unknown,
+  sessionId: string,
   timeoutMs: number,
 ): Promise<unknown> {
   let timer: NodeJS.Timeout | undefined;
@@ -119,6 +129,7 @@ async function invokeWithTimeout(
         server,
         tool,
         args,
+        sessionId,
       }),
       timeout,
     ]);

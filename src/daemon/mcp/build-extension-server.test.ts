@@ -88,7 +88,7 @@ describe("buildExtensionServer — tools/list", () => {
         },
       },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.listTools();
     expect(r.tools).toHaveLength(1);
@@ -110,7 +110,7 @@ describe("buildExtensionServer — tools/list", () => {
         outputSchema: { type: "object", properties: { ok: { type: "boolean" } } },
       },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.listTools();
     expect(r.tools[0]!.outputSchema).toEqual({
@@ -123,7 +123,7 @@ describe("buildExtensionServer — tools/list", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.listTools();
     expect(r.tools[0]!.outputSchema).toBeUndefined();
@@ -143,7 +143,7 @@ describe("buildExtensionServer — tools/list", () => {
       [{ name: "ping", description: "", inputSchema: { type: "object" } }],
       "memory extension help",
     );
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     // SDK exposes the server's instructions on the client side once
     // initialize completes; whether the API name is getInstructions or
@@ -189,7 +189,7 @@ describe("buildExtensionServer — tools/call success", () => {
         inputSchema: { type: "object", properties: { x: { type: "number" } } },
       },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     await client.callTool({ name: "ping", arguments: { x: 42 } });
     expect(mock.calls).toHaveLength(1);
@@ -198,6 +198,7 @@ describe("buildExtensionServer — tools/call success", () => {
       server: "memory",
       tool: "ping",
       args: { x: 42 },
+      sessionId: "hydra_session_test",
     });
   });
 
@@ -209,7 +210,7 @@ describe("buildExtensionServer — tools/call success", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.callTool({ name: "ping", arguments: {} });
     expect(r.content).toEqual([{ type: "text", text: "hello" }]);
@@ -222,13 +223,14 @@ describe("buildExtensionServer — tools/call success", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     await client.callTool({ name: "ping" });
     expect(mock.calls[0]!.params).toEqual({
       server: "memory",
       tool: "ping",
       args: {},
+      sessionId: "hydra_session_test",
     });
   });
 });
@@ -256,7 +258,7 @@ describe("buildExtensionServer — tools/call error paths", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.callTool({ name: "absent", arguments: {} });
     expect(r.isError).toBe(true);
@@ -272,7 +274,7 @@ describe("buildExtensionServer — tools/call error paths", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.callTool({ name: "ping", arguments: {} });
     expect(r.isError).toBe(true);
@@ -291,7 +293,7 @@ describe("buildExtensionServer — tools/call error paths", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry, { invokeTimeoutMs: 50 });
+    server = buildExtensionServer("memory", entry, "hydra_session_test", { invokeTimeoutMs: 50 });
     client = await connect(server);
     const start = Date.now();
     const r = await client.callTool({ name: "ping", arguments: {} });
@@ -309,7 +311,7 @@ describe("buildExtensionServer — tools/call error paths", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.callTool({ name: "ping", arguments: {} });
     expect(r.isError).toBe(true);
@@ -322,7 +324,7 @@ describe("buildExtensionServer — tools/call error paths", () => {
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
-    server = buildExtensionServer("memory", entry);
+    server = buildExtensionServer("memory", entry, "hydra_session_test");
     client = await connect(server);
     const r = await client.callTool({ name: "ping", arguments: {} });
     expect(r.isError).toBe(true);
@@ -346,7 +348,7 @@ describe("buildExtensionServer — registry integration smoke", () => {
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
     const entry = registry.lookup("memory")!;
-    const server = buildExtensionServer("memory", entry);
+    const server = buildExtensionServer("memory", entry, "hydra_session_test");
     const client = await connect(server);
     try {
       const r = await client.callTool({ name: "ping", arguments: {} });

@@ -93,6 +93,7 @@ export function registerExtensionMcpRoutes(
   async function ensureTransport(
     token: string,
     extName: string,
+    sessionId: string,
   ): Promise<StreamableHTTPServerTransport | undefined> {
     let tokenScope = built.get(token);
     if (tokenScope === undefined) {
@@ -123,7 +124,7 @@ export function registerExtensionMcpRoutes(
       return undefined;
     }
 
-    const server = buildExtensionServer(extName, entry, options.buildOptions);
+    const server = buildExtensionServer(extName, entry, sessionId, options.buildOptions);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
@@ -168,7 +169,10 @@ export function registerExtensionMcpRoutes(
     }
 
     const extName = (req.params as { name: string }).name;
-    const transport = await ensureTransport(token, extName);
+    // entry.session is guaranteed defined here — the sessionReady race
+    // above either populated it or 503'd out.
+    const sessionId = entry.session!.sessionId;
+    const transport = await ensureTransport(token, extName, sessionId);
     if (transport === undefined) {
       reply.code(404).send({ error: `unknown mcp server: ${extName}` });
       return;

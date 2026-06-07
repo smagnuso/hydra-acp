@@ -1122,9 +1122,10 @@ The MCP `tools/call` from the agent, forwarded to the registered process.
 ```jsonc
 // params
 {
-  "server": "<process-name>",
-  "tool":   "<tool name>",
-  "args":   { /* tool args */ }
+  "server":    "<process-name>",
+  "tool":      "<tool name>",
+  "args":      { /* tool args */ },
+  "sessionId": "<id>"
 }
 // result — MCP CallToolResult shape:
 {
@@ -1133,6 +1134,8 @@ The MCP `tools/call` from the agent, forwarded to the registered process.
   "isError":           false
 }
 ```
+
+`sessionId` carries the hydra session that originated the call. Extensions need this when their tools operate on per-session state (e.g. the planner managing a per-session project board) — agents don't see hydra session ids, so the extension can't derive this from `args`. The daemon resolves the session from the per-session bearer token used to call the MCP HTTP endpoint, so extensions can trust the value without further verification.
 
 ### Transformer-only methods
 
