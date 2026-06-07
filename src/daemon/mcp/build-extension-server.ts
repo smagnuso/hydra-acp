@@ -43,11 +43,25 @@ export function buildExtensionServer(
   // agent's tool args. Without this an extension that needs to
   // operate on per-session state (like the planner managing a per-
   // session project board) wouldn't know which board to touch.
-  sessionId: string,
+  //
+  // Accepts either a string (sessionId known up front) or a resolver
+  // (() => string | Promise<string>) used when the sessionId isn't
+  // available at build time. The route handler uses the resolver form
+  // so the agent's session/new MCP handshake (initialize / tools/list)
+  // doesn't have to block on the daemon's session/new completing —
+  // which it can't, since the daemon's session/new IS the call that's
+  // waiting on the agent's session/new to return. tools/call is the
+  // only place that actually needs the sessionId, and by the time
+  // tools/call fires the session has long since been bound.
+  sessionId: string | (() => string | Promise<string>),
   options: BuildExtensionServerOptions = {},
 ): Server {
   const invokeTimeoutMs =
     options.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
+  const resolveSessionId: () => Promise<string> =
+    typeof sessionId === "function"
+      ? async () => sessionId()
+      : async () => sessionId;
 
   const server = new Server(
     { name: extensionName, version: "1.0.0" },
@@ -88,12 +102,13 @@ export function buildExtensionServer(
         return errorResult(`unknown tool: ${toolName}`);
       }
       try {
+        const resolvedSessionId = await resolveSessionId();
         const raw = await invokeWithTimeout(
           entry.connection,
           extensionName,
           toolName,
           req.params.arguments ?? {},
-          sessionId,
+          resolvedSessionId,
           invokeTimeoutMs,
         );
         return normalizeToolResult(raw, toolName);

@@ -386,6 +386,92 @@ describe("extension MCP route — hot reload eviction", () => {
   });
 });
 
+describe("extension MCP route — reservation pending (deadlock regression)", () => {
+  // Regression for the planner-MCP deadlock: agent's session/new
+  // initializes MCP servers against /mcp/<name> BEFORE the daemon's
+  // session/new completes — i.e. while the token reservation is still
+  // pending (entry.session === undefined). The route must allow
+  // initialize / tools/list through immediately; only tools/call
+  // needs the sessionId and may await sessionReady.
+  let h: Harness | null = null;
+  const token = "tok-pending";
+  let reservation: { complete: (s: Session) => void; abandon: (e?: Error) => void };
+  let mock: MockConnection;
+
+  beforeEach(async () => {
+    h = await makeHarness();
+    reservation = h.tokenRegistry.reserve(token);
+    mock = makeMockConnection();
+    mock.setResponder(async () => ({
+      content: [{ type: "text", text: "ok" }],
+    }));
+    h.extensionMcp.register("memory", mock.conn, undefined, [pingTool()]);
+  });
+
+  afterEach(async () => {
+    if (h) {
+      // Tests own whether they completed or abandoned the reservation;
+      // abandon() here is a no-op if it already completed.
+      try {
+        reservation.abandon();
+      } catch {
+        // intentional
+      }
+      await h.app.close().catch(() => undefined);
+      h = null;
+    }
+  });
+
+  it("tools/list completes while the token reservation is still pending", async () => {
+    // The reservation is pending — entry.session is undefined and
+    // sessionReady will never resolve until complete() runs.
+    // With the old behavior this would 503 after 10s.
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${h!.baseUrl}/mcp/memory`),
+      {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      },
+    );
+    const client = new Client({ name: "test", version: "0.0.1" });
+    const start = Date.now();
+    await client.connect(transport);
+    const r = await client.listTools();
+    const elapsed = Date.now() - start;
+    expect(r.tools.map((t) => t.name)).toEqual(["ping"]);
+    // Must not have waited on the (never-resolving) sessionReady.
+    expect(elapsed).toBeLessThan(2000);
+    await client.close().catch(() => undefined);
+  });
+
+  it("tools/call awaits sessionReady and forwards the sessionId once the reservation completes", async () => {
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${h!.baseUrl}/mcp/memory`),
+      {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      },
+    );
+    const client = new Client({ name: "test", version: "0.0.1" });
+    await client.connect(transport);
+
+    // Complete the reservation a beat after issuing the call so the
+    // resolver actually has to await. Without the fix this race would
+    // be irrelevant — the deadlock blocked at connect-time.
+    const session = makeSession();
+    const callP = client.callTool({ name: "ping", arguments: { x: 1 } });
+    setTimeout(() => reservation.complete(session), 25);
+    const r = await callP;
+    const content = r.content as Array<{ type: string; text: string }>;
+    expect(content[0]!.text).toBe("ok");
+    expect(mock.calls[0]!.params).toMatchObject({
+      server: "memory",
+      tool: "ping",
+      args: { x: 1 },
+      sessionId: session.sessionId,
+    });
+    await client.close().catch(() => undefined);
+  });
+});
+
 describe("extension MCP route — session-end cleanup", () => {
   it("unbinding the token disposes the cached transport", async () => {
     const h = await makeHarness();

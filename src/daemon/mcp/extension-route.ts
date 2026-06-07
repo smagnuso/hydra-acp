@@ -39,9 +39,12 @@ interface BuiltPair {
   transport: StreamableHTTPServerTransport;
 }
 
-// Same conservative bound as /mcp/hydra-acp-stdin: agent spawn + eager-init is
-// well under a second in practice, but we leave headroom for a slow
-// claude-acp install.
+// Upper bound for awaiting sessionReady inside a tools/call. tools/list
+// and initialize don't await at all (they don't need a sessionId), so
+// the agent's session/new MCP handshake never blocks on the daemon's
+// session/new completing. tools/call only fires after the agent's
+// session/new has long since returned, so this timeout is effectively a
+// safety net for pathological cases (session abandoned mid-call).
 const SESSION_READY_TIMEOUT_MS = 10_000;
 
 export interface RegisterExtensionMcpRoutesOptions {
@@ -93,7 +96,6 @@ export function registerExtensionMcpRoutes(
   async function ensureTransport(
     token: string,
     extName: string,
-    sessionId: string,
   ): Promise<StreamableHTTPServerTransport | undefined> {
     let tokenScope = built.get(token);
     if (tokenScope === undefined) {
@@ -124,7 +126,45 @@ export function registerExtensionMcpRoutes(
       return undefined;
     }
 
-    const server = buildExtensionServer(extName, entry, sessionId, options.buildOptions);
+    // Lazy sessionId resolver. The agent's initial MCP handshake
+    // (initialize / tools/list) lands here mid-manager.create() — i.e.
+    // before the token's session is bound — so we MUST NOT block on
+    // sessionReady at request time, or we deadlock the daemon's
+    // session/new against the agent's session/new. Instead we hand the
+    // builder a resolver: tools/list never invokes it, and by the time
+    // tools/call fires the session is long since bound, so the await
+    // resolves immediately.
+    const resolveSessionId = async (): Promise<string> => {
+      const entry = tokenRegistry.lookup(token);
+      if (entry === undefined) {
+        throw new Error("mcp token no longer bound");
+      }
+      if (entry.session !== undefined) {
+        return entry.session.sessionId;
+      }
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), SESSION_READY_TIMEOUT_MS);
+      });
+      const resolved = await Promise.race([
+        entry.sessionReady.catch(() => undefined),
+        timeout,
+      ]);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      if (resolved === undefined) {
+        throw new Error("session not ready");
+      }
+      return resolved.sessionId;
+    };
+
+    const server = buildExtensionServer(
+      extName,
+      entry,
+      resolveSessionId,
+      options.buildOptions,
+    );
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
@@ -147,32 +187,16 @@ export function registerExtensionMcpRoutes(
       reply.code(404).send({ error: "unknown mcp token" });
       return;
     }
-    // Wait for the session to be ready if the reservation is still
-    // pending. Same pattern as the stdin route — claude-acp can land
-    // here mid-manager.create().
-    if (entry.session === undefined) {
-      let timer: NodeJS.Timeout | undefined;
-      const timeout = new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => resolve(undefined), SESSION_READY_TIMEOUT_MS);
-      });
-      const resolved = await Promise.race([
-        entry.sessionReady.catch(() => undefined),
-        timeout,
-      ]);
-      if (timer !== undefined) {
-        clearTimeout(timer);
-      }
-      if (resolved === undefined) {
-        reply.code(503).send({ error: "session not ready" });
-        return;
-      }
-    }
+    // No sessionReady await here: the agent's initial MCP handshake
+    // (initialize / tools/list) MUST be allowed through even when the
+    // token's session is still pending — otherwise the daemon's
+    // session/new deadlocks against the agent's session/new (the
+    // daemon is awaiting manager.create which is awaiting the agent
+    // which is awaiting this route). The sessionId is only needed in
+    // tools/call; the builder gets a resolver and awaits there.
 
     const extName = (req.params as { name: string }).name;
-    // entry.session is guaranteed defined here — the sessionReady race
-    // above either populated it or 503'd out.
-    const sessionId = entry.session!.sessionId;
-    const transport = await ensureTransport(token, extName, sessionId);
+    const transport = await ensureTransport(token, extName);
     if (transport === undefined) {
       reply.code(404).send({ error: `unknown mcp server: ${extName}` });
       return;
