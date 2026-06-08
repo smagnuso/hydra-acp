@@ -365,6 +365,24 @@ Download a session bundle (`*.hydra` JSON: meta + history + optional prompt hist
 - `Content-Disposition: attachment; filename="<id>-<utc-stamp>.hydra"`
 - Body is the JSON bundle.
 
+#### `GET /v1/sessions/:id/diff`
+
+Reconstructed per-file diff for a session — the same aggregation `hydra session diff --json` runs client-side, but server-side so other consumers (e.g. the planner's verified-diff audit) can fetch a ready-made shape with a single HTTP call instead of pulling the full export and redoing the walk. The diff is drawn from the session's recorded `tool_call` / `tool_call_update` edit payloads (canonical `content[].type:"diff"`, Claude `Edit`/`Write`/`MultiEdit` raw inputs); no git, no filesystem read of the workspace. Deletes aren't representable today and won't appear.
+
+**Query parameters**
+
+| Param | Effect |
+|-------|--------|
+| `fold=true` | Collapse sequential hunks that rewrite the same region into one net-effect hunk (same as the CLI's `--fold` flag). |
+| `paths=a,b,c` | Filter results to only the listed paths. Comma-separated, no URL encoding inside the list. |
+
+**Response — `200 OK`**
+
+- `Content-Type: application/json`
+- Body is an array of `{ path, hunks: [{ oldText, newText }], created }` — identical to what `hydra session diff --json` emits.
+
+**Response — `404 Not Found`** when the session id is unknown.
+
 #### `GET /v1/sessions/:id/transcript`
 
 Render a session as a markdown transcript. Shares bundle assembly with `/export`, then pipes through `bundleToMarkdown` — byte-identical to what the CLI's `session transcript` produces.

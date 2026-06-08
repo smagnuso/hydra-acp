@@ -60,33 +60,55 @@ export async function runSessionsDiff(
     !!config.daemon.tls,
   );
 
-  const exportResp = await fetch(
-    `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export`,
-    { headers: { Authorization: `Bearer ${serviceToken}` } },
-  );
-  if (!exportResp.ok) {
-    const text = await exportResp.text().catch(() => "");
+  // Prefer the daemon's /diff endpoint (single fetch, server-side
+  // aggregation). Fall back to /export + local aggregate only when the
+  // daemon is older and returns 404 for /diff so we keep working
+  // against pre-endpoint daemons.
+  const diffUrl = new URL(`${baseUrl}/v1/sessions/${encodeURIComponent(id)}/diff`);
+  if (opts.fold === true) diffUrl.searchParams.set("fold", "true");
+  const diffResp = await fetch(diffUrl.toString(), {
+    headers: { Authorization: `Bearer ${serviceToken}` },
+  });
+  let files: FileEditAggregate[];
+  if (diffResp.ok) {
+    files = (await diffResp.json()) as FileEditAggregate[];
+  } else if (diffResp.status === 404) {
+    // 404 here can mean either "endpoint not found" (old daemon) or
+    // "session not found" (real miss). Probe with /export — if that
+    // also 404s, the session is genuinely missing.
+    const exportResp = await fetch(
+      `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export`,
+      { headers: { Authorization: `Bearer ${serviceToken}` } },
+    );
+    if (!exportResp.ok) {
+      const text = await exportResp.text().catch(() => "");
+      process.stderr.write(
+        `Daemon returned HTTP ${exportResp.status}: ${text}\n`,
+      );
+      process.exit(1);
+    }
+    const raw = (await exportResp.json()) as unknown;
+    let bundle: Bundle;
+    try {
+      bundle = decodeBundle(raw);
+    } catch (err) {
+      process.stderr.write(
+        `Failed to decode session bundle: ${(err as Error).message}\n`,
+      );
+      process.exit(1);
+    }
+    const rawFiles = aggregateFileEdits(bundle.history);
+    files =
+      opts.fold === true
+        ? rawFiles.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }))
+        : rawFiles;
+  } else {
+    const text = await diffResp.text().catch(() => "");
     process.stderr.write(
-      `Daemon returned HTTP ${exportResp.status}: ${text}\n`,
+      `Daemon returned HTTP ${diffResp.status}: ${text}\n`,
     );
     process.exit(1);
   }
-  const raw = (await exportResp.json()) as unknown;
-  let bundle: Bundle;
-  try {
-    bundle = decodeBundle(raw);
-  } catch (err) {
-    process.stderr.write(
-      `Failed to decode session bundle: ${(err as Error).message}\n`,
-    );
-    process.exit(1);
-  }
-
-  const rawFiles = aggregateFileEdits(bundle.history);
-  const files: FileEditAggregate[] =
-    opts.fold === true
-      ? rawFiles.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }))
-      : rawFiles;
   if (opts.json) {
     process.stdout.write(JSON.stringify(files, null, 2) + "\n");
     return;

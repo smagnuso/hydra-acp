@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import { expandHome } from "../../core/config.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
+import { aggregateFileEdits, foldHunks } from "../../core/history-edits.js";
 import {
   applyToolContentMode,
   parseToolContentMode,
@@ -335,6 +336,45 @@ export function registerSessionRoutes(
       `attachment; filename="${id}-${stamp}.hydra"`,
     );
     reply.code(200).send(bundle);
+  });
+
+  // Reconstructed per-file diff for a session — the same aggregation
+  // `hydra session diff --json` runs client-side, but server-side so
+  // other consumers (e.g. the planner's verified_diff audit) can fetch
+  // a ready-made shape with a single HTTP call instead of pulling the
+  // full export and redoing the walk. Output shape matches the CLI's
+  // --json output exactly: an array of { path, hunks: [...], created }.
+  //
+  // Query params:
+  //   ?fold=true       — collapse sequential hunks that rewrite the
+  //                      same region into one net-effect hunk (same
+  //                      semantics as the CLI's --fold flag).
+  //   ?paths=a,b,c     — filter results to only the listed paths.
+  //                      Order is preserved from the aggregation.
+  app.get("/v1/sessions/:id/diff", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const exported = await manager.exportBundle(id);
+    if (!exported) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    const query = (request.query as
+      | { fold?: string; paths?: string }
+      | undefined) ?? {};
+    const fold = query.fold === "true" || query.fold === "1";
+    const pathFilter =
+      typeof query.paths === "string" && query.paths.length > 0
+        ? new Set(query.paths.split(",").map((p) => p.trim()).filter((p) => p.length > 0))
+        : undefined;
+    let files = aggregateFileEdits(exported.history as unknown as Parameters<typeof aggregateFileEdits>[0]);
+    if (pathFilter) {
+      files = files.filter((f) => pathFilter.has(f.path));
+    }
+    if (fold) {
+      files = files.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }));
+    }
+    reply.code(200).send(files);
   });
 
   // Fetch a single externalized tool-content blob by its sha256. Used by

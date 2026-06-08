@@ -571,6 +571,84 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(diff.newText).toBe(big + "x");
   });
 
+  it("GET /v1/sessions/:id/diff returns aggregated per-file hunks", async () => {
+    const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const history = new HistoryStore();
+    // Two distinct files, one with two snippet edits to exercise hunks[].
+    await history.append(s.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "e1",
+          status: "completed",
+          content: [{ type: "diff", path: "/repo/a.ts", oldText: "old1", newText: "new1" }],
+        },
+      },
+      recordedAt: 1,
+    });
+    await history.append(s.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "e2",
+          status: "completed",
+          content: [{ type: "diff", path: "/repo/a.ts", oldText: "old2", newText: "new2" }],
+        },
+      },
+      recordedAt: 2,
+    });
+    await history.append(s.sessionId, {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "e3",
+          status: "completed",
+          content: [{ type: "diff", path: "/repo/b.ts", oldText: "x", newText: "y" }],
+        },
+      },
+      recordedAt: 3,
+    });
+
+    const auth = { Authorization: "Bearer test" } as Record<string, string>;
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${s.sessionId}/diff`,
+      { headers: auth },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Array<{
+      path: string;
+      hunks: Array<{ oldText: string; newText: string }>;
+      created: boolean;
+    }>;
+    const byPath = Object.fromEntries(body.map((f) => [f.path, f]));
+    expect(byPath["/repo/a.ts"]?.hunks).toEqual([
+      { oldText: "old1", newText: "new1" },
+      { oldText: "old2", newText: "new2" },
+    ]);
+    expect(byPath["/repo/b.ts"]?.hunks).toEqual([
+      { oldText: "x", newText: "y" },
+    ]);
+
+    // ?paths= filters results.
+    const filtered = await fetch(
+      `${harness.baseUrl}/v1/sessions/${s.sessionId}/diff?paths=/repo/b.ts`,
+      { headers: auth },
+    );
+    const filteredBody = (await filtered.json()) as Array<{ path: string }>;
+    expect(filteredBody.map((f) => f.path)).toEqual(["/repo/b.ts"]);
+  });
+
+  it("GET /v1/sessions/:id/diff returns 404 for an unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/does-not-exist/diff`,
+      { headers: { Authorization: "Bearer test" } },
+    );
+    expect(res.status).toBe(404);
+  });
+
   it("GET /tools/:hash returns an externalized blob, 404 for unknown", async () => {
     const s = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
     const history = new HistoryStore();
