@@ -53,6 +53,11 @@ const BundleSession = z.object({
   // without freezing a sticky `false` into the record.
   interactive: z.boolean().optional(),
   originatingClient: PersistedOriginatingClient.optional(),
+  // User-set sort weight. Carried so a session that the exporter
+  // pinned arrives still pinned on the importing machine (e.g.
+  // round-tripping your own work between laptops). The recipient can
+  // always clear it with `*` if they don't care.
+  priority: z.number().int().nonnegative().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -137,6 +142,9 @@ export function encodeBundle(params: EncodeBundleParams): Bundle {
         : {}),
       ...(params.record.originatingClient !== undefined
         ? { originatingClient: params.record.originatingClient }
+        : {}),
+      ...(params.record.priority !== undefined && params.record.priority > 0
+        ? { priority: params.record.priority }
         : {}),
       createdAt: params.record.createdAt,
       updatedAt: params.record.updatedAt,

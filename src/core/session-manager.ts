@@ -1964,6 +1964,7 @@ export class SessionManager {
         // back to effectiveInteractive's history-presence inference.
         interactive: args.bundle.session.interactive,
         originatingClient: args.bundle.session.originatingClient,
+        priority: args.bundle.session.priority,
         createdAt: args.preservedCreatedAt ?? now,
         // Fallback path for historyStatus (used when the history file
         // is missing). Keep this consistent with the utimes stamp above.
