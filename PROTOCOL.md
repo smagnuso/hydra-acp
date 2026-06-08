@@ -365,6 +365,20 @@ Download a session bundle (`*.hydra` JSON: meta + history + optional prompt hist
 - `Content-Disposition: attachment; filename="<id>-<utc-stamp>.hydra"`
 - Body is the JSON bundle.
 
+#### Transformer call: `hydra-acp/session/request_permission`
+
+Broadcast a `session/request_permission` to a session's attached user-facing clients and resolve with the winning client's pick. Same broadcast-and-await logic the agent's own `session/request_permission` goes through — the difference is that any transformer/client can initiate it, not just the session's agent. Used by transformers (notably the planner) that need to surface a permission prompt on a session *other than* the one whose agent originated the request — e.g. a worker session's agent asks for permission, but the worker has no human-facing client; the planner forwards to the orchestrator session where the user is attached, then routes the answer back to the worker.
+
+**Params** — same shape as the agent's own `session/request_permission`. `params.sessionId` targets the session whose attached clients should vote; the rest of the payload (`toolCall`, `options`, …) is the standard ACP permission payload.
+
+**Result** — the winning client's selection, typically `{ outcome: { outcome: "selected", optionId: "..." } }` or `{ outcome: { outcome: "cancelled" } }`.
+
+**Errors**
+
+- `-32602` when `sessionId` is missing.
+- `SessionNotFound` (-32004) when the target session is unknown.
+- `PermissionDenied` (-32008) when the session has no attached clients to vote.
+
 #### `GET /v1/sessions/:id/diff`
 
 Reconstructed per-file diff for a session — the same aggregation `hydra session diff --json` runs client-side, but server-side so other consumers (e.g. the planner's verified-diff audit) can fetch a ready-made shape with a single HTTP call instead of pulling the full export and redoing the walk. The diff is drawn from the session's recorded `tool_call` / `tool_call_update` edit payloads (canonical `content[].type:"diff"`, Claude `Edit`/`Write`/`MultiEdit` raw inputs); no git, no filesystem read of the workspace. Deletes aren't representable today and won't appear.

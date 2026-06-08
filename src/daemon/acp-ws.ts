@@ -404,6 +404,40 @@ export function registerAcpWsEndpoint(
         throw Object.assign(new Error(`unsupported route: ${JSON.stringify(route)}`), { code: -32602 });
       });
 
+      // Broadcast a session/request_permission to a session's attached
+      // user-facing clients and resolve with the winning client's pick.
+      // Used by transformers (e.g. the planner) that need to surface a
+      // permission prompt on a session OTHER than the one whose agent
+      // originated the request — typical case: a worker session's
+      // agent asks for permission, but the worker has no human-facing
+      // client; the planner forwards to the orchestrator session
+      // where the user is attached, and routes the answer back to the
+      // worker.
+      //
+      // Same shape as the agent's own session/request_permission:
+      // params.sessionId targets the session whose clients should
+      // vote; the rest of params (toolCall, options, …) is the
+      // standard ACP permission payload.
+      connection.onRequest("hydra-acp/session/request_permission", async (raw) => {
+        const params = (raw ?? {}) as { sessionId?: unknown };
+        const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+        if (!sessionId) {
+          throw Object.assign(
+            new Error("hydra-acp/session/request_permission requires sessionId"),
+            { code: -32602 },
+          );
+        }
+        const session = deps.manager.get(sessionId);
+        if (!session) {
+          throw Object.assign(new Error(`session ${sessionId} not found`), {
+            code: JsonRpcErrorCodes.SessionNotFound,
+          });
+        }
+        // Delegate to the same broadcast-and-await logic the agent's
+        // own session/request_permission goes through.
+        return session.requestPermissionFromClients(params);
+      });
+
       // Attach the calling transformer to an existing session's chain.
       // Mirror of the `transformers` field in `session/new`'s _meta, but
       // as a runtime call. Lets transformers self-install when their

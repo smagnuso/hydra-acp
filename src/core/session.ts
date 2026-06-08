@@ -4165,6 +4165,15 @@ export class Session {
     }
   }
 
+  // Public wrapper for callers (e.g. transformers that need to surface
+  // a permission prompt to a session's attached user-facing clients
+  // even though the originating agent isn't on this session). Delegates
+  // to the same broadcast-and-await logic the agent's own
+  // session/request_permission goes through.
+  async requestPermissionFromClients(params: unknown): Promise<unknown> {
+    return this.handlePermissionRequest(params);
+  }
+
   private async handlePermissionRequest(params: unknown): Promise<unknown> {
     const initialClients = [...this.clients.values()];
     if (initialClients.length === 0) {
