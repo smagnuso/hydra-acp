@@ -52,6 +52,10 @@ export interface DiscoveredSession {
   // helper. The picker uses this to render hints; the daemon already
   // applied the filter when constructing the list.
   interactive?: boolean;
+  // User-set sort weight. >0 floats the session to the top of the
+  // picker; absent / 0 means normal priority. Toggled from the picker
+  // with `*`.
+  priority?: number;
 }
 
 export interface DiscoveredUsage {
@@ -117,6 +121,7 @@ export async function listSessions(
     awaitingInput: s.awaitingInput,
     originatingClient: s.originatingClient,
     interactive: s.interactive,
+    priority: s.priority,
   }));
 }
 
@@ -283,6 +288,29 @@ export async function renameSession(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ title }),
+  });
+  if (!response.ok && response.status !== 204 && response.status !== 404) {
+    throw new Error(`daemon returned HTTP ${response.status}`);
+  }
+}
+
+// Set or clear the user-set priority on a session via PATCH .../sessions/:id.
+// Pass null (or 0) to return to normal priority. Works on live AND cold
+// sessions. 404 (no such record) is tolerated so the picker doesn't
+// special-case races where the row vanished between list and toggle.
+export async function setSessionPriority(
+  target: RemoteTarget,
+  id: string,
+  priority: number | null,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${target.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ priority }),
   });
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);

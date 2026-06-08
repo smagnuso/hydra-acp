@@ -186,6 +186,9 @@ export interface SessionInit {
   // list views. SessionManager sets this from the persisted record on
   // resurrect; the first-prompt path flips undefined → true.
   interactive?: boolean;
+  // User-set sort weight. 0 / absent → normal; positive → pinned to top
+  // of the picker. Loaded from the persisted record on resurrect.
+  priority?: number;
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
@@ -301,6 +304,13 @@ export class Session {
   private _interactive: boolean | undefined;
   get interactive(): boolean | undefined {
     return this._interactive;
+  }
+  // User-set sort weight; see SessionInit.priority. Mutated via
+  // setPriority(), which fires onPriorityChange so SessionManager can
+  // persist the change to meta.json.
+  private _priority: number | undefined;
+  get priority(): number | undefined {
+    return this._priority;
   }
   title: string | undefined;
   // Snapshot state delivered to attaching clients via the attach
@@ -453,6 +463,7 @@ export class Session {
   private modelHandlers: Array<(model: string) => void> = [];
   private modeHandlers: Array<(mode: string) => void> = [];
   private interactiveHandlers: Array<(interactive: boolean) => void> = [];
+  private priorityHandlers: Array<(priority: number | undefined) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
   private cumulativeCost: number = 0;
 
@@ -569,6 +580,7 @@ export class Session {
       this._firstPromptSeeded = true;
     }
     this._interactive = init.interactive;
+    this._priority = init.priority;
     this.historyStore = init.historyStore;
     this.historyMaxEntries = init.historyMaxEntries ?? DEFAULT_HISTORY_MAX_ENTRIES;
     this.compactEvery = Math.max(1, Math.floor(this.historyMaxEntries * 0.2));
@@ -2550,6 +2562,31 @@ export class Session {
 
   onInteractiveChange(handler: (interactive: boolean) => void): void {
     this.interactiveHandlers.push(handler);
+  }
+
+  onPriorityChange(handler: (priority: number | undefined) => void): void {
+    this.priorityHandlers.push(handler);
+  }
+
+  // Update the user-set sort weight. Passing 0 or undefined returns the
+  // session to normal priority. Notifies registered handlers so the
+  // SessionManager can persist to meta.json. No client broadcast — the
+  // picker's auto-refresh picks the new value up on the next tick.
+  setPriority(priority: number | undefined): void {
+    const next =
+      priority === undefined || priority <= 0 ? undefined : Math.floor(priority);
+    if (next === this._priority) {
+      return;
+    }
+    this._priority = next;
+    this.updatedAt = Date.now();
+    for (const handler of this.priorityHandlers) {
+      try {
+        handler(next);
+      } catch {
+        void 0;
+      }
+    }
   }
 
   // Apply a model change initiated by a client request (session/set_model)

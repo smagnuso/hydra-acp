@@ -137,6 +137,10 @@ export interface ResurrectParams {
   // Persisted tristate flag from meta.json; the live Session carries
   // it forward and persists changes (first prompt promotes undefined→true).
   interactive?: boolean;
+  // User-set sort weight from meta.json; carried into the resurrected
+  // Session so toggles + list rendering see the persisted value
+  // immediately on wake.
+  priority?: number;
   // Local-fork breadcrumbs from meta.json. Read-only on the resurrected
   // Session; surfaced in list views so future UI can show "branched from <id>".
   forkedFromSessionId?: string;
@@ -624,6 +628,7 @@ export class SessionManager {
         : undefined,
       originatingClient: params.originatingClient,
       interactive: params.interactive,
+      priority: params.priority,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
@@ -707,6 +712,7 @@ export class SessionManager {
         : undefined,
       originatingClient: params.originatingClient,
       interactive: params.interactive,
+      priority: params.priority,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       extensionCommands: this.extensionCommands,
@@ -1211,6 +1217,11 @@ export class SessionManager {
     session.onTitleChange((title) => {
       void this.persistTitle(session.sessionId, title).catch(() => undefined);
     });
+    session.onPriorityChange((priority) => {
+      void this.persistPriority(session.sessionId, priority).catch(
+        () => undefined,
+      );
+    });
     session.onAgentChange(({ agentId, upstreamSessionId }) => {
       void this.persistAgentChange(session.sessionId, agentId, upstreamSessionId).catch(
         () => undefined,
@@ -1352,6 +1363,7 @@ export class SessionManager {
       pendingHistorySync: record.pendingHistorySync,
       originatingClient: record.originatingClient,
       interactive: record.interactive,
+      priority: record.priority,
       forkedFromSessionId: record.forkedFromSessionId,
       forkedFromMessageId: record.forkedFromMessageId,
     };
@@ -1556,6 +1568,7 @@ export class SessionManager {
         forkedFromMessageId: session.forkedFromMessageId,
         originatingClient: session.originatingClient,
         interactive,
+        priority: session.priority,
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "live",
@@ -1599,6 +1612,7 @@ export class SessionManager {
         forkedFromMessageId: r.forkedFromMessageId,
         originatingClient: r.originatingClient,
         interactive,
+        priority: r.priority,
         updatedAt: used,
         attachedClients: 0,
         status: "cold",
@@ -2009,6 +2023,51 @@ export class SessionManager {
   //   nothing in memory to broadcast to, but a later resurrect / list
   //   will pick up the new title.
   // Returns false when no record exists at all (live or on disk).
+  // Set or clear the user-set priority on a session. Mirrors setTitle:
+  // works on live (in-memory mutation + persist hook) and cold (direct
+  // meta.json write) sessions. Pass 0 or undefined to clear (return to
+  // normal priority). Returns false when no record exists at all.
+  async setPriority(
+    sessionId: string,
+    priority: number | undefined,
+  ): Promise<boolean> {
+    const live = this.get(sessionId);
+    if (live) {
+      live.setPriority(priority);
+      return true;
+    }
+    if (!(await this.hasRecord(sessionId))) {
+      return false;
+    }
+    const next =
+      priority === undefined || priority <= 0 ? undefined : Math.floor(priority);
+    await this.persistPriority(sessionId, next);
+    return true;
+  }
+
+  private async persistPriority(
+    sessionId: string,
+    priority: number | undefined,
+  ): Promise<void> {
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      const next: SessionRecord = {
+        ...record,
+        updatedAt: new Date().toISOString(),
+      };
+      if (priority === undefined) {
+        delete next.priority;
+      } else {
+        next.priority = priority;
+      }
+      await this.store.write(next);
+    });
+    this.invalidateListCache();
+  }
+
   async setTitle(sessionId: string, title: string): Promise<boolean> {
     const live = this.get(sessionId);
     if (live) {
@@ -2358,6 +2417,7 @@ function mergeForPersistence(
     originatingClient:
       session.originatingClient ?? existing?.originatingClient,
     interactive: session.interactive ?? existing?.interactive,
+    priority: session.priority ?? existing?.priority,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }

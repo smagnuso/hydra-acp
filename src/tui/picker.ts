@@ -32,6 +32,7 @@ import {
   regenSessionTitle,
   renameSession,
   searchSessions,
+  setSessionPriority,
   syncInstalledAgents,
   type DiscoveredSession,
   type SessionHits,
@@ -140,9 +141,11 @@ export function createPickerPrefs(): PickerPrefs {
   };
 }
 
-// Each row is prefixed with "❯ " or "  " (2 columns wide) so the row's
-// content budget is termWidth - 2. Apply the same prefix to the
-// "Create new session" title so its truncation matches.
+// Each row is prefixed with "<p> " (2 columns wide): col 0 is the
+// priority marker ("*" for priority>0, blank otherwise); col 1 is a
+// fixed separating space. Selection is indicated by the row's
+// background highlight, so no glyph is needed in the prefix. The
+// label's content budget is therefore termWidth - 2.
 const ROW_PREFIX_WIDTH = 2;
 
 // Visual rows the composer pane can occupy before its internal window
@@ -185,6 +188,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["d", "delete the selected session (kills first if live)"],
   ["t", "retitle the selected session"],
   ["T", "regenerate title + synopsis via agent (live session)"],
+  ["*", "toggle high priority on the selected session (floats to top)"],
   null,
   ["?", "toggle this help"],
   ["q / Esc / ^C / ^D", "quit picker (detach)"],
@@ -603,10 +607,15 @@ export async function pickSession(
 
   const paintSessionRow = (sessionIdx: number): void => {
     const label = sessionLines[sessionIdx] ?? "";
+    // 2-col prefix: "* " for priority rows, "  " for normal rows.
+    // Selection is signalled by the bg highlight (no arrow glyph).
+    const session = visible[sessionIdx];
+    const prefix =
+      session && session.priority && session.priority > 0 ? "* " : "  ";
     if (selectedIdx === sessionIdx + 1) {
-      term.brightWhite.bgBlue.noFormat(`❯ ${label}`);
+      term.brightWhite.bgBlue.noFormat(`${prefix}${label}`);
     } else {
-      term.noFormat(`  ${label}`);
+      term.noFormat(`${prefix}${label}`);
     }
   };
 
@@ -1635,6 +1644,41 @@ export async function pickSession(
         paintIndicator();
       }
     };
+    // Toggle the user-set priority on a session. With the picker only
+    // distinguishing normal (0) and high (1) for now, we flip between
+    // those two values; the on-disk schema accepts any positive integer
+    // so a future "very high" tier would slot in without a migration.
+    // Mutates the in-memory `visible`/`allSessions` rows immediately so
+    // the row re-sorts on the next paint without waiting for the auto-
+    // refresh round-trip; the daemon write is fire-and-forget.
+    const performTogglePriority = async (
+      session: DiscoveredSession,
+    ): Promise<void> => {
+      const current = session.priority && session.priority > 0 ? session.priority : 0;
+      const next: number | null = current > 0 ? null : 1;
+      const nextValue = next ?? 0;
+      // Mutate the loaded source rows so subsequent applyFilter sorts
+      // pick up the new value. visible is rebuilt from allSessions in
+      // applyPrefsFilters, so updating the entry in allSessions is enough.
+      for (const row of allSessions) {
+        if (row.sessionId === session.sessionId) {
+          row.priority = nextValue > 0 ? nextValue : undefined;
+        }
+      }
+      const keepId = session.sessionId;
+      allSessions = sortSessions(allSessions, opts.cwd);
+      applyFilter();
+      restoreCursorAfterFilter(keepId);
+      renderFromScratch();
+      transientStatus = nextValue > 0 ? "priority: high" : "priority: normal";
+      paintIndicator();
+      try {
+        await setSessionPriority(opts.target, session.sessionId, next);
+      } catch (err) {
+        transientStatus = `priority failed: ${(err as Error).message}`;
+        paintIndicator();
+      }
+    };
     // On-demand agent sync (the `s` keystroke). Spawns each installed
     // agent transiently to pull in sessions it remembers, then refreshes
     // the list so freshly-imported rows (with their agent-generated
@@ -2469,6 +2513,14 @@ export async function pickSession(
           void performRegen({ sessionId: session.sessionId });
           return;
         }
+        if (name === "*" && selectedIdx > 0) {
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          void performTogglePriority(session);
+          return;
+        }
         if ((name === "d" || name === "D") && selectedIdx > 0) {
           const session = visible[selectedIdx - 1];
           if (!session) {
@@ -2650,34 +2702,43 @@ function formatComposerTitle(cwd: string, maxWidth: number): string {
 }
 
 // Order sessions for the picker. Tiers (highest first):
-//   3: live + awaiting input
-//   2: live + busy
-//   1: live
+//   5: live + awaiting input
+//   4: live + busy
+//   3: live + priority (idle)
+//   2: live (idle)
+//   1: cold + priority
 //   0: cold
-// Sessions blocked on the user float above merely-busy ones — they're
-// the ones that actually need your attention. The current cwd does not
-// influence ranking — users who want to focus on this directory can
-// press `o` to toggle the cwd-only filter. Within a tier, newer
-// updatedAt wins — but compared at minute precision so a streaming
-// session's per-chunk mtime churn doesn't keep flipping the sort order
-// between auto-refreshes.
+// Active sessions (awaiting input / busy) outrank everything else —
+// even pinned ones — because they're the ones with real-time activity
+// the user might want to peek at. Priority then floats idle-live rows
+// above other idle-live, and cold-priority rows above plain cold.
+// Within a tier, higher priority value wins; final tiebreak is
+// updatedAt at minute precision so per-chunk mtime churn doesn't
+// reshuffle the list between auto-refreshes.
 export function sortSessions(
   sessions: DiscoveredSession[],
   _cwd: string,
 ): DiscoveredSession[] {
-  const score = (s: DiscoveredSession): number => {
-    if (s.status !== "live") {
-      return 0;
-    }
-    if (s.awaitingInput) {
-      return 3;
-    }
-    return s.busy ? 2 : 1;
+  const priorityOf = (s: DiscoveredSession): number =>
+    s.priority && s.priority > 0 ? s.priority : 0;
+  const tier = (s: DiscoveredSession): number => {
+    const isLive = s.status === "live";
+    const isPriority = priorityOf(s) > 0;
+    if (isLive && s.awaitingInput) return 5;
+    if (isLive && s.busy) return 4;
+    if (isLive && isPriority) return 3;
+    if (isLive) return 2;
+    if (isPriority) return 1;
+    return 0;
   };
   return [...sessions].sort((a, b) => {
-    const tier = score(b) - score(a);
-    if (tier !== 0) {
-      return tier;
+    const dt = tier(b) - tier(a);
+    if (dt !== 0) {
+      return dt;
+    }
+    const dp = priorityOf(b) - priorityOf(a);
+    if (dp !== 0) {
+      return dp;
     }
     return b.updatedAt.slice(0, 16).localeCompare(a.updatedAt.slice(0, 16));
   });

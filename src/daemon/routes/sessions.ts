@@ -244,7 +244,34 @@ export function registerSessionRoutes(
   app.patch("/v1/sessions/:id", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
-    const body = (request.body ?? {}) as { title?: unknown; regen?: unknown };
+    const body = (request.body ?? {}) as {
+      title?: unknown;
+      regen?: unknown;
+      priority?: unknown;
+    };
+    if (body.priority !== undefined) {
+      // Accept any non-negative integer; 0 / null clears. Reject other
+      // shapes so a typo doesn't silently no-op.
+      const raw = body.priority;
+      let next: number | undefined;
+      if (raw === null || raw === 0) {
+        next = undefined;
+      } else if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) {
+        next = raw;
+      } else {
+        reply.code(400).send({
+          error: "priority must be a non-negative integer (or null to clear)",
+        });
+        return;
+      }
+      const ok = await manager.setPriority(id, next);
+      if (!ok) {
+        reply.code(404).send({ error: "session not found" });
+        return;
+      }
+      reply.code(204).send();
+      return;
+    }
     if (body.regen === true) {
       // Picker T and /hydra title (no arg) both land here. The synopsis
       // coordinator handles live and cold sessions uniformly: live agents

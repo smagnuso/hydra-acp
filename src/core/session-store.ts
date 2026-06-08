@@ -155,6 +155,13 @@ export const SessionRecord = z.object({
   // yet. effectiveInteractive() in session-manager.ts is the single
   // resolver — every filter site goes through it.
   interactive: z.boolean().optional(),
+  // User-set sort weight. Non-negative integer; 0 (or absent) is the
+  // default "normal" priority, any positive value floats the session to
+  // the top of the picker regardless of live/cold status. Higher values
+  // win ties between two prioritised rows. Toggled from the picker with
+  // `*`; no agent involvement, no broadcast — picker auto-refresh picks
+  // it up on the next tick.
+  priority: z.number().int().nonnegative().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -297,6 +304,7 @@ export function recordFromMemorySession(args: {
   forkedFromMessageId?: string;
   originatingClient?: PersistedOriginatingClient;
   interactive?: boolean;
+  priority?: number;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -326,6 +334,7 @@ export function recordFromMemorySession(args: {
     forkedFromMessageId: args.forkedFromMessageId,
     originatingClient: args.originatingClient,
     interactive: args.interactive,
+    priority: args.priority,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

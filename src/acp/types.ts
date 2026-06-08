@@ -299,6 +299,7 @@ export interface HydraMeta {
   status?: "live" | "cold";
   busy?: boolean;
   awaitingInput?: boolean;
+  priority?: number;
   attachedClients?: number;
   importedFromMachine?: string;
   importedFromUpstreamSessionId?: string;
@@ -625,6 +626,9 @@ export const SessionListEntry = z.object({
   // history-presence). Clients can use this to render a hint glyph
   // (e.g. dim non-interactive rows when the user toggles them in).
   interactive: z.boolean().optional(),
+  // User-set sort weight; >0 floats the session to the top of the
+  // picker. Absent / 0 = normal priority.
+  priority: z.number().int().nonnegative().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
   status: z.enum(["live", "cold"]).default("live"),
@@ -741,6 +745,9 @@ export function buildHydraSessionMeta(
   }
   if (entry.interactive !== undefined) {
     meta.interactive = entry.interactive;
+  }
+  if (entry.priority !== undefined && entry.priority > 0) {
+    meta.priority = entry.priority;
   }
   if (extras) {
     if (extras.clientId !== undefined) {
