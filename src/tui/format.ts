@@ -411,6 +411,15 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
   // closing ``` arrives.
   if (inCode)
     flushCode();
+  // Trim trailing blank lines. Symmetric with the leading-whitespace strip
+  // above: messages routinely end with "\n", which would otherwise emit a
+  // prefix-only ("  ", "") tail line. That tail isn't recognized as blank
+  // by Screen.ensureSeparator (it probes for an empty prefix), so the next
+  // block's separator stacks on top of it and doubles the gap between
+  // adjacent agent/thought blocks.
+  while (out.length > 0 && out[out.length - 1]!.body === "") {
+    out.pop();
+  }
   return out;
 }
 
