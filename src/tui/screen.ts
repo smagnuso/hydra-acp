@@ -5150,6 +5150,44 @@ export function emergencyTerminalReset(): void {
   }
 }
 
+// terminal-kit stores width/height as plain properties: `undefined` until
+// the first size probe, and `Infinity` whenever stdout isn't a TTY (see
+// Terminal.js onResize — "the size is virtually infinite"). The render
+// path does arithmetic on these (e.g. padEnd(width)), and `Infinity` or
+// `NaN` there throws `RangeError: Invalid string length`, killing the
+// TUI on startup. Redefine width/height as accessors that keep the raw
+// terminal-kit value (so live resizes still flow through the setter) but
+// always hand callers a finite, positive number. Idempotent.
+export function guardTerminalDimensions(term: Terminal): void {
+  const dims: ReadonlyArray<readonly ["width" | "height", number]> = [
+    ["width", 80],
+    ["height", 24],
+  ];
+  for (const [prop, fallback] of dims) {
+    const existing = Object.getOwnPropertyDescriptor(term, prop);
+    // Already guarded (accessor installed) — nothing to do.
+    if (existing && existing.get) {
+      continue;
+    }
+    const backing = Symbol(`raw-${prop}`);
+    const store = term as unknown as Record<symbol, unknown>;
+    store[backing] = existing ? existing.value : undefined;
+    Object.defineProperty(term, prop, {
+      configurable: true,
+      enumerable: true,
+      get(): number {
+        const v = (this as Record<symbol, unknown>)[backing];
+        return typeof v === "number" && Number.isFinite(v) && v > 0
+          ? v
+          : fallback;
+      },
+      set(v: unknown): void {
+        (this as Record<symbol, unknown>)[backing] = v;
+      },
+    });
+  }
+}
+
 // Kitty keyboard protocol modifier codes are 1 + bitfield of
 // shift(1) | alt(2) | ctrl(4) | super(8) | hyper(16) | meta(32).
 // We only care about plain (1), shift (2), alt (3), ctrl (5).

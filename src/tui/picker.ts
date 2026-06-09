@@ -2684,12 +2684,19 @@ export async function pickSession(
   });
 }
 
+// terminal-kit reports width/height as `undefined` before the first size
+// probe and as `Infinity` whenever stdout isn't a TTY. A nullish fallback
+// (`?? 80`) lets `Infinity` through, and `Infinity` then propagates into
+// the row-width math until `padEnd(Infinity)` throws `Invalid string
+// length`. Clamp to a finite, positive number instead.
 function readTermHeight(term: Terminal): number {
-  return (term as unknown as { height?: number }).height ?? 24;
+  const h = (term as unknown as { height?: number }).height;
+  return typeof h === "number" && Number.isFinite(h) && h > 0 ? h : 24;
 }
 
 function readTermWidth(term: Terminal): number {
-  return (term as unknown as { width?: number }).width ?? 80;
+  const w = (term as unknown as { width?: number }).width;
+  return typeof w === "number" && Number.isFinite(w) && w > 0 ? w : 80;
 }
 
 // Title line for the composer pane. Middle-truncate the cwd so the user

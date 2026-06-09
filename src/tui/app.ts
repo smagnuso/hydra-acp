@@ -74,7 +74,12 @@ import {
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
 import { promptForAgent } from "./agent-prompt.js";
-import { formatElapsed, Screen, setAmbiguousWide } from "./screen.js";
+import {
+  formatElapsed,
+  guardTerminalDimensions,
+  Screen,
+  setAmbiguousWide,
+} from "./screen.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -326,6 +331,10 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     await ensureDaemonReachable(config);
   }
   const term = termkit.terminal;
+  // terminal-kit hands back Infinity for width/height when stdout isn't a
+  // detectable TTY; left unclamped that overflows the render math into a
+  // `RangeError: Invalid string length`. Clamp once, at the source.
+  guardTerminalDimensions(term);
 
   // Filled in by runSession as soon as a session is attached/created.
   // Used to print a "Coninue: …" hint on the way out so the user
