@@ -344,7 +344,7 @@ hydra-acp daemon [status]                   # output status of daemon
 hydra-acp daemon start [--foreground]       # detached by default; --foreground to attach
 hydra-acp daemon stop                       # stop running daemon
 hydra-acp daemon restart                    # stop then start the daemon
-hydra-acp daemon logs [-f] [-n N]           # tail (default 50) or follow the daemon log
+hydra-acp daemon log [-f] [-n N]            # tail (default 50) or follow the daemon log
 
 hydra-acp session [list]                   # list sessions
 hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]

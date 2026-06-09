@@ -359,7 +359,7 @@ async function main(): Promise<void> {
         await runDaemonRestart();
         return;
       }
-      if (sub === "logs") {
+      if (sub === "log" || sub === "logs") {
         await runDaemonLogs(tail.slice(1));
         return;
       }
@@ -887,7 +887,7 @@ function printHelp(): void {
       "  hydra-acp daemon [status]          Show daemon pid/version (default when no subcommand)",
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart",
-      "  hydra-acp daemon logs [-f] [-n N]  Tail or follow the daemon log",
+      "  hydra-acp daemon log [-f] [-n N]   Tail or follow the daemon log",
       "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive] [--columns=<list>]",
       "                                     List sessions (live + 20 most-recent cold; --all lifts the cold cap AND surfaces non-interactive sessions; --json emits JSON for scripts).",
       "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer.",
