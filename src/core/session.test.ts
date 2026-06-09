@@ -4827,4 +4827,180 @@ describe("Session", () => {
       expect(hasConfigUpdate).toBe(false);
     });
   });
+
+  describe("/hydra config command", () => {
+    function seedConfigOptions(session: Session, mock: ReturnType<typeof makeSession>["mock"]): void {
+      mock.triggerNotification("session/update", {
+        sessionId: "u_seed",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            {
+              id: "model",
+              currentValue: "ncp-anthropic/claude-opus-4-7",
+              options: [
+                { value: "ncp-anthropic/claude-opus-4-7", name: "Claude Opus 4.7" },
+                { value: "openai/gpt-5", name: "GPT-5" },
+              ],
+            },
+            {
+              id: "mode",
+              currentValue: "plan",
+              options: [
+                { value: "default", name: "Default" },
+                { value: "plan", name: "Plan" },
+                { value: "bypassPermissions", name: "Bypass" },
+              ],
+            },
+            {
+              id: "effort",
+              currentValue: "low",
+              options: [
+                { value: "low", name: "Low" },
+                { value: "medium", name: "Medium" },
+                { value: "high", name: "High" },
+              ],
+            },
+          ],
+        },
+      });
+    }
+
+    function findConfigBroadcast(stream: { sent: unknown[] }): JsonRpcNotification | undefined {
+      return stream.sent.find(
+        (m) =>
+          !!m &&
+          typeof m === "object" &&
+          "method" in m &&
+          (m as { method?: string }).method === "session/update" &&
+          (m as { params?: { update?: { sessionUpdate?: string } } }).params
+            ?.update?.sessionUpdate === "config_option_update",
+      ) as JsonRpcNotification | undefined;
+    }
+
+    function extractTextMessage(stream: { sent: unknown[] }): string | undefined {
+      const chunk = stream.sent.find(
+        (m) =>
+          !!m &&
+          typeof m === "object" &&
+          "method" in m &&
+          (m as { method?: string }).method === "session/update" &&
+          (m as { params?: { update?: { sessionUpdate?: string } } }).params
+            ?.update?.sessionUpdate === "agent_message_chunk",
+      ) as JsonRpcNotification | undefined;
+      if (!chunk) return undefined;
+      const content = (chunk.params as { update: { content: { text: string } } }).update.content;
+      return typeof content.text === "string" ? content.text : undefined;
+    }
+
+    it("'/hydra config' with no args lists every advertised option", async () => {
+      const { session, mock } = makeSession("sess_cfg1", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+
+      const { client: alice, stream } = makeClient();
+      await session.attach(alice, "full");
+
+      const result = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config" }],
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+
+      const text = extractTextMessage(stream);
+      expect(text).toBeDefined();
+      // All three seeded options plus the hydra-native agent option,
+      // each rendered with `id  (Name) — ▶ currentValue` headers.
+      expect(text).toContain("model  (Model) — \u25b6 ncp-anthropic/claude-opus-4-7");
+      expect(text).toContain("mode  (Session Mode) — \u25b6 plan");
+      expect(text).toContain("effort — \u25b6 low");
+      expect(text).toContain("agent  (Agent) — \u25b6");
+      // Choice rows: current marked ▶, others ·, with the human name shown.
+      expect(text).toContain("\u25b6 plan               Plan");
+      expect(text).toContain("\u00b7 default            Default");
+      expect(text).toContain("\u25b6 low     Low");
+      expect(text).toContain("\u00b7 medium  Medium");
+    });
+
+    it("'/hydra config effort' lists choices for that single id", async () => {
+      const { session, mock } = makeSession("sess_cfg2", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+
+      const { client: alice, stream } = makeClient();
+      await session.attach(alice, "full");
+
+      const result = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config effort" }],
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+
+      const text = extractTextMessage(stream);
+      expect(text).toBeDefined();
+      expect(text).toContain("effort — \u25b6 low");
+      expect(text).toContain("\u25b6 low     Low");
+      expect(text).toContain("\u00b7 high    High");
+    });
+
+    it("'/hydra config effort high' forwards a session/set_config_option request", async () => {
+      const { session, mock } = makeSession("sess_cfg3", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      requestMock.mockResolvedValue({});
+
+      const { client: alice, stream } = makeClient();
+      await session.attach(alice, "full");
+
+      const result = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config effort high" }],
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+
+      // The daemon should have forwarded set_config_option to the agent.
+      expect(requestMock).toHaveBeenCalledWith("session/set_config_option", {
+        sessionId: "u_seed",
+        configId: "effort",
+        value: "high",
+      });
+    });
+
+    it("'/hydra config bogus' returns a synthetic error listing valid ids", async () => {
+      const { session, mock } = makeSession("sess_cfg4", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+
+      const { client: alice, stream } = makeClient();
+      await session.attach(alice, "full");
+
+      const result = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config bogus" }],
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+
+      const text = extractTextMessage(stream);
+      expect(text).toBeDefined();
+      expect(text).toContain('"bogus" is not a known config option');
+      expect(text).toContain("Available options");
+    });
+
+    it("'/hydra config effort bogus' returns a synthetic error listing valid values", async () => {
+      const { session, mock } = makeSession("sess_cfg5", "u_seed");
+      seedConfigOptions(session, mock);
+      await flushHistoryWrites();
+
+      const { client: alice, stream } = makeClient();
+      await session.attach(alice, "full");
+
+      const result = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra config effort bogus" }],
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+
+      const text = extractTextMessage(stream);
+      expect(text).toBeDefined();
+      expect(text).toContain('"bogus" is not a valid value for "effort"');
+      expect(text).toContain("Valid values");
+    });
+  });
 });

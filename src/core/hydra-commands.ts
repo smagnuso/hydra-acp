@@ -40,6 +40,13 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
     description:
       "Restart the agent with a fresh session/new while preserving conversation history (useful when the proxy has changed available models)",
   },
+  {
+    verb: "config",
+    name: "hydra config",
+    argsHint: "[<id> [<value>]]",
+    description:
+      "List or set an agent-advertised configOption (model, mode, effort, etc.). With no args, lists all options; with <id>, shows its choices; with <id> <value>, applies it.",
+  },
 ];
 
 const VERB_INDEX = new Map(HYDRA_COMMANDS.map((c) => [c.verb, c]));

@@ -447,6 +447,11 @@ export class Session {
   // snapshot, and so session/set_model can validate the requested id
   // against what the agent claims to support.
   private agentAdvertisedModels: AdvertisedModel[] = [];
+  // Extra, non-standard config options advertised by the agent (e.g.
+  // "effort", "thought_level"). Stored so buildConfigOptions can surface
+  // them alongside model/mode/agent — agents like opencode carry these
+  // only in config_option_update, never via a dedicated notification.
+  private agentAdvertisedConfigOptions: ConfigOption[] = [];
   // Persist hooks for snapshot-shaped state. SessionManager hooks these
   // to mirror changes into meta.json so cold-resurrect attaches can
   // surface the latest snapshot via the attach response _meta.
@@ -2315,6 +2320,52 @@ export class Session {
             this.applyModeChange(trimmed);
           }
         }
+      } else if (typeof opt.id === "string" && opt.id.trim()) {
+        // Non-standard config option (e.g. "effort", "thought_level").
+        // Store it so buildConfigOptions can surface it alongside
+        // model/mode/agent — agents advertise these only in the
+        // config_option_update payload, never via a dedicated channel.
+        const id = opt.id.trim();
+        const options = parseModelsList(opt.options);
+        if (options.length > 0) {
+          const modeList = parseModesList(opt.options);
+          const valueOpts: ConfigOptionValue[] = modeList.length > 0
+            ? modeList.map((m) => ({
+                value: m.id,
+                name: m.name ?? m.id,
+              }))
+            : options.map((m) => ({
+                value: m.modelId,
+                name: m.name ?? m.modelId,
+              }));
+          const rawName = (opt as { name?: unknown }).name;
+          const name = typeof rawName === "string" && rawName.trim() ? rawName.trim() : id;
+          const rawCv = opt.currentValue;
+          const currentValue =
+            typeof rawCv === "string" && rawCv.trim()
+              ? rawCv.trim()
+              : valueOpts[0]?.value ?? "";
+          const existing = this.agentAdvertisedConfigOptions.findIndex(
+            (o) => o.id === id,
+          );
+          if (existing >= 0) {
+            const updated = { ...this.agentAdvertisedConfigOptions[existing]! };
+            updated.options = valueOpts;
+            if (typeof rawCv === "string" && rawCv.trim()) {
+              updated.currentValue = rawCv.trim();
+            }
+            this.agentAdvertisedConfigOptions[existing] = updated;
+          } else {
+            this.agentAdvertisedConfigOptions.push({
+              id,
+              name,
+              category: "other",
+              type: "select",
+              currentValue,
+              options: valueOpts,
+            });
+          }
+        }
       }
     }
     return true;
@@ -2743,6 +2794,8 @@ export class Session {
       currentValue: this.agentId,
       options: agentOptions,
     });
+    // Append extra config options advertised by the agent (e.g. effort).
+    out.push(...this.agentAdvertisedConfigOptions);
     return out;
   }
 
@@ -2947,6 +3000,8 @@ export class Session {
           return inline ? this.runTitleCommandInline(remainder) : this.runTitleCommand(remainder);
         case "agent":
           return inline ? this.runAgentCommandInline(remainder) : this.runAgentCommand(remainder);
+        case "config":
+          return this.handleConfigCommand(`/config ${remainder}`);
         case "kill":
           // Kill is intentionally not queued (see runKillCommand
           // comment) — fire directly in both paths.
@@ -3335,6 +3390,94 @@ export class Session {
       modeId: arg,
     });
     this.applyModeChange(arg);
+    return { stopReason: "end_turn" };
+  }
+
+  // /config — list or set an agent-advertised configOption. With no arg it
+  // lists all options with their current values; with one arg it shows the
+  // named option; with two args it validates and forwards
+  // session/set_config_option to apply the change.
+  private async handleConfigCommand(text: string): Promise<unknown> {
+    const match = text.slice("/config".length).trim().match(/^(\S+)(?:\s+([\s\S]*))?$/);
+    const id = match?.[1];
+    const value = match?.[2] ?? "";
+
+    if (!id) {
+      // No arg: list all config options with current values marked.
+      const options = this.buildConfigOptions();
+      if (options.length === 0) {
+        this.recordAndBroadcast("session/update", {
+          sessionId: this.upstreamSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "\n_(no config options advertised yet)_\n" },
+            _meta: { "hydra-acp": { synthetic: true } },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+      const blocks = options.map((o) => renderConfigOptionBlock(o));
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `\n${blocks.join("\n\n")}\n` },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
+
+    // One arg (id): look up the option and display its current value + choices.
+    const options = this.buildConfigOptions();
+    const option = options.find((o) => o.id === id);
+    if (!option) {
+      const known = options.map((o) => o.id).join("\n  ");
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `\n"${id}" is not a known config option.\nAvailable options:\n  ${known}\n` },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
+
+    if (!value) {
+      // One arg: render just this option's block.
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: {
+            type: "text",
+            text: `\n${renderConfigOptionBlock(option)}\n`,
+          },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
+
+    if (!option.options.some((c) => c.value === value)) {
+      const known = option.options.map((c) => c.value).join("\n  ");
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `\n"${value}" is not a valid value for "${id}".\nValid values:\n  ${known}\n` },
+          _meta: { "hydra-acp": { synthetic: true } },
+        },
+      });
+      return { stopReason: "end_turn" };
+    }
+
+    await this.forwardRequest("session/set_config_option", {
+      sessionId: this.sessionId,
+      configId: id,
+      value,
+    });
     return { stopReason: "end_turn" };
   }
 
@@ -5043,6 +5186,29 @@ function defaultStopPayload(method: string): Record<string, unknown> {
 // First non-empty line of `text`, truncated to `max` chars with a
 // trailing ellipsis if needed. Used to seed a session title from the
 // first user prompt's leading line.
+// Render one configOption as a header line (`id  (Name) — ▶ currentValue`)
+// followed by an indented choice list where the current value is marked
+// with ▶ and others with ·, and the human-readable `name` is right-padded
+// against the longest `value` for vertical alignment. Used by both the
+// no-arg listing and the single-id show path in /hydra config.
+function renderConfigOptionBlock(o: ConfigOption): string {
+  const header =
+    o.name && o.name !== o.id
+      ? `${o.id}  (${o.name}) — \u25b6 ${o.currentValue}`
+      : `${o.id} — \u25b6 ${o.currentValue}`;
+  if (o.options.length === 0) {
+    return header;
+  }
+  const valueWidth = Math.max(...o.options.map((c) => c.value.length));
+  const rows = o.options.map((c) => {
+    const marker = c.value === o.currentValue ? "\u25b6" : "\u00b7";
+    const showName = c.name && c.name !== c.value;
+    const valueCell = showName ? c.value.padEnd(valueWidth) : c.value;
+    return showName ? `  ${marker} ${valueCell}  ${c.name}` : `  ${marker} ${valueCell}`;
+  });
+  return `${header}\n${rows.join("\n")}`;
+}
+
 export function firstLine(text: string, max: number): string | undefined {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
