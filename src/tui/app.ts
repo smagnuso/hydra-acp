@@ -1645,6 +1645,11 @@ async function runSession(
     { name: "/quit", description: "Exit the TUI" },
     { name: "/clear", description: "Clear scrollback" },
     { name: "/sessions", description: "List sessions" },
+    { name: "/resume", description: "Switch sessions (open the picker)" },
+    {
+      name: "/rename",
+      description: "Rename this session (alias for /hydra title): /rename [title]",
+    },
     { name: "/model", description: "Switch model: /model <model-id>" },
     { name: "/agent", description: "Switch agent via config option: /agent <agent-id>" },
     { name: "/demo-plan", description: "Inject synthetic plan events (UI test)" },
@@ -3269,6 +3274,23 @@ async function runSession(
           },
         ]);
         return true;
+      case "/resume":
+        // Same destination as the switch-session hotkey: suspend the live
+        // session and open the picker.
+        void switchSession();
+        return true;
+      case "/rename": {
+        // Alias for the daemon-side `/hydra title` command. Rewrite to the
+        // wire form and send it like any agent slash command, but keep the
+        // user's literal "/rename …" as the scrollback echo + history entry
+        // so up-arrow recall re-aliases rather than surfacing the
+        // expansion.
+        const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        const wire = arg.length > 0 ? `/hydra title ${arg}` : "/hydra title";
+        recordHistoryEntry(trimmed, trimmed);
+        void runPrompt(wire, [], trimmed);
+        return true;
+      }
       default:
         // Not a built-in — fall through so the agent can handle it.
         return false;
