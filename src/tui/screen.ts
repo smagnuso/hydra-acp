@@ -27,6 +27,32 @@ import {
 } from "./column-mapping.js";
 import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
 import { withSync } from "./sync.js";
+import {
+  ALT_SCREEN_LEAVE,
+  AUTOWRAP_OFF,
+  AUTOWRAP_ON,
+  BRACKETED_PASTE_OFF,
+  BRACKETED_PASTE_ON,
+  DECCKM_OFF,
+  DECPAM_OFF,
+  FORMAT_OTHER_KEYS_OFF,
+  FORMAT_OTHER_KEYS_ON,
+  KITTY_KBD_POP,
+  KITTY_KBD_PUSH,
+  MODIFY_OTHER_KEYS_OFF,
+  MODIFY_OTHER_KEYS_ON,
+  MOUSE_ANY_MOTION_OFF,
+  MOUSE_BUTTON_OFF,
+  MOUSE_SGR_OFF,
+  MOUSE_URXVT_OFF,
+  MOUSE_X10_OFF,
+  PASTE_END,
+  PASTE_START,
+  SELECTIVE_MOUSE_OFF,
+  SELECTIVE_MOUSE_PROBE,
+  SELECTIVE_MOUSE_WHEEL_ONLY,
+  SHOW_CURSOR,
+} from "./ansi.js";
 
 // Maximum gap, in milliseconds, between two left-button presses on the
 // same cell that still counts as a double-click for word-snap selection.
@@ -566,7 +592,7 @@ export class Screen {
     // row. Without this, a wide-unicode body whose visible width exceeds
     // our wrap budget would bleed onto the row below, and paintRow's
     // sig-based skip can leave that bleed uncleared indefinitely.
-    process.stdout.write("\x1b[?7l");
+    process.stdout.write(AUTOWRAP_OFF);
     // mouse: "drag" enables wheel + button-press/release reporting AND
     // motion-during-drag (xterm DEC mode ?1002). The drag stream is what
     // makes click-drag text selection work inside the app: handleMouse
@@ -638,7 +664,7 @@ export class Screen {
       // Only needed on the way out — the picker doesn't re-enable it,
       // so leaving auto-wrap disabled across the picker round-trip is
       // fine (start() will re-disable on resume anyway).
-      process.stdout.write("\x1b[?7h");
+      process.stdout.write(AUTOWRAP_ON);
     }
     // Clear any progress indicator so the host terminal's taskbar /
     // dock badge doesn't keep pulsing after we exit (or while a picker
@@ -673,7 +699,7 @@ export class Screen {
   private installBracketedPaste(): void {
     // Enable bracketed paste — terminals that don't support it ignore
     // the sequence harmlessly.
-    process.stdout.write("\x1b[?2004h");
+    process.stdout.write(BRACKETED_PASTE_ON);
     // Enable two key-reporting protocols so modified Enter arrives as
     // a CSI-u sequence (Shift+Enter = \x1b[13;2u). Different terminals
     // support different things:
@@ -689,9 +715,9 @@ export class Screen {
     // Shift+Enter just behaves like Enter — the right fallback. We
     // also intercept the legacy CSI 27;…~ format below in case
     // formatOtherKeys=1 is unsupported.
-    process.stdout.write("\x1b[>4;2m");
-    process.stdout.write("\x1b[>5;1m");
-    process.stdout.write("\x1b[>1u");
+    process.stdout.write(MODIFY_OTHER_KEYS_ON);
+    process.stdout.write(FORMAT_OTHER_KEYS_ON);
+    process.stdout.write(KITTY_KBD_PUSH);
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
       onStdin: (chunk: Buffer) => void;
@@ -705,17 +731,17 @@ export class Screen {
   }
 
   private uninstallBracketedPaste(): void {
-    process.stdout.write("\x1b[?2004l");
-    process.stdout.write("\x1b[>4;0m");
-    process.stdout.write("\x1b[>5;0m");
-    process.stdout.write("\x1b[<u");
+    process.stdout.write(BRACKETED_PASTE_OFF);
+    process.stdout.write(MODIFY_OTHER_KEYS_OFF);
+    process.stdout.write(FORMAT_OTHER_KEYS_OFF);
+    process.stdout.write(KITTY_KBD_POP);
     // Force normal cursor key mode (DECCKM off) + numeric keypad mode
     // (DECPAM off). Alt-screen enable enables application cursor mode
     // on iTerm, which makes arrows send \x1bOA. The picker uses
     // terminal-kit's osx-256color config which only recognizes \x1b[A,
     // so without this reset arrows don't reach the picker's key handler.
-    process.stdout.write("\x1b[?1l");
-    process.stdout.write("\x1b>");
+    process.stdout.write(DECCKM_OFF);
+    process.stdout.write(DECPAM_OFF);
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
     };
@@ -740,7 +766,7 @@ export class Screen {
       return;
     }
     this.selectiveMouseProbing = true;
-    process.stdout.write("\x1b[?w");
+    process.stdout.write(SELECTIVE_MOUSE_PROBE);
     // 250ms is comfortably longer than any local terminal's reply
     // latency. After the window we stop accepting probe replies; a
     // late-arriving reply would be passed through as junk, but in
@@ -758,7 +784,7 @@ export class Screen {
     }
     this.selectiveMouseProbing = false;
     if (this.selectiveMouseSupported) {
-      process.stdout.write("\x1b[=0;0w");
+      process.stdout.write(SELECTIVE_MOUSE_OFF);
       this.selectiveMouseSupported = false;
     }
   }
@@ -831,7 +857,7 @@ export class Screen {
         this.selectiveMouseSupported = true;
         // Enable wheel-only reporting: bmask 0x18 (wheel up | wheel down),
         // emask 0x1 (press). Matches the worked example in the spec.
-        process.stdout.write("\x1b[=24;1w");
+        process.stdout.write(SELECTIVE_MOUSE_WHEEL_ONLY);
         text = text.slice(0, m.index) + text.slice(m.index + m[0].length);
       }
     }
@@ -910,7 +936,7 @@ export class Screen {
     // wezterm deliver the whole paste (start marker + LF-separated
     // content + end marker) in a single read, and the LFs inside the
     // payload must not be interpreted as Ctrl+Enter.
-    if (text.includes("\x1b[200~")) {
+    if (text.includes(PASTE_START)) {
       this.handleRawStdinSegment(text);
       return;
     }
@@ -1014,8 +1040,8 @@ export class Screen {
   // to terminal-kit. Split out so shift-enter interception can call it
   // for the non-shift-enter portions of a mixed chunk.
   private handleRawStdinSegment(text: string): void {
-    const startMarker = "\x1b[200~";
-    const endMarker = "\x1b[201~";
+    const startMarker = PASTE_START;
+    const endMarker = PASTE_END;
     while (text.length > 0) {
       if (this.pasteActive) {
         const endIdx = text.indexOf(endMarker);
@@ -2059,7 +2085,7 @@ export class Screen {
     this.wrapCache.clear();
     this.wrapCacheWidth = 0;
     // Re-assert DECAWM-off in case something turned it back on.
-    process.stdout.write("\x1b[?7l");
+    process.stdout.write(AUTOWRAP_OFF);
     this.term.clear();
     this.repaint();
   }
@@ -5309,22 +5335,22 @@ export function mapKeyName(name: string): KeyName | null {
 // isn't set is harmless.
 export function emergencyTerminalReset(): void {
   const seq = [
-    "\x1b[?1000l", // mouse button reporting off
-    "\x1b[?1002l", // mouse drag reporting off
-    "\x1b[?1003l", // mouse any-motion reporting off
-    "\x1b[?1006l", // SGR mouse mode off
-    "\x1b[?1015l", // urxvt mouse mode off
-    "\x1b[=0;0w", // MasterBandit selective mouse reporting off
-    "\x1b[?2004l", // bracketed paste off
-    "\x1b[>4;0m", // xterm modifyOtherKeys off
-    "\x1b[>5;0m", // xterm formatOtherKeys off
-    "\x1b[<u", // pop kitty keyboard stack
-    "\x1b[?1l", // DECCKM off: arrows send CSI A/B/C/D not SS3 O A/B/C/D
-    "\x1b>", // DECPAM off: numeric keypad mode
-    "\x1b[?7h", // auto-wrap on
-    "\x1b[?25h", // show cursor
+    MOUSE_X10_OFF, // mouse button reporting off
+    MOUSE_BUTTON_OFF, // mouse drag reporting off
+    MOUSE_ANY_MOTION_OFF, // mouse any-motion reporting off
+    MOUSE_SGR_OFF, // SGR mouse mode off
+    MOUSE_URXVT_OFF, // urxvt mouse mode off
+    SELECTIVE_MOUSE_OFF, // MasterBandit selective mouse reporting off
+    BRACKETED_PASTE_OFF, // bracketed paste off
+    MODIFY_OTHER_KEYS_OFF, // xterm modifyOtherKeys off
+    FORMAT_OTHER_KEYS_OFF, // xterm formatOtherKeys off
+    KITTY_KBD_POP, // pop kitty keyboard stack
+    DECCKM_OFF, // DECCKM off: arrows send CSI A/B/C/D not SS3 O A/B/C/D
+    DECPAM_OFF, // DECPAM off: numeric keypad mode
+    AUTOWRAP_ON, // auto-wrap on
+    SHOW_CURSOR, // show cursor
     "\x1b]9;4;0\x07", // clear OSC 9;4 progress indicator
-    "\x1b[?1049l", // leave alternate screen
+    ALT_SCREEN_LEAVE, // leave alternate screen
   ].join("");
   try {
     process.stdout.write(seq);

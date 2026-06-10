@@ -631,6 +631,26 @@ async function runSession(
   // the daemon. The 1Hz timer reads this to detect a stalled upstream
   // (silence past STALL_THRESHOLD_MS while busy) and flip the banner red.
   let lastUpdateAt: number | null = null;
+  // Single 1Hz tick used by the busy banner: emits elapsedMs and a
+  // stalled flag derived from the gap since the last session/update.
+  // Used from the pendingTurns 0 → >0 transition and from the two
+  // reattach/reconcile paths that adopt an in-flight turn after the
+  // screen comes up. Returns the interval handle so the caller can
+  // stash it in sessionElapsedTimer and clearInterval on teardown.
+  const startSessionElapsedTimer = (): NodeJS.Timeout => {
+    return setInterval(() => {
+      if (sessionBusySince === null || screenRef === null) {
+        return;
+      }
+      const idleMs =
+        lastUpdateAt === null ? 0 : Date.now() - lastUpdateAt;
+      screenRef.setBanner({
+        elapsedMs: Date.now() - sessionBusySince,
+        stalled: idleMs >= STALL_THRESHOLD_MS,
+      });
+      renderToolsBlock();
+    }, 1_000);
+  };
   // Latched per-turn: any tool_call_update arriving with
   // upstreamInterrupted=true sets this to true. Consumed at turn_complete
   // to override a misleadingly clean end_turn from the upstream agent —
@@ -668,18 +688,7 @@ async function runSession(
         // feedback that something is happening; a 5s tick made the TUI
         // feel frozen by comparison. The 1Hz screen-repaint throttle
         // coalesces paints, so this isn't expensive.
-        sessionElapsedTimer = setInterval(() => {
-          if (sessionBusySince === null || screenRef === null) {
-            return;
-          }
-          const idleMs =
-            lastUpdateAt === null ? 0 : Date.now() - lastUpdateAt;
-          screenRef.setBanner({
-            elapsedMs: Date.now() - sessionBusySince,
-            stalled: idleMs >= STALL_THRESHOLD_MS,
-          });
-          renderToolsBlock();
-        }, 1_000);
+        sessionElapsedTimer = startSessionElapsedTimer();
       }
     } else if (before > 0 && pendingTurns === 0) {
       cancelling = false;
@@ -4900,13 +4909,7 @@ async function runSession(
       elapsedMs: Date.now() - initialTurnStartedAt,
     });
     if (sessionElapsedTimer === null) {
-      sessionElapsedTimer = setInterval(() => {
-        if (sessionBusySince === null || screenRef === null) {
-          return;
-        }
-        screenRef.setBanner({ elapsedMs: Date.now() - sessionBusySince });
-        renderToolsBlock();
-      }, 1_000);
+      sessionElapsedTimer = startSessionElapsedTimer();
     }
     // Only anchor a fresh tools block if the replay didn't already leave
     // one live. The busy turn's replayed user-text calls startToolsBlock,
@@ -5137,13 +5140,7 @@ async function runSession(
           elapsedMs: Date.now() - reconcile.busySince,
         });
         if (sessionElapsedTimer === null) {
-          sessionElapsedTimer = setInterval(() => {
-            if (sessionBusySince === null || screenRef === null) {
-              return;
-            }
-            screenRef.setBanner({ elapsedMs: Date.now() - sessionBusySince });
-            renderToolsBlock();
-          }, 1_000);
+          sessionElapsedTimer = startSessionElapsedTimer();
         }
       } else {
         screen.setBanner({ status: "ready", elapsedMs: undefined });

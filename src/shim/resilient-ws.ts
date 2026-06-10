@@ -74,11 +74,13 @@ export class ResilientWsStream implements MessageStream {
     if (this.connectGate || !this.current || this.flushing) {
       // Always go through the queue while a flush is in progress so
       // ordering is preserved and a concurrent send() can't be stranded
-      // by the loop having already snapshotted the prior queue.
+      // by the loop having already snapshotted the prior queue. The
+      // in-flight flushQueue() loop re-checks outboundQueue.length each
+      // iteration, so appending here is sufficient — no second drain
+      // call is needed (and any such call would be unreachable: the
+      // outer guard already encompasses every case where draining
+      // would be safe).
       this.outboundQueue.push(message);
-      if (!this.connectGate && this.current && !this.flushing) {
-        await this.flushQueue();
-      }
       return;
     }
     this.outboundQueue.push(message);

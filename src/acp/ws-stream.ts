@@ -72,7 +72,28 @@ export function wsToMessageStream(ws: WebSocket): MessageStream {
       if (closed) {
         return;
       }
-      ws.close();
+      // Wait for ws to actually finish closing before notifying listeners
+      // so they don't observe a "closed" signal while the socket is still
+      // mid-handshake. Timeout fallback in case the peer never sends the
+      // close frame and the socket never fires its `close` event.
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const done = (): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, 5000);
+        ws.once("close", done);
+        try {
+          ws.close();
+        } catch {
+          done();
+        }
+      });
       emitClose();
     },
   };

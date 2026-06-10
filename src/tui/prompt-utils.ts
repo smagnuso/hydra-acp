@@ -23,6 +23,17 @@
 // picker.ts does too (see renderFromScratch in picker.ts:385).
 
 import type { Terminal } from "terminal-kit";
+import {
+  BRACKETED_PASTE_OFF,
+  DECCKM_OFF,
+  DECPAM_OFF,
+  FORMAT_OTHER_KEYS_OFF,
+  KITTY_KBD_POP,
+  MODIFY_OTHER_KEYS_OFF,
+  MOUSE_BUTTON_OFF,
+  MOUSE_SGR_OFF,
+  MOUSE_X10_OFF,
+} from "./ansi.js";
 
 export interface BoxLayout {
   // Outer coordinates (1-based, terminal-kit convention).
@@ -62,15 +73,15 @@ const BR = "┘";
 // picker.ts:105-113 so prompt-utils owns one copy and future prompts
 // import the helper instead of pasting the block.
 export function resetTerminalModes(): void {
-  process.stdout.write("\x1b[<u");
-  process.stdout.write("\x1b[?2004l");
-  process.stdout.write("\x1b[>4;0m");
-  process.stdout.write("\x1b[>5;0m");
-  process.stdout.write("\x1b[?1000l");
-  process.stdout.write("\x1b[?1002l");
-  process.stdout.write("\x1b[?1006l");
-  process.stdout.write("\x1b[?1l");
-  process.stdout.write("\x1b>");
+  process.stdout.write(KITTY_KBD_POP);
+  process.stdout.write(BRACKETED_PASTE_OFF);
+  process.stdout.write(MODIFY_OTHER_KEYS_OFF);
+  process.stdout.write(FORMAT_OTHER_KEYS_OFF);
+  process.stdout.write(MOUSE_X10_OFF);
+  process.stdout.write(MOUSE_BUTTON_OFF);
+  process.stdout.write(MOUSE_SGR_OFF);
+  process.stdout.write(DECCKM_OFF);
+  process.stdout.write(DECPAM_OFF);
 }
 
 export function readTermWidth(term: Terminal): number {

@@ -53,6 +53,24 @@ import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
+import {
+  ALT_SCREEN_ENTER,
+  ALT_SCREEN_LEAVE,
+  AUTOWRAP_ON,
+  BRACKETED_PASTE_OFF,
+  BRACKETED_PASTE_ON,
+  DECCKM_OFF,
+  DECPAM_OFF,
+  FORMAT_OTHER_KEYS_OFF,
+  KITTY_KBD_POP,
+  MODIFY_OTHER_KEYS_OFF,
+  MOUSE_BUTTON_OFF,
+  MOUSE_SGR_OFF,
+  MOUSE_X10_OFF,
+  PASTE_END,
+  PASTE_START,
+  SHOW_CURSOR,
+} from "./ansi.js";
 import { decodeBundle } from "../core/bundle.js";
 import {
   aggregate as aggregateSessionInfo,
@@ -222,15 +240,15 @@ export async function pickSession(
   // \x1b[A/B/C/D. terminal-kit detects iTerm as osx-256color whose
   // keymap only recognizes the \x1b[ form, so without this reset the
   // arrows are dropped as "unknown" sequences and never reach onKey.
-  process.stdout.write("\x1b[<u");
-  process.stdout.write("\x1b[?2004l");
-  process.stdout.write("\x1b[>4;0m");
-  process.stdout.write("\x1b[>5;0m");
-  process.stdout.write("\x1b[?1000l");
-  process.stdout.write("\x1b[?1002l");
-  process.stdout.write("\x1b[?1006l");
-  process.stdout.write("\x1b[?1l");
-  process.stdout.write("\x1b>");
+  process.stdout.write(KITTY_KBD_POP);
+  process.stdout.write(BRACKETED_PASTE_OFF);
+  process.stdout.write(MODIFY_OTHER_KEYS_OFF);
+  process.stdout.write(FORMAT_OTHER_KEYS_OFF);
+  process.stdout.write(MOUSE_X10_OFF);
+  process.stdout.write(MOUSE_BUTTON_OFF);
+  process.stdout.write(MOUSE_SGR_OFF);
+  process.stdout.write(DECCKM_OFF);
+  process.stdout.write(DECPAM_OFF);
 
   // All persistent toggles live on `prefs.filters`. We read and write
   // straight through this object — no shadow locals — so adding a new
@@ -1419,8 +1437,6 @@ export async function pickSession(
   // exists) so the suspend closure can refer to the same listeners /
   // teardown bits cleanup() uses. Null on Windows (no SIGTSTP / SIGCONT).
   let suspend: (() => void) | null = null;
-  const PASTE_START = "\x1b[200~";
-  const PASTE_END = "\x1b[201~";
   const rawStdinHandler = (chunk: Buffer): void => {
     let text = chunk.toString("binary");
     // ^Z (SUB, 0x1a) — raw mode swallowed VSUSP. Only the bare byte
@@ -1596,7 +1612,7 @@ export async function pickSession(
       term.off("key", dispatch);
       term.off("resize", dispatchResize);
       // Restore terminal-kit's stdin listener and disable bracketed paste.
-      process.stdout.write("\x1b[?2004l");
+      process.stdout.write(BRACKETED_PASTE_OFF);
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
       if (tClean.stdin && tkStdinHandler) {
         tClean.stdin.removeListener("data", rawStdinHandler);
@@ -2753,7 +2769,7 @@ export async function pickSession(
         tkStdinHandler = tSetup.onStdin;
         tSetup.stdin.removeListener("data", tSetup.onStdin);
         tSetup.stdin.on("data", rawStdinHandler);
-        process.stdout.write("\x1b[?2004h");
+        process.stdout.write(BRACKETED_PASTE_ON);
       }
       term.on("key", dispatch);
       term.on("resize", dispatchResize);
@@ -2761,7 +2777,7 @@ export async function pickSession(
     // Reverse of installGrab. Used both by cleanup (in resolve path) and
     // by suspend (which then re-runs installGrab on SIGCONT).
     const uninstallGrab = (): void => {
-      process.stdout.write("\x1b[?2004l");
+      process.stdout.write(BRACKETED_PASTE_OFF);
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
       if (tClean.stdin && tkStdinHandler) {
         tClean.stdin.removeListener("data", rawStdinHandler);
@@ -2791,7 +2807,7 @@ export async function pickSession(
         suspendInProgress = false;
         // Re-enter alt screen, hide cursor (renderFromScratch repositions),
         // re-grab input, repaint.
-        process.stdout.write("\x1b[?1049h");
+        process.stdout.write(ALT_SCREEN_ENTER);
         installGrab();
         if (!resolved) {
           renderFromScratch();
@@ -2806,7 +2822,7 @@ export async function pickSession(
         // Leave the alt-screen buffer so the host shell is visible while
         // we're stopped. Re-enable cursor; restore auto-wrap so any
         // shell job-control message renders cleanly.
-        process.stdout.write("\x1b[?1049l\x1b[?7h\x1b[?25h\n");
+        process.stdout.write(`${ALT_SCREEN_LEAVE}${AUTOWRAP_ON}${SHOW_CURSOR}\n`);
         process.once("SIGCONT", onCont);
         process.kill(process.pid, "SIGTSTP");
       };

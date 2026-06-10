@@ -891,4 +891,34 @@ describe("session routes: POST /v1/sessions/:id/fork", () => {
     expect(fork).toBeDefined();
     expect(fork!.cwd.startsWith("~")).toBe(false);
   });
+
+  it("GET /v1/sessions/:id returns the same shape as the corresponding /v1/sessions row", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const id = session.sessionId;
+
+    const listRes = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=1`,
+    );
+    const listBody = (await listRes.json()) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    const listEntry = listBody.sessions.find((s) => s.sessionId === id);
+    expect(listEntry).toBeDefined();
+
+    const oneRes = await fetch(`${harness.baseUrl}/v1/sessions/${id}`);
+    expect(oneRes.status).toBe(200);
+    const oneEntry = (await oneRes.json()) as Record<string, unknown>;
+
+    expect(oneEntry).toEqual(listEntry);
+  });
+
+  it("GET /v1/sessions/:id 404s for an unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra-doesnotexist`,
+    );
+    expect(res.status).toBe(404);
+  });
 });

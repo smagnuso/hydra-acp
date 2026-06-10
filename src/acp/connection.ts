@@ -43,6 +43,16 @@ export class JsonRpcConnection {
   // ever subscribes.
   private bufferedNotifications = new Map<string, JsonRpcNotification[]>();
   private static readonly MAX_BUFFERED_PER_METHOD = 64;
+  // Per-method cap bounds memory for any one notification topic, but the
+  // number of *distinct* topics is itself attacker-controlled (a peer can
+  // emit one notification per fabricated method name). Cap the number of
+  // method buckets too. Eviction policy: drop the bucket that was least
+  // recently inserted (Map preserves insertion order, so `keys().next()`
+  // returns it in O(1)). We prefer "oldest inserted" over "oldest written"
+  // because tracking last-touched would require re-inserting on every
+  // notification, and the threat model — a flood of unique method names
+  // pushing real buckets out — is addressed equally well by either policy.
+  private static readonly MAX_BUFFERED_METHODS = 256;
   private pending = new Map<JsonRpcId, PendingRequest>();
   private closed = false;
   private closeHandlers: Array<(err?: Error) => void> = [];
@@ -225,6 +235,14 @@ export class JsonRpcConnection {
     // capped so a misbehaving sender can't OOM us.
     let queued = this.bufferedNotifications.get(note.method);
     if (!queued) {
+      if (
+        this.bufferedNotifications.size >= JsonRpcConnection.MAX_BUFFERED_METHODS
+      ) {
+        const oldestKey = this.bufferedNotifications.keys().next().value;
+        if (oldestKey !== undefined) {
+          this.bufferedNotifications.delete(oldestKey);
+        }
+      }
       queued = [];
       this.bufferedNotifications.set(note.method, queued);
     }

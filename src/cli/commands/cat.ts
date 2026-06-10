@@ -185,7 +185,7 @@ export async function runCat(opts: CatOptions): Promise<void> {
       // Best-effort cleanup on normal exit. --detach leaves the dir
       // intact since the daemon-resident agent may still be using it
       // (and /tmp gets GC'd on reboot anyway).
-      process.on("exit", () => {
+      process.once("exit", () => {
         try {
           rmSync(sandbox, { recursive: true, force: true });
         } catch {

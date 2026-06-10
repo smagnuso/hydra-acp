@@ -137,6 +137,74 @@ function rpcError(
 // reject if it isn't live" — does NOT consult disk, so handlers that
 // want to resurrect a cold session must still call manager.get/
 // loadFromDisk themselves.
+// Approximate the serialized JSON length of a session-broadcast entry
+// without paying for a full JSON.stringify on the hot path. Walks the
+// well-known payload-bearing string fields on an ACP session_update
+// (content text/data, toolCall raw input/output, embedded content
+// blocks) and adds a fixed envelope overhead. Errs on the high side
+// so the byte cap stays effective; MAX_ENTRIES backstops exotic shapes.
+function estimateBroadcastSize(entry: unknown): number {
+  const ENVELOPE = 512;
+  if (!entry || typeof entry !== "object") {
+    return ENVELOPE;
+  }
+  const e = entry as { params?: { update?: Record<string, unknown> } };
+  const upd = e.params?.update;
+  if (!upd) {
+    return ENVELOPE;
+  }
+  let n = ENVELOPE;
+  const content = upd.content as unknown;
+  if (typeof content === "string") {
+    n += content.length;
+  } else if (content && typeof content === "object") {
+    const c = content as { text?: unknown; data?: unknown };
+    if (typeof c.text === "string") {
+      n += c.text.length;
+    }
+    if (typeof c.data === "string") {
+      n += c.data.length;
+    }
+  }
+  const tc = upd.toolCall as
+    | {
+        rawInput?: unknown;
+        rawOutput?: unknown;
+        content?: unknown;
+      }
+    | undefined;
+  if (tc) {
+    if (typeof tc.rawInput === "string") {
+      n += tc.rawInput.length;
+    } else if (tc.rawInput && typeof tc.rawInput === "object") {
+      n += 256;
+    }
+    if (typeof tc.rawOutput === "string") {
+      n += tc.rawOutput.length;
+    } else if (tc.rawOutput && typeof tc.rawOutput === "object") {
+      n += 256;
+    }
+    if (Array.isArray(tc.content)) {
+      for (const block of tc.content) {
+        if (!block || typeof block !== "object") {
+          continue;
+        }
+        const b = block as { text?: unknown; content?: unknown };
+        if (typeof b.text === "string") {
+          n += b.text.length;
+        }
+        if (b.content && typeof b.content === "object") {
+          const inner = b.content as { text?: unknown };
+          if (typeof inner.text === "string") {
+            n += inner.text.length;
+          }
+        }
+      }
+    }
+  }
+  return n;
+}
+
 function requireLiveSession(
   manager: { get(sessionId: string): Session | undefined },
   sessionId: string,
@@ -707,12 +775,13 @@ export function registerAcpWsEndpoint(
 
           // Collect recordable updates; resolve when the stop condition fires.
           unsubscribeBroadcast = child.onBroadcast((entry) => {
-            let entrySize = 0;
-            try {
-              entrySize = JSON.stringify(entry).length;
-            } catch {
-              entrySize = 0;
-            }
+            // Cheap byte-cap estimate: sum lengths of the obvious
+            // payload-bearing string fields on a session_update entry
+            // plus a fixed envelope overhead. Avoids the per-broadcast
+            // O(size) JSON.stringify on the hot path. The MAX_ENTRIES
+            // cap remains an unconditional backstop, so a mis-estimate
+            // on an exotic entry shape can't unbound the response.
+            const entrySize = estimateBroadcastSize(entry);
             entries.push(entry);
             sizes.push(entrySize);
             totalBytes += entrySize;
@@ -943,6 +1012,11 @@ export function registerAcpWsEndpoint(
       setImmediate(() => {
         void (async () => {
           for (const note of replay) {
+            // Bail if the client went away between schedule and now so
+            // we don't push the rest of the history into a dead socket.
+            if (connection.isClosed()) {
+              break;
+            }
             await connection
               .notify(note.method, note.params)
               .catch(() => undefined);

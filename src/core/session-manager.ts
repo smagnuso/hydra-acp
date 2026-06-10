@@ -1499,6 +1499,84 @@ export class SessionManager {
     };
   }
 
+  // Single-row variant of list() for callers that already know the
+  // sessionId (e.g. GET /v1/sessions/:id). Reads exactly one record
+  // and runs one historyStatus probe instead of walking the full
+  // live+cold list. Output matches the corresponding row from
+  // listUncached() byte-for-byte (same fields, same enrichment).
+  async getOne(sessionId: string): Promise<SessionListEntry | undefined> {
+    const live = this.sessions.get(sessionId);
+    if (live) {
+      const hist = await historyStatus(live.sessionId);
+      const interactive = effectiveInteractive(
+        {
+          interactive: live.interactive,
+          ...(live.originatingClient
+            ? { originatingClient: live.originatingClient }
+            : {}),
+        },
+        hist.hasContent,
+      );
+      const used = hist.mtime ?? new Date(live.updatedAt).toISOString();
+      return {
+        sessionId: live.sessionId,
+        upstreamSessionId: live.upstreamSessionId,
+        cwd: live.cwd,
+        title: live.title,
+        agentId: live.agentId,
+        currentModel: live.currentModel,
+        currentUsage: live.currentUsage,
+        parentSessionId: live.parentSessionId,
+        forkedFromSessionId: live.forkedFromSessionId,
+        forkedFromMessageId: live.forkedFromMessageId,
+        originatingClient: live.originatingClient,
+        interactive,
+        priority: live.priority,
+        updatedAt: used,
+        attachedClients: live.attachedCount,
+        status: "live",
+        busy: live.turnStartedAt !== undefined,
+        awaitingInput: live.awaitingInput,
+      };
+    }
+    const r = await this.store.read(sessionId).catch(() => undefined);
+    if (!r) {
+      return undefined;
+    }
+    const hist = await historyStatus(r.sessionId);
+    const interactive = effectiveInteractive(r, hist.hasContent);
+    const used = hist.mtime ?? r.updatedAt;
+    return {
+      sessionId: r.sessionId,
+      upstreamSessionId: r.upstreamSessionId,
+      cwd: r.cwd,
+      title: r.title,
+      agentId: r.agentId,
+      currentModel: r.currentModel,
+      currentUsage: r.currentUsage
+        ? {
+            ...r.currentUsage,
+            costAmount:
+              (r.currentUsage.cumulativeCost ?? 0) +
+              (r.currentUsage.costAmount ?? 0) || undefined,
+          }
+        : undefined,
+      importedFromMachine: r.importedFromMachine,
+      importedFromUpstreamSessionId: r.importedFromUpstreamSessionId,
+      parentSessionId: r.parentSessionId,
+      forkedFromSessionId: r.forkedFromSessionId,
+      forkedFromMessageId: r.forkedFromMessageId,
+      originatingClient: r.originatingClient,
+      interactive,
+      priority: r.priority,
+      updatedAt: used,
+      attachedClients: 0,
+      status: "cold",
+      busy: false,
+      awaitingInput: false,
+    };
+  }
+
   async list(
     filter: { cwd?: string; includeNonInteractive?: boolean } = {},
   ): Promise<SessionListEntry[]> {
@@ -1590,7 +1668,15 @@ export class SessionManager {
         awaitingInput: session.awaitingInput,
       });
     }
-    const records = await this.store.list().catch(() => []);
+    // Propagate disk errors so list()'s cache entry evicts and the next
+    // caller retries instead of seeing an empty cold-record set wedged
+    // in the 500ms list cache.
+    const records = await this.store.list().catch((err: unknown) => {
+      this.logger?.warn(
+        `session list: store.list() failed: ${(err as Error)?.message ?? String(err)}`,
+      );
+      throw err;
+    });
     const coldRecords = records.filter(
       (r) => !liveIds.has(r.sessionId) && (!filter.cwd || r.cwd === filter.cwd),
     );

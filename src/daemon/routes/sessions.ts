@@ -71,8 +71,7 @@ export function registerSessionRoutes(
   app.get("/v1/sessions/:id", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
-    const entries = await manager.list({ includeNonInteractive: true });
-    const entry = entries.find((e) => e.sessionId === id);
+    const entry = await manager.getOne(id);
     if (!entry) {
       reply.code(404).send({ error: "session not found" });
       return reply;
