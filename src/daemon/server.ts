@@ -352,6 +352,7 @@ export async function startDaemon(
       stopAgentSync();
     }
     clearInterval(sweepInterval);
+    clearInterval(rateLimitSweepInterval);
     await sessionTokenStore.flush();
     await extensions.stop();
     await transformers.stop();

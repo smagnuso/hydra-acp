@@ -50,6 +50,8 @@ import {
   type LaunchOrViewResult,
 } from "./import-action-prompt.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
+import { readTermHeight, readTermWidth } from "./prompt-utils.js";
+import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
 import { decodeBundle } from "../core/bundle.js";
 import {
@@ -409,6 +411,13 @@ export async function pickSession(
     })
     .catch(() => undefined);
 
+  // Row-level diff painter: every render path funnels its row writes
+  // through painter.paintRow(row, sig, paint) so consecutive frames
+  // emit only the rows whose sig changed. Cleared at entry points
+  // that paint outside the painter (help / find overlays, openCwdPrompt)
+  // so the next picker render emits a full frame.
+  const painter = new RowPainter(term);
+
   // All layout state — recomputed on initial paint AND on every resize.
   let termHeight = readTermHeight(term);
   let termWidth = readTermWidth(term);
@@ -586,18 +595,25 @@ export async function pickSession(
     }
   };
 
+  // The visible slice of the composer buffer for one visual row, used
+  // by paintComposerBodyRow to draw the row and by composerBodySig to
+  // detect when that row's content has changed across frames.
+  const composerSliceAt = (visualIdx: number): string => {
+    const vr = composerVisualRows[visualIdx];
+    if (!vr) {
+      return "";
+    }
+    return (composer.state().buffer[vr.bufferIdx] ?? "").slice(
+      vr.startCol,
+      vr.endCol,
+    );
+  };
+
   // One visual row of the composer body. Focused: border glyphs in
   // brightBlue, content plain. Unfocused: borders dim, content plain.
   const paintComposerBodyRow = (visualIdx: number): void => {
     const inner = composerBoxInner();
-    const vr = composerVisualRows[visualIdx];
-    let slice = "";
-    if (vr) {
-      slice = (composer.state().buffer[vr.bufferIdx] ?? "").slice(
-        vr.startCol,
-        vr.endCol,
-      );
-    }
+    const slice = composerSliceAt(visualIdx);
     const padWidth = Math.max(0, inner - 1 - slice.length);
     const pad = " ".repeat(padWidth);
     if (selectedIdx === 0) {
@@ -663,50 +679,64 @@ export async function pickSession(
   // length varies (search hint, transient status), so we still have to
   // clear leftover chars — but doing the erase AFTER paint (rather than
   // before) means the row is never blanked mid-frame.
+  // Sig captures every state input the indicator paint reads so the
+  // row-painter cache can short-circuit redundant emits between key
+  // events. Includes mode, pending session id/status, transient
+  // status, search state, and filter prefs (so toggling filters
+  // re-emits the indicator).
+  const indicatorSig = (): string => {
+    const pending = pendingAction
+      ? `${pendingAction.sessionId}|${pendingAction.status}`
+      : "";
+    return [
+      "ind",
+      mode,
+      pending,
+      renameBuffer,
+      transientStatus ?? "",
+      searchActive ? `1|${searchTerm}|${visible.length}` : "0",
+      formatIndicator(),
+    ].join("\u0001");
+  };
   const paintIndicator = (): void => {
     withSync(() => {
-      term.moveTo(1, indicatorRow());
-      if (mode === "confirm-kill" && pendingAction) {
-        term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
-      } else if (mode === "confirm-delete" && pendingAction) {
-        if (pendingAction.status === "live") {
-          term.brightRed.noFormat(
-            `  kill + delete ${shortId(pendingAction.sessionId)}? [y/N]`,
-          );
+      painter.paintRow(indicatorRow(), indicatorSig(), () => {
+        if (mode === "confirm-kill" && pendingAction) {
+          term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
+        } else if (mode === "confirm-delete" && pendingAction) {
+          if (pendingAction.status === "live") {
+            term.brightRed.noFormat(
+              `  kill + delete ${shortId(pendingAction.sessionId)}? [y/N]`,
+            );
+          } else {
+            term.brightRed.noFormat(
+              `  delete ${shortId(pendingAction.sessionId)}? [y/N]`,
+            );
+          }
+        } else if (mode === "busy" && pendingAction) {
+          term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
+        } else if (mode === "rename" && pendingAction) {
+          term.brightYellow.noFormat(`  title: ${renameBuffer}`);
+          term.bgBrightYellow(" ");
+          term.dim.noFormat("  Enter saves · Esc cancels");
+        } else if (transientStatus !== null) {
+          term.dim.noFormat(`  ${transientStatus}`);
+        } else if (searchActive) {
+          // Search line is anchored to the bottom of the picker so it
+          // stays visible regardless of how the session list scrolls
+          // above. ^c exits and clears the filter. A trailing block
+          // cursor reinforces that the line accepts input.
+          term.brightYellow.noFormat(`  /${searchTerm}`);
+          term.bgBrightYellow(" ");
+          const hint =
+            visible.length === 0
+              ? " no matches"
+              : ` ${visible.length} match${visible.length === 1 ? "" : "es"}`;
+          term.dim.noFormat(`${hint} · ^c clears`);
         } else {
-          term.brightRed.noFormat(
-            `  delete ${shortId(pendingAction.sessionId)}? [y/N]`,
-          );
+          term.dim.noFormat(formatIndicator());
         }
-      } else if (mode === "busy" && pendingAction) {
-        term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
-      } else if (mode === "rename" && pendingAction) {
-        term.brightYellow.noFormat(`  title: ${renameBuffer}`);
-        term.bgBrightYellow(" ");
-        term.dim.noFormat("  Enter saves · Esc cancels");
-      } else if (transientStatus !== null) {
-        term.dim.noFormat(`  ${transientStatus}`);
-      } else if (searchActive) {
-        // Search line is anchored to the bottom of the picker so it
-        // stays visible regardless of how the session list scrolls
-        // above. ^c exits and clears the filter. A trailing block
-        // cursor reinforces that the line accepts input.
-        term.brightYellow.noFormat(`  /${searchTerm}`);
-        term.bgBrightYellow(" ");
-        const hint =
-          visible.length === 0
-            ? " no matches"
-            : ` ${visible.length} match${visible.length === 1 ? "" : "es"}`;
-        term.dim.noFormat(`${hint} · ^c clears`);
-      } else {
-        term.dim.noFormat(formatIndicator());
-      }
-      // Trailing reset + erase: clears any stale chars past the new
-      // content from the previous frame, with default SGR so the
-      // erased cells don't inherit a bg colour from the rename / search
-      // bgBrightYellow span above.
-      term.styleReset();
-      term.eraseLineAfter();
+      });
     });
   };
 
@@ -739,34 +769,70 @@ export async function pickSession(
     term.moveTo(col, composerBodyRow(visualOffset));
   };
 
-  // Full paint from a clean slate: clear the screen, anchor the picker at
-  // row 1, and lay out every row. Used on initial entry (so we don't have
-  // to rely on a cursor-position query) and on resize (where the cleanest
-  // way to recover is to start over). Hides the cursor for the duration
-  // of the paint so the user never sees it skitter row-by-row across the
-  // frame; the trailing block places it where it belongs.
+  // Sigs for the row-painter cache. Each must include every variable
+  // input that affects the row's visible output; identical sig means
+  // identical bytes so paintRow can short-circuit.
+  const composerTopSig = (): string =>
+    `ct|${selectedIdx === 0 ? "f" : "u"}|${composerBoxInner()}|${composerTitle}`;
+  const composerBotSig = (): string =>
+    `cb|${selectedIdx === 0 ? "f" : "u"}|${composerBoxInner()}`;
+  const composerBodySig = (visualIdx: number): string =>
+    `cbb|${selectedIdx === 0 ? "f" : "u"}|${composerBoxInner()}|${composerSliceAt(visualIdx)}`;
+  const headerSig = (): string => `h|${headerLine}`;
+  const sessionRowSig = (sessionIdx: number): string => {
+    const session = visible[sessionIdx];
+    const prefix = session && session.priority && session.priority > 0 ? "* " : "  ";
+    const label = sessionLines[sessionIdx] ?? "";
+    const selected = selectedIdx === sessionIdx + 1 ? "1" : "0";
+    return `sr|${selected}|${prefix}${label}`;
+  };
+
+  // Paint the picker's main view through the row-painter so frames
+  // share their per-row signature cache. The first call (after
+  // painter.clearCache()) emits every row; subsequent calls with
+  // overlapping state emit only the rows whose sig changed.
+  // Hides the cursor for the duration so the user never sees it
+  // skitter row-by-row across the frame; the trailing block places
+  // it where it belongs.
   const renderFromScratch = (): void => {
     withSync(() => {
       term.hideCursor();
       computeLayout();
       adjustScroll();
       startRow = 1;
-      term.moveTo(1, 1).eraseDisplayBelow();
-      paintComposerTopBorder();
-      term("\n");
+      painter.ensureSize(termWidth, termHeight);
+      painter.paintRow(startRow, composerTopSig(), () => {
+        paintComposerTopBorder();
+      });
       for (let v = 0; v < composerRows; v++) {
-        paintComposerBodyRow(composerWindowStart + v);
-        term("\n");
+        const visualIdx = composerWindowStart + v;
+        painter.paintRow(composerBodyRow(v), composerBodySig(visualIdx), () => {
+          paintComposerBodyRow(visualIdx);
+        });
       }
-      paintComposerBottomBorder();
-      term("\n\n");
-      term.dim.noFormat(`  ${headerLine}`)("\n");
+      painter.paintRow(composerBottomRow(), composerBotSig(), () => {
+        paintComposerBottomBorder();
+      });
+      // Blank gap row between composer and header.
+      painter.paintRow(composerBottomRow() + 1, "blank", () => {});
+      painter.paintRow(headerRow(), headerSig(), () => {
+        term.dim.noFormat(`  ${headerLine}`);
+      });
       for (let v = 0; v < viewportSize; v++) {
-        paintSessionRow(scrollOffset + v);
-        term("\n");
+        const sessionIdx = scrollOffset + v;
+        const row = headerRow() + 1 + v;
+        if (sessionIdx < visible.length) {
+          painter.paintRow(row, sessionRowSig(sessionIdx), () => {
+            paintSessionRow(sessionIdx);
+          });
+        } else {
+          painter.paintRow(row, "blank", () => {});
+        }
       }
       paintIndicator();
-      term("\n");
+      // Blank trailing row after the indicator — guarantees the
+      // bottom row is clean if a prior frame left content there.
+      painter.paintRow(indicatorRow() + 1, "blank", () => {});
       if (selectedIdx === 0) {
         placeComposerCursor();
         term.hideCursor(false);
@@ -777,6 +843,7 @@ export async function pickSession(
   const renderHelp = (): void => {
     withSync(() => {
       term.hideCursor();
+      painter.clearCache();
       term.moveTo(1, 1).eraseDisplayBelow();
       term.brightWhite.bold.noFormat("  Picker hotkeys")("\n\n");
       for (const entry of HELP_ENTRIES) {
@@ -1048,6 +1115,7 @@ export async function pickSession(
     const queryText = findComposer.state().buffer.join("\n");
     withSync(() => {
       term.hideCursor();
+      painter.clearCache();
       term.moveTo(1, 1).eraseDisplayBelow();
       // Box — always visible regardless of mode.
       paintFindBoxTopBorder(focused);
@@ -1225,13 +1293,17 @@ export async function pickSession(
       if (showCursor) {
         term.hideCursor();
       }
-      term.moveTo(1, startRow);
-      paintComposerTopBorder();
-      term.moveTo(1, composerBottomRow());
-      paintComposerBottomBorder();
+      painter.paintRow(startRow, composerTopSig(), () => {
+        paintComposerTopBorder();
+      });
+      painter.paintRow(composerBottomRow(), composerBotSig(), () => {
+        paintComposerBottomBorder();
+      });
       for (let v = 0; v < composerRows; v++) {
-        term.moveTo(1, composerBodyRow(v));
-        paintComposerBodyRow(composerWindowStart + v);
+        const visualIdx = composerWindowStart + v;
+        painter.paintRow(composerBodyRow(v), composerBodySig(visualIdx), () => {
+          paintComposerBodyRow(visualIdx);
+        });
       }
       if (showCursor) {
         placeComposerCursor();
@@ -1262,8 +1334,10 @@ export async function pickSession(
         term.hideCursor();
       }
       for (let v = 0; v < composerRows; v++) {
-        term.moveTo(1, composerBodyRow(v));
-        paintComposerBodyRow(composerWindowStart + v);
+        const visualIdx = composerWindowStart + v;
+        painter.paintRow(composerBodyRow(v), composerBodySig(visualIdx), () => {
+          paintComposerBodyRow(visualIdx);
+        });
       }
       if (showCursor) {
         placeComposerCursor();
@@ -1279,8 +1353,9 @@ export async function pickSession(
       return;
     }
     withSync(() => {
-      term.moveTo(1, sessionRow(sessionIdx));
-      paintSessionRow(sessionIdx);
+      painter.paintRow(sessionRow(sessionIdx), sessionRowSig(sessionIdx), () => {
+        paintSessionRow(sessionIdx);
+      });
     });
   };
   const repaintViewport = (): void => {
@@ -1289,12 +1364,13 @@ export async function pickSession(
         const row = headerRow() + 1 + v;
         const sessionIdx = scrollOffset + v;
         if (sessionIdx < visible.length) {
-          term.moveTo(1, row);
-          paintSessionRow(sessionIdx);
+          painter.paintRow(row, sessionRowSig(sessionIdx), () => {
+            paintSessionRow(sessionIdx);
+          });
         } else {
-          // Past the end of the visible list — still need to erase so a
+          // Past the end of the visible list — emit a blank row so a
           // stale row from a prior frame doesn't linger.
-          term.moveTo(1, row).eraseLineAfter();
+          painter.paintRow(row, "blank", () => {});
         }
       }
       paintIndicator();
@@ -1307,16 +1383,18 @@ export async function pickSession(
   // that renderFromScratch produces.
   const repaintDataZone = (): void => {
     withSync(() => {
-      term.moveTo(1, headerRow());
-      term.dim.noFormat(`  ${headerLine}`);
+      painter.paintRow(headerRow(), headerSig(), () => {
+        term.dim.noFormat(`  ${headerLine}`);
+      });
       for (let v = 0; v < viewportSize; v++) {
         const row = headerRow() + 1 + v;
         const sessionIdx = scrollOffset + v;
         if (sessionIdx < visible.length) {
-          term.moveTo(1, row);
-          paintSessionRow(sessionIdx);
+          painter.paintRow(row, sessionRowSig(sessionIdx), () => {
+            paintSessionRow(sessionIdx);
+          });
         } else {
-          term.moveTo(1, row).eraseLineAfter();
+          painter.paintRow(row, "blank", () => {});
         }
       }
       paintIndicator();
@@ -1447,13 +1525,24 @@ export async function pickSession(
     // to detach the picker's grab while it runs and re-attach after.
     const openCwdPrompt = async (): Promise<void> => {
       uninstallGrab();
+      painter.clearCache();
       term.moveTo(1, 1).eraseDisplayBelow();
-      const result = await promptForImportCwd(term, undefined, {
-        defaultCwd: currentCwd,
-        title: "Change cwd",
-        intro: "New cwd for the picker and any new sessions:",
-      });
-      installGrab();
+      // Push a focus layer so the auto-refresh tick is suppressed while the
+      // cwd prompt owns the terminal. The prompt manages its own input, so
+      // the layer's onKey/onResize don't need to do anything.
+      const cwdLayer: FocusLayer = { onKey: () => {}, onResize: () => {} };
+      pushLayer(cwdLayer);
+      let result;
+      try {
+        result = await promptForImportCwd(term, undefined, {
+          defaultCwd: currentCwd,
+          title: "Change cwd",
+          intro: "New cwd for the picker and any new sessions:",
+        });
+      } finally {
+        popLayer();
+        installGrab();
+      }
       if (result.kind === "ok" && result.path !== currentCwd) {
         currentCwd = result.path;
         // Re-sort so the cwd-priority bump in sortSessions follows the new
@@ -1857,6 +1946,7 @@ export async function pickSession(
       const renderInfo = (): void => {
         withSync(() => {
           term.hideCursor();
+          painter.clearCache();
           term.moveTo(1, 1).eraseDisplayBelow();
           term.brightWhite.bold.noFormat(
             `  Session info — ${stripHydraSessionPrefix(session.sessionId)}`,
@@ -1876,7 +1966,7 @@ export async function pickSession(
       };
 
       renderInfo();
-      pushLayer({
+      const infoLayer: FocusLayer = {
         onKey: (name) => {
           if (name === "ESCAPE" || name === "CTRL_C") {
             popLayer();
@@ -1884,7 +1974,8 @@ export async function pickSession(
           }
         },
         onResize: () => renderInfo(),
-      });
+      };
+      pushLayer(infoLayer);
 
       void (async () => {
         try {
@@ -1904,7 +1995,11 @@ export async function pickSession(
           error = `failed to load info: ${(err as Error).message}`;
         } finally {
           loading = false;
-          renderInfo();
+          // Only paint if the info layer is still on top and the picker
+          // hasn't resolved — otherwise we'd clobber whatever replaced it.
+          if (!resolved && focusStack[focusStack.length - 1] === infoLayer) {
+            renderInfo();
+          }
         }
       })();
     };
@@ -2725,21 +2820,6 @@ export async function pickSession(
     // is the common case — keeps the picker quiet between actual events.
     autoRefreshTimer = setInterval(autoRefreshTick, 3000);
   });
-}
-
-// terminal-kit reports width/height as `undefined` before the first size
-// probe and as `Infinity` whenever stdout isn't a TTY. A nullish fallback
-// (`?? 80`) lets `Infinity` through, and `Infinity` then propagates into
-// the row-width math until `padEnd(Infinity)` throws `Invalid string
-// length`. Clamp to a finite, positive number instead.
-function readTermHeight(term: Terminal): number {
-  const h = (term as unknown as { height?: number }).height;
-  return typeof h === "number" && Number.isFinite(h) && h > 0 ? h : 24;
-}
-
-function readTermWidth(term: Terminal): number {
-  const w = (term as unknown as { width?: number }).width;
-  return typeof w === "number" && Number.isFinite(w) && w > 0 ? w : 80;
 }
 
 // Title line for the composer pane. Middle-truncate the cwd so the user

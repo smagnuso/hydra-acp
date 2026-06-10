@@ -8,7 +8,10 @@ import * as fsp from "node:fs/promises";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
-import { httpBase } from "./sessions.js";
+export function httpBase(host: string, port: number, tls: boolean): string {
+  const protocol = tls ? "https" : "http";
+  return `${protocol}://${host}:${port}`;
+}
 
 export { openWs } from "../../shim/open-ws.js";
 

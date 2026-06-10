@@ -659,14 +659,19 @@ export function registerSessionRoutes(
       }
     }
     // Drain any entries that landed during the snapshot read window,
-    // skipping ones already in the snapshot.
-    for (const entry of pending) {
-      const e = entry as { recordedAt?: number };
-      const key = typeof e.recordedAt === "number" ? String(e.recordedAt) : "";
-      if (key && snapshotKeys.has(key)) {
-        continue;
+    // skipping ones already in the snapshot. Loop until pending is
+    // empty so entries that arrive during the drain are also flushed
+    // before we flip snapshotDone and switch to direct emission.
+    while (pending.length > 0) {
+      const batch = pending.splice(0, pending.length);
+      for (const entry of batch) {
+        const e = entry as { recordedAt?: number };
+        const key = typeof e.recordedAt === "number" ? String(e.recordedAt) : "";
+        if (key && snapshotKeys.has(key)) {
+          continue;
+        }
+        reply.raw.write(JSON.stringify(entry) + "\n");
       }
-      reply.raw.write(JSON.stringify(entry) + "\n");
     }
     snapshotDone = true;
 

@@ -152,6 +152,35 @@ function requireLiveSession(
   return session;
 }
 
+// Shared "cold session resurrection" sequence: mint extension MCP
+// descriptors (if any), call manager.resurrect with mcpServers wired
+// in, abandon the mint on failure, bind it to the session on success,
+// then wire default transformers. Callers pass any per-site resurrect
+// extras (e.g. onInstallProgress) merged into resurrectParams.
+async function resurrectFromDisk(
+  deps: AcpWsDeps,
+  resurrectParams: ResurrectParams,
+): Promise<Session> {
+  const extMcpMint = mintExtensionMcpDescriptors(deps);
+  let session: Session;
+  try {
+    session = await deps.manager.resurrect({
+      ...resurrectParams,
+      mcpServers: extMcpMint?.descriptors,
+    });
+  } catch (err) {
+    if (extMcpMint !== undefined) {
+      extMcpMint.abandon(err instanceof Error ? err : undefined);
+    }
+    throw err;
+  }
+  if (extMcpMint !== undefined) {
+    extMcpMint.bindToSession(session);
+  }
+  wireDefaultTransformers(session, deps);
+  return session;
+}
+
 export function registerAcpWsEndpoint(
   app: FastifyInstance,
   deps: AcpWsDeps,
@@ -1049,23 +1078,10 @@ export function registerAcpWsEndpoint(
         const resurrectWithOriginator = resurrectParams.originatingClient
           ? resurrectParams
           : { ...resurrectParams, originatingClient: state.clientInfo };
-        const extMcpMint = mintExtensionMcpDescriptors(deps);
-        try {
-          session = await deps.manager.resurrect({
-            ...resurrectWithOriginator,
-            mcpServers: extMcpMint?.descriptors,
-            onInstallProgress: makeInstallProgressForwarder(connection),
-          });
-        } catch (err) {
-          if (extMcpMint !== undefined) {
-            extMcpMint.abandon(err instanceof Error ? err : undefined);
-          }
-          throw err;
-        }
-        if (extMcpMint !== undefined) {
-          extMcpMint.bindToSession(session);
-        }
-        wireDefaultTransformers(session, deps);
+        session = await resurrectFromDisk(deps, {
+          ...resurrectWithOriginator,
+          onInstallProgress: makeInstallProgressForwarder(connection),
+        });
       }
       const client = bindClientToSession(
         connection,
@@ -1266,22 +1282,7 @@ export function registerAcpWsEndpoint(
         app.log.info(
           `session/prompt auto-resurrecting cold sessionId=${params.sessionId}`,
         );
-        const extMcpMint = mintExtensionMcpDescriptors(deps);
-        try {
-          session = await deps.manager.resurrect({
-            ...fromDisk,
-            mcpServers: extMcpMint?.descriptors,
-          });
-        } catch (err) {
-          if (extMcpMint !== undefined) {
-            extMcpMint.abandon(err instanceof Error ? err : undefined);
-          }
-          throw err;
-        }
-        if (extMcpMint !== undefined) {
-          extMcpMint.bindToSession(session);
-        }
-        wireDefaultTransformers(session, deps);
+        session = await resurrectFromDisk(deps, fromDisk);
         const client = bindClientToSession(
           connection,
           session,
@@ -1403,22 +1404,7 @@ export function registerAcpWsEndpoint(
             `session ${rawSessionId} not found in memory or on disk`,
           );
         }
-        const extMcpMint = mintExtensionMcpDescriptors(deps);
-        try {
-          session = await deps.manager.resurrect({
-            ...fromDisk,
-            mcpServers: extMcpMint?.descriptors,
-          });
-        } catch (err) {
-          if (extMcpMint !== undefined) {
-            extMcpMint.abandon(err instanceof Error ? err : undefined);
-          }
-          throw err;
-        }
-        if (extMcpMint !== undefined) {
-          extMcpMint.bindToSession(session);
-        }
-        wireDefaultTransformers(session, deps);
+        session = await resurrectFromDisk(deps, fromDisk);
       }
       const client = bindClientToSession(connection, session, state);
       const { entries: replay } = await session.attach(client, "pending_only");

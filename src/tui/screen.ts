@@ -5,6 +5,7 @@
 
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
+import { RepaintScheduler, RowPainter } from "./screen/painter.js";
 import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { shortenHomePath } from "../core/paths.js";
@@ -309,9 +310,9 @@ export class Screen {
   private attachments: Attachment[] = [];
   private repaintPaused = 0;
   private repaintPending = false;
-  private lastRepaintAt = 0;
-  private throttledRepaintTimer: NodeJS.Timeout | null = null;
   private contentRepaintThrottleMs: number;
+  private readonly painter: RowPainter;
+  private readonly scheduler: RepaintScheduler;
   private maxScrollbackLines: number;
   // Wrap memoization: each FormattedLine that lands in this.lines gets a
   // monotonic id assigned via trackLine(); wrapCache holds the pre-wrapped
@@ -332,16 +333,9 @@ export class Screen {
     FormattedLine,
     { sourceLineId: number; sourceColOffset: number }
   >();
-  // Per-row signature of what was painted to each terminal row on the
-  // previous repaint. drawX methods funnel through paintRow(), which
-  // skips the moveTo+eraseLineAfter+write sequence when the new
-  // signature matches the previous frame. Eliminates flicker during
-  // the 1Hz busy-tick: only rows whose content actually changed
-  // (banner elapsed, tools-block summary) get re-emitted instead of
-  // every visible row. Cleared on dimension change.
-  private lastFrameRows = new Map<number, string>();
-  private lastFrameW = 0;
-  private lastFrameH = 0;
+  // Per-row signature cache + repaint throttle state live in the
+  // shared RowPainter / RepaintScheduler (src/tui/screen/painter.ts);
+  // see paintRow() / scheduleRepaint() below for the local delegates.
   private permissionPrompt: PermissionPromptSpec | null = null;
   private optionsPrompt: OptionsPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
@@ -518,6 +512,16 @@ export class Screen {
     this.onSuspend = opts.onSuspend;
     this.contentRepaintThrottleMs =
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
+    this.painter = new RowPainter(this.term);
+    this.scheduler = new RepaintScheduler({
+      isStarted: () => this.started,
+      isRepaintPaused: () => this.repaintPaused > 0,
+      markRepaintPending: () => {
+        this.repaintPending = true;
+      },
+      throttleMs: () => this.contentRepaintThrottleMs,
+      doRepaint: () => this.repaint(),
+    });
     this.maxScrollbackLines =
       opts.maxScrollbackLines ?? DEFAULT_MAX_SCROLLBACK_LINES;
     this.mouseEnabled = opts.mouse ?? false;
@@ -554,9 +558,7 @@ export class Screen {
     // stop/start round-trip (e.g. the session picker) leaves paintRow
     // short-circuiting against signatures from the previous run and the
     // screen stays blank until something forces a fullRedraw.
-    this.lastFrameRows.clear();
-    this.lastFrameW = 0;
-    this.lastFrameH = 0;
+    this.painter.clearCache();
     this.lastWindowTitle = null;
     // Disable auto-wrap (DECAWM). Our row painter assumes each row starts
     // with a moveTo + eraseLineAfter, so any character that overflows the
@@ -620,10 +622,7 @@ export class Screen {
     // A throttled repaint queued just before stop would otherwise fire
     // AFTER we leave the alternate screen and write raw cursor-position
     // escapes into the host shell, scrambling it.
-    if (this.throttledRepaintTimer) {
-      clearTimeout(this.throttledRepaintTimer);
-      this.throttledRepaintTimer = null;
-    }
+    this.scheduler.cancel();
     this.uninstallSelectiveMouseReporting();
     this.uninstallBracketedPaste();
     this.uninstallEmergencyCleanup();
@@ -2055,9 +2054,7 @@ export class Screen {
   // corrupted the visible state and the per-row sig check otherwise
   // short-circuits the re-emit.
   fullRedraw(): void {
-    this.lastFrameRows.clear();
-    this.lastFrameW = 0;
-    this.lastFrameH = 0;
+    this.painter.clearCache();
     this.lastWindowTitle = null;
     this.wrapCache.clear();
     this.wrapCacheWidth = 0;
@@ -3047,34 +3044,7 @@ export class Screen {
   // recently, schedule one for the remainder of the window. Setting the
   // throttle to 0 disables coalescing entirely.
   private scheduleRepaint(): void {
-    if (!this.started) {
-      return;
-    }
-    if (this.repaintPaused > 0) {
-      this.repaintPending = true;
-      return;
-    }
-    if (this.contentRepaintThrottleMs <= 0) {
-      this.repaint();
-      return;
-    }
-    const now = Date.now();
-    const elapsed = now - this.lastRepaintAt;
-    if (elapsed >= this.contentRepaintThrottleMs) {
-      if (this.throttledRepaintTimer) {
-        clearTimeout(this.throttledRepaintTimer);
-        this.throttledRepaintTimer = null;
-      }
-      this.repaint();
-      return;
-    }
-    if (this.throttledRepaintTimer !== null) {
-      return;
-    }
-    this.throttledRepaintTimer = setTimeout(() => {
-      this.throttledRepaintTimer = null;
-      this.repaint();
-    }, this.contentRepaintThrottleMs - elapsed);
+    this.scheduler.schedule();
   }
 
   // Funnel for every row that any drawX method renders. Skips emitting
@@ -3096,17 +3066,7 @@ export class Screen {
     if (!this.started) {
       return;
     }
-    if (row < 1 || row > this.term.height) {
-      return;
-    }
-    if (this.lastFrameRows.get(row) === signature) {
-      return;
-    }
-    this.lastFrameRows.set(row, signature);
-    this.term.moveTo(1, row);
-    paint();
-    this.term.styleReset();
-    this.term.eraseLineAfter();
+    this.painter.paintRow(row, signature, paint);
   }
 
   private repaint(): void {
@@ -3117,21 +3077,13 @@ export class Screen {
       this.repaintPending = true;
       return;
     }
-    this.lastRepaintAt = Date.now();
-    if (this.throttledRepaintTimer) {
-      clearTimeout(this.throttledRepaintTimer);
-      this.throttledRepaintTimer = null;
-    }
+    this.scheduler.noteRepaintStart();
     const w = this.term.width;
     const h = this.term.height;
     if (w < 20 || h < 8) {
       return;
     }
-    if (w !== this.lastFrameW || h !== this.lastFrameH) {
-      this.lastFrameRows.clear();
-      this.lastFrameW = w;
-      this.lastFrameH = h;
-    }
+    this.painter.ensureSize(w, h);
     // Wrap the whole frame in DEC 2026 synchronized output so terminals
     // that support it commit every row change atomically. Big repaints
     // (resize, /clear, scrollback scroll, modal open/close) used to land

@@ -1110,8 +1110,11 @@ describe("Screen lifecycle", () => {
     return (screen as unknown as { started: boolean }).started;
   }
   function getThrottleTimer(screen: Screen): NodeJS.Timeout | null {
-    return (screen as unknown as { throttledRepaintTimer: NodeJS.Timeout | null })
-      .throttledRepaintTimer;
+    return (
+      screen as unknown as {
+        scheduler: { pendingTimer: NodeJS.Timeout | null };
+      }
+    ).scheduler.pendingTimer;
   }
 
   it("clears the pending throttled repaint on stop()", () => {

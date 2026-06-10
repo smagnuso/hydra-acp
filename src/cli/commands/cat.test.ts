@@ -1007,6 +1007,70 @@ describe("runCatLoop", () => {
       h.respondToRequest("session/prompt", { stopReason: "end_turn" });
       await loopPromise;
     });
+
+    it("FILE pivot: bytes and EOF arriving during streamClient.open() are ordered after head drain", async () => {
+      const h = makeHarness();
+      // Intercept open() and hold it until the test releases the gate.
+      // That window is exactly when the pre-fix race ran: head bytes had
+      // not yet been enqueued, but the data/end handler was already in
+      // the file-mode branch.
+      let releaseOpen: () => void = () => undefined;
+      const openGate = new Promise<void>((resolve) => {
+        releaseOpen = resolve;
+      });
+      const realOpen = h.baseArgs.streamClient.open.bind(h.baseArgs.streamClient);
+      h.baseArgs.streamClient.open = async (sessionId, opts) => {
+        await openGate;
+        return realOpen(sessionId, opts);
+      };
+
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: { prompt: "watch", streamThreshold: 4 },
+      });
+      await performHandshake(h);
+
+      // Cross the threshold. switchToFile() starts but blocks on open.
+      h.fakeStdin.push("HEAD!"); // 5 bytes, > 4
+
+      // Give the loop a microtask cycle to enter switchToFile and
+      // start awaiting open(). headChunks is now staged but undrained.
+      await new Promise((r) => setTimeout(r, 5));
+
+      // Now, with open still pending, fire more data and EOF. Pre-fix,
+      // these would be writeToStream()'d immediately and beat the head
+      // drain into the daemon ring.
+      h.fakeStdin.push("MID");
+      h.fakeStdin.push("TAIL");
+      h.fakeStdin.end();
+
+      // Release open. Head drain should land first, then MID+TAIL, and
+      // EOF must be the final write.
+      releaseOpen();
+
+      await h.waitForRequest("session/prompt");
+      // Let any post-open writes flush.
+      await new Promise((r) => setTimeout(r, 10));
+
+      const writeTexts = h.streamCalls.writes.map((w) => w.text);
+      const writeEofs = h.streamCalls.writes.map((w) => w.eof);
+
+      // Concatenated payload (ignoring the EOF marker) must equal the
+      // exact concatenation of arrival order.
+      const concat = writeTexts.join("");
+      expect(concat).toBe("HEAD!MIDTAIL");
+
+      // Head bytes must appear at the start of the first write — they
+      // cannot land behind bytes that arrived during open().
+      expect(writeTexts[0]?.startsWith("HEAD!")).toBe(true);
+
+      // EOF must be the last write, and only the last write.
+      expect(writeEofs[writeEofs.length - 1]).toBe(true);
+      expect(writeEofs.slice(0, -1).every((e) => e === false)).toBe(true);
+
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      await loopPromise;
+    });
   });
 });
 

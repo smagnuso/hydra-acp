@@ -766,8 +766,12 @@ function runStreamingPath(args: StreamingPathArgs): void {
   const { conn, streamClient, sessionId, opts, stdin, stderr, sendInline } = args;
   const threshold = opts.streamThreshold ?? DEFAULT_STREAM_THRESHOLD;
 
-  type Mode = "undecided" | "inline" | "file";
+  type Mode = "undecided" | "pivoting" | "inline" | "file";
   let mode: Mode = "undecided";
+  // Set when stdin "end" fires while switchToFile() is still awaiting
+  // streamClient.open(). Replayed as an EOF write after the head buffer
+  // is drained, so leading bytes can never land behind the EOF marker.
+  let pendingEofDuringPivot = false;
   // Chunks accrued in undecided/inline mode before we know whether to
   // flush as a single inline prompt or pivot into streaming-file mode.
   // Kept as an array + running length to avoid the O(n²) Buffer.concat
@@ -806,7 +810,12 @@ function runStreamingPath(args: StreamingPathArgs): void {
   };
 
   const switchToFile = async (): Promise<void> => {
-    mode = "file";
+    // Stay in "pivoting" while open is in flight. Data and end events
+    // arriving during the await are buffered into headChunks /
+    // pendingEofDuringPivot instead of being written directly — that
+    // way the head bytes can never land in the daemon ring AFTER bytes
+    // that arrived mid-pivot, and EOF can never beat the head drain.
+    mode = "pivoting";
     let open: { capacityBytes: number };
     try {
       const openParams: { mode: "memory"; capacityBytes?: number } = {
@@ -829,6 +838,12 @@ function runStreamingPath(args: StreamingPathArgs): void {
       writeToStream(Buffer.concat(headChunks, headLen), false);
       headChunks = [];
       headLen = 0;
+    }
+    // Only now does the "data"/"end" branch flip to direct writes.
+    mode = "file";
+    if (pendingEofDuringPivot) {
+      pendingEofDuringPivot = false;
+      writeToStream(Buffer.alloc(0), true);
     }
     await writeChain.catch(() => undefined);
 
@@ -870,6 +885,13 @@ function runStreamingPath(args: StreamingPathArgs): void {
       }
       return;
     }
+    if (mode === "pivoting") {
+      // open() is still in flight; defer the bytes onto the head
+      // buffer so switchToFile drains them in arrival order.
+      headChunks.push(buf);
+      headLen += buf.length;
+      return;
+    }
     if (mode === "file") {
       writeToStream(buf, false);
       return;
@@ -884,6 +906,11 @@ function runStreamingPath(args: StreamingPathArgs): void {
     stdinClosed = true;
     if (mode === "undecided") {
       void flushInline();
+      return;
+    }
+    if (mode === "pivoting") {
+      // switchToFile will replay this EOF after draining headChunks.
+      pendingEofDuringPivot = true;
       return;
     }
     if (mode === "file") {

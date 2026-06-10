@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
-import { daemonFetch, formatRelative } from "./_shared.js";
+import { daemonFetch, formatRelative, httpBase } from "./_shared.js";
 import { resolveLocalTarget } from "../../core/remote-target.js";
 import { formatHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
 import { stripHydraSessionPrefix } from "../../core/session.js";
@@ -537,10 +537,7 @@ function deriveFilenameFrom(response: Response, id: string): string {
   return `hydra-${id}-${stamp}.hydra`;
 }
 
-export function httpBase(host: string, port: number, tls: boolean): string {
-  const protocol = tls ? "https" : "http";
-  return `${protocol}://${host}:${port}`;
-}
+export { httpBase };
 
 // Print a hydra:// URL the recipient can paste into `--session`.
 // Host precedence: --host flag > config.daemon.publicHost > config.daemon.host

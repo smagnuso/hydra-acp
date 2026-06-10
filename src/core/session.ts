@@ -2117,6 +2117,10 @@ export class Session {
       `session ${this.sessionId} closing deleteRecord=${opts.deleteRecord ?? false}`,
     );
     this.cancelIdleTimer();
+    for (const claim of this.pendingClaims.values()) {
+      clearTimeout(claim.timer);
+    }
+    this.pendingClaims.clear();
     await this.agent.kill().catch(() => undefined);
     this.markClosed({ deleteRecord: opts.deleteRecord ?? false });
   }
