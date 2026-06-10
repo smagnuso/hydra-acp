@@ -54,8 +54,6 @@ import { readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
 import {
-  ALT_SCREEN_ENTER,
-  ALT_SCREEN_LEAVE,
   AUTOWRAP_ON,
   BRACKETED_PASTE_OFF,
   BRACKETED_PASTE_ON,
@@ -240,15 +238,21 @@ export async function pickSession(
   // \x1b[A/B/C/D. terminal-kit detects iTerm as osx-256color whose
   // keymap only recognizes the \x1b[ form, so without this reset the
   // arrows are dropped as "unknown" sequences and never reach onKey.
-  process.stdout.write(KITTY_KBD_POP);
-  process.stdout.write(BRACKETED_PASTE_OFF);
-  process.stdout.write(MODIFY_OTHER_KEYS_OFF);
-  process.stdout.write(FORMAT_OTHER_KEYS_OFF);
-  process.stdout.write(MOUSE_X10_OFF);
-  process.stdout.write(MOUSE_BUTTON_OFF);
-  process.stdout.write(MOUSE_SGR_OFF);
-  process.stdout.write(DECCKM_OFF);
-  process.stdout.write(DECPAM_OFF);
+  // Picker terminal-mode reset. Used at entry and again on SIGCONT
+  // resume — the shell we yielded to during ^Z can leave any of these
+  // modes in an unknown state, so we re-assert them before painting.
+  const resetPickerTerminalModes = (): void => {
+    process.stdout.write(KITTY_KBD_POP);
+    process.stdout.write(BRACKETED_PASTE_OFF);
+    process.stdout.write(MODIFY_OTHER_KEYS_OFF);
+    process.stdout.write(FORMAT_OTHER_KEYS_OFF);
+    process.stdout.write(MOUSE_X10_OFF);
+    process.stdout.write(MOUSE_BUTTON_OFF);
+    process.stdout.write(MOUSE_SGR_OFF);
+    process.stdout.write(DECCKM_OFF);
+    process.stdout.write(DECPAM_OFF);
+  };
+  resetPickerTerminalModes();
 
   // All persistent toggles live on `prefs.filters`. We read and write
   // straight through this object — no shadow locals — so adding a new
@@ -856,6 +860,17 @@ export async function pickSession(
         term.hideCursor(false);
       }
     });
+  };
+
+  // Force-repaint every row. renderFromScratch only repaints rows whose
+  // signatures changed, which is wrong any time the terminal contents
+  // are out of sync with our cache — after SIGCONT resume, after ^L, or
+  // any other "the screen lied to us" event. Wipe the cache and clear
+  // the display so the next paintRow call for each row is unconditional.
+  const forceFullRepaint = (): void => {
+    painter.clearCache();
+    term.moveTo(1, 1).eraseDisplayBelow();
+    renderFromScratch();
   };
 
   const renderHelp = (): void => {
@@ -2268,6 +2283,12 @@ export async function pickSession(
         void openCwdPrompt();
         return;
       }
+      // ^L — full repaint. Hoisted above mode checks so the user can
+      // recover from a scrambled screen in any submode.
+      if (name === "CTRL_L") {
+        forceFullRepaint();
+        return;
+      }
       if (mode === "rename") {
         if (name === "ENTER" || name === "KP_ENTER") {
           const trimmed = renameBuffer.trim();
@@ -2805,12 +2826,19 @@ export async function pickSession(
           return;
         }
         suspendInProgress = false;
-        // Re-enter alt screen, hide cursor (renderFromScratch repositions),
-        // re-grab input, repaint.
-        process.stdout.write(ALT_SCREEN_ENTER);
+        // Route alt-screen re-entry through terminal-kit so its internal
+        // fullscreen tracking stays consistent with what's on the wire.
+        term.fullscreen(true);
+        // The shell we yielded to during ^Z can have scrambled DECCKM,
+        // kitty kbd, mouse, modifyOtherKeys, bracketed paste, cursor
+        // visibility — re-assert every mode the picker depends on
+        // before installGrab() turns bracketed paste back on and the
+        // first repaint goes out.
+        resetPickerTerminalModes();
+        term.hideCursor();
         installGrab();
         if (!resolved) {
-          renderFromScratch();
+          forceFullRepaint();
         }
       };
       suspend = (): void => {
@@ -2821,8 +2849,10 @@ export async function pickSession(
         uninstallGrab();
         // Leave the alt-screen buffer so the host shell is visible while
         // we're stopped. Re-enable cursor; restore auto-wrap so any
-        // shell job-control message renders cleanly.
-        process.stdout.write(`${ALT_SCREEN_LEAVE}${AUTOWRAP_ON}${SHOW_CURSOR}\n`);
+        // shell job-control message renders cleanly. Use term.fullscreen
+        // so terminal-kit's own state tracking matches the wire.
+        term.fullscreen(false);
+        process.stdout.write(`${AUTOWRAP_ON}${SHOW_CURSOR}\n`);
         process.once("SIGCONT", onCont);
         process.kill(process.pid, "SIGTSTP");
       };
