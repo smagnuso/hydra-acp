@@ -61,8 +61,35 @@ function fakeFetch(
 // Build a test harness: controlled stream that the sidechain uses instead of
 // a real WebSocket. The stream tracks sent messages and lets the test emit
 // daemon responses at will.
+//
+// Auto-acks the two handshake requests runBtwSidechain makes before handing
+// the emitter to the caller (`initialize` and `session/attach`). Without
+// this, every test would hang on session/attach until the vitest timeout.
 function makeHarness() {
   const stream = makeControlledStream();
+  const origSend = stream.send.bind(stream);
+  stream.send = async (msg) => {
+    await origSend(msg);
+    if (
+      typeof msg === "object" &&
+      msg !== null &&
+      "method" in msg &&
+      "id" in msg &&
+      (msg as { id: unknown }).id !== undefined
+    ) {
+      const method = (msg as { method: unknown }).method;
+      if (method === "initialize" || method === "session/attach") {
+        const id = (msg as { id: string | number }).id;
+        queueMicrotask(() => {
+          stream.emitMessage({
+            jsonrpc: "2.0",
+            id,
+            result: method === "initialize" ? { protocolVersion: 1, agentCapabilities: {} } : {},
+          });
+        });
+      }
+    }
+  };
   return {
     stream,
     get sent(): unknown[] {
@@ -112,6 +139,43 @@ async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
 
+// Wait until a JSON-RPC request with the given method has been sent through
+// the stream. session/prompt is sent from a setImmediate inside the sidechain,
+// so callers need to yield until the request actually appears in `sent`.
+async function waitForRequest(
+  harness: { sent: unknown[] },
+  method: string,
+): Promise<JsonRpcRequest> {
+  for (let i = 0; i < 50; i++) {
+    const req = findRequest(harness.sent, method);
+    if (req) return req;
+    await new Promise((r) => setImmediate(r));
+  }
+  throw new Error(`request ${method} was never sent`);
+}
+
+// Respond to an in-flight request with a JSON-RPC result frame.
+function respondResult(
+  harness: { stream: ControlledStream },
+  req: JsonRpcRequest,
+  result: unknown,
+): void {
+  harness.stream.emitMessage({ jsonrpc: "2.0", id: req.id, result });
+}
+
+// Respond to an in-flight request with a JSON-RPC error frame.
+function respondError(
+  harness: { stream: ControlledStream },
+  req: JsonRpcRequest,
+  message: string,
+): void {
+  harness.stream.emitMessage({
+    jsonrpc: "2.0",
+    id: req.id,
+    error: { code: -32000, message },
+  });
+}
+
 describe("runBtwSidechain", () => {
   afterEach(() => {
     fetchCalls.length = 0;
@@ -158,14 +222,8 @@ describe("runBtwSidechain", () => {
       expect(forkCall).toBeDefined();
       expect(forkCall?.method).toBe("POST");
 
-      // Verify the prompt was sent with ancillary flag.
-      const promptReq = findRequest(harness.sent, "session/prompt");
-      expect(promptReq).toBeDefined();
-      expect(promptReq?.params).toMatchObject({
-        sessionId: "forked-1",
-        prompt: [{ type: "text", text: "hello world" }],
-        _meta: { "hydra-acp": { ancillary: true } },
-      });
+      // Attach the collector BEFORE emitting — settle() emits synchronously.
+      const eventsPromise = collectEvents(emitter);
 
       // Send an agent-message-chunk update.
       harness.stream.emitMessage({
@@ -179,14 +237,21 @@ describe("runBtwSidechain", () => {
         },
       });
 
-      // Send turn_complete to signal completion.
-      harness.stream.emitMessage({
-        jsonrpc: "2.0",
-        method: "hydra-acp/turn_complete",
-        params: { sessionId: "forked-1" },
+      // session/prompt is sent from a setImmediate inside the sidechain,
+      // so wait for it before asserting and before responding.
+      const promptReq = await waitForRequest(harness, "session/prompt");
+      expect(promptReq.params).toMatchObject({
+        sessionId: "forked-1",
+        prompt: [{ type: "text", text: "hello world" }],
+        _meta: { "hydra-acp": { ancillary: true } },
       });
 
-      const events = await collectEvents(emitter);
+      // The originator settles on the session/prompt response carrying
+      // stopReason — not on the turn_complete notification (which the
+      // daemon excludes the originator from).
+      respondResult(harness, promptReq, { stopReason: "end_turn" });
+
+      const events = await eventsPromise;
 
       // Should have received the update and then the completion.
       const updates = events.filter(
@@ -264,6 +329,8 @@ describe("runBtwSidechain", () => {
       await tick();
       const emitter = await result;
 
+      const eventsPromise = collectEvents(emitter);
+
       // Emit multiple updates.
       harness.stream.emitMessage({
         jsonrpc: "2.0",
@@ -275,13 +342,11 @@ describe("runBtwSidechain", () => {
         method: "session/update",
         params: { update: { kind: "tool-call", toolCallId: "t1", title: "read_file" } },
       });
-      harness.stream.emitMessage({
-        jsonrpc: "2.0",
-        method: "hydra-acp/turn_complete",
-        params: {},
-      });
 
-      const events = await collectEvents(emitter);
+      const promptReq = await waitForRequest(harness, "session/prompt");
+      respondResult(harness, promptReq, { stopReason: "end_turn" });
+
+      const events = await eventsPromise;
 
       // Filter for update events — should have at least 2.
       const updateEvents = events.filter(
@@ -368,14 +433,13 @@ describe("runBtwSidechain", () => {
       await tick();
       const emitter = await result;
 
-      // Emit a turn_complete first so the sidechain is settled.
-      harness.stream.emitMessage({
-        jsonrpc: "2.0",
-        method: "hydra-acp/turn_complete",
-        params: {},
-      });
+      const eventsPromise = collectEvents(emitter);
 
-      const events = await collectEvents(emitter);
+      // Respond to session/prompt to settle the sidechain as completed.
+      const promptReq = await waitForRequest(harness, "session/prompt");
+      respondResult(harness, promptReq, { stopReason: "end_turn" });
+
+      const events = await eventsPromise;
 
       // Cancel after completion — should not produce a cancelled event since
       // the sidechain already settled with completed.
@@ -414,6 +478,12 @@ describe("runBtwSidechain", () => {
         _streamFactory: () => Promise.resolve(harness.stream),
       });
 
+      // Attach the rejection expectation BEFORE any await — otherwise the
+      // sidechain's IIFE can reject between ticks while no handler is
+      // attached, and Node emits a PromiseRejectionHandledWarning that
+      // vitest surfaces as an unhandled error, failing the run.
+      const assertion = expect(result).rejects.toThrow(/fork failed/);
+
       await tick();
       const initReq = findRequest(harness.sent, "initialize");
       if (initReq) {
@@ -424,8 +494,7 @@ describe("runBtwSidechain", () => {
         });
       }
 
-      await tick();
-      await expect(result).rejects.toThrow(/fork failed/);
+      await assertion;
     });
 
     it("emits errored event on turn_error notification", async () => {
@@ -457,14 +526,14 @@ describe("runBtwSidechain", () => {
       await tick();
       const emitter = await result;
 
-      // Emit a turn_error.
-      harness.stream.emitMessage({
-        jsonrpc: "2.0",
-        method: "hydra-acp/turn_error",
-        params: { message: "agent crashed" },
-      });
+      const eventsPromise = collectEvents(emitter);
 
-      const events = await collectEvents(emitter);
+      // Reject the session/prompt request — the sidechain maps a prompt
+      // rejection to an errored terminal event carrying the error message.
+      const promptReq = await waitForRequest(harness, "session/prompt");
+      respondError(harness, promptReq, "agent crashed");
+
+      const events = await eventsPromise;
 
       const errors = events.filter(
         (e) => typeof e === "object" && e !== null && "kind" in e && (e as { kind: string }).kind === "errored",
@@ -503,10 +572,13 @@ describe("runBtwSidechain", () => {
       await tick();
       const emitter = await result;
 
+      // Attach the collector BEFORE closing — onClose settles synchronously.
+      const eventsPromise = collectEvents(emitter);
+
       // Close the stream (simulates connection drop).
       harness.stream.emitClose();
 
-      const events = await collectEvents(emitter);
+      const events = await eventsPromise;
 
       const completions = events.filter(
         (e) => typeof e === "object" && e !== null && "kind" in e && (e as { kind: string }).kind === "completed",
@@ -543,11 +615,13 @@ describe("runBtwSidechain", () => {
       await tick();
       const emitter = await result;
 
+      const eventsPromise = collectEvents(emitter);
+
       // Close the stream first (simulates connection drop).
       harness.stream.emitClose();
 
       // Collect the completion event.
-      await collectEvents(emitter);
+      await eventsPromise;
 
       // Cancel after close — should not throw.
       expect(() => emitter.cancel()).not.toThrow();
