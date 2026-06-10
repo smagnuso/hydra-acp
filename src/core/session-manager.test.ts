@@ -3609,7 +3609,13 @@ describe("SessionManager.forkSession", () => {
     expect(history.length).toBe(2);
   });
 
-  it("copies the source's interactive value onto the fork", async () => {
+  it("forces interactive=false on the fork regardless of source", async () => {
+    // A fork is a pristine snapshot — it has not had a real turn on its
+    // own yet. interactive=false (not undefined) bypasses
+    // effectiveInteractive's hasContent → true inference, which would
+    // otherwise put every fork in the default picker because forks
+    // inherit history from the source. The first non-ancillary prompt
+    // promotes the fork to interactive=true.
     const manager = noSpawnManager();
     const source = await manager.importBundle(
       bundleWith({
@@ -3620,7 +3626,7 @@ describe("SessionManager.forkSession", () => {
     );
     const fork = await manager.forkSession(source.sessionId);
     const forkMeta = await readMeta(fork.sessionId);
-    expect(forkMeta.interactive).toBe(true);
+    expect(forkMeta.interactive).toBe(false);
   });
 
   it("forks at a specific messageId, truncating later turns", async () => {

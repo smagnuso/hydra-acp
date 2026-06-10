@@ -1828,10 +1828,27 @@ export class SessionManager {
     // would deadlock importBundle's dedup against the source itself).
     // For cross-agent forks, omit agent-specific state so the new agent
     // boots clean — title and history survive.
+    //
+    // `interactive` is forced to false on every fork: a fork is a
+    // pristine snapshot that has not had a real turn on its own yet,
+    // regardless of the source's interactive state. The first
+    // non-ancillary prompt against the fork promotes it to true (see
+    // session.ts:1229), matching session/new semantics. Forks that are
+    // viewed but never prompted stay hidden from default picker
+    // listings (visible via --all / --include-non-interactive) —
+    // they're just unused snapshots at that point. /btw forks stay
+    // false because their prompts are tagged ancillary.
+    //
+    // The alternative — leaving interactive=undefined — falls through
+    // to effectiveInteractive's hasContent inference, which returns
+    // true because the fork is seeded with the source's history. That
+    // would put every /btw fork in the picker. Setting false here
+    // bypasses the inference cleanly.
     const recordForBundle: SessionRecord & { lineageId: string } = {
       ...sourceRecord,
       lineageId: generateLineageId(),
       agentId: targetAgentId,
+      interactive: false,
       ...(crossAgent
         ? {
             currentModel: undefined,

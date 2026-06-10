@@ -65,6 +65,8 @@ import {
   pickMostRecent,
   type DiscoveredSession,
 } from "./discovery.js";
+import { runBtwSidechain, type SidechainEventEmitter } from "./btw/sidechain.js";
+import { BtwOverlayBuffer } from "./btw/overlay-buffer.js";
 import {
   createPickerPrefs,
   pickSession,
@@ -582,10 +584,18 @@ async function runSession(
     if (workerTaskId === undefined) {
       return;
     }
-    screen.appendLines([
-      { prefix: "  ", body: `── T${workerTaskId} ──`, bodyStyle: "dim" },
-    ]);
+    screen.appendLines([{ prefix: "  ", body: `── T${workerTaskId} ──`, bodyStyle: "dim" }]);
   };
+
+  // Holds the currently-active sidechain emitter so /btw can be cancelled
+  // on session teardown or switch. Also tracks the forked sessionId so
+  // dismiss can killSession the ancillary daemon-side fork. The
+  // generation counter handles rapid double-/btw: each invocation captures
+  // its own gen and the .then() handler discards itself if the gen has
+  // moved on, preventing an in-flight start from clobbering its successor.
+  let currentSidechain: SidechainEventEmitter | null = null;
+  let btwSessionId: string | null = null;
+  let btwStartGen = 0;
 
   // Count of prompts currently in flight on the daemon — across ALL
   // clients, not just ours. Incremented when we observe a peer's
@@ -1586,6 +1596,9 @@ async function runSession(
         if (tryHandleCompletionKey(ev)) {
           continue;
         }
+        if (tryHandleBtwCloseKey(ev)) {
+          continue;
+        }
         // Drag-and-drop file paths are intercepted before the
         // dispatcher sees them — they're not text edits, they're an
         // async file-read that ends in addAttachment().
@@ -1654,6 +1667,7 @@ async function runSession(
     { name: "/agent", description: "Switch agent via config option: /agent <agent-id>" },
     { name: "/demo-plan", description: "Inject synthetic plan events (UI test)" },
     { name: "/demo-tool", description: "Inject a synthetic tool-call sequence (UI test)" },
+    { name: "/btw", description: "Run an ancillary forked session: /btw <prompt>" },
   ];
   // Seeded from the attach/new response _meta so the slash-completion
   // palette is populated before any history replay or live update.
@@ -1738,6 +1752,14 @@ async function runSession(
     // Slash-command completion takes precedence when the first line is a
     // /command.
     const matches = currentCompletions();
+    // Tab toggles pane focus when the overlay is open AND there's no
+    // active slash-completion candidate to consume the Tab. Without this
+    // guard the overlay would steal Tab from /command completion the
+    // moment a /btw is in progress.
+    if (screen.isOverlayOpen() && matches.length === 0) {
+      screen.toggleFocusedPane();
+      return true;
+    }
     if (matches.length > 0) {
       fileCompletions = [];
       const firstLine = dispatcher.state().buffer[0] ?? "";
@@ -1783,6 +1805,32 @@ async function runSession(
       result.candidates.length > 1
         ? result.candidates.map((name) => ({ name }))
         : [];
+    return true;
+  };
+
+
+
+  // ESC / ^C always dismisses the btw overlay when it's open, regardless
+  // of pane focus or dispatcher state. Runs before dispatcher.feed so we
+  // don't rely on the dispatcher emitting a cancel effect — it only does
+  // so in certain states (in-flight turn, prompt buffer non-empty, etc.),
+  // which made ESC feel unresponsive to the overlay in other states.
+  const tryHandleBtwCloseKey = (ev: KeyEvent): boolean => {
+    if (!screen.isOverlayOpen()) {
+      return false;
+    }
+    if (ev.type !== "key") {
+      return false;
+    }
+    if (ev.name !== "escape" && ev.name !== "ctrl-c") {
+      return false;
+    }
+    if (currentSidechain) {
+      currentSidechain.cancel();
+      currentSidechain = null;
+    }
+    btwSessionId = null;
+    screen.closeBtwOverlay();
     return true;
   };
 
@@ -2262,6 +2310,12 @@ async function runSession(
     // Set first so any inbound notification/request that lands between
     // here and stream.close() bails before touching the screen.
     teardownStarted = true;
+    // Cancel any in-flight btw sidechain so its events don't land on a
+    // stale screen after we've torn down this session.
+    if (currentSidechain) {
+      currentSidechain.cancel();
+      currentSidechain = null;
+    }
     process.off("SIGINT", sigintHandler);
     if (process.platform !== "win32") {
       process.off("SIGCONT", onSigCont);
@@ -2297,6 +2351,11 @@ async function runSession(
   const switchSession = async (): Promise<void> => {
     if (!finishSession) {
       return;
+    }
+    // Cancel any in-flight btw sidechain before tearing down this session.
+    if (currentSidechain) {
+      currentSidechain.cancel();
+      currentSidechain = null;
     }
     // If the user has half-typed text in the prompt, snapshot it into
     // history before opening the picker. Picking a different session
@@ -2615,6 +2674,20 @@ async function runSession(
         return;
       }
       case "cancel": {
+        // ESC / ^C always dismisses the btw overlay first if it's open,
+        // regardless of which pane has focus. The overlay is meant to be
+        // quick and disposable — making ESC silently route to main turn
+        // cancel while the overlay sits there made it feel sticky. Two
+        // ESCs to "cancel main while btw is showing" is fine.
+        if (screen.isOverlayOpen()) {
+          if (currentSidechain) {
+            currentSidechain.cancel();
+            currentSidechain = null;
+          }
+          btwSessionId = null;
+          screen.closeBtwOverlay();
+          return;
+        }
         // Escape (prefill=true) wants the cancelled prompt put back into
         // the buffer so the user can edit and resubmit — but only when
         // nothing else is queued behind it and the buffer is empty (we
@@ -3289,6 +3362,108 @@ async function runSession(
         const wire = arg.length > 0 ? `/hydra title ${arg}` : "/hydra title";
         recordHistoryEntry(trimmed, trimmed);
         void runPrompt(wire, [], trimmed);
+        return true;
+      }
+      case "/btw": {
+        // Fork a new ancillary session and stream its updates into an
+        // overlay pane (not the main transcript).  Does NOT enqueue onto
+        // the main prompt queue — it targets a different sessionId so it
+        // dispatches immediately even when the main turn is in flight.
+        const prompt = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        if (!prompt) {
+          screen.appendLines([
+            { prefix: "  ", body: "/btw requires a prompt", bodyStyle: "info" },
+          ]);
+          return true;
+        }
+        // Must have an active session to fork from.
+        if (resolvedSessionId === "__new__") {
+          screen.appendLines([
+            { prefix: "  ", body: "no active session to fork", bodyStyle: "info" },
+          ]);
+          return true;
+       }
+        // Generation-stamp this invocation. A rapid second /btw before
+        // the first runBtwSidechain promise resolves bumps the gen; the
+        // first promise's .then() then sees a stale gen and aborts the
+        // emitter it would otherwise have installed, preventing a leaked
+        // fork.
+        btwStartGen += 1;
+        const myGen = btwStartGen;
+        if (currentSidechain) {
+          currentSidechain.cancel();
+          currentSidechain = null;
+        }
+        btwSessionId = null;
+        screen.openBtwOverlay();
+        screen.setBtwOverlayStatus({ label: "busy", style: "busy" });
+        const buffer = new BtwOverlayBuffer();
+        buffer.on("changed", () => {
+          screen.setBtwOverlayContent(buffer.getLines());
+        });
+        // Echo the user's prompt at the top of the overlay so it reads
+        // like a mini-conversation, rendered with the same "▎ " gutter
+        // the main transcript uses for user messages. The daemon excludes
+        // the originator from prompt_received broadcasts so the only way
+        // this lands in the overlay is by us seeding it ourselves.
+        buffer.append({
+          sessionUpdate: "prompt_received",
+          prompt: [{ type: "text", text: prompt }],
+        });
+        const appendOverlayMessage = (text: string): void => {
+          buffer.append({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text },
+          });
+        };
+        void runBtwSidechain(target, resolvedSessionId, prompt).then(
+          (emitter) => {
+            // Superseded by a newer /btw — discard this emitter so it
+            // doesn't clobber the active one.
+            if (myGen !== btwStartGen) {
+              emitter.cancel();
+              return;
+            }
+            currentSidechain = emitter;
+            btwSessionId = emitter.sessionId;
+            emitter.on("event", (ev) => {
+              if (myGen !== btwStartGen) {
+                // Stale events from a superseded sidechain — ignore.
+                return;
+              }
+              if (ev.kind === "update") {
+                buffer.append(ev.update);
+              } else if (ev.kind === "completed") {
+                screen.setBtwOverlayStatus({ label: "done", style: "done" });
+                currentSidechain = null;
+              } else if (ev.kind === "cancelled") {
+                screen.setBtwOverlayStatus({ label: "cancelled", style: "cancelled" });
+                currentSidechain = null;
+              } else if (ev.kind === "errored") {
+                screen.setBtwOverlayStatus({ label: "errored", style: "errored" });
+                appendOverlayMessage(`btw errored: ${ev.error.message}`);
+                currentSidechain = null;
+              }
+            });
+          },
+        ).catch((err) => {
+          if (myGen !== btwStartGen) {
+            return;
+          }
+          // Startup failure (e.g. WS connect, fork HTTP error) — surface
+          // it in the overlay and main transcript so the user isn't left
+          // wondering why /btw produced no visible output.
+          const msg = err instanceof Error ? err.message : String(err);
+          screen.setBtwOverlayStatus({ label: "errored", style: "errored" });
+          appendOverlayMessage(`btw startup failed: ${msg}`);
+          screen.appendLines([
+            {
+              prefix: "  ",
+              body: `btw startup failed: ${msg}`,
+              bodyStyle: "tool-status-fail",
+            },
+          ]);
+        });
         return true;
       }
       default:

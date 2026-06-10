@@ -399,6 +399,25 @@ export class Screen {
   private bannerNotification: string | null = null;
   private bannerNotificationTimer: NodeJS.Timeout | null = null;
   private bannerSearchIndicator: string | null = null;
+  // Bottom-of-screen "btw" overlay pane. Closed by default; when open,
+  // reserves `btwOverlayHeight` rows from the bottom (1 separator + 1
+  // header + height-2 content). The main scrollback area shrinks to make
+  // room. Rendered purely with termkit helpers — no ACP knowledge.
+  private btwOverlayOpen = false;
+  // Maximum height the overlay can grow to. Actual height auto-sizes to
+  // 1 (header) + content rows. When content is empty AND overlay is open,
+  // the overlay reserves zero rows and the prompt-above separator carries
+  // the btw label instead (see drawPromptSeparator).
+  private btwOverlayMaxHeight = 12;
+  private btwOverlayLines: FormattedLine[] = [];
+  private btwOverlayLabel = "";
+  private btwOverlayStatus: "busy" | "done" | "cancelled" | "errored" = "busy";
+  // Which pane is the ESC target. Drives the visual focus indicator on the
+  // overlay header and, when "btw", dims the main input prompt to signal
+  // that ESC will act on the overlay (T7). Typing always goes to the main
+  // buffer regardless of focus.
+  private focusedPane: "main" | "btw" = "main";
+
   private banner: BannerState = {
     status: "ready",
     currentMode: undefined,
@@ -2133,6 +2152,83 @@ export class Screen {
     return this.helpPrompt !== null;
   }
 
+  // Open a bottom-of-screen overlay pane. `opts.height` is the MAX rows
+  // the overlay may grow to (default 12); actual height auto-sizes to
+  // (1 header + content rows). When content is empty, the overlay
+  // reserves zero rows and the prompt-above separator carries the btw
+  // label instead, so a still-waiting /btw doesn't leave a yawning empty
+  // pane on screen.
+  openBtwOverlay(opts?: { height?: number }): void {
+    const maxHeight = opts?.height ?? 12;
+    this.btwOverlayOpen = true;
+    this.btwOverlayMaxHeight = maxHeight;
+    this.focusedPane = "btw";
+    this.btwOverlayLines = [];
+    this.scheduleRepaint();
+  }
+
+  // Replace the overlay's content lines. Only the LAST (rows-1) entries
+  // are visible at any given time (auto-height caps content to fit).
+  // FormattedLine retains bodyStyle/fillRow so the overlay paints user
+  // turns / tool labels / agent text with the same styling as the main
+  // transcript.
+  setBtwOverlayContent(lines: FormattedLine[]): void {
+    if (this.btwOverlayLines.length === lines.length) {
+      let identical = true;
+      for (let i = 0; i < lines.length; i++) {
+        if (this.btwOverlayLines[i] !== lines[i]) {
+          identical = false;
+          break;
+        }
+      }
+      if (identical) {
+        return;
+      }
+    }
+    this.btwOverlayLines = [...lines];
+    this.scheduleRepaint();
+  }
+
+  // Update the overlay's status label and style. The label is rendered in
+  // the header ("── btw [<label>] ──") and the `style` drives the colour:
+  // running → yellow, done → green, cancelled → dim, errored → red.
+  setBtwOverlayStatus(s: { label: string; style: "busy" | "done" | "cancelled" | "errored" }): void {
+    const sameLabel = this.btwOverlayLabel === s.label;
+    const sameStyle = this.btwOverlayStatus === s.style;
+    if (sameLabel && sameStyle) {
+      return;
+    }
+    this.btwOverlayLabel = s.label;
+    this.btwOverlayStatus = s.style;
+    this.scheduleRepaint();
+  }
+
+  // Close the overlay pane, returning layout to its default state.
+  closeBtwOverlay(): void {
+    if (!this.btwOverlayOpen) {
+      return;
+    }
+    this.btwOverlayOpen = false;
+    this.btwOverlayLines = [];
+    this.focusedPane = "main";
+    this.scheduleRepaint();
+  }
+
+  // Toggle which pane is focused (main ↔ btw). Only has a visual effect
+  // when the overlay is open — the focus indicator on the header flips.
+  toggleFocusedPane(): void {
+    this.focusedPane = this.focusedPane === "main" ? "btw" : "main";
+    this.scheduleRepaint();
+  }
+
+  getFocusedPane(): "main" | "btw" {
+    return this.focusedPane;
+  }
+
+  isOverlayOpen(): boolean {
+    return this.btwOverlayOpen;
+  }
+
   // Slash-command completion list shown directly above the separator. App
   // calls this after each keystroke; pass [] to dismiss. Suppressed when
   // the permission modal is active (the modal owns the prompt area).
@@ -2933,7 +3029,8 @@ export class Screen {
       SEPARATOR_ROWS - // separator above prompt
       this.chipRows() -
       this.queuedRows() -
-      this.completionRows();
+      this.completionRows() -
+      this.btwOverlayRows();
     return Math.max(0, bottom - top + 1);
   }
 
@@ -3055,6 +3152,7 @@ export class Screen {
       // alternate-screen mode means the buffer starts clean; resize
       // triggers a repaint that covers all rows in the new size.)
       this.drawScrollback();
+      this.drawBtwOverlay();
       this.drawCompletionZone();
       this.drawQueuedZone();
       this.drawAttachmentChipZone();
@@ -3156,6 +3254,62 @@ export class Screen {
     this.paintRow(row, `sep|${w}`, () => {
       this.term.dim("─".repeat(w));
     });
+  }
+
+  // Compose the three header segments (left dashes, label, right dashes)
+  // so paintBtwHeader can paint the dashes dim and the label in the
+  // status colour. A single signature string is derived from all parts
+  // for repaint coalescing.
+  private buildBtwHeaderSegments(): {
+    left: string;
+    label: string;
+    right: string;
+    signature: string;
+  } {
+    const w = this.term.width;
+    const isFocused = this.focusedPane === "btw";
+    const focusMark = isFocused ? "▶ " : "  ";
+    const label = `${focusMark}btw [${this.btwOverlayLabel}] `;
+    const left = "── ";
+    const right = "─".repeat(
+      Math.max(0, w - stringWidth(label) - left.length),
+    );
+    const signature =
+      `${w}|${this.btwOverlayLabel}|${this.btwOverlayStatus}|${this.focusedPane}`;
+    return { left, label, right, signature };
+  }
+
+  private paintBtwHeader(segments: {
+    left: string;
+    label: string;
+    right: string;
+  }): void {
+    // Dashes always dim — they're the separator. Only the label segment
+    // carries the status colour so an at-a-glance scan of the screen
+    // shows colour ONLY where there's actual state (busy/done/etc).
+    this.term.dim(segments.left);
+    const isFocused = this.focusedPane === "btw";
+    if (!isFocused) {
+      this.term.dim(segments.label);
+    } else {
+      switch (this.btwOverlayStatus) {
+        case "busy":
+          this.term.brightYellow(segments.label);
+          break;
+        case "done":
+          this.term.green(segments.label);
+          break;
+        case "cancelled":
+          this.term.dim(segments.label);
+          break;
+        case "errored":
+          this.term.brightRed(segments.label);
+          break;
+        default:
+          this.term.brightYellow(segments.label);
+      }
+    }
+    this.term.dim(segments.right);
   }
 
   private drawScrollback(): void {
@@ -3510,6 +3664,11 @@ export class Screen {
       SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
+    // The prompt area is always painted bright — typing always routes to
+    // the main input regardless of pane focus, so dimming the prompt would
+    // misleadingly suggest typing is disabled. The focus indicator lives
+    // on the overlay header (▶ prefix) instead.
+    const overlayFocused = false;
     for (let i = 0; i < layout.rendered; i++) {
       const vr = visualRows[layout.windowStart + i];
       const row = top + i;
@@ -3533,7 +3692,11 @@ export class Screen {
         // Gutter: "> " on the very first visual row, "· " on the start of a
         // logical newline, blank on a soft-wrap continuation.
         if (gutter === "first") {
-          this.term.brightWhite("> ");
+          if (overlayFocused) {
+            this.term.dim("> ");
+          } else {
+            this.term.brightWhite("> ");
+          }
         } else if (gutter === "newline") {
           this.term.dim("· ");
         } else {
@@ -3541,7 +3704,11 @@ export class Screen {
         }
         // noFormat so literal `^X` typed by the user is rendered verbatim
         // and not interpreted as terminal-kit's color/style markup.
-        this.term.noFormat(slice);
+        if (overlayFocused) {
+          this.term.dim(slice);
+        } else {
+          this.term.noFormat(slice);
+        }
       });
     }
   }
@@ -3975,6 +4142,70 @@ export class Screen {
     writeRow(`opts|hint|${w}`, () => {
       this.term.dim(" ↑/↓ choose · Enter this session · s save default · Esc close");
     });
+  }
+
+  private btwOverlayRows(): number {
+    if (!this.btwOverlayOpen) return 0;
+    // Defensive: if any caller ever opens the overlay without seeding
+    // content, reserve zero rows rather than render an isolated header
+    // floating above the prompt separator. The /btw handler seeds the
+    // user prompt synchronously with open, so in practice this branch is
+    // only hit on the very first repaint between open and seed.
+    if (this.btwOverlayLines.length === 0) return 0;
+    // Header + content, capped by max. Only the LAST (rows-1) entries
+    // are visible at render time (drawBtwOverlay takes the tail).
+    return Math.min(
+      this.btwOverlayMaxHeight,
+      1 + this.btwOverlayLines.length,
+    );
+  }
+
+  private drawBtwOverlay(): void {
+    if (!this.btwOverlayOpen) {
+      return;
+    }
+    const rows = this.btwOverlayRows();
+    if (rows === 0) {
+      // Empty + open → the prompt-above separator carries the label
+      // instead; nothing to draw here. drawPromptSeparator handles it.
+      return;
+    }
+    const w = this.term.width;
+    const h = this.term.height;
+    const separatorAbovePromptRow =
+      h - this.promptRows() - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+    const zoneRows = this.chipRows() + this.queuedRows() + this.completionRows();
+    const overlayBottom = separatorAbovePromptRow - 1 - zoneRows;
+    const overlayTop = overlayBottom - rows + 1;
+    // Row layout (top → bottom):
+    //   overlayTop                  header (acts as top separator)
+    //   overlayTop+1 ... overlayBottom   content rows (rows-1 of them)
+    // No bottom separator — the existing separator above prompt does it.
+    const contentRows = rows - 1;
+    const headerRow = overlayTop;
+    const segments = this.buildBtwHeaderSegments();
+    this.paintRow(headerRow, `btw|h|${segments.signature}`, () => {
+      this.paintBtwHeader(segments);
+    });
+    // Paint the content rows below the header. Show the LAST `contentRows`
+    // entries from btwOverlayLines top-down. Each line carries its own
+    // FormattedLine fields (prefix/body/bodyStyle/fillRow) so user-text
+    // bands, tool labels, etc. render with the same styling as the main
+    // transcript — that's the whole reason the buffer keeps FormattedLine
+    // rather than flattening to strings.
+    for (let i = 0; i < contentRows; i++) {
+      const row = headerRow + 1 + i;
+      const lineIdx = this.btwOverlayLines.length - contentRows + i;
+      const line = lineIdx >= 0 ? this.btwOverlayLines[lineIdx] : undefined;
+      const sig = formattedLineSig(`btw|c${i}`, w, line);
+      this.paintRow(row, sig, () => {
+        if (line) {
+          this.writeFormattedLine(line, w);
+        } else {
+          this.term.noFormat(" ".repeat(w));
+        }
+      });
+    }
   }
 
   // Walk this.lines from the tail, accumulating wrapped rows via the

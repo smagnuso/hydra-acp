@@ -1356,6 +1356,248 @@ describe("Selective Mouse Reporting probe + wheel", () => {
 // Click-to-toggle: a left-click resolves to the keyed block painted under
 // it (keyAtRow) and is reported via onBlockClick — but only under full
 // mouse capture.
+describe("Screen btw overlay", () => {
+  function makeOverlayScreen(opts: {
+    width?: number;
+    height?: number;
+  } = {}): Screen {
+    const width = opts.width ?? 40;
+    const height = opts.height ?? 24;
+    const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
+      apply: () => term,
+      get(_target, prop) {
+        if (prop === "width") return width;
+        if (prop === "height") return height;
+        if (prop === "on" || prop === "off") return () => undefined;
+        return new Proxy(() => term, handler);
+      },
+    };
+    const term = new Proxy(
+      function noop() {} as (...args: unknown[]) => unknown,
+      handler,
+    ) as unknown as Terminal;
+    const dispatcher = {
+      state: () => ({
+        buffer: [""],
+        row: 0,
+        col: 0,
+        planMode: false,
+        historyIndex: -1,
+        queueIndex: -1,
+        attachments: [],
+        historySearchQuery: null,
+      }),
+    } as unknown as InputDispatcher;
+    return new Screen({
+      term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+    });
+  }
+
+  function getOverlayState(screen: Screen): {
+    btwOverlayOpen: boolean;
+    btwOverlayMaxHeight: number;
+    btwOverlayLines: string[];
+    btwOverlayLabel: string;
+    btwOverlayStatus: string;
+  } {
+    const s = screen as unknown as {
+      btwOverlayOpen: boolean;
+      btwOverlayMaxHeight: number;
+      btwOverlayLines: string[];
+      btwOverlayLabel: string;
+      btwOverlayStatus: "busy" | "done" | "cancelled" | "errored";
+    };
+    return {
+      btwOverlayOpen: s.btwOverlayOpen,
+      btwOverlayMaxHeight: s.btwOverlayMaxHeight,
+      btwOverlayLines: [...s.btwOverlayLines],
+      btwOverlayLabel: s.btwOverlayLabel,
+      btwOverlayStatus: s.btwOverlayStatus,
+    };
+  }
+
+  function overlayRows(screen: Screen): number {
+    return (
+      screen as unknown as { btwOverlayRows: () => number }
+    ).btwOverlayRows();
+  }
+
+  function visibleRows(screen: Screen): number {
+    return (
+      screen as unknown as { scrollbackVisibleRows: () => number }
+    ).scrollbackVisibleRows();
+  }
+
+  it("is closed by default; open + empty reserves zero rows", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    const state = getOverlayState(screen);
+    expect(state.btwOverlayOpen).toBe(false);
+    const beforeRows = visibleRows(screen);
+    screen.openBtwOverlay();
+    expect(getOverlayState(screen).btwOverlayOpen).toBe(true);
+    // Open with no content yet: overlay reserves zero rows (the prompt
+    // separator carries the label). Scrollback height is unchanged.
+    expect(overlayRows(screen)).toBe(0);
+    expect(visibleRows(screen)).toBe(beforeRows);
+  });
+
+  it("openBtwOverlay sets default max-height and initial state", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay();
+    const state = getOverlayState(screen);
+    expect(state.btwOverlayOpen).toBe(true);
+    expect(state.btwOverlayMaxHeight).toBe(12);
+    expect(state.btwOverlayLines).toEqual([]);
+    expect(state.btwOverlayLabel).toBe("");
+    expect(state.btwOverlayStatus).toBe("busy");
+  });
+
+  it("openBtwOverlay with custom max-height", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 8 });
+    expect(getOverlayState(screen).btwOverlayMaxHeight).toBe(8);
+  });
+
+  // Helper: build a minimal FormattedLine for tests that only care about
+  // line count / structure, not styling.
+  const plain = (body: string): FormattedLine => ({ body });
+
+  it("auto-sizes to content: rows == 1 + content.length, capped at max", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 5 });
+    expect(overlayRows(screen)).toBe(0);
+    screen.setBtwOverlayContent([plain("a")]);
+    expect(overlayRows(screen)).toBe(2);
+    screen.setBtwOverlayContent([plain("a"), plain("b"), plain("c")]);
+    expect(overlayRows(screen)).toBe(4);
+    screen.setBtwOverlayContent(["a", "b", "c", "d", "e", "f"].map(plain));
+    expect(overlayRows(screen)).toBe(5);
+  });
+
+  it("setBtwOverlayContent stores lines and shows last N when open", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 5 });
+    const lines = ["line-1", "line-2", "line-3", "line-4", "line-5"].map(plain);
+    screen.setBtwOverlayContent(lines);
+    expect(getOverlayState(screen).btwOverlayLines).toEqual(lines);
+  });
+
+  it("setBtwOverlayContent truncates to last (height-2) lines for display", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 4 });
+    screen.setBtwOverlayContent(
+      ["first entry", "second entry", "third entry", "fourth entry"].map(plain),
+    );
+    expect(getOverlayState(screen).btwOverlayLines).toHaveLength(4);
+  });
+
+  it("setBtwOverlayContent is idempotent for identical references", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    const lines = [plain("a"), plain("b")];
+    screen.openBtwOverlay();
+    screen.setBtwOverlayContent(lines);
+    screen.setBtwOverlayContent(lines);
+    expect(getOverlayState(screen).btwOverlayLines).toEqual(lines);
+  });
+
+  it("setBtwOverlayStatus updates label and style", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay();
+    screen.setBtwOverlayStatus({ label: "agent-1", style: "busy" });
+    expect(getOverlayState(screen).btwOverlayLabel).toBe("agent-1");
+    expect(getOverlayState(screen).btwOverlayStatus).toBe("busy");
+  });
+
+  it("status colour maps running → brightYellow, done → green, cancelled → dim, errored → brightRed", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay();
+    // Verify the status value is stored correctly for each type.
+    screen.setBtwOverlayStatus({ label: "x", style: "busy" });
+    expect(getOverlayState(screen).btwOverlayStatus).toBe("busy");
+    screen.setBtwOverlayStatus({ label: "y", style: "done" });
+    expect(getOverlayState(screen).btwOverlayStatus).toBe("done");
+    screen.setBtwOverlayStatus({ label: "z", style: "cancelled" });
+    expect(getOverlayState(screen).btwOverlayStatus).toBe("cancelled");
+    screen.setBtwOverlayStatus({ label: "w", style: "errored" });
+    expect(getOverlayState(screen).btwOverlayStatus).toBe("errored");
+  });
+
+  it("status update is idempotent for identical label+style", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay();
+    screen.setBtwOverlayStatus({ label: "a", style: "busy" });
+    // Same values — no-op.
+    screen.setBtwOverlayStatus({ label: "a", style: "busy" });
+    expect(getOverlayState(screen).btwOverlayLabel).toBe("a");
+    expect(getOverlayState(screen).btwOverlayStatus).toBe("busy");
+  });
+
+  it("closeBtwOverlay resets state to closed", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 8 });
+    screen.setBtwOverlayContent([plain("x")]);
+    screen.setBtwOverlayStatus({ label: "test", style: "done" });
+    screen.closeBtwOverlay();
+    const state = getOverlayState(screen);
+    expect(state.btwOverlayOpen).toBe(false);
+    expect(state.btwOverlayLines).toEqual([]);
+  });
+
+  it("closeBtwOverlay is a no-op when already closed", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    // Should not throw.
+    screen.closeBtwOverlay();
+    expect(getOverlayState(screen).btwOverlayOpen).toBe(false);
+  });
+
+  it("close then render matches before open (closed state is unchanged)", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    const beforeRows = visibleRows(screen);
+    screen.openBtwOverlay();
+    screen.setBtwOverlayContent([plain("a"), plain("b")]);
+    expect(visibleRows(screen)).toBeLessThan(beforeRows);
+    screen.closeBtwOverlay();
+    expect(visibleRows(screen)).toBe(beforeRows);
+  });
+
+  it("overlay with fewer lines than content rows shows all available", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 6 });
+    screen.setBtwOverlayContent([plain("only-one")]);
+    expect(getOverlayState(screen).btwOverlayLines).toEqual([plain("only-one")]);
+  });
+
+  it("overlay with zero lines shows blank content rows", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay();
+    // No setBtwOverlayContent call — lines are empty.
+    expect(getOverlayState(screen).btwOverlayLines).toEqual([]);
+  });
+
+  it("re-opening with same max-height preserves state", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    screen.openBtwOverlay({ height: 10 });
+    expect(getOverlayState(screen).btwOverlayOpen).toBe(true);
+    screen.openBtwOverlay({ height: 10 });
+    expect(getOverlayState(screen).btwOverlayMaxHeight).toBe(10);
+  });
+
+  it("overlay shrinks scrollback by its dynamic row count", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    const beforeRows = visibleRows(screen);
+    screen.openBtwOverlay({ height: 7 });
+    expect(visibleRows(screen)).toBe(beforeRows);
+    screen.setBtwOverlayContent(["a", "b", "c"].map(plain));
+    expect(beforeRows - visibleRows(screen)).toBe(4);
+    screen.setBtwOverlayContent(["a", "b", "c", "d", "e", "f", "g"].map(plain));
+    expect(beforeRows - visibleRows(screen)).toBe(7);
+  });
+});
+
 describe("Screen block-click routing", () => {
   // A taller/wider mock than makeScreen so scrollbackVisibleRows() is
   // positive and the row→line mapping has real geometry to walk.
