@@ -1817,15 +1817,18 @@ export class SessionManager {
       forkedAt = opts.forkAt;
     } else {
       const found = findLastTurnComplete(sourceHistory);
-      if (!found) {
-        const err = new Error(
-          `source session ${sourceSessionId} has no completed turns to fork from`,
-        ) as Error & { code: number };
-        err.code = JsonRpcErrorCodes.InvalidParams;
-        throw err;
+      if (found) {
+        cutoffIndex = found.index;
+        forkedAt = found.messageId;
+      } else {
+        // Source has no completed turns yet (e.g. a freshly-spawned
+        // session that hasn't received a real prompt). Fork at the
+        // beginning — empty history, no messageId to point at. This
+        // makes /btw and other fork-based features work from any
+        // session state, not just established conversations.
+        cutoffIndex = -1;
+        forkedAt = "";
       }
-      cutoffIndex = found.index;
-      forkedAt = found.messageId;
     }
 
     const slicedHistory = sourceHistory.slice(0, cutoffIndex + 1);

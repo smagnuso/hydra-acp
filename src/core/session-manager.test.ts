@@ -3687,7 +3687,11 @@ describe("SessionManager.forkSession", () => {
     ).rejects.toMatchObject({ code: JsonRpcErrorCodes.SessionNotFound });
   });
 
-  it("errors when source has no completed turns", async () => {
+  it("forks at the beginning when source has no completed turns", async () => {
+    // Sources with no completed turns (e.g. a freshly-spawned session
+    // that hasn't received a prompt yet) used to be unforkable. Now the
+    // fork starts with empty history and forkedAt="" as the sentinel —
+    // /btw and other fork-based features should work from any state.
     const manager = noSpawnManager();
     const source = await manager.importBundle(
       bundleWith({
@@ -3695,9 +3699,11 @@ describe("SessionManager.forkSession", () => {
         history: [userMessage("hello, only user input")],
       }),
     );
-    await expect(
-      manager.forkSession(source.sessionId),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+    const result = await manager.forkSession(source.sessionId);
+    expect(result.forkedFromSessionId).toBe(source.sessionId);
+    expect(result.forkedAt).toBe("");
+    const history = await readHistory(result.sessionId);
+    expect(history).toEqual([]);
   });
 
   it("errors on unknown forkAt", async () => {
