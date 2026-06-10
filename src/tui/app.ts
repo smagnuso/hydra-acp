@@ -5184,7 +5184,7 @@ async function resolveSession(
   opts: TuiOptions,
   pickerPrefs: PickerPrefs,
 ): Promise<SessionContext | null> {
-  const cwd = opts.cwd ?? process.cwd();
+  let cwd = opts.cwd ?? process.cwd();
   if (opts.sessionId) {
     const ctx: SessionContext = {
       sessionId: opts.sessionId,
@@ -5244,6 +5244,10 @@ async function resolveSession(
     if (choice.kind === "new") {
       if (choice.prompt !== undefined) {
         opts.initialPrompt = choice.prompt;
+      }
+      if (choice.cwd !== undefined) {
+        cwd = choice.cwd;
+        opts.cwd = choice.cwd;
       }
       // If no agent is configured, choose one before creating the
       // session. Esc (back) re-shows the picker — opts.initialPrompt is

@@ -49,6 +49,7 @@ import {
   promptForLaunchOrView,
   type LaunchOrViewResult,
 } from "./import-action-prompt.js";
+import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { withSync } from "./sync.js";
 import { decodeBundle } from "../core/bundle.js";
 import {
@@ -80,7 +81,7 @@ export type PickerResult =
       sourceImportedFromMachine?: string;
       sourceUpstreamSessionId?: string;
     }
-  | { kind: "new"; prompt?: string }
+  | { kind: "new"; prompt?: string; cwd?: string }
   | { kind: "abort" }
   | { kind: "exit" };
 
@@ -169,7 +170,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["Composer", "type prompt for new session; Enter creates + submits"],
   ["↓ from composer", "drop focus into session list"],
   null,
-  ["↑ / ↓, n / p, ^p / ^n", "navigate sessions"],
+  ["↑ / ↓, n / p, ^n", "navigate sessions"],
   ["PgUp / PgDn", "page up / page down"],
   ["Home / End", "first / last"],
   ["Enter", "open selected session"],
@@ -179,6 +180,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["^f", "find in session history (content + tool inputs)"],
   ["o", "toggle cwd-only filter"],
   ["h", "cycle host filter (local / <peer> / all)"],
+  ["^p", "change cwd (for the picker and any new sessions)"],
   ["i", "show info for the selected session"],
   ["I", "toggle include-cat filter"],
   ["r", "refresh from daemon"],
@@ -262,7 +264,11 @@ export async function pickSession(
   // full sorted source; `visible` is the currently displayed slice — the
   // subset of allSessions after the cwd-only / host filter / search
   // filters compose.
-  let allSessions: DiscoveredSession[] = sortSessions(opts.sessions, opts.cwd);
+  // Mutable cwd used for the composer title, the cwd-only filter, and as
+  // the cwd reported back for "new" results. Initialized from opts.cwd
+  // and updated by the ^p cwd-change prompt.
+  let currentCwd = opts.cwd;
+  let allSessions: DiscoveredSession[] = sortSessions(opts.sessions, currentCwd);
   // Single source of truth for persistent filters from prefs. Both the
   // initial paint and applyFilter (after a toggle) route through this so
   // adding a new filter is a one-place change. The transient search
@@ -273,7 +279,7 @@ export async function pickSession(
   ): DiscoveredSession[] => {
     let base = sessions;
     if (prefs.filters.cwdOnly) {
-      base = base.filter((s) => s.cwd === opts.cwd);
+      base = base.filter((s) => s.cwd === currentCwd);
     }
     if (!prefs.filters.includeNonInteractive) {
       // Mirror the daemon's includeRow rule: only effective === true is
@@ -444,7 +450,7 @@ export async function pickSession(
     // title length is capped at termWidth - 8 to guarantee at least two
     // trailing dashes before the corner glyph.
     const titleBudget = Math.max(10, termWidth - 8);
-    composerTitle = formatComposerTitle(opts.cwd, titleBudget);
+    composerTitle = formatComposerTitle(currentCwd, titleBudget);
     const state = composer.state();
     composerVisualRows = computePromptVisualRows(state.buffer, composerRoom);
     const layout = computePromptLayout(
@@ -1424,6 +1430,41 @@ export async function pickSession(
       }
     };
     const focus = { push: pushLayer, pop: popLayer };
+
+    // Build a "new" PickerResult, attaching cwd only if the user changed
+    // it via the ^p cwd prompt — keeps the call sites tidy.
+    const makeNewResult = (): PickerResult => {
+      const out: PickerResult = { kind: "new" };
+      if (currentCwd !== opts.cwd) {
+        out.cwd = currentCwd;
+      }
+      return out;
+    };
+
+    // ^p opens a directory prompt. On accept, currentCwd updates and the
+    // composer title + cwd-only filter follow. On Esc, cwd is unchanged.
+    // The prompt manages its own grabInput / key listeners, so we have
+    // to detach the picker's grab while it runs and re-attach after.
+    const openCwdPrompt = async (): Promise<void> => {
+      uninstallGrab();
+      term.moveTo(1, 1).eraseDisplayBelow();
+      const result = await promptForImportCwd(term, undefined, {
+        defaultCwd: currentCwd,
+        title: "Change cwd",
+        intro: "New cwd for the picker and any new sessions:",
+      });
+      installGrab();
+      if (result.kind === "ok" && result.path !== currentCwd) {
+        currentCwd = result.path;
+        // Re-sort so the cwd-priority bump in sortSessions follows the new
+        // cwd, then re-run filters (cwd-only depends on currentCwd too).
+        allSessions = sortSessions(allSessions, currentCwd);
+        applyFilter();
+      }
+      if (!resolved) {
+        renderFromScratch();
+      }
+    };
     exitFind = (): void => {
       findComposer = new InputDispatcher({
         history: [],
@@ -1567,7 +1608,7 @@ export async function pickSession(
         const followId =
           preferredId ??
           (selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined);
-        allSessions = sortSessions(next, opts.cwd);
+        allSessions = sortSessions(next, currentCwd);
         applyFilter();
         if (followId !== undefined) {
           const idx = visible.findIndex((s) => s.sessionId === followId);
@@ -1666,7 +1707,7 @@ export async function pickSession(
         }
       }
       const keepId = session.sessionId;
-      allSessions = sortSessions(allSessions, opts.cwd);
+      allSessions = sortSessions(allSessions, currentCwd);
       applyFilter();
       restoreCursorAfterFilter(keepId);
       renderFromScratch();
@@ -2109,6 +2150,13 @@ export async function pickSession(
       if (mode === "busy") {
         return;
       }
+      // ^P opens the cwd prompt from anywhere in the picker — composer,
+      // list focus, search, rename, or a confirm modal. Hoisted above all
+      // mode checks so no submode can swallow it.
+      if (name === "CTRL_P") {
+        void openCwdPrompt();
+        return;
+      }
       if (mode === "rename") {
         if (name === "ENTER" || name === "KP_ENTER") {
           const trimmed = renameBuffer.trim();
@@ -2204,11 +2252,16 @@ export async function pickSession(
         if (name === "ENTER" || name === "KP_ENTER") {
           cleanup();
           const text = composer.expandedText();
-          if (text.trim().length === 0) {
-            resolve({ kind: "new" });
-          } else {
-            resolve({ kind: "new", prompt: text });
+          const base: { kind: "new"; prompt?: string; cwd?: string } = {
+            kind: "new",
+          };
+          if (text.trim().length > 0) {
+            base.prompt = text;
           }
+          if (currentCwd !== opts.cwd) {
+            base.cwd = currentCwd;
+          }
+          resolve(base);
           return;
         }
         // A held UP that just walked focus up into the composer keeps
@@ -2258,15 +2311,6 @@ export async function pickSession(
             move(1);
             return;
           }
-        }
-        // ^P switches the input dispatcher in the live composer; here it
-        // would emit a "switch-session" effect we'd just drop. Map it to
-        // the picker's list-focus instead so the chord stays useful.
-        if (name === "CTRL_P") {
-          if (visible.length > 0) {
-            move(1);
-          }
-          return;
         }
         // Any other key in the composer cancels the held-UP guard so a
         // later, deliberate UP isn't wrongly swallowed.
@@ -2377,7 +2421,7 @@ export async function pickSession(
         }
         if (name === "c" || name === "C") {
           cleanup();
-          resolve({ kind: "new" });
+          resolve(makeNewResult());
           return;
         }
         if (name === "q" || name === "Q") {
@@ -2540,7 +2584,6 @@ export async function pickSession(
       switch (name) {
         case "UP":
         case "SHIFT_TAB":
-        case "CTRL_P":
           // Crossing from the topmost session row into the composer via a
           // held UP arms the guard so auto-repeat doesn't fall through into
           // prompt-history (see upGuardArmed / lastUpAt).
@@ -2576,7 +2619,7 @@ export async function pickSession(
         case "KP_ENTER": {
           cleanup();
           if (selectedIdx === 0) {
-            resolve({ kind: "new" });
+            resolve(makeNewResult());
             return;
           }
           const session = visible[selectedIdx - 1];

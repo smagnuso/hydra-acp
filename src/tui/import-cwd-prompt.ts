@@ -43,28 +43,30 @@ export type CwdPromptResult =
 
 export async function promptForImportCwd(
   term: Terminal,
-  session: DiscoveredSession,
+  session: DiscoveredSession | undefined,
   opts: PromptOptions = {},
 ): Promise<CwdPromptResult> {
   const defaultCwd =
     opts.defaultCwd ??
-    (await pickInitialLocalCwd(session.cwd)) ??
+    (session ? await pickInitialLocalCwd(session.cwd) : undefined) ??
     os.homedir();
   resetTerminalModes();
 
-  const shortId = stripHydraSessionPrefix(session.sessionId);
-  const originalCwd = shortenHomePath(session.cwd);
   const title = opts.title ?? "Fork locally — choose cwd";
   const intro = opts.intro ?? "Pick a local cwd for this session:";
   // The "from:" row only makes sense for imported sessions; the dead-cwd
-  // repair path has no origin machine, so it's omitted there.
-  const headerRows = [
-    { label: "session: ", value: shortId },
-    ...(session.importedFromMachine
-      ? [{ label: "from:    ", value: session.importedFromMachine }]
-      : []),
-    { label: "cwd:     ", value: originalCwd },
-  ];
+  // repair path has no origin machine, so it's omitted there. When there
+  // is no session (picker-cwd-change path), the whole header block is
+  // dropped.
+  const headerRows = session
+    ? [
+        { label: "session: ", value: stripHydraSessionPrefix(session.sessionId) },
+        ...(session.importedFromMachine
+          ? [{ label: "from:    ", value: session.importedFromMachine }]
+          : []),
+        { label: "cwd:     ", value: shortenHomePath(session.cwd) },
+      ]
+    : [];
 
   let buffer = defaultCwd;
   let errorLine: string | null = null;
