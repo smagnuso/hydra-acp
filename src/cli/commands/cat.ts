@@ -555,8 +555,15 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     // below doesn't race the request onto a half-shut socket.
     if (!opts.detach) {
       const DETACH_TIMEOUT_MS = 500;
+      // Wrap in an async IIFE so a synchronous throw from
+      // requestWithId (e.g. ConnectionClosedError when the connection
+      // has already been torn down) is converted to a rejected promise
+      // the .catch can swallow. Without the IIFE the sync throw escapes
+      // Promise.race and bubbles out of settle(), leaving runCat hung.
       await Promise.race([
-        conn.request("session/detach", { sessionId }).catch(() => undefined),
+        (async () => conn.request("session/detach", { sessionId }))().catch(
+          () => undefined,
+        ),
         new Promise<void>((r) => setTimeout(r, DETACH_TIMEOUT_MS)),
       ]);
     }

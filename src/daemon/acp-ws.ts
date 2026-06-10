@@ -1488,7 +1488,12 @@ export function registerAcpWsEndpoint(
         readonly: false,
       });
       for (const note of replay) {
-        await connection.notify(note.method, note.params);
+        if (connection.isClosed()) {
+          break;
+        }
+        await connection
+          .notify(note.method, note.params)
+          .catch(() => undefined);
       }
       session.replayPendingPermissions(client);
       const modesPayload = buildModesPayload(session);

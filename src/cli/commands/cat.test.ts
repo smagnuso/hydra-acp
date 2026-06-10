@@ -1072,6 +1072,26 @@ describe("runCatLoop", () => {
       await loopPromise;
     });
   });
+
+  it("settle()'s detach race tolerates a synchronous ConnectionClosedError from conn.request", async () => {
+    // Regression: cat.ts:556-562 wraps conn.request("session/detach")
+    // in Promise.race. requestWithId throws ConnectionClosedError
+    // SYNCHRONOUSLY when the underlying connection is already closed.
+    // Without the async-IIFE wrap the sync throw escapes Promise.race
+    // and bubbles out of settle(), leaving runCat hung forever. This
+    // mirrors the exact pattern in cat.ts and asserts it resolves.
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    await conn.close();
+    expect(conn.isClosed()).toBe(true);
+    const winner = await Promise.race([
+      (async () => conn.request("session/detach", { sessionId: "x" }))().catch(
+        () => "caught" as const,
+      ),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 100)),
+    ]);
+    expect(winner).toBe("caught");
+  });
 });
 
 async function waitForStreamWriteWithBytes(

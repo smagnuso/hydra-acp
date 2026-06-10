@@ -113,8 +113,30 @@ export class ResilientWsStream implements MessageStream {
 
   async close(): Promise<void> {
     this.destroyed = true;
+    // Wait for any in-flight reconnect attempt to settle before tearing
+    // down. Otherwise connectWithRetry could bind a fresh socket AFTER
+    // close() returns and leave the caller with a phantom live stream.
+    // Cap the wait so a stuck retry loop (e.g. openWs hanging on a
+    // never-resolving handshake) can't block shutdown forever.
+    if (this.reconnectInFlight) {
+      const CLOSE_RECONNECT_WAIT_MS = 2_000;
+      await Promise.race([
+        this.reconnectInFlight.catch(() => undefined),
+        sleep(CLOSE_RECONNECT_WAIT_MS),
+      ]);
+    }
     if (this.current) {
       await this.current.close().catch(() => undefined);
+    }
+    // Reject any request() promises still waiting on a response — the
+    // stream is gone, no reply will ever arrive. Without this, callers
+    // awaiting request() hang forever even though we've signalled close.
+    if (this.pendingRequests.size > 0) {
+      const reason = new Error("resilient ws stream is destroyed");
+      for (const { reject } of this.pendingRequests.values()) {
+        reject(reason);
+      }
+      this.pendingRequests.clear();
     }
     for (const handler of this.closeHandlers) {
       handler();
@@ -167,6 +189,11 @@ export class ResilientWsStream implements MessageStream {
           `hydra-acp: connect attempt ${attempt} failed (${(err as Error).message}); retrying in ${backoff}ms`,
         );
         await sleep(backoff);
+        // close() may have flipped destroyed while we were sleeping;
+        // bail before opening another socket the caller no longer wants.
+        if (this.destroyed) {
+          return;
+        }
         backoff = Math.min(backoff * BACKOFF_MULTIPLIER, BACKOFF_MAX_MS);
       }
     }

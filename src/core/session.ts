@@ -764,7 +764,9 @@ export class Session {
                 claimEnvelope,
                 new Set([...claimOriginatedBy, t.name]),
                 claimIdx + 1,
-              ).then(resolve);
+              )
+                .then(() => resolve())
+                .catch(() => resolve());
             }
           }, TRANSFORMER_CLAIM_TIMEOUT_MS);
           if (typeof timer.unref === "function") {
@@ -2031,7 +2033,9 @@ export class Session {
             claim.envelope,
             new Set([...claim.originatedBy, claim.transformerName]),
             claim.chainIdx + 1,
-          ).then(() => claim.resolve(undefined));
+          )
+            .then(() => claim.resolve(undefined))
+            .catch(() => claim.resolve(undefined));
         } else {
           const tailKind = claim.tailKind ?? "request";
           void this.forwardRequest(

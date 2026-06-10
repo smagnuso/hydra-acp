@@ -864,6 +864,9 @@ async function runSession(
       const mid = p.messageId;
       const prompt = p.prompt;
       const timer = setTimeout(() => {
+        if (teardownStarted) {
+          return;
+        }
         amendPendingPaintTimers.delete(mid);
         queueCache.set(mid, chipFromPrompt(mid, prompt));
         if (screenRef && dispatcherRef) {
@@ -1681,8 +1684,6 @@ async function runSession(
     },
     { name: "/model", description: "Switch model: /model <model-id>" },
     { name: "/agent", description: "Switch agent via config option: /agent <agent-id>" },
-    { name: "/demo-plan", description: "Inject synthetic plan events (UI test)" },
-    { name: "/demo-tool", description: "Inject a synthetic tool-call sequence (UI test)" },
     { name: "/btw", description: "Run an ancillary forked session: /btw <prompt>" },
   ];
   // Seeded from the attach/new response _meta so the slash-completion
@@ -2359,6 +2360,10 @@ async function runSession(
       clearInterval(sessionElapsedTimer);
       sessionElapsedTimer = null;
     }
+    for (const timer of amendPendingPaintTimers.values()) {
+      clearTimeout(timer);
+    }
+    amendPendingPaintTimers.clear();
     screen.clearWindowTitle();
     // runTuiApp owns alt-screen entry/exit for the whole TUI lifetime,
     // so don't toggle fullscreen here — that's done after the outer
@@ -2771,10 +2776,10 @@ async function runSession(
         screen.scrollToBottom();
         return;
       case "switch-session":
-        void switchSession();
+        void switchSession().catch(() => undefined);
         return;
       case "next-live-session":
-        void cycleLiveSession();
+        void cycleLiveSession().catch(() => undefined);
         return;
       case "toggle-options":
         toggleOptionsModal();
@@ -3237,64 +3242,6 @@ async function runSession(
         collapsedThoughtRuns.clear();
         screen.clearScrollback();
         return true;
-      case "/demo-plan": {
-        // Force a fresh plan block at the bottom of scrollback even if a
-        // prior turn or history-replay already anchored the "plan" key.
-        screen.clearKey("plan");
-        const steps = ["Step 1", "Step 2", "Step 3", "Step 4", "Step 5"];
-        const sequences: string[][] = [
-          ["pending", "pending", "pending", "pending", "pending"],
-          ["in_progress", "pending", "pending", "pending", "pending"],
-          ["completed", "in_progress", "pending", "pending", "pending"],
-          ["completed", "completed", "in_progress", "pending", "pending"],
-          ["completed", "completed", "completed", "in_progress", "pending"],
-          ["completed", "completed", "completed", "completed", "in_progress"],
-          ["completed", "completed", "completed", "completed", "completed"],
-        ];
-        let i = 0;
-        const tick = (): void => {
-          const statuses = sequences[i];
-          if (!statuses) {
-            return;
-          }
-          appendRender({
-            kind: "plan",
-            entries: steps.map((content, j) => ({
-              content,
-              status: statuses[j] ?? "pending",
-            })),
-          });
-          i += 1;
-          setTimeout(tick, 600);
-        };
-        tick();
-        return true;
-      }
-      case "/demo-tool": {
-        const id = `demo-${Date.now()}`;
-        appendRender({
-          kind: "tool-call",
-          toolCallId: id,
-          title: "Terminal",
-          status: "pending",
-        });
-        setTimeout(() => {
-          appendRender({
-            kind: "tool-call-update",
-            toolCallId: id,
-            title: "echo hello world",
-            status: "in_progress",
-          });
-        }, 500);
-        setTimeout(() => {
-          appendRender({
-            kind: "tool-call-update",
-            toolCallId: id,
-            status: "completed",
-          });
-        }, 1500);
-        return true;
-      }
       case "/help": {
         const lines: FormattedLine[] = [
           { prefix: "  ", body: "Built-in commands:", bodyStyle: "system" },
@@ -3386,7 +3333,7 @@ async function runSession(
       case "/resume":
         // Same destination as the switch-session hotkey: suspend the live
         // session and open the picker.
-        void switchSession();
+        void switchSession().catch(() => undefined);
         return true;
       case "/rename": {
         // Alias for the daemon-side `/hydra title` command. Rewrite to the

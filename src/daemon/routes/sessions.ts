@@ -631,6 +631,12 @@ export function registerSessionRoutes(
           }
         });
       }
+      request.raw.on("close", () => {
+        unsubscribe?.();
+        if (!reply.raw.writableEnded) {
+          reply.raw.end();
+        }
+      });
       try {
         snapshot = await live.getHistorySnapshot();
       } catch (err) {
@@ -680,14 +686,9 @@ export function registerSessionRoutes(
     }
 
     // Follow mode against a live session — keep the connection open
-    // until the client disconnects, then unsubscribe so the handler
-    // doesn't keep firing for nobody.
-    request.raw.on("close", () => {
-      unsubscribe?.();
-      if (!reply.raw.writableEnded) {
-        reply.raw.end();
-      }
-    });
+    // until the client disconnects. The on('close') handler that
+    // unsubscribes was registered earlier (before the snapshot await)
+    // so an abort during the snapshot phase also cleans up.
     return reply;
   });
 }
