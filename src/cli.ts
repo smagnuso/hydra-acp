@@ -72,6 +72,7 @@ import {
 } from "./cli/commands/auth.js";
 import { runShim } from "./shim/proxy.js";
 import { runCat } from "./cli/commands/cat.js";
+import { runVersion } from "./cli/commands/version.js";
 import { maybeDispatchExternal } from "./cli/external-subcommand.js";
 import {
   buildTitleFromArgv,
@@ -334,6 +335,11 @@ async function main(): Promise<void> {
       }
       suppressUpdateNotice = true;
       await runCat(catOpts);
+      return;
+    }
+    case "version": {
+      suppressUpdateNotice = true;
+      await runVersion({ json: flags.json === true });
       return;
     }
     case "init":
@@ -888,6 +894,7 @@ function printHelp(): void {
       "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
       "  hydra-acp daemon stop|restart",
       "  hydra-acp daemon log [-f] [-n N]   Tail or follow the daemon log",
+      "  hydra-acp version [--json]         Print CLI, daemon, and extension/transformer versions",
       "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive] [--columns=<list>]",
       "                                     List sessions (live + 20 most-recent cold; --all lifts the cold cap AND surfaces non-interactive sessions; --json emits JSON for scripts).",
       "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer.",
