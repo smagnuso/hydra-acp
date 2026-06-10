@@ -60,6 +60,26 @@ export function registerSessionRoutes(
     return { sessions };
   });
 
+  // Single-session info — the same shape as one `GET /v1/sessions`
+  // entry, looked up by id. Useful for callers that already know the
+  // sessionId and just want its `_meta` (agentId, currentModel, busy,
+  // status, etc.) without scanning the full list. The planner uses
+  // this at project-create time to seed `board.orchestratorAgent` /
+  // `orchestratorModel` so the status view can show the effective
+  // agent/model immediately — before any new `session_info_update`
+  // happens to fire.
+  app.get("/v1/sessions/:id", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const entries = await manager.list({ includeNonInteractive: true });
+    const entry = entries.find((e) => e.sessionId === id);
+    if (!entry) {
+      reply.code(404).send({ error: "session not found" });
+      return reply;
+    }
+    return entry;
+  });
+
   // Substring-search session transcripts. `q` is required; `sessionIds`
   // optionally scopes the scan to an allowlist (the picker passes its
   // currently-visible rows so `o`/`h`/`/` filters compose with the

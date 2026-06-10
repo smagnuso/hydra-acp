@@ -352,6 +352,32 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry?.awaitingInput).toBe(false);
   });
 
+  it("GET /v1/sessions/:id returns the single entry", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessionId: string;
+      agentId?: string;
+      status?: string;
+    };
+    expect(body.sessionId).toBe(session.sessionId);
+    expect(body.agentId).toBe("claude-code");
+    expect(body.status).toBe("live");
+  });
+
+  it("GET /v1/sessions/:id 404s for an unknown id", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_nope`,
+    );
+    expect(res.status).toBe(404);
+  });
+
   it("POST /v1/sessions/search returns grouped hits", async () => {
     // Two sessions, distinct prose, plus an Edit tool call so the file
     // path scan path also runs.

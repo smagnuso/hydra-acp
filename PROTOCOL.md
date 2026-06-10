@@ -228,6 +228,16 @@ List sessions known to the daemon.
 }
 ```
 
+#### `GET /v1/sessions/:id`
+
+Single-session info — same shape as one entry from `GET /v1/sessions`, looked up by id. Lets callers that already know a `sessionId` read its `agentId`, `currentModel`, `currentUsage`, `status`, `busy`, `awaitingInput`, etc. without scanning the full list. Works on both live and cold sessions.
+
+**Response — `200 OK`** — the matching `SessionListEntry` (see [`GET /v1/sessions`](#get-v1sessions) for the shape).
+
+**Errors**
+
+- `404` — no session with that id.
+
 #### `POST /v1/sessions/search`
 
 Substring search across session transcripts. POST (not GET) because the optional `sessionIds` allowlist can exceed header-size limits on long-lived installs.
