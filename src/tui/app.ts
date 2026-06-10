@@ -1987,11 +1987,13 @@ async function runSession(
   if (initialMode) {
     screen.setBanner({ currentMode: initialMode });
   }
-  void getPendingUpdate().then((info) => {
-    if (info) {
-      screen.notify(`✨ ${formatUpdateNoticeLine(info)}`, 30_000);
-    }
-  });
+  void getPendingUpdate()
+    .then((info) => {
+      if (info) {
+        screen.notify(`✨ ${formatUpdateNoticeLine(info)}`, 30_000);
+      }
+    })
+    .catch(() => undefined);
 
   let finishSession: ((next: TuiOptions | null) => void) | null = null;
   const sessionDone = new Promise<TuiOptions | null>((resolve) => {
@@ -5510,7 +5512,8 @@ async function ensureAgentForNew(
   if (agents.length === 0) {
     return "ok";
   }
-  const result = await promptForAgent(term, agents);
+  const config = await loadConfig();
+  const result = await promptForAgent(term, agents, config.defaultAgent);
   if (result.kind === "cancel") {
     return "cancel";
   }

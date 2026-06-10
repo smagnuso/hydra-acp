@@ -44,7 +44,16 @@ export function pickPermissionOptionId(
       return fallback.optionId;
     }
   }
-  return preferredKinds[0] ?? "allow";
+  // Last-resort fallback: return a kind name where an optionId is
+  // expected. Most agents will reject this, so warn so the silent
+  // rejection is traceable in logs.
+  const fallback = preferredKinds[0] ?? "allow";
+  console.warn(
+    `[permission-pick] no optionId match for preferredKinds=${JSON.stringify(
+      preferredKinds,
+    )}; falling back to kind name ${JSON.stringify(fallback)} (agent will likely reject)`,
+  );
+  return fallback;
 }
 
 // Build the response body for an auto-approved permission request.

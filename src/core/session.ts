@@ -2121,8 +2121,14 @@ export class Session {
     this.markClosed({ deleteRecord: opts.deleteRecord ?? false });
   }
 
-  onClose(handler: (opts: { deleteRecord: boolean }) => void): void {
+  onClose(handler: (opts: { deleteRecord: boolean }) => void): () => void {
     this.closeHandlers.push(handler);
+    return () => {
+      const i = this.closeHandlers.indexOf(handler);
+      if (i >= 0) {
+        this.closeHandlers.splice(i, 1);
+      }
+    };
   }
 
   // Subscribe to title updates. The SessionManager hooks this to

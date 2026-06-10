@@ -10,9 +10,7 @@
 // All aggregation is local — no new daemon endpoint. Same posture as
 // `sessions list` / `sessions search`.
 
-import * as fs from "node:fs/promises";
-import { loadConfig } from "../../core/config.js";
-import { loadServiceToken } from "../../core/service-token.js";
+import { daemonFetch } from "./_shared.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import type { HistoryEntry } from "../../core/history-store.js";
 import {
@@ -29,7 +27,6 @@ import {
 } from "../../core/history-edits.js";
 import { openPager } from "../pager.js";
 import { renderDiff } from "./sessions-diff.js";
-import { httpBase } from "./sessions.js";
 
 export interface SessionsInfoOptions {
   verbose?: boolean;
@@ -105,39 +102,23 @@ export async function runSessionsInfo(
     );
     process.exit(2);
   }
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(
-    config.daemon.host,
-    config.daemon.port,
-    !!config.daemon.tls,
+  // Resolve `live` vs `cold` from the single-session endpoint — /export
+  // doesn't carry it. Previously this hit /v1/sessions and scanned the
+  // full list; /v1/sessions/:id returns the same per-entry shape for one id.
+  const infoRes = await daemonFetch(
+    `/v1/sessions/${encodeURIComponent(id)}`,
+    { expectStatus: [200, 404] },
   );
+  const liveStatus =
+    infoRes.status === 200
+      ? (infoRes.body as { status?: "live" | "cold" }).status
+      : undefined;
 
-  // Resolve `live` vs `cold` from the list endpoint — /export doesn't carry it.
-  const listResp = await fetch(`${baseUrl}/v1/sessions`, {
-    headers: { Authorization: `Bearer ${serviceToken}` },
-  });
-  if (!listResp.ok) {
-    process.stderr.write(`Daemon returned HTTP ${listResp.status}\n`);
-    process.exit(1);
-  }
-  const listBody = (await listResp.json()) as {
-    sessions: Array<{ sessionId: string; status?: "live" | "cold" }>;
-  };
-  const liveStatus = listBody.sessions.find((s) => s.sessionId === id)?.status;
-
-  const exportResp = await fetch(
-    `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export`,
-    { headers: { Authorization: `Bearer ${serviceToken}` } },
+  const exportRes = await daemonFetch(
+    `/v1/sessions/${encodeURIComponent(id)}/export`,
+    { expectStatus: 200 },
   );
-  if (!exportResp.ok) {
-    const text = await exportResp.text().catch(() => "");
-    process.stderr.write(
-      `Daemon returned HTTP ${exportResp.status}: ${text}\n`,
-    );
-    process.exit(1);
-  }
-  const raw = (await exportResp.json()) as unknown;
+  const raw = exportRes.body;
   let bundle: Bundle;
   try {
     bundle = decodeBundle(raw);
@@ -387,7 +368,5 @@ function formatDuration(ms: number): string {
   return parts.join(" ");
 }
 
-// Re-export the aggregator + types for the test file. fs import retained
-// to avoid an unused-symbol error if a future feature needs fs here.
+// Re-export the aggregator + types for the test file.
 export type { SessionInfoData, ToolCount, FileCount, HistoryEntry };
-void fs;

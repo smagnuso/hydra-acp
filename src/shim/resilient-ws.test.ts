@@ -129,6 +129,48 @@ describe("ResilientWsStream", () => {
     await stream.close();
   });
 
+  it("does not strand a concurrent send() issued during flushQueue", async () => {
+    // Server records every frame received in order, with a tiny per-message
+    // ack delay so the in-flight `await this.current.send()` straddles a
+    // concurrent client send().
+    const wire: string[] = [];
+    server.wss.on("connection", (ws) => {
+      ws.on("message", (data) => {
+        const msg = JSON.parse(data.toString("utf8")) as {
+          method?: string;
+        };
+        if (msg.method !== undefined) {
+          wire.push(msg.method);
+        }
+      });
+    });
+
+    const stream = new ResilientWsStream({
+      url: `ws://127.0.0.1:${server.port}`,
+      subprotocols: [],
+      log: () => undefined,
+    });
+
+    // Two pre-connect sends populate the queue.
+    void stream.send({ jsonrpc: "2.0", id: 1, method: "queued-A" });
+    void stream.send({ jsonrpc: "2.0", id: 2, method: "queued-B" });
+
+    // Issue a third send concurrently with the flush triggered by start().
+    // With the old snapshot-then-flush implementation this would be stranded
+    // on the freshly-created queue until the next reconnect; the regression
+    // assertion is that it lands on the wire alongside the pre-queued ones.
+    const startPromise = stream.start();
+    void stream.send({ jsonrpc: "2.0", id: 3, method: "queued-C" });
+    await startPromise;
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(wire).toContain("queued-A");
+    expect(wire).toContain("queued-B");
+    expect(wire).toContain("queued-C");
+
+    await stream.close();
+  });
+
   it("holds back routine send() until onConnect awaits a request response", async () => {
     // Server: respond to "session/attach" requests after a 200ms delay,
     // and record the order frames are received. Any other request gets

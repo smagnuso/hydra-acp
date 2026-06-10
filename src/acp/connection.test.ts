@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { JsonRpcConnection } from "./connection.js";
+import { JsonRpcConnection, ConnectionClosedError } from "./connection.js";
 import { JsonRpcErrorCodes, type JsonRpcRequest } from "./types.js";
 import { makeControlledStream } from "../__tests__/test-utils.js";
 
@@ -238,6 +238,35 @@ describe("JsonRpcConnection", () => {
     expect(orphan).toHaveBeenCalledWith({
       code: JsonRpcErrorCodes.MethodNotFound,
       message: "unsupported",
+      data: undefined,
+    });
+  });
+
+  it("throws ConnectionClosedError from requestWithId after close (no fake id sentinel)", async () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    await conn.close();
+    await expect(conn.request("ping")).rejects.toBeInstanceOf(
+      ConnectionClosedError,
+    );
+  });
+
+  it("routes a parse-error response (id=null) to orphan-error observers", async () => {
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    const orphan = vi.fn();
+    conn.onOrphanError(orphan);
+
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "parse error" },
+    } as unknown as JsonRpcRequest);
+    await new Promise((r) => setImmediate(r));
+
+    expect(orphan).toHaveBeenCalledWith({
+      code: -32700,
+      message: "parse error",
       data: undefined,
     });
   });

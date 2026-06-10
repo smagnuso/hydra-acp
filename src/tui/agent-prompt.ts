@@ -12,9 +12,12 @@ import type { Terminal } from "terminal-kit";
 import type { DiscoveredAgent } from "./discovery.js";
 import {
   drawBox,
-  resetTerminalModes,
+  padRight,
   readTermHeight,
   readTermWidth,
+  resetTerminalModes,
+  runModalPrompt,
+  truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
 
@@ -23,7 +26,10 @@ export type AgentPromptResult =
   | { kind: "back" }
   | { kind: "cancel" };
 
-const PREFERRED_DEFAULT = "opencode";
+// Hardcoded fallback used only when neither the caller nor config
+// supplies a preferred agent id. Kept so the picker still highlights a
+// sensible default on a fresh install.
+const FALLBACK_PREFERRED_AGENT = "opencode";
 
 // Most agent rows we'll ever show at once, before the list scrolls
 // inside the box. Clamped further to the terminal height at render time.
@@ -33,17 +39,18 @@ const MAX_VISIBLE_ROWS = 20;
 // is wider than the default modal; clamped to the terminal by drawBox.
 const PREFERRED_CONTENT_WIDTH = 88;
 
-function initialIndex(agents: DiscoveredAgent[]): number {
-  const idx = agents.findIndex((a) => a.id === PREFERRED_DEFAULT);
+function initialIndex(agents: DiscoveredAgent[], preferred: string): number {
+  const idx = agents.findIndex((a) => a.id === preferred);
   return idx === -1 ? 0 : idx;
 }
 
 export async function promptForAgent(
   term: Terminal,
   agents: DiscoveredAgent[],
+  preferred?: string,
 ): Promise<AgentPromptResult> {
   resetTerminalModes();
-  let selected = initialIndex(agents);
+  let selected = initialIndex(agents, preferred ?? FALLBACK_PREFERRED_AGENT);
   let windowStart = 0;
 
   // How many list rows fit: capped by MAX_VISIBLE_ROWS and by the
@@ -127,49 +134,23 @@ export async function promptForAgent(
     return layout;
   };
 
-  render();
-  term.hideCursor();
-
-  return await new Promise<AgentPromptResult>((resolve) => {
-    let resolved = false;
-    const cleanup = (): void => {
-      if (resolved) {
-        return;
-      }
-      resolved = true;
-      term.off("key", onKey);
-      term.off("resize", onResize);
-      term.grabInput(false);
-      term.hideCursor(false);
-      term.moveTo(1, 1).eraseDisplayBelow();
-    };
-    const finish = (value: AgentPromptResult): void => {
-      cleanup();
-      resolve(value);
-    };
-    const onResize = (): void => {
-      if (resolved) {
-        return;
-      }
+  const moveDown = (): void => {
+    if (selected < agents.length - 1) {
+      selected++;
       render();
-    };
-    const moveDown = (): void => {
-      if (selected < agents.length - 1) {
-        selected++;
-        render();
-      }
-    };
-    const moveUp = (): void => {
-      if (selected > 0) {
-        selected--;
-        render();
-      }
-    };
-    const onKey = (
-      name: string,
-      _m: unknown,
-      data?: { isCharacter?: boolean },
-    ): void => {
+    }
+  };
+  const moveUp = (): void => {
+    if (selected > 0) {
+      selected--;
+      render();
+    }
+  };
+
+  return runModalPrompt<AgentPromptResult>({
+    term,
+    render,
+    onKey: (name, _m, data, finish) => {
       if (name === "CTRL_C" || name === "CTRL_D") {
         finish({ kind: "cancel" });
         return;
@@ -211,26 +192,6 @@ export async function promptForAgent(
           return;
         }
       }
-    };
-    term.grabInput({});
-    term.on("key", onKey);
-    term.on("resize", onResize);
+    },
   });
-}
-
-function truncate(s: string, max: number): string {
-  if (max <= 1) {
-    return "";
-  }
-  if (s.length <= max) {
-    return s;
-  }
-  return s.slice(0, Math.max(0, max - 1)) + "…";
-}
-
-function padRight(s: string, w: number): string {
-  if (s.length >= w) {
-    return s.slice(0, w);
-  }
-  return s + " ".repeat(w - s.length);
 }

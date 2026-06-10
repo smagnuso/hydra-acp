@@ -24,6 +24,8 @@ import { longestCommonPrefix } from "./completion.js";
 import {
   drawBox,
   resetTerminalModes,
+  runModalPrompt,
+  truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
 
@@ -146,36 +148,11 @@ export async function promptForImportCwd(
     }
   };
 
-  render();
-
-  return await new Promise<CwdPromptResult>((resolve) => {
-    let resolved = false;
-    const cleanup = (): void => {
-      if (resolved) {
-        return;
-      }
-      resolved = true;
-      term.off("key", onKey);
-      term.off("resize", onResize);
-      term.grabInput(false);
-      term.hideCursor(false);
-      term.moveTo(1, 1).eraseDisplayBelow();
-    };
-    const finish = (value: CwdPromptResult): void => {
-      cleanup();
-      resolve(value);
-    };
-    const onResize = (): void => {
-      if (resolved) {
-        return;
-      }
-      render();
-    };
-    const onKey = (
-      name: string,
-      _matches: unknown,
-      data?: { isCharacter?: boolean },
-    ): void => {
+  return runModalPrompt<CwdPromptResult>({
+    term,
+    render,
+    hideCursor: false,
+    onKey: (name, _matches, data, finish) => {
       if (busy) {
         return;
       }
@@ -260,21 +237,8 @@ export async function promptForImportCwd(
         repaintInput();
         return;
       }
-    };
-    term.grabInput({});
-    term.on("key", onKey);
-    term.on("resize", onResize);
+    },
   });
-}
-
-function truncate(s: string, max: number): string {
-  if (max <= 1) {
-    return "";
-  }
-  if (s.length <= max) {
-    return s;
-  }
-  return s.slice(0, Math.max(0, max - 1)) + "…";
 }
 
 // Used for the cwd input: when the buffer is longer than the visible

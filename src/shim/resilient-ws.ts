@@ -1,9 +1,8 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { WebSocket } from "ws";
+import { openWs } from "./open-ws.js";
 import type { MessageStream } from "../acp/framing.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
 import {
-  JsonRpcErrorCodes,
   type JsonRpcId,
   type JsonRpcMessage,
   type JsonRpcRequest,
@@ -35,6 +34,7 @@ const MAX_RECONNECT_ATTEMPTS = 60;
 export class ResilientWsStream implements MessageStream {
   private current: MessageStream | undefined;
   private outboundQueue: JsonRpcMessage[] = [];
+  private flushing = false;
   private messageHandlers: Array<(m: JsonRpcMessage) => void> = [];
   private closeHandlers: Array<(err?: Error) => void> = [];
   private destroyed = false;
@@ -71,16 +71,18 @@ export class ResilientWsStream implements MessageStream {
     // Hold back routine sends while onConnect is running — it's mid-replay
     // of session/attach requests and any prompts that slip past would race
     // against an in-flight resurrect on the daemon.
-    if (this.connectGate || !this.current) {
+    if (this.connectGate || !this.current || this.flushing) {
+      // Always go through the queue while a flush is in progress so
+      // ordering is preserved and a concurrent send() can't be stranded
+      // by the loop having already snapshotted the prior queue.
       this.outboundQueue.push(message);
+      if (!this.connectGate && this.current && !this.flushing) {
+        await this.flushQueue();
+      }
       return;
     }
-    try {
-      await this.current.send(message);
-    } catch (err) {
-      this.outboundQueue.push(message);
-      this.scheduleReconnect(err as Error);
-    }
+    this.outboundQueue.push(message);
+    await this.flushQueue();
   }
 
   // Send a request directly and resolve when the matching response arrives
@@ -122,8 +124,8 @@ export class ResilientWsStream implements MessageStream {
     let backoff = BACKOFF_INITIAL_MS;
     while (!this.destroyed) {
       try {
-        const stream = await openWs(this.opts.url, this.opts.subprotocols);
-        this.bindStream(stream);
+        const ws = await openWs(this.opts.url, this.opts.subprotocols);
+        this.bindStream(wsToMessageStream(ws));
         const wasFirst = this.firstConnect;
         this.firstConnect = false;
         // Gate routine outbound traffic while onConnect runs. onConnect can
@@ -171,7 +173,7 @@ export class ResilientWsStream implements MessageStream {
   private bindStream(stream: MessageStream): void {
     this.current = stream;
     stream.onMessage((msg) => {
-      if (isResponse(msg)) {
+      if (isResponse(msg) && msg.id !== null) {
         const pending = this.pendingRequests.get(msg.id);
         if (pending) {
           this.pendingRequests.delete(msg.id);
@@ -202,19 +204,31 @@ export class ResilientWsStream implements MessageStream {
   }
 
   private async flushQueue(): Promise<void> {
-    if (!this.current) {
+    if (this.flushing) {
       return;
     }
-    const queue = this.outboundQueue;
-    this.outboundQueue = [];
-    for (const msg of queue) {
-      try {
-        await this.current.send(msg);
-      } catch (err) {
-        this.outboundQueue.unshift(msg);
-        this.scheduleReconnect(err as Error);
-        return;
+    this.flushing = true;
+    try {
+      // Re-check the queue inside the loop rather than snapshotting it
+      // up-front: a concurrent send() can append while we're awaiting a
+      // network write, and leaving the failing head in place avoids the
+      // unshift() re-ordering hazard the old code had.
+      while (
+        !this.destroyed &&
+        this.current &&
+        this.outboundQueue.length > 0
+      ) {
+        const msg = this.outboundQueue[0]!;
+        try {
+          await this.current.send(msg);
+        } catch (err) {
+          this.scheduleReconnect(err as Error);
+          return;
+        }
+        this.outboundQueue.shift();
       }
+    } finally {
+      this.flushing = false;
     }
   }
 
@@ -265,29 +279,4 @@ function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
   );
 }
 
-async function openWs(
-  url: string,
-  subprotocols: string[],
-): Promise<MessageStream> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, subprotocols);
-    const onOpen = (): void => {
-      ws.off("error", onError);
-      resolve(wsToMessageStream(ws));
-    };
-    const onError = (err: Error): void => {
-      ws.off("open", onOpen);
-      reject(err);
-    };
-    ws.once("open", onOpen);
-    ws.once("error", onError);
-  });
-}
 
-export function isResurrectableError(err: unknown): boolean {
-  if (err && typeof err === "object" && "code" in err) {
-    const code = (err as { code: unknown }).code;
-    return code === JsonRpcErrorCodes.SessionNotFound;
-  }
-  return false;
-}

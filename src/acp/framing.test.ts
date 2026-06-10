@@ -76,6 +76,19 @@ describe("ndjsonStreamFromStdio", () => {
     });
   });
 
+  it("synthesizes parse-error frames with id=null (never 0)", async () => {
+    const { stdout, stream } = makeStream();
+    const received: JsonRpcMessage[] = [];
+    stream.onMessage((m) => received.push(m));
+
+    stdout.write("definitely { not json\n");
+    await new Promise((r) => setImmediate(r));
+
+    expect(received).toHaveLength(1);
+    const frame = received[0] as { id: unknown };
+    expect(frame.id).toBeNull();
+  });
+
   it("writes outbound messages with a trailing newline", async () => {
     const { stdin, stream } = makeStream();
     const writes: string[] = [];

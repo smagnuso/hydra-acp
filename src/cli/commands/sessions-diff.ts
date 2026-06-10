@@ -19,8 +19,7 @@
 // file as removed. Deleted files just won't appear.
 
 import { highlight, supportsLanguage } from "cli-highlight";
-import { loadConfig } from "../../core/config.js";
-import { loadServiceToken } from "../../core/service-token.js";
+import { daemonFetch } from "./_shared.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
 import {
   aggregateFileEdits,
@@ -29,7 +28,6 @@ import {
 } from "../../core/history-edits.js";
 import { buildUnifiedDiff } from "../../tui/format.js";
 import { openPager } from "../pager.js";
-import { httpBase } from "./sessions.js";
 
 export interface SessionsDiffOptions {
   json?: boolean;
@@ -52,42 +50,26 @@ export async function runSessionsDiff(
     );
     process.exit(2);
   }
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(
-    config.daemon.host,
-    config.daemon.port,
-    !!config.daemon.tls,
-  );
-
   // Prefer the daemon's /diff endpoint (single fetch, server-side
   // aggregation). Fall back to /export + local aggregate only when the
   // daemon is older and returns 404 for /diff so we keep working
   // against pre-endpoint daemons.
-  const diffUrl = new URL(`${baseUrl}/v1/sessions/${encodeURIComponent(id)}/diff`);
-  if (opts.fold === true) diffUrl.searchParams.set("fold", "true");
-  const diffResp = await fetch(diffUrl.toString(), {
-    headers: { Authorization: `Bearer ${serviceToken}` },
-  });
+  const diffQs = opts.fold === true ? "?fold=true" : "";
+  const diffRes = await daemonFetch(
+    `/v1/sessions/${encodeURIComponent(id)}/diff${diffQs}`,
+  );
   let files: FileEditAggregate[];
-  if (diffResp.ok) {
-    files = (await diffResp.json()) as FileEditAggregate[];
-  } else if (diffResp.status === 404) {
+  if (diffRes.ok) {
+    files = diffRes.body as FileEditAggregate[];
+  } else if (diffRes.status === 404) {
     // 404 here can mean either "endpoint not found" (old daemon) or
     // "session not found" (real miss). Probe with /export — if that
     // also 404s, the session is genuinely missing.
-    const exportResp = await fetch(
-      `${baseUrl}/v1/sessions/${encodeURIComponent(id)}/export`,
-      { headers: { Authorization: `Bearer ${serviceToken}` } },
+    const exportRes = await daemonFetch(
+      `/v1/sessions/${encodeURIComponent(id)}/export`,
+      { expectStatus: 200 },
     );
-    if (!exportResp.ok) {
-      const text = await exportResp.text().catch(() => "");
-      process.stderr.write(
-        `Daemon returned HTTP ${exportResp.status}: ${text}\n`,
-      );
-      process.exit(1);
-    }
-    const raw = (await exportResp.json()) as unknown;
+    const raw = exportRes.body;
     let bundle: Bundle;
     try {
       bundle = decodeBundle(raw);
@@ -103,10 +85,7 @@ export async function runSessionsDiff(
         ? rawFiles.map((f) => ({ ...f, hunks: foldHunks(f.hunks) }))
         : rawFiles;
   } else {
-    const text = await diffResp.text().catch(() => "");
-    process.stderr.write(
-      `Daemon returned HTTP ${diffResp.status}: ${text}\n`,
-    );
+    process.stderr.write(`Daemon returned HTTP ${diffRes.status}\n`);
     process.exit(1);
   }
   if (opts.json) {

@@ -937,9 +937,12 @@ export class SessionManager {
       updatedAt?: string;
     }> = [];
     let cursor: string | undefined;
-    // Bound the loop to defend against an agent that hands back the same
-    // cursor forever; 100 pages × any reasonable page size is well past
-    // anything sane.
+    const seenCursors = new Set<string>();
+    // Bound the loop to defend against a buggy agent; 100 pages × any
+    // reasonable page size is well past anything sane. We also bail
+    // immediately if the agent hands back a cursor we've already used,
+    // since otherwise we'd burn the full 100-page cap re-fetching the
+    // same page.
     for (let page = 0; page < 100; page += 1) {
       const params: Record<string, unknown> = {};
       if (cursor !== undefined) {
@@ -976,6 +979,10 @@ export class SessionManager {
       if (typeof result.nextCursor !== "string" || result.nextCursor.length === 0) {
         break;
       }
+      if (seenCursors.has(result.nextCursor)) {
+        break;
+      }
+      seenCursors.add(result.nextCursor);
       cursor = result.nextCursor;
     }
     return out;
@@ -1536,12 +1543,19 @@ export class SessionManager {
       if (filter.includeNonInteractive) return true;
       return interactive === true;
     };
-    for (const session of this.sessions.values()) {
-      if (filter.cwd && session.cwd !== filter.cwd) {
-        continue;
-      }
+    // Stat all sessions (live + cold) in parallel. The sequential
+    // historyStatus loop was the dominant cost when the picker opened
+    // against a directory with hundreds of cold sessions.
+    const liveSessions = [...this.sessions.values()].filter(
+      (s) => !filter.cwd || s.cwd === filter.cwd,
+    );
+    const liveStats = await Promise.all(
+      liveSessions.map((s) => historyStatus(s.sessionId)),
+    );
+    for (let i = 0; i < liveSessions.length; i += 1) {
+      const session = liveSessions[i]!;
+      const hist = liveStats[i]!;
       liveIds.add(session.sessionId);
-      const hist = await historyStatus(session.sessionId);
       const interactive = effectiveInteractive(
         {
           interactive: session.interactive,
@@ -1577,14 +1591,15 @@ export class SessionManager {
       });
     }
     const records = await this.store.list().catch(() => []);
-    for (const r of records) {
-      if (liveIds.has(r.sessionId)) {
-        continue;
-      }
-      if (filter.cwd && r.cwd !== filter.cwd) {
-        continue;
-      }
-      const hist = await historyStatus(r.sessionId);
+    const coldRecords = records.filter(
+      (r) => !liveIds.has(r.sessionId) && (!filter.cwd || r.cwd === filter.cwd),
+    );
+    const coldStats = await Promise.all(
+      coldRecords.map((r) => historyStatus(r.sessionId)),
+    );
+    for (let i = 0; i < coldRecords.length; i += 1) {
+      const r = coldRecords[i]!;
+      const hist = coldStats[i]!;
       const interactive = effectiveInteractive(r, hist.hasContent);
       if (!includeRow(interactive)) {
         continue;
@@ -2079,22 +2094,11 @@ export class SessionManager {
     sessionId: string,
     priority: number | undefined,
   ): Promise<void> {
-    await this.enqueueMetaWrite(sessionId, async () => {
-      const record = await this.store.read(sessionId);
-      if (!record) {
-        return;
-      }
-      const next: SessionRecord = {
-        ...record,
-        updatedAt: new Date().toISOString(),
-      };
-      if (priority === undefined) {
-        delete next.priority;
-      } else {
-        next.priority = priority;
-      }
-      await this.store.write(next);
-    });
+    if (priority === undefined) {
+      await this.mutateRecord(sessionId, {}, ["priority"]);
+    } else {
+      await this.mutateRecord(sessionId, { priority });
+    }
     this.invalidateListCache();
   }
 
@@ -2116,17 +2120,7 @@ export class SessionManager {
   // record's title in sync with what was broadcast to clients so a
   // daemon restart (and later resurrect) restores the same title.
   private async persistTitle(sessionId: string, title: string): Promise<void> {
-    await this.enqueueMetaWrite(sessionId, async () => {
-      const record = await this.store.read(sessionId);
-      if (!record) {
-        return;
-      }
-      await this.store.write({
-        ...record,
-        title,
-        updatedAt: new Date().toISOString(),
-      });
-    });
+    await this.mutateRecord(sessionId, { title });
   }
 
   // Persist a synopsis update from Session.setSynopsis. The synopsis and
@@ -2138,18 +2132,7 @@ export class SessionManager {
     synopsis: SessionSynopsis,
     summarizedThroughEntry: number,
   ): Promise<void> {
-    await this.enqueueMetaWrite(sessionId, async () => {
-      const record = await this.store.read(sessionId);
-      if (!record) {
-        return;
-      }
-      await this.store.write({
-        ...record,
-        synopsis,
-        summarizedThroughEntry,
-        updatedAt: new Date().toISOString(),
-      });
-    });
+    await this.mutateRecord(sessionId, { synopsis, summarizedThroughEntry });
   }
 
   // Persist an agent swap from /hydra agent. The on-disk record's
@@ -2161,18 +2144,7 @@ export class SessionManager {
     agentId: string,
     upstreamSessionId: string,
   ): Promise<void> {
-    await this.enqueueMetaWrite(sessionId, async () => {
-      const record = await this.store.read(sessionId);
-      if (!record) {
-        return;
-      }
-      await this.store.write({
-        ...record,
-        agentId,
-        upstreamSessionId,
-        updatedAt: new Date().toISOString(),
-      });
-    });
+    await this.mutateRecord(sessionId, { agentId, upstreamSessionId });
   }
 
   // Update one or more snapshot fields (model, mode, commands) in
@@ -2192,37 +2164,41 @@ export class SessionManager {
       cwd?: string;
     },
   ): Promise<void> {
+    const fields: Partial<SessionRecord> = {};
+    if (update.currentModel !== undefined) fields.currentModel = update.currentModel;
+    if (update.currentMode !== undefined) fields.currentMode = update.currentMode;
+    if (update.currentUsage !== undefined) fields.currentUsage = update.currentUsage;
+    if (update.agentCommands !== undefined) fields.agentCommands = update.agentCommands;
+    if (update.agentModes !== undefined) fields.agentModes = update.agentModes;
+    if (update.agentModels !== undefined) fields.agentModels = update.agentModels;
+    if (update.interactive !== undefined) fields.interactive = update.interactive;
+    if (update.cwd !== undefined) fields.cwd = update.cwd;
+    await this.mutateRecord(sessionId, fields);
+  }
+
+  // Read-modify-write a session's meta.json record under the per-session
+  // write queue. Spreads `fields` over the current record, bumps
+  // updatedAt, and deletes any keys named in `remove`. No-op if the
+  // record has gone away (race with deleteRecord).
+  private async mutateRecord(
+    sessionId: string,
+    fields: Partial<SessionRecord>,
+    remove: ReadonlyArray<keyof SessionRecord> = [],
+  ): Promise<void> {
     await this.enqueueMetaWrite(sessionId, async () => {
       const record = await this.store.read(sessionId);
       if (!record) {
         return;
       }
-      await this.store.write({
+      const next: SessionRecord = {
         ...record,
-        ...(update.currentModel !== undefined
-          ? { currentModel: update.currentModel }
-          : {}),
-        ...(update.currentMode !== undefined
-          ? { currentMode: update.currentMode }
-          : {}),
-        ...(update.currentUsage !== undefined
-          ? { currentUsage: update.currentUsage }
-          : {}),
-        ...(update.agentCommands !== undefined
-          ? { agentCommands: update.agentCommands }
-          : {}),
-        ...(update.agentModes !== undefined
-          ? { agentModes: update.agentModes }
-          : {}),
-        ...(update.agentModels !== undefined
-          ? { agentModels: update.agentModels }
-          : {}),
-        ...(update.interactive !== undefined
-          ? { interactive: update.interactive }
-          : {}),
-        ...(update.cwd !== undefined ? { cwd: update.cwd } : {}),
+        ...fields,
         updatedAt: new Date().toISOString(),
-      });
+      };
+      for (const key of remove) {
+        delete (next as Record<string, unknown>)[key as string];
+      }
+      await this.store.write(next);
     });
   }
 
@@ -2233,7 +2209,11 @@ export class SessionManager {
     task: () => Promise<void>,
   ): Promise<void> {
     const prev = this.metaWriteQueues.get(sessionId) ?? Promise.resolve();
-    const next = prev.then(task, task);
+    // Swallow the predecessor's error before chaining so `task` runs
+    // exactly once. The earlier `prev.then(task, task)` passed task as
+    // both fulfilled and rejected handler, which re-ran the work on a
+    // predecessor failure.
+    const next = prev.catch(() => undefined).then(task);
     const settled = next.catch(() => undefined);
     this.metaWriteQueues.set(sessionId, settled);
     void settled.finally(() => {
@@ -2519,54 +2499,73 @@ function buildSessionLoadMeta(
 // We try the common shapes in order and stop on the first non-empty
 // string. Anything we don't recognize returns undefined; the session
 // will pick the model up later if/when a current_model_update arrives.
-export function extractInitialModel(
+// Generic four-step search for an extractor: top-level direct fields,
+// the nested object (`models` / `modes`), each non-hydra `_meta`
+// namespace, then the matching `configOptions` entry. `fromObject` is
+// applied to the result root, the nested object, and each _meta value
+// in turn; the first non-empty hit wins. `fromConfig` is applied to
+// the configOption entry. Returns undefined when nothing matches.
+//
+// The four extractors below differ only in which keys they probe at
+// each layer, so they're written as small closure tables passed in.
+function searchInitial<T>(
   result: Record<string, unknown>,
-): string | undefined {
-  const direct =
-    asString(result.currentModelId) ??
-    asString(result.currentModel) ??
-    asString(result.modelId) ??
-    asString(result.model);
-  if (direct) {
+  spec: {
+    nestedKey: "models" | "modes";
+    configId: "model" | "mode";
+    fromObject: (obj: Record<string, unknown>) => T | undefined;
+    fromConfig: (entry: { currentValue?: unknown; options?: unknown }) => T | undefined;
+  },
+): T | undefined {
+  const direct = spec.fromObject(result);
+  if (direct !== undefined) {
     return direct;
   }
-  const models = result.models;
-  if (models && typeof models === "object" && !Array.isArray(models)) {
-    const m =
-      asString((models as Record<string, unknown>).currentModelId) ??
-      asString((models as Record<string, unknown>).currentModel);
-    if (m) {
-      return m;
+  const nested = result[spec.nestedKey];
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const v = spec.fromObject(nested as Record<string, unknown>);
+    if (v !== undefined) {
+      return v;
     }
   }
   const meta = result._meta;
   if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-    for (const [key, value] of Object.entries(
-      meta as Record<string, unknown>,
-    )) {
+    for (const [key, value] of Object.entries(meta as Record<string, unknown>)) {
       // Hydra's own _meta namespace is informational; skip it.
       if (key === "hydra-acp") {
         continue;
       }
       if (value && typeof value === "object" && !Array.isArray(value)) {
-        const m =
-          asString((value as Record<string, unknown>).modelId) ??
-          asString((value as Record<string, unknown>).model) ??
-          asString((value as Record<string, unknown>).currentModelId);
-        if (m) {
-          return m;
+        const v = spec.fromObject(value as Record<string, unknown>);
+        if (v !== undefined) {
+          return v;
         }
       }
     }
   }
-  const fromConfig = findConfigOptionEntry(result, "model");
-  if (fromConfig) {
-    const cv = asString(fromConfig.currentValue);
-    if (cv) {
-      return cv;
+  const entry = findConfigOptionEntry(result, spec.configId);
+  if (entry) {
+    const v = spec.fromConfig(entry);
+    if (v !== undefined) {
+      return v;
     }
   }
   return undefined;
+}
+
+export function extractInitialModel(
+  result: Record<string, unknown>,
+): string | undefined {
+  return searchInitial<string>(result, {
+    nestedKey: "models",
+    configId: "model",
+    fromObject: (o) =>
+      asString(o.currentModelId) ??
+      asString(o.currentModel) ??
+      asString(o.modelId) ??
+      asString(o.model),
+    fromConfig: (e) => asString(e.currentValue),
+  });
 }
 
 function asString(value: unknown): string | undefined {
@@ -2622,45 +2621,20 @@ function nonEmptyOrUndefined<T>(arr: T[]): T[] | undefined {
 export function extractInitialModels(
   result: Record<string, unknown>,
 ): AdvertisedModel[] {
-  const direct = parseModelsList(result.availableModels);
-  if (direct.length > 0) {
-    return direct;
-  }
-  const models = result.models;
-  if (models && typeof models === "object" && !Array.isArray(models)) {
-    const fromModelsObj = parseModelsList(
-      (models as Record<string, unknown>).availableModels,
-    );
-    if (fromModelsObj.length > 0) {
-      return fromModelsObj;
-    }
-  }
-  const meta = result._meta;
-  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-    for (const [key, value] of Object.entries(
-      meta as Record<string, unknown>,
-    )) {
-      if (key === "hydra-acp") {
-        continue;
-      }
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        const fromMeta = parseModelsList(
-          (value as Record<string, unknown>).availableModels,
-        );
-        if (fromMeta.length > 0) {
-          return fromMeta;
-        }
-      }
-    }
-  }
-  const fromConfig = findConfigOptionEntry(result, "model");
-  if (fromConfig) {
-    const parsed = parseModelsList(fromConfig.options);
-    if (parsed.length > 0) {
-      return parsed;
-    }
-  }
-  return [];
+  return (
+    searchInitial<AdvertisedModel[]>(result, {
+      nestedKey: "models",
+      configId: "model",
+      fromObject: (o) => {
+        const parsed = parseModelsList(o.availableModels);
+        return parsed.length > 0 ? parsed : undefined;
+      },
+      fromConfig: (e) => {
+        const parsed = parseModelsList(e.options);
+        return parsed.length > 0 ? parsed : undefined;
+      },
+    }) ?? []
+  );
 }
 
 // Pull an available-modes list from a session/new or session/load response.
@@ -2673,45 +2647,20 @@ export function extractInitialModels(
 export function extractInitialModes(
   result: Record<string, unknown>,
 ): AdvertisedMode[] {
-  const direct = parseModesList(result.availableModes);
-  if (direct.length > 0) {
-    return direct;
-  }
-  const modes = result.modes;
-  if (modes && typeof modes === "object" && !Array.isArray(modes)) {
-    const fromModesObj = parseModesList(
-      (modes as Record<string, unknown>).availableModes,
-    );
-    if (fromModesObj.length > 0) {
-      return fromModesObj;
-    }
-  }
-  const meta = result._meta;
-  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-    for (const [key, value] of Object.entries(
-      meta as Record<string, unknown>,
-    )) {
-      if (key === "hydra-acp") {
-        continue;
-      }
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        const fromMeta = parseModesList(
-          (value as Record<string, unknown>).availableModes,
-        );
-        if (fromMeta.length > 0) {
-          return fromMeta;
-        }
-      }
-    }
-  }
-  const fromConfig = findConfigOptionEntry(result, "mode");
-  if (fromConfig) {
-    const parsed = parseModesList(fromConfig.options);
-    if (parsed.length > 0) {
-      return parsed;
-    }
-  }
-  return [];
+  return (
+    searchInitial<AdvertisedMode[]>(result, {
+      nestedKey: "modes",
+      configId: "mode",
+      fromObject: (o) => {
+        const parsed = parseModesList(o.availableModes);
+        return parsed.length > 0 ? parsed : undefined;
+      },
+      fromConfig: (e) => {
+        const parsed = parseModesList(e.options);
+        return parsed.length > 0 ? parsed : undefined;
+      },
+    }) ?? []
+  );
 }
 
 // Pull a current-mode id from a session/new or session/load response.
@@ -2719,50 +2668,16 @@ export function extractInitialModes(
 export function extractInitialCurrentMode(
   result: Record<string, unknown>,
 ): string | undefined {
-  const direct =
-    asString(result.currentModeId) ??
-    asString(result.currentMode) ??
-    asString(result.modeId) ??
-    asString(result.mode);
-  if (direct) {
-    return direct;
-  }
-  const modes = result.modes;
-  if (modes && typeof modes === "object" && !Array.isArray(modes)) {
-    const m =
-      asString((modes as Record<string, unknown>).currentModeId) ??
-      asString((modes as Record<string, unknown>).currentMode);
-    if (m) {
-      return m;
-    }
-  }
-  const meta = result._meta;
-  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-    for (const [key, value] of Object.entries(
-      meta as Record<string, unknown>,
-    )) {
-      if (key === "hydra-acp") {
-        continue;
-      }
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        const m =
-          asString((value as Record<string, unknown>).currentModeId) ??
-          asString((value as Record<string, unknown>).currentMode) ??
-          asString((value as Record<string, unknown>).modeId);
-        if (m) {
-          return m;
-        }
-      }
-    }
-  }
-  const fromConfig = findConfigOptionEntry(result, "mode");
-  if (fromConfig) {
-    const cv = asString(fromConfig.currentValue);
-    if (cv) {
-      return cv;
-    }
-  }
-  return undefined;
+  return searchInitial<string>(result, {
+    nestedKey: "modes",
+    configId: "mode",
+    fromObject: (o) =>
+      asString(o.currentModeId) ??
+      asString(o.currentMode) ??
+      asString(o.modeId) ??
+      asString(o.mode),
+    fromConfig: (e) => asString(e.currentValue),
+  });
 }
 
 // Push a persisted mode back to a freshly loaded/spawned agent so a

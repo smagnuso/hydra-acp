@@ -610,6 +610,11 @@ export function registerSessionRoutes(
     let snapshot: ReadonlyArray<unknown> | undefined;
     let unsubscribe: (() => void) | undefined;
     let snapshotDone = false;
+    // Bound the bridge buffer so a chatty session during the snapshot
+    // read window can't grow it unboundedly. Drop oldest on overflow —
+    // those entries should also appear in the snapshot most of the time
+    // (we de-dupe by recordedAt below).
+    const PENDING_MAX = 10_000;
     const pending: unknown[] = [];
     if (live) {
       if (follow) {
@@ -621,10 +626,18 @@ export function registerSessionRoutes(
             reply.raw.write(JSON.stringify(entry) + "\n");
           } else {
             pending.push(entry);
+            if (pending.length > PENDING_MAX) {
+              pending.shift();
+            }
           }
         });
       }
-      snapshot = await live.getHistorySnapshot();
+      try {
+        snapshot = await live.getHistorySnapshot();
+      } catch (err) {
+        unsubscribe?.();
+        throw err;
+      }
     } else {
       const cold = await manager.getHistory(id);
       if (cold === undefined) {

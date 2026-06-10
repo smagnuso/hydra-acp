@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
+import { daemonFetch, formatRelative } from "./_shared.js";
 import { resolveLocalTarget } from "../../core/remote-target.js";
 import { formatHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
 import { stripHydraSessionPrefix } from "../../core/session.js";
@@ -32,24 +33,16 @@ export async function runSessionsList(
   } = {},
 ): Promise<void> {
   const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const url = new URL(`${baseUrl}/v1/sessions`);
   // `--all` means "show everything in scope" — it lifts the cold-recency
   // cap (below) AND drops the non-interactive filter. `--include-non-
   // interactive` stays as the narrower knob (surface ancillary rows but
   // still respect the cold cap).
-  if (opts.includeNonInteractive || opts.all) {
-    url.searchParams.set("includeNonInteractive", "true");
-  }
-  const response = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${serviceToken}` },
-  });
-  if (!response.ok) {
-    process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
-    process.exit(1);
-  }
-  const body = (await response.json()) as {
+  const qs =
+    opts.includeNonInteractive || opts.all
+      ? "?includeNonInteractive=true"
+      : "";
+  const res = await daemonFetch(`/v1/sessions${qs}`, { expectStatus: 200 });
+  const body = res.body as {
     sessions: Array<{
       sessionId: string;
       upstreamSessionId?: string;
@@ -166,15 +159,9 @@ export async function runSessionsKill(id: string | undefined): Promise<void> {
     process.stderr.write("Usage: hydra-acp sessions kill <session-id>\n");
     process.exit(2);
   }
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetch(`${baseUrl}/v1/sessions/${id}/kill`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${serviceToken}` },
-  });
-  if (!response.ok && response.status !== 204) {
-    process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
+  const res = await daemonFetch(`/v1/sessions/${id}/kill`, { method: "POST" });
+  if (!res.ok && res.status !== 204) {
+    process.stderr.write(`Daemon returned HTTP ${res.status}\n`);
     process.exit(1);
   }
   process.stdout.write(`Killed ${id}\n`);
@@ -185,15 +172,9 @@ export async function runSessionsRemove(id: string | undefined): Promise<void> {
     process.stderr.write("Usage: hydra-acp sessions remove <session-id>\n");
     process.exit(2);
   }
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetch(`${baseUrl}/v1/sessions/${id}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${serviceToken}` },
-  });
-  if (!response.ok && response.status !== 204) {
-    process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
+  const res = await daemonFetch(`/v1/sessions/${id}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 204) {
+    process.stderr.write(`Daemon returned HTTP ${res.status}\n`);
     process.exit(1);
   }
   process.stdout.write(`Removed ${id}\n`);
@@ -216,13 +197,6 @@ export async function runSessionsCollect(opts: {
   // promoted to a real conversation.
   keepUndecided?: boolean;
 }): Promise<void> {
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(
-    config.daemon.host,
-    config.daemon.port,
-    !!config.daemon.tls,
-  );
   // Default to 0 (collect everything that matches the interactivity
   // filter, regardless of age) when --max-age-days isn't passed. The
   // CLI is interactive — the user typed `sessions collect` because they
@@ -237,19 +211,12 @@ export async function runSessionsCollect(opts: {
     body.limit = opts.limit;
   }
   body.selection = opts.keepUndecided ? "explicit" : "unpromoted";
-  const response = await fetch(`${baseUrl}/v1/sessions/collect`, {
+  const res = await daemonFetch("/v1/sessions/collect", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${serviceToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
+    body,
+    expectStatus: 200,
   });
-  if (!response.ok) {
-    process.stderr.write(`Daemon returned HTTP ${response.status}\n`);
-    process.exit(1);
-  }
-  const result = (await response.json()) as {
+  const result = res.body as {
     considered: number;
     deleted: number;
     failed: number;
@@ -270,7 +237,7 @@ export async function runSessionsCollect(opts: {
   }
   const ageNote =
     result.oldestLastUsedMs !== undefined
-      ? ` (oldest: ${formatAgo(Date.now() - result.oldestLastUsedMs)} ago)`
+      ? ` (oldest: ${formatRelative(result.oldestLastUsedMs)})`
       : "";
   process.stdout.write(
     `Collected ${result.deleted} of ${result.considered} ${label} session(s)${ageNote}.\n`,
@@ -283,19 +250,6 @@ export async function runSessionsCollect(opts: {
       `  ${result.deferred} deferred — re-run \`hydra sessions collect\` to drain.\n`,
     );
   }
-}
-
-function formatAgo(ms: number): string {
-  const days = ms / (24 * 60 * 60 * 1000);
-  if (days >= 1) {
-    return `${days.toFixed(days >= 10 ? 0 : 1)}d`;
-  }
-  const hours = ms / (60 * 60 * 1000);
-  if (hours >= 1) {
-    return `${hours.toFixed(hours >= 10 ? 0 : 1)}h`;
-  }
-  const minutes = ms / (60 * 1000);
-  return `${minutes.toFixed(0)}m`;
 }
 
 export async function runSessionsExport(
@@ -476,36 +430,26 @@ export async function runSessionsImport(
     printBundleInfo(bundle, inspectConfig.tui.cwdColumnMaxWidth);
     return;
   }
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  const response = await fetch(`${baseUrl}/v1/sessions/import`, {
+  const res = await daemonFetch("/v1/sessions/import", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${serviceToken}`,
-    },
-    body: JSON.stringify({
+    body: {
       bundle,
       replace: opts.replace === true,
       ...(cwdOverride !== undefined ? { cwd: cwdOverride } : {}),
-    }),
+    },
   });
-  if (response.status === 409) {
-    const detail = (await response.json().catch(() => ({}))) as {
-      existingSessionId?: string;
-    };
+  if (res.status === 409) {
+    const detail = (res.body ?? {}) as { existingSessionId?: string };
     process.stderr.write(
       `Bundle already imported as ${detail.existingSessionId ?? "unknown"}. Use --replace to overwrite.\n`,
     );
     process.exit(1);
   }
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    process.stderr.write(`Daemon returned HTTP ${response.status}: ${text}\n`);
+  if (!res.ok) {
+    process.stderr.write(`Daemon returned HTTP ${res.status}\n`);
     process.exit(1);
   }
-  const result = (await response.json()) as {
+  const result = res.body as {
     sessionId: string;
     importedFromSessionId: string;
     replaced: boolean;

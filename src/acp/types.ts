@@ -24,7 +24,11 @@ export interface JsonRpcNotification {
 
 export interface JsonRpcResponse {
   jsonrpc: "2.0";
-  id: JsonRpcId;
+  // Per JSON-RPC 2.0, `id` MUST be null when a server-side error makes
+  // the request id undeterminable (e.g. a parse error on the frame
+  // itself). The framing layers synthesize such responses with id=null;
+  // peer-correlated responses use the same id as the request.
+  id: JsonRpcId | null;
   result?: unknown;
   error?: JsonRpcError;
 }

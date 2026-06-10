@@ -13,6 +13,17 @@ import type { MessageStream } from "./framing.js";
 export type RequestHandler = (params: unknown, method: string) => Promise<unknown>;
 export type NotificationHandler = (params: unknown, method: string) => void;
 
+// Thrown by request()/requestWithId() when the connection has already
+// been torn down. Distinguished from a generic Error so callers can
+// branch on the closed state without string-matching the message.
+export class ConnectionClosedError extends Error {
+  readonly code = "ERR_CONNECTION_CLOSED" as const;
+  constructor(message = "connection is closed") {
+    super(message);
+    this.name = "ConnectionClosedError";
+  }
+}
+
 interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
@@ -91,6 +102,10 @@ export class JsonRpcConnection {
     this.closeHandlers.push(handler);
   }
 
+  isClosed(): boolean {
+    return this.closed;
+  }
+
   // Subscribe to error frames that can't be matched to a pending request.
   onOrphanError(
     handler: (error: { code?: number; message: string; data?: unknown }) => void,
@@ -110,10 +125,10 @@ export class JsonRpcConnection {
     params?: unknown,
   ): { id: JsonRpcId; response: Promise<T> } {
     if (this.closed) {
-      return {
-        id: "",
-        response: Promise.reject(new Error("connection is closed")),
-      };
+      // Synchronously throw — returning a sentinel id (`""` or `0`) would
+      // collide with real peer-assigned ids on responses. Callers that
+      // need fire-and-forget should catch this or check beforehand.
+      throw new ConnectionClosedError();
     }
     const id = nanoid();
     const message: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
@@ -220,7 +235,10 @@ export class JsonRpcConnection {
   }
 
   private handleResponse(res: JsonRpcResponse): void {
-    const pending = this.pending.get(res.id);
+    // id=null indicates a server-synthesized parse-error frame (per
+    // JSON-RPC 2.0). It can't correlate to anything we sent; route
+    // through the orphan-error path so it isn't silently dropped.
+    const pending = res.id === null ? undefined : this.pending.get(res.id);
     if (!pending) {
       // Uncorrelated frame. If it's an error, surface it to orphan-error
       // observers rather than dropping silently — this is how a reply to
@@ -240,7 +258,7 @@ export class JsonRpcConnection {
       }
       return;
     }
-    this.pending.delete(res.id);
+    this.pending.delete(res.id as JsonRpcId);
     if (res.error) {
       const err = new Error(res.error.message) as Error & { code?: number; data?: unknown };
       err.code = res.error.code;

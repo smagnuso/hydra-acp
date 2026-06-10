@@ -43,4 +43,17 @@ export class AuthRateLimiter {
   recordSuccess(ip: string): void {
     this.entries.delete(ip);
   }
+
+  // Drop entries whose window has expired. The recordSuccess path only
+  // erases for the IP that just authenticated, so without a periodic
+  // sweep any IP that ever hit a failure and never came back would
+  // linger forever. Callers wire this on a setInterval in server.ts.
+  sweepExpired(): void {
+    const now = Date.now();
+    for (const [ip, e] of this.entries) {
+      if (now - e.windowStart > this.windowMs) {
+        this.entries.delete(ip);
+      }
+    }
+  }
 }

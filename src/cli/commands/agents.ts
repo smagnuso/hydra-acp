@@ -1,4 +1,3 @@
-import * as fsp from "node:fs/promises";
 import {
   loadConfig,
   setDefaultAgent,
@@ -8,10 +7,14 @@ import {
   setRegistryPinned,
   type LocalAgentConfig,
 } from "../../core/config.js";
-import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
 import { runLogTail } from "./log-tail.js";
-import { httpBase } from "./sessions.js";
+import {
+  daemonFetch,
+  formatRelative,
+  parseAddFlags,
+  readRawConfig,
+} from "./_shared.js";
 
 interface AgentSummary {
   id: string;
@@ -24,30 +27,12 @@ interface AgentSummary {
 }
 
 export async function runAgentsList(): Promise<void> {
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  let body: {
+  const res = await daemonFetch("/v1/agents", { expectStatus: 200 });
+  const body = res.body as {
     version: string;
     fetchedAt?: number;
     agents: AgentSummary[];
   };
-  try {
-    const r = await fetch(`${baseUrl}/v1/agents`, {
-      headers: { Authorization: `Bearer ${serviceToken}` },
-    });
-    if (!r.ok) {
-      process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
-      process.exit(1);
-    }
-    body = (await r.json()) as typeof body;
-  } catch (err) {
-    process.stderr.write(
-      `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
-    );
-    process.exit(1);
-    return;
-  }
 
   if (body.agents.length === 0) {
     process.stdout.write("No agents in registry.\n");
@@ -96,35 +81,11 @@ export async function runAgentsList(): Promise<void> {
   }
   const syncSuffix =
     body.fetchedAt !== undefined
-      ? ` (synced ${formatAge(Date.now() - body.fetchedAt)} ago)`
+      ? ` (synced ${formatRelative(body.fetchedAt)})`
       : "";
   process.stdout.write(
     `\nRegistry version: ${body.version}${syncSuffix}\n`,
   );
-}
-
-// Round-and-bucket: "just now" for <60s, then a single
-// minute/hour/day unit. Mirrors how `git log --relative-date`
-// summarizes age — precise enough to spot a stale cache, terse
-// enough to fit on the trailer line.
-export function formatAge(ms: number): string {
-  if (ms < 0) {
-    return "just now";
-  }
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) {
-    return "just now";
-  }
-  const min = Math.floor(sec / 60);
-  if (min < 60) {
-    return `${min} minute${min === 1 ? "" : "s"}`;
-  }
-  const hour = Math.floor(min / 60);
-  if (hour < 24) {
-    return `${hour} hour${hour === 1 ? "" : "s"}`;
-  }
-  const day = Math.floor(hour / 24);
-  return `${day} day${day === 1 ? "" : "s"}`;
 }
 
 // Validate an explicit --agent id against the daemon's registry before a
@@ -140,17 +101,13 @@ export async function assertKnownAgent(agentId: string): Promise<void> {
   if (config.agents[agentId] !== undefined) {
     return;
   }
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   let known: string[];
   try {
-    const r = await fetch(`${baseUrl}/v1/agents`, {
-      headers: { Authorization: `Bearer ${serviceToken}` },
-    });
-    if (!r.ok) {
+    const res = await daemonFetch("/v1/agents", { rethrowNetworkError: true });
+    if (!res.ok) {
       return;
     }
-    const body = (await r.json()) as { agents: AgentSummary[] };
+    const body = res.body as { agents: AgentSummary[] };
     known = body.agents.map((a) => a.id);
   } catch {
     return;
@@ -181,11 +138,16 @@ export async function runAgentsInstall(
     process.exit(2);
     return;
   }
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
   process.stdout.write(`Installing ${agentId}…\n`);
-  let body: {
+  const res = await daemonFetch(
+    `/v1/agents/${encodeURIComponent(agentId)}/install`,
+    {
+      method: "POST",
+      expectStatus: 200,
+      errorPrefix: `hydra agent install ${agentId}:`,
+    },
+  );
+  const body = res.body as {
     agentId: string;
     version: string;
     distribution: string;
@@ -193,35 +155,6 @@ export async function runAgentsInstall(
     command?: string;
     message?: string;
   };
-  try {
-    const r = await fetch(
-      `${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/install`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${serviceToken}` },
-      },
-    );
-    if (!r.ok) {
-      let detail = `HTTP ${r.status}`;
-      try {
-        const j = (await r.json()) as { error?: string };
-        if (j.error) {
-          detail = j.error;
-        }
-      } catch {
-        void 0;
-      }
-      process.stderr.write(`hydra agent install ${agentId}: ${detail}\n`);
-      process.exit(1);
-    }
-    body = (await r.json()) as typeof body;
-  } catch (err) {
-    process.stderr.write(
-      `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
-    );
-    process.exit(1);
-    return;
-  }
 
   if (!body.installed) {
     process.stdout.write(
@@ -243,36 +176,15 @@ export async function runAgentsSync(agentId: string | undefined): Promise<void> 
     process.exit(2);
     return;
   }
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  let body: { synced: SyncedSession[]; skipped: number };
-  try {
-    const r = await fetch(`${baseUrl}/v1/agents/${encodeURIComponent(agentId)}/sync`, {
+  const res = await daemonFetch(
+    `/v1/agents/${encodeURIComponent(agentId)}/sync`,
+    {
       method: "POST",
-      headers: { Authorization: `Bearer ${serviceToken}` },
-    });
-    if (!r.ok) {
-      let detail = `HTTP ${r.status}`;
-      try {
-        const j = (await r.json()) as { error?: string };
-        if (j.error) {
-          detail = j.error;
-        }
-      } catch {
-        void 0;
-      }
-      process.stderr.write(`hydra agent sync ${agentId}: ${detail}\n`);
-      process.exit(1);
-    }
-    body = (await r.json()) as { synced: SyncedSession[]; skipped: number };
-  } catch (err) {
-    process.stderr.write(
-      `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
-    );
-    process.exit(1);
-    return;
-  }
+      expectStatus: 200,
+      errorPrefix: `hydra agent sync ${agentId}:`,
+    },
+  );
+  const body = res.body as { synced: SyncedSession[]; skipped: number };
 
   if (body.synced.length === 0) {
     process.stdout.write(
@@ -329,11 +241,9 @@ export async function runAgentsSet(
   modelId: string | undefined,
 ): Promise<void> {
   const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
 
   if (!agentId) {
-    const daemonView = await fetchDaemonAgentDefaults(baseUrl, serviceToken);
+    const daemonView = await fetchDaemonAgentDefaults();
     const view = daemonView ?? readAgentDefaults(await readRawConfig());
     process.stdout.write(`${formatDefaultLine(view)}\n`);
     return;
@@ -341,11 +251,9 @@ export async function runAgentsSet(
 
   let known: string[] | undefined;
   try {
-    const r = await fetch(`${baseUrl}/v1/agents`, {
-      headers: { Authorization: `Bearer ${serviceToken}` },
-    });
-    if (r.ok) {
-      const body = (await r.json()) as { agents: AgentSummary[] };
+    const res = await daemonFetch("/v1/agents", { rethrowNetworkError: true });
+    if (res.ok) {
+      const body = res.body as { agents: AgentSummary[] };
       known = body.agents.map((a) => a.id);
     }
   } catch {
@@ -382,7 +290,7 @@ export async function runAgentsSet(
   }
   process.stdout.write(`${formatDefaultLine(disk)}\n`);
 
-  const daemonView = await fetchDaemonAgentDefaults(baseUrl, serviceToken);
+  const daemonView = await fetchDaemonAgentDefaults();
   if (daemonView === undefined) {
     return;
   }
@@ -419,54 +327,26 @@ function readAgentDefaults(
     : { agent };
 }
 
-async function fetchDaemonAgentDefaults(
-  baseUrl: string,
-  serviceToken: string,
-): Promise<{ agent: string; model?: string } | undefined> {
+async function fetchDaemonAgentDefaults(): Promise<
+  { agent: string; model?: string } | undefined
+> {
   try {
-    const r = await fetch(`${baseUrl}/v1/config`, {
-      headers: { Authorization: `Bearer ${serviceToken}` },
-    });
-    if (!r.ok) {
+    const res = await daemonFetch("/v1/config", { rethrowNetworkError: true });
+    if (!res.ok) {
       return undefined;
     }
-    const body = (await r.json()) as {
-      defaultAgent?: unknown;
-      defaultModels?: unknown;
-    };
-    return readAgentDefaults(body as Record<string, unknown>);
+    return readAgentDefaults(res.body as Record<string, unknown>);
   } catch {
     return undefined;
   }
 }
 
-async function readRawConfig(): Promise<Record<string, unknown>> {
-  const raw = await fsp.readFile(paths.config(), "utf8");
-  return JSON.parse(raw) as Record<string, unknown>;
-}
-
 export async function runAgentsRefresh(): Promise<void> {
-  const config = await loadConfig();
-  const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
-  let body: { version: string; agentCount: number };
-  try {
-    const r = await fetch(`${baseUrl}/v1/registry/refresh`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${serviceToken}` },
-    });
-    if (!r.ok) {
-      process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
-      process.exit(1);
-    }
-    body = (await r.json()) as { version: string; agentCount: number };
-  } catch (err) {
-    process.stderr.write(
-      `Could not reach daemon at ${baseUrl}: ${(err as Error).message}\n`,
-    );
-    process.exit(1);
-    return;
-  }
+  const res = await daemonFetch("/v1/registry/refresh", {
+    method: "POST",
+    expectStatus: 200,
+  });
+  const body = res.body as { version: string; agentCount: number };
   process.stdout.write(
     `Refreshed registry: ${body.agentCount} agents (version ${body.version})\n`,
   );
@@ -518,21 +398,22 @@ export async function runAgentsAdd(
     process.exit(2);
     return;
   }
-  const { command, args, env } = parseAgentAddFlags(argv);
+  const parsed = parseAddFlags(argv, "agent");
+  const command = parsed.command as string | undefined;
   const def: LocalAgentConfig = {};
   if (command !== undefined) {
     def.command = command;
   }
-  if (args.length > 0) {
-    def.args = args;
+  if (parsed.args.length > 0) {
+    def.args = parsed.args;
   }
-  if (Object.keys(env).length > 0) {
-    def.env = env;
+  if (Object.keys(parsed.env).length > 0) {
+    def.env = parsed.env;
   }
   await setLocalAgent(agentId, def);
   const shown = command ?? `${agentId} (default — resolved off PATH)`;
   process.stdout.write(
-    `Local agent ${agentId} → ${shown}${args.length > 0 ? " " + args.join(" ") : ""}\n`,
+    `Local agent ${agentId} → ${shown}${parsed.args.length > 0 ? " " + parsed.args.join(" ") : ""}\n`,
   );
   process.stdout.write(
     "Restart with `hydra-acp daemon restart` to apply to new sessions.\n",
@@ -551,59 +432,6 @@ export async function runAgentsRemove(agentId: string | undefined): Promise<void
   process.stdout.write(
     "Restart with `hydra-acp daemon restart` to apply to new sessions.\n",
   );
-}
-
-function parseAgentAddFlags(argv: string[]): {
-  command: string | undefined;
-  args: string[];
-  env: Record<string, string>;
-} {
-  let command: string | undefined;
-  let args: string[] = [];
-  const env: Record<string, string> = {};
-  let i = 0;
-  while (i < argv.length) {
-    const tok = argv[i];
-    if (tok === "--command") {
-      const v = argv[i + 1];
-      if (v === undefined) {
-        process.stderr.write("--command requires a value\n");
-        process.exit(2);
-      }
-      command = v;
-      i += 2;
-      continue;
-    }
-    if (tok === "--args") {
-      const v = argv[i + 1];
-      if (v === undefined) {
-        process.stderr.write("--args requires a value\n");
-        process.exit(2);
-      }
-      args = v.split(",").filter((s) => s.length > 0);
-      i += 2;
-      continue;
-    }
-    if (tok === "--env") {
-      const v = argv[i + 1];
-      if (v === undefined) {
-        process.stderr.write("--env requires KEY=VALUE\n");
-        process.exit(2);
-      }
-      const eq = v.indexOf("=");
-      if (eq <= 0) {
-        process.stderr.write(`Invalid --env value '${v}': expected KEY=VALUE\n`);
-        process.exit(2);
-      }
-      env[v.slice(0, eq)] = v.slice(eq + 1);
-      i += 2;
-      continue;
-    }
-    process.stderr.write(`Unknown flag: ${tok}\n`);
-    process.exit(2);
-    return { command: undefined, args: [], env: {} };
-  }
-  return { command, args, env };
 }
 
 // `hydra registry pin` / `hydra registry unpin` — freeze (or unfreeze)

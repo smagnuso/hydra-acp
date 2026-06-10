@@ -38,6 +38,12 @@ import {
   type ProcessTokenRegistry,
   type ProcessIdentity,
 } from "./auth.js";
+import {
+  AWAIT_CHILD_DEFAULT_TIMEOUT_MS,
+  AWAIT_CHILD_MAX_TIMEOUT_MS,
+  REPLAY_DRIP_MAX_GAP_MS,
+  REPLAY_FLUSH_EVERY,
+} from "./constants.js";
 import type { TransformerManager, TransformerRef } from "../core/transformer-manager.js";
 import type {
   ExtensionCommandRegistry,
@@ -110,6 +116,42 @@ export interface AcpWsDeps {
   registry?: Registry;
 }
 
+// JSON-RPC error helper: synthesizes an Error with the `code` (and
+// optional `data`) properties the connection layer reads off the
+// thrown value when serializing the error frame.
+function rpcError(
+  code: number,
+  message: string,
+  data?: unknown,
+): Error & { code: number; data?: unknown } {
+  const err = new Error(message) as Error & { code: number; data?: unknown };
+  err.code = code;
+  if (data !== undefined) {
+    err.data = data;
+  }
+  return err;
+}
+
+// Resolve a live Session by id, or throw SessionNotFound. Used by the
+// many JSON-RPC handlers whose first step is "look up the session,
+// reject if it isn't live" — does NOT consult disk, so handlers that
+// want to resurrect a cold session must still call manager.get/
+// loadFromDisk themselves.
+function requireLiveSession(
+  manager: { get(sessionId: string): Session | undefined },
+  sessionId: string,
+  message?: string,
+): Session {
+  const session = manager.get(sessionId);
+  if (!session) {
+    throw rpcError(
+      JsonRpcErrorCodes.SessionNotFound,
+      message ?? `session ${sessionId} not found`,
+    );
+  }
+  return session;
+}
+
 export function registerAcpWsEndpoint(
   app: FastifyInstance,
   deps: AcpWsDeps,
@@ -159,11 +201,10 @@ export function registerAcpWsEndpoint(
     const denyIfReadonly = (sessionId: string, method: string): void => {
       const att = state.attached.get(sessionId);
       if (att?.readonly) {
-        const err = new Error(
+        throw rpcError(
+          JsonRpcErrorCodes.PermissionDenied,
           `${method} not permitted on a read-only attachment`,
-        ) as Error & { code: number };
-        err.code = JsonRpcErrorCodes.PermissionDenied;
-        throw err;
+        );
       }
     };
 
@@ -369,13 +410,10 @@ export function registerAcpWsEndpoint(
         const route = params.route;
 
         if (!sessionId || !method) {
-          throw Object.assign(new Error("emit_message requires sessionId and method"), { code: -32602 });
+          throw rpcError(-32602, "emit_message requires sessionId and method");
         }
 
-        const session = deps.manager.get(sessionId);
-        if (!session) {
-          throw Object.assign(new Error(`session ${sessionId} not found`), { code: JsonRpcErrorCodes.SessionNotFound });
-        }
+        const session = requireLiveSession(deps.manager, sessionId);
 
         // respondsTo discharges an outstanding processing claim regardless of
         // route. The result is delivered to the original requester.
@@ -401,7 +439,7 @@ export function registerAcpWsEndpoint(
           return { ok: true, response };
         }
 
-        throw Object.assign(new Error(`unsupported route: ${JSON.stringify(route)}`), { code: -32602 });
+        throw rpcError(-32602, `unsupported route: ${JSON.stringify(route)}`);
       });
 
       // Broadcast a session/request_permission to a session's attached
@@ -422,17 +460,12 @@ export function registerAcpWsEndpoint(
         const params = (raw ?? {}) as { sessionId?: unknown };
         const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
         if (!sessionId) {
-          throw Object.assign(
-            new Error("hydra-acp/session/request_permission requires sessionId"),
-            { code: -32602 },
+          throw rpcError(
+            -32602,
+            "hydra-acp/session/request_permission requires sessionId",
           );
         }
-        const session = deps.manager.get(sessionId);
-        if (!session) {
-          throw Object.assign(new Error(`session ${sessionId} not found`), {
-            code: JsonRpcErrorCodes.SessionNotFound,
-          });
-        }
+        const session = requireLiveSession(deps.manager, sessionId);
         // Delegate to the same broadcast-and-await logic the agent's
         // own session/request_permission goes through.
         return session.requestPermissionFromClients(params);
@@ -506,11 +539,9 @@ export function registerAcpWsEndpoint(
         }
 
         if (!cwd) {
-          throw Object.assign(
-            new Error(
-              "child_session/spawn requires cwd (or a parentSessionId pointing at a live session whose cwd we can inherit)",
-            ),
-            { code: -32602 },
+          throw rpcError(
+            -32602,
+            "child_session/spawn requires cwd (or a parentSessionId pointing at a live session whose cwd we can inherit)",
           );
         }
 
@@ -549,9 +580,9 @@ export function registerAcpWsEndpoint(
           agentId?: unknown;
         };
         if (typeof params.sessionId !== "string") {
-          throw Object.assign(
-            new Error("fork_session requires sessionId"),
-            { code: JsonRpcErrorCodes.InvalidParams },
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidParams,
+            "fork_session requires sessionId",
           );
         }
         const forkAt = typeof params.forkAt === "string" ? params.forkAt : undefined;
@@ -573,9 +604,9 @@ export function registerAcpWsEndpoint(
       connection.onRequest("hydra-acp/session/delete", async (raw) => {
         const params = (raw ?? {}) as { sessionId?: unknown };
         if (typeof params.sessionId !== "string") {
-          throw Object.assign(
-            new Error("hydra-acp/session/delete requires sessionId"),
-            { code: JsonRpcErrorCodes.InvalidParams },
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidParams,
+            "hydra-acp/session/delete requires sessionId",
           );
         }
         const id =
@@ -588,9 +619,9 @@ export function registerAcpWsEndpoint(
         }
         const removed = await deps.manager.deleteRecord(id);
         if (!removed) {
-          throw Object.assign(
-            new Error(`session ${id} not found`),
-            { code: JsonRpcErrorCodes.SessionNotFound },
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
+            `session ${id} not found`,
           );
         }
         return { deleted: true, sessionId: id };
@@ -607,33 +638,63 @@ export function registerAcpWsEndpoint(
           : undefined;
         const until = params.until === "idle" ? "idle" : "turn_complete";
         const timeoutMs = typeof params.timeoutMs === "number"
-          ? Math.min(params.timeoutMs, 30 * 60_000)
-          : 5 * 60_000;
+          ? Math.min(params.timeoutMs, AWAIT_CHILD_MAX_TIMEOUT_MS)
+          : AWAIT_CHILD_DEFAULT_TIMEOUT_MS;
 
         if (!childSessionId) {
-          throw Object.assign(new Error("await_child requires childSessionId"), { code: -32602 });
+          throw rpcError(-32602, "await_child requires childSessionId");
         }
-        const child = deps.manager.get(childSessionId);
-        if (!child) {
-          throw Object.assign(
-            new Error(`child session ${childSessionId} not found`),
-            { code: JsonRpcErrorCodes.SessionNotFound },
-          );
-        }
+        const child = requireLiveSession(
+          deps.manager,
+          childSessionId,
+          `child session ${childSessionId} not found`,
+        );
 
         return new Promise((resolve) => {
+          // Cap collected entries so a chatty child can't balloon the
+          // response. Approximate the 1 MB serialized bound by tracking
+          // running JSON length; drop oldest when either bound is hit
+          // and flag truncated:true.
+          const MAX_ENTRIES = 1000;
+          const MAX_BYTES = 1 * 1024 * 1024;
           const entries: unknown[] = [];
-          let unsubscribe: (() => void) | undefined;
+          const sizes: number[] = [];
+          let totalBytes = 0;
+          let truncated = false;
+          let unsubscribeBroadcast: (() => void) | undefined;
+          let unsubscribeClose: (() => void) | undefined;
+          let resolved = false;
 
           const finish = (): void => {
+            if (resolved) {
+              return;
+            }
+            resolved = true;
             clearTimeout(timer);
-            unsubscribe?.();
-            resolve({ entries });
+            unsubscribeBroadcast?.();
+            unsubscribeClose?.();
+            resolve(truncated ? { entries, truncated: true } : { entries });
           };
 
           // Collect recordable updates; resolve when the stop condition fires.
-          unsubscribe = child.onBroadcast((entry) => {
+          unsubscribeBroadcast = child.onBroadcast((entry) => {
+            let entrySize = 0;
+            try {
+              entrySize = JSON.stringify(entry).length;
+            } catch {
+              entrySize = 0;
+            }
             entries.push(entry);
+            sizes.push(entrySize);
+            totalBytes += entrySize;
+            while (
+              entries.length > 0 &&
+              (entries.length > MAX_ENTRIES || totalBytes > MAX_BYTES)
+            ) {
+              entries.shift();
+              totalBytes -= sizes.shift() ?? 0;
+              truncated = true;
+            }
             if (until === "turn_complete") {
               const upd = (entry.params as { update?: { sessionUpdate?: string } } | undefined)
                 ?.update;
@@ -653,7 +714,7 @@ export function registerAcpWsEndpoint(
           }
 
           // Also resolve if the child session closes.
-          child.onClose(() => finish());
+          unsubscribeClose = child.onClose(() => finish());
         });
       });
 
@@ -663,7 +724,7 @@ export function registerAcpWsEndpoint(
           ? params.childSessionId
           : undefined;
         if (!childSessionId) {
-          throw Object.assign(new Error("close_child_session requires childSessionId"), { code: -32602 });
+          throw rpcError(-32602, "close_child_session requires childSessionId");
         }
         const child = deps.manager.get(childSessionId);
         if (child) {
@@ -700,9 +761,9 @@ export function registerAcpWsEndpoint(
     connection.onRequest("hydra-acp/session/tool_content", async (raw) => {
       const params = (raw ?? {}) as { sessionId?: unknown; hash?: unknown };
       if (typeof params.sessionId !== "string" || typeof params.hash !== "string") {
-        throw Object.assign(
-          new Error("hydra-acp/session/tool_content requires sessionId and hash"),
-          { code: JsonRpcErrorCodes.InvalidParams },
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "hydra-acp/session/tool_content requires sessionId and hash",
         );
       }
       const id =
@@ -710,9 +771,9 @@ export function registerAcpWsEndpoint(
         params.sessionId;
       const content = await deps.manager.loadToolBlob(id, params.hash);
       if (content === null) {
-        throw Object.assign(
-          new Error("tool content not found"),
-          { code: JsonRpcErrorCodes.SessionNotFound },
+        throw rpcError(
+          JsonRpcErrorCodes.SessionNotFound,
+          "tool content not found",
         );
       }
       return { content };
@@ -819,13 +880,25 @@ export function registerAcpWsEndpoint(
       if (extMcpMint !== undefined) {
         extMcpMint.bindToSession(session);
       }
-      const client = bindClientToSession(connection, session, state);
-      // No conversation history to replay on a fresh session, but
-      // buildStateSnapshotReplay() still emits synthetic state snapshots
-      // (at minimum the hydra verbs in available_commands_update) so a
-      // protocol-only client sees the current command set right after
-      // session/new — without depending on hydra's `_meta`.
-      const { entries: replay } = await session.attach(client, "full");
+      // From here on, the session is live and has bindings (stdin token,
+      // extension MCP) wired to its onClose. If any of the remaining
+      // attach/replay work throws, close the session so those disposers
+      // run — otherwise the bindings linger on a session nobody
+      // attached to.
+      let client: ReturnType<typeof bindClientToSession>;
+      let replay: Awaited<ReturnType<typeof session.attach>>["entries"];
+      try {
+        client = bindClientToSession(connection, session, state);
+        // No conversation history to replay on a fresh session, but
+        // buildStateSnapshotReplay() still emits synthetic state snapshots
+        // (at minimum the hydra verbs in available_commands_update) so a
+        // protocol-only client sees the current command set right after
+        // session/new — without depending on hydra's `_meta`.
+        ({ entries: replay } = await session.attach(client, "full"));
+      } catch (err) {
+        await session.close({ deleteRecord: false }).catch(() => undefined);
+        throw err;
+      }
       state.attached.set(session.sessionId, {
         sessionId: session.sessionId,
         clientId: client.clientId,
@@ -905,11 +978,10 @@ export function registerAcpWsEndpoint(
       if (!session && readonly) {
         const fromDisk = await deps.manager.loadFromDisk(lookupId);
         if (!fromDisk) {
-          const err = new Error(
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
             `session ${params.sessionId} not found`,
-          ) as Error & { code: number };
-          err.code = JsonRpcErrorCodes.SessionNotFound;
-          throw err;
+          );
         }
         const history = await deps.manager.loadHistory(lookupId);
         const viewerClientId = params.clientId ?? `cli_${nanoid(8)}`;
@@ -964,11 +1036,10 @@ export function registerAcpWsEndpoint(
           };
         }
         if (!resurrectParams) {
-          const err = new Error(
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
             `session ${params.sessionId} not found and no resume hints provided`,
-          ) as Error & { code: number };
-          err.code = JsonRpcErrorCodes.SessionNotFound;
-          throw err;
+          );
         }
         // Backfill originatingClient from the attaching connection's
         // initialize when disk has none. Catches sessions created before
@@ -1034,7 +1105,7 @@ export function registerAcpWsEndpoint(
         // Debug path only — set via _meta["hydra-acp"].replayMode.
         const speed =
           hydraAttach.dripSpeed && hydraAttach.dripSpeed > 0 ? hydraAttach.dripSpeed : 1;
-        const MAX_GAP_MS = 750;
+        const MAX_GAP_MS = REPLAY_DRIP_MAX_GAP_MS;
         void (async () => {
           let prev: number | null = null;
           for (const note of replay) {
@@ -1065,8 +1136,12 @@ export function registerAcpWsEndpoint(
         // seconds. We await only every REPLAY_FLUSH_EVERY entries to retain
         // coarse backpressure so a slow/remote client can't make us buffer
         // the whole replay in the ws send queue at once.
-        const REPLAY_FLUSH_EVERY = 200;
         for (let i = 0; i < replay.length; i++) {
+          // Mirror the drip path: bail if the client went away mid-replay
+          // so we don't push the rest of the history into a dead socket.
+          if (connection.isClosed()) {
+            break;
+          }
           const note = replay[i]!;
           const pending = connection
             .notify(note.method, note.params)
@@ -1100,11 +1175,10 @@ export function registerAcpWsEndpoint(
       const params = SessionDetachParams.parse(raw);
       const att = state.attached.get(params.sessionId);
       if (!att) {
-        const err = new Error("client not attached to that session") as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.SessionNotFound,
+          "client not attached to that session",
+        );
       }
       const session = deps.manager.get(params.sessionId);
       session?.detach(att.clientId);
@@ -1156,11 +1230,10 @@ export function registerAcpWsEndpoint(
     // under hydra-acp per the Extensibility convention.
     connection.onRequest("hydra-acp/agents/list", async () => {
       if (!deps.registry) {
-        const err = new Error("agent registry unavailable") as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.InternalError;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.InternalError,
+          "agent registry unavailable",
+        );
       }
       return listAgents(deps.registry);
     });
@@ -1173,11 +1246,10 @@ export function registerAcpWsEndpoint(
         app.log.warn(
           `session/prompt rejected: not attached sessionId=${params.sessionId} attachedKeys=[${[...state.attached.keys()].join(",")}]`,
         );
-        const err = new Error("not attached to session") as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.SessionNotFound,
+          "not attached to session",
+        );
       }
       let session = deps.manager.get(params.sessionId);
       if (!session) {
@@ -1186,11 +1258,10 @@ export function registerAcpWsEndpoint(
         // proceeds without requiring the client to re-attach explicitly.
         const fromDisk = await deps.manager.loadFromDisk(params.sessionId);
         if (!fromDisk) {
-          const err = new Error(
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
             `session ${params.sessionId} not found`,
-          ) as Error & { code: number };
-          err.code = JsonRpcErrorCodes.SessionNotFound;
-          throw err;
+          );
         }
         app.log.info(
           `session/prompt auto-resurrecting cold sessionId=${params.sessionId}`,
@@ -1276,14 +1347,7 @@ export function registerAcpWsEndpoint(
     connection.onRequest("hydra-acp/prompt/cancel", async (raw) => {
       const params = CancelPromptParams.parse(raw);
       denyIfReadonly(params.sessionId, "hydra-acp/prompt/cancel");
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
+      const session = requireLiveSession(deps.manager, params.sessionId);
       return session.cancelQueuedPrompt(params.messageId);
     });
 
@@ -1293,28 +1357,14 @@ export function registerAcpWsEndpoint(
     connection.onRequest("hydra-acp/session/force_cancel", async (raw) => {
       const params = SessionCancelParams.parse(raw);
       denyIfReadonly(params.sessionId, "hydra-acp/session/force_cancel");
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
+      const session = requireLiveSession(deps.manager, params.sessionId);
       return session.forceCancel();
     });
 
     connection.onRequest("hydra-acp/prompt/update", async (raw) => {
       const params = UpdatePromptParams.parse(raw);
       denyIfReadonly(params.sessionId, "hydra-acp/prompt/update");
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
+      const session = requireLiveSession(deps.manager, params.sessionId);
       return session.updateQueuedPrompt(params.messageId, params.prompt);
     });
 
@@ -1323,20 +1373,12 @@ export function registerAcpWsEndpoint(
       denyIfReadonly(params.sessionId, "hydra-acp/prompt/amend");
       const att = state.attached.get(params.sessionId);
       if (!att) {
-        const err = new Error("not attached to session") as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.SessionNotFound,
+          "not attached to session",
+        );
       }
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
+      const session = requireLiveSession(deps.manager, params.sessionId);
       return session.amendPrompt(att.clientId, params);
     });
 
@@ -1345,11 +1387,10 @@ export function registerAcpWsEndpoint(
       const rawSessionId =
         typeof rawObj.sessionId === "string" ? rawObj.sessionId : undefined;
       if (!rawSessionId) {
-        const err = new Error("session/load requires sessionId") as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.InvalidParams;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "session/load requires sessionId",
+        );
       }
       const sessionId =
         (await deps.manager.resolveCanonicalId(rawSessionId)) ?? rawSessionId;
@@ -1357,11 +1398,10 @@ export function registerAcpWsEndpoint(
       if (!session) {
         const fromDisk = await deps.manager.loadFromDisk(sessionId);
         if (!fromDisk) {
-          const err = new Error(
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
             `session ${rawSessionId} not found in memory or on disk`,
-          ) as Error & { code: number };
-          err.code = JsonRpcErrorCodes.SessionNotFound;
-          throw err;
+          );
         }
         const extMcpMint = mintExtensionMcpDescriptors(deps);
         try {
@@ -1432,9 +1472,7 @@ export function registerAcpWsEndpoint(
       const decision = decideSetModel(rawParams, deps.manager);
       if (decision.kind === "error") {
         app.log.warn(decision.logMessage);
-        const err = new Error(decision.message) as Error & { code: number };
-        err.code = decision.code;
-        throw err;
+        throw rpcError(decision.code, decision.message);
       }
       if (decision.kind === "no_op") {
         // Validation failed but the session has a current model — keep
@@ -1482,21 +1520,18 @@ export function registerAcpWsEndpoint(
         denyIfReadonly(sessionIdField, "session/set_mode");
       }
       if (!params || typeof params.sessionId !== "string") {
-        const err = new Error("session/set_mode requires string sessionId") as Error & { code: number };
-        err.code = JsonRpcErrorCodes.InvalidParams;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "session/set_mode requires string sessionId",
+        );
       }
       if (typeof params.modeId !== "string") {
-        const err = new Error("session/set_mode requires string modeId") as Error & { code: number };
-        err.code = JsonRpcErrorCodes.InvalidParams;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "session/set_mode requires string modeId",
+        );
       }
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(`session ${params.sessionId} not found`) as Error & { code: number };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
+      const session = requireLiveSession(deps.manager, params.sessionId);
       const result = await session.forwardRequest("session/set_mode", rawParams);
       // Agent doesn't broadcast current_mode_update after set_mode, so
       // apply the change directly so persistence and attach-response meta
@@ -1515,11 +1550,8 @@ export function registerAcpWsEndpoint(
       const params = rawParams as
         | { sessionId?: unknown; configId?: unknown; value?: unknown }
         | undefined;
-      const invalid = (msg: string): Error & { code: number } => {
-        const err = new Error(msg) as Error & { code: number };
-        err.code = JsonRpcErrorCodes.InvalidParams;
-        return err;
-      };
+      const invalid = (msg: string): Error & { code: number } =>
+        rpcError(JsonRpcErrorCodes.InvalidParams, msg);
       const sessionIdField = params?.sessionId;
       if (typeof sessionIdField === "string") {
         denyIfReadonly(sessionIdField, "session/set_config_option");
@@ -1533,14 +1565,7 @@ export function registerAcpWsEndpoint(
       if (typeof params.value !== "string") {
         throw invalid("session/set_config_option requires string value");
       }
-      const session = deps.manager.get(params.sessionId);
-      if (!session) {
-        const err = new Error(
-          `session ${params.sessionId} not found`,
-        ) as Error & { code: number };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
+      const session = requireLiveSession(deps.manager, params.sessionId);
       // Validate configId + value against the live snapshot so we never
       // dispatch an option hydra isn't currently offering.
       const option = session
@@ -1599,33 +1624,24 @@ export function registerAcpWsEndpoint(
         rawParams === null ||
         typeof rawParams !== "object"
       ) {
-        const err = new Error(`Method not found: ${method}`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.MethodNotFound;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.MethodNotFound,
+          `Method not found: ${method}`,
+        );
       }
       const sessionId = (rawParams as { sessionId?: unknown }).sessionId;
       if (typeof sessionId !== "string") {
-        const err = new Error(`Method not found: ${method}`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.MethodNotFound;
-        throw err;
+        throw rpcError(
+          JsonRpcErrorCodes.MethodNotFound,
+          `Method not found: ${method}`,
+        );
       }
       // Any unhandled session/* method that reaches the default forwarder
       // is by definition state-changing (the read-only-safe methods all
       // have explicit handlers above). Reject for read-only attachments
       // before forwarding to the agent.
       denyIfReadonly(sessionId, method);
-      const session = deps.manager.get(sessionId);
-      if (!session) {
-        const err = new Error(`session ${sessionId} not found`) as Error & {
-          code: number;
-        };
-        err.code = JsonRpcErrorCodes.SessionNotFound;
-        throw err;
-      }
+      const session = requireLiveSession(deps.manager, sessionId);
       return session.forwardRequest(method, rawParams);
     });
   });
@@ -1903,33 +1919,25 @@ export async function handleTransformerAttach(
     ? params.sessionId
     : undefined;
   if (!sessionId) {
-    throw Object.assign(
-      new Error("transformer/attach requires sessionId"),
-      { code: JsonRpcErrorCodes.InvalidParams },
+    throw rpcError(
+      JsonRpcErrorCodes.InvalidParams,
+      "transformer/attach requires sessionId",
     );
   }
   if (!deps.transformers) {
-    throw Object.assign(
-      new Error("transformer manager not configured"),
-      { code: JsonRpcErrorCodes.InternalError },
+    throw rpcError(
+      JsonRpcErrorCodes.InternalError,
+      "transformer manager not configured",
     );
   }
   const ref = deps.transformers.resolveChain([callerName])[0];
   if (!ref) {
-    throw Object.assign(
-      new Error(
-        `transformer ${callerName} is not connected (call hydra-acp/transformer/initialize first)`,
-      ),
-      { code: JsonRpcErrorCodes.InternalError },
+    throw rpcError(
+      JsonRpcErrorCodes.InternalError,
+      `transformer ${callerName} is not connected (call hydra-acp/transformer/initialize first)`,
     );
   }
-  const session = deps.manager.get(sessionId);
-  if (!session) {
-    throw Object.assign(
-      new Error(`session ${sessionId} not found`),
-      { code: JsonRpcErrorCodes.SessionNotFound },
-    );
-  }
+  const session = requireLiveSession(deps.manager, sessionId);
   session.addTransformer(ref);
   return { ok: true };
 }

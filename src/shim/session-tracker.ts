@@ -58,6 +58,9 @@ export class SessionTracker {
 
   observeFromClient(msg: JsonRpcMessage): void {
     if (isResponse(msg)) {
+      if (msg.id === null) {
+        return;
+      }
       const existing = this.pendingPermissions.get(msg.id);
       if (existing) {
         this.deletePendingPermission(existing);
@@ -142,6 +145,9 @@ export class SessionTracker {
       return;
     }
     if (!isResponse(msg)) {
+      return;
+    }
+    if (msg.id === null) {
       return;
     }
     if (msg.error) {

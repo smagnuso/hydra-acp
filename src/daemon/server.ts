@@ -147,6 +147,14 @@ export async function startDaemon(
   );
   sweepInterval.unref();
 
+  const rateLimitSweepInterval = setInterval(
+    () => {
+      authRateLimiter.sweepExpired();
+    },
+    5 * 60 * 1000,
+  );
+  rateLimitSweepInterval.unref();
+
   // `registry` and `manager` reference each other through the prune hook:
   // the registry's onFetched closure reads `manager` to discover live
   // sessions, while `manager` is constructed from `registry`. Both names

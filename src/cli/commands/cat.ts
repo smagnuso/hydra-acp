@@ -1,9 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WebSocket } from "ws";
 import { JsonRpcConnection } from "../../acp/connection.js";
 import { wsToMessageStream } from "../../acp/ws-stream.js";
+import { openWs } from "../../shim/open-ws.js";
 import { loadConfig } from "../../core/config.js";
 import {
   resolveLocalTarget,
@@ -549,12 +549,16 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     // finalizeTurn(), so without this every >1MB pipe would lose the
     // agent's answer.
     finalizeTurn();
-    // Fire session/detach without awaiting the response. The daemon
-    // will detach us anyway when the WS drops; the explicit detach is
-    // a politeness so the daemon's log shows a clean teardown.
-    // Awaiting here would let an unresponsive daemon hang shutdown.
+    // Politeness: tell the daemon we're going so its log shows a clean
+    // detach (vs us just dropping the WS). Await with a tight timeout
+    // so an unresponsive daemon can't hang shutdown, and so the close
+    // below doesn't race the request onto a half-shut socket.
     if (!opts.detach) {
-      conn.request("session/detach", { sessionId }).catch(() => undefined);
+      const DETACH_TIMEOUT_MS = 500;
+      await Promise.race([
+        conn.request("session/detach", { sessionId }).catch(() => undefined),
+        new Promise<void>((r) => setTimeout(r, DETACH_TIMEOUT_MS)),
+      ]);
     }
     await conn.close().catch(() => undefined);
     resolveDone({ exitCode: code });
@@ -764,7 +768,12 @@ function runStreamingPath(args: StreamingPathArgs): void {
 
   type Mode = "undecided" | "inline" | "file";
   let mode: Mode = "undecided";
-  let headBuffer = Buffer.alloc(0);
+  // Chunks accrued in undecided/inline mode before we know whether to
+  // flush as a single inline prompt or pivot into streaming-file mode.
+  // Kept as an array + running length to avoid the O(n²) Buffer.concat
+  // per chunk; concatenation happens once at the threshold or on EOF.
+  let headChunks: Buffer[] = [];
+  let headLen = 0;
   let stdinClosed = false;
   // Once we're in FILE mode, every stdin chunk goes through this
   // promise chain so writes land in order even though they're fired
@@ -784,8 +793,9 @@ function runStreamingPath(args: StreamingPathArgs): void {
 
   const flushInline = async (): Promise<void> => {
     mode = "inline";
-    const text = headBuffer.toString("utf8");
-    headBuffer = Buffer.alloc(0);
+    const text = Buffer.concat(headChunks, headLen).toString("utf8");
+    headChunks = [];
+    headLen = 0;
     try {
       await sendInline(text);
     } catch (err) {
@@ -815,9 +825,10 @@ function runStreamingPath(args: StreamingPathArgs): void {
     // Drain the head buffer into the ring BEFORE firing the kick-off
     // prompt — that way when the agent calls tail_stdin / read_stdin
     // it sees at minimum what cat had already buffered locally.
-    if (headBuffer.length > 0) {
-      writeToStream(headBuffer, false);
-      headBuffer = Buffer.alloc(0);
+    if (headLen > 0) {
+      writeToStream(Buffer.concat(headChunks, headLen), false);
+      headChunks = [];
+      headLen = 0;
     }
     await writeChain.catch(() => undefined);
 
@@ -852,8 +863,9 @@ function runStreamingPath(args: StreamingPathArgs): void {
   stdin.on("data", (data: string | Buffer) => {
     const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
     if (mode === "undecided") {
-      headBuffer = Buffer.concat([headBuffer, buf]);
-      if (headBuffer.length > threshold) {
+      headChunks.push(buf);
+      headLen += buf.length;
+      if (headLen > threshold) {
         void switchToFile();
       }
       return;
@@ -864,7 +876,8 @@ function runStreamingPath(args: StreamingPathArgs): void {
     }
     // inline mode shouldn't see post-EOF data; if it does, just hold
     // it in the buffer in case the caller wants to peek.
-    headBuffer = Buffer.concat([headBuffer, buf]);
+    headChunks.push(buf);
+    headLen += buf.length;
   });
 
   stdin.on("end", () => {
@@ -982,21 +995,4 @@ async function openOrAttachSession(
   return created.sessionId;
 }
 
-async function openWs(
-  url: string,
-  subprotocols: string[],
-): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, subprotocols);
-    const onOpen = (): void => {
-      ws.off("error", onError);
-      resolve(ws);
-    };
-    const onError = (err: Error): void => {
-      ws.off("open", onOpen);
-      reject(err);
-    };
-    ws.once("open", onOpen);
-    ws.once("error", onError);
-  });
-}
+

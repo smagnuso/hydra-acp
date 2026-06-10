@@ -101,8 +101,19 @@ export async function runShim(opts: ShimOptions): Promise<void> {
     process.exit(err ? 1 : 0);
   });
   downstream.onClose(() => {
-    void upstream.close();
-    process.exit(0);
+    // Give the upstream a brief window to flush a clean ws close frame
+    // before we exit; without the await the daemon sees a TCP reset
+    // and has to garbage-collect the attachment via its keepalive.
+    void (async () => {
+      const UPSTREAM_CLOSE_TIMEOUT_MS = 1_000;
+      await Promise.race([
+        upstream.close().catch(() => undefined),
+        new Promise<void>((resolve) =>
+          setTimeout(resolve, UPSTREAM_CLOSE_TIMEOUT_MS),
+        ),
+      ]);
+      process.exit(0);
+    })();
   });
 
   await upstream.start();

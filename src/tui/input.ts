@@ -235,17 +235,21 @@ export class InputDispatcher {
     return this.expandPastes(this.bufferText());
   }
 
+  // Returns a frozen view that aliases the dispatcher's live buffer and
+  // attachments arrays. Callers must treat the result as read-only —
+  // mutations go through dispatch()/addAttachment()/removeAttachment().
+  // app.ts calls this 3x per keystroke, so avoiding the copies matters.
   state(): InputState {
-    return {
-      buffer: [...this.buffer],
+    return Object.freeze({
+      buffer: this.buffer,
       row: this.row,
       col: this.col,
       planMode: this.planMode,
       historyIndex: this.historyIndex,
       queueIndex: this.queueIndex,
-      attachments: [...this.attachments],
+      attachments: this.attachments,
       historySearchQuery: this.historySearch?.query ?? null,
-    };
+    });
   }
 
   // App calls this after asynchronously acquiring an image (drag-drop

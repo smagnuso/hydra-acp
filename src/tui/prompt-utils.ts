@@ -166,3 +166,95 @@ function paintTopStrip(
   term.brightCyan.noFormat(strip.title.text);
   term.dim.noFormat(strip.dashes.slice(strip.title.offset + strip.title.text.length));
 }
+
+// Single-line ellipsised truncate. Returns "" when max <= 1 so a one-cell
+// budget never paints a stray ellipsis.
+export function truncate(s: string, max: number): string {
+  if (max <= 1) {
+    return "";
+  }
+  if (s.length <= max) {
+    return s;
+  }
+  return s.slice(0, Math.max(0, max - 1)) + "…";
+}
+
+// Right-pad / hard-truncate to exactly `w` chars so a highlight bar
+// covers the full line width.
+export function padRight(s: string, w: number): string {
+  if (s.length >= w) {
+    return s.slice(0, w);
+  }
+  return s + " ".repeat(w - s.length);
+}
+
+export interface ModalKeyData {
+  isCharacter?: boolean;
+}
+
+export interface RunModalOptions<T> {
+  term: Terminal;
+  render: () => void;
+  onKey: (
+    name: string,
+    matches: unknown,
+    data: ModalKeyData | undefined,
+    finish: (value: T) => void,
+  ) => void;
+  onResize?: () => void;
+  // Most modals hide the terminal cursor on entry (text-only display).
+  // Set this false for input-driven prompts that paint their own fake
+  // cursor and want the real one to follow normal terminal-kit state.
+  hideCursor?: boolean;
+}
+
+// Owns the modal lifecycle shared by every pre-screen prompt:
+// initial paint, hideCursor, grabInput install, key + resize listeners,
+// and the matching teardown on resolve (hideCursor restore, listener
+// removal, grabInput off, eraseDisplayBelow). Callers only supply the
+// render + key logic.
+export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
+  const { term, render, onKey, onResize } = opts;
+  const wantsHideCursor = opts.hideCursor !== false;
+  render();
+  if (wantsHideCursor) {
+    term.hideCursor();
+  }
+  return await new Promise<T>((resolve) => {
+    let resolved = false;
+    const handleResize = (): void => {
+      if (resolved) {
+        return;
+      }
+      (onResize ?? render)();
+    };
+    const handleKey = (
+      name: string,
+      matches: unknown,
+      data?: ModalKeyData,
+    ): void => {
+      if (resolved) {
+        return;
+      }
+      onKey(name, matches, data, finish);
+    };
+    const cleanup = (): void => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      term.off("key", handleKey);
+      term.off("resize", handleResize);
+      term.grabInput(false);
+      term.hideCursor(false);
+      term.moveTo(1, 1).eraseDisplayBelow();
+    };
+    const finish = (value: T): void => {
+      cleanup();
+      resolve(value);
+    };
+    term.grabInput({});
+    term.on("key", handleKey);
+    term.on("resize", handleResize);
+  });
+}

@@ -16,7 +16,10 @@ import { stripHydraSessionPrefix } from "../core/session.js";
 import type { DiscoveredSession } from "./discovery.js";
 import {
   drawBox,
+  padRight,
   resetTerminalModes,
+  runModalPrompt,
+  truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
 
@@ -169,64 +172,19 @@ export async function promptForImportAction(
       row++;
     }
     row++;
-    term.moveTo(layout.contentX, layout.contentY + row);
-    term.noFormat(" What do you want to do?");
-    row += 2;
-    for (let i = 0; i < ACTION_CHOICES.length; i++) {
-      const choice = ACTION_CHOICES[i];
-      if (!choice) {
-        continue;
-      }
-      const pointer = i === selected ? "❯" : " ";
-      const label = ` ${pointer} ${choice.label}`;
-      term.moveTo(layout.contentX, layout.contentY + row);
-      if (i === selected) {
-        term.brightWhite.bgBlue.noFormat(padRight(label, innerW));
-      } else {
-        term.noFormat(label);
-      }
-      row++;
-      term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(`     ${choice.description}`);
-      row++;
-    }
-    row++;
-    term.moveTo(layout.contentX, layout.contentY + row);
-    term.dim.noFormat(" ↑/↓ navigate · Enter select · f/v jump · Esc back");
+    paintActionBody(term, layout, row, {
+      intro: "What do you want to do?",
+      choices: ACTION_CHOICES,
+      selected,
+      footer: "↑/↓ navigate · Enter select · f/v jump · Esc back",
+    });
     return layout;
   };
 
-  render();
-  term.hideCursor();
-
-  return await new Promise<ActionResult>((resolve) => {
-    let resolved = false;
-    const cleanup = (): void => {
-      if (resolved) {
-        return;
-      }
-      resolved = true;
-      term.off("key", onKey);
-      term.off("resize", onResize);
-      term.grabInput(false);
-      term.hideCursor(false);
-      term.moveTo(1, 1).eraseDisplayBelow();
-    };
-    const finish = (value: ActionResult): void => {
-      cleanup();
-      resolve(value);
-    };
-    const onResize = (): void => {
-      if (resolved) {
-        return;
-      }
-      render();
-    };
-    const onKey = (
-      name: string,
-      _matches: unknown,
-      data?: { isCharacter?: boolean },
-    ): void => {
+  return runModalPrompt<ActionResult>({
+    term,
+    render,
+    onKey: (name, _matches, data, finish) => {
       const input = mapKey(name, data);
       if (!input) {
         return;
@@ -248,11 +206,51 @@ export async function promptForImportAction(
         selected = step.selected;
         render();
       }
-    };
-    term.grabInput({});
-    term.on("key", onKey);
-    term.on("resize", onResize);
+    },
   });
+}
+
+// Shared "intro line + choice list + footer hint" block used by both
+// promptForImportAction and promptForLaunchOrView. Layout above the
+// startRow (header rows + blank) is the caller's responsibility because
+// the two modals have different header shapes.
+function paintActionBody(
+  term: Terminal,
+  layout: BoxLayout,
+  startRow: number,
+  opts: {
+    intro: string;
+    choices: readonly { label: string; description: string }[];
+    selected: number;
+    footer: string;
+  },
+): void {
+  const innerW = layout.contentW;
+  let row = startRow;
+  term.moveTo(layout.contentX, layout.contentY + row);
+  term.noFormat(` ${opts.intro}`);
+  row += 2;
+  for (let i = 0; i < opts.choices.length; i++) {
+    const choice = opts.choices[i];
+    if (!choice) {
+      continue;
+    }
+    const pointer = i === opts.selected ? "❯" : " ";
+    const label = ` ${pointer} ${choice.label}`;
+    term.moveTo(layout.contentX, layout.contentY + row);
+    if (i === opts.selected) {
+      term.brightWhite.bgBlue.noFormat(padRight(label, innerW));
+    } else {
+      term.noFormat(label);
+    }
+    row++;
+    term.moveTo(layout.contentX, layout.contentY + row);
+    term.dim.noFormat(`     ${choice.description}`);
+    row++;
+  }
+  row++;
+  term.moveTo(layout.contentX, layout.contentY + row);
+  term.dim.noFormat(` ${opts.footer}`);
 }
 
 function mapKey(
@@ -305,7 +303,6 @@ export async function promptForLaunchOrView(
     const layout = drawBox(term, { contentHeight: 11, title: "Open session" });
     const innerW = layout.contentW;
     let row = 0;
-    // Header rows
     term.moveTo(layout.contentX, layout.contentY + row);
     term.dim.noFormat(" session: ");
     term.noFormat(truncate(shortId, innerW - 10));
@@ -313,33 +310,13 @@ export async function promptForLaunchOrView(
     term.moveTo(layout.contentX, layout.contentY + row);
     term.noFormat(" " + truncate(titleOrCwd, innerW - 2));
     row++;
-    // blank
     row++;
-    term.moveTo(layout.contentX, layout.contentY + row);
-    term.noFormat(" What do you want to do?");
-    row += 2;
-    for (let i = 0; i < CHOICES.length; i++) {
-      const choice = CHOICES[i];
-      if (!choice) {
-        continue;
-      }
-      const pointer = i === selected ? "❯" : " ";
-      const label = ` ${pointer} ${choice.label}`;
-      term.moveTo(layout.contentX, layout.contentY + row);
-      if (i === selected) {
-        term.brightWhite.bgBlue.noFormat(padRight(label, innerW));
-      } else {
-        term.noFormat(label);
-      }
-      row++;
-      term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(`     ${choice.description}`);
-      row++;
-    }
-    // blank
-    row++;
-    term.moveTo(layout.contentX, layout.contentY + row);
-    term.dim.noFormat(" ↑/↓ navigate · Enter select · l/v jump · Esc back");
+    paintActionBody(term, layout, row, {
+      intro: "What do you want to do?",
+      choices: CHOICES,
+      selected,
+      footer: "↑/↓ navigate · Enter select · l/v jump · Esc back",
+    });
   };
 
   render();
@@ -419,19 +396,4 @@ export async function promptForLaunchOrView(
   });
 }
 
-function truncate(s: string, max: number): string {
-  if (max <= 1) {
-    return "";
-  }
-  if (s.length <= max) {
-    return s;
-  }
-  return s.slice(0, Math.max(0, max - 1)) + "…";
-}
 
-function padRight(s: string, w: number): string {
-  if (s.length >= w) {
-    return s.slice(0, w);
-  }
-  return s + " ".repeat(w - s.length);
-}

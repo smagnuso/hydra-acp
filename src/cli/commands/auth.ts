@@ -1,12 +1,10 @@
-import { loadConfig } from "../../core/config.js";
-import { loadServiceToken } from "../../core/service-token.js";
 import {
   hasPassword,
   setPassword,
   verifyPassword,
 } from "../../core/password.js";
 import { promptPassword } from "../../core/prompt-password.js";
-import { httpBase } from "./sessions.js";
+import { daemonFetch } from "./_shared.js";
 import { flagBool } from "../parse-args.js";
 
 interface SessionTokenSummary {
@@ -43,21 +41,8 @@ export async function runAuthPasswordSet(
 }
 
 export async function runAuthList(): Promise<void> {
-  const config = await loadConfig();
-  const token = await loadServiceToken();
-  const baseUrl = httpBase(
-    config.daemon.host,
-    config.daemon.port,
-    !!config.daemon.tls,
-  );
-  const r = await fetch(`${baseUrl}/v1/auth/sessions`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!r.ok) {
-    process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
-    process.exit(1);
-  }
-  const body = (await r.json()) as { sessions: SessionTokenSummary[] };
+  const res = await daemonFetch("/v1/auth/sessions", { expectStatus: 200 });
+  const body = res.body as { sessions: SessionTokenSummary[] };
   if (body.sessions.length === 0) {
     process.stdout.write("No active session tokens.\n");
     return;
@@ -101,26 +86,18 @@ export async function runAuthRevoke(id: string | undefined): Promise<void> {
     process.stderr.write("Usage: hydra-acp auth revoke <id>\n");
     process.exit(2);
   }
-  const config = await loadConfig();
-  const token = await loadServiceToken();
-  const baseUrl = httpBase(
-    config.daemon.host,
-    config.daemon.port,
-    !!config.daemon.tls,
-  );
-  const r = await fetch(`${baseUrl}/v1/auth/sessions/${id}`, {
+  const res = await daemonFetch(`/v1/auth/sessions/${id}`, {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
   });
-  if (r.status === 204) {
+  if (res.status === 204) {
     process.stdout.write(`Revoked ${id}\n`);
     return;
   }
-  if (r.status === 404) {
+  if (res.status === 404) {
     process.stderr.write(`No session token with id ${id}\n`);
     process.exit(1);
   }
-  process.stderr.write(`Daemon returned HTTP ${r.status}\n`);
+  process.stderr.write(`Daemon returned HTTP ${res.status}\n`);
   process.exit(1);
 }
 

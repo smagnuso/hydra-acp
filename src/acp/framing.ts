@@ -41,7 +41,9 @@ export function ndjsonStreamFromStdio(stdout: Readable, stdin: Writable): Messag
           for (const handler of messageHandlers) {
             handler({
               jsonrpc: "2.0",
-              id: 0,
+              // Per JSON-RPC 2.0, parse errors carry id=null (0 and ""
+              // are both valid peer-assigned ids that could collide).
+              id: null,
               error: {
                 code: JsonRpcErrorCodes.ParseError,
                 message: `Failed to parse ndjson line: ${(err as Error).message}`,
