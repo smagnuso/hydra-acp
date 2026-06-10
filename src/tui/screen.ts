@@ -915,6 +915,19 @@ export class Screen {
       this.onSuspend();
       return;
     }
+    // Ctrl+Z under modifyOtherKeys=2 / kitty keyboard. WezTerm honors
+    // both protocols (which we enable at screen.start), so ^Z arrives
+    // as the escaped form instead of the bare 0x1a byte — tmux strips
+    // these protocols which is why it works there. Match the same
+    // "exact chunk" rule as the raw byte path so an embedded code in a
+    // paste/key burst doesn't accidentally suspend.
+    if (
+      this.onSuspend &&
+      (text === "\x1b[27;5;122~" || text === "\x1b[122;5u")
+    ) {
+      this.onSuspend();
+      return;
+    }
     // Two families of "modified key" sequences leak through terminal-kit
     // because it doesn't parse them, and would otherwise insert literal
     // "[27;2;73~" / "[13;2u" etc. into the buffer:
