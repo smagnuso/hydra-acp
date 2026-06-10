@@ -24,6 +24,12 @@ export interface SidechainOptions {
   forkAt?: string;
   // CWD for the new session. Defaults to the source session's cwd.
   cwd?: string;
+  // When set, the sidechain skips the fork step and attaches to this
+  // existing session instead. Used to reuse a prior /btw fork for a
+  // follow-up prompt when the main session hasn't moved since — saves
+  // a fresh forkSession + seedFromImport (which would otherwise replay
+  // the entire main transcript through a new agent on every /btw).
+  reuseSessionId?: string;
   // Custom fetch implementation. Injected so tests can mock daemon HTTP.
   fetchImpl?: typeof fetch;
   // Internal: stream factory for test injection. Production code omits this.
@@ -92,24 +98,30 @@ export function runBtwSidechain(
         } catch {
           void 0;
         }
-        // Title the fork so it's identifiable in `hydra sessions list
-        // --all`. Without this the fork inherits the source's title and
-        // every /btw shows up looking exactly like its parent. Threaded
-        // through forkSession itself (single round-trip, no rename
-        // race window).
-        const titlePreview = prompt.replace(/\s+/g, " ").trim().slice(0, 60);
-        const forkResult = await forkSession(
-          target,
-          sourceSessionId,
-          {
-            forkAt: opts.forkAt,
-            cwd: opts.cwd,
-            agentId: opts.agentId,
-            title: `btw: ${titlePreview}`,
-          },
-          fetchImpl,
-        );
-        forkedSessionId = forkResult.sessionId;
+        if (opts.reuseSessionId !== undefined) {
+          // Reuse path: skip the fork + seedFromImport entirely. The
+          // session already exists (from a prior /btw that completed
+          // cleanly) and the agent is warm with the right context.
+          // Just attach and send the new prompt.
+          forkedSessionId = opts.reuseSessionId;
+        } else {
+          // Title the fork so it's identifiable in `hydra sessions
+          // list --all`. Threaded through forkSession itself — single
+          // round-trip, no rename race window.
+          const titlePreview = prompt.replace(/\s+/g, " ").trim().slice(0, 60);
+          const forkResult = await forkSession(
+            target,
+            sourceSessionId,
+            {
+              forkAt: opts.forkAt,
+              cwd: opts.cwd,
+              agentId: opts.agentId,
+              title: `btw: ${titlePreview}`,
+            },
+            fetchImpl,
+          );
+          forkedSessionId = forkResult.sessionId;
+        }
       } catch (err) {
         void stream.close().catch(() => undefined);
         throw err;

@@ -60,6 +60,7 @@ import {
 } from "./history.js";
 import {
   forkSession,
+  killSession,
   listSessions,
   listAgents,
   pickMostRecent,
@@ -588,13 +589,16 @@ async function runSession(
   };
 
   // Holds the currently-active sidechain emitter so /btw can be cancelled
-  // on session teardown or switch. Also tracks the forked sessionId so
-  // dismiss can killSession the ancillary daemon-side fork. The
-  // generation counter handles rapid double-/btw: each invocation captures
-  // its own gen and the .then() handler discards itself if the gen has
-  // moved on, preventing an in-flight start from clobbering its successor.
+  // on session teardown or switch. btwSessionId tracks the forked
+  // (daemon-side) sessionId — kept around across /btw invocations to
+  // enable reuse: a follow-up /btw on a still-warm fork skips the
+  // expensive forkSession + seedFromImport round-trip. btwReusableDirty
+  // flips true the moment the main session has a new turn_complete,
+  // signalling that the side fork's context is stale and the next /btw
+  // must fork fresh. The generation counter handles rapid double-/btw.
   let currentSidechain: SidechainEventEmitter | null = null;
   let btwSessionId: string | null = null;
+  let btwReusableDirty = false;
   let btwStartGen = 0;
 
   // Count of prompts currently in flight on the daemon — across ALL
@@ -763,6 +767,9 @@ async function runSession(
       adjustPendingTurns(1);
     } else if (event?.kind === "turn-complete") {
       adjustPendingTurns(-1);
+      // The main session has advanced — any retained /btw fork's
+      // context is now stale. Next /btw must fork fresh.
+      btwReusableDirty = true;
     }
     // currentHeadMessageId is tracked from prompt_queue_removed{started}
     // (set) and cleared in the render-event handler's turn-complete
@@ -1826,10 +1833,15 @@ async function runSession(
       return false;
     }
     if (currentSidechain) {
+      // Cancelling mid-turn — sidechain.cancel() kills the daemon-side
+      // fork. The session is gone; can't reuse it. Drop both refs.
       currentSidechain.cancel();
       currentSidechain = null;
+      btwSessionId = null;
     }
-    btwSessionId = null;
+    // After a clean completion currentSidechain is already null and
+    // btwSessionId still points at a warm, reusable fork — leave it set
+    // so the next /btw can attach to it without re-forking.
     screen.closeBtwOverlay();
     return true;
   };
@@ -2311,10 +2323,17 @@ async function runSession(
     // here and stream.close() bails before touching the screen.
     teardownStarted = true;
     // Cancel any in-flight btw sidechain so its events don't land on a
-    // stale screen after we've torn down this session.
+    // stale screen after we've torn down this session. Then kill any
+    // retained reusable fork — without an active TUI it would otherwise
+    // sit cold until the GC sweep.
     if (currentSidechain) {
       currentSidechain.cancel();
       currentSidechain = null;
+      btwSessionId = null;
+    } else if (btwSessionId !== null) {
+      const dead = btwSessionId;
+      void killSession(target, dead).catch(() => undefined);
+      btwSessionId = null;
     }
     process.off("SIGINT", sigintHandler);
     if (process.platform !== "win32") {
@@ -2352,10 +2371,17 @@ async function runSession(
     if (!finishSession) {
       return;
     }
-    // Cancel any in-flight btw sidechain before tearing down this session.
+    // Cancel any in-flight btw sidechain AND kill any retained reusable
+    // fork before tearing down this session. Switching sessions strands
+    // the reusable — nothing left to attach to it.
     if (currentSidechain) {
       currentSidechain.cancel();
       currentSidechain = null;
+      btwSessionId = null;
+    } else if (btwSessionId !== null) {
+      const dead = btwSessionId;
+      void killSession(target, dead).catch(() => undefined);
+      btwSessionId = null;
     }
     // If the user has half-typed text in the prompt, snapshot it into
     // history before opening the picker. Picking a different session
@@ -2674,17 +2700,16 @@ async function runSession(
         return;
       }
       case "cancel": {
-        // ESC / ^C always dismisses the btw overlay first if it's open,
-        // regardless of which pane has focus. The overlay is meant to be
-        // quick and disposable — making ESC silently route to main turn
-        // cancel while the overlay sits there made it feel sticky. Two
-        // ESCs to "cancel main while btw is showing" is fine.
+        // Defensive backstop — tryHandleBtwCloseKey claims ESC/^C before
+        // the dispatcher in normal flows, but if a synthetic cancel
+        // effect arrives some other way, still dismiss the overlay.
+        // Same reuse logic as the key handler.
         if (screen.isOverlayOpen()) {
           if (currentSidechain) {
             currentSidechain.cancel();
             currentSidechain = null;
+            btwSessionId = null;
           }
-          btwSessionId = null;
           screen.closeBtwOverlay();
           return;
         }
@@ -3394,7 +3419,19 @@ async function runSession(
           currentSidechain.cancel();
           currentSidechain = null;
         }
-        btwSessionId = null;
+        // Reuse decision: if a prior /btw left a fork alive AND the main
+        // session hasn't moved since (no turn_complete), attach to that
+        // fork instead of paying for a fresh fork + seedFromImport. This
+        // makes follow-up /btws feel snappy. If main HAS moved, the
+        // retained context is stale — kill the old fork and start fresh.
+        let reuseSessionId: string | null = null;
+        if (btwSessionId !== null && !btwReusableDirty) {
+          reuseSessionId = btwSessionId;
+        } else if (btwSessionId !== null) {
+          void killSession(target, btwSessionId).catch(() => undefined);
+          btwSessionId = null;
+        }
+        btwReusableDirty = false;
         screen.openBtwOverlay();
         screen.setBtwOverlayStatus({ label: "busy", style: "busy" });
         const buffer = new BtwOverlayBuffer();
@@ -3416,7 +3453,11 @@ async function runSession(
             content: { type: "text", text },
           });
         };
-        void runBtwSidechain(target, resolvedSessionId, prompt).then(
+        const sidechainOpts: { reuseSessionId?: string } = {};
+        if (reuseSessionId !== null) {
+          sidechainOpts.reuseSessionId = reuseSessionId;
+        }
+        void runBtwSidechain(target, resolvedSessionId, prompt, sidechainOpts).then(
           (emitter) => {
             // Superseded by a newer /btw — discard this emitter so it
             // doesn't clobber the active one.
@@ -3428,21 +3469,35 @@ async function runSession(
             btwSessionId = emitter.sessionId;
             emitter.on("event", (ev) => {
               if (myGen !== btwStartGen) {
-                // Stale events from a superseded sidechain — ignore.
                 return;
               }
               if (ev.kind === "update") {
                 buffer.append(ev.update);
               } else if (ev.kind === "completed") {
+                // Clean completion — keep the session alive for reuse on
+                // a follow-up /btw. btwSessionId stays set; the next
+                // /btw will check btwReusableDirty and either reuse this
+                // session or kill it and fork fresh.
                 screen.setBtwOverlayStatus({ label: "done", style: "done" });
                 currentSidechain = null;
               } else if (ev.kind === "cancelled") {
+                // Cancelled mid-turn — the side session's state is
+                // ambiguous (the agent saw an interrupted prompt). Don't
+                // reuse it. sidechain.cancel() already killed the
+                // daemon-side fork; just drop our reference.
                 screen.setBtwOverlayStatus({ label: "cancelled", style: "cancelled" });
                 currentSidechain = null;
+                btwSessionId = null;
               } else if (ev.kind === "errored") {
                 screen.setBtwOverlayStatus({ label: "errored", style: "errored" });
                 appendOverlayMessage(`btw errored: ${ev.error.message}`);
+                // Errored sessions are unsafe to reuse — kill it.
+                if (btwSessionId !== null) {
+                  const dead = btwSessionId;
+                  void killSession(target, dead).catch(() => undefined);
+                }
                 currentSidechain = null;
+                btwSessionId = null;
               }
             });
           },
