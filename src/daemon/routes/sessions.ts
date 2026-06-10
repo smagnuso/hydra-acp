@@ -464,8 +464,14 @@ export function registerSessionRoutes(
       forkAt?: unknown;
       cwd?: unknown;
       agentId?: unknown;
+      title?: unknown;
     };
-    const opts: { forkAt?: string; cwd?: string; agentId?: string } = {};
+    const opts: {
+      forkAt?: string;
+      cwd?: string;
+      agentId?: string;
+      title?: string;
+    } = {};
     if (body.forkAt !== undefined) {
       if (typeof body.forkAt !== "string" || body.forkAt.length === 0) {
         reply.code(400).send({ error: "forkAt must be a non-empty string" });
@@ -486,6 +492,13 @@ export function registerSessionRoutes(
         return;
       }
       opts.agentId = body.agentId;
+    }
+    if (body.title !== undefined) {
+      if (typeof body.title !== "string") {
+        reply.code(400).send({ error: "title must be a string" });
+        return;
+      }
+      opts.title = body.title;
     }
     try {
       const result = await manager.forkSession(id, opts);

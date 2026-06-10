@@ -92,10 +92,21 @@ export function runBtwSidechain(
         } catch {
           void 0;
         }
+        // Title the fork so it's identifiable in `hydra sessions list
+        // --all`. Without this the fork inherits the source's title and
+        // every /btw shows up looking exactly like its parent. Threaded
+        // through forkSession itself (single round-trip, no rename
+        // race window).
+        const titlePreview = prompt.replace(/\s+/g, " ").trim().slice(0, 60);
         const forkResult = await forkSession(
           target,
           sourceSessionId,
-          { forkAt: opts.forkAt, cwd: opts.cwd, agentId: opts.agentId },
+          {
+            forkAt: opts.forkAt,
+            cwd: opts.cwd,
+            agentId: opts.agentId,
+            title: `btw: ${titlePreview}`,
+          },
           fetchImpl,
         );
         forkedSessionId = forkResult.sessionId;

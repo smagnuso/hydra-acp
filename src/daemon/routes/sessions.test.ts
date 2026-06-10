@@ -821,7 +821,11 @@ describe("session routes: POST /v1/sessions/:id/fork", () => {
     expect(forkRes.status).toBe(201);
     const forkBody = (await forkRes.json()) as { sessionId: string };
 
-    const listRes = await fetch(`${harness.baseUrl}/v1/sessions`);
+    // Forks are created with interactive=false (pristine snapshot), so
+    // the default listing hides them. Use includeNonInteractive=1.
+    const listRes = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=1`,
+    );
     expect(listRes.status).toBe(200);
     const listBody = (await listRes.json()) as {
       sessions: Array<{
@@ -849,8 +853,11 @@ describe("session routes: POST /v1/sessions/:id/fork", () => {
     expect(res.status).toBe(201);
     const body = (await res.json()) as { sessionId: string };
     // Look up the new record's cwd via GET /v1/sessions and assert it
-    // doesn't start with "~".
-    const listRes = await fetch(`${harness.baseUrl}/v1/sessions`);
+    // doesn't start with "~". Forks are interactive=false so list with
+    // includeNonInteractive=1 to surface them.
+    const listRes = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=1`,
+    );
     const listBody = (await listRes.json()) as {
       sessions: Array<{ sessionId: string; cwd: string }>;
     };

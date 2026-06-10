@@ -1765,7 +1765,15 @@ export class SessionManager {
   // are kept.
   async forkSession(
     sourceSessionId: string,
-    opts: { forkAt?: string; cwd?: string; agentId?: string } = {},
+    opts: {
+      forkAt?: string;
+      cwd?: string;
+      agentId?: string;
+      // Optional title for the fork. When omitted, the fork inherits the
+      // source's title via the spread below. /btw passes "btw: <prompt>"
+      // so the fork is identifiable in `hydra sessions list --all`.
+      title?: string;
+    } = {},
   ): Promise<{
     sessionId: string;
     forkedFromSessionId: string;
@@ -1849,6 +1857,7 @@ export class SessionManager {
       lineageId: generateLineageId(),
       agentId: targetAgentId,
       interactive: false,
+      ...(opts.title !== undefined ? { title: opts.title } : {}),
       ...(crossAgent
         ? {
             currentModel: undefined,

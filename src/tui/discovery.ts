@@ -220,7 +220,7 @@ export async function listAgents(
 export async function forkSession(
   target: RemoteTarget,
   id: string,
-  opts: { forkAt?: string; cwd?: string; agentId?: string } = {},
+  opts: { forkAt?: string; cwd?: string; agentId?: string; title?: string } = {},
   fetchImpl: typeof fetch = fetch,
 ): Promise<{
   sessionId: string;
