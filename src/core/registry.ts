@@ -67,6 +67,12 @@ const ExecDistribution = z.object({
   env: z.record(z.string()).optional(),
 });
 
+const Onboarding = z.object({
+  command: z.string().optional(),
+  url: z.string().optional(),
+  description: z.string().optional(),
+});
+
 const Distribution = z.object({
   npx: NpxDistribution.optional(),
   binary: BinaryDistribution.optional(),
@@ -85,6 +91,7 @@ export const RegistryAgent = z.object({
   repository: z.string().optional(),
   website: z.string().optional(),
   distribution: Distribution,
+  onboarding: Onboarding.optional(),
 });
 export type RegistryAgent = z.infer<typeof RegistryAgent>;
 
@@ -324,6 +331,13 @@ export interface AgentListEntry {
   // Where this entry came from: "local" → config.agents (shadows any
   // same-id registry entry); "registry" → the network registry document.
   source: "local" | "registry";
+  // Optional onboarding hints (T4) — surfaced so the TUI can paint a
+  // helpful AUTH_REQUIRED banner without a second round trip.
+  onboarding?: {
+    command?: string;
+    url?: string;
+    description?: string;
+  };
 }
 
 export interface AgentListResult {
@@ -364,6 +378,7 @@ export async function listAgents(registry: Registry): Promise<AgentListResult> {
       source: localIds.has(a.id)
         ? ("local" as const)
         : ("registry" as const),
+      ...(a.onboarding ? { onboarding: a.onboarding } : {}),
     })),
   );
   return {

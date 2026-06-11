@@ -5,6 +5,7 @@ import * as os from "node:os";
 import { AgentInstance } from "./agent-instance.js";
 import { paths } from "./paths.js";
 import type { SpawnPlan } from "./registry.js";
+import type { AuthMethod } from "../acp/types-capabilities.js";
 
 function nodeScript(script: string): SpawnPlan {
   return {
@@ -145,6 +146,22 @@ describe("AgentInstance: spawn-level failures", () => {
     const err = (await pending) as Error;
     expect(err.message).not.toMatch(/exited before responding/);
     expect(err.message).toMatch(/closed/i);
+  });
+
+  it("exposes a mutable authMethods field that callers can populate after initialize", async () => {
+    const agent = AgentInstance.spawn({
+      agentId: "auth-methods",
+      cwd: process.cwd(),
+      plan: nodeScript("setInterval(() => {}, 1000);"),
+    });
+    expect(agent.authMethods).toBeUndefined();
+    const methods: AuthMethod[] = [
+      { id: "claude-login", description: "Browser OAuth", type: "agent" },
+      { id: "api-key", description: "ANTHROPIC_API_KEY", type: "terminal" },
+    ];
+    agent.authMethods = methods;
+    expect(agent.authMethods).toEqual(methods);
+    await agent.kill();
   });
 
   it("kill() escalates to SIGKILL when the agent ignores SIGTERM", async () => {

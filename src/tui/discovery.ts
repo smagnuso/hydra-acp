@@ -198,6 +198,11 @@ export interface DiscoveredAgent {
   id: string;
   name: string;
   description?: string;
+  onboarding?: {
+    command?: string;
+    url?: string;
+    description?: string;
+  };
 }
 
 // Spawn each installed agent transiently and pull in any sessions it
@@ -277,7 +282,12 @@ export async function listAgents(
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
   const body = (await response.json()) as {
-    agents?: Array<{ id: string; name: string; description?: string }>;
+    agents?: Array<{
+      id: string;
+      name: string;
+      description?: string;
+      onboarding?: { command?: string; url?: string; description?: string };
+    }>;
   };
   if (!Array.isArray(body.agents)) {
     return [];
@@ -286,6 +296,7 @@ export async function listAgents(
     id: a.id,
     name: a.name,
     description: a.description,
+    ...(a.onboarding ? { onboarding: a.onboarding } : {}),
   }));
 }
 

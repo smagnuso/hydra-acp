@@ -60,6 +60,15 @@ export interface AgentCapabilities {
   sessionCapabilities?: SessionCapabilities;
 }
 
+export interface AuthMethod {
+  id: string;
+  description: string;
+  // ACP auth method type per AUTHENTICATION.md: "agent" (OAuth flow
+  // managed by the agent) or "terminal" (interactive --setup). When
+  // omitted, "agent" is assumed for backward compatibility.
+  type?: "agent" | "terminal";
+}
+
 export interface InitializeResult {
   protocolVersion: number;
   agentCapabilities: AgentCapabilities;
@@ -67,14 +76,7 @@ export interface InitializeResult {
     name: string;
     version: string;
   };
-  authMethods?: Array<{
-    id: string;
-    description: string;
-    // ACP auth method type per AUTHENTICATION.md: "agent" (OAuth flow
-    // managed by the agent) or "terminal" (interactive --setup). When
-    // omitted, "agent" is assumed for backward compatibility.
-    type?: "agent" | "terminal";
-  }>;
+  authMethods?: AuthMethod[];
   // Hydra-only extensions ride in _meta["hydra-acp"]; see HydraMeta.
   // Generic ACP clients ignore the field, so this is additive only.
   _meta?: Record<string, unknown>;

@@ -45,6 +45,10 @@ export const JsonRpcErrorCodes = {
   MethodNotFound: -32601,
   InvalidParams: -32602,
   InternalError: -32603,
+  // -32000 is the first server-defined slot per JSON-RPC 2.0; the ACP
+  // AUTHENTICATION.md spec assigns it to AUTH_REQUIRED, returned by an
+  // agent when a method needs a prior `authenticate` round-trip.
+  AuthRequired: -32000,
   // -32001…-32003 reserved for RFD #533 attach semantics:
   //   -32001 Session not found
   //   -32002 Not authorised to attach

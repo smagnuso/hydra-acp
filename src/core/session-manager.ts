@@ -48,7 +48,7 @@ import type {
   AdvertisedModel,
 } from "./hydra-commands.js";
 import { resolveModelId } from "./model-resolve.js";
-import type { AgentCapabilities, SessionListEntry } from "../acp/types.js";
+import type { AgentCapabilities, AuthMethod, SessionListEntry } from "../acp/types.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
@@ -210,6 +210,12 @@ export interface SessionManagerOptions {
 export class SessionManager {
   private sessions = new Map<string, Session>();
   private resurrectionInflight = new Map<string, Promise<Session>>();
+  // Standalone agents spawned by the `authenticate` RPC, keyed by
+  // agentId. Kept alive past the RPC so an immediately-following
+  // session/new can reuse the now-authenticated channel; auto-pruned
+  // when the agent exits. At most one per agentId — a second
+  // authenticate for the same id reuses the live entry.
+  private pendingAuthAgents = new Map<string, AgentInstance>();
   private spawner: AgentSpawner;
   private store: SessionStore;
   private tombstones: TombstoneStore;
@@ -480,9 +486,10 @@ export class SessionManager {
       agentCapabilities = initResult.agentCapabilities as
         | AgentCapabilities
         | undefined;
+      agent.authMethods = parseAuthMethods(initResult.authMethods);
     } catch (err) {
       await agent.kill().catch(() => undefined);
-      throw err;
+      throw enrichAuthRequired(err, agent);
     }
 
     let loadResult: Record<string, unknown> | undefined;
@@ -498,6 +505,18 @@ export class SessionManager {
         },
       );
     } catch (err) {
+      // AUTH_REQUIRED is not a missing-upstream-id condition; the
+      // recovery/reseed path would mint a brand-new session without
+      // resolving the actual auth problem. Surface it verbatim with
+      // enriched authMethods context so editors can prompt the user.
+      if (
+        err &&
+        typeof err === "object" &&
+        (err as { code?: unknown }).code === JsonRpcErrorCodes.AuthRequired
+      ) {
+        await agent.kill().catch(() => undefined);
+        throw enrichAuthRequired(err, agent);
+      }
       // Agent forgot the upstream id (e.g. its store was wiped). Drop
       // this agent and recover via the import-reseed path: a fresh
       // session/new gives us a new upstream id, attachManagerHooks
@@ -817,8 +836,9 @@ export class SessionManager {
       );
     } catch (err) {
       await agent.kill().catch(() => undefined);
-      throw err;
+      throw enrichAuthRequired(err, agent);
     }
+    agent.authMethods = parseAuthMethods(initResult.authMethods);
 
     const caps = (initResult.agentCapabilities ?? {}) as {
       sessionCapabilities?: { list?: unknown };
@@ -1068,6 +1088,7 @@ export class SessionManager {
       const agentCapabilities = initResult.agentCapabilities as
         | AgentCapabilities
         | undefined;
+      agent.authMethods = parseAuthMethods(initResult.authMethods);
       const newResult = await agent.connection.request<Record<string, unknown>>(
         "session/new",
         {
@@ -1151,8 +1172,86 @@ export class SessionManager {
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);
+      throw enrichAuthRequired(err, agent);
+    }
+  }
+
+  // Spawn + initialize an agent for the standalone `authenticate` RPC.
+  // Unlike bootstrapAgent this skips session/new — the caller only needs
+  // a live JSON-RPC channel to forward `authenticate` to, and a populated
+  // authMethods list to validate the methodId against. The agent stays
+  // alive on success so a follow-up session/new (post-auth) can reuse the
+  // already-authenticated channel via consumePendingAuthAgent.
+  async bootstrapAgentForAuth(
+    agentId: string,
+    cwd?: string,
+  ): Promise<AgentInstance> {
+    const existing = this.pendingAuthAgents.get(agentId);
+    if (existing && existing.isAlive()) {
+      return existing;
+    }
+    const agentDef = await this.registry.getAgent(agentId);
+    if (!agentDef) {
+      const err = new Error(
+        `agent ${agentId} not found in registry`,
+      ) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.AgentNotInstalled;
       throw err;
     }
+    const plan = await planSpawn(agentDef, [], {
+      npmRegistry: this.npmRegistry,
+    });
+    const effectiveCwd = cwd ?? expandHome(this.defaultCwd);
+    const agent = this.spawner({
+      agentId,
+      cwd: effectiveCwd,
+      plan,
+    });
+    try {
+      const initResult = await agent.connection.request<Record<string, unknown>>(
+        "initialize",
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {},
+          clientInfo: { name: "hydra", version: HYDRA_VERSION },
+        },
+      );
+      agent.authMethods = parseAuthMethods(initResult.authMethods);
+    } catch (err) {
+      await agent.kill().catch(() => undefined);
+      throw enrichAuthRequired(err, agent);
+    }
+    this.pendingAuthAgents.set(agentId, agent);
+    agent.onExit(() => {
+      if (this.pendingAuthAgents.get(agentId) === agent) {
+        this.pendingAuthAgents.delete(agentId);
+      }
+    });
+    return agent;
+  }
+
+  // Pop the most-recently-authenticated standalone agent for this id, if
+  // any. Used by session/new (TODO) to avoid re-spawning + re-initing
+  // right after the editor's authenticate round-trip completed.
+  consumePendingAuthAgent(agentId: string): AgentInstance | undefined {
+    const agent = this.pendingAuthAgents.get(agentId);
+    if (!agent) {
+      return undefined;
+    }
+    this.pendingAuthAgents.delete(agentId);
+    if (!agent.isAlive()) {
+      return undefined;
+    }
+    return agent;
+  }
+
+  // Live AgentInstance backing the given hydra sessionId, or undefined
+  // when no session by that id is currently in memory. Used by the
+  // `authenticate` RPC to route to an existing session's child agent
+  // instead of spawning a fresh one.
+  getAgentForSession(sessionId: string): AgentInstance | undefined {
+    const session = this.sessions.get(sessionId);
+    return session?.agent;
   }
 
   // Hooks that bridge a Session into the manager's persistence/listing
@@ -2652,6 +2751,80 @@ export function extractInitialModel(
       asString(o.model),
     fromConfig: (e) => asString(e.currentValue),
   });
+}
+
+// If `err` is an AUTH_REQUIRED JSON-RPC error from a child agent,
+// return a fresh Error preserving its code and message but with the
+// child's advertised authMethods and agentId merged into
+// data._meta['hydra-acp']. Otherwise return `err` unchanged so callers
+// can `throw enrichAuthRequired(err, agent)` without branching. Editors
+// and the TUI consume the enriched envelope to render an onboarding
+// flow that lists the agent's real auth methods instead of an opaque
+// code; the recovery (import-reseed) path must NOT run for AUTH_REQUIRED
+// since that path exists for missing-upstream-id, not unauthenticated
+// agents.
+export function enrichAuthRequired(
+  err: unknown,
+  agent: { agentId: string; authMethods?: AuthMethod[] },
+): unknown {
+  if (!err || typeof err !== "object") {
+    return err;
+  }
+  const e = err as { code?: unknown; message?: unknown; data?: unknown };
+  if (e.code !== JsonRpcErrorCodes.AuthRequired) {
+    return err;
+  }
+  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+  const baseData = isPlainObject(e.data) ? e.data : {};
+  const baseMeta = isPlainObject(baseData._meta) ? baseData._meta : {};
+  const baseHydra = isPlainObject(baseMeta["hydra-acp"])
+    ? baseMeta["hydra-acp"]
+    : {};
+  const message =
+    typeof e.message === "string" ? e.message : "authentication required";
+  const next = new Error(message) as Error & {
+    code: number;
+    data: Record<string, unknown>;
+  };
+  next.code = JsonRpcErrorCodes.AuthRequired;
+  next.data = {
+    ...baseData,
+    _meta: {
+      ...baseMeta,
+      "hydra-acp": {
+        ...baseHydra,
+        authMethods: agent.authMethods ?? [],
+        agentId: agent.agentId,
+      },
+    },
+  };
+  return next;
+}
+
+// Validate and narrow a raw initialize.authMethods payload to the
+// strict AuthMethod[] shape. Drops malformed entries silently; returns
+// undefined when the field is absent or yields zero valid entries, so
+// callers can treat "agent didn't advertise auth" and "agent sent junk"
+// the same way.
+function parseAuthMethods(value: unknown): AuthMethod[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const out: AuthMethod[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e.id !== "string") {
+      continue;
+    }
+    const description = typeof e.description === "string" ? e.description : "";
+    const type = e.type === "agent" || e.type === "terminal" ? e.type : undefined;
+    out.push({ id: e.id, description, ...(type && { type }) });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function asString(value: unknown): string | undefined {

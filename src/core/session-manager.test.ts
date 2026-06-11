@@ -215,6 +215,86 @@ describe("SessionManager.resurrect", () => {
     expect(reloaded?.upstreamSessionId).toBe("u_new");
   });
 
+  it("propagates AUTH_REQUIRED from session/load with enriched authMethods (no recovery)", async () => {
+    let spawnCount = 0;
+    const authMethods = [
+      { id: "claude-login", description: "Log in", type: "agent" as const },
+    ];
+    const authMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
+        mocks.push(m);
+        spawnCount += 1;
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        const authErr = Object.assign(new Error("auth needed"), {
+          code: JsonRpcErrorCodes.AuthRequired,
+        });
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1, authMethods })
+          .mockRejectedValueOnce(authErr);
+        return m.agent;
+      },
+    );
+
+    let caught: unknown;
+    try {
+      await authMgr.resurrect({
+        hydraSessionId: "sess_auth",
+        upstreamSessionId: "u_auth",
+        agentId: "claude-code",
+        cwd: W_CWD,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    const err = caught as { code: number; message: string; data: Record<string, unknown> };
+    expect(err.code).toBe(JsonRpcErrorCodes.AuthRequired);
+    expect(err.message).toBe("auth needed");
+    const meta = err.data._meta as Record<string, unknown>;
+    const hydraMeta = meta["hydra-acp"] as { agentId: string; authMethods: unknown[] };
+    expect(hydraMeta.agentId).toBe("claude-code");
+    expect(hydraMeta.authMethods).toEqual(authMethods);
+    // Recovery/reseed path must NOT run for AUTH_REQUIRED.
+    expect(spawnCount).toBe(1);
+    expect(mocks[0]?.agent.kill).toHaveBeenCalled();
+  });
+
+  it("still recovers via import-reseed when session/load fails with a non-auth code (regression guard)", async () => {
+    let spawnCount = 0;
+    const recoverMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: W_CWD });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        if (spawnCount === 0) {
+          const otherErr = Object.assign(new Error("session not found"), {
+            code: JsonRpcErrorCodes.SessionNotFound,
+          });
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockRejectedValueOnce(otherErr);
+        } else {
+          requestMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockResolvedValueOnce({ sessionId: "u_recovered" });
+        }
+        spawnCount += 1;
+        return m.agent;
+      },
+    );
+    const session = await recoverMgr.resurrect({
+      hydraSessionId: "sess_recover",
+      upstreamSessionId: "u_old",
+      agentId: "claude-code",
+      cwd: W_CWD,
+    });
+    expect(session.upstreamSessionId).toBe("u_recovered");
+    expect(spawnCount).toBe(2);
+  });
+
   it("captures the agent's _meta on session/load for passthrough", async () => {
     const passthroughMgr = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
@@ -3489,6 +3569,68 @@ describe("SessionManager.create: agent:initialize intercept", () => {
     });
 
     expect(connRequestSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionManager.create: captures child authMethods on AgentInstance", () => {
+  it("populates agent.authMethods from the initialize response for a brand-new session", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        agentCapabilities: {},
+        authMethods: [
+          {
+            id: "claude-login",
+            description: "Log in with Claude account",
+            type: "agent",
+          },
+          {
+            id: "api-key",
+            description: "Use ANTHROPIC_API_KEY",
+            type: "terminal",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ sessionId: "u_auth_capture" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    expect(mock.agent.authMethods).toEqual([
+      {
+        id: "claude-login",
+        description: "Log in with Claude account",
+        type: "agent",
+      },
+      {
+        id: "api-key",
+        description: "Use ANTHROPIC_API_KEY",
+        type: "terminal",
+      },
+    ]);
+  });
+
+  it("leaves agent.authMethods undefined when the initialize response omits the field", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1, agentCapabilities: {} })
+      .mockResolvedValueOnce({ sessionId: "u_no_auth" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+
+    await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    expect(mock.agent.authMethods).toBeUndefined();
   });
 });
 

@@ -13,6 +13,7 @@ import {
   planSpawn,
   type AgentInstallProgress,
   type RegistryAgent,
+  RegistryDocument,
 } from "./registry.js";
 import { paths } from "./paths.js";
 import { currentPlatformKey } from "./binary-install.js";
@@ -558,6 +559,36 @@ describe("Registry disk cache", () => {
     } finally {
       await close();
     }
+  });
+
+  it("round-trips an optional onboarding field on agent entries", async () => {
+    const doc = {
+      version: "1.0.0",
+      agents: [
+        {
+          id: "needs-auth",
+          name: "Needs Auth",
+          distribution: { npx: { package: "needs-auth@1.0.0" } },
+          onboarding: {
+            command: "needs-auth login",
+            url: "https://example.com/auth",
+            description: "Run `needs-auth login` to authenticate.",
+          },
+        },
+        {
+          id: "plain",
+          name: "Plain",
+          distribution: { npx: { package: "plain@1.0.0" } },
+        },
+      ],
+    };
+    const parsed = RegistryDocument.parse(doc);
+    expect(parsed.agents[0]!.onboarding).toEqual({
+      command: "needs-auth login",
+      url: "https://example.com/auth",
+      description: "Run `needs-auth login` to authenticate.",
+    });
+    expect(parsed.agents[1]!.onboarding).toBeUndefined();
   });
 
   it("writes atomically — no .tmp- siblings remain after a successful write", async () => {

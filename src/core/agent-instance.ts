@@ -5,6 +5,7 @@ import { ndjsonStreamFromStdio } from "../acp/framing.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { paths } from "./paths.js";
 import type { SpawnPlan } from "./registry.js";
+import type { AuthMethod } from "../acp/types-capabilities.js";
 
 export interface AgentInstanceOptions {
   agentId: string;
@@ -39,6 +40,13 @@ export class AgentInstance {
   readonly version: string;
   readonly cwd: string;
   readonly connection: JsonRpcConnection;
+  // Child agent's advertised authMethods from its initialize response.
+  // Populated by the caller that drives the initialize exchange (see
+  // session-manager) once the result arrives; left undefined if the
+  // child omitted the field. Mutable by design — AgentInstance.spawn
+  // returns before initialize runs, so the field is filled in after
+  // construction rather than via the constructor signature.
+  authMethods?: AuthMethod[];
   private child: ChildProcess;
   private exited = false;
   private killed = false;

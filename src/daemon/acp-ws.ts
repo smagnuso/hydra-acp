@@ -3,7 +3,11 @@ import type { WebSocket } from "ws";
 import { nanoid } from "nanoid";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
-import { SessionManager, type ResurrectParams } from "../core/session-manager.js";
+import {
+  SessionManager,
+  enrichAuthRequired,
+  type ResurrectParams,
+} from "../core/session-manager.js";
 import { resolveModelId } from "../core/model-resolve.js";
 import { Session, type AttachedClient } from "../core/session.js";
 import {
@@ -877,6 +881,10 @@ export function registerAcpWsEndpoint(
       return { content };
     });
 
+    connection.onRequest("authenticate", async (raw) =>
+      handleAuthenticate(raw, deps),
+    );
+
     connection.onRequest("session/new", async (raw) => {
       const params = SessionNewParams.parse(raw);
       const hydraMeta = extractHydraMeta(
@@ -1720,6 +1728,60 @@ export function registerAcpWsEndpoint(
 // (e.g. client already disconnected mid-download) are swallowed so the
 // install itself isn't disrupted.
 //
+// Handle the ACP `authenticate` JSON-RPC request. Resolves a target
+// child agent (by sessionId → agentId → defaultAgent), validates the
+// requested methodId against the child's advertised authMethods, and
+// forwards the call. On success the agent stays alive so a follow-up
+// session/new can reuse the now-authenticated channel; we never call
+// agent.kill() here. AUTH_REQUIRED bubbled out of the child is enriched
+// with hydra's _meta envelope identically to the session-load path.
+//
+// Exported so the unit test can drive it without a live WS.
+export async function handleAuthenticate(
+  raw: unknown,
+  deps: Pick<AcpWsDeps, "manager" | "defaultAgent">,
+): Promise<unknown> {
+  const params = (raw ?? {}) as {
+    methodId?: unknown;
+    _meta?: { "hydra-acp"?: { agentId?: unknown; sessionId?: unknown } };
+  };
+  if (typeof params.methodId !== "string" || params.methodId.length === 0) {
+    throw rpcError(
+      JsonRpcErrorCodes.InvalidParams,
+      "authenticate requires a non-empty methodId string",
+    );
+  }
+  const methodId = params.methodId;
+  const hydraMeta = params._meta?.["hydra-acp"];
+  const targetSessionId =
+    typeof hydraMeta?.sessionId === "string" ? hydraMeta.sessionId : undefined;
+  const targetAgentId =
+    typeof hydraMeta?.agentId === "string" ? hydraMeta.agentId : undefined;
+
+  let agent =
+    targetSessionId !== undefined
+      ? deps.manager.getAgentForSession(targetSessionId)
+      : undefined;
+  if (!agent || !agent.isAlive()) {
+    const spawnId = targetAgentId ?? deps.defaultAgent;
+    agent = await deps.manager.bootstrapAgentForAuth(spawnId);
+  }
+
+  const validIds = (agent.authMethods ?? []).map((m) => m.id);
+  if (!validIds.includes(methodId)) {
+    throw rpcError(
+      JsonRpcErrorCodes.InvalidParams,
+      `authenticate: methodId ${JSON.stringify(methodId)} is not advertised by agent ${agent.agentId}; valid: [${validIds.map((id) => JSON.stringify(id)).join(", ")}]`,
+    );
+  }
+
+  try {
+    return await agent.connection.request("authenticate", { methodId });
+  } catch (err) {
+    throw enrichAuthRequired(err, agent);
+  }
+}
+
 // Exported for unit testing — the WS layer is the only production
 // consumer.
 export function makeInstallProgressForwarder(

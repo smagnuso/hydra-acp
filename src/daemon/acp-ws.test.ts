@@ -6,6 +6,7 @@ import {
 } from "../__tests__/test-utils.js";
 import {
   decideSetModel,
+  handleAuthenticate,
   handleTransformerAttach,
   makeInstallProgressForwarder,
 } from "./acp-ws.js";
@@ -551,5 +552,120 @@ describe("handleTransformerAttach", () => {
     // attach call for other-victim from caller's connection wouldn't
     // make sense; this design forecloses on it entirely.
     await handleTransformerAttach({ sessionId: "s" }, "caller", deps);
+  });
+});
+
+describe("handleAuthenticate", () => {
+  function makeAuthDeps(opts: {
+    sessionAgent?: ReturnType<typeof makeMockAgent>;
+    spawnAgent?: ReturnType<typeof makeMockAgent>;
+    defaultAgent?: string;
+  }) {
+    const bootstrap = vi.fn(async () => {
+      if (!opts.spawnAgent) {
+        throw new Error("spawn not expected");
+      }
+      return opts.spawnAgent.agent;
+    });
+    const manager = {
+      getAgentForSession: (sid: string) =>
+        sid === "sess_live" ? opts.sessionAgent?.agent : undefined,
+      bootstrapAgentForAuth: bootstrap,
+    } as unknown as SessionManager;
+    return {
+      deps: { manager, defaultAgent: opts.defaultAgent ?? "claude-acp" },
+      bootstrap,
+    };
+  }
+
+  it("routes to the session's child agent when sessionId is provided", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "claude-acp" });
+    sessionAgent.agent.authMethods = [
+      { id: "claude-login", description: "Login", type: "agent" },
+    ];
+    sessionAgent.agentToClient.mockResolvedValueOnce({ ok: true });
+    const { deps, bootstrap } = makeAuthDeps({ sessionAgent });
+
+    const result = await handleAuthenticate(
+      {
+        methodId: "claude-login",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    );
+    expect(result).toEqual({ ok: true });
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(sessionAgent.agentToClient).toHaveBeenCalledWith("authenticate", {
+      methodId: "claude-login",
+    });
+    expect(sessionAgent.agent.kill).not.toHaveBeenCalled();
+  });
+
+  it("falls back to defaultAgent and bootstraps when no target is provided", async () => {
+    const spawnAgent = makeMockAgent({ agentId: "claude-acp" });
+    spawnAgent.agent.authMethods = [
+      { id: "claude-login", description: "", type: "agent" },
+    ];
+    spawnAgent.agentToClient.mockResolvedValueOnce({ ok: "ok" });
+    const { deps, bootstrap } = makeAuthDeps({ spawnAgent });
+
+    const result = await handleAuthenticate({ methodId: "claude-login" }, deps);
+    expect(result).toEqual({ ok: "ok" });
+    expect(bootstrap).toHaveBeenCalledWith("claude-acp");
+    expect(spawnAgent.agent.kill).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown methodId with InvalidParams listing valid ids", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "claude-acp" });
+    sessionAgent.agent.authMethods = [
+      { id: "claude-login", description: "", type: "agent" },
+      { id: "claude-api-key", description: "", type: "agent" },
+    ];
+    const { deps } = makeAuthDeps({ sessionAgent });
+
+    await expect(
+      handleAuthenticate(
+        {
+          methodId: "bogus",
+          _meta: { "hydra-acp": { sessionId: "sess_live" } },
+        },
+        deps,
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCodes.InvalidParams,
+      message: expect.stringContaining("claude-login"),
+    });
+    expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
+    expect(sessionAgent.agent.kill).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty methodId with InvalidParams", async () => {
+    const { deps } = makeAuthDeps({});
+    await expect(
+      handleAuthenticate({ methodId: "" }, deps),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("returns the child's success response verbatim and does not kill the agent", async () => {
+    const spawnAgent = makeMockAgent({ agentId: "codex-acp" });
+    spawnAgent.agent.authMethods = [
+      { id: "oauth", description: "", type: "agent" },
+    ];
+    const childResponse = { token: "abc", extra: 42 };
+    spawnAgent.agentToClient.mockResolvedValueOnce(childResponse);
+    const { deps } = makeAuthDeps({
+      spawnAgent,
+      defaultAgent: "codex-acp",
+    });
+
+    const result = await handleAuthenticate(
+      {
+        methodId: "oauth",
+        _meta: { "hydra-acp": { agentId: "codex-acp" } },
+      },
+      deps,
+    );
+    expect(result).toBe(childResponse);
+    expect(spawnAgent.agent.kill).not.toHaveBeenCalled();
   });
 });

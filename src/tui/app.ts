@@ -78,6 +78,11 @@ import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
 import { promptForAgent } from "./agent-prompt.js";
 import {
+  promptAuthRequiredBanner,
+  runAuthRetryLoop,
+  type AuthOnboarding,
+} from "./auth-required-banner.js";
+import {
   formatElapsed,
   guardTerminalDimensions,
   Screen,
@@ -1315,16 +1320,63 @@ async function runSession(
     if (opts.model) {
       hydraNewMeta.model = opts.model;
     }
-    const created = (await conn.request("session/new", {
+    const sessionNewParams = {
       cwd: ctx.cwd,
       ...(Object.keys(hydraNewMeta).length > 0
         ? { _meta: { [HYDRA_META_KEY]: hydraNewMeta } }
         : {}),
-    })) as {
+    };
+    type SessionNewResult = {
       sessionId: string;
       configOptions?: unknown;
       _meta?: Record<string, unknown>;
     };
+    // Wrap session/new so an AUTH_REQUIRED from the child surfaces as a
+    // banner (with the registry's onboarding hints) instead of an
+    // opaque crash. `r` re-issues with identical params; Esc bubbles
+    // back to the picker via the runTuiApp outer loop.
+    const authOutcome = await runAuthRetryLoop<SessionNewResult>({
+      request: () =>
+        conn.request("session/new", sessionNewParams) as Promise<SessionNewResult>,
+      showBanner: (agentId, onboarding) =>
+        promptAuthRequiredBanner(term, agentId, onboarding),
+      resolveOnboarding: async (agentId) => {
+        if (!agentId) {
+          return undefined;
+        }
+        try {
+          const agents = await listAgents(target);
+          const entry = agents.find((a) => a.id === agentId);
+          return entry?.onboarding;
+        } catch {
+          return undefined;
+        }
+      },
+      fallbackAgentId: opts.agentId,
+    });
+    if (authOutcome.kind === "cancel") {
+      term.grabInput(false);
+      void stream.close().catch(() => undefined);
+      return null;
+    }
+    if (authOutcome.kind === "back") {
+      term.grabInput(false);
+      void stream.close().catch(() => undefined);
+      // Re-enter the outer loop with sessionId/forceNew/resume cleared
+      // so resolveSession re-shows the picker. agentId is cleared so
+      // the user can choose a different agent on retry; their original
+      // pick is still recoverable via the agent picker.
+      const nextOpts: TuiOptions = { ...opts };
+      delete nextOpts.sessionId;
+      delete nextOpts.forceNew;
+      delete nextOpts.resume;
+      delete nextOpts.agentId;
+      return nextOpts;
+    }
+    const created = authOutcome.result;
+    // Modal teardown wiped the install status line; repaint it so the
+    // user sees the launch label again while session bring-up continues.
+    installStatus.write(launchLabelBase);
     resolvedSessionId = created.sessionId;
     exitHint.sessionId = resolvedSessionId;
     exitHint.readonly = false;
