@@ -3742,6 +3742,7 @@ describe("SessionManager.forkSession", () => {
     promptHistory?: string[];
     currentModel?: string;
     currentMode?: string;
+    currentUsage?: { cumulativeCost?: number; costAmount?: number };
     interactive?: boolean;
   }) {
     return {
@@ -3756,6 +3757,7 @@ describe("SessionManager.forkSession", () => {
         ...(opts.title !== undefined ? { title: opts.title } : {}),
         ...(opts.currentModel !== undefined ? { currentModel: opts.currentModel } : {}),
         ...(opts.currentMode !== undefined ? { currentMode: opts.currentMode } : {}),
+        ...(opts.currentUsage !== undefined ? { currentUsage: opts.currentUsage } : {}),
         ...(opts.interactive !== undefined ? { interactive: opts.interactive } : {}),
         createdAt: "2026-05-13T00:00:00.000Z",
         updatedAt: "2026-05-13T00:00:00.000Z",
@@ -3954,6 +3956,7 @@ describe("SessionManager.forkSession", () => {
         title: "shared title",
         currentModel: "claude-sonnet-4-6",
         currentMode: "default",
+        currentUsage: { cumulativeCost: 4.2 },
         history: [turnComplete("m_one")],
       }),
     );
@@ -3984,6 +3987,25 @@ describe("SessionManager.forkSession", () => {
       agentId: "claude-code",
     });
     const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.currentModel).toBe("claude-sonnet-4-6");
+    expect(forkMeta.currentMode).toBe("default");
+  });
+
+  it("same-agent fork wipes currentUsage (fork is a new session for billing)", async () => {
+    const manager = noSpawnManager();
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_usage_same",
+        agentId: "claude-code",
+        currentModel: "claude-sonnet-4-6",
+        currentMode: "default",
+        currentUsage: { cumulativeCost: 4.2 },
+        history: [turnComplete("m_one")],
+      }),
+    );
+    const fork = await manager.forkSession(source.sessionId);
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.currentUsage).toBeUndefined();
     expect(forkMeta.currentModel).toBe("claude-sonnet-4-6");
     expect(forkMeta.currentMode).toBe("default");
   });

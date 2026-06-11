@@ -2127,11 +2127,16 @@ export class SessionManager {
       agentId: targetAgentId,
       interactive: false,
       ...(opts.title !== undefined ? { title: opts.title } : {}),
+      // A fork is a new session: its first turn re-pays for the carried
+      // context (cache miss on the new session id, full prompt re-sent),
+      // so cumulativeCost from turn 1 onward is the true cost of this
+      // session. Inheriting the source's usage would double-count the
+      // shared prefix against the source's own ledger.
+      currentUsage: undefined,
       ...(crossAgent
         ? {
             currentModel: undefined,
             currentMode: undefined,
-            currentUsage: undefined,
             agentCommands: undefined,
             agentModes: undefined,
             agentModels: undefined,
