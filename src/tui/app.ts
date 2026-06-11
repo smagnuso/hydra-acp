@@ -1798,13 +1798,11 @@ async function runSession(
       return [];
     }
     const matches = allCommands().filter((c) => c.name.startsWith(prefix));
-    // If the user has typed an exact command name (no args yet), don't
-    // bother showing a single-element list — they're done picking.
-    if (
-      matches.length === 1 &&
-      matches[0]?.name === prefix &&
-      space === -1
-    ) {
+    // If the user has typed an exact command name, they're done picking.
+    // Hide the popup whether or not they've started typing arguments —
+    // otherwise the lone single-row popup resurfaces the moment a space
+    // is added (e.g. "/btw" hides it, "/btw foo" brought it back).
+    if (matches.length === 1 && matches[0]?.name === prefix) {
       return [];
     }
     return matches;
