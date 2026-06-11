@@ -353,41 +353,44 @@ export async function startDaemon(
     }
     clearInterval(sweepInterval);
     clearInterval(rateLimitSweepInterval);
-    await sessionTokenStore.flush();
-    await extensions.stop();
-    await transformers.stop();
-    await manager.closeAll();
+    const safeStep = async (name: string, fn: () => Promise<unknown> | unknown): Promise<void> => {
+      try {
+        await fn();
+      } catch (err) {
+        app.log.warn(`shutdown step ${name} failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    await safeStep("sessionTokenStore.flush", () => sessionTokenStore.flush());
+    await safeStep("extensions.stop", () => extensions.stop());
+    await safeStep("transformers.stop", () => transformers.stop());
+    await safeStep("manager.closeAll", () => manager.closeAll());
     // Wait for any in-flight background synopsis to land (and queued
     // ones to drain). The 30s cap bounds total shutdown latency; queued
     // jobs that didn't get to run before the cap are dropped by
     // shutdownSynopsis. Smoke testing showed ephemeral synopsis on
     // Haiku finishes in 2-3s even for deep histories.
-    await manager.flushSynopsis(30_000);
-    await manager.shutdownSynopsis();
+    await safeStep("manager.flushSynopsis", () => manager.flushSynopsis(30_000));
+    await safeStep("manager.shutdownSynopsis", () => manager.shutdownSynopsis());
     // Drain pending meta.json writes after closing sessions so any
     // final persistTitle/persistSynopsis call has a chance to hit disk
     // before the daemon exits.
-    await manager.flushMetaWrites();
+    await safeStep("manager.flushMetaWrites", () => manager.flushMetaWrites());
     // Same for history.jsonl — markClosed emits a turn_complete
     // (interrupted) for the in-flight turn via fire-and-forget append.
     // Without this flush, a SIGTERM can race ahead of that write and
     // leave an unmatched prompt_received that leaks pendingTurns on
     // every client that later replays the session.
-    await manager.flushHistoryWrites();
+    await safeStep("manager.flushHistoryWrites", () => manager.flushHistoryWrites());
     setBinaryInstallLogger(null);
     setNpmInstallLogger(null);
     setAgentPruneLogger(null);
-    await app.close();
+    await safeStep("app.close", () => app.close());
     try {
       fs.unlinkSync(paths.pidFile());
     } catch {
       void 0;
     }
-    try {
-      fileStream.flushSync();
-    } catch {
-      void 0;
-    }
+    await safeStep("fileStream.flushSync", () => fileStream.flushSync());
   };
 
   return {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DaemonTimeoutError,
   deleteSession,
+  fetchWithTimeout,
   killSession,
   listSessions,
   pickMostRecent,
@@ -282,5 +284,60 @@ describe("syncInstalledAgents", () => {
     await expect(syncInstalledAgents(target, fetchImpl)).rejects.toThrow(
       /HTTP 500/,
     );
+  });
+});
+
+describe("fetchWithTimeout (T2 — picker hang regression)", () => {
+  // Drives the picker auto-refresh path: an unresponsive daemon must
+  // not freeze the picker forever. With a tight timeout the helper
+  // rejects with DaemonTimeoutError instead of pending indefinitely.
+  it("rejects with DaemonTimeoutError when the daemon never responds", async () => {
+    const fetchImpl = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          (err as Error & { name: string }).name = "AbortError";
+          reject(err);
+        });
+      })) as typeof fetch;
+    await expect(
+      fetchWithTimeout("http://stuck/", {}, 25, fetchImpl),
+    ).rejects.toBeInstanceOf(DaemonTimeoutError);
+  });
+
+  it("propagates caller-cancellation as AbortError, not DaemonTimeoutError", async () => {
+    const controller = new AbortController();
+    const fetchImpl = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          (err as Error & { name: string }).name = "AbortError";
+          reject(err);
+        });
+      })) as typeof fetch;
+    const p = fetchWithTimeout(
+      "http://stuck/",
+      { signal: controller.signal },
+      10000,
+      fetchImpl,
+    );
+    controller.abort();
+    await expect(p).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("listSessions plumbs caller signals through to the fetch", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const fetchImpl = ((_url: string, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      return Promise.resolve(
+        new Response(JSON.stringify({ sessions: [] }), { status: 200 }),
+      );
+    }) as typeof fetch;
+    const ctrl = new AbortController();
+    await listSessions(target, { signal: ctrl.signal }, fetchImpl);
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal?.aborted).toBe(false);
+    ctrl.abort();
+    expect(observedSignal?.aborted).toBe(true);
   });
 });

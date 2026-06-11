@@ -27,6 +27,7 @@ import type { HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 import {
   deleteSession,
+  fetchWithTimeout,
   killSession,
   listSessions,
   regenSessionTitle,
@@ -1518,6 +1519,10 @@ export async function pickSession(
     let resolved = false;
     let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
     let autoRefreshInFlight = false;
+    // AbortController tied to the in-flight refresh. Allows the picker
+    // teardown (cleanup) and a fresh keystroke-driven refresh to cancel
+    // a stuck listSessions before starting a new one.
+    let autoRefreshAbort: AbortController | null = null;
     // Guards the on-demand agent sync (`s`). Sync spawns a fresh process
     // per installed agent and can run for several seconds; the guard
     // keeps repeated `s` presses from launching overlapping syncs.
@@ -1624,6 +1629,11 @@ export async function pickSession(
         clearInterval(autoRefreshTimer);
         autoRefreshTimer = null;
       }
+      if (autoRefreshAbort) {
+        autoRefreshAbort.abort();
+        autoRefreshAbort = null;
+        autoRefreshInFlight = false;
+      }
       term.off("key", dispatch);
       term.off("resize", dispatchResize);
       // Restore terminal-kit's stdin listener and disable bracketed paste.
@@ -1650,15 +1660,26 @@ export async function pickSession(
         focusStack.length > 1 ||
         mode !== "normal" ||
         searchActive ||
-        autoRefreshInFlight ||
         syncInFlight
       ) {
         return;
       }
+      if (autoRefreshInFlight && autoRefreshAbort) {
+        // A prior refresh is stuck — cancel it before issuing a new one
+        // so an unresponsive daemon can't latch the in-flight flag.
+        autoRefreshAbort.abort();
+        autoRefreshAbort = null;
+        autoRefreshInFlight = false;
+      }
       const currentId =
         selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
       autoRefreshInFlight = true;
-      void refresh(currentId, { silent: true }).finally(() => {
+      const controller = new AbortController();
+      autoRefreshAbort = controller;
+      void refresh(currentId, { silent: true, signal: controller.signal }).finally(() => {
+        if (autoRefreshAbort === controller) {
+          autoRefreshAbort = null;
+        }
         autoRefreshInFlight = false;
       });
     };
@@ -1711,13 +1732,14 @@ export async function pickSession(
     };
     const refresh = async (
       preferredId?: string,
-      refreshOpts: { silent?: boolean } = {},
+      refreshOpts: { silent?: boolean; signal?: AbortSignal } = {},
     ): Promise<void> => {
       try {
         const beforeKey = refreshOpts.silent ? renderFingerprint() : "";
         const beforeTotal = total;
         const next = await listSessions(opts.target, {
           includeNonInteractive: true,
+          signal: refreshOpts.signal,
         });
         // Snapshot the session the cursor is on right now — after the
         // HTTP wait, not before — so callers that don't pin a specific
@@ -1997,9 +2019,14 @@ export async function pickSession(
       };
 
       renderInfo();
+      // Cancellation tied to the info layer's lifetime. On Esc / ^C we
+      // abort the in-flight export fetch so a stuck daemon doesn't keep
+      // the picker pinned waiting for the response.
+      const infoAbort = new AbortController();
       const infoLayer: FocusLayer = {
         onKey: (name) => {
           if (name === "ESCAPE" || name === "CTRL_C") {
+            infoAbort.abort();
             popLayer();
             return;
           }
@@ -2010,9 +2037,12 @@ export async function pickSession(
 
       void (async () => {
         try {
-          const resp = await fetch(
+          const resp = await fetchWithTimeout(
             `${opts.target.baseUrl}/v1/sessions/${encodeURIComponent(session.sessionId)}/export`,
-            { headers: { Authorization: `Bearer ${opts.target.token}` } },
+            {
+              headers: { Authorization: `Bearer ${opts.target.token}` },
+              signal: infoAbort.signal,
+            },
           );
           if (!resp.ok) {
             throw new Error(`daemon returned HTTP ${resp.status}`);
@@ -2023,6 +2053,9 @@ export async function pickSession(
           const text = formatSessionInfoSummary(data, false);
           lines = text.replace(/\n$/, "").split("\n");
         } catch (err) {
+          if (infoAbort.signal.aborted) {
+            return;
+          }
           error = `failed to load info: ${(err as Error).message}`;
         } finally {
           loading = false;

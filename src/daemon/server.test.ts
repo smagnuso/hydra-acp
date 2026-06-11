@@ -1261,6 +1261,21 @@ describe("startDaemon", () => {
       handle = null;
     });
 
+    it("removes daemon.pid even when a shutdown step throws", async () => {
+      const original = handle!.extensions.stop.bind(handle!.extensions);
+      handle!.extensions.stop = async () => {
+        throw new Error("synthetic extensions.stop failure");
+      };
+      try {
+        await handle!.shutdown();
+      } finally {
+        handle!.extensions.stop = original;
+      }
+      handle = null;
+      const pidPath = path.join(tmpHome, "daemon.pid");
+      await expect(fs.access(pidPath)).rejects.toThrow();
+    });
+
     it("rotates logs into daemon.<N>.log files with a current.log symlink", async () => {
       handle!.app.log.warn("test-marker-line");
 

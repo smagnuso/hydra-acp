@@ -306,6 +306,35 @@ describe("SessionTracker", () => {
       expect(tracker.takePendingPermissionByToolCall("tc_51")).toBeUndefined();
     });
 
+    it("preserves other pending permissions sharing a toolCallId when one resolves", () => {
+      const tracker = new SessionTracker();
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        id: 60,
+        method: "session/request_permission",
+        params: {
+          sessionId: "sess_a",
+          toolCall: { toolCallId: "tc_shared" },
+        },
+      });
+      tracker.observeFromServer({
+        jsonrpc: "2.0",
+        id: 61,
+        method: "session/request_permission",
+        params: {
+          sessionId: "sess_a",
+          toolCall: { toolCallId: "tc_shared" },
+        },
+      });
+      const first = tracker.takePendingPermission(60);
+      expect(first).toMatchObject({ requestId: 60, toolCallId: "tc_shared" });
+      const second = tracker.takePendingPermissionByToolCall("tc_shared");
+      expect(second).toMatchObject({ requestId: 61, toolCallId: "tc_shared" });
+      expect(
+        tracker.takePendingPermissionByToolCall("tc_shared"),
+      ).toBeUndefined();
+    });
+
     it("returns undefined for an unknown toolCallId", () => {
       const tracker = new SessionTracker();
       expect(tracker.takePendingPermissionByToolCall("nope")).toBeUndefined();

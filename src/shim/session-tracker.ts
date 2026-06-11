@@ -49,7 +49,10 @@ export class SessionTracker {
   // the daemon's `session/update`/`permission_resolved` events back to the
   // pending downstream request, since per-recipient JSON-RPC ids are no
   // longer carried on the wire.
-  private pendingPermissionsByToolCall = new Map<string, PendingPermission>();
+  // Multiple pending permissions can share a toolCallId when the daemon
+  // retries or fans out across a reconnect. Track each toolCallId as an
+  // ordered list of requestIds so resolving one doesn't orphan the others.
+  private pendingPermissionsByToolCall = new Map<string, JsonRpcId[]>();
   // Most recent messageId observed on a session/update from the daemon
   // (prompt_received / turn_complete), keyed by sessionId. Used by the
   // reconnect-replay path to send historyPolicy:"after_message" with
@@ -138,7 +141,12 @@ export class SessionTracker {
           };
           this.pendingPermissions.set(msg.id, entry);
           if (toolCallId) {
-            this.pendingPermissionsByToolCall.set(toolCallId, entry);
+            const list = this.pendingPermissionsByToolCall.get(toolCallId);
+            if (list) {
+              list.push(msg.id);
+            } else {
+              this.pendingPermissionsByToolCall.set(toolCallId, [msg.id]);
+            }
           }
         }
       }
@@ -226,7 +234,12 @@ export class SessionTracker {
   takePendingPermissionByToolCall(
     toolCallId: string,
   ): PendingPermission | undefined {
-    const found = this.pendingPermissionsByToolCall.get(toolCallId);
+    const list = this.pendingPermissionsByToolCall.get(toolCallId);
+    if (!list || list.length === 0) {
+      return undefined;
+    }
+    const requestId = list[0]!;
+    const found = this.pendingPermissions.get(requestId);
     if (found) {
       this.deletePendingPermission(found);
     }
@@ -236,7 +249,16 @@ export class SessionTracker {
   private deletePendingPermission(entry: PendingPermission): void {
     this.pendingPermissions.delete(entry.requestId);
     if (entry.toolCallId) {
-      this.pendingPermissionsByToolCall.delete(entry.toolCallId);
+      const list = this.pendingPermissionsByToolCall.get(entry.toolCallId);
+      if (list) {
+        const idx = list.indexOf(entry.requestId);
+        if (idx >= 0) {
+          list.splice(idx, 1);
+        }
+        if (list.length === 0) {
+          this.pendingPermissionsByToolCall.delete(entry.toolCallId);
+        }
+      }
     }
   }
 }

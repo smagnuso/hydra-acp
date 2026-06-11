@@ -17,6 +17,65 @@ import type {
 
 export type { SessionSearchResponse, SessionHits, Snippet };
 
+// Default per-request timeout for daemon REST calls from the TUI. Picked
+// to be long enough that a healthy daemon under load never trips it but
+// short enough that an unresponsive daemon doesn't freeze the picker for
+// minutes. See T2 — discovery.ts.
+export const DEFAULT_DAEMON_FETCH_TIMEOUT_MS = 8000;
+
+// Thrown when a daemon fetch is aborted by its own timeout rather than
+// by the caller. Lets callers distinguish "user/cancellation" from
+// "daemon stuck"; the picker treats both as silent-failure for the
+// auto-refresh path but the error message surfaces for manual refresh.
+export class DaemonTimeoutError extends Error {
+  constructor(public readonly url: string, public readonly timeoutMs: number) {
+    super(`daemon did not respond within ${timeoutMs}ms (${url})`);
+    this.name = "DaemonTimeoutError";
+  }
+}
+
+// Wraps `fetch` so every daemon call gets both a caller-supplied
+// AbortSignal AND a hard timeout. The two are merged into a single
+// AbortController that fires whichever comes first. On timeout we throw
+// DaemonTimeoutError; on caller-cancellation we let the native AbortError
+// from fetch propagate so existing `if (e.name === 'AbortError')` checks
+// still match.
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
+  const controller = new AbortController();
+  const callerSignal = init.signal ?? undefined;
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort(callerSignal.reason);
+    } else {
+      callerSignal.addEventListener(
+        "abort",
+        () => controller.abort(callerSignal.reason),
+        { once: true },
+      );
+    }
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await fetchImpl(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) {
+      throw new DaemonTimeoutError(url, timeoutMs);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface DiscoveredSession {
   sessionId: string;
   upstreamSessionId?: string;
@@ -72,6 +131,10 @@ export interface ListOptions {
   // filter and return every row (including `hydra cat` sessions and
   // editor-spawned empty sessions). Picker's `i` toggle sets this.
   includeNonInteractive?: boolean;
+  // Optional caller-cancellation signal. The picker passes one driven by
+  // its layer lifetime so a stuck refresh aborts when the picker tears
+  // down or when the user fires a fresh refresh.
+  signal?: AbortSignal;
 }
 
 export async function listSessions(
@@ -90,9 +153,15 @@ export async function listSessions(
   if (opts.includeNonInteractive) {
     url.searchParams.set("includeNonInteractive", "true");
   }
-  const response = await fetchImpl(url.toString(), {
-    headers: { Authorization: `Bearer ${target.token}` },
-  });
+  const response = await fetchWithTimeout(
+    url.toString(),
+    {
+      headers: { Authorization: `Bearer ${target.token}` },
+      signal: opts.signal,
+    },
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
@@ -142,9 +211,12 @@ export async function syncInstalledAgents(
   target: RemoteTarget,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ synced: number; skipped: number; agents: number }> {
-  const response = await fetchImpl(`${target.baseUrl}/v1/agents`, {
-    headers: { Authorization: `Bearer ${target.token}` },
-  });
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/agents`,
+    { headers: { Authorization: `Bearer ${target.token}` } },
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
@@ -159,12 +231,16 @@ export async function syncInstalledAgents(
   let agents = 0;
   for (const agent of installed) {
     try {
-      const res = await fetchImpl(
+      const res = await fetchWithTimeout(
         `${target.baseUrl}/v1/agents/${agent.id}/sync`,
         {
           method: "POST",
           headers: { Authorization: `Bearer ${target.token}` },
         },
+        // Agent sync spawns a child process per agent; give it longer
+        // than the default REST timeout before declaring it dead.
+        30000,
+        fetchImpl,
       );
       if (!res.ok) {
         continue;
@@ -191,9 +267,12 @@ export async function listAgents(
   target: RemoteTarget,
   fetchImpl: typeof fetch = fetch,
 ): Promise<DiscoveredAgent[]> {
-  const response = await fetchImpl(`${target.baseUrl}/v1/agents`, {
-    headers: { Authorization: `Bearer ${target.token}` },
-  });
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/agents`,
+    { headers: { Authorization: `Bearer ${target.token}` } },
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
@@ -227,7 +306,7 @@ export async function forkSession(
   forkedFromSessionId: string;
   forkedAt: string;
 }> {
-  const response = await fetchImpl(
+  const response = await fetchWithTimeout(
     `${target.baseUrl}/v1/sessions/${id}/fork`,
     {
       method: "POST",
@@ -237,6 +316,9 @@ export async function forkSession(
       },
       body: JSON.stringify(opts),
     },
+    // Fork can include a seedFromImport replay; keep the timeout generous.
+    30000,
+    fetchImpl,
   );
   if (!response.ok) {
     let detail = "";
@@ -262,10 +344,15 @@ export async function killSession(
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}/kill`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${target.token}` },
-  });
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions/${id}/kill`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${target.token}` },
+    },
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
@@ -281,14 +368,19 @@ export async function renameSession(
   title: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${target.token}`,
-      "Content-Type": "application/json",
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions/${id}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ title }),
     },
-    body: JSON.stringify({ title }),
-  });
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
@@ -304,14 +396,19 @@ export async function setSessionPriority(
   priority: number | null,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${target.token}`,
-      "Content-Type": "application/json",
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions/${id}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ priority }),
     },
-    body: JSON.stringify({ priority }),
-  });
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
@@ -330,14 +427,19 @@ export async function regenSessionTitle(
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
-    method: "PATCH",
-    headers: {
-      Authorization: `Bearer ${target.token}`,
-      "Content-Type": "application/json",
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions/${id}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ regen: true }),
     },
-    body: JSON.stringify({ regen: true }),
-  });
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (
     !response.ok &&
     response.status !== 202 &&
@@ -368,14 +470,20 @@ export async function searchSessions(
   if (opts.sessionIds && opts.sessionIds.length > 0) {
     body.sessionIds = opts.sessionIds;
   }
-  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/search`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${target.token}`,
-      "Content-Type": "application/json",
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions/search`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${target.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    // Full-text search across many sessions can take a few seconds.
+    20000,
+    fetchImpl,
+  );
   if (!response.ok) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
@@ -387,10 +495,15 @@ export async function deleteSession(
   id: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const response = await fetchImpl(`${target.baseUrl}/v1/sessions/${id}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${target.token}` },
-  });
+  const response = await fetchWithTimeout(
+    `${target.baseUrl}/v1/sessions/${id}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${target.token}` },
+    },
+    DEFAULT_DAEMON_FETCH_TIMEOUT_MS,
+    fetchImpl,
+  );
   if (!response.ok && response.status !== 204 && response.status !== 404) {
     throw new Error(`daemon returned HTTP ${response.status}`);
   }
