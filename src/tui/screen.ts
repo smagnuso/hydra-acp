@@ -432,6 +432,14 @@ export class Screen {
   private btwOverlayLines: FormattedLine[] = [];
   private btwOverlayLabel = "";
   private btwOverlayStatus: "busy" | "done" | "cancelled" | "errored" = "busy";
+  // Session id of the forked btw fork and a running usage snapshot,
+  // rendered into the overlay header alongside the [<label>]. Reset on
+  // open/close so a previous fork's numbers don't bleed into the next
+  // /btw invocation. Kept here rather than recomputed from the buffer
+  // because usage_update events carry no visible representation and
+  // would otherwise be discarded.
+  private btwOverlaySessionId: string | null = null;
+  private btwOverlayUsage: UsageState | undefined = undefined;
   // Which pane is the ESC target. Drives the visual focus indicator on the
   // overlay header and, when "btw", dims the main input prompt to signal
   // that ESC will act on the overlay (T7). Typing always goes to the main
@@ -2200,7 +2208,39 @@ export class Screen {
     this.btwOverlayMaxHeight = maxHeight;
     this.focusedPane = "btw";
     this.btwOverlayLines = [];
+    this.btwOverlaySessionId = null;
+    this.btwOverlayUsage = undefined;
     this.scheduleRepaint();
+  }
+
+  // Update the overlay's session-id / usage snapshot, both surfaced in
+  // the overlay header. Fields are independently optional so the caller
+  // can set just one (e.g. sessionId once at fork-attach time, usage
+  // repeatedly as usage_update events arrive). Pass `null` for sessionId
+  // to clear it. Idempotent for unchanged values.
+  setBtwOverlayMeta(meta: { sessionId?: string | null; usage?: UsageState }): void {
+    let changed = false;
+    if (meta.sessionId !== undefined && this.btwOverlaySessionId !== meta.sessionId) {
+      this.btwOverlaySessionId = meta.sessionId;
+      changed = true;
+    }
+    if (meta.usage !== undefined) {
+      const prev = this.btwOverlayUsage;
+      const next = meta.usage;
+      if (
+        !prev ||
+        prev.used !== next.used ||
+        prev.size !== next.size ||
+        prev.costAmount !== next.costAmount ||
+        prev.costCurrency !== next.costCurrency
+      ) {
+        this.btwOverlayUsage = { ...next };
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.scheduleRepaint();
+    }
   }
 
   // Replace the overlay's content lines. Only the LAST (rows-1) entries
@@ -2246,6 +2286,8 @@ export class Screen {
     }
     this.btwOverlayOpen = false;
     this.btwOverlayLines = [];
+    this.btwOverlaySessionId = null;
+    this.btwOverlayUsage = undefined;
     this.focusedPane = "main";
     this.scheduleRepaint();
   }
@@ -3247,58 +3289,84 @@ export class Screen {
     });
   }
 
-  // Compose the three header segments (left dashes, label, right dashes)
-  // so paintBtwHeader can paint the dashes dim and the label in the
-  // status colour. A single signature string is derived from all parts
-  // for repaint coalescing.
+  // Compose the header segments so paintBtwHeader can paint the dashes
+  // dim, "By the way" status-coloured, the sid yellow, and the usage dim
+  // — same colour conventions as the bottom sessionbar. A single
+  // signature string is derived from all parts for repaint coalescing.
+  //
+  // Layout (left → right):
+  //   "── "  "By the way"  " · "  <sid>  <middle dashes>  " <usage> "  "──"
+  // The <sid> block (and its " · " separator) is omitted when no fork
+  // sessionId is known; the <usage> block is omitted when no usage
+  // snapshot has arrived.
   private buildBtwHeaderSegments(): {
     left: string;
     label: string;
+    sidSep: string;
+    sid: string;
+    middle: string;
+    usage: string;
     right: string;
     signature: string;
   } {
     const w = this.term.width;
-    const isFocused = this.focusedPane === "btw";
-    const focusMark = isFocused ? "▶ " : "  ";
-    const label = `${focusMark}btw [${this.btwOverlayLabel}] `;
+    const label = "By the way";
     const left = "── ";
-    const right = "─".repeat(
-      Math.max(0, w - stringWidth(label) - left.length),
-    );
+    const sid = this.btwOverlaySessionId
+      ? shortId(this.btwOverlaySessionId)
+      : "";
+    const sidSep = sid ? " · " : " ";
+    const usageStr = formatUsage(this.btwOverlayUsage);
+    const usage = usageStr ? ` ${usageStr} ` : "";
+    const right = usageStr ? "──" : "";
+    const consumed =
+      left.length +
+      stringWidth(label) +
+      sidSep.length +
+      stringWidth(sid) +
+      stringWidth(usage) +
+      right.length;
+    const middle = "─".repeat(Math.max(0, w - consumed));
     const signature =
-      `${w}|${this.btwOverlayLabel}|${this.btwOverlayStatus}|${this.focusedPane}`;
-    return { left, label, right, signature };
+      `${w}|${sid}|${this.btwOverlayStatus}|${usageStr ?? ""}`;
+    return { left, label, sidSep, sid, middle, usage, right, signature };
   }
 
   private paintBtwHeader(segments: {
     left: string;
     label: string;
+    sidSep: string;
+    sid: string;
+    middle: string;
+    usage: string;
     right: string;
   }): void {
-    // Dashes always dim — they're the separator. Only the label segment
+    // Dashes always dim — they're the separator. The "By the way" label
     // carries the status colour so an at-a-glance scan of the screen
-    // shows colour ONLY where there's actual state (busy/done/etc).
+    // shows colour ONLY where there's actual state: yellow while
+    // running, regular (default) when done, red on cancel/error.
     this.term.dim(segments.left);
-    const isFocused = this.focusedPane === "btw";
-    if (!isFocused) {
-      this.term.dim(segments.label);
-    } else {
-      switch (this.btwOverlayStatus) {
-        case "busy":
-          this.term.brightYellow(segments.label);
-          break;
-        case "done":
-          this.term.green(segments.label);
-          break;
-        case "cancelled":
-          this.term.dim(segments.label);
-          break;
-        case "errored":
-          this.term.brightRed(segments.label);
-          break;
-        default:
-          this.term.brightYellow(segments.label);
-      }
+    switch (this.btwOverlayStatus) {
+      case "busy":
+        this.term.brightYellow(segments.label);
+        break;
+      case "done":
+        this.term(segments.label);
+        break;
+      case "cancelled":
+      case "errored":
+        this.term.brightRed(segments.label);
+        break;
+      default:
+        this.term(segments.label);
+    }
+    this.term.dim(segments.sidSep);
+    if (segments.sid) {
+      this.term.yellow(segments.sid);
+    }
+    this.term.dim(segments.middle);
+    if (segments.usage) {
+      this.term.dim.noFormat(segments.usage);
     }
     this.term.dim(segments.right);
   }

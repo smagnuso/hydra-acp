@@ -3410,6 +3410,10 @@ async function runSession(
         buffer.on("changed", () => {
           screen.setBtwOverlayContent(buffer.getLines());
         });
+        // Running usage snapshot for the btw fork, fed by usage_update
+        // session/update events. Mirrors how the main sessionbar tracks
+        // usage; the formatted string lands in the overlay header.
+        const btwUsage: SessionListUsage = {};
         // Echo the user's prompt at the top of the overlay so it reads
         // like a mini-conversation, rendered with the same "▎ " gutter
         // the main transcript uses for user messages. The daemon excludes
@@ -3439,12 +3443,45 @@ async function runSession(
             }
             currentSidechain = emitter;
             btwSessionId = emitter.sessionId;
+            screen.setBtwOverlayMeta({ sessionId: emitter.sessionId });
             emitter.on("event", (ev) => {
               if (myGen !== btwStartGen) {
                 return;
               }
               if (ev.kind === "update") {
                 buffer.append(ev.update);
+                // Tap usage_update events into the overlay header. Other
+                // event kinds carry visible content that the buffer
+                // already renders into the overlay body.
+                const mapped = mapUpdate(ev.update);
+                if (mapped && mapped.kind === "usage-update") {
+                  let dirty = false;
+                  if (mapped.used !== undefined && btwUsage.used !== mapped.used) {
+                    btwUsage.used = mapped.used;
+                    dirty = true;
+                  }
+                  if (mapped.size !== undefined && btwUsage.size !== mapped.size) {
+                    btwUsage.size = mapped.size;
+                    dirty = true;
+                  }
+                  if (
+                    mapped.costAmount !== undefined &&
+                    btwUsage.costAmount !== mapped.costAmount
+                  ) {
+                    btwUsage.costAmount = mapped.costAmount;
+                    dirty = true;
+                  }
+                  if (
+                    mapped.costCurrency !== undefined &&
+                    btwUsage.costCurrency !== mapped.costCurrency
+                  ) {
+                    btwUsage.costCurrency = mapped.costCurrency;
+                    dirty = true;
+                  }
+                  if (dirty) {
+                    screen.setBtwOverlayMeta({ usage: { ...btwUsage } });
+                  }
+                }
               } else if (ev.kind === "completed") {
                 // Clean completion — keep the session alive for reuse on
                 // a follow-up /btw. btwSessionId stays set; the next

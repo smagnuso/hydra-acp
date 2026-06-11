@@ -1406,6 +1406,8 @@ describe("Screen btw overlay", () => {
     btwOverlayLines: string[];
     btwOverlayLabel: string;
     btwOverlayStatus: string;
+    btwOverlaySessionId: string | null;
+    btwOverlayUsage: { used?: number; size?: number; costAmount?: number; costCurrency?: string } | undefined;
   } {
     const s = screen as unknown as {
       btwOverlayOpen: boolean;
@@ -1413,6 +1415,10 @@ describe("Screen btw overlay", () => {
       btwOverlayLines: string[];
       btwOverlayLabel: string;
       btwOverlayStatus: "busy" | "done" | "cancelled" | "errored";
+      btwOverlaySessionId: string | null;
+      btwOverlayUsage:
+        | { used?: number; size?: number; costAmount?: number; costCurrency?: string }
+        | undefined;
     };
     return {
       btwOverlayOpen: s.btwOverlayOpen,
@@ -1420,6 +1426,8 @@ describe("Screen btw overlay", () => {
       btwOverlayLines: [...s.btwOverlayLines],
       btwOverlayLabel: s.btwOverlayLabel,
       btwOverlayStatus: s.btwOverlayStatus,
+      btwOverlaySessionId: s.btwOverlaySessionId,
+      btwOverlayUsage: s.btwOverlayUsage ? { ...s.btwOverlayUsage } : undefined,
     };
   }
 
@@ -1537,6 +1545,43 @@ describe("Screen btw overlay", () => {
     screen.setBtwOverlayStatus({ label: "a", style: "busy" });
     expect(getOverlayState(screen).btwOverlayLabel).toBe("a");
     expect(getOverlayState(screen).btwOverlayStatus).toBe("busy");
+  });
+
+  it("setBtwOverlayMeta stores sessionId and usage, resets on open/close", () => {
+    const screen = makeOverlayScreen({ width: 80, height: 24 });
+    screen.openBtwOverlay();
+    expect(getOverlayState(screen).btwOverlaySessionId).toBeNull();
+    expect(getOverlayState(screen).btwOverlayUsage).toBeUndefined();
+    screen.setBtwOverlayMeta({ sessionId: "hydra-session-abc123" });
+    expect(getOverlayState(screen).btwOverlaySessionId).toBe("hydra-session-abc123");
+    screen.setBtwOverlayMeta({
+      usage: { used: 1234, size: 200_000, costAmount: 0.42, costCurrency: "USD" },
+    });
+    expect(getOverlayState(screen).btwOverlayUsage).toEqual({
+      used: 1234,
+      size: 200_000,
+      costAmount: 0.42,
+      costCurrency: "USD",
+    });
+    // Replace semantics — caller passes a full snapshot each time.
+    screen.setBtwOverlayMeta({ usage: { used: 2000 } });
+    expect(getOverlayState(screen).btwOverlayUsage?.used).toBe(2000);
+    expect(getOverlayState(screen).btwOverlayUsage?.size).toBeUndefined();
+    screen.closeBtwOverlay();
+    expect(getOverlayState(screen).btwOverlaySessionId).toBeNull();
+    expect(getOverlayState(screen).btwOverlayUsage).toBeUndefined();
+  });
+
+  it("openBtwOverlay clears stale sessionId and usage", () => {
+    const screen = makeOverlayScreen({ width: 80, height: 24 });
+    screen.openBtwOverlay();
+    screen.setBtwOverlayMeta({
+      sessionId: "x",
+      usage: { used: 1, costAmount: 0.01 },
+    });
+    screen.openBtwOverlay();
+    expect(getOverlayState(screen).btwOverlaySessionId).toBeNull();
+    expect(getOverlayState(screen).btwOverlayUsage).toBeUndefined();
   });
 
   it("closeBtwOverlay resets state to closed", () => {
