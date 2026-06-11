@@ -1,15 +1,19 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { JsonRpcErrorCodes } from "../acp/types-jsonrpc.js";
 import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
 import {
   buildAuthBannerLines,
+  handleAuthMethodSelection,
   isAuthRequiredError,
   mapAuthBannerKey,
   readAgentIdFromAuthError,
   readAuthMethodsFromAuthError,
   runAuthRetryLoop,
+  runTerminalAuthSpawn,
   type AuthOnboarding,
   type AuthBannerResult,
+  type SpawnFn,
 } from "./auth-required-banner.js";
 
 function makeAuthError(agentId: string | undefined, extra: object = {}): Error {
@@ -67,6 +71,37 @@ describe("buildAuthBannerLines", () => {
   it("omits authMethods when the list is empty", () => {
     const lines = buildAuthBannerLines("x", undefined, []);
     expect(lines.authMethods).toBeUndefined();
+    expect(lines.methodLines).toBeUndefined();
+    expect(lines.footer).toBe("[r] retry  ·  [Esc] back to picker");
+  });
+
+  it("exposes numbered methodLines and a chooser footer when methods are present", () => {
+    const lines = buildAuthBannerLines("qwen", undefined, [
+      { id: "qwen-oauth", description: "OAuth", name: "Qwen OAuth" },
+      { id: "api-key", description: "API key" },
+    ]);
+    expect(lines.methodLines).toEqual([
+      {
+        index: 0,
+        label: "[1] Qwen OAuth (qwen-oauth)",
+        method: expect.objectContaining({ id: "qwen-oauth" }),
+      },
+      {
+        index: 1,
+        label: "[2] API key (api-key)",
+        method: expect.objectContaining({ id: "api-key" }),
+      },
+    ]);
+    expect(lines.footer).toContain("[1…2]");
+    expect(lines.footer).toContain("choose method");
+    expect(lines.footer).toContain("[Esc]");
+  });
+
+  it("offers Enter as a shortcut when exactly one method is advertised", () => {
+    const lines = buildAuthBannerLines("solo", undefined, [
+      { id: "only", description: "only" },
+    ]);
+    expect(lines.footer).toContain("[Enter] choose");
   });
 });
 
@@ -84,6 +119,36 @@ describe("readAuthMethodsFromAuthError", () => {
     expect(out).toEqual([
       { id: "oauth", description: "Sign in", type: "agent" },
       { id: "api", description: "API key" },
+    ]);
+  });
+
+  it("preserves name and plain-object _meta, drops malformed variants", () => {
+    const err = makeAuthError("qwen", {
+      authMethods: [
+        {
+          id: "qwen-oauth",
+          name: "Qwen OAuth",
+          description: "Sign in",
+          _meta: { type: "terminal", args: ["--auth"] },
+        },
+        { id: "bad-name", description: "n/a", name: 42 },
+        { id: "bad-meta-arr", description: "n/a", _meta: ["x"] },
+        { id: "bad-meta-null", description: "n/a", _meta: null },
+        { id: "bad-meta-str", description: "n/a", _meta: "nope" },
+      ],
+    });
+    const out = readAuthMethodsFromAuthError(err);
+    expect(out).toEqual([
+      {
+        id: "qwen-oauth",
+        description: "Sign in",
+        name: "Qwen OAuth",
+        _meta: { type: "terminal", args: ["--auth"] },
+      },
+      { id: "bad-name", description: "n/a" },
+      { id: "bad-meta-arr", description: "n/a" },
+      { id: "bad-meta-null", description: "n/a" },
+      { id: "bad-meta-str", description: "n/a" },
     ]);
   });
 
@@ -107,6 +172,35 @@ describe("mapAuthBannerKey", () => {
   it("ignores unrelated keys", () => {
     expect(mapAuthBannerKey("x", { isCharacter: true }).kind).toBe("ignore");
     expect(mapAuthBannerKey("UP").kind).toBe("ignore");
+  });
+
+  it("maps digit keys 1..9 to selectMethod when methodCount permits", () => {
+    expect(mapAuthBannerKey("1", { isCharacter: true }, 3)).toEqual({
+      kind: "selectMethod",
+      index: 0,
+    });
+    expect(mapAuthBannerKey("3", { isCharacter: true }, 3)).toEqual({
+      kind: "selectMethod",
+      index: 2,
+    });
+    expect(mapAuthBannerKey("9", { isCharacter: true }, 9)).toEqual({
+      kind: "selectMethod",
+      index: 8,
+    });
+  });
+
+  it("ignores digits that exceed methodCount", () => {
+    expect(mapAuthBannerKey("5", { isCharacter: true }, 2).kind).toBe("ignore");
+    expect(mapAuthBannerKey("1", { isCharacter: true }, 0).kind).toBe("ignore");
+  });
+
+  it("treats Enter as a shortcut for index 0 when exactly one method exists", () => {
+    expect(mapAuthBannerKey("ENTER", undefined, 1)).toEqual({
+      kind: "selectMethod",
+      index: 0,
+    });
+    expect(mapAuthBannerKey("ENTER", undefined, 2).kind).toBe("retry");
+    expect(mapAuthBannerKey("ENTER").kind).toBe("retry");
   });
 });
 
@@ -248,5 +342,170 @@ describe("runAuthRetryLoop", () => {
       resolveOnboarding: vi.fn().mockResolvedValue(undefined),
     });
     expect(out).toEqual({ kind: "cancel" });
+  });
+
+  it("treats a 'terminal-completed' banner result as an automatic retry", async () => {
+    const err = makeAuthError("qwen");
+    const success = { sessionId: "after-terminal" };
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(err)
+      .mockResolvedValueOnce(success);
+    const showBanner = vi.fn().mockResolvedValue("terminal-completed");
+    const out = await runAuthRetryLoop({
+      request,
+      showBanner,
+      resolveOnboarding: vi.fn().mockResolvedValue(undefined),
+    });
+    expect(out).toEqual({ kind: "ok", result: success });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(showBanner).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handleAuthMethodSelection", () => {
+  const method = { id: "qwen-oauth", description: "Sign in" };
+
+  it("returns retry when authenticate response is not a terminal plan", async () => {
+    const authenticate = vi.fn().mockResolvedValue({ ok: true });
+    const runTerminalAuth = vi.fn();
+    const out = await handleAuthMethodSelection(method, {
+      authenticate,
+      runTerminalAuth,
+    });
+    expect(out).toEqual({ kind: "retry" });
+    expect(authenticate).toHaveBeenCalledWith("qwen-oauth");
+    expect(runTerminalAuth).not.toHaveBeenCalled();
+  });
+
+  it("runs the terminal-auth plan verbatim and returns terminal-completed on exit 0", async () => {
+    const plan = {
+      kind: "terminal" as const,
+      command: "qwen",
+      args: ["--auth"],
+      env: { FOO: "bar" },
+      cwd: "/tmp",
+    };
+    const authenticate = vi.fn().mockResolvedValue(plan);
+    const runTerminalAuth = vi
+      .fn<(p: { command: string; args: string[]; env?: Record<string, string>; cwd?: string }) => Promise<{ exitCode: number | null }>>()
+      .mockResolvedValue({ exitCode: 0 });
+    const out = await handleAuthMethodSelection(method, {
+      authenticate,
+      runTerminalAuth,
+    });
+    expect(runTerminalAuth).toHaveBeenCalledWith({
+      command: "qwen",
+      args: ["--auth"],
+      env: { FOO: "bar" },
+      cwd: "/tmp",
+    });
+    expect(out).toEqual({ kind: "terminal-completed" });
+  });
+
+  it("returns exit-nonzero for non-zero exits", async () => {
+    const authenticate = vi.fn().mockResolvedValue({
+      kind: "terminal",
+      command: "qwen",
+      args: [],
+    });
+    const runTerminalAuth = vi.fn().mockResolvedValue({ exitCode: 2 });
+    const out = await handleAuthMethodSelection(method, {
+      authenticate,
+      runTerminalAuth,
+    });
+    expect(out).toEqual({ kind: "exit-nonzero", exitCode: 2 });
+  });
+
+  it("surfaces an authenticate error message without throwing", async () => {
+    const boom = new Error("bad methodId");
+    const authenticate = vi.fn().mockRejectedValue(boom);
+    const runTerminalAuth = vi.fn();
+    const out = await handleAuthMethodSelection(method, {
+      authenticate,
+      runTerminalAuth,
+    });
+    expect(out).toEqual({ kind: "error", message: "bad methodId" });
+    expect(runTerminalAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe("runTerminalAuthSpawn", () => {
+  function makeFakeTerm(): {
+    grabInput: ReturnType<typeof vi.fn>;
+    moveTo: ReturnType<typeof vi.fn>;
+    eraseDisplayBelow: ReturnType<typeof vi.fn>;
+  } {
+    const term = {
+      grabInput: vi.fn(),
+      moveTo: vi.fn(),
+      eraseDisplayBelow: vi.fn(),
+    };
+    (term.moveTo as ReturnType<typeof vi.fn>).mockReturnValue(term);
+    return term;
+  }
+
+  function makeFakeChild(): EventEmitter & { emit: EventEmitter["emit"] } {
+    return new EventEmitter() as EventEmitter & {
+      emit: EventEmitter["emit"];
+    };
+  }
+
+  it("passes command/args/env/cwd verbatim to spawn and resolves with the exit code", async () => {
+    const term = makeFakeTerm();
+    const child = makeFakeChild();
+    const spawn = vi.fn().mockReturnValue(child) as unknown as SpawnFn;
+    const plan = {
+      command: "qwen",
+      args: ["--auth", "--quiet"],
+      env: { FOO: "bar", PATH: "/usr/bin" },
+      cwd: "/home/user",
+    };
+    const p = runTerminalAuthSpawn(
+      term as unknown as Parameters<typeof runTerminalAuthSpawn>[0],
+      plan,
+      { spawn },
+    );
+    // Allow the dynamic import path to settle before asserting the spawn
+    // call shape.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spawn).toHaveBeenCalledWith("qwen", ["--auth", "--quiet"], {
+      stdio: "inherit",
+      env: { FOO: "bar", PATH: "/usr/bin" },
+      cwd: "/home/user",
+    });
+    child.emit("exit", 0);
+    await expect(p).resolves.toEqual({ exitCode: 0 });
+    expect(term.grabInput).toHaveBeenCalledWith(false);
+    // Re-grab after exit so the banner can repaint.
+    expect(term.grabInput).toHaveBeenCalledWith({});
+  });
+
+  it("on a child error, resolves with exitCode -1 instead of crashing", async () => {
+    const term = makeFakeTerm();
+    const child = makeFakeChild();
+    const spawn = vi.fn().mockReturnValue(child) as unknown as SpawnFn;
+    const p = runTerminalAuthSpawn(
+      term as unknown as Parameters<typeof runTerminalAuthSpawn>[0],
+      { command: "missing", args: [] },
+      { spawn },
+    );
+    await Promise.resolve();
+    child.emit("error", new Error("ENOENT"));
+    await expect(p).resolves.toEqual({ exitCode: -1 });
+  });
+
+  it("catches synchronous spawn throws (e.g. immediate ENOENT) without crashing", async () => {
+    const term = makeFakeTerm();
+    const spawn = vi.fn().mockImplementation(() => {
+      throw new Error("ENOENT: missing");
+    }) as unknown as SpawnFn;
+    const out = await runTerminalAuthSpawn(
+      term as unknown as Parameters<typeof runTerminalAuthSpawn>[0],
+      { command: "nope", args: [] },
+      { spawn },
+    );
+    expect(out).toEqual({ exitCode: -1 });
   });
 });

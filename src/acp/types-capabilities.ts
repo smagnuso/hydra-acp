@@ -67,6 +67,14 @@ export interface AuthMethod {
   // managed by the agent) or "terminal" (interactive --setup). When
   // omitted, "agent" is assumed for backward compatibility.
   type?: "agent" | "terminal";
+  // Optional friendlier label some agents (e.g. qwen-code) include
+  // alongside `description`; banner code may prefer it for display.
+  name?: string;
+  // Verbatim agent-supplied `_meta` envelope. Opaque to hydra: we
+  // preserve it (when it is a plain object) so consumers like the
+  // terminal-auth flow can read `_meta.type` / `_meta.args`. Never
+  // promoted to the top-level fields.
+  _meta?: Record<string, unknown>;
 }
 
 export interface InitializeResult {

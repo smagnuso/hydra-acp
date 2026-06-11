@@ -8,6 +8,7 @@ import {
   listAgents,
   planSpawn,
   type AgentInstallProgressCallback,
+  type SpawnPlan,
 } from "./registry.js";
 import {
   HYDRA_SESSION_PREFIX,
@@ -95,6 +96,12 @@ export interface CreateSessionParams {
   // passes `false`; everything else leaves it undefined (the first
   // session/prompt will promote it to true).
   interactive?: boolean;
+  // Caller-supplied env to forward into the spawned agent process.
+  // Used as `extraEnv` on AgentInstanceOptions; persisted on the
+  // session record as `forwardedEnv` and reapplied on respawn /
+  // cold-resurrect. An explicit empty map `{}` clears any persisted
+  // value (overwrite semantics, not merge).
+  forwardedEnv?: Record<string, string>;
 }
 
 export interface ResurrectParams {
@@ -152,6 +159,9 @@ export interface ResurrectParams {
   // tools they had at original create time. Empty/undefined means the agent
   // gets no MCP servers (legacy behavior).
   mcpServers?: unknown[];
+  // Env to forward into the spawn. Mirrors CreateSessionParams.forwardedEnv;
+  // loadFromDisk() reads it off the persisted record.
+  forwardedEnv?: Record<string, string>;
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -336,6 +346,7 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       model: params.model,
       onInstallProgress: params.onInstallProgress,
+      forwardedEnv: params.forwardedEnv,
     });
 
     // Run the agent:initialize chain intercept. Transformers that declared
@@ -392,6 +403,7 @@ export class SessionManager {
       parentSessionId: params.parentSessionId,
       originatingClient: params.originatingClient,
       interactive: params.interactive,
+      forwardedEnv: params.forwardedEnv,
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
     });
@@ -471,6 +483,7 @@ export class SessionManager {
       agentId: params.agentId,
       cwd: params.cwd,
       plan,
+      ...(params.forwardedEnv ? { extraEnv: params.forwardedEnv } : {}),
     });
 
     let agentCapabilities: AgentCapabilities | undefined;
@@ -650,6 +663,7 @@ export class SessionManager {
       priority: params.priority,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
+      forwardedEnv: params.forwardedEnv,
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
     });
@@ -676,6 +690,7 @@ export class SessionManager {
       agentArgs: params.agentArgs,
       mcpServers: params.mcpServers ?? [],
       onInstallProgress: params.onInstallProgress,
+      forwardedEnv: params.forwardedEnv,
       // Pass the persisted model so bootstrapAgent calls session/set_model
       // during session/new — the only context where the agent reliably
       // honours the switch.
@@ -734,6 +749,7 @@ export class SessionManager {
       priority: params.priority,
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
+      forwardedEnv: params.forwardedEnv,
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
     });
@@ -1049,6 +1065,11 @@ export class SessionManager {
     // wires this — the in-process /hydra agent-switch path leaves it
     // undefined and falls back to the daemon-log sink.
     onInstallProgress?: AgentInstallProgressCallback;
+    // Caller-supplied env forwarded into the spawn via extraEnv on
+    // AgentInstanceOptions. Applied on every bootstrapAgent call site
+    // (brand-new, agent switch, import re-seed, /hydra restart) so
+    // resurrect paths and respawn carry the same env.
+    forwardedEnv?: Record<string, string>;
   }): Promise<{
     agent: AgentInstance;
     upstreamSessionId: string;
@@ -1075,6 +1096,7 @@ export class SessionManager {
       agentId: params.agentId,
       cwd: params.cwd,
       plan,
+      ...(params.forwardedEnv ? { extraEnv: params.forwardedEnv } : {}),
     });
     try {
       const initResult = await agent.connection.request<Record<string, unknown>>(
@@ -1228,6 +1250,22 @@ export class SessionManager {
       }
     });
     return agent;
+  }
+
+  // Resolve a registry-shaped SpawnPlan for `agentId` without spawning.
+  // Mirrors the registry lookup + planSpawn pair used by session
+  // create/load/respawn and bootstrapAgentForAuth, so terminal-auth can
+  // surface the exact same command/args/env the daemon would launch.
+  async planSpawnForAgent(agentId: string): Promise<SpawnPlan> {
+    const agentDef = await this.registry.getAgent(agentId);
+    if (!agentDef) {
+      const err = new Error(
+        `agent ${agentId} not found in registry`,
+      ) as Error & { code: number };
+      err.code = JsonRpcErrorCodes.AgentNotInstalled;
+      throw err;
+    }
+    return planSpawn(agentDef, [], { npmRegistry: this.npmRegistry });
   }
 
   // Pop the most-recently-authenticated standalone agent for this id, if
@@ -1472,7 +1510,35 @@ export class SessionManager {
       priority: record.priority,
       forkedFromSessionId: record.forkedFromSessionId,
       forkedFromMessageId: record.forkedFromMessageId,
+      forwardedEnv: record.forwardedEnv,
     };
+  }
+
+  // Overwrite the persisted forwardedEnv for a session (and the live
+  // Session's mirror, if hot). Called from the daemon's session/new
+  // and session/attach handlers when the request carries a fresh
+  // _meta["hydra-acp"].env map. Pass an empty object to clear; pass
+  // undefined and the call is a no-op (no fresh env means leave the
+  // persisted value alone).
+  async setForwardedEnv(
+    sessionId: string,
+    env: Record<string, string> | undefined,
+  ): Promise<void> {
+    if (env === undefined) {
+      return;
+    }
+    const live = this.sessions.get(sessionId);
+    if (live) {
+      live.forwardedEnv = env;
+    }
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      const next: SessionRecord = { ...record, forwardedEnv: env };
+      await this.store.write(next);
+    });
   }
 
   private async clearPendingHistorySync(sessionId: string): Promise<void> {
@@ -2613,6 +2679,13 @@ function mergeForPersistence(
       session.originatingClient ?? existing?.originatingClient,
     interactive: session.interactive ?? existing?.interactive,
     priority: session.priority ?? existing?.priority,
+    // Live Session is the source of truth for forwardedEnv: it's set
+    // from the most recent session/new or session/attach (overwrite
+    // semantics, including an explicit empty map) and from the
+    // persisted record on cold-resurrect. existing? fallback only
+    // matters if the Session somehow has no field at all — shouldn't
+    // happen, but keeps round-trip safe for old records.
+    forwardedEnv: session.forwardedEnv ?? existing?.forwardedEnv,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }
@@ -2822,7 +2895,21 @@ function parseAuthMethods(value: unknown): AuthMethod[] | undefined {
     }
     const description = typeof e.description === "string" ? e.description : "";
     const type = e.type === "agent" || e.type === "terminal" ? e.type : undefined;
-    out.push({ id: e.id, description, ...(type && { type }) });
+    const name = typeof e.name === "string" ? e.name : undefined;
+    const rawMeta = e._meta;
+    const meta =
+      rawMeta !== null &&
+      typeof rawMeta === "object" &&
+      !Array.isArray(rawMeta)
+        ? (rawMeta as Record<string, unknown>)
+        : undefined;
+    out.push({
+      id: e.id,
+      description,
+      ...(type && { type }),
+      ...(name !== undefined && { name }),
+      ...(meta && { _meta: meta }),
+    });
   }
   return out.length > 0 ? out : undefined;
 }

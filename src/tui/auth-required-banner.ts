@@ -1,18 +1,20 @@
 // Pre-screen "this agent needs auth" banner, shown when a fresh
 // session/new bubbles up AUTH_REQUIRED (-32000) from a child agent.
 //
-// Render-only: we do NOT inline-drive the child's `authenticate`
-// round-trip here (T8, deferred). The user reads the agent's onboarding
-// hints (command / docs URL), runs them in another terminal, then
-// presses `r` to retry session/new. Esc returns to the picker so the
-// user can choose a different agent.
+// Modes:
+//   - Read-only: no authMethods, just onboarding hints + [r] retry / [Esc].
+//   - Interactive: authMethods present → user picks one by number, the
+//     daemon's authenticate response drives either an in-process retry
+//     (forward-to-child or no-op) or a foreground terminal-auth spawn.
 //
 // Pure helpers (buildAuthBannerLines / mapAuthBannerKey /
-// isAuthRequiredError / readAgentIdFromAuthError / runAuthRetryLoop)
-// are exported so app-test coverage can exercise the retry logic
-// without standing up a terminal.
+// isAuthRequiredError / readAgentIdFromAuthError /
+// readAuthMethodsFromAuthError / runAuthRetryLoop /
+// handleAuthMethodSelection / runTerminalAuthSpawn) are exported so
+// tests can exercise the logic without standing up a terminal.
 
 import type { Terminal } from "terminal-kit";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { JsonRpcErrorCodes } from "../acp/types-jsonrpc.js";
 import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
 import type { AuthMethod } from "../acp/types-capabilities.js";
@@ -30,7 +32,17 @@ export interface AuthOnboarding {
   description?: string;
 }
 
-export type AuthBannerResult = "retry" | "back" | "cancel";
+export type AuthBannerResult =
+  | "retry"
+  | "back"
+  | "cancel"
+  | "terminal-completed";
+
+export interface AuthBannerMethodLine {
+  index: number;
+  label: string;
+  method: AuthMethod;
+}
 
 export interface AuthBannerLines {
   title: string;
@@ -38,12 +50,20 @@ export interface AuthBannerLines {
   command?: string;
   url?: string;
   authMethods?: AuthMethod[];
+  methodLines?: AuthBannerMethodLine[];
   footer: string;
 }
 
 const DEFAULT_DESCRIPTION =
   "This agent requires authentication before use.";
-const FOOTER = "[r] retry  ·  [Esc] back to picker";
+const READ_ONLY_FOOTER = "[r] retry  ·  [Esc] back to picker";
+
+function methodFriendlyLabel(m: AuthMethod): string {
+  const friendly =
+    (m.name && m.name.length > 0 ? m.name : undefined) ??
+    (m.description && m.description.length > 0 ? m.description : undefined);
+  return friendly ? `${friendly} (${m.id})` : m.id;
+}
 
 export function buildAuthBannerLines(
   agentId: string,
@@ -53,7 +73,7 @@ export function buildAuthBannerLines(
   const result: AuthBannerLines = {
     title: `Agent "${agentId}" needs to be set up`,
     description: onboarding?.description ?? DEFAULT_DESCRIPTION,
-    footer: FOOTER,
+    footer: READ_ONLY_FOOTER,
   };
   if (onboarding?.command) {
     result.command = onboarding.command;
@@ -63,6 +83,17 @@ export function buildAuthBannerLines(
   }
   if (authMethods && authMethods.length > 0) {
     result.authMethods = authMethods;
+    const lines: AuthBannerMethodLine[] = authMethods.map((m, i) => ({
+      index: i,
+      label: `[${i + 1}] ${methodFriendlyLabel(m)}`,
+      method: m,
+    }));
+    result.methodLines = lines;
+    const max = Math.min(authMethods.length, 9);
+    const range = max === 1 ? "[1]" : `[1…${max}]`;
+    const enterHint =
+      authMethods.length === 1 ? "  ·  [Enter] choose" : "";
+    result.footer = `${range} choose method${enterHint}  ·  [r] retry  ·  [Esc] back`;
   }
   return result;
 }
@@ -71,11 +102,13 @@ export type BannerKey =
   | { kind: "retry" }
   | { kind: "back" }
   | { kind: "cancel" }
+  | { kind: "selectMethod"; index: number }
   | { kind: "ignore" };
 
 export function mapAuthBannerKey(
   name: string,
   data?: { isCharacter?: boolean },
+  methodCount = 0,
 ): BannerKey {
   if (name === "CTRL_C" || name === "CTRL_D") {
     return { kind: "cancel" };
@@ -84,7 +117,17 @@ export function mapAuthBannerKey(
     return { kind: "back" };
   }
   if (name === "ENTER" || name === "KP_ENTER") {
+    if (methodCount === 1) {
+      return { kind: "selectMethod", index: 0 };
+    }
     return { kind: "retry" };
+  }
+  if (data?.isCharacter && /^[1-9]$/.test(name)) {
+    const index = Number(name) - 1;
+    if (index < methodCount) {
+      return { kind: "selectMethod", index };
+    }
+    return { kind: "ignore" };
   }
   if (data?.isCharacter && name.toLowerCase() === "r") {
     return { kind: "retry" };
@@ -155,12 +198,24 @@ export function readAuthMethodsFromAuthError(
     }
     const description = (m as { description?: unknown }).description;
     const type = (m as { type?: unknown }).type;
+    const name = (m as { name?: unknown }).name;
+    const rawMeta = (m as { _meta?: unknown })._meta;
     const method: AuthMethod = {
       id,
       description: typeof description === "string" ? description : "",
     };
     if (type === "agent" || type === "terminal") {
       method.type = type;
+    }
+    if (typeof name === "string") {
+      method.name = name;
+    }
+    if (
+      rawMeta !== null &&
+      typeof rawMeta === "object" &&
+      !Array.isArray(rawMeta)
+    ) {
+      method._meta = rawMeta as Record<string, unknown>;
     }
     out.push(method);
   }
@@ -174,7 +229,10 @@ export type AuthRetryOutcome<T> =
 
 // Drive the retry loop without any terminal coupling. Callers inject
 // the JSON-RPC request, the banner prompt, and the onboarding lookup;
-// non-auth errors are re-thrown untouched.
+// non-auth errors are re-thrown untouched. "retry" and
+// "terminal-completed" both continue the loop (the latter signals the
+// banner already finished an interactive auth flow and we should
+// immediately re-issue the request without another keystroke).
 export async function runAuthRetryLoop<T>(args: {
   request: () => Promise<T>;
   showBanner: (
@@ -210,14 +268,159 @@ export async function runAuthRetryLoop<T>(args: {
   }
 }
 
+// ---- Terminal-auth spawn ---------------------------------------------------
+
+export interface TerminalAuthPlan {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+export interface TerminalAuthOutcome {
+  exitCode: number | null;
+}
+
+export type SpawnFn = (
+  command: string,
+  args: ReadonlyArray<string>,
+  options: SpawnOptions,
+) => ChildProcess;
+
+// Foreground one-shot child runner: release input grab, clear screen,
+// print a one-line banner, inherit stdio so the child owns the TTY,
+// wait, then re-grab so the caller can repaint. The spawn function is
+// injectable so tests don't need to fork a real process.
+export async function runTerminalAuthSpawn(
+  term: Terminal,
+  plan: TerminalAuthPlan,
+  deps?: { spawn?: SpawnFn },
+): Promise<TerminalAuthOutcome> {
+  term.grabInput(false);
+  resetTerminalModes();
+  term.moveTo(1, 1).eraseDisplayBelow();
+  const headline = `─ Running ${plan.command} ${plan.args.join(" ")} — finish setup, then return to hydra ─`;
+  process.stdout.write(headline + "\n");
+
+  const spawnFn =
+    deps?.spawn ?? ((await import("node:child_process")).spawn as SpawnFn);
+
+  return await new Promise<TerminalAuthOutcome>((resolve) => {
+    const reGrab = (): void => {
+      try {
+        term.grabInput({});
+      } catch {
+        // best-effort; the caller will repaint anyway
+      }
+    };
+    try {
+      const child = spawnFn(plan.command, plan.args, {
+        stdio: "inherit",
+        env: plan.env,
+        cwd: plan.cwd,
+      });
+      child.on("exit", (code) => {
+        reGrab();
+        resolve({ exitCode: code });
+      });
+      child.on("error", (err) => {
+        reGrab();
+        process.stdout.write(
+          `\nfailed to spawn ${plan.command}: ${(err as Error).message}\n`,
+        );
+        resolve({ exitCode: -1 });
+      });
+    } catch (err) {
+      reGrab();
+      process.stdout.write(
+        `\nfailed to spawn ${plan.command}: ${(err as Error).message}\n`,
+      );
+      resolve({ exitCode: -1 });
+    }
+  });
+}
+
+// ---- Method selection orchestration ---------------------------------------
+
+export type MethodSelectionOutcome =
+  | { kind: "terminal-completed" }
+  | { kind: "retry" }
+  | { kind: "error"; message: string }
+  | { kind: "exit-nonzero"; exitCode: number | null };
+
+export interface HandleMethodSelectionDeps {
+  authenticate: (methodId: string) => Promise<unknown>;
+  runTerminalAuth: (plan: TerminalAuthPlan) => Promise<TerminalAuthOutcome>;
+}
+
+function isTerminalSpawnResponse(value: unknown): value is TerminalAuthPlan & {
+  kind: "terminal";
+} {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as { kind?: unknown; command?: unknown; args?: unknown };
+  return (
+    v.kind === "terminal" &&
+    typeof v.command === "string" &&
+    Array.isArray(v.args)
+  );
+}
+
+// Glue between "user picked method N" and the resulting daemon
+// behavior. Exported standalone so tests can replace authenticate +
+// runTerminalAuth with mocks and assert the full pipeline without
+// instantiating a Terminal.
+export async function handleAuthMethodSelection(
+  method: AuthMethod,
+  deps: HandleMethodSelectionDeps,
+): Promise<MethodSelectionOutcome> {
+  let response: unknown;
+  try {
+    response = await deps.authenticate(method.id);
+  } catch (err) {
+    const message =
+      err instanceof Error && err.message.length > 0
+        ? err.message
+        : String(err);
+    return { kind: "error", message };
+  }
+  if (isTerminalSpawnResponse(response)) {
+    const plan: TerminalAuthPlan = {
+      command: response.command,
+      args: response.args,
+      env: response.env,
+      cwd: response.cwd,
+    };
+    const outcome = await deps.runTerminalAuth(plan);
+    if (outcome.exitCode === 0) {
+      return { kind: "terminal-completed" };
+    }
+    return { kind: "exit-nonzero", exitCode: outcome.exitCode };
+  }
+  return { kind: "retry" };
+}
+
+// ---- Interactive banner ----------------------------------------------------
+
+export interface PromptAuthBannerDeps {
+  authenticate?: (methodId: string) => Promise<unknown>;
+  runTerminalAuth?: (plan: TerminalAuthPlan) => Promise<TerminalAuthOutcome>;
+}
+
 export async function promptAuthRequiredBanner(
   term: Terminal,
   agentId: string,
   onboarding?: AuthOnboarding,
   authMethods?: AuthMethod[],
+  deps?: PromptAuthBannerDeps,
 ): Promise<AuthBannerResult> {
   resetTerminalModes();
   const lines = buildAuthBannerLines(agentId, onboarding, authMethods);
+
+  let busy = false;
+  let statusNote: string | undefined;
+  let errorMessage: string | undefined;
 
   const render = (): BoxLayout => {
     let rows = 4;
@@ -227,8 +430,14 @@ export async function promptAuthRequiredBanner(
     if (lines.url) {
       rows++;
     }
-    if (lines.authMethods) {
-      rows += 1 + lines.authMethods.length;
+    if (lines.methodLines) {
+      rows += 1 + lines.methodLines.length;
+    }
+    if (statusNote) {
+      rows++;
+    }
+    if (errorMessage) {
+      rows++;
     }
     const layout = drawBox(term, {
       contentHeight: rows,
@@ -237,6 +446,16 @@ export async function promptAuthRequiredBanner(
     });
     const innerW = layout.contentW;
     let row = 0;
+    if (statusNote) {
+      term.moveTo(layout.contentX, layout.contentY + row);
+      term.brightYellow.noFormat(truncate(` ${statusNote}`, innerW));
+      row++;
+    }
+    if (errorMessage) {
+      term.moveTo(layout.contentX, layout.contentY + row);
+      term.brightRed.noFormat(truncate(` ${errorMessage}`, innerW));
+      row++;
+    }
     term.moveTo(layout.contentX, layout.contentY + row);
     term.brightWhite.bold.noFormat(truncate(` ${lines.title}`, innerW));
     row += 2;
@@ -255,17 +474,14 @@ export async function promptAuthRequiredBanner(
       term.brightWhite.noFormat(truncate(lines.url, innerW - 7));
       row++;
     }
-    if (lines.authMethods) {
+    if (lines.methodLines) {
       term.moveTo(layout.contentX, layout.contentY + row);
       term.dim.noFormat(" Methods reported by the agent:");
       row++;
-      for (const m of lines.authMethods) {
+      for (const ml of lines.methodLines) {
         term.moveTo(layout.contentX, layout.contentY + row);
-        const label = m.description && m.description.length > 0
-          ? `${m.description} (${m.id})`
-          : m.id;
-        term.dim.noFormat("   • ");
-        term.noFormat(truncate(label, innerW - 5));
+        term.dim.noFormat("   ");
+        term.noFormat(truncate(ml.label, innerW - 3));
         row++;
       }
     }
@@ -275,15 +491,64 @@ export async function promptAuthRequiredBanner(
     return layout;
   };
 
+  const methodCount = lines.methodLines?.length ?? 0;
+
   return runModalPrompt<AuthBannerResult>({
     term,
-    render,
+    render: () => {
+      render();
+    },
     onKey: (name, _matches, data, finish) => {
-      const input = mapAuthBannerKey(name, data);
+      if (busy) {
+        return;
+      }
+      const input = mapAuthBannerKey(name, data, methodCount);
       if (input.kind === "ignore") {
         return;
       }
-      finish(input.kind);
+      if (input.kind === "retry" || input.kind === "back" || input.kind === "cancel") {
+        finish(input.kind);
+        return;
+      }
+      if (input.kind === "selectMethod") {
+        const method = lines.methodLines?.[input.index]?.method;
+        if (!method || !deps?.authenticate) {
+          return;
+        }
+        busy = true;
+        errorMessage = undefined;
+        statusNote = `Authenticating with ${methodFriendlyLabel(method)}…`;
+        render();
+        const runTA =
+          deps.runTerminalAuth ?? ((plan: TerminalAuthPlan) =>
+            runTerminalAuthSpawn(term, plan));
+        void (async () => {
+          const outcome = await handleAuthMethodSelection(method, {
+            authenticate: deps.authenticate!,
+            runTerminalAuth: runTA,
+          });
+          if (outcome.kind === "terminal-completed") {
+            finish("terminal-completed");
+            return;
+          }
+          if (outcome.kind === "retry") {
+            finish("retry");
+            return;
+          }
+          if (outcome.kind === "error") {
+            errorMessage = outcome.message;
+            statusNote = undefined;
+            busy = false;
+            render();
+            return;
+          }
+          // exit-nonzero
+          statusNote = undefined;
+          errorMessage = `auth process exited with code ${outcome.exitCode ?? "(signal)"}`;
+          busy = false;
+          render();
+        })();
+      }
     },
   });
 }

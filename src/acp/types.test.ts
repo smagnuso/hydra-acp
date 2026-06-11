@@ -67,6 +67,55 @@ describe("extractHydraMeta", () => {
     });
     expect(out.model).toBe("openai/gpt-5");
   });
+
+  it("extracts a well-formed env map (keys and string values only)", () => {
+    const out = extractHydraMeta({
+      [HYDRA_META_KEY]: { env: { FOO: "bar", BAZ: "qux" } },
+    });
+    expect(out.env).toEqual({ FOO: "bar", BAZ: "qux" });
+  });
+
+  it("preserves an explicit empty env map (means 'clear')", () => {
+    const out = extractHydraMeta({ [HYDRA_META_KEY]: { env: {} } });
+    expect(out.env).toEqual({});
+  });
+
+  it("drops env when a value is non-string", () => {
+    const out = extractHydraMeta({
+      [HYDRA_META_KEY]: { env: { FOO: 42 } as unknown as Record<string, string> },
+    });
+    expect(out.env).toBeUndefined();
+  });
+
+  it("drops env when it isn't a plain object", () => {
+    const out = extractHydraMeta({
+      [HYDRA_META_KEY]: {
+        env: ["FOO=bar"] as unknown as Record<string, string>,
+      },
+    });
+    expect(out.env).toBeUndefined();
+  });
+});
+
+describe("redactHydraMetaForLog", () => {
+  it("replaces env values with key-only scaffold", async () => {
+    const { redactHydraMetaForLog } = await import("./types-hydra-meta.js");
+    const redacted = redactHydraMetaForLog({
+      [HYDRA_META_KEY]: { env: { SECRET: "shh", OTHER: "v" } },
+    });
+    const stringified = JSON.stringify(redacted);
+    expect(stringified).not.toContain("shh");
+    expect(stringified).not.toContain('"v"');
+    expect(redacted?.[HYDRA_META_KEY]).toMatchObject({
+      env: { keys: ["SECRET", "OTHER"], count: 2 },
+    });
+  });
+
+  it("is a no-op when no env field is present", async () => {
+    const { redactHydraMetaForLog } = await import("./types-hydra-meta.js");
+    const input = { [HYDRA_META_KEY]: { agentId: "x" } };
+    expect(redactHydraMetaForLog(input)).toEqual(input);
+  });
 });
 
 describe("mergeMeta", () => {

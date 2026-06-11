@@ -84,6 +84,10 @@ export interface SpawnReplacementAgentParams {
   agentId: string;
   cwd: string;
   agentArgs?: string[];
+  // Env to forward into the freshly spawned agent on respawn (/hydra
+  // restart, forceCancel). Carried from Session.forwardedEnv so the
+  // replacement process matches the persisted spawn-env.
+  forwardedEnv?: Record<string, string>;
 }
 
 export interface SpawnReplacementAgentResult {
@@ -189,6 +193,12 @@ export interface SessionInit {
   // User-set sort weight. 0 / absent → normal; positive → pinned to top
   // of the picker. Loaded from the persisted record on resurrect.
   priority?: number;
+  // Caller-supplied env to forward into the agent process on spawn.
+  // Used by SessionManager on the initial bootstrap; reapplied on
+  // respawnAgent via the spawnReplacementAgent callback. Updates from
+  // a fresh session/attach with _meta["hydra-acp"].env replace this
+  // wholesale (including an explicit empty map to clear).
+  forwardedEnv?: Record<string, string>;
   // Optional callback used by /sessions to enumerate all daemon sessions.
   // Provided by SessionManager; omitted in tests that construct Session
   // directly, in which case /sessions emits a not-available notice.
@@ -421,6 +431,11 @@ export class Session {
   // and noisy state churn keep a quiet session alive forever.
   private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
+  // See SessionInit.forwardedEnv. Mutable so a fresh session/attach can
+  // overwrite it; read by respawnAgent to thread into the replacement
+  // spawn, and by SessionManager.mergeForPersistence to round-trip
+  // through meta.json.
+  forwardedEnv: Record<string, string> | undefined;
   private listSessions: SessionInit["listSessions"];
   private logger: SessionInit["logger"];
   private transformChain: TransformerRef[];
@@ -569,6 +584,7 @@ export class Session {
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.forwardedEnv = init.forwardedEnv;
     this.availableAgentsFn = init.availableAgents;
     this.listSessions = init.listSessions;
     this.logger = init.logger;
@@ -3581,6 +3597,7 @@ export class Session {
       agentId: newAgentId,
       cwd: this.cwd,
       agentArgs: this.agentArgs,
+      ...(this.forwardedEnv ? { forwardedEnv: this.forwardedEnv } : {}),
     });
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent);
@@ -3701,6 +3718,7 @@ export class Session {
       agentId,
       cwd: this.cwd,
       agentArgs: this.agentArgs,
+      ...(this.forwardedEnv ? { forwardedEnv: this.forwardedEnv } : {}),
     });
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent);

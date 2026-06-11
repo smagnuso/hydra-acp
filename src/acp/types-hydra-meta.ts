@@ -174,6 +174,38 @@ export interface HydraMeta {
   originatingClient?: { name: string; version?: string };
   // Agent's own initialize-time capability claim, forwarded verbatim.
   agentCapabilities?: unknown;
+  // Caller-supplied environment variables to forward into the spawned
+  // child agent process for this session. Keys are non-empty strings,
+  // values are strings — anything else makes the whole field drop
+  // silently (session creation continues without env). An explicit
+  // empty map `{}` clears any previously persisted env. Persisted on
+  // the session record as `forwardedEnv` and reapplied automatically
+  // on respawn / cold-resurrect.
+  env?: Record<string, string>;
+}
+
+// Validate a candidate _meta["hydra-acp"].env map. Returns the cleaned
+// Record<string,string> when the shape is well-formed (every key a
+// non-empty string and every value a string), or undefined otherwise.
+// An explicit empty object is preserved — callers use it to clear the
+// persisted env.
+function parseForwardedEnv(
+  raw: unknown,
+): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== "string" || key.length === 0) {
+      return undefined;
+    }
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    out[key] = value;
+  }
+  return out;
 }
 
 export function extractHydraMeta(
@@ -415,7 +447,45 @@ export function extractHydraMeta(
   if (obj.agentCapabilities !== undefined) {
     out.agentCapabilities = obj.agentCapabilities;
   }
+  if (obj.env !== undefined) {
+    const parsedEnv = parseForwardedEnv(obj.env);
+    if (parsedEnv !== undefined) {
+      out.env = parsedEnv;
+    }
+  }
   return out;
+}
+
+// Build a log-safe view of a raw _meta envelope by replacing
+// `_meta["hydra-acp"].env` (if any) with a key-only scaffold so log
+// lines that dump _meta don't leak env values. Returns a shallow clone
+// — the caller's object is not mutated. Non-record `env` values are
+// preserved as-is (already harmless or already redacted upstream).
+export function redactHydraMetaForLog(
+  meta: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!meta) {
+    return meta;
+  }
+  const ns = meta[HYDRA_META_KEY];
+  if (!ns || typeof ns !== "object" || Array.isArray(ns)) {
+    return meta;
+  }
+  const inner = ns as Record<string, unknown>;
+  if (inner.env === undefined) {
+    return meta;
+  }
+  let redactedEnv: unknown;
+  if (inner.env && typeof inner.env === "object" && !Array.isArray(inner.env)) {
+    const keys = Object.keys(inner.env as Record<string, unknown>);
+    redactedEnv = { keys, count: keys.length };
+  } else {
+    redactedEnv = "<redacted>";
+  }
+  return {
+    ...meta,
+    [HYDRA_META_KEY]: { ...inner, env: redactedEnv },
+  };
 }
 
 export function mergeMeta(

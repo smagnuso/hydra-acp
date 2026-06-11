@@ -1339,7 +1339,10 @@ async function runSession(
       request: () =>
         conn.request("session/new", sessionNewParams) as Promise<SessionNewResult>,
       showBanner: (agentId, onboarding, authMethods) =>
-        promptAuthRequiredBanner(term, agentId, onboarding, authMethods),
+        promptAuthRequiredBanner(term, agentId, onboarding, authMethods, {
+          authenticate: (methodId) =>
+            conn.request("authenticate", { methodId }),
+        }),
       resolveOnboarding: async (agentId) => {
         if (!agentId) {
           return undefined;

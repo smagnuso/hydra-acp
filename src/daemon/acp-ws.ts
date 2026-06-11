@@ -59,6 +59,7 @@ import type {
 } from "../core/extension-mcp.js";
 import { HYDRA_CAT_CLIENT_NAME, HYDRA_VERSION } from "../core/hydra-version.js";
 import { randomBytes } from "node:crypto";
+import * as os from "node:os";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
 
 interface ClientState {
@@ -961,6 +962,9 @@ export function registerAcpWsEndpoint(
           ...(hydraMeta.interactive !== undefined
             ? { interactive: hydraMeta.interactive }
             : {}),
+          ...(hydraMeta.env !== undefined
+            ? { forwardedEnv: hydraMeta.env }
+            : {}),
         });
       } catch (err) {
         if (stdinReservation !== undefined) {
@@ -1067,6 +1071,7 @@ export function registerAcpWsEndpoint(
       const hydraAttach = extractHydraMeta(params._meta);
       const hydraHints = hydraAttach.resume;
       const readonly = hydraAttach.readonly === true;
+      const freshForwardedEnv = hydraAttach.env;
       app.log.info(
         `session/attach sessionId=${params.sessionId} hasResumeHints=${!!hydraHints} readonly=${readonly}`,
       );
@@ -1160,8 +1165,12 @@ export function registerAcpWsEndpoint(
         const resurrectWithOriginator = resurrectParams.originatingClient
           ? resurrectParams
           : { ...resurrectParams, originatingClient: state.clientInfo };
+        const resurrectWithEnv =
+          freshForwardedEnv !== undefined
+            ? { ...resurrectWithOriginator, forwardedEnv: freshForwardedEnv }
+            : resurrectWithOriginator;
         session = await resurrectFromDisk(deps, {
-          ...resurrectWithOriginator,
+          ...resurrectWithEnv,
           onInstallProgress: makeInstallProgressForwarder(connection),
         });
       }
@@ -1191,6 +1200,15 @@ export function registerAcpWsEndpoint(
         clientId: client.clientId,
         readonly,
       });
+      // Persist a fresh forwardedEnv overwrite (covers both the hot
+      // re-attach case where doResurrect wasn't called and the cold
+      // case where we want the persisted record to reflect the new
+      // map immediately). undefined leaves the persisted value alone.
+      if (freshForwardedEnv !== undefined) {
+        await deps.manager
+          .setForwardedEnv(session.sessionId, freshForwardedEnv)
+          .catch(() => undefined);
+      }
       app.log.info(
         `session/attach OK sessionId=${session.sessionId} clientId=${client.clientId} attachedCount=${state.attached.size} requestedPolicy=${params.historyPolicy} appliedPolicy=${appliedPolicy} replayed=${replay.length} readonly=${readonly}${drip ? " replayMode=drip" : ""}`,
       );
@@ -1767,12 +1785,66 @@ export async function handleAuthenticate(
     agent = await deps.manager.bootstrapAgentForAuth(spawnId);
   }
 
-  const validIds = (agent.authMethods ?? []).map((m) => m.id);
-  if (!validIds.includes(methodId)) {
+  const methods = agent.authMethods ?? [];
+  const method = methods.find((m) => m.id === methodId);
+  if (!method) {
+    const validIds = methods.map((m) => m.id);
     throw rpcError(
       JsonRpcErrorCodes.InvalidParams,
       `authenticate: methodId ${JSON.stringify(methodId)} is not advertised by agent ${agent.agentId}; valid: [${validIds.map((id) => JSON.stringify(id)).join(", ")}]`,
     );
+  }
+
+  const metaType = method._meta?.type;
+  const effectiveType: "agent" | "terminal" =
+    method.type ??
+    (metaType === "agent" || metaType === "terminal"
+      ? (metaType as "agent" | "terminal")
+      : "agent");
+
+  if (effectiveType === "terminal") {
+    const rawArgs = method._meta?.args;
+    let extraArgs: string[] = [];
+    if (rawArgs !== undefined) {
+      if (!Array.isArray(rawArgs)) {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          `authenticate: method ${JSON.stringify(methodId)} _meta.args must be a string[]; got ${rawArgs === null ? "null" : typeof rawArgs}`,
+        );
+      }
+      for (const a of rawArgs) {
+        if (typeof a !== "string") {
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidParams,
+            `authenticate: method ${JSON.stringify(methodId)} _meta.args must be string[]; got non-string entry ${JSON.stringify(a)}`,
+          );
+        }
+      }
+      extraArgs = rawArgs as string[];
+    }
+    const plan = await deps.manager.planSpawnForAgent(agent.agentId);
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === "string") {
+        env[k] = v;
+      }
+    }
+    Object.assign(env, plan.env);
+    // Terminal-auth typically writes to the agent's own dotfile dir, so
+    // run from the user's home rather than any session cwd.
+    const cwd = os.homedir();
+    // Log keys only — never log env values (may contain secrets).
+    // eslint-disable-next-line no-console
+    console.error(
+      `[authenticate] terminal-auth requested agentId=${agent.agentId} methodId=${methodId}`,
+    );
+    return {
+      kind: "terminal",
+      command: plan.command,
+      args: [...plan.args, ...extraArgs],
+      env,
+      cwd,
+    };
   }
 
   try {

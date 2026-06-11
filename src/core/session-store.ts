@@ -162,6 +162,13 @@ export const SessionRecord = z.object({
   // `*`; no agent involvement, no broadcast — picker auto-refresh picks
   // it up on the next tick.
   priority: z.number().int().nonnegative().optional(),
+  // Caller-supplied environment variables to forward into the child
+  // agent process on every spawn for this session (brand-new agent,
+  // cold-resurrect, and respawn paths). Overwritten in full when a
+  // session/new or session/attach arrives with a fresh
+  // _meta["hydra-acp"].env map. Stored here so resurrect after a
+  // daemon restart restores the same spawn-env.
+  forwardedEnv: z.record(z.string(), z.string()).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -305,6 +312,7 @@ export function recordFromMemorySession(args: {
   originatingClient?: PersistedOriginatingClient;
   interactive?: boolean;
   priority?: number;
+  forwardedEnv?: Record<string, string>;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -335,6 +343,7 @@ export function recordFromMemorySession(args: {
     originatingClient: args.originatingClient,
     interactive: args.interactive,
     priority: args.priority,
+    forwardedEnv: args.forwardedEnv,
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

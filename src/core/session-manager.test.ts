@@ -3616,6 +3616,70 @@ describe("SessionManager.create: captures child authMethods on AgentInstance", (
     ]);
   });
 
+  it("preserves name and plain-object _meta verbatim and drops malformed variants", async () => {
+    const mock = makeMockAgent({ agentId: "qwen-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        agentCapabilities: {},
+        authMethods: [
+          {
+            id: "qwen-oauth",
+            name: "Qwen OAuth",
+            description: "Sign in via Qwen",
+            _meta: { type: "terminal", args: ["--auth", "qwen"] },
+          },
+          {
+            id: "bad-meta-array",
+            description: "meta is array",
+            _meta: ["nope"],
+          },
+          {
+            id: "bad-meta-null",
+            description: "meta is null",
+            _meta: null,
+          },
+          {
+            id: "bad-meta-string",
+            description: "meta is string",
+            _meta: "nope",
+          },
+          {
+            id: "bad-name",
+            description: "name not string",
+            name: 42,
+          },
+          {
+            id: "plain",
+            description: "no extras",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ sessionId: "u_auth_meta" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("qwen-code")]),
+      () => mock.agent,
+    );
+
+    await manager.create({ agentId: "qwen-code", cwd: WORK_CWD });
+
+    expect(mock.agent.authMethods).toEqual([
+      {
+        id: "qwen-oauth",
+        description: "Sign in via Qwen",
+        name: "Qwen OAuth",
+        _meta: { type: "terminal", args: ["--auth", "qwen"] },
+      },
+      { id: "bad-meta-array", description: "meta is array" },
+      { id: "bad-meta-null", description: "meta is null" },
+      { id: "bad-meta-string", description: "meta is string" },
+      { id: "bad-name", description: "name not string" },
+      { id: "plain", description: "no extras" },
+    ]);
+  });
+
   it("leaves agent.authMethods undefined when the initialize response omits the field", async () => {
     const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;

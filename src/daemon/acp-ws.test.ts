@@ -560,6 +560,12 @@ describe("handleAuthenticate", () => {
     sessionAgent?: ReturnType<typeof makeMockAgent>;
     spawnAgent?: ReturnType<typeof makeMockAgent>;
     defaultAgent?: string;
+    plan?: {
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      version: string;
+    };
   }) {
     const bootstrap = vi.fn(async () => {
       if (!opts.spawnAgent) {
@@ -567,14 +573,22 @@ describe("handleAuthenticate", () => {
       }
       return opts.spawnAgent.agent;
     });
+    const planSpawnForAgent = vi.fn(async () => {
+      if (!opts.plan) {
+        throw new Error("planSpawnForAgent not expected");
+      }
+      return opts.plan;
+    });
     const manager = {
       getAgentForSession: (sid: string) =>
         sid === "sess_live" ? opts.sessionAgent?.agent : undefined,
       bootstrapAgentForAuth: bootstrap,
+      planSpawnForAgent,
     } as unknown as SessionManager;
     return {
       deps: { manager, defaultAgent: opts.defaultAgent ?? "claude-acp" },
       bootstrap,
+      planSpawnForAgent,
     };
   }
 
@@ -667,5 +681,188 @@ describe("handleAuthenticate", () => {
     );
     expect(result).toBe(childResponse);
     expect(spawnAgent.agent.kill).not.toHaveBeenCalled();
+  });
+
+  it("returns a terminal spawn plan when method._meta.type is terminal, with registry args followed by method args", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "qwen-code" });
+    sessionAgent.agent.authMethods = [
+      {
+        id: "qwen-login",
+        description: "Sign in",
+        _meta: { type: "terminal", args: ["--setup", "--login"] },
+      },
+    ];
+    const plan = {
+      command: "/usr/bin/node",
+      args: ["/opt/qwen/index.js"],
+      env: { QWEN_HOME: "/opt/qwen" },
+      version: "1.0.0",
+    };
+    const { deps, planSpawnForAgent } = makeAuthDeps({
+      sessionAgent,
+      plan,
+    });
+
+    const result = (await handleAuthenticate(
+      {
+        methodId: "qwen-login",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    )) as {
+      kind: string;
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      cwd: string;
+    };
+
+    expect(planSpawnForAgent).toHaveBeenCalledWith("qwen-code");
+    expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
+    expect(result.kind).toBe("terminal");
+    expect(result.command).toBe(plan.command);
+    expect(result.args).toEqual([
+      "/opt/qwen/index.js",
+      "--setup",
+      "--login",
+    ]);
+    expect(result.env.QWEN_HOME).toBe("/opt/qwen");
+    expect(result.env.PATH).toBe(process.env.PATH);
+    expect(typeof result.cwd).toBe("string");
+    expect(result.cwd.length).toBeGreaterThan(0);
+  });
+
+  it("treats top-level type: terminal (no _meta) as terminal and emits empty extra args", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "qwen-code" });
+    sessionAgent.agent.authMethods = [
+      { id: "qwen-login", description: "", type: "terminal" },
+    ];
+    const plan = {
+      command: "/usr/bin/node",
+      args: ["/opt/qwen/index.js"],
+      env: {},
+      version: "1.0.0",
+    };
+    const { deps } = makeAuthDeps({ sessionAgent, plan });
+
+    const result = (await handleAuthenticate(
+      {
+        methodId: "qwen-login",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    )) as { kind: string; args: string[] };
+    expect(result.kind).toBe("terminal");
+    expect(result.args).toEqual(["/opt/qwen/index.js"]);
+    expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
+  });
+
+  it("rejects terminal method whose _meta.args is not an array", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "qwen-code" });
+    sessionAgent.agent.authMethods = [
+      {
+        id: "qwen-login",
+        description: "",
+        _meta: { type: "terminal", args: "--setup" },
+      },
+    ];
+    const { deps } = makeAuthDeps({
+      sessionAgent,
+      plan: { command: "x", args: [], env: {}, version: "1" },
+    });
+    await expect(
+      handleAuthenticate(
+        {
+          methodId: "qwen-login",
+          _meta: { "hydra-acp": { sessionId: "sess_live" } },
+        },
+        deps,
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCodes.InvalidParams,
+      message: expect.stringContaining("_meta.args"),
+    });
+    expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
+  });
+
+  it("rejects terminal method whose _meta.args contains a non-string entry", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "qwen-code" });
+    sessionAgent.agent.authMethods = [
+      {
+        id: "qwen-login",
+        description: "",
+        _meta: { type: "terminal", args: ["--setup", 42] },
+      },
+    ];
+    const { deps } = makeAuthDeps({
+      sessionAgent,
+      plan: { command: "x", args: [], env: {}, version: "1" },
+    });
+    await expect(
+      handleAuthenticate(
+        {
+          methodId: "qwen-login",
+          _meta: { "hydra-acp": { sessionId: "sess_live" } },
+        },
+        deps,
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCodes.InvalidParams,
+      message: expect.stringContaining("non-string"),
+    });
+    expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
+  });
+
+  it("defaults to agent type and forwards to the child when no type info is present anywhere", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "claude-acp" });
+    sessionAgent.agent.authMethods = [
+      { id: "untyped", description: "" },
+    ];
+    sessionAgent.agentToClient.mockResolvedValueOnce({ ok: true });
+    const { deps } = makeAuthDeps({ sessionAgent });
+
+    const result = await handleAuthenticate(
+      {
+        methodId: "untyped",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    );
+    expect(result).toEqual({ ok: true });
+    expect(sessionAgent.agentToClient).toHaveBeenCalledWith("authenticate", {
+      methodId: "untyped",
+    });
+  });
+
+  it("sends zero messages to the running child for terminal-type auth", async () => {
+    const sessionAgent = makeMockAgent({ agentId: "qwen-code" });
+    sessionAgent.agent.authMethods = [
+      {
+        id: "qwen-login",
+        description: "",
+        _meta: { type: "terminal", args: ["--setup"] },
+      },
+    ];
+    const plan = {
+      command: "node",
+      args: ["x.js"],
+      env: {},
+      version: "1",
+    };
+    const { deps } = makeAuthDeps({ sessionAgent, plan });
+
+    await handleAuthenticate(
+      {
+        methodId: "qwen-login",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    );
+
+    expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
+    const conn = sessionAgent.agent.connection as unknown as {
+      notify: ReturnType<typeof vi.fn>;
+    };
+    expect(conn.notify).not.toHaveBeenCalled();
   });
 });
