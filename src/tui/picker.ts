@@ -189,7 +189,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["Composer", "type prompt for new session; Enter creates + submits"],
   ["↓ from composer", "drop focus into session list"],
   null,
-  ["↑ / ↓, n / p, ^n", "navigate sessions"],
+  ["↑ / ↓, n / p, ^p / ^n", "navigate sessions"],
   ["PgUp / PgDn", "page up / page down"],
   ["Home / End", "first / last"],
   ["Enter", "open selected session"],
@@ -199,7 +199,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["^f", "find in session history (content + tool inputs)"],
   ["o", "toggle cwd-only filter"],
   ["h", "cycle host filter (local / <peer> / all)"],
-  ["^p", "change cwd (for the picker and any new sessions)"],
+  ["^o", "change cwd (for the picker and any new sessions)"],
   ["i", "show info for the selected session"],
   ["I", "toggle include-cat filter"],
   ["r", "refresh from daemon"],
@@ -1545,15 +1545,11 @@ export async function pickSession(
     };
     const focus = { push: pushLayer, pop: popLayer };
 
-    // Build a "new" PickerResult, attaching cwd only if the user changed
-    // it via the ^p cwd prompt — keeps the call sites tidy.
-    const makeNewResult = (): PickerResult => {
-      const out: PickerResult = { kind: "new" };
-      if (currentCwd !== opts.cwd) {
-        out.cwd = currentCwd;
-      }
-      return out;
-    };
+    // Build a "new" PickerResult, always reporting the picker's
+    // current cwd so the caller's launch path uses the same path the
+    // composer title is showing — no opts.cwd vs currentCwd skew.
+    const makeNewResult = (): { kind: "new"; prompt?: string; cwd?: string } =>
+      ({ kind: "new", cwd: currentCwd });
 
     // ^p opens a directory prompt. On accept, currentCwd updates and the
     // composer title + cwd-only filter follow. On Esc, cwd is unchanged.
@@ -2309,10 +2305,12 @@ export async function pickSession(
       if (mode === "busy") {
         return;
       }
-      // ^P opens the cwd prompt from anywhere in the picker — composer,
+      // ^O opens the cwd prompt from anywhere in the picker — composer,
       // list focus, search, rename, or a confirm modal. Hoisted above all
-      // mode checks so no submode can swallow it.
-      if (name === "CTRL_P") {
+      // mode checks so no submode can swallow it. (^P stays bound to
+      // "previous in list" / "drop focus into list" via the handlers
+      // further down.)
+      if (name === "CTRL_O") {
         void openCwdPrompt();
         return;
       }
@@ -2417,16 +2415,11 @@ export async function pickSession(
         if (name === "ENTER" || name === "KP_ENTER") {
           cleanup();
           const text = composer.expandedText();
-          const base: { kind: "new"; prompt?: string; cwd?: string } = {
-            kind: "new",
-          };
+          const out = makeNewResult();
           if (text.trim().length > 0) {
-            base.prompt = text;
+            out.prompt = text;
           }
-          if (currentCwd !== opts.cwd) {
-            base.cwd = currentCwd;
-          }
-          resolve(base);
+          resolve(out);
           return;
         }
         // A held UP that just walked focus up into the composer keeps
@@ -2476,6 +2469,15 @@ export async function pickSession(
             move(1);
             return;
           }
+        }
+        // ^P from the composer drops focus into the session list (same
+        // chord the live composer would interpret as "switch session",
+        // which is meaningless here).
+        if (name === "CTRL_P") {
+          if (visible.length > 0) {
+            move(1);
+          }
+          return;
         }
         // Any other key in the composer cancels the held-UP guard so a
         // later, deliberate UP isn't wrongly swallowed.
@@ -2749,6 +2751,7 @@ export async function pickSession(
       switch (name) {
         case "UP":
         case "SHIFT_TAB":
+        case "CTRL_P":
           // Crossing from the topmost session row into the composer via a
           // held UP arms the guard so auto-repeat doesn't fall through into
           // prompt-history (see upGuardArmed / lastUpAt).
