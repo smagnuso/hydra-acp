@@ -157,6 +157,11 @@ export interface InputOptions {
 // on submit.
 export const PASTE_LINE_THRESHOLD = 10;
 
+// Window for the double-Escape -> open-picker shortcut. Long enough to
+// be ergonomic, short enough that a held Esc on a slow terminal won't
+// trip it unintentionally.
+const DOUBLE_ESCAPE_MS = 500;
+
 // Matches the placeholder anywhere in a line. The same shape is used
 // (anchored) for atomic deletion / cursor jumps over the token.
 const PASTE_TOKEN_RE = /\[pasted #(\d+) \+\d+ lines\]/g;
@@ -221,6 +226,12 @@ export class InputDispatcher {
   private pastes = new Map<number, string>();
   private nextPasteId = 1;
   private collapsePastes: boolean;
+
+  // Timestamp of the most recent Escape that hit the composer no-op
+  // branch (no turn running, no modal, no history-search). A second
+  // Escape within DOUBLE_ESCAPE_MS — with no other input in between —
+  // opens the session picker, mirroring ^P. Reset on any other input.
+  private lastEscapeAt: number | null = null;
 
   constructor(opts: InputOptions = {}) {
     this.history = [...(opts.history ?? [])];
@@ -378,10 +389,12 @@ export class InputDispatcher {
       }
     }
     if (event.type === "char") {
+      this.lastEscapeAt = null;
       this.insertChar(event.ch);
       return [];
     }
     if (event.type === "paste") {
+      this.lastEscapeAt = null;
       const lineCount = event.text.split("\n").length;
       if (this.collapsePastes && lineCount > PASTE_LINE_THRESHOLD) {
         const id = this.nextPasteId++;
@@ -402,6 +415,9 @@ export class InputDispatcher {
   }
 
   private handleKey(name: KeyName): InputEffect[] {
+    if (name !== "escape") {
+      this.lastEscapeAt = null;
+    }
     switch (name) {
       case "enter":
         return this.send();
@@ -519,15 +535,30 @@ export class InputDispatcher {
       case "ctrl-y":
         this.yank();
         return [];
-      case "escape":
+      case "escape": {
         // Modal flows (permission prompt, exit confirm) intercept Escape
         // before it reaches here. Outside those, Escape during a turn
         // cancels with prefill — the app drops the cancelled turn's
         // text back into the buffer if nothing else is queued.
         if (this.turnRunning) {
+          this.lastEscapeAt = null;
           return [{ type: "cancel", prefill: true }];
         }
+        // No-op Escape: if a second one arrives within DOUBLE_ESCAPE_MS
+        // (with no other input in between — handleKey resets the timer
+        // for any other chord, and feed() resets it for char/paste),
+        // jump to the session picker like ^P.
+        const now = Date.now();
+        if (
+          this.lastEscapeAt !== null &&
+          now - this.lastEscapeAt <= DOUBLE_ESCAPE_MS
+        ) {
+          this.lastEscapeAt = null;
+          return [{ type: "switch-session" }];
+        }
+        this.lastEscapeAt = now;
         return [];
+      }
     }
   }
 

@@ -747,6 +747,44 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual(["hi"]);
   });
 
+  it("Double-Escape outside a turn opens the session picker", () => {
+    const d = new InputDispatcher();
+    expect(feed(d, [k("escape")])).toEqual([]);
+    expect(feed(d, [k("escape")])).toEqual([{ type: "switch-session" }]);
+  });
+
+  it("Double-Escape is reset by other input in between", () => {
+    const d = new InputDispatcher();
+    feed(d, [k("escape")]);
+    feed(d, [ch("x")]);
+    expect(feed(d, [k("escape")])).toEqual([]);
+  });
+
+  it("Double-Escape window times out", async () => {
+    const d = new InputDispatcher();
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      expect(feed(d, [k("escape")])).toEqual([]);
+      now += 600;
+      expect(feed(d, [k("escape")])).toEqual([]);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("Escape that cancels a turn does not count toward double-tap", () => {
+    const d = new InputDispatcher();
+    d.setTurnRunning(true);
+    expect(feed(d, [k("escape")])).toEqual([
+      { type: "cancel", prefill: true },
+    ]);
+    d.setTurnRunning(false);
+    // Next esc starts a fresh double-tap window; one press alone is no-op.
+    expect(feed(d, [k("escape")])).toEqual([]);
+  });
+
   it("setBuffer seeds the prompt and clears navigation state", () => {
     const d = new InputDispatcher({ history: ["old"] });
     d.setQueue(["q"]);

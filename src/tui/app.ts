@@ -1618,6 +1618,20 @@ async function runSession(
         if (tryHandleBtwCloseKey(ev)) {
           continue;
         }
+        // Escape while scrolled back snaps the viewport to the bottom
+        // instead of falling through to the composer. Runs after modal /
+        // overlay / search interceptors so they keep priority, but
+        // before the dispatcher so a one-tap Escape doesn't also cancel
+        // an in-flight turn — the user's intent here is "get me back to
+        // live", not "cancel".
+        if (
+          ev.type === "key" &&
+          ev.name === "escape" &&
+          screen.isScrolledBack()
+        ) {
+          screen.scrollToBottom();
+          continue;
+        }
         // Drag-and-drop file paths are intercepted before the
         // dispatcher sees them — they're not text edits, they're an
         // async file-read that ends in addAttachment().
