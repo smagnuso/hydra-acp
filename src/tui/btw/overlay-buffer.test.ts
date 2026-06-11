@@ -327,6 +327,70 @@ describe("BtwOverlayBuffer", () => {
     });
   });
 
+  describe("agent-text markdown parsing", () => {
+    it("renders **bold** via parseAgentMarkdown (asterisks consumed, ^+ markup emitted)", () => {
+      const buf = new BtwOverlayBuffer();
+      buf.append({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "hello **world**" },
+      });
+      const body = buf.getLines()[0]!.body;
+      expect(body).not.toContain("**");
+      expect(body).toContain("^+world");
+    });
+
+    it("renders fenced code as bodyStyle 'code' (parseAgentMarkdown ran, not plain formatBlock)", () => {
+      const buf = new BtwOverlayBuffer();
+      buf.append({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "```\nconst x = 1;\n```" },
+      });
+      const styles = buf.getLines().map((l) => l.bodyStyle);
+      expect(styles).toContain("code");
+    });
+
+    it("re-parses the whole accumulated paragraph on each streaming chunk", () => {
+      const buf = new BtwOverlayBuffer();
+      buf.append({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "hi **wor" },
+      });
+      buf.append({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "ld**" },
+      });
+      const body = buf.getLines()[0]!.body;
+      expect(body).not.toContain("**");
+      expect(body).toContain("^+world");
+    });
+  });
+
+  describe("agent-thought markdown parsing", () => {
+    it("uses parseThoughtMarkdown (bodyStyle 'thought', asterisks consumed)", () => {
+      const buf = new BtwOverlayBuffer();
+      buf.append({
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "thinking **hard**" },
+      });
+      const line = buf.getLines()[0]!;
+      expect(line.bodyStyle).toBe("thought");
+      expect(line.body).not.toContain("**");
+    });
+
+    it("coalesces consecutive thought chunks into one paragraph", () => {
+      const buf = new BtwOverlayBuffer();
+      buf.append({
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "one " },
+      });
+      buf.append({
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "two" },
+      });
+      expect(buf.getLines().map(txt)).toEqual(["  one two"]);
+    });
+  });
+
   describe("getLines returns a snapshot", () => {
     it("returned array is independent of the buffer's internal state", () => {
       const buf = new BtwOverlayBuffer();

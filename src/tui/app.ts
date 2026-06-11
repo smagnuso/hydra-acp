@@ -3461,7 +3461,12 @@ async function runSession(
         btwReusableDirty = false;
         screen.openBtwOverlay();
         screen.setBtwOverlayStatus({ label: "busy", style: "busy" });
-        const buffer = new BtwOverlayBuffer();
+        const buffer = new BtwOverlayBuffer({
+          getMaxWidth: () => {
+            const w = screen.width();
+            return w > 0 ? w : undefined;
+          },
+        });
         buffer.on("changed", () => {
           screen.setBtwOverlayContent(buffer.getLines());
         });

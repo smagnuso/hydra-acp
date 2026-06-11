@@ -5,6 +5,8 @@
 import {
   formatEvent,
   formatToolLine,
+  parseAgentMarkdown,
+  parseThoughtMarkdown,
   type FormattedLine,
   type ToolLineState,
 } from "../format.js";
@@ -44,6 +46,11 @@ export interface OverlayBufferOptions {
   // When set, the buffer emits a "changed" event after every mutation.
   // Default is true.
   emitChanged?: boolean;
+  // Optional getter for the live terminal width. Used as `maxWidth` when
+  // re-parsing agent-text through parseAgentMarkdown so pipe tables clamp
+  // to the visible column count (matches the main transcript path in
+  // app.ts:renderAgentBlock). When unset, tables stay natural-width.
+  getMaxWidth?: () => number | undefined;
 }
 
 export class BtwOverlayBuffer extends TypedEmitter<{ changed: () => void }> {
@@ -69,14 +76,21 @@ export class BtwOverlayBuffer extends TypedEmitter<{ changed: () => void }> {
   // paragraph: as new chunks arrive their text concatenates with the
   // pending paragraph, the prior rendered range is replaced in place.
   // Any non-agent-text event (tool_call, plan, etc.) seals the paragraph
-  // and the next agent-text event starts a new one.
+  // and the next agent-text event starts a new one. Same pattern is
+  // applied separately to agent-thought chunks so streaming markdown
+  // (bold, code, fences, headings, tables) renders coherently rather
+  // than as one parsed line per chunk.
   private _pendingAgentText: string | null = null;
   private _pendingAgentRange: { start: number; length: number } | null = null;
+  private _pendingThoughtText: string | null = null;
+  private _pendingThoughtRange: { start: number; length: number } | null = null;
   private readonly _emitChanged: boolean;
+  private readonly _getMaxWidth: (() => number | undefined) | undefined;
 
   constructor(options: OverlayBufferOptions = {}) {
     super();
     this._emitChanged = options.emitChanged ?? true;
+    this._getMaxWidth = options.getMaxWidth;
   }
 
   // Append a raw SessionUpdate, format it into display lines via the
@@ -87,33 +101,54 @@ export class BtwOverlayBuffer extends TypedEmitter<{ changed: () => void }> {
     const event = mapUpdate(update);
     if (!event) return 0;
 
-    // Most kinds end the pending agent-text paragraph. agent-text itself
-    // is handled below (it APPENDS to the paragraph instead).
+    // Most kinds end whichever pending paragraph (agent-text or thought)
+    // is open. The matching kind below APPENDS to its paragraph instead.
     if (event.kind !== "agent-text") {
       this._pendingAgentText = null;
       this._pendingAgentRange = null;
+    }
+    if (event.kind !== "agent-thought") {
+      this._pendingThoughtText = null;
+      this._pendingThoughtRange = null;
     }
 
     switch (event.kind) {
       case "agent-text": {
         const chunk = event.text;
         if (this._pendingAgentText !== null && this._pendingAgentRange !== null) {
-          // Continue the paragraph: concat the text and re-format the
-          // whole accumulated string, then replace the prior range with
-          // the new lines.
+          // Continue the paragraph: concat the text and re-parse the
+          // whole accumulated string through parseAgentMarkdown (matches
+          // the main transcript path in app.ts:renderAgentBlock), then
+          // replace the prior range with the new lines.
           this._pendingAgentText += chunk;
-          const lines = formatEvent({
-            kind: "agent-text",
-            text: this._pendingAgentText,
-          });
+          const lines = this._parseAgent(this._pendingAgentText);
           this._replaceAgentRange(this._pendingAgentRange, lines);
           return lines.length;
         }
         this._pendingAgentText = chunk;
-        const lines = formatEvent(event);
+        const lines = this._parseAgent(chunk);
         const start = this._lines.length;
         this._pushLines(lines);
         this._pendingAgentRange = { start, length: lines.length };
+        return lines.length;
+      }
+
+      case "agent-thought": {
+        const chunk = event.text;
+        if (
+          this._pendingThoughtText !== null &&
+          this._pendingThoughtRange !== null
+        ) {
+          this._pendingThoughtText += chunk;
+          const lines = parseThoughtMarkdown(this._pendingThoughtText);
+          this._replaceThoughtRange(this._pendingThoughtRange, lines);
+          return lines.length;
+        }
+        this._pendingThoughtText = chunk;
+        const lines = parseThoughtMarkdown(chunk);
+        const start = this._lines.length;
+        this._pushLines(lines);
+        this._pendingThoughtRange = { start, length: lines.length };
         return lines.length;
       }
 
@@ -167,9 +202,15 @@ export class BtwOverlayBuffer extends TypedEmitter<{ changed: () => void }> {
     }
   }
 
+  private _parseAgent(text: string): FormattedLine[] {
+    const w = this._getMaxWidth?.();
+    return parseAgentMarkdown(text, w !== undefined && w > 0 ? { maxWidth: w } : undefined);
+  }
+
   // Replace the lines occupying the pending-agent-text range with new
-  // ones, shifting any tool ranges that sit below by the delta. Mirrors
-  // _replaceRange but targets the agent paragraph slot.
+  // ones, shifting any tool ranges and the thought paragraph that sit
+  // below by the delta. Mirrors _replaceRange but targets the agent
+  // paragraph slot.
   private _replaceAgentRange(
     range: { start: number; length: number },
     formatted: FormattedLine[],
@@ -180,6 +221,29 @@ export class BtwOverlayBuffer extends TypedEmitter<{ changed: () => void }> {
     if (delta !== 0) {
       for (const r of this._toolRanges.values()) {
         if (r.start > range.start) r.start += delta;
+      }
+      if (this._pendingThoughtRange && this._pendingThoughtRange.start > range.start) {
+        this._pendingThoughtRange.start += delta;
+      }
+    }
+    if (this._emitChanged) {
+      this.emit("changed");
+    }
+  }
+
+  private _replaceThoughtRange(
+    range: { start: number; length: number },
+    formatted: FormattedLine[],
+  ): void {
+    const delta = formatted.length - range.length;
+    this._lines.splice(range.start, range.length, ...formatted);
+    range.length = formatted.length;
+    if (delta !== 0) {
+      for (const r of this._toolRanges.values()) {
+        if (r.start > range.start) r.start += delta;
+      }
+      if (this._pendingAgentRange && this._pendingAgentRange.start > range.start) {
+        this._pendingAgentRange.start += delta;
       }
     }
     if (this._emitChanged) {
@@ -207,6 +271,9 @@ export class BtwOverlayBuffer extends TypedEmitter<{ changed: () => void }> {
       if (this._pendingAgentRange && this._pendingAgentRange.start > range.start) {
         this._pendingAgentRange.start += delta;
       }
+      if (this._pendingThoughtRange && this._pendingThoughtRange.start > range.start) {
+        this._pendingThoughtRange.start += delta;
+      }
     }
     if (this._emitChanged) {
       this.emit("changed");
@@ -224,6 +291,8 @@ export class BtwOverlayBuffer extends TypedEmitter<{ changed: () => void }> {
       this._toolRanges.clear();
       this._pendingAgentText = null;
       this._pendingAgentRange = null;
+      this._pendingThoughtText = null;
+      this._pendingThoughtRange = null;
       this.emit("changed");
     }
   }
