@@ -15,6 +15,7 @@
 import type { Terminal } from "terminal-kit";
 import { JsonRpcErrorCodes } from "../acp/types-jsonrpc.js";
 import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
+import type { AuthMethod } from "../acp/types-capabilities.js";
 import {
   drawBox,
   resetTerminalModes,
@@ -36,6 +37,7 @@ export interface AuthBannerLines {
   description: string;
   command?: string;
   url?: string;
+  authMethods?: AuthMethod[];
   footer: string;
 }
 
@@ -46,6 +48,7 @@ const FOOTER = "[r] retry  ·  [Esc] back to picker";
 export function buildAuthBannerLines(
   agentId: string,
   onboarding?: AuthOnboarding,
+  authMethods?: AuthMethod[],
 ): AuthBannerLines {
   const result: AuthBannerLines = {
     title: `Agent "${agentId}" needs to be set up`,
@@ -57,6 +60,9 @@ export function buildAuthBannerLines(
   }
   if (onboarding?.url) {
     result.url = onboarding.url;
+  }
+  if (authMethods && authMethods.length > 0) {
+    result.authMethods = authMethods;
   }
   return result;
 }
@@ -97,7 +103,9 @@ export function isAuthRequiredError(err: unknown): boolean {
   return (err as { code?: unknown }).code === JsonRpcErrorCodes.AuthRequired;
 }
 
-export function readAgentIdFromAuthError(err: unknown): string | undefined {
+function readHydraMetaFromAuthError(
+  err: unknown,
+): Record<string, unknown> | undefined {
   if (typeof err !== "object" || err === null) {
     return undefined;
   }
@@ -113,8 +121,50 @@ export function readAgentIdFromAuthError(err: unknown): string | undefined {
   if (typeof hydra !== "object" || hydra === null) {
     return undefined;
   }
-  const agentId = (hydra as { agentId?: unknown }).agentId;
+  return hydra as Record<string, unknown>;
+}
+
+export function readAgentIdFromAuthError(err: unknown): string | undefined {
+  const hydra = readHydraMetaFromAuthError(err);
+  if (!hydra) {
+    return undefined;
+  }
+  const agentId = hydra.agentId;
   return typeof agentId === "string" ? agentId : undefined;
+}
+
+export function readAuthMethodsFromAuthError(
+  err: unknown,
+): AuthMethod[] | undefined {
+  const hydra = readHydraMetaFromAuthError(err);
+  if (!hydra) {
+    return undefined;
+  }
+  const methods = hydra.authMethods;
+  if (!Array.isArray(methods)) {
+    return undefined;
+  }
+  const out: AuthMethod[] = [];
+  for (const m of methods) {
+    if (typeof m !== "object" || m === null) {
+      continue;
+    }
+    const id = (m as { id?: unknown }).id;
+    if (typeof id !== "string" || id.length === 0) {
+      continue;
+    }
+    const description = (m as { description?: unknown }).description;
+    const type = (m as { type?: unknown }).type;
+    const method: AuthMethod = {
+      id,
+      description: typeof description === "string" ? description : "",
+    };
+    if (type === "agent" || type === "terminal") {
+      method.type = type;
+    }
+    out.push(method);
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 export type AuthRetryOutcome<T> =
@@ -130,6 +180,7 @@ export async function runAuthRetryLoop<T>(args: {
   showBanner: (
     agentId: string,
     onboarding: AuthOnboarding | undefined,
+    authMethods: AuthMethod[] | undefined,
   ) => Promise<AuthBannerResult>;
   resolveOnboarding: (
     agentId: string,
@@ -146,8 +197,9 @@ export async function runAuthRetryLoop<T>(args: {
       }
       const agentId =
         readAgentIdFromAuthError(err) ?? args.fallbackAgentId ?? "";
+      const authMethods = readAuthMethodsFromAuthError(err);
       const onboarding = await args.resolveOnboarding(agentId);
-      const decision = await args.showBanner(agentId, onboarding);
+      const decision = await args.showBanner(agentId, onboarding, authMethods);
       if (decision === "back") {
         return { kind: "back" };
       }
@@ -162,19 +214,21 @@ export async function promptAuthRequiredBanner(
   term: Terminal,
   agentId: string,
   onboarding?: AuthOnboarding,
+  authMethods?: AuthMethod[],
 ): Promise<AuthBannerResult> {
   resetTerminalModes();
-  const lines = buildAuthBannerLines(agentId, onboarding);
+  const lines = buildAuthBannerLines(agentId, onboarding, authMethods);
 
   const render = (): BoxLayout => {
-    // title + blank + description + optional command + optional url +
-    // blank + footer
     let rows = 4;
     if (lines.command) {
       rows++;
     }
     if (lines.url) {
       rows++;
+    }
+    if (lines.authMethods) {
+      rows += 1 + lines.authMethods.length;
     }
     const layout = drawBox(term, {
       contentHeight: rows,
@@ -200,6 +254,20 @@ export async function promptAuthRequiredBanner(
       term.dim.noFormat(" Docs: ");
       term.brightWhite.noFormat(truncate(lines.url, innerW - 7));
       row++;
+    }
+    if (lines.authMethods) {
+      term.moveTo(layout.contentX, layout.contentY + row);
+      term.dim.noFormat(" Methods reported by the agent:");
+      row++;
+      for (const m of lines.authMethods) {
+        term.moveTo(layout.contentX, layout.contentY + row);
+        const label = m.description && m.description.length > 0
+          ? `${m.description} (${m.id})`
+          : m.id;
+        term.dim.noFormat("   • ");
+        term.noFormat(truncate(label, innerW - 5));
+        row++;
+      }
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);

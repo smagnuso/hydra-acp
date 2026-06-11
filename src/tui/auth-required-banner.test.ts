@@ -6,6 +6,7 @@ import {
   isAuthRequiredError,
   mapAuthBannerKey,
   readAgentIdFromAuthError,
+  readAuthMethodsFromAuthError,
   runAuthRetryLoop,
   type AuthOnboarding,
   type AuthBannerResult,
@@ -52,6 +53,43 @@ describe("buildAuthBannerLines", () => {
     expect(lines.description).toBe("Log in to Foo Cloud.");
     expect(lines.command).toBe("foo login");
     expect(lines.url).toBe("https://foo.example/docs/auth");
+  });
+
+  it("includes authMethods from the child agent when provided", () => {
+    const lines = buildAuthBannerLines("claude-acp", undefined, [
+      { id: "oauth", description: "Sign in with browser", type: "agent" },
+      { id: "api-key", description: "Use ANTHROPIC_API_KEY", type: "terminal" },
+    ]);
+    expect(lines.authMethods).toHaveLength(2);
+    expect(lines.authMethods?.[0].id).toBe("oauth");
+  });
+
+  it("omits authMethods when the list is empty", () => {
+    const lines = buildAuthBannerLines("x", undefined, []);
+    expect(lines.authMethods).toBeUndefined();
+  });
+});
+
+describe("readAuthMethodsFromAuthError", () => {
+  it("extracts and normalizes authMethods from the error _meta", () => {
+    const err = makeAuthError("claude-acp", {
+      authMethods: [
+        { id: "oauth", description: "Sign in", type: "agent" },
+        { id: "api", description: "API key" },
+        { id: "", description: "skipped" },
+        { description: "no id, skipped" },
+      ],
+    });
+    const out = readAuthMethodsFromAuthError(err);
+    expect(out).toEqual([
+      { id: "oauth", description: "Sign in", type: "agent" },
+      { id: "api", description: "API key" },
+    ]);
+  });
+
+  it("returns undefined when authMethods is missing or empty", () => {
+    const err = makeAuthError("x");
+    expect(readAuthMethodsFromAuthError(err)).toBeUndefined();
   });
 });
 
@@ -130,7 +168,7 @@ describe("runAuthRetryLoop", () => {
     };
     const resolveOnboarding = vi.fn().mockResolvedValue(onboarding);
     const showBanner = vi
-      .fn<(id: string, o: AuthOnboarding | undefined) => Promise<AuthBannerResult>>()
+      .fn<(id: string, o: AuthOnboarding | undefined, m: unknown) => Promise<AuthBannerResult>>()
       .mockResolvedValue("back");
 
     const out = await runAuthRetryLoop({
@@ -140,7 +178,7 @@ describe("runAuthRetryLoop", () => {
     });
     expect(out).toEqual({ kind: "back" });
     expect(resolveOnboarding).toHaveBeenCalledWith("claude-acp");
-    expect(showBanner).toHaveBeenCalledWith("claude-acp", onboarding);
+    expect(showBanner).toHaveBeenCalledWith("claude-acp", onboarding, undefined);
     // The banner is for display only; one paint, no auto-retry.
     expect(request).toHaveBeenCalledTimes(1);
   });
@@ -170,7 +208,7 @@ describe("runAuthRetryLoop", () => {
       .mockRejectedValueOnce(err)
       .mockRejectedValueOnce(err);
     const showBanner = vi
-      .fn<(id: string, o: AuthOnboarding | undefined) => Promise<AuthBannerResult>>()
+      .fn<(id: string, o: AuthOnboarding | undefined, m: unknown) => Promise<AuthBannerResult>>()
       .mockResolvedValueOnce("retry")
       .mockResolvedValueOnce("back");
     const out = await runAuthRetryLoop({
@@ -197,7 +235,7 @@ describe("runAuthRetryLoop", () => {
       fallbackAgentId: "opencode",
     });
     expect(resolveOnboarding).toHaveBeenCalledWith("opencode");
-    expect(showBanner).toHaveBeenCalledWith("opencode", undefined);
+    expect(showBanner).toHaveBeenCalledWith("opencode", undefined, undefined);
   });
 
   it("cancel decision bubbles out as kind:cancel", async () => {

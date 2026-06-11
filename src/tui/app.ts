@@ -1338,8 +1338,8 @@ async function runSession(
     const authOutcome = await runAuthRetryLoop<SessionNewResult>({
       request: () =>
         conn.request("session/new", sessionNewParams) as Promise<SessionNewResult>,
-      showBanner: (agentId, onboarding) =>
-        promptAuthRequiredBanner(term, agentId, onboarding),
+      showBanner: (agentId, onboarding, authMethods) =>
+        promptAuthRequiredBanner(term, agentId, onboarding, authMethods),
       resolveOnboarding: async (agentId) => {
         if (!agentId) {
           return undefined;
