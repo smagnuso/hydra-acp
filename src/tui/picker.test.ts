@@ -438,7 +438,10 @@ describe("pickSession composer", () => {
   it("returns kind:new with no prompt when Enter is hit on empty composer", async () => {
     const drv = makePicker({ sessions });
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({ kind: "new" });
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      cwd: "/home/me/work/project",
+    });
   });
 
   it("returns kind:new with prompt when text is typed then Enter", async () => {
@@ -447,6 +450,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "hello world",
     });
   });
@@ -455,7 +459,10 @@ describe("pickSession composer", () => {
     const drv = makePicker({ sessions });
     drv.type("   ");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({ kind: "new" });
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      cwd: "/home/me/work/project",
+    });
   });
 
   it("supports Alt+Enter for multiline prompts", async () => {
@@ -466,6 +473,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "line one\nline two",
     });
   });
@@ -488,6 +496,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "from composer",
     });
   });
@@ -507,6 +516,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "still composer",
     });
   });
@@ -519,6 +529,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "draft",
     });
   });
@@ -529,6 +540,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "only choice",
     });
   });
@@ -555,7 +567,10 @@ describe("pickSession composer", () => {
     drv.type("scratch this");
     drv.press("CTRL_U");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({ kind: "new" });
+    await expect(drv.resolveOnce).resolves.toEqual({
+      kind: "new",
+      cwd: "/home/me/work/project",
+    });
   });
 
   it("backspace deletes characters in the composer", async () => {
@@ -565,6 +580,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "hello",
     });
   });
@@ -578,6 +594,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "hrkdcoqt?",
     });
   });
@@ -591,6 +608,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "line one\nline two",
     });
   });
@@ -601,6 +619,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "first\nsecond",
     });
   });
@@ -612,6 +631,7 @@ describe("pickSession composer", () => {
     drv.press("ENTER");
     await expect(drv.resolveOnce).resolves.toEqual({
       kind: "new",
+      cwd: "/home/me/work/project",
       prompt: "prefix: pasted value",
     });
   });

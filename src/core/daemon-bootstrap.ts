@@ -1,10 +1,45 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { HydraConfig } from "./config.js";
+import { computeConfigDigest } from "./config-digest.js";
+
+// Result of probing the daemon port against our local config.
+//   "match"    — a daemon answered and its configDigest equals ours;
+//                safe to talk to it.
+//   "missing"  — nothing answered; we can spawn our own daemon here.
+//   "mismatch" — something answered but with a different configDigest
+//                (different HOME / different token / drifted config).
+//                Refusing to adopt it is critical: the WS handshake
+//                would fail at the bearer-token check and the shim
+//                would loop in "connection lost; reconnecting" until
+//                the caller's timeout. Surface a clear error instead.
+export type DaemonProbe = "match" | "missing" | "mismatch";
+
+export async function probeDaemon(config: HydraConfig): Promise<DaemonProbe> {
+  const health = await fetchDaemonHealth(config, 500);
+  if (!health) {
+    return "missing";
+  }
+  if (health.configDigest === undefined) {
+    return "mismatch";
+  }
+  return health.configDigest === computeConfigDigest(config)
+    ? "match"
+    : "mismatch";
+}
 
 export async function ensureDaemonReachable(config: HydraConfig): Promise<void> {
-  if (await pingHealth(config)) {
+  const probe = await probeDaemon(config);
+  if (probe === "match") {
     return;
+  }
+  if (probe === "mismatch") {
+    const protocol = config.daemon.tls ? "https" : "http";
+    throw new Error(
+      `a different daemon is already listening on ${protocol}://${config.daemon.host}:${config.daemon.port} ` +
+        `(config digest mismatch). Refusing to connect because the auth token would not match. ` +
+        `Stop the other daemon (\`hydra-acp daemon stop\` in its HOME) or change daemon.port in this config.`,
+    );
   }
   process.stderr.write("hydra-acp: daemon not running; starting it...\n");
   spawnDaemonDetached();
