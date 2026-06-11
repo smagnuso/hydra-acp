@@ -2114,10 +2114,23 @@ function buildInitializeResult(): InitializeResult {
         list: {},
       },
     },
+    // Hydra is a proxy and has no provider auth of its own. The
+    // downstream agent (claude-code, gemini, codex, ...) owns the real
+    // OAuth/terminal flow, and its AUTH_REQUIRED errors surface back
+    // through hydra at prompt-time. ACP requires authMethods to be
+    // declared up front at initialize, before any session exists and
+    // before a child agent is selected, so there's nothing concrete to
+    // forward here — we advertise a single placeholder of type "agent"
+    // so registries/clients that gate on AUTHENTICATION.md see a
+    // structurally valid entry. (The WS bearer token used by remote
+    // clients is a transport detail, not an ACP authMethod, and is not
+    // surfaced here.)
     authMethods: [
       {
-        id: "bearer-token",
-        description: "Bearer token presented at WS upgrade",
+        id: "proxy",
+        type: "agent",
+        description:
+          "Hydra proxies authentication to the downstream agent selected per session",
       },
     ],
     // Advertise hydra-only capabilities via _meta["hydra-acp"], grouped by
