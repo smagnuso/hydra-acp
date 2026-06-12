@@ -324,6 +324,44 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^G", "toggle this help"],
 ];
 
+// Pure function: toggles a toolCallId in the perToolExpanded set.
+// Exported for unit testing without wiring through runSession.
+export function toggleToolExpansion(
+  toolCallId: string,
+  perToolExpanded: Set<string>,
+): void {
+  if (perToolExpanded.has(toolCallId)) {
+    perToolExpanded.delete(toolCallId);
+  } else {
+    perToolExpanded.add(toolCallId);
+  }
+}
+
+// Pure function: resolves what a tools-click should do based on rowOffset.
+// Returns null when the click has no effect (no rowOwners entry or null id).
+// Exported for unit testing without wiring through runSession.
+export function resolveToolsClick(
+  key: string,
+  rowOffset: number,
+  rowOwners: Map<string, (string | null)[]>,
+): { toolCallId: string } | null {
+  if (!key.startsWith("tools:")) {
+    return null;
+  }
+  if (rowOffset === 0) {
+    // Header click — not a per-tool action.
+    return null;
+  }
+  const owners = rowOwners.get(key);
+  if (!owners) {
+    return null;
+  }
+  const toolCallId = owners[rowOffset];
+  if (!toolCallId) {
+    return null;
+  }
+  return { toolCallId };
+}
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const config = await loadConfig();
@@ -2259,6 +2297,7 @@ async function runSession(
         viewPrefs.toolsExpanded = !viewPrefs.toolsExpanded;
         // Global toggle wins over any per-block click overrides.
         toolsOverrides.clear();
+        perToolExpanded.clear();
         reRenderAllTools();
         break;
       case "plan":
@@ -3834,6 +3873,16 @@ async function runSession(
   // viewPrefs.toolsExpanded for that one block. Cleared when the global ^O
   // Tools toggle fires (global wins).
   const toolsOverrides = new Map<string, boolean>();
+  // Per-tool expansion state: a Set of toolCallIds whose detail is expanded.
+  // Cleared by the global ^O Tools toggle only — NOT by header-click or turn
+  // boundary so a user can still click into a past turn's tool after a reset.
+  const perToolExpanded = new Set<string>();
+  // Maps tools:N key → an array whose length equals the number of lines in
+  // that block's render, where each entry is either the toolCallId for that
+  // row or null for the header line. Populated by buildToolsLines; used by
+  // handleBlockClick to resolve (key, rowOffset) → toolCallId. Until T4
+  // wires this up from snapshots it only holds the latest block's data.
+  const rowOwners = new Map<string, (string | null)[]>();
   // Retained thought text, keyed by thought block key, so a click can
   // re-render the block collapsed/expanded even after closeThought wipes
   // the live buffer (the lines stay painted in scrollback). Cleared on
@@ -4020,7 +4069,7 @@ async function runSession(
     endedAt: number | null;
     stopReason: string | null;
     expanded: boolean;
-  }): FormattedLine[] => {
+  }): { lines: FormattedLine[]; rowOwners: (string | null)[] } => {
     const { order, states, startedAt, endedAt, stopReason: stop } = args;
     const total = order.length;
     // limit <= 0 disables the cap — render every row regardless of
@@ -4097,13 +4146,19 @@ async function runSession(
         bodyStyle: pureThinking ? "tool-status-running" : frozenBodyStyle,
       },
     ];
+    // rowOwners[0] is always null (header line); subsequent entries map to
+    // the toolCallId of the tool that produced them.
+    const rowOwners: (string | null)[] = [null];
     for (const id of visibleIds) {
       const state = states.get(id);
       if (state) {
-        lines.push(...formatToolLine(state, end));
+        const toolLines = formatToolLine(state, end);
+        lines.push(...toolLines);
+        // Every line emitted for this tool is owned by that tool's id.
+        rowOwners.push(...toolLines.map(() => id));
       }
     }
-    return lines;
+    return { lines, rowOwners };
   };
 
   // Whether the tools block for `key` should render expanded: a per-block
@@ -4116,7 +4171,7 @@ async function runSession(
     if (toolsBlockStartedAt === null) {
       return;
     }
-    const lines = buildToolsLines({
+    const { lines, rowOwners: owners } = buildToolsLines({
       order: toolCallOrder,
       states: toolStates,
       startedAt: toolsBlockStartedAt,
@@ -4125,6 +4180,7 @@ async function runSession(
       expanded: toolsExpandedFor(currentToolsKey),
     });
     screen.upsertLines(currentToolsKey, lines);
+    rowOwners.set(currentToolsKey, owners);
   };
 
   // Re-render a frozen tools snapshot in place (click-to-expand on a past
@@ -4134,7 +4190,7 @@ async function runSession(
     if (!snap) {
       return;
     }
-    const lines = buildToolsLines({
+    const { lines, rowOwners: owners } = buildToolsLines({
       order: snap.order,
       states: snap.states,
       startedAt: snap.startedAt,
@@ -4143,6 +4199,7 @@ async function runSession(
       expanded: toolsExpandedFor(key),
     });
     screen.upsertLines(key, lines);
+    rowOwners.set(key, owners);
   };
 
   // Re-render every tools block (live + frozen snapshots) under the current
@@ -4474,7 +4531,7 @@ async function runSession(
   // expand/collapse toggle. Only the clicked block changes; the global ^O
   // settings are untouched. Unknown keys (agent text, thoughts, etc.) are
   // ignored. Each toggle flips relative to what the block currently shows.
-  const handleBlockClick = (key: string, _rowOffset: number): void => {
+  const handleBlockClick = (key: string, rowOffset: number): void => {
     if (key.startsWith("editdiff:")) {
       const id = key.slice("editdiff:".length);
       const diff = renderedEditDiffs.get(id);
@@ -4505,13 +4562,30 @@ async function runSession(
       return;
     }
     if (key.startsWith("tools:")) {
-      const current = toolsOverrides.get(key) ?? viewPrefs.toolsExpanded;
-      toolsOverrides.set(key, !current);
-      if (key === currentToolsKey && toolsBlockStartedAt !== null) {
-        renderToolsBlock();
-      } else {
-        renderToolsBlockFor(key);
+      // rowOffset === 0 → header click: flip the block-level cap via
+      // toolsOverrides. Does NOT touch perToolExpanded.
+      if (rowOffset === 0) {
+        const current = toolsOverrides.get(key) ?? viewPrefs.toolsExpanded;
+        toolsOverrides.set(key, !current);
+        if (key === currentToolsKey && toolsBlockStartedAt !== null) {
+          renderToolsBlock();
+        } else {
+          renderToolsBlockFor(key);
+        }
+        screen.repaintNow();
+        return;
       }
+      // rowOffset > 0 → per-tool click: resolve toolCallId from rowOwners.
+      const owners = rowOwners.get(key);
+      if (!owners) {
+        return;
+      }
+      const toolCallId = owners[rowOffset];
+      if (!toolCallId) {
+        return;
+      }
+      toggleToolExpansion(toolCallId, perToolExpanded);
+      renderToolsBlockFor(key);
       screen.repaintNow();
       return;
     }
