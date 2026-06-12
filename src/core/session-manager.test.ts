@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import * as fs from "node:fs/promises";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -4150,4 +4150,9 @@ describe("SessionManager.forkSession", () => {
     expect(forkMeta.importedFromSessionId).toBeUndefined();
     expect(forkMeta.forkedFromSessionId).toBe(source.sessionId);
   });
+});
+
+afterAll(() => {
+  rmSync(WORK_CWD, { recursive: true, force: true });
+  rmSync(W_CWD, { recursive: true, force: true });
 });

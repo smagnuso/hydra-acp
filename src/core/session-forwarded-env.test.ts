@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -180,4 +180,8 @@ describe("SessionManager forwardedEnv plumbing", () => {
       .join("\n");
     expect(all).not.toContain("shh-please-do-not-log");
   });
+});
+
+afterAll(() => {
+  rmSync(WORK_CWD, { recursive: true, force: true });
 });
