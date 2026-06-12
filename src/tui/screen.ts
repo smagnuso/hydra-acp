@@ -76,8 +76,10 @@ export interface ScreenOptions {
   // Invoked with the keyed-block key under a left-click, when full mouse
   // capture is on and the click lands on a row owned by an upserted block
   // (e.g. "tools:3", "plan", "editdiff:<id>"). Lets the app toggle a
-  // single block's expand/collapse. Clicks on unkeyed rows are ignored.
-  onBlockClick?: (key: string) => void;
+  // single block's expand/collapse. `rowOffset` is the 0-based index of
+  // the clicked terminal row within that block (0 = top line of the
+  // block). Clicks on unkeyed rows are ignored.
+  onBlockClick?: (key: string, rowOffset: number) => void;
   // Invoked for every mouse button-press, drag-motion, and button-release
   // event while mouse capture is on. Wheel events are NOT routed here —
   // they continue to drive scrollback internally. Coordinates are 1-based
@@ -298,7 +300,7 @@ export class Screen {
   private term: Terminal;
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
-  private onBlockClick: ((key: string) => void) | undefined;
+  private onBlockClick: ((key: string, rowOffset: number) => void) | undefined;
   private onMouse: ((ev: MouseEvent) => void) | undefined;
   private onBlockVisible: ((key: string) => void) | undefined;
   private onSuspend: (() => void) | undefined;
@@ -2488,7 +2490,14 @@ export class Screen {
       ) {
         const key = this.keyAtRow(cell.y);
         if (key !== null) {
-          this.onBlockClick(key);
+          // Scan upward to find the block's top row so we can report a
+          // 0-based offset within the block. Relies on the invariant
+          // that a given key occupies a contiguous run of rows.
+          let firstRowY = cell.y;
+          while (firstRowY > 1 && this.keyAtRow(firstRowY - 1) === key) {
+            firstRowY -= 1;
+          }
+          this.onBlockClick(key, cell.y - firstRowY);
         }
       }
       this.handleSelectionRelease(cell);

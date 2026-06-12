@@ -11,6 +11,7 @@ import {
   isTerminalToolStatus,
   parseAgentMarkdown,
   pickPlanWindow,
+  truncateResultText,
   type FormattedLine,
 } from "./format.js";
 import type { PlanEntry } from "../core/render-update.js";
@@ -1095,6 +1096,72 @@ describe("formatEvent plan windowing", () => {
     );
     expect(lines[0]?.bodyStyle).toBe("tool-status-fail");
     expect(lines[0]?.body).toBe("Plan · 2 done · 5 left");
+  });
+});
+
+describe("truncateResultText", () => {
+  it("returns text unchanged when under both limits", () => {
+    const result = truncateResultText("line one\nline two\nline three");
+    expect(result.truncated).toBe(false);
+    expect(result.text).toBe("line one\nline two\nline three");
+  });
+
+  it("truncates at 4096 characters even with few lines", () => {
+    const longLine = "x".repeat(5000);
+    const result = truncateResultText(longLine);
+    expect(result.truncated).toBe(true);
+    expect(result.text.length).toBe(4096);
+  });
+
+  it("truncates at 40 lines even with few characters", () => {
+    const lines = Array.from({ length: 50 }, (_, i) => `line ${i}`);
+    const text = lines.join("\n");
+    const result = truncateResultText(text);
+    expect(result.truncated).toBe(true);
+    const resultLines = result.text.split("\n");
+    expect(resultLines.length).toBe(40);
+  });
+
+  it("character cap fires first when text is long but few lines", () => {
+    const oneLine = "a".repeat(5000);
+    const result = truncateResultText(oneLine);
+    expect(result.truncated).toBe(true);
+    expect(result.text.length).toBe(4096);
+    expect(result.text.split("\n").length).toBe(1);
+  });
+
+  it("line cap fires first when many short lines stay under char limit", () => {
+    const lines = Array.from({ length: 50 }, () => "x");
+    const text = lines.join("\n");
+    expect(text.length).toBeLessThan(4096);
+    const result = truncateResultText(text);
+    expect(result.truncated).toBe(true);
+    expect(result.text.split("\n").length).toBe(40);
+  });
+
+  it("simulates two successive updates: second replaces first", () => {
+    // First update — small result, not truncated.
+    const state1 = { text: "first result", truncated: false };
+    const r1 = truncateResultText(state1.text);
+    expect(r1.truncated).toBe(false);
+    expect(r1.text).toBe("first result");
+
+    // Second update — larger result, replaces first.
+    const state2 = { text: "second result", truncated: false };
+    const r2 = truncateResultText(state2.text);
+    expect(r2.truncated).toBe(false);
+    expect(r2.text).toBe("second result");
+  });
+
+  it("flips truncated to true when second update exceeds limits", () => {
+    // First update: small, not truncated.
+    const r1 = truncateResultText("small");
+    expect(r1.truncated).toBe(false);
+
+    // Second update: large, triggers truncation.
+    const bigText = "line\n".repeat(50);
+    const r2 = truncateResultText(bigText);
+    expect(r2.truncated).toBe(true);
   });
 });
 

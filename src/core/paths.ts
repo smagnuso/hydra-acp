@@ -17,19 +17,52 @@ export function shortenHomePath(p: string): string {
   return p;
 }
 
+// Identify a test runner from process signals, or undefined for a real run.
+// Returns a label for the error message. Kept broad on purpose: a missed
+// runner means silent writes into the user's real ~/.hydra-acp.
+export function detectTestRunner(): string | undefined {
+  if (process.env.VITEST) {
+    return "vitest";
+  }
+  // `bun test` sets no dedicated env var, but the Bun runtime exposes
+  // process.versions.bun / globalThis.Bun. hydra runs under node in prod,
+  // so any Bun runtime here is a dev/test invocation.
+  if (process.versions.bun || typeof (globalThis as { Bun?: unknown }).Bun !== "undefined") {
+    return "bun";
+  }
+  if (process.env.JEST_WORKER_ID !== undefined) {
+    return "jest";
+  }
+  if (process.env.NODE_TEST_CONTEXT !== undefined) {
+    return "node:test";
+  }
+  return undefined;
+}
+
 export function hydraHome(): string {
   const override = process.env[ROOT_ENV];
   if (override && override.length > 0) {
     return path.resolve(override);
   }
-  // Safety net: under VITEST, never silently fall back to the developer's
-  // real ~/.hydra-acp. vitest.setup.ts clamps HYDRA_ACP_HOME to a
-  // per-worker tmpdir; if it goes missing we'd rather a fire-and-forget
-  // write throw (and get swallowed by the surrounding .catch) than land
-  // a stray meta.json in the user's session directory.
-  if (process.env.VITEST) {
+  // Safety net: under ANY test runner, never silently fall back to the
+  // developer's real ~/.hydra-acp. vitest.setup.ts clamps HYDRA_ACP_HOME to
+  // a per-worker tmpdir; if it goes missing (or the runner never set it) we
+  // throw rather than land a stray meta.json / clobbered config in the
+  // user's real home.
+  //
+  // This must catch more than vitest. `bun test` runs the *.test.ts files
+  // (Bun shims the `vitest` import) but loads NEITHER vitest.config.ts (so
+  // no clamp) NOR sets process.env.VITEST (so a vitest-only guard misses it)
+  // — running the suite under bun then wrote ~400 fixture sessions and a
+  // default config straight into ~/.hydra-acp. hydra ships as a node CLI, so
+  // process.versions.bun being set means a dev/test invocation, never prod.
+  const runner = detectTestRunner();
+  if (runner) {
     throw new Error(
-      "HYDRA_ACP_HOME is unset under VITEST; vitest.setup.ts must run first",
+      `HYDRA_ACP_HOME is unset under a test runner (${runner}); refusing to ` +
+        `fall back to ~/.hydra-acp. The harness must set HYDRA_ACP_HOME — ` +
+        `vitest.setup.ts does this, but \`bun test\` bypasses the vitest ` +
+        `config and does not. Run the suite with \`npx vitest run\`, not \`bun test\`.`,
     );
   }
   return path.join(os.homedir(), ".hydra-acp");

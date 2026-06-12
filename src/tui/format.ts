@@ -971,6 +971,40 @@ export interface ToolLineState {
   // Identifier for the worker task that produced this tool call, forwarded
   // from the session update's workerTaskId field when present.
   workerTaskId?: string;
+  // Captured plain-text output from the tool, extracted from the
+  // `content[]` text blocks of a tool_call / tool_call_update payload.
+  // Stored with latest-replaces semantics (each update overwrites).
+  // Truncated to at most 40 lines or 4096 characters; when truncation
+  // occurs, `resultTruncated` is true and the expansion renderer
+  // appends a "… (truncated)" trailer.
+  resultText?: string;
+  // True when `resultText` was truncated because it exceeded 40 lines
+  // or 4096 characters. Used by the expansion renderer to append a
+  // "… (truncated)" trailer after the last visible line.
+  resultTruncated?: boolean;
+}
+
+// Truncate a result-text string to at most 40 lines or 4096 characters,
+// whichever limit is hit first. Returns { text, truncated }.
+export function truncateResultText(raw: string): { text: string; truncated: boolean } {
+  const MAX_CHARS = 4096;
+  const MAX_LINES = 40;
+  if (raw.length <= MAX_CHARS) {
+    const lines = raw.split("\n");
+    if (lines.length <= MAX_LINES) {
+      return { text: raw, truncated: false };
+    }
+  }
+  // Character cap first: slice to MAX_CHARS.
+  let text = raw.slice(0, MAX_CHARS);
+  let truncated = raw.length > MAX_CHARS;
+  // Then enforce the line cap on the (possibly already-sliced) string.
+  const lines = text.split("\n");
+  if (lines.length > MAX_LINES) {
+    text = lines.slice(0, MAX_LINES).join("\n");
+    truncated = true;
+  }
+  return { text, truncated };
 }
 
 // One tool call → one or more FormattedLines. The primary row is the

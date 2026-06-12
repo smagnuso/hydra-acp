@@ -111,4 +111,35 @@ describe("writeFileAtomic", () => {
     const stat = await fs.stat(target);
     expect(stat.mode & 0o777).toBe(0o600);
   });
+
+  it("writes through a symlink instead of replacing it", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    const realTarget = p("real-target.json");
+    const link = p("link.json");
+    await fs.writeFile(realTarget, "{}\n");
+    await fs.symlink(realTarget, link);
+
+    await writeFileAtomic(link, '{"v":1}\n');
+
+    // The link node must survive — not be replaced by a regular file.
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+    // And the content must land in the symlink's target.
+    expect(await fs.readFile(realTarget, "utf8")).toBe('{"v":1}\n');
+  });
+
+  it("re-materializes a symlink target that does not exist yet", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    const dir = p("subdir");
+    await fs.mkdir(dir, { recursive: true });
+    const realTarget = path.join(dir, "absent.json");
+    const link = p("link-to-absent.json");
+    // Link points at a file that has not been created (e.g. a dotfile not
+    // yet decrypted). The directory exists, the file does not.
+    await fs.symlink(realTarget, link);
+
+    await writeFileAtomic(link, '{"v":2}\n');
+
+    expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await fs.readFile(realTarget, "utf8")).toBe('{"v":2}\n');
+  });
 });

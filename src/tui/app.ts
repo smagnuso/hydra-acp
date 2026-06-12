@@ -118,6 +118,7 @@ import {
   mapUpdate,
   normalizeAdvertisedCommands,
   sanitizeSingleLine,
+  sanitizeWireText,
   type AvailableCommand,
   type AvailableMode,
   type EditDiff,
@@ -133,6 +134,7 @@ import {
   isTerminalToolStatus,
   parseAgentMarkdown,
   parseThoughtMarkdown,
+  truncateResultText,
   type ExitPlanState,
   type FormattedLine,
   type ToolLineState,
@@ -552,7 +554,7 @@ async function runSession(
   // importantly, the history replay during session/attach. Once
   // applyRenderEvent is bound we drain the buffer through it.
   let bufferedEvents: RenderEvent[] = [];
-  let applyRenderEvent: ((event: RenderEvent) => void) | null = null;
+  let applyRenderEvent: ((event: RenderEvent, rawUpdate?: unknown) => void) | null = null;
   // Flips true the moment teardown starts. Notification/request handlers
   // check this and bail before touching the screen — otherwise updates
   // streaming in during a long turn keep painting after we've left the
@@ -565,12 +567,12 @@ async function runSession(
   // above 0 represents the still-open turn at the head of history, not
   // local drift. See shouldDriftSnap in reconnect-state.ts.
   let replayDraining = false;
-  const appendRender = (event: RenderEvent | null): void => {
+  const appendRender = (event: RenderEvent | null, rawUpdate?: unknown): void => {
     if (!event) {
       return;
     }
     if (applyRenderEvent) {
-      applyRenderEvent(event);
+      applyRenderEvent(event, rawUpdate);
     } else {
       bufferedEvents.push(event);
     }
@@ -795,7 +797,7 @@ async function runSession(
       handlePermissionResolved(update);
       return;
     }
-    appendRender(event);
+    appendRender(event, update);
     maybeDismissPermissionByToolUpdate(update);
   };
   conn.onNotification("session/update", (params) => {
@@ -1627,8 +1629,8 @@ async function runSession(
     // Click a collapsed/expanded scrollback block to toggle just that one
     // block (the ^O dialog toggles all blocks of a type session-wide).
     // Routes by key prefix to the matching per-block override.
-    onBlockClick: (key: string) => {
-      handleBlockClick(key);
+    onBlockClick: (_key: string, _rowOffset: number) => {
+      handleBlockClick(_key, _rowOffset);
     },
     // Lazy-load deferred (references-mode) diff bodies only when the block
     // scrolls into view.
@@ -4185,6 +4187,38 @@ async function runSession(
     renderToolsBlock();
   };
 
+  // Extract plain text from a `content[]` array (ACP content blocks).
+  // Iterates every block, pulls string text from `{ type: "text", text }`
+  // or bare `{ text }` shapes, joins with newlines. Returns null when
+  // nothing was found so callers can skip the call entirely.
+  function extractResultText(rawUpdate: unknown): string | null {
+    if (!rawUpdate || typeof rawUpdate !== "object") {
+      return null;
+    }
+    const u = rawUpdate as Record<string, unknown>;
+    const content = Array.isArray(u.content) ? u.content : undefined;
+    if (!content) {
+      return null;
+    }
+    const parts: string[] = [];
+    for (const block of content) {
+      if (!block || typeof block !== "object") {
+        continue;
+      }
+      const b = block as Record<string, unknown>;
+      // ACP canonical shape: { type: "text", text: "..." }
+      if (b.type === "text" && typeof b.text === "string") {
+        parts.push(sanitizeWireText(b.text));
+        continue;
+      }
+      // Bare text shape (no type field): { text: "..." }
+      if (typeof b.text === "string") {
+        parts.push(sanitizeWireText(b.text));
+      }
+    }
+    return parts.length > 0 ? parts.join("\n") : null;
+  }
+
   const recordToolCall = (
     id: string,
     title: string | undefined,
@@ -4193,6 +4227,7 @@ async function runSession(
     editDiff: EditDiff | undefined,
     detail: string | undefined,
     workerTaskId?: string,
+    rawUpdate?: unknown,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -4229,6 +4264,17 @@ async function runSession(
     }
     if (editDiff !== undefined) {
       state.editDiff = editDiff;
+    }
+    // Extract and store resultText from the raw update's content[].
+    // Latest-replaces: every tool_call_update carries a snapshot of all
+    // content blocks, so we rebuild and overwrite on each call.
+    if (rawUpdate !== undefined) {
+      const extracted = extractResultText(rawUpdate);
+      if (extracted !== null) {
+        const { text, truncated } = truncateResultText(extracted);
+        state.resultText = text;
+        state.resultTruncated = truncated;
+      }
     }
     toolStates.set(id, state);
     if (wasNew) {
@@ -4428,7 +4474,7 @@ async function runSession(
   // expand/collapse toggle. Only the clicked block changes; the global ^O
   // settings are untouched. Unknown keys (agent text, thoughts, etc.) are
   // ignored. Each toggle flips relative to what the block currently shows.
-  const handleBlockClick = (key: string): void => {
+  const handleBlockClick = (key: string, _rowOffset: number): void => {
     if (key.startsWith("editdiff:")) {
       const id = key.slice("editdiff:".length);
       const diff = renderedEditDiffs.get(id);
@@ -4498,7 +4544,7 @@ async function runSession(
     }
   };
 
-  applyRenderEvent = (event: RenderEvent): void => {
+  applyRenderEvent = (event: RenderEvent, rawUpdate?: unknown): void => {
     if (event.kind === "available-commands") {
       agentCommands = event.commands;
       refreshCompletions();
@@ -4707,6 +4753,7 @@ async function runSession(
         event.editDiff,
         event.detail,
         event.workerTaskId,
+        rawUpdate,
       );
       renderToolsBlock();
       maybeRenderEditDiff(event.toolCallId);
@@ -4758,6 +4805,7 @@ async function runSession(
         event.editDiff,
         event.detail,
         event.workerTaskId,
+        rawUpdate,
       );
       if (event.upstreamInterrupted) {
         upstreamInterruptedSeen = true;

@@ -382,8 +382,44 @@ export function transformerList(config: HydraConfig): TransformerConfig[] {
 // the file is missing, empty, or corrupted. Genuine IO errors
 // (permission, etc.) still throw.
 async function readConfigFile(): Promise<Record<string, unknown>> {
+  await assertConfigSymlinkNotBroken();
   const parsed = await readJsonSafe<Record<string, unknown>>(paths.config());
   return parsed ?? {};
+}
+
+// Guard against a config.json that is a symlink whose target is missing
+// (e.g. a synced dotfile whose decrypted plaintext hasn't been regenerated
+// yet). fs.readFile follows the link and reports ENOENT — indistinguishable
+// from "no config exists" — so without this check readConfigFile would
+// return {} and a downstream write would persist defaults *over the broken
+// link*, severing it from its source. Treat a dangling link as a hard error
+// instead so the user heals the link rather than silently losing config.
+async function assertConfigSymlinkNotBroken(): Promise<void> {
+  let lst;
+  try {
+    lst = await fs.lstat(paths.config());
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw err;
+  }
+  if (!lst.isSymbolicLink()) {
+    return;
+  }
+  try {
+    await fs.stat(paths.config());
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw err;
+    }
+    const dest = await fs.readlink(paths.config()).catch(() => "<unknown>");
+    throw new Error(
+      `config.json at ${paths.config()} is a broken symlink (-> ${dest}); its target is missing. ` +
+        `Refusing to treat this as "no config" and overwrite it. Restore the target ` +
+        `(e.g. decrypt/check out your dotfiles) or remove the dangling link.`,
+    );
+  }
 }
 
 // One-shot heal for installs predating the auth-token split: if

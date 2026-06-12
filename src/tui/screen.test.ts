@@ -1651,7 +1651,7 @@ describe("Screen block-click routing", () => {
   // positive and the row→line mapping has real geometry to walk.
   function makeTallScreen(opts: {
     mouse?: boolean;
-    onBlockClick?: (key: string) => void;
+    onBlockClick?: (key: string, rowOffset: number) => void;
     onBlockVisible?: (key: string) => void;
     width?: number;
     height?: number;
@@ -1807,7 +1807,7 @@ describe("Screen block-click routing", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({
       mouse: true,
-      onBlockClick: (key) => clicks.push(key),
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
     });
     screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
     clickAt(screen, 3, visibleRows(screen));
@@ -1818,7 +1818,7 @@ describe("Screen block-click routing", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({
       mouse: true,
-      onBlockClick: (key) => clicks.push(key),
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
     });
     screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
     dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", {
@@ -1832,7 +1832,7 @@ describe("Screen block-click routing", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({
       mouse: true,
-      onBlockClick: (key) => clicks.push(key),
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
     });
     screen.upsertLines("editdiff:xyz", [{ body: "a-longer-diff-row" }]);
     const y = visibleRows(screen);
@@ -1847,7 +1847,7 @@ describe("Screen block-click routing", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({
       mouse: true,
-      onBlockClick: (key) => clicks.push(key),
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
     });
     screen.upsertLines("tools:1", [{ body: "only-row" }]);
     // Top padding row — no block there.
@@ -1859,12 +1859,80 @@ describe("Screen block-click routing", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({
       mouse: true,
-      onBlockClick: (key) => clicks.push(key),
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
     });
     screen.upsertLines("tools:1", [{ body: "only-row" }]);
     dispatchMouse(screen, "MOUSE_WHEEL_UP", { x: 1, y: visibleRows(screen) });
     dispatchMouse(screen, "MOUSE_WHEEL_DOWN", { x: 1, y: visibleRows(screen) });
     expect(clicks).toEqual([]);
+  });
+
+  it("rowOffset is 0 on the top line of a multi-row block and increments downward", () => {
+    const clicks: Array<{ key: string; rowOffset: number }> = [];
+    // Use inAppSelection=false to avoid double-click detection interfering
+    // with multiple consecutive clicks in the same test.
+    const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
+      apply: () => term,
+      get(_target, prop) {
+        if (prop === "width") return 40;
+        if (prop === "height") return 24;
+        if (prop === "on" || prop === "off") return () => undefined;
+        return new Proxy(() => term, handler);
+      },
+    };
+    const term = new Proxy(
+      function noop() {} as (...args: unknown[]) => unknown,
+      handler,
+    ) as unknown as Terminal;
+    const dispatcher = {
+      state: () => ({
+        buffer: [""],
+        row: 0,
+        col: 0,
+        planMode: false,
+        historyIndex: -1,
+        queueIndex: -1,
+        attachments: [],
+        historySearchQuery: null,
+      }),
+    } as unknown as InputDispatcher;
+    const screen = new Screen({
+      term,
+      dispatcher,
+      onKey: () => {},
+      mouse: true,
+      inAppSelection: false,
+      onBlockClick: (key, rowOffset) => clicks.push({ key, rowOffset }),
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+    });
+    // 4-line block at the tail.
+    screen.upsertLines("tools:1", [
+      { body: "header" },
+      { body: "tool-a" },
+      { body: "tool-b" },
+      { body: "tool-c" },
+    ]);
+    const rows = visibleRows(screen);
+    // Walk from the bottom up to find all terminal rows that map to our block.
+    const blockRowsBottomUp: number[] = [];
+    for (let y = rows; y >= 1; y--) {
+      const key = callKeyAtRow(screen, y);
+      if (key === "tools:1") {
+        blockRowsBottomUp.push(y);
+      } else if (blockRowsBottomUp.length > 0) {
+        break;
+      }
+    }
+    // reverse to get top-to-bottom order for testing
+    const blockRows = blockRowsBottomUp.reverse();
+    expect(blockRows.length).toBeGreaterThanOrEqual(4);
+    // Click each block row from top to bottom and verify offsets.
+    for (let i = 0; i < blockRows.length; i++) {
+      clicks.length = 0;
+      clickAt(screen, 3, blockRows[i]!);
+      expect(clicks).toEqual([{ key: "tools:1", rowOffset: i }]);
+    }
   });
 
   // Visible (non-skipped) line bodies, top-to-bottom, via the same wrapTail

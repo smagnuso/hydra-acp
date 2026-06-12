@@ -160,6 +160,21 @@ describe("writeConfig", () => {
   });
 });
 
+describe("loadConfig with a broken config symlink", () => {
+  it("throws instead of returning defaults when config.json is a dangling symlink", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    // Clear any regular config.json a prior test left behind.
+    await fs.rm(paths.config(), { force: true });
+    const missingTarget = `${paths.home()}/does-not-exist-target.json`;
+    await fs.symlink(missingTarget, paths.config());
+    try {
+      await expect(loadConfig()).rejects.toThrow(/broken symlink/);
+    } finally {
+      await fs.rm(paths.config(), { force: true });
+    }
+  });
+});
+
 describe("expandHome", () => {
   const home = homedir();
 
