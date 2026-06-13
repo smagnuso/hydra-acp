@@ -44,7 +44,7 @@ import {
   type ConfigOption,
   type ConfigOptionValue,
 } from "./hydra-commands.js";
-import { resolveModelId } from "./model-resolve.js";
+import { resolveCandidate, resolveModelId } from "./model-resolve.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import { coalesceReplay } from "./coalesce-replay.js";
@@ -3343,16 +3343,32 @@ export class Session {
     if (resolution.kind === "resolved") {
       modelId = resolution.modelId;
     } else if (resolution.kind === "ambiguous" || resolution.kind === "unknown") {
-      const known = this.agentAdvertisedModels.map((m) => m.modelId).join("\n  ");
+      // Narrow the "Available models" hint to substring matches of the
+      // user's query so a quick `/model sonnet` doesn't dump the full
+      // 70-row provider catalog. Fall back to the complete list only
+      // when nothing contains the query (typo case).
+      const allIds = this.agentAdvertisedModels.map((m) => m.modelId);
+      const needle = arg.toLowerCase();
+      const filtered =
+        resolution.kind === "ambiguous"
+          ? resolution.candidates
+          : allIds.filter((id) => id.toLowerCase().includes(needle));
+      const shown = filtered.length > 0 ? filtered : allIds;
       const reason =
         resolution.kind === "ambiguous"
           ? `"${arg}" matches multiple models: ${resolution.candidates.join(", ")}`
-          : `"${arg}" is not an available model`;
+          : filtered.length > 0
+            ? `"${arg}" is not an available model. Did you mean`
+            : `"${arg}" is not an available model`;
+      const heading =
+        resolution.kind === "ambiguous" || filtered.length === 0
+          ? "Available models"
+          : "Matching models";
       this.recordAndBroadcast("session/update", {
         sessionId: this.upstreamSessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: `\n${reason}.\nAvailable models:\n  ${known}\n` },
+          content: { type: "text", text: `\n${reason}.\n${heading}:\n  ${shown.join("\n  ")}\n` },
           _meta: { "hydra-acp": { synthetic: true } },
         },
       });
@@ -3362,6 +3378,12 @@ export class Session {
       sessionId: this.sessionId,
       modelId,
     });
+    // Mirror the daemon's session/set_model WS handler (acp-ws.ts) —
+    // update the cached currentModel and broadcast a synthetic
+    // current_model_update. Some agents don't emit one themselves, so
+    // without this the slash-command path silently leaves the session
+    // pinned to the previous model.
+    this.applyModelChange(modelId);
     return { stopReason: "end_turn" };
   }
 
@@ -3490,23 +3512,83 @@ export class Session {
       return { stopReason: "end_turn" };
     }
 
-    if (!option.options.some((c) => c.value === value)) {
-      const known = option.options.map((c) => c.value).join("\n  ");
+    // Run the value through the same fuzzy resolver the /model slash
+    // command uses, so `/hydra config model sonnet-4-6` resolves to
+    // `ncp-anthropic/claude-sonnet-4-6` and `/hydra config agent codex`
+    // matches `gpt-5-codex`. The trailing-segment tier degenerates to
+    // case-insensitive equality for slash-free values (most config
+    // options), which is a strict widening.
+    const allValues = option.options.map((c) => c.value);
+    const resolution = resolveCandidate(value, allValues);
+    let resolvedValue = value;
+    if (resolution.kind === "resolved") {
+      resolvedValue = resolution.modelId;
+    } else if (resolution.kind === "ambiguous" || resolution.kind === "unknown") {
+      const needle = value.toLowerCase();
+      const filtered =
+        resolution.kind === "ambiguous"
+          ? resolution.candidates
+          : allValues.filter((v) => v.toLowerCase().includes(needle));
+      const shown = filtered.length > 0 ? filtered : allValues;
+      const reason =
+        resolution.kind === "ambiguous"
+          ? `"${value}" matches multiple values for "${id}": ${resolution.candidates.join(", ")}`
+          : filtered.length > 0
+            ? `"${value}" is not a valid value for "${id}". Did you mean`
+            : `"${value}" is not a valid value for "${id}"`;
+      const heading =
+        resolution.kind === "ambiguous" || filtered.length === 0
+          ? "Valid values"
+          : "Matching values";
       this.recordAndBroadcast("session/update", {
         sessionId: this.upstreamSessionId,
         update: {
           sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: `\n"${value}" is not a valid value for "${id}".\nValid values:\n  ${known}\n` },
+          content: { type: "text", text: `\n${reason}.\n${heading}:\n  ${shown.join("\n  ")}\n` },
           _meta: { "hydra-acp": { synthetic: true } },
         },
       });
       return { stopReason: "end_turn" };
     }
 
+    // hydra synthesizes three config ids that the underlying agent
+    // doesn't understand: `model`, `mode`, `agent`. The daemon's WS twin
+    // (acp-ws.ts handleSetConfigOption) special-cases them to dispatch
+    // to session/set_model / session/set_mode / agent swap respectively.
+    // The text path must do the same — a raw upstream
+    // session/set_config_option for configId=model is silently ignored
+    // by the agent, which is why `/hydra config model opus-4-7`
+    // appeared to no-op.
+    if (id === "model") {
+      if (resolvedValue !== this.currentModel) {
+        await this.forwardRequest("session/set_model", {
+          sessionId: this.sessionId,
+          modelId: resolvedValue,
+        });
+      }
+      this.applyModelChange(resolvedValue);
+      return { stopReason: "end_turn" };
+    }
+    if (id === "mode") {
+      if (resolvedValue !== this.currentMode) {
+        await this.forwardRequest("session/set_mode", {
+          sessionId: this.sessionId,
+          modeId: resolvedValue,
+        });
+      }
+      this.applyModeChange(resolvedValue);
+      return { stopReason: "end_turn" };
+    }
+    if (id === "agent") {
+      if (resolvedValue !== this.agentId) {
+        await this.runAgentCommandInline(resolvedValue);
+      }
+      return { stopReason: "end_turn" };
+    }
     await this.forwardRequest("session/set_config_option", {
       sessionId: this.sessionId,
       configId: id,
-      value,
+      value: resolvedValue,
     });
     return { stopReason: "end_turn" };
   }

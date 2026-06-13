@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveModelId } from "./model-resolve.js";
+import { resolveCandidate, resolveModelId } from "./model-resolve.js";
 import type { AdvertisedModel } from "./hydra-commands.js";
 
 const models = (...ids: string[]): AdvertisedModel[] =>
@@ -85,9 +85,70 @@ describe("resolveModelId", () => {
     expect(res).toEqual({ kind: "unknown", requested: "claude-opus-4-9" });
   });
 
-  it("does not match a partial trailing segment", () => {
-    // "gpt-5" must not resolve to "gpt-5-mini" — segment equality, not substring.
+  it("does not partial-match by trailing segment alone", () => {
+    // "gpt-5" doesn't trailing-segment-match "gpt-5-mini" — segment
+    // equality, not substring. It DOES fall through to the substring
+    // tier, where it hits both "gpt-5-mini" and "gpt-5-nano" → ambiguous.
     const res = resolveModelId("gpt-5", models("openai/gpt-5-mini", "openai/gpt-5-nano"));
-    expect(res).toEqual({ kind: "unknown", requested: "gpt-5" });
+    expect(res).toEqual({
+      kind: "ambiguous",
+      requested: "gpt-5",
+      candidates: ["openai/gpt-5-mini", "openai/gpt-5-nano"],
+    });
+  });
+
+  it("substring-resolves an unambiguous fragment", () => {
+    const res = resolveModelId(
+      "sonnet-4-6",
+      models("ncp-anthropic/claude-sonnet-4-6", "ncp-anthropic/claude-opus-4-7"),
+    );
+    expect(res).toEqual({
+      kind: "resolved",
+      modelId: "ncp-anthropic/claude-sonnet-4-6",
+      requested: "sonnet-4-6",
+    });
+  });
+
+  it("substring tier reports ambiguous when several ids contain the fragment", () => {
+    const res = resolveModelId(
+      "sonnet",
+      models("ncp-anthropic/claude-sonnet-4-5-20250929", "ncp-anthropic/claude-sonnet-4-6"),
+    );
+    expect(res).toEqual({
+      kind: "ambiguous",
+      requested: "sonnet",
+      candidates: [
+        "ncp-anthropic/claude-sonnet-4-5-20250929",
+        "ncp-anthropic/claude-sonnet-4-6",
+      ],
+    });
+  });
+
+  it("substring tier is case-insensitive", () => {
+    const res = resolveModelId(
+      "SONNET-4-6",
+      models("ncp-anthropic/claude-sonnet-4-6", "ncp-anthropic/claude-opus-4-7"),
+    );
+    expect(res).toMatchObject({
+      kind: "resolved",
+      modelId: "ncp-anthropic/claude-sonnet-4-6",
+    });
+  });
+});
+
+describe("resolveCandidate", () => {
+  it("exact-matches a slash-free value", () => {
+    const res = resolveCandidate("build", ["build", "plan", "chat"]);
+    expect(res).toEqual({ kind: "exact", modelId: "build" });
+  });
+
+  it("substring-resolves a slash-free fragment", () => {
+    const res = resolveCandidate("plan", ["build", "planning", "chat"]);
+    expect(res).toEqual({ kind: "resolved", modelId: "planning", requested: "plan" });
+  });
+
+  it("returns 'unknown' when no candidate contains the query", () => {
+    const res = resolveCandidate("zzz", ["build", "plan"]);
+    expect(res).toEqual({ kind: "unknown", requested: "zzz" });
   });
 });
