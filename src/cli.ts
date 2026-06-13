@@ -64,6 +64,7 @@ import {
   runAgentsRemove,
   runRegistryPin,
 } from "./cli/commands/agents.js";
+import { runAgentAuth } from "./cli/commands/agent-auth.js";
 import { splitNameFromLogTailArgs } from "./cli/commands/log-tail.js";
 import {
   runAuthList,
@@ -615,6 +616,10 @@ async function main(): Promise<void> {
         await runAgentsLogs(name, rest);
         return;
       }
+      if (sub === "auth") {
+        await runAgentAuth(positional[2], flags);
+        return;
+      }
       process.stderr.write(`Unknown agent subcommand: ${sub}\n`);
       process.exit(2);
       return;
@@ -936,6 +941,7 @@ function printHelp(): void {
       "  hydra-acp registry pin | unpin              Freeze the daemon on its cached registry (pin) so a bad push isn't picked up, or resume normal TTL fetching (unpin). `agent refresh` still forces a fetch.",
       "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
       "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log",
+      "  hydra-acp agent auth <id>                      Run the auth flow for <id>",
       "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
       "  hydra-acp auth revoke <id>                  Revoke a session token",
