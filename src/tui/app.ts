@@ -129,6 +129,7 @@ import {
   formatEditDiffBlock,
   formatEvent,
   formatExitPlanMode,
+  renderToolDetail,
   setDiffContextLines,
   formatToolLine,
   isTerminalToolStatus,
@@ -508,6 +509,122 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   }
 }
 
+// Pure tools-block renderer. All turn-scoped inputs are passed in so it
+// serves both the live block (current toolStates/order) and a click-driven
+// re-render of a frozen snapshot. `expanded` decides whether the rolling
+// collapse cap applies; `endedAt` null means the block is still live.
+// `perToolExpanded` controls per-tool inline expansion — when a tool's
+// id is present, its detail body (detail, errorText, resultText) renders
+// inline below the summary row. Exported for unit testing without wiring
+// through runSession's closure scope.
+export function _buildToolsLines(args: {
+  order: string[];
+  states: Map<string, ToolLineState>;
+  startedAt: number;
+  endedAt: number | null;
+  stopReason: string | null;
+  expanded: boolean;
+  perToolExpanded?: Set<string>;
+  collapsedLimit?: number;
+}): { lines: FormattedLine[]; rowOwners: (string | null)[] } {
+  const { order, states, startedAt, endedAt, stopReason: stop, perToolExpanded, collapsedLimit = 20 } = args;
+  const total = order.length;
+  // limit <= 0 disables the cap — render every row regardless of
+  // expanded so the ^O toggle is a no-op in unlimited mode.
+  const capped = collapsedLimit > 0;
+  const visibleIds =
+    !capped || args.expanded
+      ? order
+      : order.slice(Math.max(0, total - collapsedLimit));
+  const hidden = total - visibleIds.length;
+  const inProgress = endedAt === null;
+  const end = endedAt ?? Date.now();
+  const elapsed = end - startedAt;
+  // Any frozen non-success stopReason gets the loud "stopped (<reason>)"
+  // treatment so cancel/refusal/max_tokens etc. aren't visually identical
+  // to a normal end_turn finish. Amended is the exception: a deliberate
+  // user replacement, not a failure — rendered dim with a softer label.
+  const stoppedReason =
+    !inProgress && stop !== null && stop !== "end_turn" ? stop : null;
+  const isAmended = stoppedReason === "amended";
+  const stoppedLabel = isAmended
+    ? `amended · ${formatElapsed(elapsed)}`
+    : `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`;
+  let summary: string;
+  if (total === 0) {
+    // Pre-tool state — the block exists purely as a "still working"
+    // indicator while the agent is thinking, then freezes as "thought · Xs"
+    // at turn end so the user has a visible trace of the reasoning time.
+    if (stoppedReason !== null) {
+      summary = stoppedLabel;
+    } else {
+      summary = inProgress
+        ? `thinking · ${formatElapsed(elapsed)}`
+        : `thought · ${formatElapsed(elapsed)}`;
+    }
+  } else {
+    const noun = total === 1 ? "tool" : "tools";
+    const timing =
+      stoppedReason !== null
+        ? stoppedLabel
+        : inProgress
+          ? formatElapsed(elapsed)
+          : `took ${formatElapsed(elapsed)}`;
+    const parts: string[] = [`${total} ${noun}`, timing];
+    // Surface the hidden count while the block is live and capped so the
+    // user knows there's more behind the collapse. Expand/collapse now
+    // lives in the ^O options dialog, so we don't advertise a hotkey
+    // here (it would be misleading — ^O opens the dialog, not a toggle).
+    if (inProgress && capped && hidden > 0) {
+      parts.push(`${hidden} hidden`);
+    }
+    summary = parts.join(" · ");
+  }
+  // Pure-thinking placeholder (no tool has fired yet and the turn is
+  // still live) renders yellow to match the busy banner / active plan /
+  // running tool accent. Once a tool fires the per-tool status colors
+  // carry the activity signal, and once frozen ("thought · Xs") the
+  // header dims so completed turns stop pulling the eye. A non-success
+  // stopReason overrides the frozen dim and goes bold-red so the user
+  // can spot a cancelled / refused / truncated turn at a glance.
+  // Amended is the exception: stays dim since it's a user action.
+  const pureThinking = total === 0 && inProgress;
+  const stoppedHeaderStyle: "tool-status-fail" | "tool-status-cancelled" =
+    isAmended ? "tool-status-cancelled" : "tool-status-fail";
+  const frozenStyle: "tool-status-fail" | "tool-status-cancelled" | "tool" =
+    stoppedReason !== null ? stoppedHeaderStyle : "tool";
+  const frozenBodyStyle: "tool-status-fail" | "tool-status-cancelled" | "dim" =
+    stoppedReason !== null ? stoppedHeaderStyle : "dim";
+  const lines: FormattedLine[] = [
+    {
+      prefix: "⚙ ",
+      prefixStyle: pureThinking ? "tool-status-running" : frozenStyle,
+      body: summary,
+      bodyStyle: pureThinking ? "tool-status-running" : frozenBodyStyle,
+    },
+  ];
+  // rowOwners[0] is always null (header line); subsequent entries map to
+  // the toolCallId of the tool that produced them.
+  const rowOwners: (string | null)[] = [null];
+  for (const id of visibleIds) {
+    const state = states.get(id);
+    if (state) {
+      const toolLines = formatToolLine(state, end);
+      lines.push(...toolLines);
+      // Every line emitted for this tool is owned by that tool's id.
+      rowOwners.push(...toolLines.map(() => id));
+      // When the tool is expanded and not an edit/write tool, render its
+      // detail body inline below the summary row.
+      if (perToolExpanded?.has(id)) {
+        const bodyLines = renderToolDetail(state);
+        lines.push(...bodyLines);
+        rowOwners.push(...bodyLines.map(() => id));
+      }
+    }
+  }
+  return { lines, rowOwners };
+}
+
 async function runSession(
   term: termkit.Terminal,
   config: HydraConfig,
@@ -591,7 +708,7 @@ async function runSession(
   // Buffer rendered events that arrive before the screen is wired up — most
   // importantly, the history replay during session/attach. Once
   // applyRenderEvent is bound we drain the buffer through it.
-  let bufferedEvents: RenderEvent[] = [];
+  let bufferedEvents: Array<{ event: RenderEvent; rawUpdate?: unknown }> = [];
   let applyRenderEvent: ((event: RenderEvent, rawUpdate?: unknown) => void) | null = null;
   // Flips true the moment teardown starts. Notification/request handlers
   // check this and bail before touching the screen — otherwise updates
@@ -612,7 +729,7 @@ async function runSession(
     if (applyRenderEvent) {
       applyRenderEvent(event, rawUpdate);
     } else {
-      bufferedEvents.push(event);
+      bufferedEvents.push({ event, rawUpdate });
     }
   };
 
@@ -3866,6 +3983,7 @@ async function runSession(
       startedAt: number;
       endedAt: number;
       stopReason: string | null;
+      rowOwners: (string | null)[];
     }
   >();
   // Per-block expand overrides set by clicking a tools block. Keyed by the
@@ -3880,8 +3998,8 @@ async function runSession(
   // Maps tools:N key → an array whose length equals the number of lines in
   // that block's render, where each entry is either the toolCallId for that
   // row or null for the header line. Populated by buildToolsLines; used by
-  // handleBlockClick to resolve (key, rowOffset) → toolCallId. Until T4
-  // wires this up from snapshots it only holds the latest block's data.
+  // handleBlockClick to resolve (key, rowOffset) → toolCallId. Snapshot
+  // blocks store their own rowOwners so click resolution works on past turns.
   const rowOwners = new Map<string, (string | null)[]>();
   // Retained thought text, keyed by thought block key, so a click can
   // re-render the block collapsed/expanded even after closeThought wipes
@@ -4058,108 +4176,10 @@ async function runSession(
     thoughtBuffer = "";
   };
 
-  // Pure tools-block renderer. All turn-scoped inputs are passed in so it
-  // serves both the live block (current toolStates/order) and a click-driven
-  // re-render of a frozen snapshot. `expanded` decides whether the rolling
-  // collapse cap applies; `endedAt` null means the block is still live.
-  const buildToolsLines = (args: {
-    order: string[];
-    states: Map<string, ToolLineState>;
-    startedAt: number;
-    endedAt: number | null;
-    stopReason: string | null;
-    expanded: boolean;
-  }): { lines: FormattedLine[]; rowOwners: (string | null)[] } => {
-    const { order, states, startedAt, endedAt, stopReason: stop } = args;
-    const total = order.length;
-    // limit <= 0 disables the cap — render every row regardless of
-    // expanded so the ^O toggle is a no-op in unlimited mode.
-    const capped = TOOLS_COLLAPSED_LIMIT > 0;
-    const visibleIds =
-      !capped || args.expanded
-        ? order
-        : order.slice(Math.max(0, total - TOOLS_COLLAPSED_LIMIT));
-    const hidden = total - visibleIds.length;
-    const inProgress = endedAt === null;
-    const end = endedAt ?? Date.now();
-    const elapsed = end - startedAt;
-    // Any frozen non-success stopReason gets the loud "stopped (<reason>)"
-    // treatment so cancel/refusal/max_tokens etc. aren't visually identical
-    // to a normal end_turn finish. Amended is the exception: a deliberate
-    // user replacement, not a failure — rendered dim with a softer label.
-    const stoppedReason =
-      !inProgress && stop !== null && stop !== "end_turn" ? stop : null;
-    const isAmended = stoppedReason === "amended";
-    const stoppedLabel = isAmended
-      ? `amended · ${formatElapsed(elapsed)}`
-      : `stopped (${stoppedReason}) · ${formatElapsed(elapsed)}`;
-    let summary: string;
-    if (total === 0) {
-      // Pre-tool state — the block exists purely as a "still working"
-      // indicator while the agent is thinking, then freezes as "thought · Xs"
-      // at turn end so the user has a visible trace of the reasoning time.
-      if (stoppedReason !== null) {
-        summary = stoppedLabel;
-      } else {
-        summary = inProgress
-          ? `thinking · ${formatElapsed(elapsed)}`
-          : `thought · ${formatElapsed(elapsed)}`;
-      }
-    } else {
-      const noun = total === 1 ? "tool" : "tools";
-      const timing =
-        stoppedReason !== null
-          ? stoppedLabel
-          : inProgress
-            ? formatElapsed(elapsed)
-            : `took ${formatElapsed(elapsed)}`;
-      const parts: string[] = [`${total} ${noun}`, timing];
-      // Surface the hidden count while the block is live and capped so the
-      // user knows there's more behind the collapse. Expand/collapse now
-      // lives in the ^O options dialog, so we don't advertise a hotkey
-      // here (it would be misleading — ^O opens the dialog, not a toggle).
-      if (inProgress && capped && hidden > 0) {
-        parts.push(`${hidden} hidden`);
-      }
-      summary = parts.join(" · ");
-    }
-    // Pure-thinking placeholder (no tool has fired yet and the turn is
-    // still live) renders yellow to match the busy banner / active plan /
-    // running tool accent. Once a tool fires the per-tool status colors
-    // carry the activity signal, and once frozen ("thought · Xs") the
-    // header dims so completed turns stop pulling the eye. A non-success
-    // stopReason overrides the frozen dim and goes bold-red so the user
-    // can spot a cancelled / refused / truncated turn at a glance.
-    // Amended is the exception: stays dim since it's a user action.
-    const pureThinking = total === 0 && inProgress;
-    const stoppedHeaderStyle: "tool-status-fail" | "tool-status-cancelled" =
-      isAmended ? "tool-status-cancelled" : "tool-status-fail";
-    const frozenStyle: "tool-status-fail" | "tool-status-cancelled" | "tool" =
-      stoppedReason !== null ? stoppedHeaderStyle : "tool";
-    const frozenBodyStyle: "tool-status-fail" | "tool-status-cancelled" | "dim" =
-      stoppedReason !== null ? stoppedHeaderStyle : "dim";
-    const lines: FormattedLine[] = [
-      {
-        prefix: "⚙ ",
-        prefixStyle: pureThinking ? "tool-status-running" : frozenStyle,
-        body: summary,
-        bodyStyle: pureThinking ? "tool-status-running" : frozenBodyStyle,
-      },
-    ];
-    // rowOwners[0] is always null (header line); subsequent entries map to
-    // the toolCallId of the tool that produced them.
-    const rowOwners: (string | null)[] = [null];
-    for (const id of visibleIds) {
-      const state = states.get(id);
-      if (state) {
-        const toolLines = formatToolLine(state, end);
-        lines.push(...toolLines);
-        // Every line emitted for this tool is owned by that tool's id.
-        rowOwners.push(...toolLines.map(() => id));
-      }
-    }
-    return { lines, rowOwners };
-  };
+  // Reference to the module-level pure renderer (avoids re-declaring the
+  // logic inside this closure).
+  const buildToolsLines = (args: Parameters<typeof _buildToolsLines>[0]): ReturnType<typeof _buildToolsLines> =>
+    _buildToolsLines({ ...args, collapsedLimit: TOOLS_COLLAPSED_LIMIT });
 
   // Whether the tools block for `key` should render expanded: a per-block
   // click override wins; otherwise the global ^O Tools setting applies.
@@ -4178,6 +4198,7 @@ async function runSession(
       endedAt: toolsBlockEndedAt,
       stopReason: toolsBlockStopReason,
       expanded: toolsExpandedFor(currentToolsKey),
+      perToolExpanded,
     });
     screen.upsertLines(currentToolsKey, lines);
     rowOwners.set(currentToolsKey, owners);
@@ -4197,6 +4218,7 @@ async function runSession(
       endedAt: snap.endedAt,
       stopReason: snap.stopReason,
       expanded: toolsExpandedFor(key),
+      perToolExpanded,
     });
     screen.upsertLines(key, lines);
     rowOwners.set(key, owners);
@@ -4227,6 +4249,7 @@ async function runSession(
       startedAt: toolsBlockStartedAt,
       endedAt: toolsBlockEndedAt ?? Date.now(),
       stopReason: toolsBlockStopReason,
+      rowOwners: rowOwners.get(currentToolsKey) ?? [],
     });
   };
 
@@ -4244,11 +4267,15 @@ async function runSession(
     renderToolsBlock();
   };
 
-  // Extract plain text from a `content[]` array (ACP content blocks).
-  // Iterates every block, pulls string text from `{ type: "text", text }`
-  // or bare `{ text }` shapes, joins with newlines. Returns null when
-  // nothing was found so callers can skip the call entirely.
-  function extractResultText(rawUpdate: unknown): string | null {
+  // Extract result text from a `content[]` array (ACP content blocks).
+  // Returns parts as either inline strings or blob refs (hashes from the
+  // lean "references" mode, where the daemon swaps `text` for
+  // `{ __hydraBlob, bytes }` so large file Reads don't bloat history).
+  // Callers stitch inline parts immediately and fetch refs on demand.
+  // Returns null when no content was found at all.
+  function extractResultText(
+    rawUpdate: unknown,
+  ): Array<{ text: string } | { hash: string }> | null {
     if (!rawUpdate || typeof rawUpdate !== "object") {
       return null;
     }
@@ -4257,24 +4284,118 @@ async function runSession(
     if (!content) {
       return null;
     }
-    const parts: string[] = [];
+    const parts: Array<{ text: string } | { hash: string }> = [];
+    const pushFromText = (v: unknown): void => {
+      if (typeof v === "string") {
+        parts.push({ text: sanitizeWireText(v) });
+        return;
+      }
+      if (v && typeof v === "object") {
+        const blob = v as { __hydraBlob?: unknown };
+        if (typeof blob.__hydraBlob === "string") {
+          parts.push({ hash: blob.__hydraBlob });
+        }
+      }
+    };
     for (const block of content) {
       if (!block || typeof block !== "object") {
         continue;
       }
       const b = block as Record<string, unknown>;
-      // ACP canonical shape: { type: "text", text: "..." }
-      if (b.type === "text" && typeof b.text === "string") {
-        parts.push(sanitizeWireText(b.text));
+      // ACP canonical ToolCallContent wrapper:
+      //   { type: "content", content: { type: "text", text: "..." | blobRef } }
+      if (b.type === "content" && b.content && typeof b.content === "object") {
+        const inner = b.content as Record<string, unknown>;
+        if (inner.text !== undefined) {
+          pushFromText(inner.text);
+          continue;
+        }
+      }
+      // Bare ContentBlock shape: { type: "text", text: "..." | blobRef }
+      if (b.type === "text" && b.text !== undefined) {
+        pushFromText(b.text);
         continue;
       }
-      // Bare text shape (no type field): { text: "..." }
-      if (typeof b.text === "string") {
-        parts.push(sanitizeWireText(b.text));
+      // Last-resort fallback: bare { text: "..." } with no type field.
+      if (b.text !== undefined) {
+        pushFromText(b.text);
       }
     }
-    return parts.length > 0 ? parts.join("\n") : null;
+    return parts.length > 0 ? parts : null;
   }
+
+  const applyResultParts = (
+    state: ToolLineState,
+    parts: Array<{ text: string } | { hash: string }>,
+  ): void => {
+    const joined = parts
+      .map((p) => ("text" in p ? p.text : ""))
+      .join("\n");
+    if (joined.length === 0) {
+      return;
+    }
+    const { text, truncated } = truncateResultText(joined);
+    state.resultText = text;
+    state.resultTruncated = truncated;
+  };
+
+  // Per-tool guard so a content-blob fetch isn't issued twice when the
+  // same tool_call_update is re-emitted (status pings).
+  const fetchingToolBlobs = new Set<string>();
+
+  const resolveBlobsAndUpdate = (
+    id: string,
+    parts: Array<{ text: string } | { hash: string }>,
+  ): void => {
+    const hasRefs = parts.some((p) => "hash" in p);
+    if (!hasRefs || fetchingToolBlobs.has(id)) {
+      return;
+    }
+    fetchingToolBlobs.add(id);
+    (async () => {
+      const resolved: Array<{ text: string } | { hash: string }> =
+        await Promise.all(
+          parts.map(async (p) => {
+            if ("text" in p) {
+              return p;
+            }
+            const fetched = await fetchToolContent(p.hash);
+            return { text: fetched ?? "" };
+          }),
+        );
+      fetchingToolBlobs.delete(id);
+      // toolStates is cleared at turn boundaries, so by the time a
+      // fetch resolves the live map may not have this tool anymore.
+      // Find the state in any frozen snapshot too — snapshots clone the
+      // map shallowly, so the ToolLineState reference is shared with
+      // toolStates while live, and survives the clear inside snapshots.
+      let target = toolStates.get(id);
+      if (!target) {
+        for (const snap of renderedTools.values()) {
+          const s = snap.states.get(id);
+          if (s) {
+            target = s;
+            break;
+          }
+        }
+      }
+      if (!target) {
+        return;
+      }
+      applyResultParts(target, resolved);
+      if (toolStates.has(id)) {
+        renderToolsBlock();
+      }
+      for (const [key, snap] of renderedTools) {
+        if (snap.states.has(id)) {
+          renderToolsBlockFor(key);
+        }
+      }
+      screen.repaintNow();
+    })().catch(() => {
+      fetchingToolBlobs.delete(id);
+    });
+  };
 
   const recordToolCall = (
     id: string,
@@ -4283,6 +4404,7 @@ async function runSession(
     errorText: string | undefined,
     editDiff: EditDiff | undefined,
     detail: string | undefined,
+    detailFull: string | undefined,
     workerTaskId?: string,
     rawUpdate?: unknown,
   ): void => {
@@ -4305,6 +4427,9 @@ async function runSession(
     if (detail !== undefined && state.detail === undefined) {
       state.detail = detail;
     }
+    if (detailFull !== undefined && state.detailFull === undefined) {
+      state.detailFull = detailFull;
+    }
     if (existing && status !== undefined) {
       state.status = status;
     }
@@ -4324,13 +4449,16 @@ async function runSession(
     }
     // Extract and store resultText from the raw update's content[].
     // Latest-replaces: every tool_call_update carries a snapshot of all
-    // content blocks, so we rebuild and overwrite on each call.
+    // content blocks, so we rebuild and overwrite on each call. Inline
+    // text shows immediately; blob refs (lean references mode) are
+    // fetched asynchronously and spliced in once they arrive.
     if (rawUpdate !== undefined) {
       const extracted = extractResultText(rawUpdate);
       if (extracted !== null) {
-        const { text, truncated } = truncateResultText(extracted);
-        state.resultText = text;
-        state.resultTruncated = truncated;
+        applyResultParts(state, extracted);
+        if (extracted.some((p) => "hash" in p)) {
+          resolveBlobsAndUpdate(id, extracted);
+        }
       }
     }
     toolStates.set(id, state);
@@ -4826,6 +4954,7 @@ async function runSession(
         undefined,
         event.editDiff,
         event.detail,
+        event.detailFull,
         event.workerTaskId,
         rawUpdate,
       );
@@ -4878,6 +5007,7 @@ async function runSession(
         event.errorText,
         event.editDiff,
         event.detail,
+        event.detailFull,
         event.workerTaskId,
         rawUpdate,
       );
@@ -5042,7 +5172,7 @@ async function runSession(
   // so the drain itself doesn't double-record; the merge below folds
   // these in with set-based dedup against existing history.
   const replayedPromptTexts: string[] = [];
-  for (const event of buffered) {
+  for (const { event } of buffered) {
     if (event.kind === "user-text" && typeof event.text === "string") {
       replayedPromptTexts.push(event.text);
     }
@@ -5050,8 +5180,8 @@ async function runSession(
   screen.pauseRepaint();
   replayDraining = true;
   try {
-    for (const event of buffered) {
-      applyRenderEvent(event);
+    for (const { event, rawUpdate } of buffered) {
+      applyRenderEvent(event, rawUpdate);
     }
   } finally {
     replayDraining = false;

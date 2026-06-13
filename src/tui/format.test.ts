@@ -11,6 +11,7 @@ import {
   isTerminalToolStatus,
   parseAgentMarkdown,
   pickPlanWindow,
+  renderToolDetail,
   truncateResultText,
   type FormattedLine,
 } from "./format.js";
@@ -1162,6 +1163,125 @@ describe("truncateResultText", () => {
     const bigText = "line\n".repeat(50);
     const r2 = truncateResultText(bigText);
     expect(r2.truncated).toBe(true);
+  });
+});
+
+describe("renderToolDetail", () => {
+  it("returns empty array when editDiff is set", () => {
+    const lines = renderToolDetail({
+      initialTitle: "edit",
+      latestTitle: "edit",
+      status: "completed",
+      editDiff: { path: "/foo/bar.ts", oldText: "x", newText: "y" },
+    });
+    expect(lines).toHaveLength(0);
+  });
+
+  it("returns empty array when no body content is available", () => {
+    const lines = renderToolDetail({
+      initialTitle: "Terminal",
+      latestTitle: "ls",
+      status: "completed",
+    });
+    expect(lines).toHaveLength(0);
+  });
+
+  it("emits a dim detail line when detail is set", () => {
+    const lines = renderToolDetail({
+      initialTitle: "bash",
+      latestTitle: "bash",
+      status: "completed",
+      detail: "grep -n foo src/x.ts",
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      prefix: "     ",
+      body: "grep -n foo src/x.ts",
+      bodyStyle: "dim",
+    });
+  });
+
+  it("emits an error line when status is failed and errorText is set", () => {
+    const lines = renderToolDetail({
+      initialTitle: "task",
+      latestTitle: "task",
+      status: "failed",
+      errorText: "Tool execution aborted",
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      prefix: "     ",
+      body: "Tool execution aborted",
+      bodyStyle: "tool-status-fail",
+    });
+  });
+
+  it("does not emit error line when status is not failed", () => {
+    const lines = renderToolDetail({
+      initialTitle: "task",
+      latestTitle: "task",
+      status: "completed",
+      errorText: "stale text",
+    });
+    expect(lines).toHaveLength(0);
+  });
+
+  it("emits resultText lines split by newline in dim style", () => {
+    const lines = renderToolDetail({
+      initialTitle: "Terminal",
+      latestTitle: "ls",
+      status: "completed",
+      resultText: "line one\nline two\nline three",
+    });
+    expect(lines).toHaveLength(3);
+    for (const line of lines) {
+      expect(line.prefix).toBe("     ");
+      expect(line.bodyStyle).toBe("dim");
+    }
+    expect(lines[0]?.body).toBe("line one");
+    expect(lines[1]?.body).toBe("line two");
+    expect(lines[2]?.body).toBe("line three");
+  });
+
+  it("appends truncated trailer when resultTruncated is true", () => {
+    const lines = renderToolDetail({
+      initialTitle: "Terminal",
+      latestTitle: "ls",
+      status: "completed",
+      resultText: "content",
+      resultTruncated: true,
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]?.body).toBe("\u2026 (truncated)");
+    expect(lines[1]?.bodyStyle).toBe("dim");
+  });
+
+  it("includes detail + errorText when both present and failed", () => {
+    const lines = renderToolDetail({
+      initialTitle: "bash",
+      latestTitle: "bash",
+      status: "failed",
+      detail: "cat /nonexistent",
+      errorText: "No such file",
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.bodyStyle).toBe("tool-status-fail");
+  });
+
+  it("includes detail + resultText when both present and completed", () => {
+    const lines = renderToolDetail({
+      initialTitle: "Terminal",
+      latestTitle: "ls",
+      status: "completed",
+      detail: "ls -la /tmp",
+      resultText: "total 0\ndrwxrwxrwt",
+    });
+    expect(lines).toHaveLength(3);
+    // detail line first, then each resultText line.
+    expect(lines[0]?.body).toBe("ls -la /tmp");
+    expect(lines[1]?.body).toBe("total 0");
+    expect(lines[2]?.body).toBe("drwxrwxrwt");
   });
 });
 

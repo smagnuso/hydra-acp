@@ -444,6 +444,7 @@ describe("mapUpdate", () => {
       toolCallId: "tc1",
       title: "Edit",
       detail: "/repo/src/foo.ts",
+      detailFull: "/repo/src/foo.ts",
       editDiff: {
         path: "/repo/src/foo.ts",
         oldText: "before",
@@ -468,6 +469,7 @@ describe("mapUpdate", () => {
       toolCallId: "tc1",
       title: "Write",
       detail: "/repo/new.ts",
+      detailFull: "/repo/new.ts",
       editDiff: {
         path: "/repo/new.ts",
         oldText: "",
@@ -514,6 +516,7 @@ describe("mapUpdate", () => {
       toolCallId: "tc1",
       title: "Read",
       detail: "/repo/src/foo.ts",
+      detailFull: "/repo/src/foo.ts",
     });
   });
 

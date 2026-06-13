@@ -76,6 +76,10 @@ export type RenderEvent =
       // title is usually just the generic verb ("bash"/"edit"), so this is
       // what tells the user *which* command/file. Never the full body.
       detail?: string;
+      // Untruncated form of `detail` — same source (rawInput.command /
+      // file path) but without the head/tail clip. Used by the expanded
+      // tool view so users see the whole command, not the …elided form.
+      detailFull?: string;
       workerTaskId?: string;
     }
   | {
@@ -85,6 +89,7 @@ export type RenderEvent =
       status?: string;
       editDiff?: EditDiff;
       detail?: string;
+      detailFull?: string;
       // Best-effort error text extracted from a `failed` update. Pulled
       // from the first text payload in `content[]`, falling back to a
       // string `rawOutput.error`. Surfaced inline under the tool row.
@@ -585,6 +590,10 @@ function mapToolCall(
   if (detail !== undefined) {
     event.detail = detail;
   }
+  const detailFull = extractToolDetailFull(u);
+  if (detailFull !== undefined) {
+    event.detailFull = detailFull;
+  }
   const wtid = getWorkerTaskId(u);
   if (wtid !== undefined) {
     event.workerTaskId = wtid;
@@ -599,21 +608,34 @@ function mapToolCall(
 const TOOL_DETAIL_MAX = 64;
 
 function extractToolDetail(u: UpdateLike): string | undefined {
+  const full = extractToolDetailFull(u);
+  if (full === undefined) {
+    return undefined;
+  }
+  // Bash commands are clipped from the head (keep the action); paths
+  // are clipped from the tail (keep the filename). The full extractor
+  // returns the un-clipped form; pick the right truncation here.
+  const rawInput = u.rawInput as Record<string, unknown> | undefined;
+  if (rawInput && typeof rawInput.command === "string") {
+    return clipHead(full, TOOL_DETAIL_MAX);
+  }
+  return clipTail(full, TOOL_DETAIL_MAX);
+}
+
+function extractToolDetailFull(u: UpdateLike): string | undefined {
   const rawInput = u.rawInput;
   if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
     return undefined;
   }
   const r = rawInput as Record<string, unknown>;
   if (typeof r.command === "string" && r.command.trim().length > 0) {
-    const firstLine = sanitizeSingleLine(r.command).trim();
-    // Strip a leading `cd <path> &&` so the meaningful command leads.
-    const cmd = firstLine.replace(/^cd\s+\S+\s+&&\s+/, "");
-    return clipHead(cmd, TOOL_DETAIL_MAX);
+    // Preserve newlines — multi-line bash commands render across rows
+    // in the expanded view. Strip a leading `cd <path> &&` only when
+    // it sits on the first line, matching the summary form's intent.
+    return sanitizeWireText(r.command)
+      .trim()
+      .replace(/^cd\s+\S+\s+&&\s+/, "");
   }
-  // Recognize all three spellings agents use in the wild:
-  // - `file_path` (snake_case, common)
-  // - `path` (generic)
-  // - `filePath` (camelCase, Claude Code)
   const path =
     typeof r.file_path === "string"
       ? r.file_path
@@ -623,8 +645,7 @@ function extractToolDetail(u: UpdateLike): string | undefined {
           ? r.path
           : undefined;
   if (path !== undefined && path.length > 0) {
-    // Keep the tail (filename) visible when the path is long.
-    return clipTail(shortenHomePath(sanitizeSingleLine(path)), TOOL_DETAIL_MAX);
+    return shortenHomePath(sanitizeSingleLine(path));
   }
   return undefined;
 }
@@ -784,6 +805,10 @@ function mapToolCallUpdate(
   }
   if (detail !== undefined) {
     event.detail = detail;
+  }
+  const detailFull = extractToolDetailFull(u);
+  if (detailFull !== undefined) {
+    event.detailFull = detailFull;
   }
   if (status !== undefined) {
     event.status = status;

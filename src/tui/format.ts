@@ -949,6 +949,10 @@ export interface ToolLineState {
   // Short single-line hint of what the tool acts on (bash command / file
   // path), shown after the verb so "bash"/"edit" rows say *which* one.
   detail?: string;
+  // Un-clipped version of `detail` (full command / full path). Rendered
+  // in the expanded view so users can read the whole thing instead of
+  // the truncated …elided form shown in the collapsed row.
+  detailFull?: string;
   status: string;
   // Optional error text from a `failed` update. When present, rendered as
   // an indented continuation line under the tool row so the user sees
@@ -1074,6 +1078,61 @@ export function formatToolLine(
       body: sanitizeSingleLine(state.errorText),
       bodyStyle: "tool-status-fail",
     });
+  }
+  return lines;
+}
+
+// Render the expanded detail body for a single tool call. Called by
+// buildToolsLines when a tool's id is in perToolExpanded and the tool
+// does not carry an editDiff (edit/write tools keep their dedicated
+// diff block). Returns zero lines when there is no body to render.
+export function renderToolDetail(state: ToolLineState): FormattedLine[] {
+  // Edit/write tools: skip the inline body entirely — the editdiff:
+  // scrollback block handles everything for those tools.
+  if (state.editDiff !== undefined) {
+    return [];
+  }
+  const lines: FormattedLine[] = [];
+  // Full detail text from the initial tool_call (command, file path,
+  // etc.) — un-clipped when available, falling back to the truncated
+  // summary form. Multi-line: each line gets its own dim row so a long
+  // bash command wraps naturally instead of being squashed onto one row.
+  const fullDetail = state.detailFull ?? state.detail;
+  if (fullDetail) {
+    for (const line of fullDetail.split("\n")) {
+      lines.push({
+        prefix: "     ",
+        body: sanitizeSingleLine(line),
+        bodyStyle: "dim",
+      });
+    }
+  }
+  // Error text only when the call actually failed — otherwise it's stale.
+  if (state.status === "failed" && state.errorText) {
+    lines.push({
+      prefix: "     ",
+      body: sanitizeSingleLine(state.errorText),
+      bodyStyle: "tool-status-fail",
+    });
+  }
+  // Captured result text from content[] blocks, split into individual
+  // dim lines. If truncated, append a trailer after the last visible line.
+  if (state.resultText) {
+    const resultLines = state.resultText.split("\n");
+    for (const line of resultLines) {
+      lines.push({
+        prefix: "     ",
+        body: sanitizeSingleLine(line),
+        bodyStyle: "dim",
+      });
+    }
+    if (state.resultTruncated) {
+      lines.push({
+        prefix: "     ",
+        body: "\u2026 (truncated)",
+        bodyStyle: "dim",
+      });
+    }
   }
   return lines;
 }

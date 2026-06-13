@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { toggleToolExpansion, resolveToolsClick } from "./app.js";
+import type { ToolLineState } from "./format.js";
+import { toggleToolExpansion, resolveToolsClick, _buildToolsLines } from "./app.js";
 
 describe("toggleToolExpansion", () => {
   it("adds a toolCallId to the set on first toggle", () => {
@@ -142,5 +143,146 @@ describe("handleBlockClick integration via pure functions", () => {
     expect(info2).toEqual({ toolCallId: "tc-x" });
     toggleToolExpansion(info2!.toolCallId, perToolExpanded);
     expect(perToolExpanded.has("tc-x")).toBe(false);
+  });
+});
+
+describe("_buildToolsLines", () => {
+  const makeState = (id: string, opts: Partial<ToolLineState> = {}): ToolLineState => ({
+    initialTitle: opts.initialTitle ?? id,
+    latestTitle: opts.latestTitle ?? id,
+    status: opts.status ?? "completed",
+    ...opts,
+  });
+
+  it("collapsed tool → 1 line, rowOwners[1] = toolCallId", () => {
+    const order = ["tc-aaa"];
+    const states = new Map([["tc-aaa", makeState("tc-aaa")]]);
+    const result = _buildToolsLines({
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: "end_turn",
+      expanded: false,
+    });
+    // Header + 1 tool line = 2 lines
+    expect(result.lines).toHaveLength(2);
+    expect(result.rowOwners).toHaveLength(2);
+    expect(result.rowOwners[0]).toBeNull();
+    expect(result.rowOwners[1]).toBe("tc-aaa");
+  });
+
+  it("expanded non-edit tool with detail+resultText → summary + body lines, rowOwners for both", () => {
+    const order = ["tc-bbb"];
+    const states = new Map([["tc-bbb", makeState("tc-bbb", {
+      detail: "ls -la /tmp",
+      resultText: "total 0\nfile1\nfile2",
+    })]]);
+    const perToolExpanded = new Set(["tc-bbb"]);
+    const result = _buildToolsLines({
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: "end_turn",
+      expanded: false, // block-level cap doesn't matter — tool is explicitly expanded
+      perToolExpanded,
+    });
+    // Header (1) + summary (1) + detail (1) + resultText lines (3) = 6
+    expect(result.lines).toHaveLength(6);
+    expect(result.rowOwners).toHaveLength(6);
+    expect(result.rowOwners[0]).toBeNull(); // header
+    expect(result.rowOwners[1]).toBe("tc-bbb"); // summary
+    expect(result.rowOwners[2]).toBe("tc-bbb"); // detail
+    expect(result.rowOwners[3]).toBe("tc-bbb"); // result line 1
+    expect(result.rowOwners[4]).toBe("tc-bbb"); // result line 2
+    expect(result.rowOwners[5]).toBe("tc-bbb"); // result line 3
+  });
+
+  it("expanded edit tool (editDiff set) → still 1 line, no body emitted", () => {
+    const order = ["tc-edit"];
+    const states = new Map([["tc-edit", makeState("tc-edit", {
+      editDiff: { path: "/foo/bar.ts", oldText: "x", newText: "y" },
+    })]]);
+    const perToolExpanded = new Set(["tc-edit"]);
+    const result = _buildToolsLines({
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: "end_turn",
+      expanded: false,
+      perToolExpanded,
+    });
+    // Header + 1 summary line = 2 (no body for edit tools)
+    expect(result.lines).toHaveLength(2);
+    expect(result.rowOwners).toHaveLength(2);
+    expect(result.rowOwners[0]).toBeNull();
+    expect(result.rowOwners[1]).toBe("tc-edit");
+  });
+
+  it("rowOwners length === lines length", () => {
+    const order = ["tc-a", "tc-b", "tc-c"];
+    const states = new Map([
+      ["tc-a", makeState("tc-a", { detail: "cmd a" })],
+      ["tc-b", makeState("tc-b", { resultText: "r1\nr2" })],
+      ["tc-c", makeState("tc-c", { editDiff: { path: "/f.ts", oldText: "", newText: "" } })],
+    ]);
+    const perToolExpanded = new Set(["tc-a", "tc-b"]); // tc-c has editDiff, no body
+    const result = _buildToolsLines({
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: "end_turn",
+      expanded: false,
+      perToolExpanded,
+    });
+    // Header (1) + tc-a summary (1) + tc-a detail (1) + tc-b summary (1) + tc-b result (2) + tc-c summary (1) = 7
+    expect(result.lines.length).toBe(result.rowOwners.length);
+    expect(result.rowOwners[0]).toBeNull();
+    expect(result.rowOwners[1]).toBe("tc-a"); // summary
+    expect(result.rowOwners[2]).toBe("tc-a"); // detail body
+    expect(result.rowOwners[3]).toBe("tc-b"); // summary
+    expect(result.rowOwners[4]).toBe("tc-b"); // result line 1
+    expect(result.rowOwners[5]).toBe("tc-b"); // result line 2
+    expect(result.rowOwners[6]).toBe("tc-c"); // summary (no body)
+  });
+
+  it("empty order → header only, rowOwners = [null]", () => {
+    const result = _buildToolsLines({
+      order: [],
+      states: new Map(),
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: null,
+      expanded: false,
+    });
+    expect(result.lines).toHaveLength(1);
+    expect(result.rowOwners).toEqual([null]);
+  });
+
+  it("when perToolExpanded is empty, output matches collapsed behavior", () => {
+    const order = ["tc-x", "tc-y"];
+    const states = new Map([
+      ["tc-x", makeState("tc-x", { detail: "cmd x", resultText: "result" })],
+      ["tc-y", makeState("tc-y", { detail: "cmd y" })],
+    ]);
+    const emptyExpanded = new Set<string>();
+    const result = _buildToolsLines({
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: "end_turn",
+      expanded: false,
+      perToolExpanded: emptyExpanded,
+    });
+    // Header + 2 summary lines = 3 (no body since nothing is expanded)
+    expect(result.lines).toHaveLength(3);
+    expect(result.rowOwners).toHaveLength(3);
+    expect(result.rowOwners[0]).toBeNull();
+    expect(result.rowOwners[1]).toBe("tc-x");
+    expect(result.rowOwners[2]).toBe("tc-y");
   });
 });
