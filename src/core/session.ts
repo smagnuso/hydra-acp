@@ -4399,6 +4399,16 @@ export class Session {
     return new Promise<unknown>((resolve, reject) => {
       let settled = false;
       const outbound: Array<{ client: AttachedClient }> = [];
+      // Outstanding = clients we've broadcast to and are still awaiting.
+      // Reject only when outstanding hits zero with no successful resolve;
+      // a single client errored does NOT settle the request. This keeps
+      // a misbehaving / transformer-attached client (e.g. the planner
+      // self-attached to its own orchestrator session) from poisoning the
+      // user TUI's vote with an early MethodNotFound. lastRealErr tracks
+      // the most recent non-abstention failure so the eventual reject
+      // surfaces something meaningful.
+      let outstanding = 0;
+      let lastRealErr: unknown;
       const entry = { addClient: sendTo };
       this.inFlightPermissions.add(entry);
       const sessionId = this.sessionId;
@@ -4412,6 +4422,11 @@ export class Session {
         fn();
       };
 
+      const isAbstention = (err: unknown): boolean => {
+        const code = (err as { code?: unknown } | null)?.code;
+        return code === JsonRpcErrorCodes.MethodNotFound;
+      };
+
       function sendTo(client: AttachedClient): void {
         if (settled) {
           return;
@@ -4421,8 +4436,10 @@ export class Session {
           clientParams,
         );
         outbound.push({ client });
+        outstanding++;
         void response
           .then((result) => {
+            outstanding--;
             settle(() => {
               const update = buildPermissionResolvedUpdate({
                 toolCallId,
@@ -4444,7 +4461,19 @@ export class Session {
             });
           })
           .catch((err) => {
-            settle(() => reject(err));
+            outstanding--;
+            if (!isAbstention(err)) {
+              lastRealErr = err;
+            }
+            if (outstanding === 0 && !settled) {
+              const finalErr =
+                lastRealErr ??
+                withCode(
+                  new Error("no client handled permission request"),
+                  JsonRpcErrorCodes.PermissionDenied,
+                );
+              settle(() => reject(finalErr));
+            }
           });
       }
 
