@@ -2766,26 +2766,39 @@ export class Screen {
     if (line === null || line.ansi) {
       return null;
     }
-    const body = line.body ?? "";
-    if (body.length === 0) {
+    const rawBody = line.body ?? "";
+    if (rawBody.length === 0) {
       return null;
     }
-    let idx = Math.max(0, Math.min(body.length - 1, pos.offset));
-    if (pos.offset >= body.length) {
-      idx = body.length - 1;
+    // Styled bodies (agent/thought/etc.) carry zero-width terminal-kit
+    // markup spans like `^Csrc/foo.ts^:` for inline `code`. Scanning
+    // the raw body directly lets the `C` in `^C` slip into the path
+    // token (it matches [A-Z]), and the result resolves to a bogus
+    // path. Strip markup to a clean view and project the click offset
+    // through, then scan there. For plain bodies this is a no-op
+    // (stripTkMarkup returns the input unchanged when no `^` is
+    // present).
+    const { clean, rawToClean } = stripTkMarkupWithMap(rawBody);
+    if (clean.length === 0) {
+      return null;
     }
-    if (!PATH_TOKEN_RE.test(body[idx]!)) {
+    const cleanOffset = rawToClean[Math.min(pos.offset, rawToClean.length - 1)] ?? clean.length;
+    let idx = Math.max(0, Math.min(clean.length - 1, cleanOffset));
+    if (cleanOffset >= clean.length) {
+      idx = clean.length - 1;
+    }
+    if (!PATH_TOKEN_RE.test(clean[idx]!)) {
       return null;
     }
     let start = idx;
-    while (start > 0 && PATH_TOKEN_RE.test(body[start - 1]!)) {
+    while (start > 0 && PATH_TOKEN_RE.test(clean[start - 1]!)) {
       start--;
     }
     let end = idx + 1;
-    while (end < body.length && PATH_TOKEN_RE.test(body[end]!)) {
+    while (end < clean.length && PATH_TOKEN_RE.test(clean[end]!)) {
       end++;
     }
-    let raw = body.slice(start, end);
+    let raw = clean.slice(start, end);
     // Strip trailing punctuation that's commonly adjacent to a path but
     // not part of it (period at end of sentence, etc.).
     raw = raw.replace(/[.]+$/, "");
@@ -2794,7 +2807,7 @@ export class Screen {
     }
     let lineNum: number | null = null;
     // Optional ":<digits>" (and optional second ":<digits>") suffix.
-    const suffix = body.slice(end).match(/^:(\d+)(?::\d+)?/);
+    const suffix = clean.slice(end).match(/^:(\d+)(?::\d+)?/);
     if (suffix) {
       lineNum = Number.parseInt(suffix[1]!, 10);
     }
@@ -2802,24 +2815,41 @@ export class Screen {
   }
 
   // Resolve a token to an existing absolute filesystem path, or null if
-  // it doesn't name a real file. Honors three shapes per spec: absolute
-  // (/foo/bar), home-relative (~/x), and cwd-relative (foo/bar). Rejects
-  // tokens that don't look like paths at all (no separator, no leading
-  // ~, not absolute) to avoid firing on bare identifiers that happen to
-  // exist as files in cwd.
+  // Resolve a path-shaped token to an absolute filesystem path. Two
+  // tiers, depending on how unambiguous the token's "I am a path"
+  // signal is:
+  //
+  //   Strong signal — absolute (/etc/hosts) or home-relative (~/foo):
+  //     accept without stat-checking. The user clearly named a file,
+  //     even if it doesn't exist yet. Letting non-existent paths through
+  //     lets editors open a new buffer (the standard "create new file"
+  //     flow), which matches how `code ~/notes/draft.md` works from a
+  //     shell.
+  //
+  //   Weak signal — cwd-relative with a slash (src/foo):
+  //     require statSync to succeed and report a regular file. Slashy
+  //     non-paths are common in chat ("react/server-components",
+  //     "agent/role"); without existence-gating we'd spawn an editor
+  //     buffer for each one.
+  //
+  // Returns the absolute path on success, null when the token isn't
+  // path-shaped enough or fails the weak-signal existence check.
   private resolvePathToken(raw: string): string | null {
     let expanded = raw;
     if (expanded === "~" || expanded.startsWith("~/")) {
       expanded = expanded === "~" ? homedir() : `${homedir()}/${expanded.slice(2)}`;
     }
-    const looksLikePath =
-      isAbsolute(expanded) || expanded.includes("/") || raw.startsWith("~");
-    if (!looksLikePath) {
+    const strongSignal = isAbsolute(expanded) || raw.startsWith("~");
+    const hasSeparator = expanded.includes("/");
+    if (!strongSignal && !hasSeparator) {
       return null;
     }
     const base = isAbsolute(expanded)
       ? expanded
       : resolvePath(this.sessionbar.cwd, expanded);
+    if (strongSignal) {
+      return base;
+    }
     try {
       const st = statSync(base);
       if (st.isFile()) {
@@ -5321,6 +5351,42 @@ export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
 // Used when copying a styled scrollback line to the clipboard so the
 // payload is plain text — the same grammar that wrap/truncate already
 // recognize, with no parallel definition.
+// Like stripTkMarkup but also returns a raw→clean offset map so callers
+// that started with an index into the raw (markup-bearing) text can
+// project it onto the cleaned view. rawToClean[i] is the index in the
+// clean string of the visible char at raw position i (or, for raw
+// positions inside a zero-width markup span, the clean index where the
+// next visible char will appear). Length is text.length + 1 so the
+// past-the-end raw index also maps cleanly.
+export function stripTkMarkupWithMap(text: string): {
+  clean: string;
+  rawToClean: number[];
+} {
+  const rawToClean = new Array<number>(text.length + 1).fill(0);
+  let clean = "";
+  let i = 0;
+  while (i < text.length) {
+    rawToClean[i] = clean.length;
+    const m = matchTkMarkupAt(text, i);
+    if (m) {
+      if (m.width > 0) {
+        clean += "^";
+      }
+      // Every raw byte inside the markup span maps to the same clean
+      // index — its trailing edge (where the next visible char lands).
+      for (let k = 1; k < m.text.length; k++) {
+        rawToClean[i + k] = clean.length;
+      }
+      i += m.text.length;
+      continue;
+    }
+    clean += text[i];
+    i += 1;
+  }
+  rawToClean[text.length] = clean.length;
+  return { clean, rawToClean };
+}
+
 export function stripTkMarkup(text: string): string {
   if (!text.includes("^"))
     return text;

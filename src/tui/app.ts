@@ -4806,20 +4806,44 @@ async function runSession(
   // fallback. False means "I don't have a path for this block — go
   // ahead with the default double-click handling."
   const handleBlockDoubleClick = (key: string, rowOffset: number): boolean => {
-    // The toolCallId for the clicked block, so we can prefer the ACP
-    // `locations[]` array (canonical agent-reported {path,line}) over
-    // any derived detail string or file-on-disk heuristics.
-    let toolCallId: string | null = null;
+    // Edit-diff block: combine the best path (locations[] is canonical
+    // when present, otherwise the diff.path) with the best line
+    // (locations[0].line when present, otherwise the first-changed
+    // file line derived from the diff body + file on disk). Agents
+    // like Claude often populate locations with a path but no line —
+    // an all-or-nothing locations check would dispatch with no line
+    // info and skip the in-file lookup that knows where the change
+    // actually landed.
     if (key.startsWith("editdiff:")) {
-      toolCallId = key.slice("editdiff:".length);
-    } else if (key.startsWith("tools:")) {
+      const id = key.slice("editdiff:".length);
+      const diff = renderedEditDiffs.get(id);
+      const state = toolStates.get(id);
+      const loc = state?.locations?.[0];
+      const filePath = loc?.path ?? diff?.path;
+      if (!filePath) {
+        return false;
+      }
+      let lineNum: number | null = null;
+      if (loc?.line !== undefined) {
+        lineNum = loc.line;
+      } else if (diff) {
+        lineNum = firstChangedFileLine(diff);
+      }
+      const suffix = lineNum === null ? "" : `:${lineNum}`;
+      return screen.tryOpenPathString(filePath + suffix);
+    }
+    // Tools block: prefer locations[] (canonical {path, line}) when
+    // present; otherwise fall back to whatever path the tool's detail
+    // string carries (line info not available there).
+    if (key.startsWith("tools:")) {
       if (rowOffset === 0) {
         return false;
       }
       const owners = rowOwners.get(key);
-      toolCallId = (owners ? owners[rowOffset] : undefined) ?? null;
-    }
-    if (toolCallId !== null) {
+      const toolCallId = owners ? owners[rowOffset] : undefined;
+      if (!toolCallId) {
+        return false;
+      }
       const state = toolStates.get(toolCallId);
       const loc = state?.locations?.[0];
       if (loc) {
@@ -4828,22 +4852,6 @@ async function runSession(
           return true;
         }
       }
-    }
-    // Edit-diff fallback: agent didn't send locations, derive the
-    // first-changed file line from the diff body + the file on disk.
-    if (key.startsWith("editdiff:")) {
-      const diff = renderedEditDiffs.get(toolCallId!);
-      if (diff?.path) {
-        const lineNum = firstChangedFileLine(diff);
-        const suffix = lineNum === null ? "" : `:${lineNum}`;
-        return screen.tryOpenPathString(diff.path + suffix);
-      }
-      return false;
-    }
-    // Tools fallback: open whatever path is in the tool's detail string
-    // (no line info available).
-    if (key.startsWith("tools:") && toolCallId !== null) {
-      const state = toolStates.get(toolCallId);
       const candidate = state?.detailFull ?? state?.detail;
       if (candidate) {
         return screen.tryOpenPathString(candidate);
