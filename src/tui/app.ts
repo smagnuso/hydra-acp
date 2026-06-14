@@ -2804,7 +2804,7 @@ async function runSession(
       // session's WS attach.
       const nextOpts: TuiOptions = {
         ...rest,
-        cwd: resolvedCwd,
+        cwd: choice.cwd ?? resolvedCwd,
         forceNew: true,
         readonly: false,
       };

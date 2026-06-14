@@ -2587,8 +2587,13 @@ export async function pickSession(
           return;
         }
         if (name === "c" || name === "C") {
+          const highlighted =
+            selectedIdx > 0 ? visible[selectedIdx - 1] : undefined;
+          const result = makeNewResult();
+          if (highlighted?.cwd)
+            result.cwd = highlighted.cwd;
           cleanup();
-          resolve(makeNewResult());
+          resolve(result);
           return;
         }
         if (name === "q" || name === "Q") {
