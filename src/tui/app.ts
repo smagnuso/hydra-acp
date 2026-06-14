@@ -1,7 +1,7 @@
 // Orchestrator: ties config, daemon discovery, WS connection, the screen, and
 // the input dispatcher together.
 
-import { appendFileSync, statSync, renameSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, renameSync } from "node:fs";
 import { nanoid } from "nanoid";
 import termkit from "terminal-kit";
 import { JsonRpcConnection } from "../acp/connection.js";
@@ -1787,6 +1787,16 @@ async function runSession(
     // Routes by key prefix to the matching per-block override.
     onBlockClick: (_key: string, _rowOffset: number) => {
       handleBlockClick(_key, _rowOffset);
+    },
+    // Double-click on a keyed block: try to open the file the block is
+    // *about* (a tool's recorded path, an edit diff's target) via the
+    // configured tui.openFileCommand. The app has authoritative info
+    // here that the screen's row-text scan would only approximate;
+    // returning true claims the gesture so the screen skips its own
+    // open-file scan and the word-snap copy fallback. Returning false
+    // lets the screen fall through to its row-text scan.
+    onBlockDoubleClick: (key: string, rowOffset: number): boolean => {
+      return handleBlockDoubleClick(key, rowOffset);
     },
     // Lazy-load deferred (references-mode) diff bodies only when the block
     // scrolls into view.
@@ -4481,6 +4491,7 @@ async function runSession(
     editDiff: EditDiff | undefined,
     detail: string | undefined,
     detailFull: string | undefined,
+    locations: import("../core/render-update.js").ToolCallLocation[] | undefined,
     workerTaskId?: string,
     rawUpdate?: unknown,
   ): void => {
@@ -4505,6 +4516,13 @@ async function runSession(
     }
     if (detailFull !== undefined && state.detailFull === undefined) {
       state.detailFull = detailFull;
+    }
+    // Locations carry richer info than detailFull (an array of
+    // {path,line} rather than a single clipped string) and updates can
+    // genuinely refine them as the agent works through a file, so we
+    // replace rather than first-wins.
+    if (locations !== undefined && locations.length > 0) {
+      state.locations = locations;
     }
     if (existing && status !== undefined) {
       state.status = status;
@@ -4735,6 +4753,105 @@ async function runSession(
   // expand/collapse toggle. Only the clicked block changes; the global ^O
   // settings are untouched. Unknown keys (agent text, thoughts, etc.) are
   // ignored. Each toggle flips relative to what the block currently shows.
+  // Locate the first changed line of an edit inside the file on disk.
+  // For Claude-style Edit / str_replace tools, oldText/newText are
+  // snippets, so walking the common prefix only tells you where the
+  // change is *within the snippet* — useless as a file line. After the
+  // edit lands, the changed line from newText exists in the file at
+  // its real location, so we anchor on it: take the first line of
+  // newText that differs from oldText, then grep the file for that
+  // exact line and return its 1-based position. Returns null when the
+  // file can't be read, the diff is missing a path, the anchor is
+  // empty (pure whitespace / blank line), or no match is found —
+  // letting the caller fall back to opening at the file top.
+  const firstChangedFileLine = (
+    diff: import("../core/render-update.js").EditDiff,
+  ): number | null => {
+    if (!diff.path) {
+      return null;
+    }
+    const oldLines = sanitizeWireText(diff.oldText).split("\n");
+    const newLines = sanitizeWireText(diff.newText).split("\n");
+    let start = 0;
+    const minLen = Math.min(oldLines.length, newLines.length);
+    while (start < minLen && oldLines[start] === newLines[start]) {
+      start++;
+    }
+    const anchor = newLines[start];
+    if (!anchor) {
+      return null;
+    }
+    const filePath = path.isAbsolute(diff.path)
+      ? diff.path
+      : path.resolve(resolvedCwd, diff.path);
+    let content: string;
+    try {
+      content = readFileSync(filePath, "utf8");
+    } catch {
+      return null;
+    }
+    const fileLines = content.split("\n");
+    for (let i = 0; i < fileLines.length; i++) {
+      if (fileLines[i] === anchor) {
+        return i + 1;
+      }
+    }
+    return null;
+  };
+
+  // Resolve the file path a keyed block is about (tool detail / edit
+  // diff target) and hand it to the screen's open-file dispatcher.
+  // Returns true when the path was real and a spawn was attempted, so
+  // the screen knows to suppress its row-text scan + word-snap copy
+  // fallback. False means "I don't have a path for this block — go
+  // ahead with the default double-click handling."
+  const handleBlockDoubleClick = (key: string, rowOffset: number): boolean => {
+    // The toolCallId for the clicked block, so we can prefer the ACP
+    // `locations[]` array (canonical agent-reported {path,line}) over
+    // any derived detail string or file-on-disk heuristics.
+    let toolCallId: string | null = null;
+    if (key.startsWith("editdiff:")) {
+      toolCallId = key.slice("editdiff:".length);
+    } else if (key.startsWith("tools:")) {
+      if (rowOffset === 0) {
+        return false;
+      }
+      const owners = rowOwners.get(key);
+      toolCallId = (owners ? owners[rowOffset] : undefined) ?? null;
+    }
+    if (toolCallId !== null) {
+      const state = toolStates.get(toolCallId);
+      const loc = state?.locations?.[0];
+      if (loc) {
+        const suffix = loc.line === undefined ? "" : `:${loc.line}`;
+        if (screen.tryOpenPathString(loc.path + suffix)) {
+          return true;
+        }
+      }
+    }
+    // Edit-diff fallback: agent didn't send locations, derive the
+    // first-changed file line from the diff body + the file on disk.
+    if (key.startsWith("editdiff:")) {
+      const diff = renderedEditDiffs.get(toolCallId!);
+      if (diff?.path) {
+        const lineNum = firstChangedFileLine(diff);
+        const suffix = lineNum === null ? "" : `:${lineNum}`;
+        return screen.tryOpenPathString(diff.path + suffix);
+      }
+      return false;
+    }
+    // Tools fallback: open whatever path is in the tool's detail string
+    // (no line info available).
+    if (key.startsWith("tools:") && toolCallId !== null) {
+      const state = toolStates.get(toolCallId);
+      const candidate = state?.detailFull ?? state?.detail;
+      if (candidate) {
+        return screen.tryOpenPathString(candidate);
+      }
+    }
+    return false;
+  };
+
   const handleBlockClick = (key: string, rowOffset: number): void => {
     if (key.startsWith("editdiff:")) {
       const id = key.slice("editdiff:".length);
@@ -5031,6 +5148,7 @@ async function runSession(
         event.editDiff,
         event.detail,
         event.detailFull,
+        event.locations,
         event.workerTaskId,
         rawUpdate,
       );
@@ -5084,6 +5202,7 @@ async function runSession(
         event.editDiff,
         event.detail,
         event.detailFull,
+        event.locations,
         event.workerTaskId,
         rawUpdate,
       );

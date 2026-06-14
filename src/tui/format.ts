@@ -953,6 +953,12 @@ export interface ToolLineState {
   // in the expanded view so users can read the whole thing instead of
   // the truncated …elided form shown in the collapsed row.
   detailFull?: string;
+  // ACP `locations[]` from the most recent tool_call / tool_call_update.
+  // Carries one or more {path, line} pairs describing the files the
+  // tool is operating on (the "follow-along" feature). Used by the
+  // TUI's open-on-double-click gesture so a click resolves directly to
+  // the agent-reported edit site instead of having to grep the file.
+  locations?: import("../core/render-update.js").ToolCallLocation[];
   status: string;
   // Optional error text from a `failed` update. When present, rendered as
   // an indented continuation line under the tool row so the user sees

@@ -135,6 +135,22 @@ const TuiConfig = z.object({
   //   "primary"   — only the PRIMARY selection
   // macOS has no PRIMARY concept, so all values behave as "clipboard".
   selectionClipboard: z.enum(["primary", "clipboard", "both"]).default("both"),
+  // Command spawned when a double-click lands on a token that resolves
+  // to an existing file. Accepts two shapes:
+  //   - String: split on whitespace into argv; %f is replaced with the
+  //     absolute file path and %n with the line number (or "" when the
+  //     token lacks a `:NN` suffix). If no %f appears, the path is
+  //     appended as a final arg. Examples:
+  //       "code --goto %f:%n"
+  //       "emacsclient -n +%n %f"
+  //   - Array: pre-split argv with the same %f / %n substitution rules
+  //     (use this when an arg must contain literal whitespace). Example:
+  //       ["code", "--goto", "%f:%n"]
+  // Unset (the default) means the feature is off — double-click
+  // continues to snap the word for clipboard copy. The process is
+  // spawned detached with stdio ignored; failures are surfaced via the
+  // in-app notification line, not blocking the TUI.
+  openFileCommand: z.union([z.string(), z.array(z.string())]).optional(),
   // Size at which the TUI's session/update debug log (tui.log) rotates
   // to tui.log.0 and resets. Bounds on-disk use at ~2x this value.
   logMaxBytes: z.number().int().positive().default(5 * 1024 * 1024),

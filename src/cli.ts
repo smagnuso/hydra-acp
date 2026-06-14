@@ -73,6 +73,13 @@ import {
 } from "./cli/commands/auth.js";
 import { runShim } from "./shim/proxy.js";
 import { runCat } from "./cli/commands/cat.js";
+import {
+  runConfigGet,
+  runConfigList,
+  runConfigPath,
+  runConfigSet,
+  runConfigUnset,
+} from "./cli/commands/config.js";
 import { runVersion } from "./cli/commands/version.js";
 import { maybeDispatchExternal } from "./cli/external-subcommand.js";
 import {
@@ -666,6 +673,32 @@ async function main(): Promise<void> {
       process.exit(2);
       return;
     }
+    case "config": {
+      const sub = positional[1];
+      if (sub === undefined || sub === "list") {
+        await runConfigList(positional[2]);
+        return;
+      }
+      if (sub === "get") {
+        await runConfigGet(positional[2]);
+        return;
+      }
+      if (sub === "set") {
+        await runConfigSet(positional[2], positional[3]);
+        return;
+      }
+      if (sub === "unset") {
+        await runConfigUnset(positional[2]);
+        return;
+      }
+      if (sub === "path") {
+        runConfigPath();
+        return;
+      }
+      process.stderr.write(`Unknown config subcommand: ${sub}\n`);
+      process.exit(2);
+      return;
+    }
     case "tui":
       suppressUpdateNotice = true;
       await dispatchTui(flags, {
@@ -942,6 +975,11 @@ function printHelp(): void {
       "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
       "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log",
       "  hydra-acp agent auth <id>                      Run the auth flow for <id>",
+      "  hydra-acp config [list] [<dotted.key>]      Print effective config (or one subtree) as JSON",
+      "  hydra-acp config get <dotted.key>           Print a single effective value (e.g. `tui.openFileCommand`)",
+      "  hydra-acp config set <dotted.key> <value>   Persist a value; <value> is parsed as JSON when possible, else stored as a string. Validated against the schema before write.",
+      "  hydra-acp config unset <dotted.key>         Remove a key from config.json (reverts to schema default)",
+      "  hydra-acp config path                       Print the config file path",
       "  hydra-acp auth password [--force]           Set the daemon's master password",
       "  hydra-acp auth [list]                       List active session tokens",
       "  hydra-acp auth revoke <id>                  Revoke a session token",

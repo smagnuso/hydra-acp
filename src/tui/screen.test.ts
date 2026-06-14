@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
@@ -1655,6 +1655,7 @@ describe("Screen block-click routing", () => {
     onBlockVisible?: (key: string) => void;
     width?: number;
     height?: number;
+    openFileCommand?: string | readonly string[];
   }): Screen {
     const width = opts.width ?? 40;
     const height = opts.height ?? 24;
@@ -1692,6 +1693,7 @@ describe("Screen block-click routing", () => {
       repaintThrottleMs: 0,
       progressIndicator: false,
       mouse: opts.mouse ?? false,
+      openFileCommand: opts.openFileCommand,
     });
   }
 
@@ -1713,10 +1715,21 @@ describe("Screen block-click routing", () => {
     ).handleMouse(name, data);
   }
 
-  // A full click: press then release on the same cell.
+  // A full click: press then release on the same cell. Block-click
+  // toggles are deferred by DOUBLE_CLICK_MAX_MS (so a follow-up click
+  // can cancel the toggle and run the open-file gesture instead); the
+  // tests want the eventual single-click effect, so we drain any
+  // pending timers synchronously here. Uses fake timers locally so
+  // real-time waits don't slow the suite.
   function clickAt(screen: Screen, x: number, y: number): void {
-    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
-    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
+    vi.useFakeTimers();
+    try {
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
+      vi.runAllTimers();
+    } finally {
+      vi.useRealTimers();
+    }
   }
 
   function visibleRows(screen: Screen): number {
@@ -1811,6 +1824,126 @@ describe("Screen block-click routing", () => {
     });
     screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
     clickAt(screen, 3, visibleRows(screen));
+    expect(clicks).toEqual(["editdiff:xyz"]);
+  });
+
+  it("a single block-click toggle is deferred (debounced for the double-click window)", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
+      openFileCommand: ["true"],
+    });
+    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    vi.useFakeTimers();
+    try {
+      const y = visibleRows(screen);
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+      // Toggle hasn't fired yet — it's waiting for a possible double-click.
+      expect(clicks).toEqual([]);
+      vi.runAllTimers();
+      expect(clicks).toEqual(["editdiff:xyz"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("when onBlockDoubleClick claims the gesture, the deferred toggle never fires", () => {
+    const clicks: string[] = [];
+    const opens: Array<{ key: string; rowOffset: number }> = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
+      openFileCommand: ["true"],
+    });
+    (
+      screen as unknown as {
+        onBlockDoubleClick: (key: string, rowOffset: number) => boolean;
+      }
+    ).onBlockDoubleClick = (key, rowOffset) => {
+      opens.push({ key, rowOffset });
+      return true;
+    };
+    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    vi.useFakeTimers();
+    try {
+      const y = visibleRows(screen);
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+      // The press scheduled NO new pending toggle (because the second
+      // release saw doubleClickPending=true and skipped it). Advance
+      // past the debounce window to be sure nothing fires later.
+      vi.runAllTimers();
+      expect(opens).toEqual([{ key: "editdiff:xyz", rowOffset: 0 }]);
+      expect(clicks).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a follow-up press on a different cell flushes the deferred toggle immediately", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
+      openFileCommand: ["true"],
+    });
+    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    vi.useFakeTimers();
+    try {
+      const y = visibleRows(screen);
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+      // Still deferred — within the debounce window, no follow-up yet.
+      expect(clicks).toEqual([]);
+      // Press on a clearly different cell: the previous toggle should
+      // fire NOW (before the new press's own gesture is processed),
+      // not at the end of the debounce window.
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 20, y });
+      expect(clicks).toEqual(["editdiff:xyz"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a double-click on the same cell cancels the deferred toggle", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
+      openFileCommand: ["true"],
+    });
+    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    vi.useFakeTimers();
+    try {
+      const y = visibleRows(screen);
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+      // Second press within the double-click window: the pending toggle
+      // is cancelled. The second release runs the selection-finalize path
+      // (word snap → clipboard) which does NOT toggle the block.
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+      vi.runAllTimers();
+      expect(clicks).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("without openFileCommand, a single click fires the toggle synchronously (no debounce)", () => {
+    const clicks: string[] = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (key, _rowOffset) => clicks.push(key),
+    });
+    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
     expect(clicks).toEqual(["editdiff:xyz"]);
   });
 

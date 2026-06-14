@@ -18,6 +18,7 @@ const BUILTIN_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "agents",
   "auth",
   "cat",
+  "config",
   "daemon",
   "extension",
   "extensions",

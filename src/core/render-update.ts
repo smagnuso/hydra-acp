@@ -80,6 +80,11 @@ export type RenderEvent =
       // file path) but without the head/tail clip. Used by the expanded
       // tool view so users see the whole command, not the …elided form.
       detailFull?: string;
+      // ACP "follow-along" locations from the tool call payload. Each
+      // entry is a file the call is operating on, optionally with a
+      // line number. We surface this so clients can jump directly to
+      // {path, line} on double-click instead of grepping the file.
+      locations?: ToolCallLocation[];
       workerTaskId?: string;
     }
   | {
@@ -90,6 +95,7 @@ export type RenderEvent =
       editDiff?: EditDiff;
       detail?: string;
       detailFull?: string;
+      locations?: ToolCallLocation[];
       // Best-effort error text extracted from a `failed` update. Pulled
       // from the first text payload in `content[]`, falling back to a
       // string `rawOutput.error`. Surfaced inline under the tool row.
@@ -141,6 +147,14 @@ export interface AvailableMode {
   id: string;
   name?: string;
   description?: string;
+}
+
+// ACP ToolCallLocation: a file the tool call is operating on, with an
+// optional 1-based line number. Surfaced verbatim from the wire so
+// clients can implement "follow-along" jumps to the exact edit site.
+export interface ToolCallLocation {
+  path: string;
+  line?: number;
 }
 
 export interface PlanEntry {
@@ -594,11 +608,45 @@ function mapToolCall(
   if (detailFull !== undefined) {
     event.detailFull = detailFull;
   }
+  const locations = extractToolCallLocations(u);
+  if (locations !== undefined) {
+    event.locations = locations;
+  }
   const wtid = getWorkerTaskId(u);
   if (wtid !== undefined) {
     event.workerTaskId = wtid;
   }
   return event;
+}
+
+// Pull the ACP `locations[]` array off a tool call payload. Each entry
+// must have a non-empty `path`; `line` is honored when present and >= 1
+// (ACP allows 0 as a minimum but we treat 0 as "no line" since editors
+// number from 1). Returns undefined when none are usable, so callers
+// can omit the field on the event entirely.
+function extractToolCallLocations(
+  u: UpdateLike,
+): ToolCallLocation[] | undefined {
+  const raw = u.locations;
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const out: ToolCallLocation[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const e = entry as { path?: unknown; line?: unknown };
+    if (typeof e.path !== "string" || e.path.length === 0) {
+      continue;
+    }
+    const loc: ToolCallLocation = { path: e.path };
+    if (typeof e.line === "number" && Number.isFinite(e.line) && e.line >= 1) {
+      loc.line = Math.floor(e.line);
+    }
+    out.push(loc);
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 // A short, single-line "what is this acting on" hint pulled from rawInput:
@@ -809,6 +857,10 @@ function mapToolCallUpdate(
   const detailFull = extractToolDetailFull(u);
   if (detailFull !== undefined) {
     event.detailFull = detailFull;
+  }
+  const locations = extractToolCallLocations(u);
+  if (locations !== undefined) {
+    event.locations = locations;
   }
   if (status !== undefined) {
     event.status = status;

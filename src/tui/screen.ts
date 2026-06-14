@@ -3,6 +3,10 @@
 // user and delegates them to an `InputDispatcher` (held by the app), then
 // redraws.
 
+import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import { RepaintScheduler, RowPainter } from "./screen/painter.js";
@@ -65,6 +69,11 @@ const DOUBLE_CLICK_MAX_DIST = 1;
 // restrict to ASCII for this version (per spec) — Unicode word boundary
 // expansion would require ICU or per-codepoint category tables.
 const ASCII_WORD_RE = /[A-Za-z0-9_]/;
+// Path-token characters scanned for the double-click "open file" gesture.
+// Wider than ASCII_WORD_RE: includes the filesystem separators, dots,
+// hyphens, tildes, and pluses that appear in real paths. The optional
+// `:<linenumber>` suffix is matched separately after the token boundary.
+const PATH_TOKEN_RE = /[A-Za-z0-9_./\-~+@]/;
 // ANSI SGR pattern used when stripping styling escapes from extracted
 // selection text so the clipboard payload is clean plaintext.
 const ANSI_STRIP_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
@@ -80,6 +89,15 @@ export interface ScreenOptions {
   // the clicked terminal row within that block (0 = top line of the
   // block). Clicks on unkeyed rows are ignored.
   onBlockClick?: (key: string, rowOffset: number) => void;
+  // Invoked on a double-click that lands on a row owned by a keyed
+  // block, BEFORE the screen's own open-file scan of the row text.
+  // Lets the app override the gesture with authoritative knowledge of
+  // what the block is showing (e.g. a tool call's recorded file path,
+  // an edit-diff block's target). Return true to claim the gesture —
+  // the screen then skips its own path-token scan and the word-snap
+  // copy fallback. Return false to fall through to the default
+  // double-click handling. Coordinates match onBlockClick.
+  onBlockDoubleClick?: (key: string, rowOffset: number) => boolean;
   // Invoked for every mouse button-press, drag-motion, and button-release
   // event while mouse capture is on. Wheel events are NOT routed here —
   // they continue to drive scrollback internally. Coordinates are 1-based
@@ -120,6 +138,12 @@ export interface ScreenOptions {
   // "clipboard" | "both"). Defaults to "both". Passed straight to
   // writeClipboard when a selection is finalized.
   selectionClipboard?: ClipboardTarget;
+  // Optional command (string or pre-split argv, with %f / %n
+  // placeholders) spawned when a double-click lands on a token that
+  // names an existing file. See HydraConfig.tui.openFileCommand.
+  // Undefined disables the gesture so the normal word-snap copy path
+  // runs unchanged.
+  openFileCommand?: string | readonly string[];
   // When true (default), emit OSC 9;4 progress-bar codes so the host
   // terminal can render an indeterminate busy indicator while a turn is
   // running (taskbar pulse on Windows Terminal, dock badge on Konsole,
@@ -301,6 +325,9 @@ export class Screen {
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
   private onBlockClick: ((key: string, rowOffset: number) => void) | undefined;
+  private onBlockDoubleClick:
+    | ((key: string, rowOffset: number) => boolean)
+    | undefined;
   private onMouse: ((ev: MouseEvent) => void) | undefined;
   private onBlockVisible: ((key: string) => void) | undefined;
   private onSuspend: (() => void) | undefined;
@@ -480,6 +507,15 @@ export class Screen {
   // Timestamp + cell of the most recent left-button release, used to
   // decide whether the next press qualifies as a double-click.
   private lastLeftClick: { x: number; y: number; t: number } | null = null;
+  // Single-click block toggles are deferred by DOUBLE_CLICK_MAX_MS so a
+  // follow-up click on the same cell can override the gesture (e.g. open
+  // a file path under the cursor) without first toggling the block and
+  // then immediately untoggling it. The timer fires the toggle if no
+  // double-click arrives in time; handleSelectionPress cancels it when
+  // it does. Null when no toggle is pending.
+  private pendingBlockClick:
+    | { timer: ReturnType<typeof setTimeout>; key: string; rowOffset: number }
+    | null = null;
   private started = false;
   // Bracketed-paste-mode state. terminal-kit doesn't natively support
   // bracketed paste, so on start() we enable the mode in the terminal
@@ -499,6 +535,7 @@ export class Screen {
   private inAppSelectionEnabled: boolean;
   // Which selection buffer(s) a finalized copy targets. See ScreenOptions.
   private selectionClipboard: ClipboardTarget;
+  private openFileCommand: readonly string[] | null;
   private progressIndicatorEnabled: boolean;
   // Listeners registered on process via installEmergencyCleanup so an
   // ungraceful exit (SIGTERM, SIGHUP, uncaughtException) still restores
@@ -543,6 +580,7 @@ export class Screen {
       hostOnKey(events);
     };
     this.onBlockClick = opts.onBlockClick;
+    this.onBlockDoubleClick = opts.onBlockDoubleClick;
     this.onMouse = opts.onMouse;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
@@ -563,6 +601,16 @@ export class Screen {
     this.mouseEnabled = opts.mouse ?? false;
     this.inAppSelectionEnabled = opts.inAppSelection ?? this.mouseEnabled;
     this.selectionClipboard = opts.selectionClipboard ?? "both";
+    // Normalize the openFileCommand union to a non-empty argv (or null
+    // when disabled). String form is shell-style split on whitespace —
+    // good enough for editor invocations without quoted spaces; users
+    // who need a literal space in an arg pass the array form instead.
+    const ofc = opts.openFileCommand;
+    const ofcArgv =
+      typeof ofc === "string"
+        ? ofc.split(/\s+/).filter((s) => s.length > 0)
+        : ofc;
+    this.openFileCommand = ofcArgv && ofcArgv.length > 0 ? ofcArgv : null;
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
     this.readonly = opts.readonly ?? false;
     this.resizeHandler = () => this.repaint();
@@ -659,6 +707,7 @@ export class Screen {
     // AFTER we leave the alternate screen and write raw cursor-position
     // escapes into the host shell, scrambling it.
     this.scheduler.cancel();
+    this.cancelPendingBlockClick();
     this.uninstallSelectiveMouseReporting();
     this.uninstallBracketedPaste();
     this.uninstallEmergencyCleanup();
@@ -2464,9 +2513,32 @@ export class Screen {
     // mouse capture (wheel-only/selective mode never reports button
     // events). Clicks on unkeyed rows fall through silently.
     if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
+      // If a previous click's toggle is still parked in the debounce
+      // window AND this new press isn't a same-cell double-click of
+      // it, the user has clearly moved on — fire the parked toggle
+      // immediately instead of making them wait for the timer. The
+      // double-click branch in handleSelectionPress will cancel the
+      // pending toggle on its own when the cells match, so we only
+      // flush in the "different cell / new gesture" case here.
+      const last = this.lastLeftClick;
+      const sameCell =
+        last !== null &&
+        cell !== null &&
+        Math.abs(cell.x - last.x) <= DOUBLE_CLICK_MAX_DIST &&
+        Math.abs(cell.y - last.y) <= DOUBLE_CLICK_MAX_DIST &&
+        Date.now() - last.t <= DOUBLE_CLICK_MAX_MS;
+      if (!sameCell) {
+        this.flushPendingBlockClick();
+      }
       this.pressCell = cell;
       this.handleSelectionPress(cell);
       return;
+    }
+    // Any non-left press (right/middle) is unambiguously "user moved
+    // on": flush so the deferred toggle isn't still in flight when
+    // the user, say, opens a context menu or middle-click-pastes.
+    if (name.endsWith("_PRESSED") && name !== "MOUSE_LEFT_BUTTON_PRESSED") {
+      this.flushPendingBlockClick();
     }
     if (name === "MOUSE_DRAG" && cell !== null) {
       this.handleSelectionDrag(cell);
@@ -2497,7 +2569,7 @@ export class Screen {
           while (firstRowY > 1 && this.keyAtRow(firstRowY - 1) === key) {
             firstRowY -= 1;
           }
-          this.onBlockClick(key, cell.y - firstRowY);
+          this.schedulePendingBlockClick(key, cell.y - firstRowY);
         }
       }
       this.handleSelectionRelease(cell);
@@ -2538,6 +2610,49 @@ export class Screen {
       Math.abs(cell.x - last.x) <= DOUBLE_CLICK_MAX_DIST &&
       Math.abs(cell.y - last.y) <= DOUBLE_CLICK_MAX_DIST;
     if (isDoubleClickCandidate) {
+      // Any pending single-click toggle on the same cell is moot —
+      // either we're about to open a file or word-snap, both of which
+      // supersede the toggle. Cancel before either path runs so the
+      // block doesn't flicker open/closed behind the gesture.
+      this.cancelPendingBlockClick();
+      // Block-level override: if the press landed on a keyed block and
+      // the app supplies onBlockDoubleClick, give it first refusal.
+      // The app has authoritative knowledge of what each block carries
+      // (a tool's recorded file path, an edit-diff target) which beats
+      // scraping the rendered row text. Return true claims the gesture.
+      if (this.onBlockDoubleClick && cell !== null) {
+        const blockKey = this.keyAtRow(cell.y);
+        if (blockKey !== null) {
+          let firstRowY = cell.y;
+          while (firstRowY > 1 && this.keyAtRow(firstRowY - 1) === blockKey) {
+            firstRowY -= 1;
+          }
+          const rowOffset = cell.y - firstRowY;
+          if (this.onBlockDoubleClick(blockKey, rowOffset)) {
+            // Mark the gesture as a double-click finalize so the
+            // upcoming release skips scheduling a fresh block toggle.
+            // Without this, the second release re-enters
+            // schedulePendingBlockClick and the block expands ~500ms
+            // after the file opens.
+            this.doubleClickPending = true;
+            this.lastLeftClick = null;
+            return;
+          }
+        }
+      }
+      // Try the open-file gesture first: when the click landed on a
+      // filesystem-path token, hand it to the configured editor command
+      // and skip the word-snap/clipboard path entirely. When the token
+      // isn't a file (or no command is configured) fall through to the
+      // existing word-snap copy behaviour so the gesture remains useful.
+      if (this.tryOpenFileAt(anchor)) {
+        // See onBlockDoubleClick branch above — flag this as a
+        // finalized double-click so the second release doesn't
+        // schedule a delayed block toggle behind the opened file.
+        this.doubleClickPending = true;
+        this.lastLeftClick = null;
+        return;
+      }
       const word = this.wordBoundsAt(anchor);
       if (word !== null) {
         this.setSelection(
@@ -2636,6 +2751,233 @@ export class Screen {
       end++;
     }
     return { start, end };
+  }
+
+  // Scan a path-like token around the given source-line offset. Walks
+  // left/right while PATH_TOKEN_RE matches, then peeks at the trailing
+  // ":<digits>" (and optional ":<digits>") suffix used by most compiler
+  // / grep / stack-trace output. Returns the raw token text and an
+  // optional line number, or null when the click landed off the
+  // scrollback or on a non-path character.
+  private pathTokenAt(
+    pos: { sourceLineId: number; offset: number },
+  ): { raw: string; line: number | null } | null {
+    const line = this.lineById(pos.sourceLineId);
+    if (line === null || line.ansi) {
+      return null;
+    }
+    const body = line.body ?? "";
+    if (body.length === 0) {
+      return null;
+    }
+    let idx = Math.max(0, Math.min(body.length - 1, pos.offset));
+    if (pos.offset >= body.length) {
+      idx = body.length - 1;
+    }
+    if (!PATH_TOKEN_RE.test(body[idx]!)) {
+      return null;
+    }
+    let start = idx;
+    while (start > 0 && PATH_TOKEN_RE.test(body[start - 1]!)) {
+      start--;
+    }
+    let end = idx + 1;
+    while (end < body.length && PATH_TOKEN_RE.test(body[end]!)) {
+      end++;
+    }
+    let raw = body.slice(start, end);
+    // Strip trailing punctuation that's commonly adjacent to a path but
+    // not part of it (period at end of sentence, etc.).
+    raw = raw.replace(/[.]+$/, "");
+    if (raw.length === 0) {
+      return null;
+    }
+    let lineNum: number | null = null;
+    // Optional ":<digits>" (and optional second ":<digits>") suffix.
+    const suffix = body.slice(end).match(/^:(\d+)(?::\d+)?/);
+    if (suffix) {
+      lineNum = Number.parseInt(suffix[1]!, 10);
+    }
+    return { raw, line: lineNum };
+  }
+
+  // Resolve a token to an existing absolute filesystem path, or null if
+  // it doesn't name a real file. Honors three shapes per spec: absolute
+  // (/foo/bar), home-relative (~/x), and cwd-relative (foo/bar). Rejects
+  // tokens that don't look like paths at all (no separator, no leading
+  // ~, not absolute) to avoid firing on bare identifiers that happen to
+  // exist as files in cwd.
+  private resolvePathToken(raw: string): string | null {
+    let expanded = raw;
+    if (expanded === "~" || expanded.startsWith("~/")) {
+      expanded = expanded === "~" ? homedir() : `${homedir()}/${expanded.slice(2)}`;
+    }
+    const looksLikePath =
+      isAbsolute(expanded) || expanded.includes("/") || raw.startsWith("~");
+    if (!looksLikePath) {
+      return null;
+    }
+    const base = isAbsolute(expanded)
+      ? expanded
+      : resolvePath(this.sessionbar.cwd, expanded);
+    try {
+      const st = statSync(base);
+      if (st.isFile()) {
+        return base;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  // Returns true when the click resolved to a real file and the
+  // configured editor command was dispatched (whether or not the spawn
+  // ultimately succeeds — failure is reported asynchronously via
+  // notify()). Returns false to let the caller fall through to the
+  // word-snap selection path.
+  private tryOpenFileAt(
+    pos: { sourceLineId: number; offset: number },
+  ): boolean {
+    if (this.openFileCommand === null) {
+      return false;
+    }
+    const token = this.pathTokenAt(pos);
+    if (token === null) {
+      return false;
+    }
+    const suffix = token.line === null ? "" : `:${token.line}`;
+    return this.tryOpenPathString(token.raw + suffix);
+  }
+
+  // Public entrypoint shared by the in-line word-click path and the
+  // app's block double-click handler (which feeds an authoritative
+  // token, e.g. a tool's detailFull path, instead of scraping it from
+  // rendered text). Parses an optional `:<line>` / `:<line>:<col>`
+  // suffix, resolves the bare path against cwd / ~, stat-checks it,
+  // and spawns the configured command with %f / %n substitution.
+  // Returns true iff a real file was resolved AND a spawn was attempted
+  // (failures of the spawn itself surface via notify, not the return
+  // value). Returns false when the feature is disabled, the token isn't
+  // path-shaped, or no such file exists — so callers can fall through.
+  tryOpenPathString(raw: string): boolean {
+    if (this.openFileCommand === null) {
+      return false;
+    }
+    let bare = raw;
+    let lineNum: number | null = null;
+    // Accept "path:line" and "path:line:col"; the column is ignored.
+    const m = raw.match(/^(.*?):(\d+)(?::\d+)?$/);
+    if (m) {
+      bare = m[1]!;
+      lineNum = Number.parseInt(m[2]!, 10);
+    }
+    const file = this.resolvePathToken(bare);
+    if (file === null) {
+      return false;
+    }
+    const lineStr = lineNum === null ? "" : String(lineNum);
+    const [program, ...rest] = this.openFileCommand;
+    if (!program) {
+      return false;
+    }
+    let sawFilePlaceholder = false;
+    const args: string[] = [];
+    for (const arg of rest) {
+      if (arg.includes("%f")) {
+        sawFilePlaceholder = true;
+      }
+      // Drop args that reference %n when no line number is known —
+      // otherwise a placeholder like "+%n" collapses to bare "+" and
+      // emacsclient (and most editors) treat it as a filename. Args
+      // that only carry %f or literal text still flow through.
+      if (lineStr === "" && arg.includes("%n")) {
+        continue;
+      }
+      args.push(arg.replaceAll("%f", file).replaceAll("%n", lineStr));
+    }
+    if (!sawFilePlaceholder) {
+      args.push(file);
+    }
+    try {
+      const child = spawn(program, args, {
+        detached: true,
+        stdio: "ignore",
+        cwd: this.sessionbar.cwd,
+      });
+      child.on("error", (err) => {
+        this.notify(`open file failed: ${(err as Error).message}`);
+      });
+      child.unref();
+      const where = lineNum === null ? file : `${file}:${lineNum}`;
+      this.notify(`opening ${where}`);
+    } catch (err) {
+      this.notify(`open file failed: ${(err as Error).message}`);
+    }
+    return true;
+  }
+
+  // Defer a block toggle by DOUBLE_CLICK_MAX_MS so a follow-up click on
+  // the same cell can intercept the gesture (open-file under the cursor
+  // takes priority over expand/collapse). When the timer fires without
+  // a second click intervening the toggle runs unchanged. Replaces any
+  // earlier pending toggle — if a press lands on a new cell before the
+  // previous one fired, the previous block was clearly abandoned.
+  private schedulePendingBlockClick(key: string, rowOffset: number): void {
+    if (!this.onBlockClick) {
+      return;
+    }
+    // No openFileCommand configured → double-click can't open anything,
+    // so deferring the toggle would just add lag with no upside. Fire
+    // the toggle synchronously, matching the pre-debounce behaviour.
+    if (this.openFileCommand === null) {
+      this.onBlockClick(key, rowOffset);
+      return;
+    }
+    this.cancelPendingBlockClick();
+    const handler = this.onBlockClick;
+    const timer = setTimeout(() => {
+      this.pendingBlockClick = null;
+      handler(key, rowOffset);
+    }, DOUBLE_CLICK_MAX_MS);
+    // Don't hold the event loop open just for a pending UI toggle;
+    // node shouldn't wait on this when the rest of the app has settled.
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    this.pendingBlockClick = { timer, key, rowOffset };
+  }
+
+  // Clear any pending block-click toggle without firing it. Called when
+  // a double-click is detected on the same cell (the second click is
+  // about to do something else) and at teardown so a stray timer can't
+  // poke at a stopped Screen.
+  private cancelPendingBlockClick(): void {
+    if (this.pendingBlockClick === null) {
+      return;
+    }
+    clearTimeout(this.pendingBlockClick.timer);
+    this.pendingBlockClick = null;
+  }
+
+  // Fire any deferred toggle immediately and clear the pending slot.
+  // Used as a "the user moved on" shortcut: when the next press lands
+  // on a different cell (i.e. clearly not a double-click of the prior
+  // one), we don't want to make them wait out the remainder of the
+  // debounce window before the first block reacts. Terminals only
+  // emit motion while a button is held (xterm ?1002), so the next
+  // press is the earliest signal we get that the previous click
+  // wasn't going to become a double.
+  private flushPendingBlockClick(): void {
+    const pending = this.pendingBlockClick;
+    if (pending === null) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingBlockClick = null;
+    if (this.onBlockClick) {
+      this.onBlockClick(pending.key, pending.rowOffset);
+    }
   }
 
   // Reverse lookup: source line id → FormattedLine. O(n) over the
