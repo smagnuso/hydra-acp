@@ -38,7 +38,7 @@ import {
 } from "../core/daemon-bootstrap.js";
 import { computeConfigDigest } from "../core/config-digest.js";
 import { invokedBinName } from "../core/bin-name.js";
-import { stripHydraSessionPrefix } from "../core/session.js";
+import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
@@ -1778,6 +1778,7 @@ async function runSession(
     mouse: viewPrefs.mouseEnabled,
     inAppSelection: viewPrefs.inAppSelectionEnabled,
     selectionClipboard: config.tui.selectionClipboard,
+    openFileCommand: config.tui.openFileCommand,
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
     onSuspend: process.platform !== "win32" ? onSuspend : undefined,
@@ -1904,6 +1905,10 @@ async function runSession(
     { name: "/clear", description: "Clear scrollback" },
     { name: "/sessions", description: "List sessions" },
     { name: "/resume", description: "Switch sessions (open the picker)" },
+    {
+      name: "/session",
+      description: "Switch session: /session <id|next|prev> (no arg opens picker)",
+    },
     {
       name: "/rename",
       description: "Rename this session (alias for /hydra title): /rename [title]",
@@ -2837,7 +2842,7 @@ async function runSession(
     resume(nextOpts);
   };
 
-  const cycleLiveSession = async (): Promise<void> => {
+  const cycleLiveSession = async (direction: "next" | "prev" = "next"): Promise<void> => {
     if (!finishSession)
       return;
     const sessions = await listSessions(target);
@@ -2845,14 +2850,17 @@ async function runSession(
     if (live.length <= 1)
       return;
     const idx = live.findIndex((s) => s.sessionId === resolvedSessionId);
-    const next = live[(idx + 1) % live.length]!;
+    const step = direction === "prev" ? -1 : 1;
+    const baseIdx = idx === -1 ? 0 : idx;
+    const nextIdx = (baseIdx + step + live.length) % live.length;
+    const next = live[nextIdx]!;
     const resume = finishSession;
     finishSession = null;
     process.off("SIGINT", sigintHandler);
     void stream.close().catch(() => undefined);
-    // ^T cycles to another live session. Live sessions are by
-    // definition agent-bound, so dropping any pending readonly state
-    // matches what the user expects when bouncing between active work.
+    // Live sessions are by definition agent-bound, so dropping any
+    // pending readonly state matches what the user expects when
+    // bouncing between active work.
     const nextOpts: TuiOptions = {
       ...opts,
       sessionId: next.sessionId,
@@ -2861,6 +2869,57 @@ async function runSession(
     };
     if (next.agentId !== undefined)
       nextOpts.agentId = next.agentId;
+    resume(nextOpts);
+  };
+
+  const switchToSessionById = async (idArg: string): Promise<void> => {
+    if (!finishSession)
+      return;
+    const sessions = await listSessions(target, { includeNonInteractive: true });
+    const needle = idArg.trim();
+    if (!needle) {
+      screen.notify("usage: /session <id|next|prev>");
+      return;
+    }
+    // Accept the short form (what the picker and `sessions list` show)
+    // as well as the canonical hydra_session_<tail> id. Mirrors the way
+    // `--session <id>` is resolved by SessionManager.resolveCanonicalId.
+    const candidates = needle.startsWith(HYDRA_SESSION_PREFIX)
+      ? [needle]
+      : [needle, HYDRA_SESSION_PREFIX + needle];
+    let match = sessions.find((s) => candidates.includes(s.sessionId));
+    if (!match) {
+      const prefixed = sessions.filter((s) =>
+        candidates.some((c) => s.sessionId.startsWith(c)),
+      );
+      if (prefixed.length === 1) {
+        match = prefixed[0];
+      } else if (prefixed.length > 1) {
+        screen.notify(`ambiguous session id: ${needle} (${prefixed.length} matches)`);
+        return;
+      }
+    }
+    if (!match) {
+      screen.notify(`no session matches: ${needle}`);
+      return;
+    }
+    if (match.sessionId === resolvedSessionId) {
+      screen.notify("already on that session");
+      return;
+    }
+    const resume = finishSession;
+    finishSession = null;
+    process.off("SIGINT", sigintHandler);
+    void stream.close().catch(() => undefined);
+    const nextOpts: TuiOptions = {
+      ...opts,
+      sessionId: match.sessionId,
+      cwd: match.cwd ?? resolvedCwd,
+      readonly: match.status !== "live",
+    };
+    if (match.agentId !== undefined)
+      nextOpts.agentId = match.agentId;
+    delete nextOpts.resumeHint;
     resume(nextOpts);
   };
 
@@ -3560,6 +3619,23 @@ async function runSession(
         // session and open the picker.
         void switchSession().catch(() => undefined);
         return true;
+      case "/session": {
+        const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        if (!arg) {
+          void switchSession().catch(() => undefined);
+          return true;
+        }
+        if (arg === "next" || arg === "prev") {
+          void cycleLiveSession(arg).catch((err: Error) => {
+            screen.notify(`session ${arg} failed: ${err.message}`);
+          });
+          return true;
+        }
+        void switchToSessionById(arg).catch((err: Error) => {
+          screen.notify(`session switch failed: ${err.message}`);
+        });
+        return true;
+      }
       case "/rename": {
         // Alias for the daemon-side `/hydra title` command. Rewrite to the
         // wire form and send it like any agent slash command, but keep the
