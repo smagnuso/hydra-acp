@@ -205,13 +205,35 @@ export async function startDaemon(
   });
 
   registerHealthRoutes(app, HYDRA_VERSION, computeConfigDigest(config));
-  registerSessionRoutes(app, manager, {
-    agentId: config.defaultAgent,
-    cwd: config.defaultCwd,
-    publicHost: config.daemon.publicHost,
-    host: config.daemon.host,
-    port: config.daemon.port,
-  });
+  const mcpTokenRegistry = new McpTokenRegistry();
+  const extensionMcp = new ExtensionMcpRegistry();
+  // Captured lazily by handlers that need to mint MCP descriptors. The
+  // bound port isn't known until app.listen() completes below, so we
+  // defer composition until request time.
+  let daemonOriginCached: string | undefined;
+  const getDaemonOrigin = (): string => {
+    if (daemonOriginCached !== undefined) {
+      return daemonOriginCached;
+    }
+    const addr = app.server.address();
+    const port =
+      addr && typeof addr === "object" ? addr.port : config.daemon.port;
+    const scheme = config.daemon.tls ? "https" : "http";
+    daemonOriginCached = `${scheme}://${config.daemon.host}:${port}`;
+    return daemonOriginCached;
+  };
+  registerSessionRoutes(
+    app,
+    manager,
+    {
+      agentId: config.defaultAgent,
+      cwd: config.defaultCwd,
+      publicHost: config.daemon.publicHost,
+      host: config.daemon.host,
+      port: config.daemon.port,
+    },
+    { extensionMcp, mcpTokenRegistry, getDaemonOrigin },
+  );
   registerAgentRoutes(app, registry, manager, { npmRegistry: config.npmRegistry });
   registerExtensionRoutes(app, extensions);
   registerTransformerRoutes(app, transformers);
@@ -232,25 +254,8 @@ export async function startDaemon(
     store: sessionTokenStore,
     rateLimiter: authRateLimiter,
   });
-  const mcpTokenRegistry = new McpTokenRegistry();
-  const extensionMcp = new ExtensionMcpRegistry();
   registerStdinMcpRoutes(app, mcpTokenRegistry);
   registerExtensionMcpRoutes(app, mcpTokenRegistry, extensionMcp);
-  // Captured lazily by the session/new handler. The bound port isn't
-  // known until app.listen() completes below, so we defer composition
-  // until request time.
-  let daemonOriginCached: string | undefined;
-  const getDaemonOrigin = (): string => {
-    if (daemonOriginCached !== undefined) {
-      return daemonOriginCached;
-    }
-    const addr = app.server.address();
-    const port =
-      addr && typeof addr === "object" ? addr.port : config.daemon.port;
-    const scheme = config.daemon.tls ? "https" : "http";
-    daemonOriginCached = `${scheme}://${config.daemon.host}:${port}`;
-    return daemonOriginCached;
-  };
   registerAcpWsEndpoint(app, {
     validator,
     manager,

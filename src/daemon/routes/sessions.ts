@@ -15,6 +15,10 @@ import { HYDRA_VERSION } from "../../core/hydra-version.js";
 import { isLoopbackHost } from "../../core/remote-url.js";
 import { searchHistories } from "../../core/history-search.js";
 import { sweepNonInteractiveSessions } from "../../core/session-gc.js";
+import {
+  mintExtensionMcpDescriptors,
+  type ExtensionMcpMintDeps,
+} from "../extension-mcp-mint.js";
 
 export interface SessionRouteDefaults {
   agentId: string;
@@ -45,6 +49,13 @@ export function registerSessionRoutes(
   app: FastifyInstance,
   manager: SessionManager,
   defaults: SessionRouteDefaults,
+  // Optional. When provided, POST /v1/sessions augments the new
+  // session's mcpServers with HTTP descriptors for every
+  // currently-registered extension MCP server, mirroring what the ACP
+  // WS session/new handler does. Sessions created via the REST surface
+  // (Slack `!session`, browser, etc.) need this or their agent's tool
+  // registry comes up empty — no `set_plan`, no planner tools at all.
+  extMcpDeps: ExtensionMcpMintDeps = {},
 ): void {
   app.get("/v1/sessions", async (request) => {
     const query = request.query as
@@ -114,18 +125,34 @@ export function registerSessionRoutes(
     };
     const cwd = expandHome(body.cwd ?? defaults.cwd);
     const agentId = body.agentId ?? defaults.agentId;
+    // Mirror the ACP WS session/new path: mint one per-session token
+    // covering every currently-registered extension MCP server and
+    // append the resulting HTTP descriptors to the agent's mcpServers
+    // list. Without this, REST-initiated sessions (Slack `!session`,
+    // browser, …) come up without planner/extension tools.
+    const extMcpMint = mintExtensionMcpDescriptors(extMcpDeps);
+    const mcpServers =
+      extMcpMint !== undefined
+        ? [...(body.mcpServers ?? []), ...extMcpMint.descriptors]
+        : body.mcpServers;
     try {
       const session = await manager.create({
         cwd,
         agentId,
-        mcpServers: body.mcpServers,
+        mcpServers,
       });
+      if (extMcpMint !== undefined) {
+        extMcpMint.bindToSession(session);
+      }
       reply.code(201).send({
         sessionId: session.sessionId,
         agentId: session.agentId,
         cwd: session.cwd,
       });
     } catch (err) {
+      if (extMcpMint !== undefined) {
+        extMcpMint.abandon(err instanceof Error ? err : undefined);
+      }
       reply.code(500).send({ error: (err as Error).message });
     }
   });

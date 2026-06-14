@@ -11,6 +11,8 @@ import {
   type MockAgentControls,
 } from "../../__tests__/test-utils.js";
 import { JsonRpcConnection } from "../../acp/connection.js";
+import { ExtensionMcpRegistry } from "../../core/extension-mcp.js";
+import { McpTokenRegistry } from "../mcp/token-registry.js";
 
 function fakeRegistryAgent(id = "claude-code"): RegistryAgent {
   return { id, name: id, distribution: { npx: { package: id } } };
@@ -920,5 +922,143 @@ describe("session routes: POST /v1/sessions/:id/fork", () => {
       `${harness.baseUrl}/v1/sessions/hydra-doesnotexist`,
     );
     expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /v1/sessions extension MCP injection", () => {
+  // Mirror the WS session/new behaviour: every extension currently
+  // registered with the daemon's ExtensionMcpRegistry must be appended
+  // to the new session's mcpServers as an HTTP descriptor pointing at
+  // /mcp/<extname>. Without this REST-initiated sessions (Slack
+  // `!session`, browser, …) silently lose the planner MCP and the
+  // agent can't see `set_plan` / `get_plan` etc.
+  let app: FastifyInstance;
+  let manager: SessionManager;
+  let mocks: MockAgentControls[];
+  let baseUrl: string;
+  let extensionMcp: ExtensionMcpRegistry;
+  let mcpTokenRegistry: McpTokenRegistry;
+
+  beforeEach(async () => {
+    mocks = [];
+    manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: "/w" });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: `u_${mocks.length}` });
+        return m.agent;
+      },
+    );
+    extensionMcp = new ExtensionMcpRegistry();
+    mcpTokenRegistry = new McpTokenRegistry();
+    app = Fastify();
+    registerSessionRoutes(
+      app,
+      manager,
+      { agentId: "claude-code", cwd: "/w" },
+      {
+        extensionMcp,
+        mcpTokenRegistry,
+        getDaemonOrigin: () => "http://127.0.0.1:9999",
+      },
+    );
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const addr = app.server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await manager.closeAll().catch(() => undefined);
+    await app.close();
+  });
+
+  function findSessionNewCall(mock: MockAgentControls):
+    { cwd: unknown; mcpServers: unknown[] } | undefined {
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    const call = requestMock.mock.calls.find((c) => c[0] === "session/new");
+    return call?.[1] as { cwd: unknown; mcpServers: unknown[] } | undefined;
+  }
+
+  it("appends an HTTP descriptor for each registered extension MCP", async () => {
+    const fakeConn = {} as unknown as Parameters<ExtensionMcpRegistry["register"]>[1];
+    extensionMcp.register("hydra-acp-planner", fakeConn, undefined, [
+      { name: "set_plan", description: "", inputSchema: {} },
+    ]);
+    extensionMcp.register("hydra-acp-notifier", fakeConn, undefined, [
+      { name: "notify", description: "", inputSchema: {} },
+    ]);
+
+    const res = await fetch(`${baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/w", agentId: "claude-code" }),
+    });
+    expect(res.status).toBe(201);
+
+    const payload = findSessionNewCall(mocks[0]!);
+    expect(payload).toBeDefined();
+    const servers = payload!.mcpServers as Array<{
+      name: string;
+      type: string;
+      url: string;
+      headers: Array<{ name: string; value: string }>;
+    }>;
+    const byName = new Map(servers.map((s) => [s.name, s]));
+    expect(byName.has("hydra-acp-planner")).toBe(true);
+    expect(byName.has("hydra-acp-notifier")).toBe(true);
+    const planner = byName.get("hydra-acp-planner")!;
+    expect(planner.type).toBe("http");
+    expect(planner.url).toBe("http://127.0.0.1:9999/mcp/hydra-acp-planner");
+    expect(planner.headers[0]!.name).toBe("Authorization");
+    expect(planner.headers[0]!.value).toMatch(/^Bearer [0-9a-f]{64}$/);
+    // Same bearer token across all extensions in one session (one
+    // reservation, many descriptors).
+    expect(byName.get("hydra-acp-notifier")!.headers[0]!.value).toBe(
+      planner.headers[0]!.value,
+    );
+  });
+
+  it("preserves caller-supplied mcpServers and appends extension descriptors after them", async () => {
+    const fakeConn = {} as unknown as Parameters<ExtensionMcpRegistry["register"]>[1];
+    extensionMcp.register("hydra-acp-planner", fakeConn, undefined, []);
+
+    const callerDescriptor = { name: "caller-mcp", type: "stdio", command: "x" };
+    const res = await fetch(`${baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/w",
+        agentId: "claude-code",
+        mcpServers: [callerDescriptor],
+      }),
+    });
+    expect(res.status).toBe(201);
+
+    const payload = findSessionNewCall(mocks[0]!);
+    const servers = payload!.mcpServers as unknown[];
+    expect(servers[0]).toEqual(callerDescriptor);
+    expect(servers).toHaveLength(2);
+    expect((servers[1] as { name: string }).name).toBe("hydra-acp-planner");
+  });
+
+  it("passes through the caller's mcpServers unchanged when no extensions are registered", async () => {
+    const callerDescriptor = { name: "caller-only", type: "stdio", command: "x" };
+    const res = await fetch(`${baseUrl}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/w",
+        agentId: "claude-code",
+        mcpServers: [callerDescriptor],
+      }),
+    });
+    expect(res.status).toBe(201);
+
+    const payload = findSessionNewCall(mocks[0]!);
+    expect(payload!.mcpServers).toEqual([callerDescriptor]);
   });
 });
