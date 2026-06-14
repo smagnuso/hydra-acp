@@ -71,6 +71,13 @@ export interface FormattedLine {
   // their separators are marked collapsed so only the lead line paints.
   // Cleared to restore the original blocks.
   collapsed?: boolean;
+  // Inline link ranges parsed out of markdown `[text](url)` spans.
+  // start/end are byte indices in the CLEAN body (i.e. the result of
+  // running stripTkMarkup over `body`) so they survive the zero-width
+  // styling markup the body carries. Consumed by the open-on-double-
+  // click gesture: a click whose resolved offset falls inside a link
+  // range opens the URL directly, skipping the path-token scan.
+  links?: Array<{ start: number; end: number; url: string }>;
 }
 
 export interface FormatEventOptions {
@@ -188,13 +195,139 @@ function applyInlineMarkup(
   text: string,
   opts?: { codeOpen?: string; boldReset?: string; codeReset?: string },
 ): string {
+  return applyInlineMarkupWithLinks(text, opts).styled;
+}
+
+// Single-pass inline markdown processor: walks `text` and emits two
+// parallel views — `styled`, the terminal-kit caret-markup string that
+// the renderer paints, and the `clean` string (implicit; never returned
+// directly) that is what stripTkMarkup would recover from `styled`. The
+// `links` sidecar records each `[text](url)` span with start/end
+// indices into the `clean` view so a click can resolve back to its
+// URL even though the visible text only shows `text`.
+//
+// One-pass keeps clean-coord arithmetic honest: the regex-cascade
+// version of this function shifted indices unpredictably when bold/
+// code spans appeared before a link, because `**word**` shortens to
+// `word` in clean while `^+word^:` keeps its full length in styled.
+function applyInlineMarkupWithLinks(
+  text: string,
+  opts?: {
+    codeOpen?: string;
+    boldReset?: string;
+    codeReset?: string;
+    linkOpen?: string;
+    linkReset?: string;
+  },
+): {
+  styled: string;
+  links: Array<{ start: number; end: number; url: string }>;
+  cleanLength: number;
+} {
   const codeOpen = opts?.codeOpen ?? "^C";
-  const boldReset = opts?.boldReset ?? "^:";
   const codeReset = opts?.codeReset ?? "^:";
-  let s = text.replace(/\^/g, "^^");
-  s = s.replace(/\*\*(.+?)\*\*/g, `^+$1${boldReset}`);
-  s = s.replace(/`([^`]+)`/g, `${codeOpen}$1${codeReset}`);
-  return s;
+  const boldReset = opts?.boldReset ?? "^:";
+  // Links render bright-cyan-underline by default — same visual register
+  // as inline `code` since the link text is usually a path/identifier.
+  const linkOpen = opts?.linkOpen ?? "^C^_";
+  const linkReset = opts?.linkReset ?? "^:";
+  let styled = "";
+  let cleanLen = 0;
+  const links: Array<{ start: number; end: number; url: string }> = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    // Escape literal carets so user-typed `^` doesn't get mistaken for
+    // our markup. The stripped form is still a single `^` so cleanLen
+    // advances by 1.
+    if (c === "^") {
+      styled += "^^";
+      cleanLen += 1;
+      i += 1;
+      continue;
+    }
+    // **bold** — non-greedy. Require a non-empty body and a matching
+    // closing `**`. The inner span is recursively processed so nested
+    // inline markdown (`code`, [link](url)) inside the bold span gets
+    // stripped/styled correctly — agents commonly wrap link-paths in
+    // bold (`**[`some/path`](file://…)**`). If the close is missing,
+    // fall through to the literal emit below so unbalanced asterisks
+    // aren't swallowed.
+    if (c === "*" && text[i + 1] === "*") {
+      const close = text.indexOf("**", i + 2);
+      if (close !== -1 && close > i + 2) {
+        const innerText = text.slice(i + 2, close);
+        const inner = applyInlineMarkupWithLinks(innerText, opts);
+        const start = cleanLen;
+        styled += `^+${inner.styled}${boldReset}`;
+        for (const nested of inner.links) {
+          links.push({
+            start: start + nested.start,
+            end: start + nested.end,
+            url: nested.url,
+          });
+        }
+        cleanLen += inner.cleanLength;
+        i = close + 2;
+        continue;
+      }
+    }
+    // `code` — same shape, single backtick fences. Stops at the next
+    // backtick on the same line; multi-line / triple-backtick fences
+    // are handled by the block parser before getting here.
+    if (c === "`") {
+      const close = text.indexOf("`", i + 1);
+      if (close !== -1 && close > i + 1) {
+        const inner = text.slice(i + 1, close);
+        styled += `${codeOpen}${inner}${codeReset}`;
+        cleanLen += inner.length;
+        i = close + 1;
+        continue;
+      }
+    }
+    // [text](url) — collapse to just `text` (styled with linkOpen) and
+    // record the URL with start/end in clean coords. The bracket text
+    // IS re-parsed through the same machinery so nested inline
+    // markdown (`code`, **bold**) inside the link label gets stripped
+    // too — agents commonly write `` [`some/path.ts`](file://…) `` and
+    // emitting raw backticks would leave them visible.
+    if (c === "[") {
+      const closeBracket = text.indexOf("]", i + 1);
+      if (
+        closeBracket !== -1 &&
+        text[closeBracket + 1] === "(" &&
+        closeBracket > i + 1
+      ) {
+        const closeParen = text.indexOf(")", closeBracket + 2);
+        if (closeParen !== -1 && closeParen > closeBracket + 2) {
+          const linkText = text.slice(i + 1, closeBracket);
+          const url = text.slice(closeBracket + 2, closeParen);
+          const inner = applyInlineMarkupWithLinks(linkText, opts);
+          const start = cleanLen;
+          styled += `${linkOpen}${inner.styled}${linkReset}`;
+          // Shift any nested link ranges so their coords are global
+          // to the outer string. Rare in practice (a link inside a
+          // link), but the bookkeeping is cheap and keeps the
+          // sidecar self-consistent.
+          for (const nested of inner.links) {
+            links.push({
+              start: start + nested.start,
+              end: start + nested.end,
+              url: nested.url,
+            });
+          }
+          cleanLen += inner.cleanLength;
+          links.push({ start, end: cleanLen, url });
+          i = closeParen + 1;
+          continue;
+        }
+      }
+    }
+    styled += c;
+    cleanLen += 1;
+    i += 1;
+  }
+  return { styled, links, cleanLength: cleanLen };
 }
 
 // Per-heading inline-markup opts. Headings render via the markup-interpreting
@@ -203,6 +336,26 @@ function applyInlineMarkup(
 // heading's base attrs so the rest of the heading keeps its style. heading-2
 // uses `^Y` (bright yellow) as the code opener because the default `^C`
 // would match the heading's brightCyan and disappear visually.
+// Per-plan-style reset opts so inline `code`/**bold** spans restore the
+// row's base color/attr after `^:` (full SGR reset). plan rows render as
+// brightYellow, plan-done as brightGreen, plan-pending as dim — each
+// boldReset/codeReset re-asserts that base.
+function planInlineOptsFor(style: Style): {
+  codeOpen: string;
+  boldReset: string;
+  codeReset: string;
+} {
+  switch (style) {
+    case "plan-done":
+      return { codeOpen: "^C", boldReset: "^:^g", codeReset: "^:^g" };
+    case "plan-pending":
+      return { codeOpen: "^C", boldReset: "^:^-", codeReset: "^:^-" };
+    case "plan":
+    default:
+      return { codeOpen: "^C", boldReset: "^:^Y", codeReset: "^:^Y" };
+  }
+}
+
 function headingInlineOptsFor(style: Style): {
   codeOpen: string;
   boldReset: string;
@@ -270,10 +423,18 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
   let codeLang = "";
   let codeBuffer: string[] = [];
   let firstNonBlank = firstPrefix !== "  ";
-  const line = (body: string, bodyStyle: Style, prefix = "  "): void => {
+  const line = (
+    body: string,
+    bodyStyle: Style,
+    prefix = "  ",
+    links?: Array<{ start: number; end: number; url: string }>,
+  ): void => {
     const entry: FormattedLine = { prefix, body, bodyStyle };
     if (prefixStyle !== undefined)
       entry.prefixStyle = prefixStyle;
+    if (links && links.length > 0) {
+      entry.links = links;
+    }
     out.push(entry);
   };
   const nextPrefix = (): string => {
@@ -381,11 +542,17 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     if (bullet) {
       const indent = bullet[1] ?? "";
       const item = bullet[2] ?? "";
-      line(
-        `${indent}• ${applyInlineMarkup(item, inlineOpts)}`,
-        proseStyle,
-        nextPrefix(),
-      );
+      const { styled, links } = applyInlineMarkupWithLinks(item, inlineOpts);
+      // The link sidecar reports clean-text offsets relative to `item`;
+      // shift them past the rendered prefix (`${indent}• `, which adds
+      // indent.length + 2 clean chars) so they align with the FULL body.
+      const shift = indent.length + 2;
+      const shifted = links.map((l) => ({
+        start: l.start + shift,
+        end: l.end + shift,
+        url: l.url,
+      }));
+      line(`${indent}• ${styled}`, proseStyle, nextPrefix(), shifted);
       continue;
     }
     const ordered = l.match(/^(\s*)(\d+)\.\s+(.*)$/);
@@ -393,19 +560,19 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
       const indent = ordered[1] ?? "";
       const num = ordered[2] ?? "";
       const item = ordered[3] ?? "";
-      line(
-        `${indent}${num}. ${applyInlineMarkup(item, inlineOpts)}`,
-        proseStyle,
-        nextPrefix(),
-      );
+      const { styled, links } = applyInlineMarkupWithLinks(item, inlineOpts);
+      const shift = indent.length + num.length + 2; // "N. "
+      const shifted = links.map((l) => ({
+        start: l.start + shift,
+        end: l.end + shift,
+        url: l.url,
+      }));
+      line(`${indent}${num}. ${styled}`, proseStyle, nextPrefix(), shifted);
       continue;
     }
     const isBlank = l.trim() === "";
-    line(
-      applyInlineMarkup(l, inlineOpts),
-      proseStyle,
-      isBlank ? "  " : nextPrefix(),
-    );
+    const { styled, links } = applyInlineMarkupWithLinks(l, inlineOpts);
+    line(styled, proseStyle, isBlank ? "  " : nextPrefix(), links);
   }
   // Mid-stream: flush in-progress fence so content is visible before the
   // closing ``` arrives.
@@ -1873,9 +2040,16 @@ function formatPlan(
     const content = entry.content
       .replace(/^\d+\/\d+\s+/, "")
       .replace(/\s*\(?\d+\/\d+\)?\s*$/, "");
+    // Apply inline markdown (`code`, **bold**) so plan entries that
+    // reference code symbols or fields don't render with literal
+    // backticks/asterisks. Each plan style emits its base color via
+    // writeStyled and then expects spans to restore that color after
+    // closing — pass per-style reset opts so a `code` or **bold** span
+    // doesn't strand the rest of the row in default-foreground.
+    const styledContent = applyInlineMarkup(content, planInlineOptsFor(style));
     lines.push({
       prefix: "  ",
-      body: `${marker} ${content}`,
+      body: `${marker} ${styledContent}`,
       bodyStyle: style,
     });
   }

@@ -2783,6 +2783,22 @@ export class Screen {
       return null;
     }
     const cleanOffset = rawToClean[Math.min(pos.offset, rawToClean.length - 1)] ?? clean.length;
+    // Inline-markdown link sidecar: if the click landed inside a
+    // [text](url) span, hand back the URL as the token. The render
+    // dropped the markdown syntax so the text alone (often a relative
+    // path) wouldn't resolve to the right file via cwd; the URL is
+    // the authoritative pointer. file:// URLs collapse to their
+    // absolute path here so the downstream stat/spawn path treats
+    // them like any other absolute token.
+    if (line.links) {
+      for (const link of line.links) {
+        if (cleanOffset >= link.start && cleanOffset < link.end) {
+          const url = link.url;
+          const raw = url.startsWith("file://") ? url.slice("file://".length) : url;
+          return { raw, line: null };
+        }
+      }
+    }
     let idx = Math.max(0, Math.min(clean.length - 1, cleanOffset));
     if (cleanOffset >= clean.length) {
       idx = clean.length - 1;
@@ -5125,7 +5141,13 @@ function bodyStyleUsesMarkup(style: Style | undefined): boolean {
     style === "thought" ||
     style === "heading-1" ||
     style === "heading-2" ||
-    style === "heading-3"
+    style === "heading-3" ||
+    // Plan entries route through applyInlineMarkup in formatPlan so inline
+    // `code`/**bold** in entry content renders styled instead of as literal
+    // backticks/asterisks. Width-budgeting must strip these carets too.
+    style === "plan" ||
+    style === "plan-done" ||
+    style === "plan-pending"
   );
 }
 
@@ -5197,13 +5219,17 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       term.dim.noFormat(text);
       return;
     case "plan":
-      term.brightYellow.noFormat(text);
+      // noFormat dropped so caret markup emitted by applyInlineMarkup
+      // (planInlineOptsFor in format.ts closes inline spans with the row's
+      // base color so brightYellow/green/dim is restored after the span)
+      // is interpreted.
+      term.brightYellow(text);
       return;
     case "plan-done":
-      term.green.noFormat(text);
+      term.green(text);
       return;
     case "plan-pending":
-      term.dim.noFormat(text);
+      term.dim(text);
       return;
     case "system":
       term.brightYellow.noFormat(text);
