@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { invokedBinName } from "./bin-name.js";
 import type { HydraConfig } from "./config.js";
 import { computeConfigDigest } from "./config-digest.js";
 
@@ -34,11 +35,9 @@ export async function ensureDaemonReachable(config: HydraConfig): Promise<void> 
     return;
   }
   if (probe === "mismatch") {
-    const protocol = config.daemon.tls ? "https" : "http";
+    const bin = invokedBinName();
     throw new Error(
-      `a different daemon is already listening on ${protocol}://${config.daemon.host}:${config.daemon.port} ` +
-        `(config digest mismatch). Refusing to connect because the auth token would not match. ` +
-        `Stop the other daemon (\`hydra-acp daemon stop\` in its HOME) or change daemon.port in this config.`,
+      `unable to attach to running daemon — run \`${bin} daemon stop\` and try again.`,
     );
   }
   process.stderr.write("hydra-acp: daemon not running; starting it...\n");

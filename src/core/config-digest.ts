@@ -22,7 +22,14 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function computeConfigDigest(config: HydraConfig): string {
-  const json = JSON.stringify(canonicalize(config));
+  // The `tui` section has no bearing on daemon behavior — it's all
+  // client-side rendering/input preferences. Excluding it means edits
+  // to TUI options don't trip the "config changed since daemon
+  // started" mismatch path.
+  const { tui: _tui, ...daemonRelevant } = config as HydraConfig & {
+    tui?: unknown;
+  };
+  const json = JSON.stringify(canonicalize(daemonRelevant));
   return createHash("sha256").update(json).digest("hex").slice(0, 16);
 }
 
