@@ -628,6 +628,16 @@ export function registerAcpWsEndpoint(
           hydraMeta && typeof hydraMeta.title === "string"
             ? hydraMeta.title
             : undefined;
+        // Optional starting model under _meta["hydra-acp"].model — mirrors
+        // session/new so a transformer (e.g. the planner) can spawn a
+        // worker directly on a configured floor model instead of the
+        // agent's default. Avoids a post-spawn set_model round-trip and
+        // closes the window where the session briefly exists on the
+        // wrong model.
+        const model =
+          hydraMeta && typeof hydraMeta.model === "string"
+            ? hydraMeta.model
+            : undefined;
 
         // Inherit cwd from the parent when omitted. The common transformer
         // pattern is "spawn a child in the same place as my parent"; the
@@ -664,6 +674,7 @@ export function registerAcpWsEndpoint(
           interactive,
           transformChain: [], // children start with no chain by default
           title,
+          model,
         });
         return { childSessionId: child.sessionId };
       });
