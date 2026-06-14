@@ -874,6 +874,109 @@ function highlightFencedBlock(
   }));
 }
 
+// Map common file extensions to highlight.js language ids. Only entries
+// that cli-highlight actually supports survive supportsLanguage() — the
+// helper returns "" for misses so highlightFencedBlock falls through to
+// the plain-text path.
+const EXTENSION_TO_LANGUAGE: Record<string, string> = {
+  ".ts": "typescript",
+  ".tsx": "typescript",
+  ".js": "javascript",
+  ".jsx": "javascript",
+  ".mjs": "javascript",
+  ".cjs": "javascript",
+  ".json": "json",
+  ".jsonc": "json",
+  ".py": "python",
+  ".rb": "ruby",
+  ".go": "go",
+  ".rs": "rust",
+  ".java": "java",
+  ".kt": "kotlin",
+  ".kts": "kotlin",
+  ".c": "c",
+  ".h": "c",
+  ".cc": "cpp",
+  ".cpp": "cpp",
+  ".cxx": "cpp",
+  ".hpp": "cpp",
+  ".hh": "cpp",
+  ".cs": "csharp",
+  ".swift": "swift",
+  ".m": "objectivec",
+  ".mm": "objectivec",
+  ".php": "php",
+  ".scala": "scala",
+  ".sh": "bash",
+  ".bash": "bash",
+  ".zsh": "bash",
+  ".fish": "bash",
+  ".ps1": "powershell",
+  ".sql": "sql",
+  ".html": "xml",
+  ".htm": "xml",
+  ".xml": "xml",
+  ".svg": "xml",
+  ".css": "css",
+  ".scss": "scss",
+  ".sass": "scss",
+  ".less": "less",
+  ".yaml": "yaml",
+  ".yml": "yaml",
+  ".toml": "ini",
+  ".ini": "ini",
+  ".md": "markdown",
+  ".markdown": "markdown",
+  ".lua": "lua",
+  ".pl": "perl",
+  ".pm": "perl",
+  ".r": "r",
+  ".dart": "dart",
+  ".ex": "elixir",
+  ".exs": "elixir",
+  ".erl": "erlang",
+  ".hs": "haskell",
+  ".clj": "clojure",
+  ".cljs": "clojure",
+  ".vim": "vim",
+  ".dockerfile": "dockerfile",
+  ".diff": "diff",
+  ".patch": "diff",
+  ".tf": "terraform",
+  ".proto": "protobuf",
+  ".graphql": "graphql",
+  ".gql": "graphql",
+  ".el": "lisp",
+};
+
+// Guess a highlight.js language id from a file path's extension. Returns
+// the empty string when the extension is unknown or the language isn't
+// supported by cli-highlight, so highlightFencedBlock falls through to
+// plain text.
+export function languageFromPath(p: string | undefined): string {
+  if (!p) {
+    return "";
+  }
+  // Special-case files identified by name rather than extension.
+  const base = p.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  if (base === "dockerfile" || base.startsWith("dockerfile.")) {
+    return supportsLanguage("dockerfile") ? "dockerfile" : "";
+  }
+  if (base === "makefile" || base === "gnumakefile") {
+    return supportsLanguage("makefile") ? "makefile" : "";
+  }
+  const dot = base.lastIndexOf(".");
+  if (dot < 0) {
+    return "";
+  }
+  const ext = base.slice(dot);
+  const lang = EXTENSION_TO_LANGUAGE[ext];
+  if (!lang) {
+    return "";
+  }
+  return supportsLanguage(lang) ? lang : "";
+}
+
 function formatBlock(
   text: string,
   prefix: string,
@@ -1125,12 +1228,37 @@ export function renderToolDetail(state: ToolLineState): FormattedLine[] {
   // dim lines. If truncated, append a trailer after the last visible line.
   if (state.resultText) {
     const resultLines = state.resultText.split("\n");
-    for (const line of resultLines) {
-      lines.push({
-        prefix: "     ",
-        body: sanitizeSingleLine(line),
-        bodyStyle: "dim",
-      });
+    // If the tool reports a file location (or the detail text is a bare
+    // path), try to syntax-highlight the body as that file's language.
+    // Falls through to the plain dim rendering when no language matches.
+    const pathHint =
+      state.locations?.[0]?.path ?? state.detailFull ?? state.detail;
+    const lang = languageFromPath(pathHint);
+    if (lang.length > 0) {
+      const highlighted = highlightFencedBlock(
+        lang,
+        resultLines.map((l) => sanitizeSingleLine(l)),
+      );
+      for (const piece of highlighted) {
+        const entry: FormattedLine = {
+          prefix: "     ",
+          body: piece.body,
+          bodyStyle: "code",
+          fillRow: true,
+        };
+        if (piece.ansi) {
+          entry.ansi = true;
+        }
+        lines.push(entry);
+      }
+    } else {
+      for (const line of resultLines) {
+        lines.push({
+          prefix: "     ",
+          body: sanitizeSingleLine(line),
+          bodyStyle: "dim",
+        });
+      }
     }
     if (state.resultTruncated) {
       lines.push({
