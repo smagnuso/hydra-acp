@@ -2735,20 +2735,51 @@ export class Screen {
     if (body.length === 0) {
       return null;
     }
-    let idx = Math.max(0, Math.min(body.length - 1, pos.offset));
-    if (pos.offset >= body.length) {
-      idx = body.length - 1;
-    }
-    if (!ASCII_WORD_RE.test(body[idx]!)) {
+    // Styled bodies (agent / heading / thought) carry zero-width
+    // terminal-kit markup spans like `^Ccode^:`. Scanning the raw body
+    // directly lets the `C` from `^C` (and similar style chars) count
+    // as a word character, dragging the markup byte into the snapped
+    // range. Result: selection contains stray `C` chars and the
+    // offset math for rendering the inverse band is off by one. Mirror
+    // the markup-strip pattern from pathTokenAt — scan boundaries on
+    // the visible-only view, then project them back onto raw offsets.
+    const { clean, rawToClean } = stripTkMarkupWithMap(body);
+    if (clean.length === 0) {
       return null;
     }
-    let start = idx;
-    while (start > 0 && ASCII_WORD_RE.test(body[start - 1]!)) {
-      start--;
+    const cleanOffset =
+      rawToClean[Math.min(pos.offset, rawToClean.length - 1)] ?? clean.length;
+    let idx = Math.max(0, Math.min(clean.length - 1, cleanOffset));
+    if (cleanOffset >= clean.length) {
+      idx = clean.length - 1;
     }
-    let end = idx + 1;
-    while (end < body.length && ASCII_WORD_RE.test(body[end]!)) {
-      end++;
+    if (!ASCII_WORD_RE.test(clean[idx]!)) {
+      return null;
+    }
+    let cleanStart = idx;
+    while (cleanStart > 0 && ASCII_WORD_RE.test(clean[cleanStart - 1]!)) {
+      cleanStart--;
+    }
+    let cleanEnd = idx + 1;
+    while (cleanEnd < clean.length && ASCII_WORD_RE.test(clean[cleanEnd]!)) {
+      cleanEnd++;
+    }
+    // Project clean indices back to raw offsets. The first raw index
+    // whose rawToClean value equals cleanStart is the visible char's
+    // position in the raw body; for cleanEnd we want the position past
+    // the last visible char (i.e. the first raw index mapping to
+    // cleanEnd, which sits at the boundary after the word and before
+    // any trailing markup).
+    let start = body.length;
+    let end = body.length;
+    for (let r = 0; r < rawToClean.length; r++) {
+      if (rawToClean[r] === cleanStart && start === body.length) {
+        start = r;
+      }
+      if (rawToClean[r] === cleanEnd && end === body.length) {
+        end = r;
+        break;
+      }
     }
     return { start, end };
   }
