@@ -663,11 +663,18 @@ function extractToolDetail(u: UpdateLike): string | undefined {
   // Bash commands are clipped from the head (keep the action); paths
   // are clipped from the tail (keep the filename). The full extractor
   // returns the un-clipped form; pick the right truncation here.
+  // The compact detail lands in a single FormattedLine body, so any
+  // embedded `\n` (multi-line bash heredocs are the common case) would
+  // be written verbatim to the terminal and the cursor would leave the
+  // planned row — painting the heredoc end-tag a row or two below the
+  // tool line. Collapse to a single line *before* clipping so the
+  // visible width math stays honest.
+  const oneLine = sanitizeSingleLine(full);
   const rawInput = u.rawInput as Record<string, unknown> | undefined;
   if (rawInput && typeof rawInput.command === "string") {
-    return clipHead(full, TOOL_DETAIL_MAX);
+    return clipHead(oneLine, TOOL_DETAIL_MAX);
   }
-  return clipTail(full, TOOL_DETAIL_MAX);
+  return clipTail(oneLine, TOOL_DETAIL_MAX);
 }
 
 function extractToolDetailFull(u: UpdateLike): string | undefined {

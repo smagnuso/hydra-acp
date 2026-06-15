@@ -61,6 +61,18 @@ describe("tool-call detail (rawInput hint)", () => {
     expect(detail).not.toContain("second line");
   });
 
+  it("collapses newlines in a multi-line bash command so the row stays single-line", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "bash",
+      rawInput: { command: "cat <<EOF\nhello\nEOF" },
+    });
+    const detail = (ev as { detail?: string }).detail!;
+    expect(detail).not.toContain("\n");
+    expect(detail).toBe("cat <<EOF hello EOF");
+  });
+
   it("derives a file path detail for edit/read, keeping the tail when long", () => {
     const edit = mapUpdate({
       sessionUpdate: "tool_call",
