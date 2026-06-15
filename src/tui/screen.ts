@@ -4874,11 +4874,37 @@ export class Screen {
     if (selectionRange !== null && !line.ansi) {
       const selStart = Math.max(0, Math.min(bodyText.length, selectionRange.start));
       const selEnd = Math.max(selStart, Math.min(bodyText.length, selectionRange.end));
+      const usesMarkup = bodyStyleUsesMarkup(line.bodyStyle);
       renderPiece(bodyText.slice(0, selStart), 0);
       if (selEnd > selStart) {
-        writeStyled(this.term, bodyText.slice(selStart, selEnd), "selection-highlight");
+        let selText = bodyText.slice(selStart, selEnd);
+        if (usesMarkup) {
+          // Body carries caret-markup spans (^+bold^:, ^Ccode^:, etc.)
+          // emitted by applyInlineMarkup. Strip them so the inverse
+          // band reads as one uniform color regardless of which span
+          // the selection happens to cross — leaving the markup in
+          // would either print carets literally (noFormat) or invert
+          // each span's own fg color (bold stays default, code flips
+          // to a cyan band), making the selection look striped.
+          selText = stripTkMarkup(selText);
+        }
+        writeStyled(this.term, selText, "selection-highlight");
       }
-      renderPiece(bodyText.slice(selEnd), selEnd);
+      let after = bodyText.slice(selEnd);
+      if (usesMarkup && selEnd > selStart) {
+        // The inverse writer ends with a full SGR reset, dropping any
+        // markup span (e.g. `^Ccode^:`) that opened before the
+        // selection and closes after it — the trailing piece would
+        // render without its original color. Prepend the cumulative
+        // caret-markup tokens from text[0..selEnd] so the same writer
+        // call replays the style stack right before printing the
+        // visible tail. Tokens are zero-width so this adds no chars.
+        const prime = tkMarkupTokensOnly(bodyText.slice(0, selEnd));
+        if (prime.length > 0) {
+          after = prime + after;
+        }
+      }
+      renderPiece(after, selEnd);
     } else if (this.scrollbackHighlight !== null && !line.ansi) {
       writeBodyWithHighlight(
         this.term,
@@ -5427,6 +5453,32 @@ export function stripTkMarkup(text: string): string {
       continue;
     }
     out += text[i];
+    i += 1;
+  }
+  return out;
+}
+
+// Extract only the zero-width caret-markup tokens from `text`, preserving
+// order. Used to "prime" terminal-kit's style state after a selection band
+// stripped the visible text: feeding the markup-only string back through
+// the markup writer re-applies the toggle/color spans that were active at
+// the splice point so the trailing piece keeps its original styling.
+// Literal `^^` (a visible caret) is dropped since it has no styling effect.
+function tkMarkupTokensOnly(text: string): string {
+  if (!text.includes("^")) {
+    return "";
+  }
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const m = matchTkMarkupAt(text, i);
+    if (m) {
+      if (m.width === 0) {
+        out += m.text;
+      }
+      i += m.text.length;
+      continue;
+    }
     i += 1;
   }
   return out;
