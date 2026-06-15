@@ -113,9 +113,10 @@ const TuiConfig = z.object({
   // When true, the TUI captures mouse events so the wheel can drive
   // scrollback. The cost: terminals route clicks to the app, so text
   // selection requires shift+drag to bypass mouse reporting. Default
-  // false — wheel scrollback stops working, but plain click-drag
-  // selects text via the terminal emulator. Set true to opt back in.
-  mouse: z.boolean().default(false),
+  // true — wheel scrolls the in-app scrollback and click-drag drives
+  // the in-app selector. Set false to hand the wheel + click-drag
+  // back to the terminal emulator's native scrollback / selection.
+  mouse: z.boolean().default(true),
   // Whether the TUI's in-app text selection feature is enabled. This
   // is an independent escape hatch for users whose muscle memory
   // conflicts with the in-app selector, separate from `mouse` capture
@@ -352,7 +353,7 @@ export const HydraConfig = z.object({
   tui: TuiConfig.default({
     repaintThrottleMs: 1000,
     maxScrollbackLines: 10_000,
-    mouse: false,
+    mouse: true,
     logMaxBytes: 5 * 1024 * 1024,
     cwdColumnMaxWidth: 32,
     progressIndicator: true,
