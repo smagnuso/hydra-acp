@@ -1342,6 +1342,11 @@ export function formatToolLine(
   // Append the detail hint (bash command / file path) after the verb, so a
   // generic "bash"/"edit" row says which command/file — unless the title
   // already carries it (e.g. an agent that refines the title to the path).
+  // Link ranges to stash on the FormattedLine so click-to-open can
+  // resolve any truncated-path span (`…/foo`) back to its full path.
+  // Offsets are in the eventual body string (post `· ` joins) and get
+  // back-filled as each appended piece lands at a known offset.
+  const titleLinks: Array<{ start: number; end: number; url: string }> = [];
   if (state.detail) {
     // Some adapters encode the tool verb into rawInput.command (e.g.
     // `command: "Read /foo"` for a Read tool), which would otherwise
@@ -1356,8 +1361,38 @@ export function formatToolLine(
     ) {
       detail = detail.slice(title.length).trimStart();
     }
-    if (detail.length > 0 && !title.includes(detail)) {
+    // Skip the detail append when the title already carries the full
+    // path: `state.detail` is the head/tail-clipped form (`…/foo`)
+    // while `state.detailFull` is the unclipped path. For pathy tools
+    // (Read/Edit/Write) the title was normalized to the same full
+    // path, so duplicating it as `… read · ~/long/path · …/path · 0s`
+    // is noise. Bash tools keep both because title="bash" and
+    // detail="<command>" carry different signal.
+    const dup =
+      title.includes(detail) ||
+      (state.detailFull !== undefined && title.includes(state.detailFull));
+    if (detail.length > 0 && !dup) {
+      const detailStart = title.length + 3; // " · " is 3 chars
       title = `${title} · ${detail}`;
+      // Attach a click-target for truncated paths so a double-click on
+      // `…/foo/bar.ts` still resolves to the real file. Prefer the
+      // agent-reported absolute path (locations[0].path), falling back
+      // to state.detailFull. Skip for non-path details (e.g. a clipped
+      // bash command) — locations is only populated for filesystem
+      // tools, and detailFull starts with `/` or `~` for paths.
+      if (detail.startsWith("…")) {
+        const fullPath =
+          state.locations?.[0]?.path ?? state.detailFull ?? "";
+        const looksPathy =
+          fullPath.startsWith("/") || fullPath.startsWith("~");
+        if (looksPathy) {
+          titleLinks.push({
+            start: detailStart,
+            end: detailStart + detail.length,
+            url: fullPath,
+          });
+        }
+      }
     }
   }
   // Append a duration: a live "running for Xs" counter while in flight,
@@ -1367,14 +1402,16 @@ export function formatToolLine(
     const end = state.endedAt ?? now;
     title = `${title} · ${formatElapsed(end - state.startedAt)}`;
   }
-  const lines: FormattedLine[] = [
-    {
-      prefix: `  ${toolStatusIcon(state.status)} `,
-      prefixStyle: toolIconStyle(state.status),
-      body: title,
-      bodyStyle: toolStatusStyle(state.status),
-    },
-  ];
+  const headLine: FormattedLine = {
+    prefix: `  ${toolStatusIcon(state.status)} `,
+    prefixStyle: toolIconStyle(state.status),
+    body: title,
+    bodyStyle: toolStatusStyle(state.status),
+  };
+  if (titleLinks.length > 0) {
+    headLine.links = titleLinks;
+  }
+  const lines: FormattedLine[] = [headLine];
   if (state.status === "failed" && state.errorText) {
     lines.push({
       prefix: "     ",
