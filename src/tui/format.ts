@@ -223,6 +223,12 @@ function applyInlineMarkupWithLinks(
   styled: string;
   links: Array<{ start: number; end: number; url: string }>;
   cleanLength: number;
+  // True when `styled` contains raw ANSI/OSC bytes (e.g. OSC 8
+  // hyperlink escapes for http(s) links). Callers should mirror this
+  // onto FormattedLine.ansi so width-counting and wrapping route
+  // through ANSI-aware helpers; bare term(text) renders fine either
+  // way, but column accounting needs the awareness.
+  ansi: boolean;
 } {
   const codeOpen = opts?.codeOpen ?? "^C";
   const codeReset = opts?.codeReset ?? "^:";
@@ -233,6 +239,7 @@ function applyInlineMarkupWithLinks(
   const linkReset = opts?.linkReset ?? "^:";
   let styled = "";
   let cleanLen = 0;
+  let ansi = false;
   const links: Array<{ start: number; end: number; url: string }> = [];
   let i = 0;
   while (i < text.length) {
@@ -268,6 +275,7 @@ function applyInlineMarkupWithLinks(
           });
         }
         cleanLen += inner.cleanLength;
+        if (inner.ansi) ansi = true;
         i = close + 2;
         continue;
       }
@@ -304,11 +312,25 @@ function applyInlineMarkupWithLinks(
           const url = text.slice(closeBracket + 2, closeParen);
           const inner = applyInlineMarkupWithLinks(linkText, opts);
           const start = cleanLen;
-          styled += `${linkOpen}${inner.styled}${linkReset}`;
-          // Shift any nested link ranges so their coords are global
-          // to the outer string. Rare in practice (a link inside a
-          // link), but the bookkeeping is cheap and keeps the
-          // sidecar self-consistent.
+          // file:// URLs stay in the sidecar so our double-click
+          // gesture can open them via the configured editor command;
+          // OSC 8 would route them through the terminal's URL
+          // handler, which usually means a browser. Non-file URLs
+          // (http, https, ssh, mailto, …) get wrapped in OSC 8 so
+          // modern terminals expose ctrl/cmd-click and hover tooltips
+          // — none of which our internal handler can do for a URL
+          // that isn't a filesystem path anyway.
+          const isFileUrl = url.startsWith("file://");
+          if (isFileUrl) {
+            styled += `${linkOpen}${inner.styled}${linkReset}`;
+          } else {
+            // OSC 8 framing: ESC ] 8 ; ; URL ST … ESC ] 8 ; ; ST.
+            // We use ST = ESC '\\' (the spec-canonical terminator);
+            // works in iTerm2, kitty, WezTerm, GNOME, Windows Term.
+            styled += `\x1b]8;;${url}\x1b\\${linkOpen}${inner.styled}${linkReset}\x1b]8;;\x1b\\`;
+            ansi = true;
+          }
+          // Shift any nested link ranges (links inside links — rare).
           for (const nested of inner.links) {
             links.push({
               start: start + nested.start,
@@ -317,7 +339,11 @@ function applyInlineMarkupWithLinks(
             });
           }
           cleanLen += inner.cleanLength;
-          links.push({ start, end: cleanLen, url });
+          // Only the file:// links are in the sidecar so the click
+          // handler doesn't try to spawn `code http://example.com`.
+          if (isFileUrl) {
+            links.push({ start, end: cleanLen, url });
+          }
           i = closeParen + 1;
           continue;
         }
@@ -327,7 +353,7 @@ function applyInlineMarkupWithLinks(
     cleanLen += 1;
     i += 1;
   }
-  return { styled, links, cleanLength: cleanLen };
+  return { styled, links, cleanLength: cleanLen, ansi };
 }
 
 // Per-heading inline-markup opts. Headings render via the markup-interpreting
@@ -428,12 +454,16 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     bodyStyle: Style,
     prefix = "  ",
     links?: Array<{ start: number; end: number; url: string }>,
+    ansi?: boolean,
   ): void => {
     const entry: FormattedLine = { prefix, body, bodyStyle };
     if (prefixStyle !== undefined)
       entry.prefixStyle = prefixStyle;
     if (links && links.length > 0) {
       entry.links = links;
+    }
+    if (ansi) {
+      entry.ansi = true;
     }
     out.push(entry);
   };
@@ -542,17 +572,14 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     if (bullet) {
       const indent = bullet[1] ?? "";
       const item = bullet[2] ?? "";
-      const { styled, links } = applyInlineMarkupWithLinks(item, inlineOpts);
-      // The link sidecar reports clean-text offsets relative to `item`;
-      // shift them past the rendered prefix (`${indent}• `, which adds
-      // indent.length + 2 clean chars) so they align with the FULL body.
+      const r = applyInlineMarkupWithLinks(item, inlineOpts);
       const shift = indent.length + 2;
-      const shifted = links.map((l) => ({
-        start: l.start + shift,
-        end: l.end + shift,
-        url: l.url,
+      const shifted = r.links.map((lk) => ({
+        start: lk.start + shift,
+        end: lk.end + shift,
+        url: lk.url,
       }));
-      line(`${indent}• ${styled}`, proseStyle, nextPrefix(), shifted);
+      line(`${indent}• ${r.styled}`, proseStyle, nextPrefix(), shifted, r.ansi);
       continue;
     }
     const ordered = l.match(/^(\s*)(\d+)\.\s+(.*)$/);
@@ -560,19 +587,19 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
       const indent = ordered[1] ?? "";
       const num = ordered[2] ?? "";
       const item = ordered[3] ?? "";
-      const { styled, links } = applyInlineMarkupWithLinks(item, inlineOpts);
-      const shift = indent.length + num.length + 2; // "N. "
-      const shifted = links.map((l) => ({
-        start: l.start + shift,
-        end: l.end + shift,
-        url: l.url,
+      const r = applyInlineMarkupWithLinks(item, inlineOpts);
+      const shift = indent.length + num.length + 2;
+      const shifted = r.links.map((lk) => ({
+        start: lk.start + shift,
+        end: lk.end + shift,
+        url: lk.url,
       }));
-      line(`${indent}${num}. ${styled}`, proseStyle, nextPrefix(), shifted);
+      line(`${indent}${num}. ${r.styled}`, proseStyle, nextPrefix(), shifted, r.ansi);
       continue;
     }
     const isBlank = l.trim() === "";
-    const { styled, links } = applyInlineMarkupWithLinks(l, inlineOpts);
-    line(styled, proseStyle, isBlank ? "  " : nextPrefix(), links);
+    const r = applyInlineMarkupWithLinks(l, inlineOpts);
+    line(r.styled, proseStyle, isBlank ? "  " : nextPrefix(), r.links, r.ansi);
   }
   // Mid-stream: flush in-progress fence so content is visible before the
   // closing ``` arrives.
