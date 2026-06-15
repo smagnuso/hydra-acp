@@ -853,9 +853,15 @@ export async function pickSession(
         }
       }
       paintIndicator();
-      // Blank trailing row after the indicator — guarantees the
-      // bottom row is clean if a prior frame left content there.
-      painter.paintRow(indicatorRow() + 1, "blank", () => {});
+      // Blank every row from just after the indicator down to the
+      // bottom of the terminal. The list shrinks when a filter
+      // (host / org / project) narrows the visible set, dropping
+      // viewportSize and pulling the indicator up; rows the prior
+      // frame painted below the new indicator must be cleared or
+      // they leave stale glyphs on screen.
+      for (let r = indicatorRow() + 1; r <= termHeight; r++) {
+        painter.paintRow(r, "blank", () => {});
+      }
       if (selectedIdx === 0) {
         placeComposerCursor();
         term.hideCursor(false);
