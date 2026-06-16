@@ -22,12 +22,60 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Session } from "../../core/session.js";
 import type { StreamGrepOptions as RawStreamGrepOptions } from "../../core/stream-buffer.js";
+import { renderTranscript } from "../../core/history-transcript.js";
 import { extractBearer } from "./bearer.js";
 import type { McpTokenRegistry } from "./token-registry.js";
 
 interface BuiltPair {
   server: McpServer;
   transport: StreamableHTTPServerTransport;
+}
+
+type SessionUpdateKind =
+  | "prompt_received"
+  | "agent_message_chunk"
+  | "tool_call"
+  | "turn_complete"
+  | string;
+
+function getSpeaker(kind: SessionUpdateKind): "user" | "agent" | "tool" {
+  switch (kind) {
+    case "prompt_received":
+      return "user";
+    case "tool_call":
+    case "tool_call_update":
+      return "tool";
+    default:
+      return "agent";
+  }
+}
+
+function makeSnippet(text: string, matchIndex: number): string {
+  const ellipsisCount = "…".length * 2;
+  const targetLen = 150 - ellipsisCount;
+  if (text.length <= targetLen) {
+    return text;
+  }
+  const half = Math.floor(targetLen / 2);
+  let start = matchIndex - half;
+  if (start < 0) {
+    start = 0;
+  }
+  const end = start + targetLen;
+  if (end > text.length) {
+    start = text.length - targetLen;
+    if (start < 0) {
+      start = 0;
+    }
+  }
+  let snippet = text.slice(start, end);
+  if (start > 0) {
+    snippet = "…" + snippet;
+  }
+  if (end < text.length) {
+    snippet = snippet + "…";
+  }
+  return snippet;
 }
 
 function buildMcpServer(session: Session): McpServer {
@@ -291,6 +339,275 @@ function buildMcpServer(session: Session): McpServer {
       };
     },
   );
+
+ if (session.summarizedThroughEntry !== undefined && session.summarizedThroughEntry > 0) {
+    server.registerTool(
+      "recall_search",
+      {
+        description:
+          'Search this session\'s prior conversation history (the part that was compacted out of your working memory) by keyword. Returns matching entry ids with short snippets so you can decide which to pull in full via recall_range. Use this when the compaction summary mentions something but you need the verbatim detail.',
+        inputSchema: {
+          query: z.string().min(1).describe("Case-insensitive substring to search for."),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(50)
+            .optional()
+            .describe("Maximum number of matches to return (default 10, max 50)."),
+          include_tool_calls: z
+            .boolean()
+            .optional()
+            .describe("Whether to include tool_call entries in the search (default true)."),
+        },
+      },
+      async ({ query, limit = 10, include_tool_calls = true }) => {
+        const history = await session.getHistorySnapshot();
+        const matches: Array<{
+          entryId: number;
+          speaker: "user" | "agent" | "tool";
+          snippet: string;
+          timestamp?: string;
+        }> = [];
+
+        for (let i = 0; i < history.length; i++) {
+          const entry = history[i];
+          if (!entry) {
+            continue;
+          }
+          if (entry.method !== "session/update") {
+            continue;
+          }
+          const params = entry.params as { update?: Record<string, unknown> } | undefined;
+          const update = params?.update;
+          if (!update || typeof update.sessionUpdate !== "string") {
+            continue;
+          }
+
+          const kind = update.sessionUpdate;
+          if (kind === "tool_call" && !include_tool_calls) {
+            continue;
+          }
+
+          const rendered = renderTranscript([entry] as unknown as Parameters<
+            typeof renderTranscript
+          >[0]);
+
+          const idx = rendered.toLowerCase().indexOf(query.toLowerCase());
+          if (idx < 0) {
+            continue;
+          }
+
+          const speaker = getSpeaker(kind);
+          const snippet = makeSnippet(rendered, idx);
+          const timestamp = typeof entry.recordedAt === "number" ? String(entry.recordedAt) : undefined;
+
+          matches.push({ entryId: i, speaker, snippet, timestamp });
+
+          if (matches.length >= limit) {
+            break;
+          }
+        }
+
+        const truncated = matches.length >= limit && matches.length < history.length;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                matches,
+                total_matched: matches.length,
+                truncated,
+              }),
+            },
+          ],
+          structuredContent: {
+            matches,
+            total_matched: matches.length,
+            truncated,
+          },
+        };
+      },
+    );
+
+    server.registerTool(
+      "recall_range",
+      {
+        description:
+          "Pull a contiguous range of prior conversation entries verbatim from this session's pre-compaction history. Use after recall_search narrows in on what you need. Capped at 50 entries per call.",
+        inputSchema: {
+          from_entry: z
+            .number()
+            .int()
+            .min(0)
+            .describe("Zero-based index of the first entry to include (inclusive)."),
+          to_entry: z
+            .number()
+            .int()
+            .min(0)
+            .describe("Zero-based index of the last entry to include (inclusive)."),
+        },
+      },
+      async ({ from_entry, to_entry }) => {
+        if (to_entry < from_entry) {
+          throw new Error(
+            `recall_range: to_entry (${to_entry}) must be >= from_entry (${from_entry})`,
+          );
+        }
+        const range_size = to_entry - from_entry + 1;
+        if (range_size > 50) {
+          throw new Error(
+            `recall_range: range size (${range_size}) exceeds maximum of 50 entries`,
+          );
+        }
+        const history = await session.getHistorySnapshot();
+        const clamped_from = Math.min(from_entry, history.length - 1);
+        const clamped_to = Math.min(to_entry, history.length - 1);
+        const truncated = clamped_from > from_entry || clamped_to < to_entry;
+        if (clamped_from > clamped_to) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "",
+              },
+            ],
+            structuredContent: { text: "", entry_count: 0, truncated },
+          };
+        }
+        const slice = history.slice(clamped_from, clamped_to + 1);
+        const text = renderTranscript(slice as unknown as Parameters<typeof renderTranscript>[0]);
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+          structuredContent: { text, entry_count: slice.length, truncated },
+        };
+      },
+    );
+
+    server.registerTool(
+      "recall_tool_calls",
+      {
+        description:
+          "Search this session's prior tool invocations by tool name and/or file path. Returns when each tool was called, the arguments, and the result status. Use this to recall which files were read/edited, what shell commands ran, etc.",
+        inputSchema: {
+          tool_name: z.string().optional(),
+          file_path: z.string().optional(),
+          limit: z.number().int().min(1).max(100).optional(),
+        },
+      },
+      async ({ tool_name, file_path, limit = 20 }) => {
+        const hasToolName = typeof tool_name === "string" && tool_name.length > 0;
+        const hasFilePath = typeof file_path === "string" && file_path.length > 0;
+        if (!hasToolName && !hasFilePath) {
+          throw new Error("recall_tool_calls: at least one of tool_name or file_path must be provided");
+        }
+        const history = await session.getHistorySnapshot();
+        const calls: Array<{
+          entryId: number;
+          tool: string;
+          args: Record<string, unknown>;
+          status: string;
+          timestamp?: string;
+        }> = [];
+
+        for (let i = 0; i < history.length; i++) {
+          const entry = history[i];
+          if (!entry) {
+            continue;
+          }
+          if (entry.method !== "session/update") {
+            continue;
+          }
+          const params = entry.params as { update?: Record<string, unknown> } | undefined;
+          const update = params?.update;
+          if (!update || typeof update.sessionUpdate !== "string") {
+            continue;
+          }
+          if (update.sessionUpdate !== "tool_call") {
+            continue;
+          }
+
+          // Determine tool name from name or title field.
+          let toolName: string;
+          if (typeof update.name === "string" && update.name.length > 0) {
+            toolName = update.name;
+          } else if (typeof update.title === "string" && update.title.length > 0) {
+            toolName = update.title;
+          } else {
+            toolName = "(unnamed)";
+          }
+
+          // Filter by tool_name.
+          if (tool_name !== undefined && toolName.toLowerCase() !== tool_name.toLowerCase()) {
+            continue;
+          }
+
+          // Extract rawInput for args and file_path matching.
+          const rawInput = update.rawInput as Record<string, unknown> | undefined;
+          const args: Record<string, unknown> = {};
+
+          // Build short args (only string values, skip large payloads).
+          if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
+            for (const [key, value] of Object.entries(rawInput)) {
+              if (typeof value === "string") {
+                // Truncate long strings to keep the response lean.
+                args[key] = value.length > 500 ? value.slice(0, 497) + "…" : value;
+              } else if (typeof value === "number" || typeof value === "boolean") {
+                args[key] = value;
+              }
+            }
+          }
+
+          // Filter by file_path — match against known path fields only.
+          if (hasFilePath && rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
+            const fpLower = file_path!.toLowerCase();
+            const pathKeys = ["file_path", "path"];
+            let pathMatch = false;
+            for (const key of pathKeys) {
+              const value = rawInput[key];
+              if (typeof value === "string" && value.toLowerCase() === fpLower) {
+                pathMatch = true;
+                break;
+              }
+            }
+            if (!pathMatch) {
+              continue;
+            }
+          }
+
+          // Determine status from the tool_call entry itself.
+          let status = "in_progress";
+          if (typeof update.status === "string") {
+            status = update.status;
+          }
+
+          const timestamp = typeof entry.recordedAt === "number" ? String(entry.recordedAt) : undefined;
+
+          calls.push({ entryId: i, tool: toolName, args, status, timestamp });
+
+          if (calls.length >= limit) {
+            break;
+          }
+        }
+
+        const truncated = calls.length >= limit;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ calls, truncated }),
+            },
+          ],
+          structuredContent: { calls, truncated },
+        };
+      },
+    );
+  }
 
   return server;
 }

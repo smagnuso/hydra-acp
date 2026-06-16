@@ -31,7 +31,6 @@ function testConfig(): HydraConfig {
     },
     defaultAgent: "claude-acp",
     defaultModels: {},
-    synopsisOnClose: false,
     defaultCwd: os.homedir(),
     compressToolContent: true,
     sessionListColdLimit: 20,
@@ -58,6 +57,7 @@ function testConfig(): HydraConfig {
       showFileUpdates: "none" as const,
       selectionClipboard: "both" as const,
     },
+    compaction: { tailK: 0, maxIterations: 1 },
   };
 }
 
@@ -1331,7 +1331,6 @@ describe("startDaemon — extensions REST lifecycle", () => {
       },
       defaultAgent: "claude-acp",
       defaultModels: {},
-      synopsisOnClose: false,
       defaultCwd: os.homedir(),
       compressToolContent: true,
       sessionListColdLimit: 20,
@@ -1365,6 +1364,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         showFileUpdates: "none" as const,
         selectionClipboard: "both" as const,
       },
+   compaction: { tailK: 0, maxIterations: 1 },
     };
     handle = await startDaemon(cfg, TEST_TOKEN);
     const p = port(handle);

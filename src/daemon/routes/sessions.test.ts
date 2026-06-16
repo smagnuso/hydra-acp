@@ -1062,3 +1062,141 @@ describe("POST /v1/sessions extension MCP injection", () => {
     expect(payload!.mcpServers).toEqual([callerDescriptor]);
   });
 });
+
+describe("session routes: compaction endpoints", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  it("POST /v1/sessions/:id/compact returns 202 with { scheduled: true } for a live session", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { scheduled: boolean };
+    expect(body.scheduled).toBe(true);
+  });
+
+  it("POST /v1/sessions/:id/compact returns 404 for an unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_ghost/compact`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /v1/sessions/:id/compact schedules compaction via coordinator for a cold session", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const id = session.sessionId;
+    await session.close({ deleteRecord: false });
+    expect(harness.manager.get(id)).toBeUndefined();
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${id}/compact`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { scheduled: boolean };
+    expect(body.scheduled).toBe(true);
+  });
+
+  it("GET /v1/sessions/:id/compact returns current state shape", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      summarizedThroughEntry?: number;
+      inFlight: boolean;
+    };
+    // A fresh session has never been compacted, so summarizedThroughEntry
+    // is undefined and omitted from the JSON response.
+    expect(body).toHaveProperty("inFlight");
+    expect(typeof body.inFlight).toBe("boolean");
+  });
+
+  it("GET /v1/sessions/:id/compact returns summarizedThroughEntry from a live session", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    // New sessions have no summary yet, so summarizedThroughEntry should be undefined.
+    session.summarizedThroughEntry = 42;
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { summarizedThroughEntry?: number };
+    expect(body.summarizedThroughEntry).toBe(42);
+  });
+
+  it("GET /v1/sessions/:id/compact returns 404 for an unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_ghost/compact`,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /v1/sessions/:id/compact returns summarizedThroughEntry for a cold session", async () => {
+    // Import a bundle that already has summarizedThroughEntry set,
+    // then verify the GET endpoint reads it from disk.
+    const bundle = {
+      version: 1 as const,
+      exportedAt: "2026-05-13T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_cold",
+        lineageId: "lin_cold_get",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-05-13T00:00:00.000Z",
+        updatedAt: "2026-05-13T00:00:00.000Z",
+        summarizedThroughEntry: 7,
+      },
+      history: [
+        {
+          method: "session/update",
+          params: {
+            sessionId: "u_cold",
+            update: {
+              sessionUpdate: "turn_complete",
+              messageId: "m_cold",
+              stopReason: "end_turn",
+            },
+          },
+          recordedAt: 1,
+        },
+      ],
+    };
+    const imported = await harness.manager.importBundle(bundle);
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { summarizedThroughEntry?: number };
+    expect(body.summarizedThroughEntry).toBe(7);
+  });
+});

@@ -28,7 +28,6 @@ function testConfig(): HydraConfig {
     },
     defaultAgent: "claude-acp",
     defaultModels: {},
-    synopsisOnClose: false,
     defaultCwd: os.homedir(),
     compressToolContent: true,
     sessionListColdLimit: 20,
@@ -55,6 +54,7 @@ function testConfig(): HydraConfig {
       showFileUpdates: "none" as const,
       selectionClipboard: "both" as const,
     },
+    compaction: { tailK: 0, maxIterations: 1 },
   };
 }
 

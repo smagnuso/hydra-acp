@@ -10,6 +10,7 @@ import {
   migrateLegacyAuthToken,
   writeConfig,
 } from "./config.js";
+import type { CompactionConfig } from "./config.js";
 import { paths } from "./paths.js";
 
 describe("defaultConfig", () => {
@@ -172,6 +173,78 @@ describe("loadConfig with a broken config symlink", () => {
     } finally {
       await fs.rm(paths.config(), { force: true });
     }
+  });
+});
+
+describe("compaction config", () => {
+  it("defaults tailK to 20", () => {
+    const cfg = defaultConfig();
+    expect(cfg.compaction.tailK).toBe(20);
+  });
+
+  it("defaults maxIterations to 3", () => {
+    const cfg = defaultConfig();
+    expect(cfg.compaction.maxIterations).toBe(3);
+  });
+
+  it("parses from an empty object", () => {
+    const cfg = HydraConfig.parse({ compaction: {} });
+    expect(cfg.compaction.tailK).toBe(20);
+    expect(cfg.compaction.maxIterations).toBe(3);
+  });
+
+  it("accepts explicit tailK and maxIterations", () => {
+    const cfg = HydraConfig.parse({
+      compaction: { tailK: 50, maxIterations: 10 },
+    });
+    expect(cfg.compaction.tailK).toBe(50);
+    expect(cfg.compaction.maxIterations).toBe(10);
+  });
+
+  it("omits compaction entirely and still defaults", () => {
+    const cfg = HydraConfig.parse({});
+    expect(cfg.compaction.tailK).toBe(20);
+    expect(cfg.compaction.maxIterations).toBe(3);
+  });
+
+  it("rejects a negative tailK", () => {
+    expect(() =>
+      HydraConfig.parse({ compaction: { tailK: -1 } }),
+    ).toThrow();
+  });
+
+  it("rejects a non-integer tailK", () => {
+    expect(() =>
+      HydraConfig.parse({ compaction: { tailK: 1.5 } }),
+    ).toThrow();
+  });
+
+  it("accepts tailK of zero", () => {
+    const cfg = HydraConfig.parse({ compaction: { tailK: 0 } });
+    expect(cfg.compaction.tailK).toBe(0);
+  });
+
+  it("rejects a non-positive maxIterations", () => {
+    expect(() =>
+      HydraConfig.parse({ compaction: { maxIterations: 0 } }),
+    ).toThrow();
+  });
+
+  it("rejects a negative maxIterations", () => {
+    expect(() =>
+      HydraConfig.parse({ compaction: { maxIterations: -5 } }),
+    ).toThrow();
+  });
+
+  it("rejects a non-integer maxIterations", () => {
+    expect(() =>
+      HydraConfig.parse({ compaction: { maxIterations: 2.7 } }),
+    ).toThrow();
+  });
+
+  it("CompactionConfig type is available", () => {
+    const c: CompactionConfig = { tailK: 10, maxIterations: 5 };
+    expect(c.tailK).toBe(10);
   });
 });
 

@@ -1992,6 +1992,104 @@ describe("Session", () => {
       expect(promptCalls.length).toBe(0);
     });
 
+    it("/hydra compact schedules compaction via scheduleCompaction hook", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const scheduleCompaction = vi.fn();
+      const session = new Session({
+        sessionId: "hydra_session_CK",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_CK",
+        historyStore: new HistoryStore(),
+        scheduleCompaction,
+      });
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra compact" }],
+      });
+
+      expect(scheduleCompaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("/hydra compact emits a synthetic confirmation via scheduleCompaction hook", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const scheduleCompaction = vi.fn();
+      const session = new Session({
+        sessionId: "hydra_session_CE",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_CE",
+        historyStore: new HistoryStore(),
+        scheduleCompaction,
+      });
+      const { client: alice, stream } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra compact" }],
+      });
+
+      // The synthetic confirmation is broadcast as an agent_message_chunk.
+      const sent = stream.sent;
+      const chunkUpdate = sent.find(
+        (msg) =>
+          msg.method === "session/update" &&
+          typeof msg.params === "object" &&
+          msg.params !== null &&
+          "sessionId" in msg.params &&
+          "update" in msg.params &&
+          typeof msg.params.update === "object" &&
+          msg.params.update !== null &&
+          "sessionUpdate" in msg.params.update &&
+          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
+            "agent_message_chunk",
+      );
+      expect(chunkUpdate).toBeDefined();
+      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      expect(content.text).toContain("Compaction scheduled");
+    });
+
+    it("/hydra compact without scheduleCompaction hook emits error message", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      // No scheduleCompaction provided
+      const session = new Session({
+        sessionId: "hydra_session_CX",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_CX",
+        historyStore: new HistoryStore(),
+      });
+      const { client: alice, stream } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra compact" }],
+      });
+
+      const sent = stream.sent;
+      const chunkUpdate = sent.find(
+        (msg) =>
+          msg.method === "session/update" &&
+          typeof msg.params === "object" &&
+          msg.params !== null &&
+          "sessionId" in msg.params &&
+          "update" in msg.params &&
+          typeof msg.params.update === "object" &&
+          msg.params.update !== null &&
+          "sessionUpdate" in msg.params.update &&
+          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
+            "agent_message_chunk",
+      );
+      expect(chunkUpdate).toBeDefined();
+      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      expect(content.text).toContain("compaction scheduling not configured");
+    });
+
     it("forceCancel kills the agent and closes the session (keeping the record) so it can resurrect", async () => {
       const { session, mock } = makeSession("hydra_session_FC", "u_old");
       const { client } = makeClient();

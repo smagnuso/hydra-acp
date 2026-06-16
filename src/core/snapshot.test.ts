@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { tryParseSnapshot } from "./snapshot.js";
+import { tryParseSnapshot, tryParseCompaction } from "./snapshot.js";
 
 describe("tryParseSnapshot — strict JSON happy path", () => {
   it("parses a complete title + synopsis object", () => {
@@ -163,5 +163,303 @@ describe("tryParseSnapshot — title clamping", () => {
     const r = tryParseSnapshot(raw);
     expect(r!.title!.length).toBe(200);
     expect(r!.title).toBe("A".repeat(200));
+  });
+});
+
+describe("tryParseSnapshot — compaction fields", () => {
+  it("parses synopsis with new compaction fields alongside existing fields", () => {
+    const raw = JSON.stringify({
+      title: "Compact session",
+      synopsis: {
+        goal: "add compaction support",
+        outcome: "merged PR",
+        decisions: ["use manual trigger only"],
+        file_edit_intentions: ["src/core/compact.ts"],
+        unresolved_errors: ["flaky test on CI"],
+        tool_state: ["server running on port 3000"],
+      },
+    });
+    const r = tryParseSnapshot(raw);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("Compact session");
+    expect(r!.synopsis?.goal).toBe("add compaction support");
+    expect(r!.synopsis?.decisions).toEqual(["use manual trigger only"]);
+    expect(r!.synopsis?.file_edit_intentions).toEqual(["src/core/compact.ts"]);
+    expect(r!.synopsis?.unresolved_errors).toEqual(["flaky test on CI"]);
+    expect(r!.synopsis?.tool_state).toEqual(["server running on port 3000"]);
+  });
+
+  it("registers content when synopsis has only new compaction fields", () => {
+    const raw = JSON.stringify({
+      title: "only compaction data",
+      synopsis: {
+        decisions: ["went with approach B"],
+        tool_state: ["build in progress"],
+      },
+    });
+    const r = tryParseSnapshot(raw);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("only compaction data");
+    expect(r!.synopsis).toBeDefined();
+    expect(r!.synopsis?.decisions).toEqual(["went with approach B"]);
+    expect(r!.synopsis?.tool_state).toEqual(["build in progress"]);
+  });
+
+  it("drops synopsis when only new fields are present but all empty", () => {
+    const raw = JSON.stringify({
+      title: "ok",
+      synopsis: {
+        decisions: [],
+        file_edit_intentions: [],
+        unresolved_errors: [],
+        tool_state: [],
+      },
+    });
+    const r = tryParseSnapshot(raw);
+    expect(r!.title).toBe("ok");
+    expect(r!.synopsis).toBeUndefined();
+  });
+});
+
+describe("tryParseCompaction — round-trip full compaction JSON", () => {
+  it("parses a complete flat compaction object with all fields", () => {
+    const raw = JSON.stringify({
+      title: "Compact long session",
+      goal: "Build a file watcher daemon",
+      outcome: "Prototype working with systemd integration",
+      rejected_approaches: ["inotify via native addon", "polling loop"],
+      open_threads: ["add config file support", "write unit tests"],
+      decisions: ["use node fs.watch instead of chokidar"],
+      file_edit_intentions: ["src/core/watcher.ts", "package.json"],
+      unresolved_errors: ["race condition on rapid file changes"],
+      tool_state: ["daemon listening on port 8080"],
+    });
+    const r = tryParseCompaction(raw);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("Compact long session");
+    expect(r!.synopsis?.goal).toBe("Build a file watcher daemon");
+    expect(r!.synopsis?.outcome).toBe(
+      "Prototype working with systemd integration",
+    );
+    expect(r!.synopsis?.rejected_approaches).toEqual([
+      "inotify via native addon",
+      "polling loop",
+    ]);
+    expect(r!.synopsis?.open_threads).toEqual([
+      "add config file support",
+      "write unit tests",
+    ]);
+    expect(r!.synopsis?.decisions).toEqual([
+      "use node fs.watch instead of chokidar",
+    ]);
+    expect(r!.synopsis?.file_edit_intentions).toEqual([
+      "src/core/watcher.ts",
+      "package.json",
+    ]);
+    expect(r!.synopsis?.unresolved_errors).toEqual([
+      "race condition on rapid file changes",
+    ]);
+    expect(r!.synopsis?.tool_state).toEqual(["daemon listening on port 8080"]);
+  });
+
+  it("parses compaction with only a title and one synopsis field", () => {
+    const raw = JSON.stringify({
+      title: "minimal compact",
+      goal: "fix the build",
+    });
+    const r = tryParseCompaction(raw);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("minimal compact");
+    expect(r!.synopsis?.goal).toBe("fix the build");
+  });
+
+  it("returns title-only when synopsis fields are all empty", () => {
+    const raw = JSON.stringify({
+      title: "just a title",
+      goal: "",
+      outcome: "",
+      rejected_approaches: [],
+      open_threads: [],
+      decisions: [],
+      file_edit_intentions: [],
+      unresolved_errors: [],
+      tool_state: [],
+    });
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("just a title");
+    expect(r!.synopsis).toBeUndefined();
+  });
+});
+
+describe("tryParseCompaction — preamble tolerance", () => {
+  it("extracts JSON from a reply with a preamble", () => {
+    const raw =
+      'Here is your compaction summary:\n\n{"title":"hello","goal":"x"}';
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("hello");
+    expect(r!.synopsis?.goal).toBe("x");
+  });
+
+  it("extracts JSON from a reply with trailing prose", () => {
+    const raw =
+      '{"title":"hello","outcome":"shipped"}\n\nLet me know if you need anything else.';
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("hello");
+    expect(r!.synopsis?.outcome).toBe("shipped");
+  });
+
+  it("handles ```json fenced output", () => {
+    const raw =
+      '```json\n{"title":"fenced","goal":"fenced goal"}\n```';
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("fenced");
+    expect(r!.synopsis?.goal).toBe("fenced goal");
+  });
+
+  it("handles ``` fenced output without language tag", () => {
+    const raw =
+      '```\n{"title":"bare-fenced","goal":"bare goal"}\n```';
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("bare-fenced");
+    expect(r!.synopsis?.goal).toBe("bare goal");
+  });
+});
+
+describe("tryParseCompaction — empty content rejection", () => {
+  it("returns undefined for empty input", () => {
+    expect(tryParseCompaction("")).toBeUndefined();
+    expect(tryParseCompaction("   \n  ")).toBeUndefined();
+  });
+
+  it("returns undefined for non-JSON prose", () => {
+    expect(tryParseCompaction("Sorry, I can't summarize that.")).toBeUndefined();
+  });
+
+  it("returns undefined for malformed JSON with no extractable object", () => {
+    expect(tryParseCompaction("[1, 2, 3]")).toBeUndefined();
+    expect(tryParseCompaction("not even close")).toBeUndefined();
+  });
+
+  it("returns undefined when title and all fields are missing/invalid", () => {
+    const raw = JSON.stringify({
+      something_else: "x",
+      title: 42, // wrong type
+    });
+    expect(tryParseCompaction(raw)).toBeUndefined();
+  });
+
+  it("returns undefined when top-level is an array", () => {
+    expect(tryParseCompaction('[{"title":"x"}]')).toBeUndefined();
+  });
+
+  it("returns undefined for all-empty fields with no title", () => {
+    const raw = JSON.stringify({
+      goal: "",
+      outcome: "",
+      rejected_approaches: [],
+      open_threads: [],
+      decisions: [],
+      file_edit_intentions: [],
+      unresolved_errors: [],
+      tool_state: [],
+    });
+    expect(tryParseCompaction(raw)).toBeUndefined();
+  });
+});
+
+describe("tryParseCompaction — type validation", () => {
+  it("drops array fields that are not arrays", () => {
+    const raw = JSON.stringify({
+      title: "ok",
+      goal: "do stuff",
+      decisions: "should-be-array",
+      open_threads: null,
+    });
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("ok");
+    expect(r!.synopsis?.goal).toBe("do stuff");
+    expect(r!.synopsis?.decisions).toBeUndefined();
+    expect(r!.synopsis?.open_threads).toBeUndefined();
+  });
+
+  it("drops string fields that are not strings", () => {
+    const raw = JSON.stringify({
+      title: "ok",
+      goal: 42,
+      outcome: ["should-be-string"],
+    });
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("ok");
+    expect(r!.synopsis?.goal).toBeUndefined();
+    expect(r!.synopsis?.outcome).toBeUndefined();
+  });
+
+  it("trims whitespace around string fields", () => {
+    const raw = JSON.stringify({
+      title: "  compacted  ",
+      goal: "  do the thing  ",
+    });
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("compacted");
+    expect(r!.synopsis?.goal).toBe("do the thing");
+  });
+
+  it("caps title at 200 chars", () => {
+    const longTitle = "A".repeat(300);
+    const raw = JSON.stringify({
+      title: longTitle,
+      goal: "x",
+    });
+    const r = tryParseCompaction(raw);
+    expect(r!.title!.length).toBe(200);
+    expect(r!.title).toBe("A".repeat(200));
+  });
+});
+
+describe("tryParseCompaction — compaction fields only", () => {
+  it("parses synopsis with only new compaction fields", () => {
+    const raw = JSON.stringify({
+      title: "compaction-only data",
+      decisions: ["went with approach B"],
+      file_edit_intentions: ["src/core/compact.ts"],
+      unresolved_errors: ["flaky test on CI"],
+      tool_state: ["server running on port 3000"],
+    });
+    const r = tryParseCompaction(raw);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("compaction-only data");
+    expect(r!.synopsis?.decisions).toEqual(["went with approach B"]);
+    expect(r!.synopsis?.file_edit_intentions).toEqual([
+      "src/core/compact.ts",
+    ]);
+    expect(r!.synopsis?.unresolved_errors).toEqual(["flaky test on CI"]);
+    expect(r!.synopsis?.tool_state).toEqual(["server running on port 3000"]);
+  });
+
+  it("registers content when only new compaction fields are present", () => {
+    const raw = JSON.stringify({
+      title: "only compaction data",
+      decisions: ["went with approach B"],
+      tool_state: ["build in progress"],
+    });
+    const r = tryParseCompaction(raw);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("only compaction data");
+    expect(r!.synopsis).toBeDefined();
+    expect(r!.synopsis?.decisions).toEqual(["went with approach B"]);
+    expect(r!.synopsis?.tool_state).toEqual(["build in progress"]);
+  });
+
+  it("drops synopsis when only new fields are present but all empty", () => {
+    const raw = JSON.stringify({
+      title: "ok",
+      decisions: [],
+      file_edit_intentions: [],
+      unresolved_errors: [],
+      tool_state: [],
+    });
+    const r = tryParseCompaction(raw);
+    expect(r!.title).toBe("ok");
+    expect(r!.synopsis).toBeUndefined();
   });
 });

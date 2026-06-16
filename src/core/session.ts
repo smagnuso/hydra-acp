@@ -48,6 +48,8 @@ import { resolveCandidate, resolveModelId } from "./model-resolve.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import { coalesceReplay } from "./coalesce-replay.js";
+import { renderCompactionSeed } from "./compaction-seed.js";
+import type { SessionSynopsis } from "./snapshot.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import {
   deleteQueue,
@@ -88,6 +90,10 @@ export interface SpawnReplacementAgentParams {
   // restart, forceCancel). Carried from Session.forwardedEnv so the
   // replacement process matches the persisted spawn-env.
   forwardedEnv?: Record<string, string>;
+  // MCP server descriptors passed to session/new on the fresh agent.
+  // Used by swapUpstream to bootstrap a new upstream session with the
+  // same tooling context as the current one.
+  mcpServers?: unknown[];
 }
 
 export interface SpawnReplacementAgentResult {
@@ -172,6 +178,10 @@ export interface SessionInit {
   // SessionManager to schedule an out-of-band synopsis for this session.
   // Returns immediately; the synopsis lands later via persistSynopsis.
   scheduleSynopsis?: () => void;
+  // Fire-and-forget callback used by `/hydra compact` to schedule a
+  // compaction job on the SessionManager. Returns immediately; the
+  // compaction artifact lands later via persistSynopsis + onCompactionArtifact.
+  scheduleCompaction?: () => void;
   createdAt?: number;
   transformChain?: TransformerRef[];
   // How long after the last recordable broadcast before session.idle fires to
@@ -217,6 +227,10 @@ export interface SessionInit {
     name?: string;
     description?: string;
   }>;
+  // Entry index up to which history has been compacted. Set from the
+  // persisted record on cold resurrect so the MCP server can gate
+  // recall_* tools accordingly.
+  summarizedThroughEntry?: number;
 }
 
 export interface CloseOptions {
@@ -323,6 +337,16 @@ export class Session {
     return this._priority;
   }
   title: string | undefined;
+  // Entry index up to which history has been compacted. Undefined or 0
+  // means no compaction has occurred. Used by the MCP server factory to
+  // gate recall_* tools on sessions that have actually been compacted.
+  private _summarizedThroughEntry: number | undefined;
+  get summarizedThroughEntry(): number | undefined {
+    return this._summarizedThroughEntry;
+  }
+  set summarizedThroughEntry(value: number | undefined) {
+    this._summarizedThroughEntry = value;
+  }
   // Snapshot state delivered to attaching clients via the attach
   // response _meta rather than via history replay (which would be
   // stale-prone for snapshot-shaped events).
@@ -344,6 +368,13 @@ export class Session {
   // and return already_running for the latter.
   private currentEntry: QueueEntry | undefined;
   private promptInFlight = false;
+  // True while applyModeChange / applyModelChange is executing. Guards
+  // isQuiescedForSwap so a mode/model change that arrives mid-prompt
+  // (from the agent's current_mode_update / current_model_update) does
+  // not make the session appear quiesced during the brief window between
+  // the update arriving and the drain loop picking up the next entry.
+  private modeChangeInFlight = false;
+  private modelChangeInFlight = false;
   // Serialize disk writes to the persisted queue file. Without this
   // chain, fire-and-forget appends/rewrites can interleave (e.g.
   // drainQueue's rewrite-to-empty races a sibling's append-on-
@@ -368,6 +399,10 @@ export class Session {
   // out-of-band synopsis without taking a direct dependency on
   // SessionManager.
   private scheduleSynopsisHook?: () => void;
+  // Fire-and-forget hook for `/hydra compact` — calls back to the
+  // manager's compaction scheduler so the slash command doesn't need
+  // a direct dependency on SynopsisCoordinator.
+  private scheduleCompactionHook?: () => void;
   // Subscribers notified after every entry that's actually persisted to
   // history (skipping snapshot-shaped events filtered by
   // recordAndBroadcast). The HTTP /v1/sessions/:id/history?follow=1
@@ -568,6 +603,7 @@ export class Session {
     this.originatingClient = init.originatingClient;
     this.title = init.title;
     this.scheduleSynopsisHook = init.scheduleSynopsis;
+    this.scheduleCompactionHook = init.scheduleCompaction;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
     this._currentUsage = init.currentUsage;
@@ -602,6 +638,7 @@ export class Session {
     }
     this._interactive = init.interactive;
     this._priority = init.priority;
+    this._summarizedThroughEntry = init.summarizedThroughEntry;
     this.historyStore = init.historyStore;
     this.historyMaxEntries = init.historyMaxEntries ?? DEFAULT_HISTORY_MAX_ENTRIES;
     this.compactEvery = Math.max(1, Math.floor(this.historyMaxEntries * 0.2));
@@ -895,6 +932,215 @@ export class Session {
   // "actively working" one without having to attach.
   get awaitingInput(): boolean {
     return this.inFlightPermissions.size > 0;
+  }
+
+  // True when the session is safe to swap upstream out from under.
+  // Used by T10 to decide whether it is safe to swap the upstream
+  // session without losing in-flight work. Returns true only when:
+  // - no prompt is in flight (drainQueue is idle)
+  // - no tool-call chain is open (every tool_call has a corresponding
+  //   tool_call_update with status="completed"|"failed")
+  // - no mode_change or model_change transition is in progress.
+  async isQuiescedForSwap(): Promise<boolean> {
+    if (this.promptInFlight) {
+      return false;
+    }
+    if (this.modeChangeInFlight || this.modelChangeInFlight) {
+      return false;
+    }
+    const hasOpen = await this._hasOpenToolCall();
+    if (hasOpen) {
+      return false;
+    }
+    return true;
+  }
+
+  // Swap the upstream session for a fresh one seeded with a compaction
+  // artifact (synopsis + verbatim tail turns). The Hydra session identity
+  // (sessionId, history.jsonl handle, hydraSessionId) stays intact — only
+  // the upstream agent session rotates. Intended to be called after
+  // synopsis-based compaction produces a compacted context that fits
+  // within the model's context window.
+  //
+  // Mirrors doResurrectFromImport + seedFromImport in session-manager.ts:
+  // spawn fresh agent → initialize → session/new → restore model/mode →
+  // seed with compaction transcript → swap references → kill old agent.
+  async swapUpstream(opts: {
+    artifact: SessionSynopsis;
+    title?: string;
+    tailK: number;
+  }): Promise<void> {
+    const quiesced = await this.isQuiescedForSwap();
+    if (!quiesced) {
+      throw new Error(
+        "session is not quiesced for swap — wait for in-flight work to complete",
+      );
+    }
+
+    // Capture current context so we can spawn with matching config.
+    const agentId = this.agentId;
+    const cwd = this.cwd;
+    const agentArgs = this.agentArgs;
+    const forwardedEnv = this.forwardedEnv;
+    const persistedModel = this.currentModel;
+    const persistedMode = this.currentMode;
+
+    const spawnAgent = this.spawnReplacementAgent;
+    if (!spawnAgent) {
+      throw new Error("agent spawning not configured for this session");
+    }
+
+    // Spawn a fresh agent — bootstrapAgent calls initialize + session/new
+    // internally, giving us a new upstreamSessionId.
+    const fresh = await spawnAgent({
+      agentId,
+      cwd,
+      agentArgs,
+      ...(forwardedEnv ? { forwardedEnv } : {}),
+      mcpServers: [],
+    });
+
+    this.accumulateAndResetCost();
+    this.wireAgent(fresh.agent);
+
+    // Restore model on the new agent if the old session had a non-default
+    // value. Mirrors restoreCurrentModel from session-manager.ts:3093.
+    const freshInitialModel = fresh.initialModel;
+    if (persistedModel && persistedModel !== freshInitialModel) {
+      try {
+        await fresh.agent.connection.request("session/set_model", {
+          sessionId: fresh.upstreamSessionId,
+          modelId: persistedModel,
+        });
+      } catch {
+        void 0;
+      }
+    }
+
+    // Restore mode on the new agent if the old session had a non-default
+    // value. Mirrors restoreCurrentMode from session-manager.ts:3024.
+    const freshInitialMode = fresh.initialMode;
+    if (persistedMode && persistedMode !== freshInitialMode) {
+      try {
+        await fresh.agent.connection.request("session/set_mode", {
+          sessionId: fresh.upstreamSessionId,
+          modeId: persistedMode,
+        });
+      } catch {
+        void 0;
+      }
+    }
+
+    // Drop any buffered session/update notifications that arrived during
+    // the restore calls — same race as doResurrect in session-manager.ts.
+    fresh.agent.connection.drainBuffered("session/update");
+
+    // Build the compaction seed text from the artifact + verbatim tail.
+    let historyEntries: Array<{ method: string; params: unknown }> = [];
+    if (this.historyStore) {
+      try {
+        historyEntries = await this.historyStore.load(this.sessionId);
+      } catch {
+        void 0;
+      }
+    }
+
+    const seedText = renderCompactionSeed({
+      synopsis: opts.artifact,
+      title: opts.title,
+      tail: historyEntries as Array<{ method?: unknown; params?: unknown; [key: string]: unknown }>,
+      tailK: opts.tailK,
+    });
+
+    // Send the seed as a single session/prompt on the fresh agent. Wait
+    // for the response and discard chunks — this is not real conversation,
+    // it's the agent acknowledging the compacted context. Do NOT append
+    // to history.jsonl.
+    await fresh.agent.connection.request<unknown>("session/prompt", {
+      sessionId: fresh.upstreamSessionId,
+      prompt: [{ type: "text", text: seedText }],
+    });
+
+    // Atomically swap: kill the old agent, point this.agent and
+    // this.upstreamSessionId at the new one.
+    const oldAgent = this.agent;
+    this.agent = fresh.agent;
+    this.upstreamSessionId = fresh.upstreamSessionId;
+    this.agentMeta = fresh.agentMeta;
+    this.agentCapabilities = fresh.agentCapabilities;
+
+    // Re-broadcast config options and commands under the new upstream.
+    this.broadcastMergedCommands();
+    this.broadcastConfigOptions();
+
+    await oldAgent.kill().catch(() => undefined);
+
+    // Signal to attached clients that a compaction swap occurred. Uses
+    // the same session/update channel as agent switches, with a hydra-acp
+    // _meta flag so clients can distinguish this from a normal /hydra agent.
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "session_info_update",
+        _meta: { "hydra-acp": { synthetic: true, compactionSwap: true } },
+      },
+    });
+
+    // Notify agent change handlers so SessionManager's persistAgentChange
+    // fires — this rewrites meta.json with the new upstreamSessionId.
+    for (const handler of this.agentChangeHandlers) {
+      try { handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId }); } catch { void 0; }
+    }
+
+    this.updatedAt = Date.now();
+  }
+
+  // Scan the recent tail of history.jsonl for an open tool-call chain:
+  // a tool_call entry without a corresponding tool_call_update that has
+  // status="completed" or status="failed". Scans at most `maxEntries`
+  // entries from the end of the file to bound I/O cost.
+  private async _hasOpenToolCall(maxEntries = 20): Promise<boolean> {
+    if (!this.historyStore) {
+      return false;
+    }
+    const history = await this.historyStore.load(this.sessionId);
+    const tail = history.length > maxEntries
+      ? history.slice(-maxEntries)
+      : history;
+
+    // Track toolCallIds seen in tool_call (pending) and tool_call_update
+    // with terminal status (resolved).
+    const pending = new Set<string>();
+    const resolved = new Set<string>();
+
+    for (const entry of tail) {
+      const params = entry.params as { update?: { sessionUpdate?: string; toolCallId?: unknown; status?: string } } | undefined;
+      const update = params?.update;
+      if (!update || typeof update.sessionUpdate !== "string") {
+        continue;
+      }
+      const kind = update.sessionUpdate;
+      const toolCallId = typeof update.toolCallId === "string" ? update.toolCallId : undefined;
+      if (!toolCallId) {
+        continue;
+      }
+      if (kind === "tool_call") {
+        pending.add(toolCallId);
+      } else if (kind === "tool_call_update") {
+        const status = update.status as string | undefined;
+        if (status === "completed" || status === "failed") {
+          resolved.add(toolCallId);
+        }
+      }
+    }
+
+    // Any pending tool_call that hasn't been resolved is open.
+    for (const id of pending) {
+      if (!resolved.has(id)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // Read the persisted history from disk. Returns [] if no history
@@ -2689,31 +2935,36 @@ export class Session {
     if (!trimmed) {
       return;
     }
-    if (trimmed !== this.currentModel) {
-      this.logger?.info(
-        `applyModelChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
-      );
-      this.currentModel = trimmed;
-      for (const handler of this.modelHandlers) {
-        try {
-          handler(trimmed);
-        } catch {
-          void 0;
+    this.modelChangeInFlight = true;
+    try {
+      if (trimmed !== this.currentModel) {
+        this.logger?.info(
+          `applyModelChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentModel)} → ${JSON.stringify(trimmed)}`,
+        );
+        this.currentModel = trimmed;
+        for (const handler of this.modelHandlers) {
+          try {
+            handler(trimmed);
+          } catch {
+            void 0;
+          }
         }
       }
+      const update: Record<string, unknown> = {
+        sessionUpdate: "current_model_update",
+        currentModel: trimmed,
+      };
+      if (this.agentAdvertisedModels.length > 0) {
+        update.availableModels = [...this.agentAdvertisedModels];
+      }
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update,
+      });
+      this.broadcastConfigOptions();
+    } finally {
+      this.modelChangeInFlight = false;
     }
-    const update: Record<string, unknown> = {
-      sessionUpdate: "current_model_update",
-      currentModel: trimmed,
-    };
-    if (this.agentAdvertisedModels.length > 0) {
-      update.availableModels = [...this.agentAdvertisedModels];
-    }
-    this.recordAndBroadcast("session/update", {
-      sessionId: this.upstreamSessionId,
-      update,
-    });
-    this.broadcastConfigOptions();
   }
 
   // Apply a mode change initiated by a client request (session/set_mode)
@@ -2728,31 +2979,36 @@ export class Session {
     if (!trimmed) {
       return;
     }
-    if (trimmed !== this.currentMode) {
-      this.logger?.info(
-        `applyModeChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
-      );
-      this.currentMode = trimmed;
-      for (const handler of this.modeHandlers) {
-        try {
-          handler(trimmed);
-        } catch {
-          void 0;
+    this.modeChangeInFlight = true;
+    try {
+      if (trimmed !== this.currentMode) {
+        this.logger?.info(
+          `applyModeChange: sessionId=${this.sessionId} ${JSON.stringify(this.currentMode)} → ${JSON.stringify(trimmed)}`,
+        );
+        this.currentMode = trimmed;
+        for (const handler of this.modeHandlers) {
+          try {
+            handler(trimmed);
+          } catch {
+            void 0;
+          }
         }
       }
+      const update: Record<string, unknown> = {
+        sessionUpdate: "current_mode_update",
+        currentModeId: trimmed,
+      };
+      if (this.agentAdvertisedModes.length > 0) {
+        update.availableModes = [...this.agentAdvertisedModes];
+      }
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update,
+      });
+      this.broadcastConfigOptions();
+    } finally {
+      this.modeChangeInFlight = false;
     }
-    const update: Record<string, unknown> = {
-      sessionUpdate: "current_mode_update",
-      currentModeId: trimmed,
-    };
-    if (this.agentAdvertisedModes.length > 0) {
-      update.availableModes = [...this.agentAdvertisedModes];
-    }
-    this.recordAndBroadcast("session/update", {
-      sessionId: this.upstreamSessionId,
-      update,
-    });
-    this.broadcastConfigOptions();
   }
 
   // Assemble the spec-shaped configOptions snapshot for this session.
@@ -3038,6 +3294,8 @@ export class Session {
           return this.runKillCommand();
         case "restart":
           return inline ? this.runRestartCommandInline() : this.runRestartCommand();
+        case "compact":
+          return inline ? this.runCompactCommandInline() : this.runCompactCommand();
         default: {
           const err = new Error(
             `no dispatcher for /hydra verb ${first}`,
@@ -3762,6 +4020,28 @@ export class Session {
     // Queued: waits for any in-flight turn to finish naturally, then
     // respawns. Use forceCancel() to abort a stuck turn immediately.
     await this.respawnAgent();
+    return { stopReason: "end_turn" };
+  }
+
+  // "/hydra compact" — schedules a synopsis-based compaction job and
+  // emits a synthetic confirmation. The actual compaction (summarization
+  // + upstream swap) runs asynchronously via the coordinator; this
+  // method returns end_turn immediately.
+  private runCompactCommand(): Promise<unknown> {
+    return this.enqueuePrompt(() => this.runCompactCommandInline());
+  }
+
+  private async runCompactCommandInline(): Promise<unknown> {
+    if (!this.scheduleCompactionHook) {
+      this.emitExtensionReply(
+        "compaction scheduling not configured for this session",
+      );
+      return { stopReason: "end_turn" };
+    }
+    this.scheduleCompactionHook();
+    this.emitExtensionReply(
+      "Compaction scheduled. The session will rotate to a fresh upstream once summarization completes.",
+    );
     return { stopReason: "end_turn" };
   }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Bundle } from "../../core/bundle.js";
-import { aggregate } from "./sessions-info.js";
+import { aggregate, formatSummary } from "./sessions-info.js";
 
 function toolCallEntry(
   name: string,
@@ -361,5 +361,104 @@ describe("aggregate — historyEntries count", () => {
       "cold",
     );
     expect(d.historyEntries).toBe(3);
+  });
+});
+
+describe("formatSummary — synopsis rendering", () => {
+  it("renders files_touched and tools_used when populated", () => {
+    const d = aggregate(
+      makeBundle({
+        title: "Add feature",
+        synopsis: {
+          goal: "add login page",
+          outcome: "done",
+          files_touched: ["src/auth.ts", "src/login.ts", "src/types.ts"],
+          tools_used: ["Edit", "Write", "Read", "Bash"],
+        },
+      }),
+      "cold",
+    );
+    const output = formatSummary(d, false);
+
+    expect(output).toContain("Files touched:");
+    expect(output).toContain("  - src/auth.ts");
+    expect(output).toContain("  - src/login.ts");
+    expect(output).toContain("  - src/types.ts");
+    expect(output).toContain("Tools used:");
+    expect(output).toContain("  - Edit");
+    expect(output).toContain("  - Write");
+    expect(output).toContain("  - Read");
+    expect(output).toContain("  - Bash");
+  });
+
+  it("omits files_touched and tools_used sections when absent", () => {
+    const d = aggregate(
+      makeBundle({
+        title: "Quick fix",
+        synopsis: {
+          goal: "fix a bug",
+          outcome: "patched",
+          files_touched: [],
+          tools_used: undefined,
+        },
+      }),
+      "cold",
+    );
+    const output = formatSummary(d, false);
+
+    expect(output).toContain("Goal:");
+    expect(output).toContain("Outcome:");
+    expect(output).not.toContain("Files touched:");
+    expect(output).not.toContain("Tools used:");
+  });
+
+  it("omits files_touched and tools_used sections when null", () => {
+    const d = aggregate(
+      makeBundle({
+        synopsis: {
+          goal: "exploratory session",
+        },
+      }),
+      "cold",
+    );
+    const output = formatSummary(d, false);
+
+    expect(output).toContain("Goal:");
+    expect(output).not.toContain("Files touched:");
+    expect(output).not.toContain("Tools used:");
+  });
+
+  it("renders legacy fields alongside files_touched and tools_used", () => {
+    const d = aggregate(
+      makeBundle({
+        synopsis: {
+          goal: "migrate to v2",
+          outcome: "completed",
+          rejected_approaches: ["use new parser"],
+          open_threads: ["handle edge case X"],
+          files_touched: ["src/parser.ts"],
+          tools_used: ["Edit", "Bash"],
+        },
+      }),
+      "cold",
+    );
+    const output = formatSummary(d, false);
+
+    expect(output).toContain("Goal:");
+    expect(output).toContain("Outcome:");
+    expect(output).toContain("Rejected approaches:");
+    expect(output).toContain("Open threads:");
+    expect(output).toContain("Files touched:");
+    expect(output).toContain("Tools used:");
+  });
+
+  it("renders files_touched/tools_used when synopsis is null", () => {
+    const d = aggregate(makeBundle(), "cold");
+    const output = formatSummary(d, false);
+
+    expect(output).toContain("Synopsis:");
+    expect(output).toContain("(none yet");
+    expect(output).not.toContain("Files touched:");
+    expect(output).not.toContain("Tools used:");
   });
 });

@@ -613,6 +613,50 @@ export function registerSessionRoutes(
     }
   });
 
+  // Compaction state — current watermark so callers can decide whether
+  // compaction is worthwhile (e.g. the TUI checks if summarizedThroughEntry
+  // is recent and the unsummarized tail is small before prompting).
+  app.get("/v1/sessions/:id/compact", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const session = manager.get(id);
+    let summarizedThroughEntry: number | undefined;
+    if (session) {
+      summarizedThroughEntry = session.summarizedThroughEntry;
+    } else {
+      summarizedThroughEntry = await manager.getSummarizedThroughEntry(id);
+    }
+    if (summarizedThroughEntry === undefined && !(await manager.hasRecord(id))) {
+      reply.code(404).send({ error: "session not found" });
+      return reply;
+    }
+    // synopsisCoordinator.size() is global; if any compaction is
+    // in flight or queued session-wide, report inFlight=true.
+    return { summarizedThroughEntry: summarizedThroughEntry ?? undefined, inFlight: manager.getCompactionInFlight() };
+  });
+
+  // Trigger compaction on a session. Fire-and-forget: returns 202
+  // immediately and the synopsis coordinator runs the compaction
+  // asynchronously (it may defer if the session is non-quiesced).
+  app.post("/v1/sessions/:id/compact", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const session = manager.get(id);
+    if (session) {
+      manager.scheduleCompaction(id);
+      reply.code(202).send({ scheduled: true });
+      return;
+    }
+    const exists = await manager.hasRecord(id);
+    if (!exists) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    // Cold session — still schedule (coordinator reads from disk).
+    manager.scheduleCompaction(id);
+    reply.code(202).send({ scheduled: true });
+  });
+
   // Tail a session's recorded conversation as NDJSON (one entry per
   // line). One-shot by default; ?follow=1 keeps the connection open
   // and streams new entries as they're broadcast — useful for

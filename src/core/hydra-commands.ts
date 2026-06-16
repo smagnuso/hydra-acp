@@ -41,6 +41,12 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
       "Restart the agent with a fresh session/new while preserving conversation history (useful when the proxy has changed available models)",
   },
   {
+    verb: "compact",
+    name: "hydra compact",
+    description:
+      "Compact this session's history into a summary and rotate the upstream agent. Saves tokens on subsequent turns by replacing replayed history with a structured digest plus the recent tail. Detail is retrievable via recall_* tools.",
+  },
+  {
     verb: "config",
     name: "hydra config",
     argsHint: "[<id> [<value>]]",

@@ -21,7 +21,9 @@ import type { SpawnPlan } from "./registry.js";
 import { ACP_PROTOCOL_VERSION } from "../acp/types.js";
 import { HYDRA_VERSION } from "./hydra-version.js";
 import {
+  COMPACTION_PROMPT,
   SNAPSHOT_PROMPT,
+  tryParseCompaction,
   tryParseSnapshot,
   type SnapshotParseResult,
 } from "./snapshot.js";
@@ -48,8 +50,14 @@ export interface GenerateSynopsisOpts {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-export async function generateSynopsis(
+// Shared ephemeral-agent lifecycle: spawn → initialize → session/new →
+// optional set_model → prompt with rendered transcript → parse reply → kill.
+// Both synopsis and compaction routing share this body verbatim; only the
+// prompt template and parser function differ.
+async function runEphemeralRegen(
   opts: GenerateSynopsisOpts,
+  promptText: string,
+  parser: (reply: string) => SnapshotParseResult | undefined,
 ): Promise<SnapshotParseResult | undefined> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let agent: AgentInstance | undefined;
@@ -112,22 +120,15 @@ export async function generateSynopsis(
           chunks.push(text);
         }
       });
-      const transcript = renderTranscript(opts.history, {
-        maxChars: opts.maxTranscriptChars,
-      });
-      const promptText =
-        transcript.length > 0
-          ? `${transcript}\n\n${SNAPSHOT_PROMPT}`
-          : SNAPSHOT_PROMPT;
       await agent.connection.request<unknown>("session/prompt", {
         sessionId: upstreamSessionId,
         prompt: [{ type: "text", text: promptText }],
       });
       const reply = chunks.join("");
-      const parsed = tryParseSnapshot(reply);
+      const parsed = parser(reply);
       if (!parsed) {
         opts.logger?.warn(
-          `synopsis: agent ${opts.agentId} reply did not parse as snapshot JSON (replyLen=${reply.length} preview=${JSON.stringify(reply.slice(0, 200))})`,
+          `synopsis: agent ${opts.agentId} reply did not parse (replyLen=${reply.length} preview=${JSON.stringify(reply.slice(0, 200))})`,
         );
       }
       return parsed;
@@ -176,6 +177,32 @@ export async function generateSynopsis(
       await agent.kill().catch(() => undefined);
     }
   }
+}
+
+export async function generateSynopsis(
+  opts: GenerateSynopsisOpts,
+): Promise<SnapshotParseResult | undefined> {
+  const transcript = renderTranscript(opts.history, {
+    maxChars: opts.maxTranscriptChars,
+  });
+  const promptText =
+    transcript.length > 0
+      ? `${transcript}\n\n${SNAPSHOT_PROMPT}`
+      : SNAPSHOT_PROMPT;
+  return runEphemeralRegen(opts, promptText, tryParseSnapshot);
+}
+
+export async function generateCompaction(
+  opts: GenerateSynopsisOpts,
+): Promise<SnapshotParseResult | undefined> {
+  const transcript = renderTranscript(opts.history, {
+    maxChars: opts.maxTranscriptChars,
+  });
+  const promptText =
+    transcript.length > 0
+      ? `${transcript}\n\n${COMPACTION_PROMPT}`
+      : COMPACTION_PROMPT;
+  return runEphemeralRegen(opts, promptText, tryParseCompaction);
 }
 
 function extractChunkText(params: unknown): string {

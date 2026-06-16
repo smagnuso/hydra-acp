@@ -8,11 +8,13 @@ import type { SessionSynopsis } from "./snapshot.js";
 // expensive bit (generateSynopsis spawning a real subprocess) is replaced by
 // mocking the synopsis-agent module inline below.
 vi.mock("./synopsis-agent.js", () => ({
+  generateCompaction: vi.fn(),
   generateSynopsis: vi.fn(),
 }));
-import { generateSynopsis } from "./synopsis-agent.js";
+import { generateCompaction, generateSynopsis } from "./synopsis-agent.js";
 
 const mockGenerate = generateSynopsis as ReturnType<typeof vi.fn>;
+const mockCompaction = generateCompaction as ReturnType<typeof vi.fn>;
 
 // Poll until `predicate` holds, instead of sleeping a fixed interval and
 // hoping the async drain ran. A fixed sleep is flaky under a loaded
@@ -55,7 +57,9 @@ function makeStore(records: Map<string, SessionRecord>) {
 function makeHistories(histories: Map<string, unknown[]>) {
   return {
     async load(id: string): Promise<unknown[]> {
-      return histories.get(id) ?? [];
+      // Return a copy so mutations to the backing array don't affect
+      // previously loaded snapshots — mirrors loading from disk.
+      return [...(histories.get(id) ?? [])];
     },
   } as never;
 }
@@ -85,6 +89,7 @@ vi.mock("./registry.js", async (importOriginal) => {
 describe("SynopsisCoordinator", () => {
   beforeEach(() => {
     mockGenerate.mockReset();
+    mockCompaction.mockReset();
   });
 
   it("schedules and runs a single job on the happy path", async () => {
@@ -344,5 +349,278 @@ describe("SynopsisCoordinator", () => {
     coord.schedule(record.sessionId);
     await coord.flush(1_000);
     expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
+  it("scheduling compaction before title for same session results in one compaction job", async () => {
+    // scheduleCompaction adds to queue first, then schedule sees compaction is queued and returns.
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    mockGenerate.mockResolvedValue({ title: "t", synopsis: { goal: "g" } });
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compacted" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+    });
+    coord.scheduleCompaction(record.sessionId);
+    coord.schedule(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(mockGenerate).not.toHaveBeenCalled();
+    expect(mockCompaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("scheduling compaction then title for same session runs one compaction job", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    mockGenerate.mockResolvedValue({ title: "t", synopsis: { goal: "g" } });
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compacted" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+    });
+    coord.scheduleCompaction(record.sessionId);
+    coord.schedule(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(mockGenerate).not.toHaveBeenCalled();
+    expect(mockCompaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("title persistTitle is not called when a compaction job runs", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    const persistedTitles: string[] = [];
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compacted" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      
+      persistTitle: async (id, title) => {
+        persistedTitles.push(title);
+      },
+      persistSynopsis: async () => undefined,
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(persistedTitles).toHaveLength(0);
+  });
+
+  it("onCompactionArtifact fires with the right args", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    const compactionArtifacts: Array<{
+      sessionId: string;
+      artifact: SessionSynopsis;
+      through: number;
+    }> = [];
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onCompactionArtifact: async (sid, artifact, through) => {
+        compactionArtifacts.push({ sessionId: sid, artifact, through });
+      },
+    });
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compacted", outcome: "done" } });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(compactionArtifacts).toHaveLength(1);
+    expect(compactionArtifacts[0]!.sessionId).toBe(record.sessionId);
+    expect(compactionArtifacts[0]!.artifact.goal).toBe("compacted");
+    expect(compactionArtifacts[0]!.through).toBe(3);
+  });
+
+  it("onCompactionArtifact is not called for title jobs", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    let compactionCalled = false;
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onCompactionArtifact: async () => {
+        compactionCalled = true;
+      },
+    });
+    mockGenerate.mockResolvedValue({ title: "t", synopsis: { goal: "g" } });
+    coord.schedule(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(compactionCalled).toBe(false);
+  });
+
+  it("compaction catch-up loop iterates when history grows between iterations", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const state: { history: unknown[]; iterations: number } = { history: [{}, {}], iterations: 0 };
+    const compactionArtifacts: SessionSynopsis[] = [];
+
+    mockCompaction.mockImplementation(async () => {
+      state.iterations++;
+      if (state.iterations === 1) {
+        state.history.push({}, {});
+        return { synopsis: { goal: "round 1" } };
+      }
+      return { synopsis: { goal: "round 2" } };
+    });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, state.history]])),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onCompactionArtifact: async (sid, artifact, through) => {
+        compactionArtifacts.push(artifact);
+      },
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(mockCompaction).toHaveBeenCalledTimes(2);
+    expect(compactionArtifacts).toHaveLength(2);
+    expect(compactionArtifacts[0]!.goal).toBe("round 1");
+    expect(compactionArtifacts[1]!.goal).toBe("round 2");
+  });
+
+  it("compaction loop exits when converged (no new history)", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const sharedHistory: unknown[] = [{}, {}, {}];
+
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compact" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, sharedHistory]])),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(mockCompaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("circuit-breaker fires when maxIterations hit without producing artifact", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const state: { history: unknown[]; iterations: number } = { history: [{}, {}, {}], iterations: 0 };
+
+    // Every call returns undefined (no artifact) while growing history.
+    // This ensures the loop exhausts all iterations without converging or persisting anything.
+    mockCompaction.mockImplementation(async () => {
+      state.iterations++;
+      state.history.push({});
+      return undefined;
+    });
+
+    const warnings: string[] = [];
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, state.history]])),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      compactionMaxIterations: 2,
+      logger: {
+        warn: (msg: string) => warnings.push(msg),
+        info: () => undefined,
+      },
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(warnings.some((w) => w.includes("maxIterations") && w.includes("without producing artifact"))).toBe(true);
+  });
+
+  it("compaction loop respects compactionMaxIterations=1", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const sharedHistory: unknown[] = [{}, {}, {}];
+
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "single" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, sharedHistory]])),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      compactionMaxIterations: 1,
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(mockCompaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("compaction loop continues on failed iteration and fires hook with latest artifact", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const state: { history: unknown[]; iterations: number } = { history: [{}, {}], iterations: 0 };
+    const compactionArtifacts: SessionSynopsis[] = [];
+
+    mockCompaction.mockImplementation(async () => {
+      state.iterations++;
+      if (state.iterations === 1) {
+        // First iteration succeeds, grows history.
+        state.history.push({}, {});
+        return { synopsis: { goal: "round 1" } };
+      }
+      // Subsequent iterations fail (no parseable result). Do not grow history.
+      return undefined;
+    });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, state.history]])),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onCompactionArtifact: async (sid, artifact, through) => {
+        compactionArtifacts.push(artifact);
+      },
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(mockCompaction).toHaveBeenCalledTimes(2);
+    // First iteration persisted; second returned undefined so hook not called again.
+    expect(compactionArtifacts).toHaveLength(1);
+    expect(compactionArtifacts[0]!.goal).toBe("round 1");
   });
 });

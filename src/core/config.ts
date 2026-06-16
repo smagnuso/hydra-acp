@@ -321,13 +321,17 @@ export const HydraConfig = z.object({
   // Optional override: model id passed to session/set_model on the
   // ephemeral synopsis agent. Unset → the agent uses its default.
   synopsisModel: z.string().optional(),
-  // Background synopsis on session close is opt-in. The coordinator
-  // spawns a fresh ephemeral agent per close, holds the full history
-  // in memory for the duration, and can stack up under bursty idle
-  // sweeps — defaulting off keeps the daemon's resident set predictable.
-  // Explicit user paths (picker T, `/hydra title`) are unaffected by
-  // this flag — they always schedule, since the user just asked.
-  synopsisOnClose: z.boolean().default(false),
+  // Compaction settings for manual session summarization (triggered via
+  // `/hydra compact` or `POST /v1/sessions/:id/compact`). The daemon does
+  // not auto-detect when to compact — the TUI decides.
+  compaction: z
+    .object({
+      // Number of recent turns kept verbatim in the seed after compaction.
+      tailK: z.number().int().nonnegative().default(20),
+      // Circuit-breaker on the catch-up loop during compaction.
+      maxIterations: z.number().int().positive().default(3),
+    })
+    .default({}),
   // Where new sessions land when POST /v1/sessions omits cwd. Stored as
   // a literal string ("~", "~/dev", "$HOME/work") so the config file is
   // portable across machines; expanded via expandHome at use time.
@@ -371,6 +375,8 @@ export const HydraConfig = z.object({
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;
+
+export type CompactionConfig = z.infer<typeof HydraConfig>["compaction"];
 
 // Resolve the effective in-app selection setting. When the user has
 // explicitly set tui.inAppSelection, honor it. Otherwise default to

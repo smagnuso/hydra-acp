@@ -24,7 +24,7 @@
 //     pick its default model.
 
 import * as fs from "node:fs/promises";
-import { generateSynopsis } from "./synopsis-agent.js";
+import { generateCompaction, generateSynopsis } from "./synopsis-agent.js";
 import type { AgentLogger } from "./agent-instance.js";
 import {
   planSpawn,
@@ -59,12 +59,22 @@ export interface SynopsisCoordinatorOptions {
   npmRegistry?: string;
   // Override the default 120s ephemeral timeout for tests.
   generateTimeoutMs?: number;
+  // Called after persisting a compaction result. Used by T10 to swap
+  // the compaction artifact into the live session record.
+  onCompactionArtifact?: (
+    sessionId: string,
+    artifact: SessionSynopsis,
+    summarizedThroughEntry: number,
+  ) => Promise<void>;
+  // Max iterations for the compaction catch-up loop. Default 3.
+  compactionMaxIterations?: number;
 }
 
 const DEFAULT_MAX_CONCURRENT = 2;
+type JobKind = "title" | "compaction";
 
 export class SynopsisCoordinator {
-  private queued = new Set<string>();
+  private queued: Record<string, JobKind> = {};
   private inflight = new Map<string, Promise<void>>();
   private stopped = false;
   private readonly maxConcurrent: number;
@@ -77,20 +87,44 @@ export class SynopsisCoordinator {
     if (this.stopped) {
       return;
     }
-    if (this.queued.has(sessionId) || this.inflight.has(sessionId)) {
+    if (this.inflight.has(sessionId)) {
       return;
     }
-    this.queued.add(sessionId);
+    if (sessionId in this.queued) {
+      // Title is already queued → no-op for title scheduling.
+      // Compaction is queued → no-op.
+      return;
+    }
+    this.queued[sessionId] = "title";
+    void this.drain();
+  }
+
+  scheduleCompaction(sessionId: string): void {
+    if (this.stopped) {
+      return;
+    }
+    if (this.inflight.has(sessionId)) {
+      return;
+    }
+    const existing = this.queued[sessionId];
+    if (existing === "title") {
+      // Promote title to compaction.
+      this.queued[sessionId] = "compaction";
+      return;
+    }
+    // Already compaction or not queued → add and drain.
+    this.queued[sessionId] = "compaction";
     void this.drain();
   }
 
   size(): { queued: number; inflight: number } {
-    return { queued: this.queued.size, inflight: this.inflight.size };
+    const queuedCount = Object.keys(this.queued).length;
+    return { queued: queuedCount, inflight: this.inflight.size };
   }
 
   async flush(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    while (this.queued.size > 0 || this.inflight.size > 0) {
+    while (Object.keys(this.queued).length > 0 || this.inflight.size > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         return;
@@ -115,7 +149,7 @@ export class SynopsisCoordinator {
 
   async shutdown(): Promise<void> {
     this.stopped = true;
-    this.queued.clear();
+    this.queued = {};
     await Promise.allSettled([...this.inflight.values()]);
   }
 
@@ -123,21 +157,26 @@ export class SynopsisCoordinator {
     if (this.stopped) {
       return;
     }
-    while (this.inflight.size < this.maxConcurrent && this.queued.size > 0) {
-      const next = this.queued.values().next().value as string | undefined;
-      if (!next) {
+    while (this.inflight.size < this.maxConcurrent && Object.keys(this.queued).length > 0) {
+      const keys = Object.keys(this.queued);
+      const sessionId = keys[0];
+      if (!sessionId) {
         return;
       }
-      this.queued.delete(next);
-      const p = this.runOne(next).finally(() => {
-        this.inflight.delete(next);
+      const jobKind = this.queued[sessionId] as JobKind;
+      delete this.queued[sessionId];
+      const p = this.runOne(sessionId, jobKind).finally(() => {
+        this.inflight.delete(sessionId);
         this.drain();
       });
-      this.inflight.set(next, p);
+      this.inflight.set(sessionId, p);
     }
   }
 
-  private async runOne(sessionId: string): Promise<void> {
+  private async runOne(
+    sessionId: string,
+    jobKind: JobKind,
+  ): Promise<void> {
     try {
       const record = await this.opts.store.read(sessionId);
       if (!record) {
@@ -184,34 +223,98 @@ export class SynopsisCoordinator {
       this.opts.logger?.info(
         `synopsis: start sessionId=${sessionId} agentId=${synopsisAgentId} historyLen=${history.length} model=${JSON.stringify(modelId ?? "(default)")} cwd=${synopsisCwd}`,
       );
-      const result = await generateSynopsis({
-        agentId: synopsisAgentId,
-        cwd: synopsisCwd,
-        plan,
-        history,
-        modelId,
-        logger: this.opts.logger,
-        timeoutMs: this.opts.generateTimeoutMs,
-      });
-      if (!result) {
-        this.opts.logger?.warn(
-          `synopsis: sessionId=${sessionId} no parseable result; not persisting`,
-        );
-        return;
-      }
-      if (result.title) {
-        await this.opts.persistTitle(sessionId, result.title);
-      }
-      const merged = mergeLocalFields(result.synopsis, history);
-      if (merged && synopsisHasContent(merged)) {
-        await this.opts.persistSynopsis(sessionId, merged, history.length);
-        this.opts.logger?.info(
-          `synopsis: persisted sessionId=${sessionId} title=${JSON.stringify(!!result.title)} fields=${describeFields(merged)}`,
-        );
-      } else if (result.title) {
-        this.opts.logger?.info(
-          `synopsis: persisted title only sessionId=${sessionId}`,
-        );
+      if (jobKind === "compaction") {
+        const maxIterations = this.opts.compactionMaxIterations ?? 3;
+        let iter = 0;
+        let through = last ?? 0;
+        let latestArtifact: SessionSynopsis | undefined;
+        let latestThrough = 0;
+
+        do {
+          iter++;
+          this.opts.logger?.info(
+            `synopsis: compaction iteration ${iter} sessionId=${sessionId} historyLen=${history.length} watermark=${through}`,
+          );
+
+          const historyAtStart = await this.opts.histories.load(sessionId);
+          if (historyAtStart.length <= through) {
+            break;
+          }
+
+          const result = await generateCompaction({
+            agentId: synopsisAgentId,
+            cwd: synopsisCwd,
+            plan,
+            history: historyAtStart,
+            modelId,
+            logger: this.opts.logger,
+            timeoutMs: this.opts.generateTimeoutMs,
+          });
+
+          if (result) {
+            const merged = mergeLocalFields(result.synopsis, historyAtStart);
+            if (merged && synopsisHasContent(merged)) {
+              await this.opts.persistSynopsis(sessionId, merged, historyAtStart.length);
+              latestArtifact = merged;
+              latestThrough = historyAtStart.length;
+              await this.opts.onCompactionArtifact?.(sessionId, merged, latestThrough);
+              this.opts.logger?.info(
+                `synopsis: persisted compaction sessionId=${sessionId} iteration=${iter} fields=${describeFields(merged)}`,
+              );
+            }
+          } else {
+            this.opts.logger?.warn(
+              `synopsis: sessionId=${sessionId} compaction iteration ${iter} returned no result`,
+            );
+          }
+
+          through = historyAtStart.length;
+          const historyAfter = await this.opts.histories.load(sessionId);
+          if (historyAfter.length === through) {
+            break;
+          }
+        } while (iter < maxIterations);
+
+        if (!latestArtifact && iter > 0) {
+          this.opts.logger?.warn(
+            `synopsis: compaction hit maxIterations=${maxIterations} without producing artifact sessionId=${sessionId}`,
+          );
+        } else if (iter >= maxIterations && latestArtifact) {
+          this.opts.logger?.info(
+            `synopsis: compaction converged sessionId=${sessionId} watermark=${latestThrough} iterations=${iter}`,
+          );
+        }
+      } else {
+        const result = await generateSynopsis({
+          agentId: synopsisAgentId,
+          cwd: synopsisCwd,
+          plan,
+          history,
+          modelId,
+          logger: this.opts.logger,
+          timeoutMs: this.opts.generateTimeoutMs,
+        });
+        if (!result) {
+          this.opts.logger?.warn(
+            `synopsis: sessionId=${sessionId} no parseable result; not persisting`,
+          );
+          return;
+        }
+        const merged = mergeLocalFields(result.synopsis, history);
+        if (merged && synopsisHasContent(merged)) {
+          await this.opts.persistSynopsis(sessionId, merged, history.length);
+          if (result.title) {
+            await this.opts.persistTitle(sessionId, result.title);
+          }
+          this.opts.logger?.info(
+            `synopsis: persisted sessionId=${sessionId} title=${JSON.stringify(!!result.title)} fields=${describeFields(merged)}`,
+          );
+        } else if (result.title) {
+          await this.opts.persistTitle(sessionId, result.title);
+          this.opts.logger?.info(
+            `synopsis: persisted title only sessionId=${sessionId}`,
+          );
+        }
       }
     } catch (err) {
       this.opts.logger?.warn(

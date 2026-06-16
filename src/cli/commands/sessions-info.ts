@@ -284,6 +284,18 @@ export function formatSummary(d: SessionInfoData, verbose: boolean): string {
         lines.push(`${indent}  - ${t}`);
       }
     }
+    if (d.synopsis.files_touched && d.synopsis.files_touched.length > 0) {
+      lines.push(`${indent}${synPad("Files touched:")}`);
+      for (const f of d.synopsis.files_touched) {
+        lines.push(`${indent}  - ${f}`);
+      }
+    }
+    if (d.synopsis.tools_used && d.synopsis.tools_used.length > 0) {
+      lines.push(`${indent}${synPad("Tools used:")}`);
+      for (const t of d.synopsis.tools_used) {
+        lines.push(`${indent}  - ${t}`);
+      }
+    }
   } else {
     lines.push("");
     lines.push("Synopsis:      (none yet — generated on idle-close or daemon shutdown)");

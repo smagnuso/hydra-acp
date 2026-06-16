@@ -182,10 +182,6 @@ export interface SessionManagerOptions {
   // Optional override: model id passed to session/set_model on the
   // ephemeral synopsis agent. Unset → agent picks its default.
   synopsisModel?: string;
-  // When true, schedule a background synopsis as part of session close
-  // (the onClose hook below). Defaults off — explicit user paths
-  // (picker T, `/hydra title`, scheduleSynopsis()) always run regardless.
-  synopsisOnClose?: boolean;
   // Cap on entries kept in each session's on-disk history.jsonl. Forwarded
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
@@ -215,6 +211,14 @@ export interface SessionManagerOptions {
   defaultCwd?: string;
   // Override for tests; production code constructs its own.
   tombstones?: TombstoneStore;
+  // Compaction configuration forwarded to the synopsis coordinator and
+  // used by the onCompactionArtifact hook (swap logic).
+  compaction?: {
+    // Number of recent turns kept verbatim in the seed after compaction.
+    tailK?: number;
+    // Circuit-breaker on the catch-up loop during compaction.
+    maxIterations?: number;
+  };
 }
 
 export class SessionManager {
@@ -234,7 +238,6 @@ export class SessionManager {
   private defaultModels: Record<string, string>;
   private synopsisAgent?: string;
   private synopsisModel?: string;
-  private synopsisOnClose: boolean;
   readonly defaultTransformers: string[];
   private idleEventTimeoutMs: number;
   private sessionHistoryMaxEntries: number;
@@ -261,6 +264,8 @@ export class SessionManager {
   // out-of-band so session close is instant; persists synopsis/title
   // via the same enqueueMetaWrite path the in-session handlers used.
   private synopsisCoordinator: SynopsisCoordinator;
+  // Tracked compaction deferral count per sessionId (cap at 3).
+  private compactionDeferrals = new WeakMap<object, number>();
   // Cached agent catalog used to populate the `agent` config option's
   // value list. Refreshed lazily (fire-and-forget) since the underlying
   // registry load may hit the network; sessions read whatever snapshot is
@@ -287,18 +292,20 @@ export class SessionManager {
     this.defaultModels = options.defaultModels ?? {};
     this.synopsisAgent = options.synopsisAgent;
     this.synopsisModel = options.synopsisModel;
-    this.synopsisOnClose = options.synopsisOnClose ?? false;
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
     this.extensionCommands = options.extensionCommands;
     this.defaultCwd = options.defaultCwd ?? "~";
+    const compactionConfig = options.compaction ?? {};
+    const tailK = compactionConfig.tailK ?? 20;
     this.synopsisCoordinator = new SynopsisCoordinator({
       registry: this.registry,
       store: this.store,
       histories: this.histories,
       synopsisAgent: this.synopsisAgent,
       synopsisModel: this.synopsisModel,
+      compactionMaxIterations: compactionConfig.maxIterations,
       persistTitle: async (id, title) => {
         // Route through the live session when one exists (e.g. bare
         // `/hydra title` on an attached session). retitle() broadcasts
@@ -318,6 +325,53 @@ export class SessionManager {
         this.persistSynopsis(id, synopsis, through),
       logger: this.logger,
       npmRegistry: this.npmRegistry,
+      onCompactionArtifact: async (sessionId, artifact, summarizedThroughEntry) => {
+        const live = this.get(sessionId);
+        if (!live) {
+          // Cold session — persist the compaction artifact so it is
+          // available when the session resumes. No swap can happen now
+          // because there is no live upstream agent to replace.
+          this.logger?.info(
+            `compaction: persisted artifact for cold session sessionId=${sessionId}`,
+          );
+          await this.mutateRecord(sessionId, {
+            synopsis: artifact,
+            summarizedThroughEntry,
+          });
+          return;
+        }
+        try {
+          const quiesced = await live.isQuiescedForSwap();
+          if (!quiesced) {
+            // Defer: re-schedule after a short delay. Track deferrals
+            // with a WeakMap keyed by the session object so we can cap
+            // at 3 before giving up until the next trigger.
+            const key = live as unknown as object;
+            let count = this.compactionDeferrals.get(key) ?? 0;
+            count++;
+            if (count > 3) {
+              this.logger?.warn(
+                `compaction: deferral cap reached for sessionId=${sessionId}, skipping swap until next trigger`,
+              );
+              return;
+            }
+            this.compactionDeferrals.set(key, count);
+            this.logger?.info(
+              `compaction: session not quiesced, deferring swap sessionId=${sessionId} attempt=${count}`,
+            );
+            setTimeout(() => {
+              void this.synopsisCoordinator.scheduleCompaction(sessionId);
+            }, 5000).unref();
+            return;
+          }
+          this.compactionDeferrals.delete(live as unknown as object);
+          await live.swapUpstream({ artifact, tailK });
+        } catch (err) {
+          this.logger?.warn(
+            `compaction: swap failed for sessionId=${sessionId}: ${err instanceof Error ? err.message : String(err)}, leaving session as-is`,
+          );
+        }
+      },
     });
     void this.refreshAgentCatalog();
   }
@@ -390,7 +444,7 @@ export class SessionManager {
       idleEventTimeoutMs: this.idleEventTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: [] }),
+        this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? [] }),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
@@ -406,6 +460,7 @@ export class SessionManager {
       forwardedEnv: params.forwardedEnv,
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
     });
     await this.attachManagerHooks(session);
     return session;
@@ -635,13 +690,14 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: params.mcpServers ?? [] }),
+        this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: effectiveModel,
       currentMode: effectiveMode,
+
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
@@ -650,6 +706,7 @@ export class SessionManager {
       // restarts (quota resets, rollouts), so meta.json is intentionally
       // treated as a cold fallback here, not the authoritative source.
       agentModels: advertisedModels,
+      summarizedThroughEntry: params.summarizedThroughEntry,
       // Only gate the first-prompt title heuristic when we actually have
       // a title to preserve. A title-less session (lost to a write race
       // or never seeded) should re-derive from the next prompt rather
@@ -666,6 +723,7 @@ export class SessionManager {
       forwardedEnv: params.forwardedEnv,
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
     });
     await this.attachManagerHooks(session);
     return session;
@@ -729,17 +787,19 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: params.mcpServers ?? [] }),
+        this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
       historyMaxEntries: this.sessionHistoryMaxEntries,
       currentModel: effectiveModel,
       currentMode: effectiveMode,
+
       currentUsage: params.currentUsage,
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
       agentModels: advertisedModels,
+      summarizedThroughEntry: params.summarizedThroughEntry,
       firstPromptSeeded: !!params.title,
       createdAt: params.createdAt
         ? new Date(params.createdAt).getTime()
@@ -750,8 +810,9 @@ export class SessionManager {
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       forwardedEnv: params.forwardedEnv,
-      extensionCommands: this.extensionCommands,
+    extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
+      scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
     });
     await this.attachManagerHooks(session);
     // Fire and forget — the seed runs through enqueuePrompt inside
@@ -1343,19 +1404,6 @@ export class SessionManager {
         // resurrect can replay; an explicit destroy drops both.
         void this.histories.delete(session.sessionId).catch(() => undefined);
         return;
-      }
-      // Out-of-band synopsis generation. By the time the coordinator
-      // picks this up, agent is dead and Session is destroyed; the
-      // coordinator reads the cold record + history.jsonl, spawns a
-      // fresh ephemeral agent, and writes synopsis directly via
-      // persistSynopsis. firstPromptSeeded is the gate — a session
-      // that never received a prompt has nothing to summarize. The
-      // synopsisOnClose flag is the other gate — defaults off so the
-      // ephemeral-agent fork cost doesn't pile up under idle sweeps.
-      // Explicit paths (picker T, `/hydra title`, scheduleSynopsis())
-      // bypass this flag and always run.
-      if (session.firstPromptSeeded && this.synopsisOnClose) {
-        this.synopsisCoordinator.schedule(session.sessionId);
       }
     });
     session.onTitleChange((title) => {
@@ -2512,6 +2560,32 @@ export class SessionManager {
   // schedule a synopsis on the named session (live or cold).
   scheduleSynopsis(sessionId: string): void {
     this.synopsisCoordinator.schedule(sessionId);
+  }
+
+  // Public entry point for /hydra compact — schedule a compaction job
+  // on the named session (live or cold). The coordinator runs the
+  // synopsis-based compaction asynchronously.
+  scheduleCompaction(sessionId: string): void {
+    this.synopsisCoordinator.scheduleCompaction(sessionId);
+  }
+
+  // Expose compaction in-flight status for the GET /compact endpoint.
+  getCompactionInFlight(): boolean {
+    const s = this.synopsisCoordinator.size();
+    return s.inflight > 0 || s.queued > 0;
+  }
+
+  // Read summarizedThroughEntry from a session's record (cold or live).
+  // Returns undefined when the session has never been compacted or
+  // when no record exists at all — callers should check hasRecord()
+  // separately to distinguish "unknown" from "never compacted".
+  async getSummarizedThroughEntry(sessionId: string): Promise<number | undefined> {
+    const live = this.sessions.get(sessionId);
+    if (live) {
+      return live.summarizedThroughEntry;
+    }
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    return record?.summarizedThroughEntry;
   }
 
   // Wait for every pending meta.json write to settle. Daemon shutdown

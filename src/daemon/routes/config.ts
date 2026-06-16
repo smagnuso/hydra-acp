@@ -6,7 +6,6 @@ export interface DaemonConfigView {
   defaultModels: Record<string, string>;
   synopsisAgent?: string;
   synopsisModel?: string;
-  synopsisOnClose: boolean;
   defaultTransformers: string[];
 }
 

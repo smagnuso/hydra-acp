@@ -188,7 +188,6 @@ export async function startDaemon(
     defaultModels: config.defaultModels,
     synopsisAgent: config.synopsisAgent,
     synopsisModel: config.synopsisModel,
-    synopsisOnClose: config.synopsisOnClose,
     defaultTransformers: config.defaultTransformers,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,
@@ -247,7 +246,6 @@ export async function startDaemon(
     ...(config.synopsisModel !== undefined
       ? { synopsisModel: config.synopsisModel }
       : {}),
-    synopsisOnClose: config.synopsisOnClose,
     defaultTransformers: [...config.defaultTransformers],
   });
   registerAuthRoutes(app, {
