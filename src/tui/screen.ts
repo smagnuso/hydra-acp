@@ -52,6 +52,8 @@ import {
   MOUSE_X10_OFF,
   PASTE_END,
   PASTE_START,
+  POINTER_SHAPE_DEFAULT,
+  POINTER_SHAPE_POINTER,
   SELECTIVE_MOUSE_OFF,
   SELECTIVE_MOUSE_PROBE,
   SELECTIVE_MOUSE_WHEEL_ONLY,
@@ -243,9 +245,10 @@ export interface HelpPromptSpec {
 // are 1-based (top-left cell is x=1, y=1) and refer to the physical
 // terminal cell under the pointer. `kind` is normalized:
 //   - "press"   button just went down
-//   - "move"    pointer moved while a button was held (drag motion);
-//               not emitted for hover-without-button (we use xterm's
-//               ?1002 drag-tracking mode, not ?1003 any-motion)
+//   - "move"    pointer moved to a new cell. Fires for both
+//               drag-motion (button held) and plain hover (no button)
+//               — we grab in ?1003 any-motion mode so the screen can
+//               drive OS pointer-shape on hover.
 //   - "release" button just came up
 // `button` is the button involved ("left" | "middle" | "right" | "other").
 // For "move" events, `button` reflects the button being held during the
@@ -529,6 +532,11 @@ export class Screen {
   private pasteBuffer = "";
   private rawStdinHandler: (chunk: Buffer) => void;
   private mouseEnabled: boolean;
+  // Last OS pointer-shape we asked the terminal to render via OSC 22.
+  // Used to debounce writes so we only emit on transitions (entering
+  // or leaving a clickable row) rather than every cell-crossing motion
+  // event. Terminals that ignore OSC 22 silently swallow the write.
+  private currentPointerShape: "default" | "pointer" = "default";
   // In-app selection feature flag. Mirrors the resolved config value
   // (see resolveInAppSelection in core/config.ts). Independent of
   // mouseEnabled; flipping mouse capture does NOT auto-flip this.
@@ -651,18 +659,18 @@ export class Screen {
     // our wrap budget would bleed onto the row below, and paintRow's
     // sig-based skip can leave that bleed uncleared indefinitely.
     process.stdout.write(AUTOWRAP_OFF);
-    // mouse: "drag" enables wheel + button-press/release reporting AND
-    // motion-during-drag (xterm DEC mode ?1002). The drag stream is what
-    // makes click-drag text selection work inside the app: handleMouse
-    // surfaces press / move / release to onMouse with 1-based cell
-    // coordinates, and the wheel still feeds scrollback unchanged.
-    // Plain hover-without-button is NOT reported (that would be the
-    // ?1003 any-motion mode, which floods the wire on every cursor
-    // tick — we don't need it for selection).
+    // mouse: "motion" enables wheel + button-press/release + drag
+    // motion AND hover-without-button (xterm DEC mode ?1003). The
+    // motion stream lets handleMouse update the OS pointer-shape
+    // (OSC 22) as the user moves over clickable rows, giving a
+    // browser-style "hand" affordance on terminals that honor it
+    // (kitty, wezterm, ghostty, foot, xterm). ?1003 only fires when
+    // the pointer crosses a cell boundary, so the wire cost is bounded
+    // by mouse-velocity — fine on modern terminals.
     // Skip mouse capture when disabled via config so click-drag text
     // selection works without shift; the trade-off is wheel scrollback.
     if (this.mouseEnabled) {
-      this.term.grabInput({ mouse: "drag" });
+      this.term.grabInput({ mouse: "motion" });
     } else {
       this.term.grabInput(true);
     }
@@ -718,6 +726,13 @@ export class Screen {
     this.term.off("resize", this.resizeHandler);
     this.term.grabInput(false);
     this.term.hideCursor(false);
+    // Reset OS pointer-shape so the host shell doesn't inherit our
+    // hand-pointer override. Harmless on terminals that don't support
+    // OSC 22.
+    if (this.currentPointerShape !== "default") {
+      process.stdout.write(POINTER_SHAPE_DEFAULT);
+      this.currentPointerShape = "default";
+    }
     if (!opts.keepFullscreen) {
       // Restore auto-wrap so the host shell behaves normally after exit.
       // Only needed on the way out — the picker doesn't re-enable it,
@@ -2506,6 +2521,16 @@ export class Screen {
     if (kind !== null && cell !== null && this.onMouse) {
       this.onMouse({ kind, button, x: cell.x, y: cell.y, name });
     }
+    // Update the OS pointer-shape based on what's under the pointer.
+    // Any motion/press event with a valid cell drives the diff —
+    // releases are skipped because they imply the user just confirmed
+    // intent on whatever the press already armed. keyAtRow !== null
+    // means the row belongs to a clickable scrollback block; that's
+    // exactly the affordance we want to surface.
+    if (cell !== null && kind !== "release") {
+      const overInteractive = this.keyAtRow(cell.y) !== null;
+      this.setPointerShape(overInteractive ? "pointer" : "default");
+    }
     // Left-click on a keyed scrollback block toggles that single block's
     // expand/collapse via the app. We require a full click — press and
     // release on the SAME cell — so a press-drag-release (text selection,
@@ -3126,6 +3151,20 @@ export class Screen {
       return null;
     }
     return { x, y };
+  }
+
+  // Diffed write of the OS pointer-shape (OSC 22). Best-effort: the
+  // sequence is honored by xterm, kitty, wezterm, ghostty, foot — other
+  // terminals silently no-op. We only emit on transitions to keep the
+  // wire quiet on every hover-cell crossing.
+  private setPointerShape(shape: "default" | "pointer"): void {
+    if (shape === this.currentPointerShape) {
+      return;
+    }
+    this.currentPointerShape = shape;
+    process.stdout.write(
+      shape === "pointer" ? POINTER_SHAPE_POINTER : POINTER_SHAPE_DEFAULT,
+    );
   }
 
   // Map a 1-based terminal row to the key of the block whose line is
@@ -5956,6 +5995,7 @@ export function emergencyTerminalReset(): void {
     DECPAM_OFF, // DECPAM off: numeric keypad mode
     AUTOWRAP_ON, // auto-wrap on
     SHOW_CURSOR, // show cursor
+    POINTER_SHAPE_DEFAULT, // reset OS pointer-shape (OSC 22)
     "\x1b]9;4;0\x07", // clear OSC 9;4 progress indicator
     ALT_SCREEN_LEAVE, // leave alternate screen
   ].join("");

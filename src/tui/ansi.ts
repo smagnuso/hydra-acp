@@ -69,6 +69,15 @@ export const SELECTIVE_MOUSE_PROBE = "\x1b[?w";
 export const SELECTIVE_MOUSE_WHEEL_ONLY = "\x1b[=24;1w";
 export const SELECTIVE_MOUSE_OFF = "\x1b[=0;0w";
 
+// xterm pointer-shape control (OSC 22). When the pointer hovers a
+// clickable region we ask the terminal to swap to its "pointer"
+// (hand) shape, and reset to "default" on leave. Honored by xterm,
+// kitty, wezterm, ghostty, foot; silently ignored by alacritty,
+// iTerm2, Windows Terminal — no fallback needed (the request is
+// inherently best-effort). Values mirror CSS cursor names.
+export const POINTER_SHAPE_POINTER = "\x1b]22;pointer\x07";
+export const POINTER_SHAPE_DEFAULT = "\x1b]22;default\x07";
+
 // Synchronized output (DECSET 2026) — coalesces a burst of writes into
 // a single repaint on supporting terminals.
 export const SYNC_BEGIN = "\x1b[?2026h";
