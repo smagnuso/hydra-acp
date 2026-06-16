@@ -1926,6 +1926,10 @@ async function runSession(
     { name: "/model", description: "Switch model: /model <model-id>" },
     { name: "/agent", description: "Switch agent via config option: /agent <agent-id>" },
     { name: "/btw", description: "Run an ancillary forked session: /btw <prompt>" },
+    {
+      name: "/export",
+      description: "Export this session as a markdown transcript: /export [path]",
+    },
   ];
   // Seeded from the attach/new response _meta so the slash-completion
   // palette is populated before any history replay or live update.
@@ -3830,6 +3834,60 @@ async function runSession(
             },
           ]);
         });
+        return true;
+      }
+      case "/export": {
+        // Write a markdown transcript of the current session to disk.
+        // Mirrors `hydra-acp sessions transcript <id> --out <file>`: hits
+        // the daemon's GET /v1/sessions/:id/transcript route (which uses
+        // the same bundleToMarkdown renderer as the CLI). Argument is an
+        // optional destination path; with no arg we derive a timestamped
+        // filename in the current working directory.
+        if (resolvedSessionId === "__new__") {
+          screen.appendLines([
+            { prefix: "  ", body: "no active session to export", bodyStyle: "info" },
+          ]);
+          return true;
+        }
+        const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        const sid = resolvedSessionId;
+        void (async () => {
+          try {
+            const resp = await fetch(
+              `${target.baseUrl}/v1/sessions/${encodeURIComponent(sid)}/transcript`,
+              { headers: { Authorization: `Bearer ${target.token}` } },
+            );
+            if (!resp.ok) {
+              const text = await resp.text().catch(() => "");
+              screen.appendLines([
+                {
+                  prefix: "  ",
+                  body: `/export failed: HTTP ${resp.status} ${text}`.trim(),
+                  bodyStyle: "info",
+                },
+              ]);
+              return;
+            }
+            const body = await resp.text();
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+            const defaultName = `hydra-${stripHydraSessionPrefix(sid)}-${stamp}.md`;
+            const target_path = arg.length > 0 ? expandHome(arg) : defaultName;
+            const resolved = path.resolve(target_path);
+            await fs.mkdir(path.dirname(resolved), { recursive: true });
+            await fs.writeFile(resolved, body, { encoding: "utf8", mode: 0o600 });
+            screen.appendLines([
+              { prefix: "  ", body: `Wrote ${resolved}`, bodyStyle: "system" },
+            ]);
+          } catch (err) {
+            screen.appendLines([
+              {
+                prefix: "  ",
+                body: `/export failed: ${(err as Error).message}`,
+                bodyStyle: "info",
+              },
+            ]);
+          }
+        })();
         return true;
       }
       default:
