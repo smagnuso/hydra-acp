@@ -63,6 +63,8 @@ import { loadQueue, rewriteQueue } from "./queue-store.js";
 // is a defensible default — a crash-restart cycle should be under
 // that, and longer downtime means the user has likely moved on.
 const QUEUE_REPLAY_TTL_MS = 15 * 60 * 1000;
+const DEFERRAL_RETRY_MS = 5000;
+const MAX_SWAP_DEFERRALS = 3;
 
 const HYDRA_ID_ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -264,8 +266,9 @@ export class SessionManager {
   // out-of-band so session close is instant; persists synopsis/title
   // via the same enqueueMetaWrite path the in-session handlers used.
   private synopsisCoordinator: SynopsisCoordinator;
-  // Tracked compaction deferral count per sessionId (cap at 3).
-  private compactionDeferrals = new WeakMap<object, number>();
+  // Tracked compaction deferral count per sessionId (cap at MAX_SWAP_DEFERRALS).
+  private compactionDeferrals = new Map<string, number>();
+  private compactionTailK = 20;
   // Cached agent catalog used to populate the `agent` config option's
   // value list. Refreshed lazily (fire-and-forget) since the underlying
   // registry load may hit the network; sessions read whatever snapshot is
@@ -299,6 +302,7 @@ export class SessionManager {
     this.defaultCwd = options.defaultCwd ?? "~";
     const compactionConfig = options.compaction ?? {};
     const tailK = compactionConfig.tailK ?? 20;
+    this.compactionTailK = tailK;
     this.synopsisCoordinator = new SynopsisCoordinator({
       registry: this.registry,
       store: this.store,
@@ -346,25 +350,25 @@ export class SessionManager {
             // Defer: re-schedule after a short delay. Track deferrals
             // with a WeakMap keyed by the session object so we can cap
             // at 3 before giving up until the next trigger.
-            const key = live as unknown as object;
-            let count = this.compactionDeferrals.get(key) ?? 0;
+            let count = this.compactionDeferrals.get(sessionId) ?? 0;
             count++;
-            if (count > 3) {
+            if (count > MAX_SWAP_DEFERRALS) {
               this.logger?.warn(
                 `compaction: deferral cap reached for sessionId=${sessionId}, skipping swap until next trigger`,
               );
+              this.compactionDeferrals.delete(sessionId);
               return;
             }
-            this.compactionDeferrals.set(key, count);
+            this.compactionDeferrals.set(sessionId, count);
             this.logger?.info(
               `compaction: session not quiesced, deferring swap sessionId=${sessionId} attempt=${count}`,
             );
             setTimeout(() => {
-              void this.synopsisCoordinator.scheduleCompaction(sessionId);
-            }, 5000).unref();
+              void this.retrySwap(sessionId);
+            }, DEFERRAL_RETRY_MS).unref();
             return;
           }
-          this.compactionDeferrals.delete(live as unknown as object);
+          this.compactionDeferrals.delete(sessionId);
           await live.swapUpstream({ artifact, tailK });
         } catch (err) {
           this.logger?.warn(
@@ -374,6 +378,54 @@ export class SessionManager {
       },
     });
     void this.refreshAgentCatalog();
+  }
+
+  // Retry the compaction swap using the already-persisted artifact — no new
+  // summarization is triggered. Called by the deferral timeout in
+  // onCompactionArtifact when the session was non-quiesced at artifact time.
+  private async retrySwap(sessionId: string): Promise<void> {
+    const live = this.get(sessionId);
+    if (!live) {
+      this.compactionDeferrals.delete(sessionId);
+      return;
+    }
+    const tailK = this.compactionTailK;
+    try {
+      const quiesced = await live.isQuiescedForSwap();
+      if (!quiesced) {
+        let count = this.compactionDeferrals.get(sessionId) ?? 0;
+        count++;
+        if (count > MAX_SWAP_DEFERRALS) {
+          this.logger?.warn(
+            `compaction: deferral cap reached on retry for sessionId=${sessionId}, giving up`,
+          );
+          this.compactionDeferrals.delete(sessionId);
+          return;
+        }
+        this.compactionDeferrals.set(sessionId, count);
+        this.logger?.info(
+          `compaction: still not quiesced on retry, re-deferring sessionId=${sessionId} attempt=${count}`,
+        );
+        setTimeout(() => {
+          void this.retrySwap(sessionId);
+        }, DEFERRAL_RETRY_MS).unref();
+        return;
+      }
+      const record = await this.store.read(sessionId).catch(() => undefined);
+      if (!record?.synopsis || record.summarizedThroughEntry === undefined) {
+        this.logger?.warn(
+          `compaction: persisted artifact missing on retry for sessionId=${sessionId}, skipping swap`,
+        );
+        this.compactionDeferrals.delete(sessionId);
+        return;
+      }
+      this.compactionDeferrals.delete(sessionId);
+      await live.swapUpstream({ artifact: record.synopsis, tailK });
+    } catch (err) {
+      this.logger?.warn(
+        `compaction: retrySwap failed for sessionId=${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // Refresh the cached agent catalog from the registry. Fire-and-forget;
@@ -458,6 +510,7 @@ export class SessionManager {
       originatingClient: params.originatingClient,
       interactive: params.interactive,
       forwardedEnv: params.forwardedEnv,
+      mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
       scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
@@ -721,6 +774,7 @@ export class SessionManager {
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       forwardedEnv: params.forwardedEnv,
+      mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
       scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
@@ -810,7 +864,8 @@ export class SessionManager {
       forkedFromSessionId: params.forkedFromSessionId,
       forkedFromMessageId: params.forkedFromMessageId,
       forwardedEnv: params.forwardedEnv,
-    extensionCommands: this.extensionCommands,
+      mcpServers: params.mcpServers ?? [],
+      extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
       scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
     });

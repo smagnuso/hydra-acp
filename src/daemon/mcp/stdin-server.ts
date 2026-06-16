@@ -340,7 +340,7 @@ function buildMcpServer(session: Session): McpServer {
     },
   );
 
- if (session.summarizedThroughEntry !== undefined && session.summarizedThroughEntry > 0) {
+  if (session.summarizedThroughEntry !== undefined && session.summarizedThroughEntry > 0) {
     server.registerTool(
       "recall_search",
       {

@@ -10,6 +10,10 @@ const HYDRA_ID_ALPHABET =
 const generateHydraId = customAlphabet(HYDRA_ID_ALPHABET, 16);
 const generateChainToken = customAlphabet(HYDRA_ID_ALPHABET, 16);
 
+// Maximum number of history entries scanned when checking for open tool-call
+// chains before a swap. Bounds I/O cost.
+const QUIESCE_TAIL_SCAN_ENTRIES = 20;
+
 export const HYDRA_SESSION_PREFIX = "hydra_session_";
 
 // Stable id stamped onto prompt_received / turn_complete updates per
@@ -231,6 +235,11 @@ export interface SessionInit {
   // persisted record on cold resurrect so the MCP server can gate
   // recall_* tools accordingly.
   summarizedThroughEntry?: number;
+  // MCP server configs to forward to spawnReplacementAgent on swap.
+  // Stored verbatim; never re-minted — the per-session MCP tokens are
+  // keyed by hydraSessionId (unchanged across swap), so the same config
+  // is correct for the replacement agent.
+  mcpServers?: unknown[];
 }
 
 export interface CloseOptions {
@@ -466,6 +475,7 @@ export class Session {
   // and noisy state churn keep a quiet session alive forever.
   private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
+  private readonly mcpServersConfig: unknown[] | undefined;
   // See SessionInit.forwardedEnv. Mutable so a fresh session/attach can
   // overwrite it; read by respawnAgent to thread into the replacement
   // spawn, and by SessionManager.mergeForPersistence to round-trip
@@ -620,6 +630,7 @@ export class Session {
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.mcpServersConfig = init.mcpServers;
     this.forwardedEnv = init.forwardedEnv;
     this.availableAgentsFn = init.availableAgents;
     this.listSessions = init.listSessions;
@@ -997,7 +1008,7 @@ export class Session {
       cwd,
       agentArgs,
       ...(forwardedEnv ? { forwardedEnv } : {}),
-      mcpServers: [],
+      mcpServers: this.mcpServersConfig ?? [],
     });
 
     this.accumulateAndResetCost();
@@ -1012,8 +1023,8 @@ export class Session {
           sessionId: fresh.upstreamSessionId,
           modelId: persistedModel,
         });
-      } catch {
-        void 0;
+      } catch (err) {
+        this.logger?.warn(`swapUpstream: set_model failed: ${(err as Error).message}`);
       }
     }
 
@@ -1026,8 +1037,8 @@ export class Session {
           sessionId: fresh.upstreamSessionId,
           modeId: persistedMode,
         });
-      } catch {
-        void 0;
+      } catch (err) {
+        this.logger?.warn(`swapUpstream: set_mode failed: ${(err as Error).message}`);
       }
     }
 
@@ -1040,15 +1051,16 @@ export class Session {
     if (this.historyStore) {
       try {
         historyEntries = await this.historyStore.load(this.sessionId);
-      } catch {
-        void 0;
+      } catch (err) {
+        // Serious: failure here produces a tail-less seed, silently degrading compaction quality.
+        this.logger?.warn(`swapUpstream: historyStore.load failed: ${(err as Error).message}`);
       }
     }
 
     const seedText = renderCompactionSeed({
       synopsis: opts.artifact,
       title: opts.title,
-      tail: historyEntries as Array<{ method?: unknown; params?: unknown; [key: string]: unknown }>,
+      tail: historyEntries,
       tailK: opts.tailK,
     });
 
@@ -1078,10 +1090,13 @@ export class Session {
     // Signal to attached clients that a compaction swap occurred. Uses
     // the same session/update channel as agent switches, with a hydra-acp
     // _meta flag so clients can distinguish this from a normal /hydra agent.
+    // Include title so mapSessionInfo produces a non-null render event
+    // (option b: simpler than adding a new sessionUpdate kind).
     this.recordAndBroadcast("session/update", {
       sessionId: this.upstreamSessionId,
       update: {
         sessionUpdate: "session_info_update",
+        title: this.title,
         _meta: { "hydra-acp": { synthetic: true, compactionSwap: true } },
       },
     });
@@ -1089,7 +1104,11 @@ export class Session {
     // Notify agent change handlers so SessionManager's persistAgentChange
     // fires — this rewrites meta.json with the new upstreamSessionId.
     for (const handler of this.agentChangeHandlers) {
-      try { handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId }); } catch { void 0; }
+      try {
+        handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId });
+      } catch (err) {
+        this.logger?.warn(`swapUpstream: agentChange handler failed: ${(err as Error).message}`);
+      }
     }
 
     this.updatedAt = Date.now();
@@ -1099,7 +1118,7 @@ export class Session {
   // a tool_call entry without a corresponding tool_call_update that has
   // status="completed" or status="failed". Scans at most `maxEntries`
   // entries from the end of the file to bound I/O cost.
-  private async _hasOpenToolCall(maxEntries = 20): Promise<boolean> {
+  private async _hasOpenToolCall(maxEntries = QUIESCE_TAIL_SCAN_ENTRIES): Promise<boolean> {
     if (!this.historyStore) {
       return false;
     }

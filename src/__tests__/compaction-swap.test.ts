@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "../core/session-manager.js";
@@ -21,6 +21,8 @@ import { generateCompaction, generateSynopsis } from "../core/synopsis-agent.js"
 
 const mockCompaction = generateCompaction as ReturnType<typeof vi.fn>;
 const mockSynopsis = generateSynopsis as ReturnType<typeof vi.fn>;
+
+
 
 // Poll until `predicate` holds or timeoutMs elapses.
 async function waitFor(

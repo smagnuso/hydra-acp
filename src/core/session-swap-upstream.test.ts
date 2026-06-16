@@ -848,4 +848,64 @@ describe("Session.swapUpstream", () => {
     expect(agentChangeInfos[0]!.agentId).toBe("a1");
     expect(agentChangeInfos[0]!.upstreamSessionId.startsWith("fresh_notify")).toBe(true);
   });
+
+  it("passes mcpServers config to spawnReplacementAgent (not empty array)", async () => {
+    const mcpServers = [{ name: "test-mcp", url: "http://x" }];
+    const newMock = makeMockAgent({ agentId: "a1", cwd: "/w" });
+    const spawnReplacementAgent = vi.fn().mockResolvedValue({
+      agent: newMock.agent,
+      upstreamSessionId: "fresh_mcp",
+    });
+
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_swap_mcp",
+      cwd: "/w",
+      agentId: "a1",
+      agent: makeMockAgent({ agentId: "a1", cwd: "/w" }).agent,
+      upstreamSessionId: "u1",
+      historyStore: store,
+      spawnReplacementAgent,
+      mcpServers,
+    });
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 0 });
+
+    expect(spawnReplacementAgent).toHaveBeenCalledTimes(1);
+    const spawnArg = (spawnReplacementAgent.mock.calls[0] as [{ mcpServers: unknown[] }])[0];
+    expect(spawnArg.mcpServers).toEqual(mcpServers);
+  });
+
+  it("logs a warning when historyStore.load throws during swap", async () => {
+    const { spawnReplacementAgent } = makeSpawnMock({ agentId: "a1" });
+    const warnSpy = vi.fn();
+    const logger = { info: vi.fn(), warn: warnSpy };
+
+    const store = new HistoryStore();
+    // Succeed on the first call (quiesce check in _hasOpenToolCall),
+    // then reject on the second call (the swap's historyStore.load).
+    vi.spyOn(store, "load")
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(() => Promise.reject(new Error("disk read error")));
+
+    const session = new Session({
+      sessionId: "hydra_swap_log_warn",
+      cwd: "/w",
+      agentId: "a1",
+      agent: makeMockAgent({ agentId: "a1", cwd: "/w" }).agent,
+      upstreamSessionId: "u1",
+      historyStore: store,
+      spawnReplacementAgent,
+      logger,
+    });
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("historyStore"),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("disk read error"),
+    );
+  });
 });

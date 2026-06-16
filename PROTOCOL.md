@@ -190,7 +190,6 @@ Read-only snapshot of the daemon's effective config. Mutations go through `~/.hy
   "defaultModels":        { "claude-acp": "claude-opus-4-7" },
   "synopsisAgent":        "claude-acp",                       // optional
   "synopsisModel":        "claude-haiku-4-5-20251001",        // optional
-  "synopsisOnClose":      false,
   "defaultTransformers":  []
 }
 ```
