@@ -236,21 +236,30 @@ async function resurrectFromDisk(
   resurrectParams: ResurrectParams,
 ): Promise<Session> {
   const extMcpMint = mintExtensionMcpDescriptors(deps);
-  // Mint a fresh recall MCP token + descriptor for every resurrected
-  // session (mcpStdin is NOT re-minted because it was per-session-life
-  // and not persisted; if a future resurrect path needs stdin it would
-  // wire it explicitly via a separate mechanism). Reserve before
-  // manager.resurrect so the agent's first probe of the recall route
-  // (which can fire mid-load when the upstream eagerly initializes MCP
-  // servers) finds a valid token even before the Session object is
-  // bound to it. Same pattern as session/new — see the stdin/recall
-  // reserve→complete dance in the create handler above.
+  // Mint a fresh recall MCP token + descriptor ONLY for sessions that
+  // have already been compacted (summarizedThroughEntry > 0). For
+  // never-compacted sessions, recall_* would always return "no
+  // compacted history yet" so injecting their tool descriptions into
+  // the agent's tool registry is pure context tax (~600 tokens/turn).
+  // The compaction swap callback (buildMintMcpServersForSwap) will mint
+  // recall unconditionally on the first compaction, so once a session
+  // crosses the watermark its agent gains the tools live.
+  //
+  // Reserve before manager.resurrect so the agent's first probe of the
+  // recall route (which can fire mid-load when the upstream eagerly
+  // initializes MCP servers) finds a valid token even before the
+  // Session object is bound to it. Same pattern as session/new — see
+  // the stdin/recall reserve→complete dance in the create handler above.
   let recallToken: string | undefined;
   let recallReservation:
     | { complete: (s: Session) => void; abandon: (e?: Error) => void }
     | undefined;
   let recallDescriptor: unknown | undefined;
+  const alreadyCompacted =
+    typeof resurrectParams.summarizedThroughEntry === "number" &&
+    resurrectParams.summarizedThroughEntry > 0;
   if (
+    alreadyCompacted &&
     deps.mcpTokenRegistry !== undefined &&
     deps.getDaemonOrigin !== undefined
   ) {
@@ -1000,34 +1009,17 @@ export function registerAcpWsEndpoint(
         };
         augmentedMcpServers = [...(params.mcpServers ?? []), descriptor];
       }
-      // Mint the recall MCP descriptor for EVERY session (TUI, cat,
-      // extensions — anyone with an agent). The recall server's tool
-      // list is gated on summarizedThroughEntry > 0 so non-compacted
-      // sessions see an empty tool list; compacted ones (or
-      // post-compaction post-swap with a fresh token) see the recall_*
-      // tools. Same reserve→complete/abandon pattern as stdin because
-      // claude-acp eagerly probes mcpServers during session/new.
+      // Recall MCP descriptor is NOT minted at session/new. A brand-new
+      // session has nothing to recall (summarizedThroughEntry === 0 by
+      // definition). Injecting recall_* into the agent's tool registry
+      // would waste ~600 tokens/turn describing tools that always
+      // return "no compacted history yet". The compaction swap path
+      // (mintMcpServersForSwap below) mints recall once the first
+      // compaction crosses the watermark, so the agent picks it up live.
       let recallToken: string | undefined;
       let recallReservation:
         | { complete: (s: Session) => void; abandon: (e?: Error) => void }
         | undefined;
-      if (
-        deps.mcpTokenRegistry !== undefined &&
-        deps.getDaemonOrigin !== undefined
-      ) {
-        recallToken = randomBytes(32).toString("hex");
-        recallReservation = deps.mcpTokenRegistry.reserve(recallToken);
-        const url = `${deps.getDaemonOrigin()}/mcp/hydra-acp-recall`;
-        augmentedMcpServers = [
-          ...(augmentedMcpServers ?? []),
-          {
-            name: "hydra-acp-recall",
-            type: "http",
-            url,
-            headers: [{ name: "Authorization", value: `Bearer ${recallToken}` }],
-          },
-        ];
-      }
       // Mint one per-session token covering every currently-registered
       // extension MCP server, and append one descriptor per extension.
       // Same reserve→complete/abandon pattern as stdin: claude-acp eagerly
