@@ -24,6 +24,13 @@ export interface CompactionHeuristicInput {
   lastActivityMs: number;
   nowMs: number;
   config: CompactionHeuristicConfig;
+  // Authoritative usage reported by the agent via usage_update. When
+  // present, both fields are used directly (utilization = used/size)
+  // and the char-estimate path is bypassed entirely. The status bar
+  // displays these same numbers, so this keeps the heuristic and the
+  // user's visible utilization in sync.
+  agentReportedUsed?: number;
+  agentReportedSize?: number;
 }
 
 export function estimateTokens(chars: number): number {
@@ -37,11 +44,26 @@ export function shouldCompactSession(input: CompactionHeuristicInput): boolean {
   if (input.totalEntries === 0) {
     return false;
   }
-  const tokens = estimateTokens(input.unsummarizedChars);
-  const contextWindow = input.currentModel !== undefined
-    ? input.config.modelContextWindows[input.currentModel] ?? input.config.absoluteFallback
-    : input.config.absoluteFallback;
-  const utilization = tokens / contextWindow;
+  // Prefer the agent's authoritative usage_update numbers. The
+  // char-estimate / modelContextWindows lookup is a fallback for
+  // sessions that haven't been attached to a live agent yet (cold REST
+  // queries, replayed history before the first usage_update fires).
+  let utilization: number;
+  if (
+    typeof input.agentReportedUsed === "number" &&
+    typeof input.agentReportedSize === "number" &&
+    input.agentReportedSize > 0
+  ) {
+    utilization = input.agentReportedUsed / input.agentReportedSize;
+  } else {
+    const tokens = estimateTokens(input.unsummarizedChars);
+    const contextWindow =
+      input.currentModel !== undefined
+        ? input.config.modelContextWindows[input.currentModel] ??
+          input.config.absoluteFallback
+        : input.config.absoluteFallback;
+    utilization = tokens / contextWindow;
+  }
   if (utilization >= input.config.hardCeilingFraction) {
     return true;
   }

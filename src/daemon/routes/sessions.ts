@@ -674,6 +674,10 @@ export function registerSessionRoutes(
       approxTokens = estimateTokens(unsummarizedChars);
       const currentModel = session?.currentModel;
       const lastActivityMs = history.at(-1)!.recordedAt;
+      // Pull authoritative usage from the live session if attached.
+      // The heuristic prefers these over the char-estimate so utilization
+      // matches what the status bar shows the user.
+      const usage = session?.currentUsage;
       shouldCompact = shouldCompactSession({
         summarizedThroughEntry: summarized,
         totalEntries,
@@ -683,6 +687,8 @@ export function registerSessionRoutes(
         lastActivityMs,
         nowMs: Date.now(),
         config: defaults.compaction as unknown as import("../../core/compaction-heuristic.js").CompactionHeuristicConfig,
+        ...(typeof usage?.used === "number" ? { agentReportedUsed: usage.used } : {}),
+        ...(typeof usage?.size === "number" ? { agentReportedSize: usage.size } : {}),
       });
     }
 
