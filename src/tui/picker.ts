@@ -473,7 +473,11 @@ export async function pickSession(
   const computeLayout = (): void => {
     termHeight = readTermHeight(term);
     termWidth = readTermWidth(term);
-    const rowMaxWidth = Math.max(10, termWidth - ROW_PREFIX_WIDTH);
+    // Leave the rightmost column unwritten: filling all `termWidth`
+    // cells triggers the terminal's last-column auto-wrap and eats the
+    // trailing glyph (e.g. the final digit of a 5-char COST cell). The
+    // -1 keeps the last data column safe.
+    const rowMaxWidth = Math.max(10, termWidth - ROW_PREFIX_WIDTH - 1);
     // Composer body sits inside a "│ … │" box, costing 4 cols (border +
     // 1-col pad on each side). Buffer wrap is computed against this
     // tighter budget so cursor placement matches what we paint.
