@@ -4328,7 +4328,7 @@ export class Screen {
       this.term.dim("   Compact now to reduce future per-turn token cost?");
     });
     this.paintRow(top + 2, `cpct|hint|${w}`, () => {
-      this.term.dim("   [y] yes  [n] not now  [d] don't ask again");
+      this.term.dim("   [y] yes  [n] not now");
     });
   }
 

@@ -2867,17 +2867,13 @@ export class SessionManager {
     await this.histories.flushAll();
   }
 
-  // Startup hook: scan persisted sessions for non-empty queue files,
-  // apply the TTL, resurrect anything with surviving entries, and
-  // replay them through the normal queue path. Called from the daemon
-  // boot sequence; failures per session are logged and don't block
-  // the boot.
-  //
-  // Concurrency is deliberately sequential — resurrect each session
-  // one at a time so a runaway daemon with 100 queued sessions
-  // doesn't burst-spawn 100 agents on startup. Inside a single
-  // session, the queue still drains in parallel-friendly fashion via
-  // drainQueue once resurrect() completes.
+  // Startup hook: scan persisted session records for in-flight
+  // compactionState and resume the work. requested/running statuses
+  // re-enqueue the full compaction job (idempotent against
+  // summarizedThroughEntry); swap_pending/swap_deferred statuses
+  // re-enqueue too, since the post-spawn retrySwap path bails for
+  // cold sessions at startup. Per-session failures are logged and
+  // do not block boot.
   async resumePendingCompactions(): Promise<void> {
     const records = await this.store.list().catch(() => []);
     for (const rec of records) {
@@ -2889,14 +2885,7 @@ export class SessionManager {
         `compaction: resuming sessionId=${rec.sessionId} status=${state.status} from prior daemon`,
       );
       try {
-        if (state.status === "requested" || state.status === "running") {
-          this.scheduleCompaction(rec.sessionId);
-        } else if (
-          state.status === "swap_pending" ||
-          state.status === "swap_deferred"
-        ) {
-          await this.retrySwap(rec.sessionId);
-        }
+        this.scheduleCompaction(rec.sessionId);
       } catch (err) {
         this.logger?.warn(
           `compaction: resume failed for sessionId=${rec.sessionId}: ${err instanceof Error ? err.message : String(err)}`,

@@ -1360,7 +1360,7 @@ export class Session {
   // history.jsonl so they don't cause the catch-up loop to re-iterate.
   broadcastCompactionPhase(update: Record<string, unknown>): void {
     const phase = update.phase;
-    if (phase === "swapped" || phase === "failed") {
+    if (phase === "swapped" || phase === "failed" || phase === "rolled_back") {
       this._liveCompactionPhase = undefined;
     } else {
       this._liveCompactionPhase = update;

@@ -777,7 +777,7 @@ async function runSession(
   // gate sending on this — it's purely for the banner busy state.
   let pendingTurns = 0;
   // True while the attach-time compaction prompt is showing. Dismisses
-  // on y (triggers compact), n (dismiss), or d (same as n for now).
+  // on y (triggers compact) or n (dismiss for this attach).
   let compactionPromptActive = false;
   // Set when the user has ^C-cancelled the in-flight turn but it hasn't
   // settled yet. While true the banner shows "cancelling" and the OS
@@ -1243,6 +1243,9 @@ async function runSession(
     } else if (phase === "swapped") {
       screen.setCompactionIndicator(null);
       screen.notify("\u2713 compacted", 2000);
+    } else if (phase === "rolled_back") {
+      screen.setCompactionIndicator(null);
+      screen.notify("\u2713 rolled back", 2000);
     } else if (phase === "failed") {
       screen.setCompactionIndicator(null);
       const raw = typeof u.error === "string" ? u.error : "unknown error";
@@ -2388,7 +2391,7 @@ async function runSession(
         fetch(`${target.baseUrl}/v1/sessions/${encodeURIComponent(sid)}/compact`, {
           method: "POST",
         }).catch(() => undefined);
-      } else if (ch === "n" || ch === "d") {
+      } else if (ch === "n") {
         compactionPromptActive = false;
         screen.setCompactionPrompt(null);
       }

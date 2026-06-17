@@ -104,7 +104,7 @@ describe("compaction resume on daemon startup", () => {
     expect(scheduleSpy).toHaveBeenCalledWith(sessionId);
   });
 
-  it("retrySwap is called for a session with status=swap_pending", async () => {
+  it("scheduleCompaction is called for a session with status=swap_pending", async () => {
     const sessionId = "hydra_" + "c".repeat(24);
     const store = new SessionStore();
     await store.write({
@@ -123,20 +123,15 @@ describe("compaction resume on daemon startup", () => {
     });
 
     const manager = makeManager();
-    const retrySwapSpy = vi.fn().mockResolvedValue(undefined);
-    const proto = Object.getPrototypeOf(manager) as {
-      retrySwap: (id: string) => Promise<void>;
-    };
-    vi.spyOn(proto, "retrySwap").mockImplementation(retrySwapSpy);
+    const scheduleSpy = vi.fn();
+    vi.spyOn(manager, "scheduleCompaction").mockImplementation(scheduleSpy);
 
     await manager.resumePendingCompactions();
 
-    expect(retrySwapSpy).toHaveBeenCalledWith(sessionId);
-
-    vi.restoreAllMocks();
+    expect(scheduleSpy).toHaveBeenCalledWith(sessionId);
   });
 
-  it("retrySwap is called for a session with status=swap_deferred (no re-summarization)", async () => {
+  it("scheduleCompaction is called for a session with status=swap_deferred (no re-summarization)", async () => {
     const sessionId = "hydra_" + "d".repeat(24);
     const store = new SessionStore();
     await store.write({
@@ -160,17 +155,12 @@ describe("compaction resume on daemon startup", () => {
     });
 
     const manager = makeManager();
-    const retrySwapSpy = vi.fn().mockResolvedValue(undefined);
-    const proto = Object.getPrototypeOf(manager) as {
-      retrySwap: (id: string) => Promise<void>;
-    };
-    vi.spyOn(proto, "retrySwap").mockImplementation(retrySwapSpy);
+    const scheduleSpy = vi.fn();
+    vi.spyOn(manager, "scheduleCompaction").mockImplementation(scheduleSpy);
 
     await manager.resumePendingCompactions();
 
-    expect(retrySwapSpy).toHaveBeenCalledWith(sessionId);
-
-    vi.restoreAllMocks();
+    expect(scheduleSpy).toHaveBeenCalledWith(sessionId);
   });
 
   it("sessions without compactionState are skipped", async () => {

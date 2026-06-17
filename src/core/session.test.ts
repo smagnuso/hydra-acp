@@ -5222,5 +5222,13 @@ describe("Session", () => {
       expect(text).toContain('"bogus" is not a valid value for "effort"');
       expect(text).toContain("Valid values");
     });
+
+    it("broadcastCompactionPhase clears _liveCompactionPhase on rolled_back", () => {
+      const { session } = makeSession();
+      session.broadcastCompactionPhase({ phase: "started", requestedAt: 1 });
+      expect((session as unknown as { _liveCompactionPhase: unknown })._liveCompactionPhase).toBeDefined();
+      session.broadcastCompactionPhase({ phase: "rolled_back" });
+      expect((session as unknown as { _liveCompactionPhase: unknown })._liveCompactionPhase).toBeUndefined();
+    });
   });
 });
