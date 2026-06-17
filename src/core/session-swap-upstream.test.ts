@@ -941,4 +941,38 @@ describe("Session.swapUpstream", () => {
       expect.stringContaining("disk read error"),
     );
   });
+
+  it("clears per-life usage fields on swap (used/size/costAmount) but preserves cumulativeCost", async () => {
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+    const session = new Session({
+      sessionId: "hydra_swap_usage_reset",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u1",
+      spawnReplacementAgent,
+      currentUsage: {
+        used: 877_690,
+        size: 1_000_000,
+        costAmount: 12.5,
+        costCurrency: "USD",
+        cumulativeCost: 50,
+      },
+    });
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+
+    // Per-life context utilization resets so the status bar shows "0
+    // tokens used" right after the swap. used MUST be the explicit
+    // value 0 (not undefined) so the TUI's usage_update handler
+    // refreshes the display — that handler only writes when the field
+    // is defined-and-different. size is preserved (model context
+    // window is intrinsic to agent+model, not per-life). The
+    // currentUsage getter folds cumulativeCost into costAmount for
+    // display (50 prior + 12.5 just-accumulated = 62.5).
+    expect(session.currentUsage?.used).toBe(0);
+    expect(session.currentUsage?.size).toBe(1_000_000);
+    expect(session.currentUsage?.costAmount).toBe(62.5);
+    expect(session.currentUsage?.costCurrency).toBe("USD");
+  });
 });

@@ -2570,16 +2570,25 @@ describe("Screen block-click routing", () => {
 });
 
 describe("screen compaction prompt", () => {
+  const makeSpec = () => ({
+    message: "Test message",
+    options: [
+      { label: "Compact now", key: "y" as const },
+      { label: "Not now", key: "n" as const },
+    ],
+    selectedIndex: 0,
+  });
+
   it("setCompactionPrompt makes prompt active", () => {
     const screen = makeScreen();
     expect(screen.isCompactionPromptActive()).toBe(false);
-    screen.setCompactionPrompt({ message: "Test message" });
+    screen.setCompactionPrompt(makeSpec());
     expect(screen.isCompactionPromptActive()).toBe(true);
   });
 
   it("setCompactionPrompt null clears the prompt", () => {
     const screen = makeScreen();
-    screen.setCompactionPrompt({ message: "Test message" });
+    screen.setCompactionPrompt(makeSpec());
     screen.setCompactionPrompt(null);
     expect(screen.isCompactionPromptActive()).toBe(false);
   });
@@ -2587,5 +2596,21 @@ describe("screen compaction prompt", () => {
   it("compaction prompt is inactive by default", () => {
     const screen = makeScreen();
     expect(screen.isCompactionPromptActive()).toBe(false);
+  });
+
+  it("compactionPromptSpec returns a copy of the current spec", () => {
+    const screen = makeScreen();
+    const spec = makeSpec();
+    screen.setCompactionPrompt(spec);
+    const read = screen.compactionPromptSpec();
+    expect(read).toEqual(spec);
+    // Mutating the read-back copy does not affect the live spec.
+    read!.selectedIndex = 99;
+    expect(screen.compactionPromptSpec()?.selectedIndex).toBe(0);
+  });
+
+  it("compactionPromptSpec returns null when inactive", () => {
+    const screen = makeScreen();
+    expect(screen.compactionPromptSpec()).toBeNull();
   });
 });

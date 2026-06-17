@@ -1232,22 +1232,22 @@ async function runSession(
     };
     const phase = typeof u.phase === "string" ? u.phase : undefined;
     if (phase === "started") {
-      screen.setCompactionIndicator("\u27f3 compacting...");
+      screen.setCompactionIndicator("compacting...");
     } else if (phase === "iteration") {
-      screen.setCompactionIndicator("\u27f3 compacting...");
+      screen.setCompactionIndicator("compacting...");
     } else if (phase === "deferred") {
-      screen.setCompactionIndicator("\u27f3 compaction queued (waiting for idle)");
+      screen.setCompactionIndicator("compaction queued (waiting for idle)");
     } else if (phase === "swapped") {
       screen.setCompactionIndicator(null);
-      screen.notify("\u2713 compacted", 2000);
+      screen.notify("compacted", 2000);
     } else if (phase === "rolled_back") {
       screen.setCompactionIndicator(null);
-      screen.notify("\u2713 rolled back", 2000);
+      screen.notify("rolled back", 2000);
     } else if (phase === "failed") {
       screen.setCompactionIndicator(null);
       const raw = typeof u.error === "string" ? u.error : "unknown error";
       const truncated = raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
-      screen.notify(`\u2717 compaction failed: ${truncated}`, 5000);
+      screen.notify(`compaction failed: ${truncated}`, 5000);
     }
   };
 
@@ -2381,30 +2381,80 @@ async function runSession(
   };
 
   // Dismiss or act on the attach-time compaction prompt (y/n/d).
+  const acceptCompaction = (): void => {
+    compactionPromptActive = false;
+    screen.setCompactionPrompt(null);
+    // Optimistic visible feedback so the user sees something happened
+    // — the daemon's phase:"started" broadcast may take a moment to
+    // arrive (ephemeral-agent spawn), and this indicator flips to the
+    // live one as soon as it does.
+    screen.setCompactionIndicator("compaction queued...");
+    const sid = resolvedSessionId;
+    fetch(`${target.baseUrl}/v1/sessions/${encodeURIComponent(sid)}/compact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${target.token}` },
+    }).catch(() => undefined);
+  };
+  const declineCompaction = (): void => {
+    compactionPromptActive = false;
+    screen.setCompactionPrompt(null);
+  };
+  const cycleCompactionSelection = (delta: number): void => {
+    const current = screen.compactionPromptSpec();
+    if (!current) {
+      return;
+    }
+    const n = current.options.length;
+    if (n === 0) {
+      return;
+    }
+    const next = ((current.selectedIndex + delta) % n + n) % n;
+    if (next === current.selectedIndex) {
+      return;
+    }
+    screen.setCompactionPrompt({ ...current, selectedIndex: next });
+  };
   const tryHandleCompactionPromptKey = (ev: KeyEvent): boolean => {
     if (!compactionPromptActive) {
       return false;
     }
+    // Selection-based UX matches the permission prompt: arrows cycle,
+    // Enter submits the highlighted option, 1/2 quick-pick by index,
+    // y/n preserved as muscle-memory hotkeys, Esc cancels.
+    if (ev.type === "key") {
+      if (ev.name === "escape") {
+        declineCompaction();
+        return true;
+      }
+      if (ev.name === "up") {
+        cycleCompactionSelection(-1);
+        return true;
+      }
+      if (ev.name === "down") {
+        cycleCompactionSelection(1);
+        return true;
+      }
+      if (ev.name === "enter" || ev.name === "return") {
+        const current = screen.compactionPromptSpec();
+        const selected = current?.options[current.selectedIndex];
+        if (selected?.key === "y") {
+          acceptCompaction();
+        } else {
+          declineCompaction();
+        }
+        return true;
+      }
+    }
     if (ev.type === "char") {
       const ch = ev.ch.toLowerCase();
-      if (ch === "y") {
-        compactionPromptActive = false;
-        screen.setCompactionPrompt(null);
-        const sid = resolvedSessionId;
-        fetch(`${target.baseUrl}/v1/sessions/${encodeURIComponent(sid)}/compact`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${target.token}` },
-        }).catch(() => undefined);
-      } else if (ch === "n") {
-        compactionPromptActive = false;
-        screen.setCompactionPrompt(null);
+      if (ch === "y" || ch === "1") {
+        acceptCompaction();
+        return true;
       }
-      return true;
-    }
-    if (ev.type === "key" && ev.name === "escape") {
-      compactionPromptActive = false;
-      screen.setCompactionPrompt(null);
-      return true;
+      if (ch === "n" || ch === "2") {
+        declineCompaction();
+        return true;
+      }
     }
     return true;
   };
@@ -5538,16 +5588,17 @@ async function runSession(
   }
   livePeerHistoryRecording = true;
 
-  // Attach-time compaction prompt: only fires when this TUI is what
-  // woke the session up (cold → live via the attach we just did).
-  // Re-attaches to an already-hot session don't re-prompt. The daemon
-  // still computes the heuristic via GET /compact/status; we just gate
-  // the call on the resurrected flag from the attach response so the
-  // user isn't nagged on every reattach.
+  // Attach-time compaction work — two independent concerns share one
+  // GET /compact/status call:
+  //   A. If compaction is ACTIVE on the daemon (compactionState.status
+  //      is requested/running/swap_pending/swap_deferred), seed the
+  //      status-line indicator so re-attaching to an in-flight compaction
+  //      shows "compacting..." right away rather than waiting for the
+  //      next phase broadcast. This runs on every attach.
+  //   B. If shouldCompact is true AND this attach woke the session up
+  //      (cold → live), surface the "compact?" prompt. Re-attaches to
+  //      an already-hot session don't re-prompt.
   void (async () => {
-    if (!attachJustResurrected) {
-      return;
-    }
     try {
       const compactInfoRes = await fetch(
         `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}/compact/status`,
@@ -5559,7 +5610,23 @@ async function runSession(
       const compactInfo = (await compactInfoRes.json()) as {
         shouldCompact?: boolean;
         approxTokens?: number;
+        compactionState?: { status?: string; attempts?: number } | null;
       };
+      // (A) Seed the indicator from the live compactionState. Mirrors
+      // the phase → text mapping in handleCompactionUpdate so the
+      // visible state is identical whether sourced from broadcast or
+      // from this read.
+      const status = compactInfo.compactionState?.status;
+      if (status === "requested" || status === "running") {
+        screen.setCompactionIndicator("compacting...");
+      } else if (status === "swap_pending" || status === "swap_deferred") {
+        screen.setCompactionIndicator("compaction queued (waiting for idle)");
+      }
+      // (B) The prompt only fires on a fresh wake. Gated to avoid
+      // nagging on every re-attach.
+      if (!attachJustResurrected) {
+        return;
+      }
       if (compactInfo.shouldCompact !== true) {
         return;
       }
@@ -5567,6 +5634,11 @@ async function runSession(
       compactionPromptActive = true;
       screen.setCompactionPrompt({
         message: `This session has ~${formatApproxTokens(approxTokens)} tokens of history above the compaction watermark.`,
+        options: [
+          { label: "Compact now", key: "y" },
+          { label: "Not now", key: "n" },
+        ],
+        selectedIndex: 0,
       });
     } catch {
       // Non-fatal: silently skip on any error.

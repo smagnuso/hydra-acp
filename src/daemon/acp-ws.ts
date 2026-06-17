@@ -61,7 +61,7 @@ import { HYDRA_CAT_CLIENT_NAME, HYDRA_VERSION } from "../core/hydra-version.js";
 import { randomBytes } from "node:crypto";
 import * as os from "node:os";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
-import { mintExtensionMcpDescriptors } from "./extension-mcp-mint.js";
+import { mintExtensionMcpDescriptors, buildMintMcpServersForSwap } from "./extension-mcp-mint.js";
 
 interface ClientState {
   clientId: string;
@@ -236,20 +236,76 @@ async function resurrectFromDisk(
   resurrectParams: ResurrectParams,
 ): Promise<Session> {
   const extMcpMint = mintExtensionMcpDescriptors(deps);
+  // Mint a fresh recall MCP token + descriptor for every resurrected
+  // session (mcpStdin is NOT re-minted because it was per-session-life
+  // and not persisted; if a future resurrect path needs stdin it would
+  // wire it explicitly via a separate mechanism). Reserve before
+  // manager.resurrect so the agent's first probe of the recall route
+  // (which can fire mid-load when the upstream eagerly initializes MCP
+  // servers) finds a valid token even before the Session object is
+  // bound to it. Same pattern as session/new — see the stdin/recall
+  // reserve→complete dance in the create handler above.
+  let recallToken: string | undefined;
+  let recallReservation:
+    | { complete: (s: Session) => void; abandon: (e?: Error) => void }
+    | undefined;
+  let recallDescriptor: unknown | undefined;
+  if (
+    deps.mcpTokenRegistry !== undefined &&
+    deps.getDaemonOrigin !== undefined
+  ) {
+    recallToken = randomBytes(32).toString("hex");
+    recallReservation = deps.mcpTokenRegistry.reserve(recallToken);
+    recallDescriptor = {
+      name: "hydra-acp-recall",
+      type: "http",
+      url: `${deps.getDaemonOrigin()}/mcp/hydra-acp-recall`,
+      headers: [{ name: "Authorization", value: `Bearer ${recallToken}` }],
+    };
+  }
+  const baselineMcpServers: unknown[] = [
+    ...(extMcpMint?.descriptors ?? []),
+    ...(recallDescriptor !== undefined ? [recallDescriptor] : []),
+  ];
+  // The swap callback re-mints whatever this resurrect minted, in the
+  // same shapes, so a post-compaction-swap agent gets a fresh recall
+  // token whose route-cache miss re-evaluates the
+  // summarizedThroughEntry gate.
+  const mintForSwap = buildMintMcpServersForSwap({
+    baselineMcpServers: undefined,
+    stdinEnabled: false,
+    deps,
+  });
   let session: Session;
   try {
     session = await deps.manager.resurrect({
       ...resurrectParams,
-      mcpServers: extMcpMint?.descriptors,
+      mcpServers: baselineMcpServers,
+      ...(mintForSwap ? { mintMcpServersForSwap: mintForSwap } : {}),
     });
   } catch (err) {
     if (extMcpMint !== undefined) {
       extMcpMint.abandon(err instanceof Error ? err : undefined);
     }
+    if (recallReservation !== undefined) {
+      recallReservation.abandon(err instanceof Error ? err : undefined);
+    }
     throw err;
   }
   if (extMcpMint !== undefined) {
     extMcpMint.bindToSession(session);
+  }
+  if (
+    recallToken !== undefined &&
+    recallReservation !== undefined &&
+    deps.mcpTokenRegistry !== undefined
+  ) {
+    const token = recallToken;
+    const registry = deps.mcpTokenRegistry;
+    recallReservation.complete(session);
+    session.onClose(() => {
+      void registry.unbind(token);
+    });
   }
   wireDefaultTransformers(session, deps);
   return session;
@@ -944,6 +1000,34 @@ export function registerAcpWsEndpoint(
         };
         augmentedMcpServers = [...(params.mcpServers ?? []), descriptor];
       }
+      // Mint the recall MCP descriptor for EVERY session (TUI, cat,
+      // extensions — anyone with an agent). The recall server's tool
+      // list is gated on summarizedThroughEntry > 0 so non-compacted
+      // sessions see an empty tool list; compacted ones (or
+      // post-compaction post-swap with a fresh token) see the recall_*
+      // tools. Same reserve→complete/abandon pattern as stdin because
+      // claude-acp eagerly probes mcpServers during session/new.
+      let recallToken: string | undefined;
+      let recallReservation:
+        | { complete: (s: Session) => void; abandon: (e?: Error) => void }
+        | undefined;
+      if (
+        deps.mcpTokenRegistry !== undefined &&
+        deps.getDaemonOrigin !== undefined
+      ) {
+        recallToken = randomBytes(32).toString("hex");
+        recallReservation = deps.mcpTokenRegistry.reserve(recallToken);
+        const url = `${deps.getDaemonOrigin()}/mcp/hydra-acp-recall`;
+        augmentedMcpServers = [
+          ...(augmentedMcpServers ?? []),
+          {
+            name: "hydra-acp-recall",
+            type: "http",
+            url,
+            headers: [{ name: "Authorization", value: `Bearer ${recallToken}` }],
+          },
+        ];
+      }
       // Mint one per-session token covering every currently-registered
       // extension MCP server, and append one descriptor per extension.
       // Same reserve→complete/abandon pattern as stdin: claude-acp eagerly
@@ -959,6 +1043,17 @@ export function registerAcpWsEndpoint(
           ...extMcpMint.descriptors,
         ];
       }
+      // Build the mintMcpServersForSwap callback. Captures the baseline
+      // (caller-supplied) mcpServers and whether stdin streaming was
+      // enabled, so the compaction swap can produce a fresh equivalent
+      // with new tokens. Without this, the cached pre-compaction MCP
+      // server build (keyed by token) is reused forever and recall_*
+      // tools never appear on the post-swap agent.
+      const mintForSwap = buildMintMcpServersForSwap({
+        baselineMcpServers: params.mcpServers,
+        stdinEnabled: hydraMeta.mcpStdin === true,
+        deps,
+      });
       let session: Session;
       try {
         session = await deps.manager.create({
@@ -977,10 +1072,14 @@ export function registerAcpWsEndpoint(
           ...(hydraMeta.env !== undefined
             ? { forwardedEnv: hydraMeta.env }
             : {}),
+          ...(mintForSwap ? { mintMcpServersForSwap: mintForSwap } : {}),
         });
       } catch (err) {
         if (stdinReservation !== undefined) {
           stdinReservation.abandon(err instanceof Error ? err : undefined);
+        }
+        if (recallReservation !== undefined) {
+          recallReservation.abandon(err instanceof Error ? err : undefined);
         }
         if (extMcpMint !== undefined) {
           extMcpMint.abandon(err instanceof Error ? err : undefined);
@@ -995,6 +1094,18 @@ export function registerAcpWsEndpoint(
         const token = stdinToken;
         const registry = deps.mcpTokenRegistry;
         stdinReservation.complete(session);
+        session.onClose(() => {
+          void registry.unbind(token);
+        });
+      }
+      if (
+        recallToken !== undefined &&
+        recallReservation !== undefined &&
+        deps.mcpTokenRegistry !== undefined
+      ) {
+        const token = recallToken;
+        const registry = deps.mcpTokenRegistry;
+        recallReservation.complete(session);
         session.onClose(() => {
           void registry.unbind(token);
         });

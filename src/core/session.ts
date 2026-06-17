@@ -167,6 +167,18 @@ export interface SessionInit {
   // process and run initialize + session/new on it. Provided by
   // SessionManager so Session doesn't have to depend on the registry.
   spawnReplacementAgent?: SpawnReplacementAgent;
+  // Optional callback to mint a fresh per-session mcpServers config
+  // for a NEW agent process spawned mid-life (currently just the
+  // compaction swap path). Re-minting forces the MCP-server build
+  // cache (keyed by token) to miss, so tools that gate on session
+  // state — e.g. recall_* registering only when summarizedThroughEntry
+  // > 0 — get re-evaluated against the current state. Without re-mint
+  // the cached pre-compaction MCP server (no recall tools) is reused
+  // forever. The callback receives the live Session so it can bind
+  // disposer for the new tokens (cleanup on session close). When
+  // undefined, swap falls back to the original mcpServersConfig
+  // captured at session construction.
+  mintMcpServersForSwap?: (session: Session) => Promise<unknown[]>;
   // Every recordAndBroadcast entry is persisted here. attach()/getHistorySnapshot()
   // load from this store on demand — Session keeps no in-memory copy.
   historyStore?: HistoryStore;
@@ -518,6 +530,7 @@ export class Session {
   // and noisy state churn keep a quiet session alive forever.
   private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
+  private mintMcpServersForSwap: ((session: Session) => Promise<unknown[]>) | undefined;
   private loadExistingAgentSession: LoadExistingAgentSession | undefined;
   private clearRollbackBreadcrumbHook: (() => void) | undefined;
   private onCompactionSwapHook: ((breadcrumb: RollbackBreadcrumb) => void) | undefined;
@@ -678,6 +691,7 @@ export class Session {
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.mintMcpServersForSwap = init.mintMcpServersForSwap;
     this.loadExistingAgentSession = init.loadExistingAgentSession;
     this.clearRollbackBreadcrumbHook = init.clearRollbackBreadcrumbHook;
     this.onCompactionSwapHook = init.onCompactionSwapHook;
@@ -1076,6 +1090,20 @@ export class Session {
       throw new Error("agent spawning not configured for this session");
     }
 
+    // Re-mint mcpServers (fresh tokens for the new agent process) when
+    // the daemon wires the callback. The build-time gate on recall_*
+    // tools in the stdin MCP route evaluates this session's
+    // summarizedThroughEntry on the FIRST request to the stdin URL;
+    // that result is then cached forever for that token. Reusing the
+    // pre-compaction token would freeze the recall tools in their
+    // not-yet-registered state. Fresh tokens force a fresh build,
+    // which sees summarizedThroughEntry > 0 and registers the tools.
+    // Falls back to the original config when no callback wired (tests,
+    // non-WS code paths) — those paths simply skip the rebuild.
+    const mcpServers = this.mintMcpServersForSwap
+      ? await this.mintMcpServersForSwap(this)
+      : (this.mcpServersConfig ?? []);
+
     // Spawn a fresh agent — bootstrapAgent calls initialize + session/new
     // internally, giving us a new upstreamSessionId.
     const fresh = await spawnAgent({
@@ -1083,7 +1111,7 @@ export class Session {
       cwd,
       agentArgs,
       ...(forwardedEnv ? { forwardedEnv } : {}),
-      mcpServers: this.mcpServersConfig ?? [],
+      mcpServers,
     });
 
     this.accumulateAndResetCost();
@@ -1155,7 +1183,14 @@ export class Session {
     const previousSummarizedThroughEntry = this._summarizedThroughEntry;
 
     // Atomically swap: kill the old agent, point this.agent and
-    // this.upstreamSessionId at the new one.
+    // this.upstreamSessionId at the new one. The in-memory rotation
+    // (this.agent / this.upstreamSessionId) and ALL meta-write-triggering
+    // hooks (agentChangeHandlers, onCompactionSwapHook) fire in one
+    // synchronous block BEFORE any await — otherwise any concurrent
+    // poller (waitFor-style helpers in tests, picker polls in
+    // production) can observe rotation while the breadcrumb /
+    // upstream-id meta writes are still un-enqueued, and a follow-up
+    // flushMetaWrites would resolve nothing.
     const oldAgent = this.agent;
     this.agent = fresh.agent;
     this.upstreamSessionId = fresh.upstreamSessionId;
@@ -1165,6 +1200,32 @@ export class Session {
     // Re-broadcast config options and commands under the new upstream.
     this.broadcastMergedCommands();
     this.broadcastConfigOptions();
+
+    // Fire meta-write-triggering hooks NOW (sync), so the next event-loop
+    // yield happens with the writes already queued in mutateRecord's
+    // per-session enqueueMetaWrite. agentChangeHandlers must run before
+    // onCompactionSwapHook so meta.json's upstreamSessionId is updated
+    // before the breadcrumb is written (the breadcrumb references the
+    // previous id, not the current).
+    for (const handler of this.agentChangeHandlers) {
+      try {
+        handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId });
+      } catch (err) {
+        this.logger?.warn(`swapUpstream: agentChange handler failed: ${(err as Error).message}`);
+      }
+    }
+    if (this.onCompactionSwapHook) {
+      try {
+        this.onCompactionSwapHook({
+          previousUpstreamSessionId,
+          ...(previousSummarizedThroughEntry !== undefined
+            ? { previousSummarizedThroughEntry }
+            : {}),
+        });
+      } catch (err) {
+        this.logger?.warn(`swapUpstream: onCompactionSwapHook failed: ${(err as Error).message}`);
+      }
+    }
 
     await oldAgent.kill().catch(() => undefined);
 
@@ -1201,31 +1262,8 @@ export class Session {
       void client.connection.notify("session/update", completedParams).catch(() => undefined);
     }
 
-    // Notify agent change handlers so SessionManager's persistAgentChange
-    // fires — this rewrites meta.json with the new upstreamSessionId.
-    for (const handler of this.agentChangeHandlers) {
-      try {
-        handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId });
-      } catch (err) {
-        this.logger?.warn(`swapUpstream: agentChange handler failed: ${(err as Error).message}`);
-      }
-    }
-
-    // Notify the rollback breadcrumb hook so SessionManager can persist the
-    // pre-swap upstream id. Done after agentChangeHandlers so the new
-    // upstreamSessionId is already in meta.json before the breadcrumb write.
-    if (this.onCompactionSwapHook) {
-      try {
-        this.onCompactionSwapHook({
-          previousUpstreamSessionId,
-          ...(previousSummarizedThroughEntry !== undefined
-            ? { previousSummarizedThroughEntry }
-            : {}),
-        });
-      } catch (err) {
-        this.logger?.warn(`swapUpstream: onCompactionSwapHook failed: ${(err as Error).message}`);
-      }
-    }
+    // agentChangeHandlers + onCompactionSwapHook moved above to fire
+    // before the await on oldAgent.kill — see the comment up there.
 
     this.updatedAt = Date.now();
   }
@@ -3096,14 +3134,40 @@ export class Session {
   // next agent life starts accumulating from $0. Fires usageHandlers so
   // meta.json is updated before the new agent starts emitting.
   private accumulateAndResetCost(): void {
+    // Called when the upstream agent rotates (compaction swap, /hydra agent
+    // switch, seed-from-import). Roll the prior life's cost into the
+    // cumulative running total, then reset per-life context-window
+    // utilization so the status bar shows "0 tokens used" right after
+    // a swap instead of carrying the OLD agent's last figure until the
+    // new agent's first turn emits a usage_update.
+    //
+    // used must be set to 0 (NOT cleared to undefined): the TUI's
+    // usage_update handler only writes the field when the incoming
+    // event has it `!== undefined`, so an omitted field is interpreted
+    // as "no change". Setting an explicit 0 forces the visible
+    // refresh to 0/<size>.
+    //
+    // size is preserved when known — the model's context window is a
+    // property of the agent+model pair, not the agent's runtime state,
+    // and the new agent will overwrite if its model changes.
+    //
+    // cumulativeCost is the cross-lives running total and rolls
+    // forward; costAmount is reset implicitly by being absent from
+    // next (the currentUsage getter folds cumulativeCost into the
+    // displayed costAmount).
     const amount = this._currentUsage?.costAmount;
-    if (!amount)
-      return;
-    this.cumulativeCost += amount;
+    if (amount) {
+      this.cumulativeCost += amount;
+    }
     const next: UsageSnapshot = {
-      ...(this._currentUsage ?? {}),
+      used: 0,
       cumulativeCost: this.cumulativeCost,
-      costAmount: undefined,
+      ...(typeof this._currentUsage?.size === "number"
+        ? { size: this._currentUsage.size }
+        : {}),
+      ...(this._currentUsage?.costCurrency
+        ? { costCurrency: this._currentUsage.costCurrency }
+        : {}),
     };
     this._currentUsage = next;
     for (const handler of this.usageHandlers) {
@@ -3112,6 +3176,39 @@ export class Session {
       } catch {
         void 0;
       }
+    }
+    // Broadcast a usage_update so already-attached clients (the TUI's
+    // status bar in particular) drop the OLD agent's used/size figures
+    // immediately rather than wait for the new agent's first turn to
+    // emit a fresh usage_update. State-update kinds are not appended
+    // to history.jsonl by recordAndBroadcast, so this is a pure
+    // live-broadcast — no double-record, no replay churn.
+    const displayed = this.currentUsage;
+    if (displayed !== undefined) {
+      const update: Record<string, unknown> = { sessionUpdate: "usage_update" };
+      if (typeof displayed.used === "number") {
+        update.used = displayed.used;
+      }
+      if (typeof displayed.size === "number") {
+        update.size = displayed.size;
+      }
+      if (
+        typeof displayed.costAmount === "number" ||
+        typeof displayed.costCurrency === "string"
+      ) {
+        const cost: Record<string, unknown> = {};
+        if (typeof displayed.costAmount === "number") {
+          cost.amount = displayed.costAmount;
+        }
+        if (typeof displayed.costCurrency === "string") {
+          cost.currency = displayed.costCurrency;
+        }
+        update.cost = cost;
+      }
+      this.recordAndBroadcast("session/update", {
+        sessionId: this.upstreamSessionId,
+        update,
+      });
     }
   }
 

@@ -5,7 +5,7 @@ import { makeMockAgent } from "./test-utils.js";
 import { HistoryStore } from "../core/history-store.js";
 import type { HistoryEntry } from "../core/history-store.js";
 import { McpTokenRegistry } from "../daemon/mcp/token-registry.js";
-import { registerStdinMcpRoutes } from "../daemon/mcp/stdin-server.js";
+import { registerRecallMcpRoutes } from "../daemon/mcp/recall-server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { AddressInfo } from "node:net";
@@ -40,7 +40,7 @@ interface Harness {
 async function makeHarness(): Promise<Harness> {
   const registry = new McpTokenRegistry();
   const app = Fastify({ logger: false });
-  registerStdinMcpRoutes(app, registry);
+  registerRecallMcpRoutes(app, registry);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address() as AddressInfo;
   return { app, registry, baseUrl: `http://127.0.0.1:${addr.port}` };
@@ -51,7 +51,7 @@ async function connectClient(
   token: string,
 ): Promise<Client> {
   const transport = new StreamableHTTPClientTransport(
-    new URL(`${baseUrl}/mcp/hydra-acp-stdin`),
+    new URL(`${baseUrl}/mcp/hydra-acp-recall`),
     {
       requestInit: {
         headers: { Authorization: `Bearer ${token}` },
@@ -70,8 +70,15 @@ function populateHistory(session: Session, entries: HistoryEntry[]): void {
   );
 }
 
-describe("recall tools — gated on summarizedThroughEntry", () => {
-  describe("absent when summarizedThroughEntry is undefined", () => {
+describe("recall tools — call-time gated on summarizedThroughEntry", () => {
+  // The recall MCP server always exposes the three tools (the SDK
+  // requires at least one registered tool to wire the tools/list
+  // handler). When summarizedThroughEntry is undefined or 0, calling a
+  // tool returns a friendly "no compacted history yet" result with an
+  // empty payload rather than an error. The gate moves to call time so
+  // pre-compaction sessions get the same tool surface as post-compaction
+  // ones; the gate is purely on what the tools DO, not what's listed.
+  describe("when summarizedThroughEntry is undefined", () => {
     let h: Harness | null = null;
     let client: Client | null = null;
     const token = "no-compaction-token";
@@ -95,32 +102,46 @@ describe("recall tools — gated on summarizedThroughEntry", () => {
       }
     });
 
-    it("does not expose recall_search", async () => {
-      const r = await client!.listTools();
-      const names = r.tools.map((t) => t.name);
-      expect(names).not.toContain("recall_search");
-    });
-
-    it("does not expose recall_range", async () => {
-      const r = await client!.listTools();
-      const names = r.tools.map((t) => t.name);
-      expect(names).not.toContain("recall_range");
-    });
-
-    it("does not expose recall_tool_calls", async () => {
-      const r = await client!.listTools();
-      const names = r.tools.map((t) => t.name);
-      expect(names).not.toContain("recall_tool_calls");
-    });
-
-    it("still exposes the five non-recall tools", async () => {
+    it("lists the three recall tools (registered unconditionally to keep tools/list wired)", async () => {
       const r = await client!.listTools();
       const names = r.tools.map((t) => t.name).sort();
-      expect(names).toEqual(["grep", "head", "info", "read", "tail", "wait_for_more"].sort());
+      expect(names).toEqual(["recall_range", "recall_search", "recall_tool_calls"]);
+    });
+
+    it("recall_search returns empty matches + a 'no compacted history' note", async () => {
+      const r = await client!.callTool({
+        name: "recall_search",
+        arguments: { query: "anything" },
+      });
+      const sc = r.structuredContent as { matches: unknown[]; total_matched: number; note?: string };
+      expect(sc.matches).toEqual([]);
+      expect(sc.total_matched).toBe(0);
+      expect(sc.note).toContain("no compacted history");
+    });
+
+    it("recall_range returns empty text + a 'no compacted history' note", async () => {
+      const r = await client!.callTool({
+        name: "recall_range",
+        arguments: { from_entry: 0, to_entry: 5 },
+      });
+      const sc = r.structuredContent as { text: string; entry_count: number; note?: string };
+      expect(sc.text).toBe("");
+      expect(sc.entry_count).toBe(0);
+      expect(sc.note).toContain("no compacted history");
+    });
+
+    it("recall_tool_calls returns empty calls + a 'no compacted history' note", async () => {
+      const r = await client!.callTool({
+        name: "recall_tool_calls",
+        arguments: { tool_name: "anything" },
+      });
+      const sc = r.structuredContent as { calls: unknown[]; note?: string };
+      expect(sc.calls).toEqual([]);
+      expect(sc.note).toContain("no compacted history");
     });
   });
 
-  describe("absent when summarizedThroughEntry is 0", () => {
+  describe("when summarizedThroughEntry is 0", () => {
     let h: Harness | null = null;
     let client: Client | null = null;
     const token = "zero-compaction-token";
@@ -144,28 +165,14 @@ describe("recall tools — gated on summarizedThroughEntry", () => {
       }
     });
 
-    it("does not expose recall_search", async () => {
-      const r = await client!.listTools();
-      const names = r.tools.map((t) => t.name);
-      expect(names).not.toContain("recall_search");
-    });
-
-    it("does not expose recall_range", async () => {
-      const r = await client!.listTools();
-      const names = r.tools.map((t) => t.name);
-      expect(names).not.toContain("recall_range");
-    });
-
-    it("does not expose recall_tool_calls", async () => {
-      const r = await client!.listTools();
-      const names = r.tools.map((t) => t.name);
-      expect(names).not.toContain("recall_tool_calls");
-    });
-
-    it("still exposes the five non-recall tools", async () => {
-      const r = await client!.listTools();
-      const names = r.tools.map((t) => t.name).sort();
-      expect(names).toEqual(["grep", "head", "info", "read", "tail", "wait_for_more"].sort());
+    it("recall_search returns empty matches + a 'no compacted history' note", async () => {
+      const r = await client!.callTool({
+        name: "recall_search",
+        arguments: { query: "anything" },
+      });
+      const sc = r.structuredContent as { matches: unknown[]; note?: string };
+      expect(sc.matches).toEqual([]);
+      expect(sc.note).toContain("no compacted history");
     });
   });
 
@@ -225,11 +232,11 @@ describe("recall tools — gated on summarizedThroughEntry", () => {
       expect(names).toContain("recall_tool_calls");
     });
 
-    it("lists all nine tools", async () => {
+    it("lists exactly the three recall tools (server is recall-only)", async () => {
       const r = await client!.listTools();
       const names = r.tools.map((t) => t.name).sort();
       expect(names).toEqual(
-        ["grep", "head", "info", "read", "recall_range", "recall_search", "recall_tool_calls", "tail", "wait_for_more"].sort(),
+        ["recall_range", "recall_search", "recall_tool_calls"],
       );
     });
 
@@ -277,10 +284,9 @@ describe("recall tools — gated on summarizedThroughEntry", () => {
     });
   });
 
-  describe("visibility flips after swap — new MCP server sees compaction", () => {
+  describe("behavior flips after compaction — same MCP server, gate moves from no-op to real work", () => {
     let h: Harness | null = null;
-    const preSwapToken = "pre-swap-token";
-    const postSwapToken = "post-swap-token";
+    const token = "behavior-flip-token";
 
     afterEach(async () => {
       if (h) {
@@ -289,8 +295,7 @@ describe("recall tools — gated on summarizedThroughEntry", () => {
       }
     });
 
-    it("pre-swap server lacks recall_*; post-swap server has them", async () => {
-      // Build harness and session with no compaction.
+    it("recall_search returns empty pre-compaction; returns matches post-compaction (same client, same token)", async () => {
       h = await makeHarness();
       const historyStore = new HistoryStore();
       const session = makeStreamSession({ historyStore });
@@ -302,47 +307,54 @@ describe("recall tools — gated on summarizedThroughEntry", () => {
           params: {
             update: {
               sessionUpdate: "prompt_received",
-              prompt: "pre-swap message",
+              prompt: "pre-compaction message",
             },
           },
           recordedAt: 1000,
         },
       ]);
 
-      // Bind pre-swap token and connect client — MCP server built with summarizedThroughEntry = undefined.
-      h.registry.bind(preSwapToken, session);
-      const preClient = await connectClient(h.baseUrl, preSwapToken);
+      h.registry.bind(token, session);
+      const client = await connectClient(h.baseUrl, token);
 
-      // Pre-swap: no recall tools.
-      const preTools = (await preClient.listTools()).tools.map((t) => t.name).sort();
-      expect(preTools).not.toContain("recall_search");
-      expect(preTools).not.toContain("recall_range");
-      expect(preTools).not.toContain("recall_tool_calls");
-      await preClient.close().catch(() => undefined);
+      // Pre-compaction: tool is listed but returns the "no compacted
+      // history" note. The list is identical to the post-compaction list
+      // — what differs is the answer the tool gives, not its visibility.
+      const tools = (await client.listTools()).tools.map((t) => t.name).sort();
+      expect(tools).toEqual(["recall_range", "recall_search", "recall_tool_calls"]);
 
-      // Simulate compaction: set summarizedThroughEntry on the same session.
-      // In production this happens via persistSynopsis after a compaction run.
+      const preCallResult = await client.callTool({
+        name: "recall_search",
+        arguments: { query: "pre-compaction" },
+      });
+      const preCall = preCallResult.structuredContent as {
+        matches: unknown[];
+        total_matched: number;
+        note?: string;
+      };
+      expect(preCall.matches).toEqual([]);
+      expect(preCall.total_matched).toBe(0);
+      expect(preCall.note).toContain("no compacted history");
+
+      // Simulate compaction: set summarizedThroughEntry. In production
+      // this is done via persistSynopsis after a successful compaction
+      // run. The MCP server is reused (same token), so the test verifies
+      // the call-time gate flips — no need for a fresh token / route
+      // rebuild for the BEHAVIOR transition.
       session.summarizedThroughEntry = 1;
 
-      // Bind post-swap token — new MCP server built with summarizedThroughEntry = 1.
-      h.registry.bind(postSwapToken, session);
-      const postClient = await connectClient(h.baseUrl, postSwapToken);
-
-      // Post-swap: recall tools are present.
-      const postTools = (await postClient.listTools()).tools.map((t) => t.name).sort();
-      expect(postTools).toContain("recall_search");
-      expect(postTools).toContain("recall_range");
-      expect(postTools).toContain("recall_tool_calls");
-
-      // Post-swap recall tools actually work against the same history.
-      const searchResult = await postClient.callTool({
+      const postCallResult = await client.callTool({
         name: "recall_search",
-        arguments: { query: "pre-swap" },
+        arguments: { query: "pre-compaction" },
       });
-      const sc = searchResult.structuredContent as { total_matched: number };
-      expect(sc.total_matched).toBe(1);
+      const postCall = postCallResult.structuredContent as {
+        matches: Array<{ entryId: number }>;
+        total_matched: number;
+      };
+      expect(postCall.total_matched).toBe(1);
+      expect(postCall.matches[0]!.entryId).toBe(0);
 
-      await postClient.close().catch(() => undefined);
+      await client.close().catch(() => undefined);
     });
   });
 });

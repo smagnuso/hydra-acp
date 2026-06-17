@@ -31,7 +31,12 @@ import { z } from "zod";
 // recoverable). Cleared on successful swap or exhausted deferrals.
 // worker is diagnostic only — never used as load-bearing logic.
 export const CompactionState = z.object({
-  status: z.enum(["requested", "running", "swap_pending", "swap_deferred"]),
+  // Active states: requested → running → swap_pending|swap_deferred → cleared.
+  // Terminal: "failed" — set when a compaction run exits without producing
+  // an artifact (parse failure, timeout, agent error, max iterations).
+  // Stays on disk so the user can inspect lastError; replaced atomically
+  // on the next compaction trigger; cleared when the live session resurrects.
+  status: z.enum(["requested", "running", "swap_pending", "swap_deferred", "failed"]),
   requestedAt: z.number(),
   iter: z.number().int().nonnegative().optional(),
   attempts: z.number().int().nonnegative().optional(),

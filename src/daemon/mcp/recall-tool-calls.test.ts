@@ -5,7 +5,7 @@ import { makeMockAgent } from "../../__tests__/test-utils.js";
 import type { HistoryEntry } from "../../core/history-store.js";
 import { HistoryStore } from "../../core/history-store.js";
 import { McpTokenRegistry } from "./token-registry.js";
-import { registerStdinMcpRoutes } from "./stdin-server.js";
+import { registerRecallMcpRoutes } from "./recall-server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { AddressInfo } from "node:net";
@@ -36,7 +36,7 @@ interface Harness {
 async function makeHarness(): Promise<Harness> {
   const registry = new McpTokenRegistry();
   const app = Fastify({ logger: false });
-  registerStdinMcpRoutes(app, registry);
+  registerRecallMcpRoutes(app, registry);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address() as AddressInfo;
   return { app, registry, baseUrl: `http://127.0.0.1:${addr.port}` };
@@ -62,7 +62,7 @@ describe("recall_tool_calls — missing both filters rejected", () => {
     const session = makeStreamSession();
     h.registry.bind(token, session);
     const transport = new StreamableHTTPClientTransport(
-      new URL(`${h.baseUrl}/mcp/hydra-acp-stdin`),
+      new URL(`${h.baseUrl}/mcp/hydra-acp-recall`),
       {
         requestInit: {
           headers: { Authorization: `Bearer ${token}` },
@@ -116,7 +116,7 @@ describe("recall_tool_calls — tool_name filter", () => {
     session = makeStreamSession({ historyStore });
     h.registry.bind(token, session);
     const transport = new StreamableHTTPClientTransport(
-      new URL(`${h.baseUrl}/mcp/hydra-acp-stdin`),
+      new URL(`${h.baseUrl}/mcp/hydra-acp-recall`),
       {
         requestInit: {
           headers: { Authorization: `Bearer ${token}` },
@@ -377,7 +377,7 @@ describe("recall_tool_calls — file_path filter", () => {
     session = makeStreamSession({ historyStore });
     h.registry.bind(token, session);
     const transport = new StreamableHTTPClientTransport(
-      new URL(`${h.baseUrl}/mcp/hydra-acp-stdin`),
+      new URL(`${h.baseUrl}/mcp/hydra-acp-recall`),
       {
         requestInit: {
           headers: { Authorization: `Bearer ${token}` },
@@ -546,7 +546,7 @@ describe("recall_tool_calls — both filters combined", () => {
     session = makeStreamSession({ historyStore });
     h.registry.bind(token, session);
     const transport = new StreamableHTTPClientTransport(
-      new URL(`${h.baseUrl}/mcp/hydra-acp-stdin`),
+      new URL(`${h.baseUrl}/mcp/hydra-acp-recall`),
       {
         requestInit: {
           headers: { Authorization: `Bearer ${token}` },
@@ -658,7 +658,7 @@ describe("recall_tool_calls — args and truncation", () => {
     session = makeStreamSession({ historyStore });
     h.registry.bind(token, session);
     const transport = new StreamableHTTPClientTransport(
-      new URL(`${h.baseUrl}/mcp/hydra-acp-stdin`),
+      new URL(`${h.baseUrl}/mcp/hydra-acp-recall`),
       {
         requestInit: {
           headers: { Authorization: `Bearer ${token}` },

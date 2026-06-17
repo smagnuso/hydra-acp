@@ -52,6 +52,12 @@ export interface GenerateSynopsisOpts {
   // Parent Hydra session id — used to tag the worker prompt so users can
   // identify ephemeral synopsis/compaction sessions in agent storage.
   sessionId?: string;
+  // Called once with a human-readable reason whenever the ephemeral run
+  // returns undefined (parse failure, timeout, spawn/connection error).
+  // Coordinator uses this to populate compactionState.lastError so the
+  // user can see WHY a compaction didn't produce an artifact rather than
+  // a silent failure. The reason is intended to be short and actionable.
+  onFailure?: (reason: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -98,6 +104,9 @@ async function runEphemeralRegen(
         opts.logger?.warn(
           `synopsis: agent ${opts.agentId} returned non-string sessionId from session/new`,
         );
+        opts.onFailure?.(
+          `agent ${opts.agentId} did not return a sessionId from session/new`,
+        );
         return undefined;
       }
       opts.onWorkerSpawned?.(upstreamSessionId, agent.pid);
@@ -134,8 +143,18 @@ async function runEphemeralRegen(
       const reply = chunks.join("");
       const parsed = parser(reply);
       if (!parsed) {
+        const preview = JSON.stringify(reply.slice(0, 200));
         opts.logger?.warn(
-          `synopsis: agent ${opts.agentId} reply did not parse (replyLen=${reply.length} preview=${JSON.stringify(reply.slice(0, 200))})`,
+          `synopsis: agent ${opts.agentId} reply did not parse (replyLen=${reply.length} preview=${preview})`,
+        );
+        // Include the first chunk of the reply verbatim — for small
+        // replies (refusals, error strings) this IS the diagnosis; for
+        // longer truncated JSON the preview lets the user see what the
+        // agent attempted. Prescribing a specific fallback model would
+        // be guessing at the user's available providers.
+        const preview120 = reply.slice(0, 120).replace(/\s+/g, " ").trim();
+        opts.onFailure?.(
+          `agent ${opts.agentId} returned unparseable JSON (${reply.length} chars): ${preview120}${reply.length > 120 ? "\u2026" : ""}`,
         );
       }
       return parsed;
@@ -148,6 +167,7 @@ async function runEphemeralRegen(
           opts.logger?.warn(
             `synopsis: agent ${opts.agentId} timed out after ${timeoutMs}ms`,
           );
+          opts.onFailure?.(`agent ${opts.agentId} timed out after ${timeoutMs}ms`);
           resolve(undefined);
         }, timeoutMs);
         timer.unref?.();
@@ -172,9 +192,9 @@ async function runEphemeralRegen(
       },
     );
   } catch (err) {
-    opts.logger?.warn(
-      `synopsis: agent ${opts.agentId} failed: ${(err as Error).message}`,
-    );
+    const message = (err as Error).message;
+    opts.logger?.warn(`synopsis: agent ${opts.agentId} failed: ${message}`);
+    opts.onFailure?.(`agent ${opts.agentId} failed: ${message}`);
     return undefined;
   } finally {
     if (timer) {

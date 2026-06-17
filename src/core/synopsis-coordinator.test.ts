@@ -532,28 +532,37 @@ describe("SynopsisCoordinator", () => {
     expect(mockCompaction).toHaveBeenCalledTimes(1);
   });
 
-  it("circuit-breaker fires when maxIterations hit without producing artifact", async () => {
+  it("circuit-breaker fires when maxIterations hit without producing artifact, persisting status=failed with the failure reason", async () => {
     const record = makeRecord();
     const records = new Map([[record.sessionId, record]]);
     const state: { history: unknown[]; iterations: number } = { history: [{}, {}, {}], iterations: 0 };
 
-    // Every call returns undefined (no artifact) while growing history.
-    // This ensures the loop exhausts all iterations without converging or persisting anything.
-    mockCompaction.mockImplementation(async () => {
+    // Every call invokes onFailure with a reason and returns undefined,
+    // growing history to keep the loop alive until maxIterations.
+    mockCompaction.mockImplementation(async (opts: { onFailure?: (r: string) => void }) => {
       state.iterations++;
       state.history.push({});
+      opts.onFailure?.("agent returned unparseable JSON (preview)");
       return undefined;
     });
 
     const warnings: string[] = [];
+    const stateChanges: Array<unknown> = [];
+    const broadcasts: Array<{ phase: unknown; error?: unknown }> = [];
     const coord = new SynopsisCoordinator({
       registry: makeRegistry({ id: "test-agent" }),
       store: makeStore(records),
       histories: makeHistories(new Map([[record.sessionId, state.history]])),
-      
+
       persistTitle: async () => undefined,
       persistSynopsis: async () => undefined,
       compactionMaxIterations: 2,
+      onCompactionStateChange: async (_id, s) => {
+        stateChanges.push(s);
+      },
+      broadcastHydraCompaction: (_id, payload) => {
+        broadcasts.push(payload as { phase: unknown; error?: unknown });
+      },
       logger: {
         warn: (msg: string) => warnings.push(msg),
         info: () => undefined,
@@ -562,7 +571,18 @@ describe("SynopsisCoordinator", () => {
     coord.scheduleCompaction(record.sessionId);
     await coord.flush(5_000);
 
+    // Log proof that the circuit breaker actually fired.
     expect(warnings.some((w) => w.includes("maxIterations") && w.includes("without producing artifact"))).toBe(true);
+
+    // Terminal failed state is persisted with the failure reason from onFailure.
+    const finalState = stateChanges[stateChanges.length - 1] as { status?: unknown; lastError?: unknown };
+    expect(finalState?.status).toBe("failed");
+    expect(finalState?.lastError).toContain("unparseable JSON");
+
+    // failed phase is broadcast for the TUI's status indicator.
+    const failedBroadcast = broadcasts.find((b) => b.phase === "failed");
+    expect(failedBroadcast).toBeDefined();
+    expect(failedBroadcast?.error).toContain("unparseable JSON");
   });
 
   it("compaction loop respects compactionMaxIterations=1", async () => {
@@ -713,25 +733,100 @@ describe("SynopsisCoordinator", () => {
     expect(call?.agentId).toBe("compaction-only");
   });
 
-  it("compaction job falls back to synopsisAgent when compactionAgent is unset", async () => {
+  it("compaction job falls back to the session's own agent when compactionAgent is unset (does NOT inherit synopsisAgent)", async () => {
     const record = makeRecord();
     const records = new Map([[record.sessionId, record]]);
     const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
     mockCompaction.mockResolvedValue({ synopsis: { goal: "compact" } });
 
     const coord = new SynopsisCoordinator({
-      registry: makeRegistry({ id: "test-agent" }),
+      registry: makeRegistry({ id: record.agentId }),
       store: makeStore(records),
       histories: makeHistories(histories),
-      
+
       persistTitle: async () => undefined,
       persistSynopsis: async () => undefined,
-      synopsisAgent: "synopsis-only",
+      // synopsisAgent is set (title regen would use it), but compaction
+      // must NOT inherit it — it falls through directly to record.agentId.
+      synopsisAgent: "synopsis-only-for-titles",
     });
     coord.scheduleCompaction(record.sessionId);
     await coord.flush(5_000);
 
     const call = mockCompaction.mock.calls[0]?.[0];
-    expect(call?.agentId).toBe("synopsis-only");
+    expect(call?.agentId).toBe(record.agentId);
+    expect(call?.agentId).not.toBe("synopsis-only-for-titles");
+  });
+
+  it("compaction job does NOT inherit synopsisModel when compactionModel is unset", async () => {
+    const record = makeRecord({ currentModel: "session-current-model" });
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compact" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: record.agentId }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      // synopsisModel is set (title regen would use it), but compaction
+      // must NOT inherit it. With no compactionAgent override the
+      // compaction model falls through to record.currentModel.
+      synopsisModel: "title-only-haiku",
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    const call = mockCompaction.mock.calls[0]?.[0];
+    expect(call?.modelId).toBe("session-current-model");
+    expect(call?.modelId).not.toBe("title-only-haiku");
+  });
+
+  it("compaction job uses record.currentModel when compactionModel is unset AND no compactionAgent override", async () => {
+    const record = makeRecord({ currentModel: "opus-from-session" });
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compact" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: record.agentId }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    const call = mockCompaction.mock.calls[0]?.[0];
+    expect(call?.modelId).toBe("opus-from-session");
+  });
+
+  it("compaction job does NOT inherit record.currentModel when compactionAgent IS overridden", async () => {
+    const record = makeRecord({ currentModel: "model-only-on-session-agent" });
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compact" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "different-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      // compactionAgent is explicitly different — the session's model
+      // id is meaningless to it, so model falls through to undefined
+      // (agent default) instead of cross-injecting.
+      compactionAgent: "different-agent",
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    const call = mockCompaction.mock.calls[0]?.[0];
+    expect(call?.modelId).toBeUndefined();
   });
 });

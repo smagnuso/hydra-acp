@@ -43,6 +43,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerAcpWsEndpoint } from "./acp-ws.js";
 import { McpTokenRegistry } from "./mcp/token-registry.js";
 import { registerStdinMcpRoutes } from "./mcp/stdin-server.js";
+import { registerRecallMcpRoutes } from "./mcp/recall-server.js";
 import { ExtensionMcpRegistry } from "../core/extension-mcp.js";
 import { registerExtensionMcpRoutes } from "./mcp/extension-route.js";
 
@@ -256,6 +257,7 @@ export async function startDaemon(
     rateLimiter: authRateLimiter,
   });
   registerStdinMcpRoutes(app, mcpTokenRegistry);
+  registerRecallMcpRoutes(app, mcpTokenRegistry);
   registerExtensionMcpRoutes(app, mcpTokenRegistry, extensionMcp);
   registerAcpWsEndpoint(app, {
     validator,

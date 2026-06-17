@@ -108,6 +108,16 @@ export interface CreateSessionParams {
   // cold-resurrect. An explicit empty map `{}` clears any persisted
   // value (overwrite semantics, not merge).
   forwardedEnv?: Record<string, string>;
+  // Caller-supplied callback to mint a FRESH per-session mcpServers
+  // config for a new agent process spawned mid-life (compaction swap).
+  // Wired by the daemon layer (acp-ws / REST routes) which owns the
+  // token registry; session-manager just passes it through to Session.
+  // Needed so cached MCP-server builds (keyed by token) get
+  // invalidated when session state changes that affect tool
+  // registration — primarily, recall_* tools that register only when
+  // summarizedThroughEntry > 0. Receives the live Session for disposer
+  // binding (on-close cleanup of the new token).
+  mintMcpServersForSwap?: (session: import("./session.js").Session) => Promise<unknown[]>;
 }
 
 export interface ResurrectParams {
@@ -172,6 +182,9 @@ export interface ResurrectParams {
   // Passed to Session so buildStateSnapshotReplay can deliver it to
   // freshly-attaching clients before any live broadcast fires.
   compactionState?: CompactionState;
+  // Daemon-supplied callback to mint fresh mcpServers on swap. Same
+  // semantics as CreateSessionParams.mintMcpServersForSwap.
+  mintMcpServersForSwap?: (session: import("./session.js").Session) => Promise<unknown[]>;
 }
 
 export type AgentSpawner = (opts: AgentInstanceOptions) => AgentInstance;
@@ -353,6 +366,14 @@ export class SessionManager {
       logger: this.logger,
       npmRegistry: this.npmRegistry,
       onCompactionStateChange: async (sessionId, state) => {
+        // Mirror to the live Session's in-memory field so manager.list()
+        // (which reads session.compactionState directly, not from disk)
+        // surfaces the current compactionState to pickers and other
+        // clients without waiting for disk to settle.
+        const live = this.get(sessionId);
+        if (live) {
+          live.compactionState = state;
+        }
         await this.mutateRecord(sessionId, { compactionState: state });
       },
       broadcastHydraCompaction: (sessionId, payload) => {
@@ -401,7 +422,9 @@ export class SessionManager {
           }
           this.compactionDeferrals.delete(sessionId);
           await live.swapUpstream({ artifact, tailK, summarizedThroughEntry });
-          // Clear compactionState now that the swap completed.
+          // Clear compactionState now that the swap completed (in-memory
+          // and on disk in lockstep — see onCompactionStateChange above).
+          live.compactionState = undefined;
           await this.mutateRecord(sessionId, {}, ["compactionState"]);
         } catch (err) {
           this.logger?.warn(
@@ -455,7 +478,9 @@ export class SessionManager {
       }
       this.compactionDeferrals.delete(sessionId);
       await live.swapUpstream({ artifact: record.synopsis, tailK, summarizedThroughEntry: record.summarizedThroughEntry });
-      // Clear compactionState now that the retry-swap completed.
+      // Clear compactionState now that the retry-swap completed (in-memory
+      // and on disk in lockstep — see onCompactionStateChange above).
+      live.compactionState = undefined;
       await this.mutateRecord(sessionId, {}, ["compactionState"]);
     } catch (err) {
       this.logger?.warn(
@@ -535,6 +560,9 @@ export class SessionManager {
         this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? [] }),
       loadExistingAgentSession: (upstreamId, p) =>
         this.bootstrapAgentLoad(upstreamId, { ...p, mcpServers: p.mcpServers ?? [] }),
+      ...(params.mintMcpServersForSwap
+        ? { mintMcpServersForSwap: params.mintMcpServersForSwap }
+        : {}),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
@@ -790,6 +818,9 @@ export class SessionManager {
         this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
       loadExistingAgentSession: (upstreamId, p) =>
         this.bootstrapAgentLoad(upstreamId, { ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
+      ...(params.mintMcpServersForSwap
+        ? { mintMcpServersForSwap: params.mintMcpServersForSwap }
+        : {}),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
@@ -897,6 +928,9 @@ export class SessionManager {
         this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
       loadExistingAgentSession: (upstreamId, p) =>
         this.bootstrapAgentLoad(upstreamId, { ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
+      ...(params.mintMcpServersForSwap
+        ? { mintMcpServersForSwap: params.mintMcpServersForSwap }
+        : {}),
       listSessions: () => this.list(),
       availableAgents: () => this.agentCatalog,
       historyStore: this.histories,
@@ -2889,10 +2923,29 @@ export class SessionManager {
   // cold sessions at startup. Per-session failures are logged and
   // do not block boot.
   async resumePendingCompactions(): Promise<void> {
+    // Only ACTIVE compaction states resume on daemon restart. Terminal
+    // states (currently just "failed") stay parked on disk so the user
+    // can read lastError via `/hydra compact status` or the picker —
+    // auto-resuming a failed compaction would silently retry without
+    // user consent and waste tokens on something that already broke.
+    // Re-triggering a failed compaction is explicit: `/hydra compact`
+    // or POST /v1/sessions/:id/compact.
+    const ACTIVE_RESUME_STATES = new Set([
+      "requested",
+      "running",
+      "swap_pending",
+      "swap_deferred",
+    ]);
     const records = await this.store.list().catch(() => []);
     for (const rec of records) {
       const state = rec.compactionState;
       if (state == null) {
+        continue;
+      }
+      if (!ACTIVE_RESUME_STATES.has(state.status)) {
+        this.logger?.info(
+          `compaction: not resuming sessionId=${rec.sessionId} status=${state.status} (terminal — user must re-trigger explicitly)`,
+        );
         continue;
       }
       this.logger?.info(

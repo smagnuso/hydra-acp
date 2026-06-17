@@ -20,6 +20,98 @@ import type { Session } from "../core/session.js";
 import type { ExtensionMcpRegistry } from "../core/extension-mcp.js";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
 
+// Build a callback suitable for SessionInit.mintMcpServersForSwap. The
+// callback re-mints the per-session mcpServers config that was originally
+// provided at session/new time, generating fresh tokens so the cached
+// MCP server builds (keyed by token) miss and are rebuilt against the
+// current Session state — primarily, recall_* tools gate on
+// summarizedThroughEntry which only goes up after compaction.
+//
+// Closes over the baseline user-supplied mcpServers (passed through
+// unchanged), whether stdin streaming was active at create time, and
+// the daemon deps needed to re-mint. The returned closure binds each
+// fresh token to the session's onClose disposer so it cleans up when
+// the session goes cold.
+export interface BuildMintForSwapOpts {
+  baselineMcpServers: unknown[] | undefined;
+  stdinEnabled: boolean;
+  deps: ExtensionMcpMintDeps;
+}
+
+// Re-mint a single per-session, per-descriptor bearer + URL descriptor
+// for the built-in MCP servers Hydra hosts in-process (stdin, recall).
+// Shared between session/new (where we mint the initial descriptor) and
+// the swap callback (where we re-mint to force a fresh MCP-server
+// build, e.g. so the recall server re-evaluates its
+// summarizedThroughEntry gate). The token is reserved + bound to the
+// session and torn down on close.
+function mintInternalMcpDescriptor(opts: {
+  name: "hydra-acp-stdin" | "hydra-acp-recall";
+  session: Session;
+  tokenRegistry: McpTokenRegistry;
+  getOrigin: () => string;
+}): { name: string; type: string; url: string; headers: Array<{ name: string; value: string }> } {
+  const token = randomBytes(32).toString("hex");
+  const reservation = opts.tokenRegistry.reserve(token);
+  reservation.complete(opts.session);
+  opts.session.onClose(() => {
+    void opts.tokenRegistry.unbind(token);
+  });
+  return {
+    name: opts.name,
+    type: "http",
+    url: `${opts.getOrigin()}/mcp/${opts.name}`,
+    headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+  };
+}
+
+export function buildMintMcpServersForSwap(
+  opts: BuildMintForSwapOpts,
+): ((session: Session) => Promise<unknown[]>) | undefined {
+  if (
+    opts.deps.mcpTokenRegistry === undefined ||
+    opts.deps.getDaemonOrigin === undefined
+  ) {
+    // No registry / origin → can't mint anything; let swap fall back
+    // to the captured baseline mcpServersConfig.
+    return undefined;
+  }
+  const tokenRegistry = opts.deps.mcpTokenRegistry;
+  const getOrigin = opts.deps.getDaemonOrigin;
+  return async (session: Session): Promise<unknown[]> => {
+    let descriptors: unknown[] = [...(opts.baselineMcpServers ?? [])];
+    if (opts.stdinEnabled) {
+      descriptors.push(
+        mintInternalMcpDescriptor({
+          name: "hydra-acp-stdin",
+          session,
+          tokenRegistry,
+          getOrigin,
+        }),
+      );
+    }
+    // Always re-mint the recall descriptor on swap. The recall server's
+    // tool list is gated on summarizedThroughEntry > 0 — a fresh token
+    // forces the route's per-token build cache to miss and the gate to
+    // re-evaluate, which is the whole point of mint-for-swap after a
+    // compaction has advanced the watermark.
+    descriptors.push(
+      mintInternalMcpDescriptor({
+        name: "hydra-acp-recall",
+        session,
+        tokenRegistry,
+        getOrigin,
+      }),
+    );
+    const extMcp = mintExtensionMcpDescriptors(opts.deps);
+    if (extMcp !== undefined) {
+      extMcp.bindToSession(session);
+      descriptors = [...descriptors, ...extMcp.descriptors];
+    }
+    return descriptors;
+  };
+}
+
 export interface ExtensionMcpMintDeps {
   extensionMcp?: ExtensionMcpRegistry;
   mcpTokenRegistry?: McpTokenRegistry;

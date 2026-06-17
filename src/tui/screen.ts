@@ -231,11 +231,15 @@ export interface ConfirmPromptSpec {
   hint: string;
 }
 
-// Three-line modal shown once per attach when the unsummarized history
-// tail exceeds the compaction-prompt threshold. Dismissed by y/n/d.
+// Modal shown once per attach when the daemon's shouldCompact says
+// yes AND this attach is what woke the session. Same arrow/enter +
+// hotkey UX as the permission prompt so muscle memory transfers.
+// Dismissed by Enter on the selected option, y/n quick-pick, or Esc.
 export interface CompactionPromptSpec {
   // E.g. "This session has ~85K tokens of history above the compaction watermark."
   message: string;
+  options: Array<{ label: string; key: "y" | "n" }>;
+  selectedIndex: number;
 }
 
 // Modal that displays a hotkey cheatsheet. `entries` is an ordered list
@@ -289,7 +293,11 @@ const MAX_COMPLETION_ROWS = 6;
 const MAX_CHIP_ROWS = 4;
 const CONFIRM_PROMPT_ROWS = 2;
 // message line + options line + hint line
-const COMPACTION_PROMPT_ROWS = 3;
+// Compaction prompt is dynamic — see compactionRows() — but at least
+// 5 (title + question + 2 options + hint). Kept here only for tests
+// that need a baseline guard.
+const COMPACTION_PROMPT_MIN_ROWS = 5;
+void COMPACTION_PROMPT_MIN_ROWS;
 // Default minimum interval between content-driven repaints (agent text
 // chunks, tool/plan upserts, elapsed ticks). Without this we full-redraw
 // 10–50× per second during streaming, which is wasteful and made flicker
@@ -2278,8 +2286,15 @@ export class Screen {
     return this.compactionPrompt !== null;
   }
 
-  // Three-line compaction prompt shown once per attach when the unsummarized
-  // tail is large. Pass null to dismiss.
+  // Read-only view of the current spec for callers that need to cycle
+  // the selection (TUI key handler) or check which option is active.
+  compactionPromptSpec(): CompactionPromptSpec | null {
+    return this.compactionPrompt ? { ...this.compactionPrompt } : null;
+  }
+
+  // Compaction prompt shown once per attach when the unsummarized tail
+  // is large enough that the daemon's shouldCompact heuristic fires.
+  // Pass null to dismiss.
   setCompactionPrompt(spec: CompactionPromptSpec | null): void {
     if (spec !== null && this.compactionPrompt === null) {
       this.clearSelection();
@@ -4314,22 +4329,61 @@ export class Screen {
       return;
     }
     const w = this.term.width;
+    const rows = this.compactionRows();
     const top =
       this.term.height -
-      COMPACTION_PROMPT_ROWS -
+      rows -
       BANNER_ROWS -
       SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
-    this.paintRow(top, `cpct|msg|${w}|${spec.message}`, () => {
-      this.term.brightBlue(` ⊙ ${truncate(spec.message, w - 4)}`);
+    let row = top;
+    const writeRow = (sig: string, paint: () => void): void => {
+      if (row >= top + rows) {
+        return;
+      }
+      this.paintRow(row, sig, paint);
+      row += 1;
+    };
+    // Yellow header matches the "active background work" convention
+    // and the permission prompt's brightYellow title — both interrupt
+    // the user for a decision.
+    writeRow(`cpct|msg|${w}|${spec.message}`, () => {
+      this.term.brightYellow(` ${truncate(spec.message, w - 2)}`);
     });
-    this.paintRow(top + 1, `cpct|opts|${w}`, () => {
-      this.term.dim("   Compact now to reduce future per-turn token cost?");
+    writeRow(`cpct|q|${w}`, () => {
+      this.term(" Compact now to reduce future per-turn token cost?");
     });
-    this.paintRow(top + 2, `cpct|hint|${w}`, () => {
-      this.term.dim("   [y] yes  [n] not now");
+    for (let i = 0; i < spec.options.length; i++) {
+      if (row >= top + rows - 1) {
+        break;
+      }
+      const opt = spec.options[i];
+      if (!opt) {
+        continue;
+      }
+      const isSel = i === spec.selectedIndex;
+      const marker = isSel ? "\u276f" : " ";
+      const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
+      writeRow(`cpct|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
+        if (isSel) {
+          this.term.brightYellow(body);
+        } else {
+          this.term.dim(body);
+        }
+      });
+    }
+    writeRow(`cpct|hint|${w}`, () => {
+      this.term.dim(" \u2191/\u2193 choose \u00b7 Enter submit \u00b7 Esc cancel \u00b7 y/n quick-pick");
     });
+  }
+
+  private compactionRows(): number {
+    if (!this.compactionPrompt) {
+      return 0;
+    }
+    // title + question + N options + hint = 3 + N
+    return 3 + this.compactionPrompt.options.length;
   }
 
   private drawHelpPrompt(): void {
@@ -4524,7 +4578,10 @@ export class Screen {
         if (right.kind === "search") {
           this.term.brightCyan.noFormat(right.text);
         } else if (right.kind === "compaction") {
-          this.term.brightBlue.noFormat(right.text);
+          // Yellow signals active background work — matches the convention
+          // used elsewhere in the TUI for in-flight state (busy banner,
+          // mid-turn indicators).
+          this.term.brightYellow.noFormat(right.text);
         } else {
           this.term.brightYellow.noFormat(right.text);
         }
@@ -4583,14 +4640,22 @@ export class Screen {
       return;
     }
     if (this.compactionPrompt) {
+      // Park cursor on the selected option row — same as the permission
+      // prompt — so it reads as visual feedback for the selection
+      // rather than a stray cell overlapping the message text.
+      // Layout: top row = message, +1 = question, +2 = first option.
+      const rows = this.compactionRows();
       const top =
         this.term.height -
-        COMPACTION_PROMPT_ROWS -
+        rows -
         BANNER_ROWS -
         SEPARATOR_ROWS -
         SESSIONBAR_ROWS +
         1;
-      this.term.moveTo(2, top);
+      const optionRow = top + 2 + this.compactionPrompt.selectedIndex;
+      const lastUsableRow =
+        this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+      this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
       return;
     }
     if (this.helpPrompt) {
@@ -4661,7 +4726,7 @@ export class Screen {
       return CONFIRM_PROMPT_ROWS;
     }
     if (this.compactionPrompt) {
-      return COMPACTION_PROMPT_ROWS;
+      return this.compactionRows();
     }
     if (this.helpPrompt) {
       return this.helpRows();

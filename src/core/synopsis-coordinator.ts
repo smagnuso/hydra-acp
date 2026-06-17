@@ -222,11 +222,14 @@ export class SynopsisCoordinator {
         );
         return;
       }
-      // Pick agent: compactionAgent wins for compaction jobs, synopsisAgent
-      // wins for title jobs; otherwise fall through to the session's own
-      // agentId. If neither resolves to a registered agent we skip the job.
+      // Pick agent. Compaction and title are independent concerns with
+      // different cost/quality tradeoffs, so the two knobs do NOT cascade:
+      // an unset compactionAgent does not silently inherit synopsisAgent.
+      // Fallthrough for each job kind is to the session's own agentId,
+      // letting the user opt either knob in/out without affecting the
+      // other. If neither resolves to a registered agent we skip the job.
       const synopsisAgentId = jobKind === "compaction"
-        ? (this.opts.compactionAgent ?? this.opts.synopsisAgent ?? record.agentId)
+        ? (this.opts.compactionAgent ?? record.agentId)
         : (this.opts.synopsisAgent ?? record.agentId);
       const agentDef = await this.opts.registry.getAgent(synopsisAgentId);
       if (!agentDef) {
@@ -238,8 +241,29 @@ export class SynopsisCoordinator {
       const plan = await planSpawn(agentDef, [], {
         npmRegistry: this.opts.npmRegistry,
       });
+      // Model selection rules:
+      //   - title  : synopsisModel or the agent's own default.
+      //   - compaction:
+      //       1. compactionModel if set (explicit user override).
+      //       2. otherwise, when we're also using the session's own
+      //          agent (no compactionAgent override), inherit the
+      //          session's currentModel. Compaction on the session's
+      //          own agent should produce its summary on the model
+      //          that's been doing the actual work, not whatever the
+      //          ephemeral agent's startup config happens to default
+      //          to — those defaults are often friendly aliases that
+      //          fail to resolve in a fresh process.
+      //       3. otherwise (compactionAgent IS overridden), undefined
+      //          so the override agent picks its own default — the
+      //          parent's model id may not be advertised by a
+      //          different agent.
+      //   Compaction does NOT inherit synopsisModel — those knobs are
+      //   independent (title is high-frequency / cheap; compaction is
+      //   rare / quality-sensitive).
+      const usingSessionAgent = this.opts.compactionAgent === undefined;
       const modelId = jobKind === "compaction"
-        ? (this.opts.compactionModel ?? this.opts.synopsisModel)
+        ? (this.opts.compactionModel ??
+           (usingSessionAgent ? record.currentModel : undefined))
         : this.opts.synopsisModel;
       // Run the ephemeral agent in the session's own hydra directory
       // rather than the user's project cwd. Two reasons: (a) if a prompt
@@ -260,6 +284,12 @@ export class SynopsisCoordinator {
         let through = last ?? 0;
         let latestArtifact: SessionSynopsis | undefined;
         let latestThrough = 0;
+        // Captures the most recent failure reason surfaced by
+        // generateCompaction's onFailure callback. Used to populate
+        // compactionState.lastError when the loop exits without an
+        // artifact, so the user sees an actionable message in
+        // `/hydra compact status` and the TUI's failed broadcast.
+        let lastFailureReason: string | undefined;
         const requestedAt = Date.now();
         await this.opts.onCompactionStateChange?.(sessionId, {
           status: "requested",
@@ -271,82 +301,133 @@ export class SynopsisCoordinator {
           requestedAt,
         });
 
-        do {
-          iter++;
-          this.opts.logger?.info(
-            `synopsis: compaction iteration ${iter} sessionId=${sessionId} historyLen=${history.length} watermark=${through}`,
-          );
+        try {
+          do {
+            iter++;
+            this.opts.logger?.info(
+              `synopsis: compaction iteration ${iter} sessionId=${sessionId} historyLen=${history.length} watermark=${through}`,
+            );
 
-          const historyAtStart = await this.opts.histories.load(sessionId);
-          if (historyAtStart.length <= through) {
-            break;
-          }
+            const historyAtStart = await this.opts.histories.load(sessionId);
+            if (historyAtStart.length <= through) {
+              break;
+            }
 
-          const result = await generateCompaction({
-            agentId: synopsisAgentId,
-            cwd: synopsisCwd,
-            plan,
-            history: historyAtStart,
-            modelId,
-            sessionId,
-            logger: this.opts.logger,
-            timeoutMs: this.opts.generateTimeoutMs,
-            onWorkerSpawned: (upstreamSessionId, pid) => {
-              void this.opts.onCompactionStateChange?.(sessionId, {
-                status: "running",
-                requestedAt,
-                iter,
-                worker: {
-                  upstreamSessionId,
-                  pid: pid ?? 0,
-                },
-              });
-            },
-          });
+            const result = await generateCompaction({
+              agentId: synopsisAgentId,
+              cwd: synopsisCwd,
+              plan,
+              history: historyAtStart,
+              modelId,
+              sessionId,
+              logger: this.opts.logger,
+              timeoutMs: this.opts.generateTimeoutMs,
+              onWorkerSpawned: (upstreamSessionId, pid) => {
+                void this.opts.onCompactionStateChange?.(sessionId, {
+                  status: "running",
+                  requestedAt,
+                  iter,
+                  worker: {
+                    upstreamSessionId,
+                    pid: pid ?? 0,
+                  },
+                });
+              },
+              onFailure: (reason) => {
+                lastFailureReason = reason;
+              },
+            });
 
-          if (result) {
-            const merged = mergeLocalFields(result.synopsis, historyAtStart);
-            if (merged && synopsisHasContent(merged)) {
-              await this.opts.persistSynopsis(sessionId, merged, historyAtStart.length);
-              latestArtifact = merged;
-              latestThrough = historyAtStart.length;
-              await this.opts.onCompactionStateChange?.(sessionId, {
-                status: "running",
-                requestedAt,
-                iter,
-              });
-              this.opts.broadcastHydraCompaction?.(sessionId, {
-                sessionUpdate: "hydra_compaction",
-                phase: "iteration",
-                iter,
-                historyLen: historyAtStart.length,
-              });
-              await this.opts.onCompactionArtifact?.(sessionId, merged, latestThrough);
-              this.opts.logger?.info(
-                `synopsis: persisted compaction sessionId=${sessionId} iteration=${iter} fields=${describeFields(merged)}`,
+            if (result) {
+              const merged = mergeLocalFields(result.synopsis, historyAtStart);
+              if (merged && synopsisHasContent(merged)) {
+                await this.opts.persistSynopsis(sessionId, merged, historyAtStart.length);
+                latestArtifact = merged;
+                latestThrough = historyAtStart.length;
+                // Clear any stale failure reason now that an iteration
+                // succeeded — partial progress beats no information.
+                lastFailureReason = undefined;
+                await this.opts.onCompactionStateChange?.(sessionId, {
+                  status: "running",
+                  requestedAt,
+                  iter,
+                });
+                this.opts.broadcastHydraCompaction?.(sessionId, {
+                  sessionUpdate: "hydra_compaction",
+                  phase: "iteration",
+                  iter,
+                  historyLen: historyAtStart.length,
+                });
+                await this.opts.onCompactionArtifact?.(sessionId, merged, latestThrough);
+                this.opts.logger?.info(
+                  `synopsis: persisted compaction sessionId=${sessionId} iteration=${iter} fields=${describeFields(merged)}`,
+                );
+              }
+            } else {
+              this.opts.logger?.warn(
+                `synopsis: sessionId=${sessionId} compaction iteration ${iter} returned no result`,
               );
             }
-          } else {
-            this.opts.logger?.warn(
-              `synopsis: sessionId=${sessionId} compaction iteration ${iter} returned no result`,
+
+            through = historyAtStart.length;
+            const historyAfter = await this.opts.histories.load(sessionId);
+            if (historyAfter.length === through) {
+              break;
+            }
+          } while (iter < maxIterations);
+
+          if (!latestArtifact) {
+            // Loop exited without ever producing an artifact (parse failure,
+            // timeout, agent error, or no growth since last summary). Persist
+            // a terminal "failed" state with the most recent reason so the
+            // user can read it via `/hydra compact status` or the TUI's
+            // failed broadcast. The state stays until next compaction trigger
+            // replaces it or the session resurrects.
+            if (iter > 0) {
+              this.opts.logger?.warn(
+                `synopsis: compaction hit maxIterations=${maxIterations} without producing artifact sessionId=${sessionId}: ${lastFailureReason ?? "no reason captured"}`,
+              );
+            }
+            const errorMsg =
+              lastFailureReason ??
+              (iter === 0
+                ? "no new history to compact since last summary"
+                : `compaction did not produce an artifact after ${iter} iteration(s)`);
+            await this.opts.onCompactionStateChange?.(sessionId, {
+              status: "failed",
+              requestedAt,
+              iter,
+              lastError: errorMsg,
+            });
+            this.opts.broadcastHydraCompaction?.(sessionId, {
+              sessionUpdate: "hydra_compaction",
+              phase: "failed",
+              error: errorMsg,
+            });
+          } else if (iter >= maxIterations) {
+            this.opts.logger?.info(
+              `synopsis: compaction converged sessionId=${sessionId} watermark=${latestThrough} iterations=${iter}`,
             );
           }
-
-          through = historyAtStart.length;
-          const historyAfter = await this.opts.histories.load(sessionId);
-          if (historyAfter.length === through) {
-            break;
-          }
-        } while (iter < maxIterations);
-
-        if (!latestArtifact && iter > 0) {
+        } catch (err) {
+          // Thrown errors land here — record so the state isn't stranded.
+          // The onCompactionArtifact / swap path has its own try/catch and
+          // won't reach here; this catches unexpected throws inside the loop.
+          const message = err instanceof Error ? err.message : String(err);
           this.opts.logger?.warn(
-            `synopsis: compaction hit maxIterations=${maxIterations} without producing artifact sessionId=${sessionId}`,
+            `synopsis: compaction threw for sessionId=${sessionId}: ${message}`,
           );
-        } else if (iter >= maxIterations && latestArtifact) {
-          this.opts.logger?.info(
-            `synopsis: compaction converged sessionId=${sessionId} watermark=${latestThrough} iterations=${iter}`,
-          );
+          await this.opts.onCompactionStateChange?.(sessionId, {
+            status: "failed",
+            requestedAt,
+            iter,
+            lastError: message,
+          });
+          this.opts.broadcastHydraCompaction?.(sessionId, {
+            sessionUpdate: "hydra_compaction",
+            phase: "failed",
+            error: message,
+          });
         }
       } else {
         const result = await generateSynopsis({

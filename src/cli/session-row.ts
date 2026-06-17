@@ -183,7 +183,12 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: formatUpstreamCell(s.upstreamSessionId, s.importedFromMachine),
     host: s.importedFromMachine ?? "-",
-    state: formatState(s.status, s.busy, s.awaitingInput, s.compactionState != null),
+    state: formatState(
+      s.status,
+      s.busy,
+      s.awaitingInput,
+      isCompactionInProgress(s.compactionState),
+    ),
     agent: formatAgentCell(s.agentId),
     model: shortenModel(s.currentModel) ?? "-",
     age: formatRelativeAge(s.updatedAt, now),
@@ -191,6 +196,22 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
     cwd: shortenHomePath(s.cwd),
     cost: formatCostCell(s.currentUsage),
   };
+}
+
+// True only for the active phases of compaction. Terminal states like
+// "failed" leave compactionState populated on disk so the user can read
+// lastError, but the picker badge must NOT render a spinner for them.
+function isCompactionInProgress(state: unknown): boolean {
+  if (state == null || typeof state !== "object") {
+    return false;
+  }
+  const status = (state as { status?: unknown }).status;
+  return (
+    status === "requested" ||
+    status === "running" ||
+    status === "swap_pending" ||
+    status === "swap_deferred"
+  );
 }
 
 // Pre-first-attach imported sessions have no local upstream id yet —

@@ -183,4 +183,31 @@ describe("compaction resume on daemon startup", () => {
 
     expect(scheduleSpy).not.toHaveBeenCalled();
   });
+
+  it("sessions with terminal 'failed' compactionState are NOT auto-resumed", async () => {
+    const sessionId = "hydra_" + "f".repeat(24);
+    const store = new SessionStore();
+    await store.write({
+      sessionId,
+      upstreamSessionId: "upstream_" + sessionId,
+      agentId: "claude-code",
+      cwd: WORK_CWD,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      compactionState: {
+        status: "failed",
+        requestedAt: Date.now() - 60_000,
+        iter: 1,
+        lastError: "agent returned unparseable JSON",
+      },
+    });
+
+    const manager = makeManager();
+    const scheduleSpy = vi.fn();
+    vi.spyOn(manager, "scheduleCompaction").mockImplementation(scheduleSpy);
+
+    await manager.resumePendingCompactions();
+
+    expect(scheduleSpy).not.toHaveBeenCalled();
+  });
 });
