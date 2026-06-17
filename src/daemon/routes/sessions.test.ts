@@ -1183,7 +1183,7 @@ describe("session routes: compaction endpoints", () => {
     });
 
     const res = await fetch(
-      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact`,
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact/status`,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -1205,7 +1205,7 @@ describe("session routes: compaction endpoints", () => {
     session.summarizedThroughEntry = 42;
 
     const res = await fetch(
-      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact`,
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/compact/status`,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { summarizedThroughEntry?: number };
@@ -1253,7 +1253,7 @@ describe("session routes: compaction endpoints", () => {
     const imported = await harness.manager.importBundle(bundle);
 
     const res = await fetch(
-      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact`,
+      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact/status`,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { summarizedThroughEntry?: number };
@@ -1297,7 +1297,7 @@ describe("session routes: compaction endpoints", () => {
     });
 
     const res = await fetch(
-      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact`,
+      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact/status`,
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {

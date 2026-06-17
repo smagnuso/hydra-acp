@@ -1503,6 +1503,11 @@ async function runSession(
   // when we reattach mid-turn. Lets the post-drain reconcile flip the
   // banner to busy and start the elapsed timer at the right offset.
   let initialTurnStartedAt: number | undefined;
+  // True when the session/attach call that started this TUI is what
+  // brought the session from cold → live. Drives one-shot attach-time
+  // UX (currently the compaction prompt) so re-attaches to an already
+  // hot session don't keep nagging.
+  let attachJustResurrected = false;
   if (ctx.sessionId === "__new__") {
     const hydraNewMeta: Record<string, unknown> = {};
     if (opts.agentId) {
@@ -1660,6 +1665,7 @@ async function runSession(
     exitHint.sessionId = resolvedSessionId;
     exitHint.readonly = opts.readonly === true;
     const hydraMeta = extractHydraMeta(attached._meta ?? undefined);
+    attachJustResurrected = hydraMeta.resurrected === true;
     upstreamSessionId = hydraMeta.upstreamSessionId;
     if (hydraMeta.agentId) {
       resolvedAgentId = hydraMeta.agentId;
@@ -2387,6 +2393,7 @@ async function runSession(
         const sid = resolvedSessionId;
         fetch(`${target.baseUrl}/v1/sessions/${encodeURIComponent(sid)}/compact`, {
           method: "POST",
+          headers: { Authorization: `Bearer ${target.token}` },
         }).catch(() => undefined);
       } else if (ch === "n") {
         compactionPromptActive = false;
@@ -5531,14 +5538,20 @@ async function runSession(
   }
   livePeerHistoryRecording = true;
 
-  // Attach-time compaction prompt: delegate the decision to the daemon
-  // which computes the two-signal heuristic (context utilization + idle
-  // time). The TUI simply reads shouldCompact from the GET /compact
-  // endpoint and shows the message when true.
+  // Attach-time compaction prompt: only fires when this TUI is what
+  // woke the session up (cold → live via the attach we just did).
+  // Re-attaches to an already-hot session don't re-prompt. The daemon
+  // still computes the heuristic via GET /compact/status; we just gate
+  // the call on the resurrected flag from the attach response so the
+  // user isn't nagged on every reattach.
   void (async () => {
+    if (!attachJustResurrected) {
+      return;
+    }
     try {
       const compactInfoRes = await fetch(
-        `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}/compact`,
+        `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}/compact/status`,
+        { headers: { Authorization: `Bearer ${target.token}` } },
       );
       if (!compactInfoRes.ok) {
         return;

@@ -132,6 +132,12 @@ export interface LiveSessionMetaExtras {
   turnStartedAt?: number;
   agentCapabilities?: unknown;
   queue?: unknown[];
+  // True when this session/attach call is what brought the session
+  // from cold → live (the daemon's resurrect path ran inside the
+  // handler). False/absent when attaching to an already-live session.
+  // Clients use this to decide whether to surface attach-time UX like
+  // the compaction prompt: ask once per wake, not on every re-attach.
+  resurrected?: boolean;
 }
 
 // Single source of truth for the `_meta["hydra-acp"]` object emitted on
@@ -226,6 +232,9 @@ export function buildHydraSessionMeta(
     }
     if (extras.queue !== undefined && extras.queue.length > 0) {
       meta.queue = extras.queue;
+    }
+    if (extras.resurrected === true) {
+      meta.resurrected = true;
     }
   }
   return meta;

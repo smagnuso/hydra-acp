@@ -48,7 +48,7 @@ export interface SessionRouteDefaults {
   publicHost?: string;
   host?: string;
   port?: number;
-  // Compaction heuristic config used by the GET /compact endpoint to
+  // Compaction heuristic config used by the GET /compact/status endpoint to
   // compute shouldCompact for clients deciding whether to surface a compaction prompt.
   compaction?: CompactionConfig;
 }
@@ -633,10 +633,11 @@ export function registerSessionRoutes(
     }
   });
 
-  // Compaction state — current watermark so callers can decide whether
-  // compaction is worthwhile (e.g. the TUI checks if summarizedThroughEntry
-  // is recent and the unsummarized tail is small before prompting).
-  app.get("/v1/sessions/:id/compact", async (request, reply) => {
+  // Compaction state — current watermark + the daemon-computed
+  // shouldCompact boolean so callers can decide whether to prompt the
+  // user. Read-only; does not schedule any work. POST /compact is the
+  // separate endpoint that actually starts a compaction.
+  app.get("/v1/sessions/:id/compact/status", async (request, reply) => {
     const raw = (request.params as { id: string }).id;
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
     const session = manager.get(id);

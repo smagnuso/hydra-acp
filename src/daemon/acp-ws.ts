@@ -1138,6 +1138,11 @@ export function registerAcpWsEndpoint(
           _meta: buildViewerResponseMeta(fromDisk),
         };
       }
+      // Capture whether this attach is what wakes the session up — used
+      // below to stamp `resurrected: true` onto the response _meta so
+      // attach-time UX (e.g. the TUI's compaction prompt) fires once
+      // per wake instead of on every re-attach to a hot session.
+      const resurrectedByThisAttach = !session;
       if (!session) {
         // Always consult disk so the resurrected session has its full
         // persisted state (title, snapshot fields, createdAt). When
@@ -1295,7 +1300,9 @@ export function registerAcpWsEndpoint(
         ...(modesPayload ? { modes: modesPayload } : {}),
         ...(modelsPayload ? { models: modelsPayload } : {}),
         configOptions: session.buildConfigOptions(),
-        _meta: buildResponseMeta(deps.manager, session),
+        _meta: buildResponseMeta(deps.manager, session, {
+          resurrected: resurrectedByThisAttach,
+        }),
       };
     });
 
@@ -2206,7 +2213,7 @@ function buildViewerResponseMeta(
 function buildResponseMeta(
   manager: SessionManager,
   session: Session,
-  opts: { clientId?: string } = {},
+  opts: { clientId?: string; resurrected?: boolean } = {},
 ): Record<string, unknown> {
   const entry = manager.liveListEntry(session);
   // Snapshot state for the attaching client. Carries what would
@@ -2233,6 +2240,7 @@ function buildResponseMeta(
     // waiting for new prompt_queue_added notifications. Omitted entirely
     // when the queue is empty (the common case).
     queue: session.queueSnapshot(),
+    ...(opts.resurrected === true ? { resurrected: true } : {}),
   };
   return mergeMeta(session.agentMeta, buildHydraSessionMeta(entry, extras));
 }

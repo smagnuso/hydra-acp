@@ -182,6 +182,11 @@ export interface HydraMeta {
   // the session record as `forwardedEnv` and reapplied automatically
   // on respawn / cold-resurrect.
   env?: Record<string, string>;
+  // True when the session/attach call that produced this meta is what
+  // brought the session from cold → live. Absent / false on re-attach
+  // to an already-live session. Drives one-shot attach-time UX such
+  // as the compaction prompt.
+  resurrected?: boolean;
 }
 
 // Validate a candidate _meta["hydra-acp"].env map. Returns the cleaned
@@ -416,6 +421,9 @@ export function extractHydraMeta(
   }
   if (typeof obj.attachedClients === "number") {
     out.attachedClients = obj.attachedClients;
+  }
+  if (typeof obj.resurrected === "boolean") {
+    out.resurrected = obj.resurrected;
   }
   if (typeof obj.importedFromMachine === "string") {
     out.importedFromMachine = obj.importedFromMachine;

@@ -43,7 +43,7 @@ export interface SessionSummary {
   awaitingInput?: boolean;
   // Present when compaction is in progress. Drives the trailing ⟳ in
   // the STATE cell (`LIVE⟳`) so operators can spot mid-compaction
-  // sessions at a glance without a per-session GET /compact call.
+  // sessions at a glance without a per-session GET /compact/status call.
   compactionState?: unknown;
 }
 
