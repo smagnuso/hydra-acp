@@ -4766,12 +4766,51 @@ export class Screen {
     // user prompt synchronously with open, so in practice this branch is
     // only hit on the very first repaint between open and seed.
     if (this.btwOverlayLines.length === 0) return 0;
-    // Header + content, capped by max. Only the LAST (rows-1) entries
-    // are visible at render time (drawBtwOverlay takes the tail).
-    return Math.min(
-      this.btwOverlayMaxHeight,
-      1 + this.btwOverlayLines.length,
-    );
+    // Header + content, capped by max. Count WRAPPED rows so that long
+    // lines reserve the rows they actually paint into — without this the
+    // overlay clips at the right margin (DECAWM is off) and silently
+    // drops the wrap continuations.
+    const maxContent = Math.max(0, this.btwOverlayMaxHeight - 1);
+    const w = this.term.width;
+    const wrappedCount = this.wrapBtwTail(w, maxContent).length;
+    return Math.min(this.btwOverlayMaxHeight, 1 + wrappedCount);
+  }
+
+  // Walk btwOverlayLines from the tail, wrapping each via wrapOne, until
+  // we have at least `needed` wrapped rows (or run out of source lines).
+  // Returns the collected wrapped rows in original (top-down) order.
+  // Mirrors wrapTail's tail-walk pattern but over the overlay buffer and
+  // without the thought-filter. wrapOne skips its cache for lines that
+  // aren't in lineIds (overlay lines aren't), so this re-wraps every
+  // repaint — fine, since the overlay is bounded by btwOverlayMaxHeight.
+  private wrapBtwTail(width: number, needed: number): FormattedLine[] {
+    if (width <= 4) {
+      const take = Math.min(needed, this.btwOverlayLines.length);
+      return this.btwOverlayLines.slice(this.btwOverlayLines.length - take);
+    }
+    if (needed <= 0 || this.btwOverlayLines.length === 0) {
+      return [];
+    }
+    const batches: FormattedLine[][] = [];
+    let total = 0;
+    for (let i = this.btwOverlayLines.length - 1; i >= 0; i--) {
+      const line = this.btwOverlayLines[i]!;
+      const wrapped = this.wrapOne(line, width);
+      batches.push(wrapped);
+      total += wrapped.length;
+      if (total >= needed) {
+        break;
+      }
+    }
+    const rows: FormattedLine[] = [];
+    for (let i = batches.length - 1; i >= 0; i--) {
+      rows.push(...batches[i]!);
+    }
+    // Trim from the head so we keep exactly the LAST `needed` rows.
+    if (rows.length > needed) {
+      return rows.slice(rows.length - needed);
+    }
+    return rows;
   }
 
   private drawBtwOverlay(): void {
@@ -4802,15 +4841,16 @@ export class Screen {
       this.paintBtwHeader(segments);
     });
     // Paint the content rows below the header. Show the LAST `contentRows`
-    // entries from btwOverlayLines top-down. Each line carries its own
-    // FormattedLine fields (prefix/body/bodyStyle/fillRow) so user-text
-    // bands, tool labels, etc. render with the same styling as the main
-    // transcript — that's the whole reason the buffer keeps FormattedLine
-    // rather than flattening to strings.
+    // WRAPPED rows top-down, so long lines flow onto continuation rows
+    // instead of getting clipped at the right margin. Each line carries
+    // its own FormattedLine fields (prefix/body/bodyStyle/fillRow) so
+    // user-text bands, tool labels, etc. render with the same styling as
+    // the main transcript.
+    const wrappedTail = this.wrapBtwTail(w, contentRows);
     for (let i = 0; i < contentRows; i++) {
       const row = headerRow + 1 + i;
-      const lineIdx = this.btwOverlayLines.length - contentRows + i;
-      const line = lineIdx >= 0 ? this.btwOverlayLines[lineIdx] : undefined;
+      const lineIdx = wrappedTail.length - contentRows + i;
+      const line = lineIdx >= 0 ? wrappedTail[lineIdx] : undefined;
       const sig = formattedLineSig(`btw|c${i}`, w, line);
       this.paintRow(row, sig, () => {
         if (line) {
