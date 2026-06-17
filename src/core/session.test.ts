@@ -5231,4 +5231,364 @@ describe("Session", () => {
       expect((session as unknown as { _liveCompactionPhase: unknown })._liveCompactionPhase).toBeUndefined();
     });
   });
+
+  describe("per-turn usage_update persistence (recordCurrentUsageSnapshot)", () => {
+    it("broadcastTurnComplete after applyAgentUsage writes one usage_update to historyStore", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_ut1",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_ut1",
+        historyStore: store,
+      });
+
+      // Simulate usage from the agent.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ut1",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 500,
+          size: 100_000,
+          cost: { amount: 0.12, currency: "USD" },
+        },
+      });
+
+      // Simulate turn completion (bypass prompt flow entirely).
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      const entries = await store.load("sess_ut1");
+      const usageEntries = entries.filter(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "usage_update",
+      );
+      expect(usageEntries).toHaveLength(1);
+    });
+
+    it("zero-usage turn writes no usage_update entry", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_ut2",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_ut2",
+        historyStore: store,
+      });
+
+      // No usage notifications — just broadcast turn complete.
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      const entries = await store.load("sess_ut2");
+      const usageEntries = entries.filter(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "usage_update",
+      );
+      expect(usageEntries).toHaveLength(0);
+    });
+
+    it("two turns produce two usage_update entries, second has costAmount >= first", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_ut3",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_ut3",
+        historyStore: store,
+      });
+
+      // Turn 1: usage of $0.10
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ut3",
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 0.10, currency: "USD" },
+        },
+      });
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      // Turn 2: usage of $0.08 more (total $0.18 via _currentUsage merge).
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ut3",
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 0.18, currency: "USD" },
+        },
+      });
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      const entries = await store.load("sess_ut3");
+      const usageEntries = entries.filter(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "usage_update",
+      );
+      expect(usageEntries).toHaveLength(2);
+
+      const firstCost = ((usageEntries[0]?.params as { update?: { cost?: { amount?: number } } })?.update?.cost?.amount) ?? 0;
+      const secondCost = ((usageEntries[1]?.params as { update?: { cost?: { amount?: number } } })?.update?.cost?.amount) ?? 0;
+      expect(typeof firstCost).toBe("number");
+      expect(typeof secondCost).toBe("number");
+      expect(secondCost!).toBeGreaterThanOrEqual(firstCost!);
+    });
+
+    it("recorded envelope shape matches buildStateSnapshotReplay (used/size/cost.optionality)", () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_ut4",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_ut4",
+        historyStore: store,
+      });
+
+      // Full payload: used + size + cost.amount + cost.currency.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ut4",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 5000,
+          size: 250_000,
+          cost: { amount: 0.99, currency: "EUR" },
+        },
+      });
+
+      // The currentUsage getter returns the cross-life cumulative total.
+      // recordCurrentUsageSnapshot builds its envelope from this getter,
+      // so verifying the getter shape confirms the recorded envelope shape.
+      expect(session.currentUsage).toEqual({
+        used: 5000,
+        size: 250_000,
+        costAmount: 0.99,
+        costCurrency: "EUR",
+      });
+    });
+
+    it("with non-zero cumulativeCost, recorded cost.amount = cumulativeCost + current-life costAmount", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+
+      // Build a session that has prior-life cost (simulating a resurrected session).
+      const session = new Session({
+        sessionId: "sess_ut5",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_ut5",
+        historyStore: store,
+      });
+
+      // Manually set cumulativeCost to simulate prior-life spend.
+      (session as unknown as { cumulativeCost: number }).cumulativeCost = 1.5;
+
+      // Current-life usage adds $0.30 on top.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_ut5",
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 0.30, currency: "USD" },
+        },
+      });
+
+      // The currentUsage getter folds cumulativeCost + current costAmount.
+      expect(session.currentUsage?.costAmount).toBe(1.8);
+
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      const entries = await store.load("sess_ut5");
+      const usageEntries = entries.filter(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "usage_update",
+      );
+      expect(usageEntries).toHaveLength(1);
+
+      const recordedCost = ((usageEntries[0]?.params as { update?: { cost?: { amount?: number } } })?.update?.cost?.amount) ?? 0;
+      expect(recordedCost).toBe(1.8);
+    });
+
+    it("fresh-attach replay filters usage_update from raw history (only synthesized snapshot)", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_rf1",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_rf1",
+        historyStore: store,
+      });
+
+      // Warm attach to seed the session.
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+
+      // Simulate usage over two turns.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rf1",
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 0.10, currency: "USD" },
+        },
+      });
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rf1",
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 0.25, currency: "USD" },
+        },
+      });
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      // Cold attach — should NOT receive historical usage_update entries.
+      const cold = makeClient();
+      const { entries: replay } = await session.attach(cold.client, "full");
+
+      const historicalUsageReplay = replay.filter(
+        (e) =>
+          !isStateSnapshotEntry(e) &&
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "usage_update",
+      );
+      expect(historicalUsageReplay).toHaveLength(0);
+
+      // The synthesized snapshot should carry the current cumulative total.
+      const synthUsage = replay.find(
+        (e) =>
+          isStateSnapshotEntry(e) &&
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "usage_update",
+      );
+      expect(synthUsage).toBeDefined();
+      const costAmount = ((synthUsage?.params as { update?: { cost?: { amount?: number } } })?.update?.cost?.amount) ?? 0;
+      expect(costAmount).toBe(0.25);
+    });
+
+    it("fresh-attach replay filters ALL state-update kinds from raw history", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_rf2",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_rf2",
+        historyStore: store,
+      });
+
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+
+      // Emit various state-update kinds to history.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rf2",
+        update: { sessionUpdate: "usage_update", cost: { amount: 0.05, currency: "USD" } },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rf2",
+        update: { sessionUpdate: "current_model_update", currentModel: "gpt-5" },
+      });
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rf2",
+        update: { sessionUpdate: "session_info_update", title: "Test Session" },
+      });
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void }).broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      const cold = makeClient();
+      const { entries: replay } = await session.attach(cold.client, "full");
+
+      // No state-update kinds should appear in the historical portion.
+      const stateKinds = ["usage_update", "current_model_update", "session_info_update"];
+      for (const kind of stateKinds) {
+        const found = replay.filter(
+          (e) =>
+            !isStateSnapshotEntry(e) &&
+            (e.params as { update?: { sessionUpdate?: string } }).update
+              ?.sessionUpdate === kind,
+        );
+        expect(found).toHaveLength(0);
+      }
+    });
+
+    it("after_message replay with usage_update in history uses correct cutoff", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_rf3",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_rf3",
+        historyStore: store,
+      });
+
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+
+      // Simulate a real prompt → turn flow to get messageIds.
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+      const first = makeClient();
+      await session.attach(first.client, "none");
+      await session.prompt(first.client.clientId, {
+        sessionId: "sess_rf3",
+        prompt: [{ type: "text", text: "first" }],
+      });
+      // Add a usage_update after the turn (this is what recordCurrentUsageSnapshot
+      // would have persisted at the turn boundary).
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rf3",
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount: 0.15, currency: "USD" },
+        },
+      });
+      await flushHistoryWrites();
+
+      // Grab the turn_complete messageId from history.
+      const fullSnap = await session.getHistorySnapshot();
+      const turnEntry = fullSnap.find(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "turn_complete",
+      );
+      const turnMessageId = (turnEntry?.params as { update: { messageId: string } }).update.messageId;
+      expect(turnMessageId).toBeDefined();
+
+      // Cold attach with after_message policy.
+      const cold = makeClient();
+      const { entries: delta, appliedPolicy } = await session.attach(
+        cold.client,
+        "after_message",
+        { afterMessageId: turnMessageId! },
+      );
+      expect(appliedPolicy).toBe("after_message");
+
+      // The historical delta should be empty — usage_update is a state-update
+      // kind and gets filtered out from replayable history. Nothing non-state
+      // should remain after the turn_complete cutoff.
+      const historicalDelta = delta.filter((e) => !isStateSnapshotEntry(e));
+      expect(historicalDelta).toHaveLength(0);
+    });
+  });
 });

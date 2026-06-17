@@ -1,6 +1,9 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as readline from "node:readline";
 import type { FastifyInstance } from "fastify";
+import { paths } from "../../core/paths.js";
 import { expandHome, type CompactionConfig } from "../../core/config.js";
 import { shouldCompactSession, estimateTokens } from "../../core/compaction-heuristic.js";
 import type { SessionManager } from "../../core/session-manager.js";
@@ -21,6 +24,18 @@ import {
   mintExtensionMcpDescriptors,
   type ExtensionMcpMintDeps,
 } from "../extension-mcp-mint.js";
+
+// The public wire contract for GET /v1/sessions/:id/events and
+// GET /v1/sessions/events. Additive only — new kinds may be added
+// without a version bump; removing or renaming entries requires one.
+const QUERYABLE_EVENT_KINDS = new Set([
+  "usage_update",
+  "tool_call",
+  "tool_call_update",
+  "prompt_received",
+  "turn_complete",
+  "permission_resolved",
+]);
 
 export interface SessionRouteDefaults {
   agentId: string;
@@ -827,4 +842,366 @@ export function registerSessionRoutes(
     // so an abort during the snapshot phase also cleans up.
     return reply;
   });
+
+  // Parse one line from a history.jsonl file and return structured event data
+  // if it matches the kind allowlist and since boundary, or null otherwise.
+  // The caller must supply the same `kindSet` and `sinceMs` used for validation.
+  function parseHistoryLine(
+    line: string,
+    kindSet: Set<string>,
+    sinceMs: number | undefined,
+  ): { recordedAt: number; entry: Record<string, unknown> } | null {
+    const trimmed = typeof line === "string" ? line.trim() : "";
+    if (trimmed.length === 0) {
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      console.debug("events endpoint: skipping malformed JSONL line");
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      console.debug("events endpoint: skipping non-object JSONL line");
+      return null;
+    }
+    const entry = parsed as { method?: string; params?: unknown; recordedAt?: number };
+    if (typeof entry.recordedAt !== "number") {
+      return null;
+    }
+    if (sinceMs !== undefined && entry.recordedAt < sinceMs) {
+      return null;
+    }
+    if (typeof entry.params !== "object" || entry.params === null || Array.isArray(entry.params)) {
+      return null;
+    }
+    const params = entry.params as Record<string, unknown>;
+    if (typeof params.update !== "object" || params.update === null || Array.isArray(params.update)) {
+      return null;
+    }
+    const updateObj = params.update as Record<string, unknown>;
+    const kind = updateObj.sessionUpdate;
+    if (typeof kind !== "string") {
+      return null;
+    }
+    if (!kindSet.has(kind)) {
+      return null;
+    }
+    return { recordedAt: entry.recordedAt, entry: parsed };
+  }
+
+  // Build the output row for a cross-session event (includes sessionId).
+  function buildCrossSessionRow(
+    sessionId: string,
+    entry: Record<string, unknown>,
+    kind: string,
+  ): Record<string, unknown> {
+    const params = entry.params as Record<string, unknown>;
+    const updateObj = params.update as Record<string, unknown>;
+    const row: Record<string, unknown> = {
+      sessionId,
+      ts: new Date(entry.recordedAt).toISOString(),
+      kind,
+      update: updateObj,
+    };
+    if (updateObj.messageId !== undefined && updateObj.messageId !== null) {
+      row.messageId = updateObj.messageId;
+    }
+    return row;
+  }
+
+  // K-way merge iterator state for cross-session events.
+  interface SessionIterator {
+    sessionId: string;
+    rl: readline.Interface;
+    current: { ts: number; row: Record<string, unknown> } | null;
+    exhausted: boolean;
+  }
+
+  async function initIterator(
+    sessionId: string,
+    historyPath: string,
+    kindSet: Set<string>,
+    sinceMs: number | undefined,
+  ): Promise<SessionIterator> {
+    const rl = readline.createInterface({ input: fs.createReadStream(historyPath), crlfDelay: Infinity });
+    let current: { ts: number; row: Record<string, unknown> } | null = null;
+
+    for await (const line of rl) {
+      const parsed = parseHistoryLine(line, kindSet, sinceMs);
+      if (parsed) {
+        const kind = (parsed.entry.params as Record<string, unknown>).update.sessionUpdate as string;
+        current = { ts: parsed.recordedAt, row: buildCrossSessionRow(sessionId, parsed.entry, kind) };
+        break;
+      }
+    }
+
+    return { sessionId, rl, current, exhausted: current === null };
+  }
+
+  async function advanceIterator(
+    it: SessionIterator,
+    kindSet: Set<string>,
+    sinceMs: number | undefined,
+  ): Promise<void> {
+    for await (const line of it.rl) {
+      const parsed = parseHistoryLine(line, kindSet, sinceMs);
+      if (parsed) {
+        const kind = (parsed.entry.params as Record<string, unknown>).update.sessionUpdate as string;
+        it.current = { ts: parsed.recordedAt, row: buildCrossSessionRow(it.sessionId, parsed.entry, kind) };
+        return;
+      }
+    }
+    it.exhausted = true;
+  }
+
+ // Stream selected session/update kinds from every session's history.jsonl,
+  // interleaved by ts ascending (k-way merge). `kinds` is required and
+  // validated against QUERYABLE_EVENT_KINDS. `since` is an optional ISO-8601
+  // lower bound on recordedAt. Sessions whose updatedAt falls before `since`
+  // are pre-filtered out so their history.jsonl is never opened. Each emitted
+  // row carries a `sessionId` field alongside the standard shape. Streams via
+  // Content-Type: application/x-ndjson.
+
+  app.get<{ Querystring: { kinds?: string; since?: string } }>(
+    "/v1/sessions/events",
+    async (request, reply) => {
+      const query = request.query as { kinds?: string; since?: string };
+
+      const kindsParam = query.kinds;
+      if (!kindsParam || kindsParam.trim().length === 0) {
+        reply.code(400).send({ error: "kinds parameter is required" });
+        return reply;
+      }
+
+      const requestedKinds = kindsParam.split(",").map((k) => k.trim());
+      if (requestedKinds.length === 0) {
+        reply.code(400).send({ error: "kinds parameter is required" });
+        return reply;
+      }
+
+      for (const kind of requestedKinds) {
+        if (!QUERYABLE_EVENT_KINDS.has(kind)) {
+          reply.code(400).send({
+            error: `kind "${kind}" is not queryable; allowed kinds: ${[...QUERYABLE_EVENT_KINDS].join(", ")}`,
+          });
+          return reply;
+        }
+      }
+
+      const kindSet = new Set(requestedKinds);
+      let sinceMs: number | undefined;
+      if (query.since !== undefined && query.since.trim().length > 0) {
+        const parsed = new Date(query.since);
+        if (isNaN(parsed.getTime())) {
+          reply.code(400).send({ error: "since is not a valid ISO-8601 timestamp" });
+          return reply;
+        }
+        sinceMs = parsed.getTime();
+      }
+
+      // Pre-filter sessions by updatedAt to avoid opening history.jsonl
+      // for sessions that definitely have no matching events.
+      const allSessions = await manager.list({ includeNonInteractive: true });
+      const survivingSessions =
+        sinceMs !== undefined
+          ? allSessions.filter((s) => new Date(s.updatedAt).getTime() >= sinceMs)
+          : allSessions;
+
+      reply.raw.setHeader("content-type", "application/x-ndjson");
+      reply.raw.statusCode = 200;
+
+      // Init iterators: each reads the first matching line from its session.
+      const iterators: SessionIterator[] = [];
+      for (const session of survivingSessions) {
+        try {
+          const historyPath = paths.historyFile(session.sessionId);
+          const it = await initIterator(session.sessionId, historyPath, kindSet, sinceMs);
+          if (!it.exhausted) {
+            iterators.push(it);
+          }
+        } catch (err) {
+          const e = err as NodeJS.ErrnoException;
+          if (e.code === "ENOENT") {
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      // Handle client disconnect — abort all open file streams.
+      request.raw.on("close", () => {
+        for (const it of iterators) {
+          try {
+            it.rl.close();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (!reply.raw.writableEnded) {
+          reply.raw.end();
+        }
+      });
+
+      // K-way merge: pick the smallest ts, emit, advance that iterator.
+      try {
+        while (iterators.length > 0) {
+          let minIdx = -1;
+          let minTs = Infinity;
+          for (let i = 0; i < iterators.length; i++) {
+            if (iterators[i].current !== null && iterators[i].current.ts < minTs) {
+              minTs = iterators[i].current.ts;
+              minIdx = i;
+            }
+          }
+
+          if (minIdx === -1) break;
+
+          reply.raw.write(JSON.stringify(iterators[minIdx].current.row) + "\n");
+
+          await advanceIterator(iterators[minIdx], kindSet, sinceMs);
+
+          if (iterators[minIdx].exhausted) {
+            try {
+              iterators[minIdx].rl.close();
+            } catch {
+              /* ignore */
+            }
+            iterators.splice(minIdx, 1);
+          }
+        }
+      } catch (err) {
+        for (const it of iterators) {
+          try {
+            it.rl.close();
+          } catch {
+            /* ignore */
+          }
+        }
+        throw err;
+      }
+
+      reply.raw.end();
+      return reply;
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { kinds?: string; since?: string } }>(
+    "/v1/sessions/:id/events",
+    async (request, reply) => {
+      const raw = (request.params as { id: string }).id;
+      const query = request.query as { kinds?: string; since?: string };
+      const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+
+      const session = manager.get(id);
+      if (!session) {
+        const exists = await manager.hasRecord(id);
+        if (!exists) {
+          reply.code(404).send({ error: "session not found" });
+          return reply;
+        }
+      }
+
+      const kindsParam = query.kinds;
+      if (!kindsParam || kindsParam.trim().length === 0) {
+        reply.code(400).send({ error: "kinds parameter is required" });
+        return reply;
+      }
+
+      const requestedKinds = kindsParam.split(",").map((k) => k.trim());
+      if (requestedKinds.length === 0) {
+        reply.code(400).send({ error: "kinds parameter is required" });
+        return reply;
+      }
+
+      for (const kind of requestedKinds) {
+        if (!QUERYABLE_EVENT_KINDS.has(kind)) {
+          reply.code(400).send({
+            error: `kind "${kind}" is not queryable; allowed kinds: ${[...QUERYABLE_EVENT_KINDS].join(", ")}`,
+          });
+          return reply;
+        }
+      }
+
+      const kindSet = new Set(requestedKinds);
+      let sinceMs: number | undefined;
+      if (query.since !== undefined && query.since.trim().length > 0) {
+        const parsed = new Date(query.since);
+        if (isNaN(parsed.getTime())) {
+          reply.code(400).send({ error: "since is not a valid ISO-8601 timestamp" });
+          return reply;
+        }
+        sinceMs = parsed.getTime();
+      }
+
+      const historyPath = paths.historyFile(id);
+      const fileStream = fs.createReadStream(historyPath);
+      const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+
+      reply.raw.setHeader("content-type", "application/x-ndjson");
+      reply.raw.statusCode = 200;
+
+      try {
+        for await (const line of rl) {
+        const trimmed = typeof line === "string" ? line.trim() : "";
+        if (trimmed.length === 0) {
+          continue;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          console.debug("events endpoint: skipping malformed JSONL line in %s", historyPath);
+          continue;
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          console.debug("events endpoint: skipping non-object JSONL line in %s", historyPath);
+          continue;
+        }
+        const entry = parsed as { method?: string; params?: unknown; recordedAt?: number };
+        if (typeof entry.recordedAt !== "number") {
+          continue;
+        }
+        if (typeof entry.params !== "object" || entry.params === null || Array.isArray(entry.params)) {
+          continue;
+        }
+        const params = entry.params as Record<string, unknown>;
+        if (typeof params.update !== "object" || params.update === null || Array.isArray(params.update)) {
+          continue;
+        }
+        const updateObj = params.update as Record<string, unknown>;
+        const kind = updateObj.sessionUpdate;
+        if (typeof kind !== "string") {
+          continue;
+        }
+        if (!kindSet.has(kind)) {
+          continue;
+        }
+        if (sinceMs !== undefined && entry.recordedAt < sinceMs) {
+          continue;
+        }
+        const output: Record<string, unknown> = {
+          ts: new Date(entry.recordedAt).toISOString(),
+          kind,
+          update: updateObj,
+        };
+        if (updateObj.messageId !== undefined && updateObj.messageId !== null) {
+          output.messageId = updateObj.messageId;
+        }
+        reply.raw.write(JSON.stringify(output) + "\n");
+      }
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code === "ENOENT") {
+          reply.raw.end();
+          return reply;
+        }
+        throw err;
+      }
+
+      reply.raw.end();
+      return reply;
+    },
+  );
 }

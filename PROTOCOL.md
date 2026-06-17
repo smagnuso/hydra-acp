@@ -16,6 +16,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [Auth](#auth)
   - [Config](#config)
   - [Sessions](#sessions)
+  - [Session events](#session-events)
   - [Agents](#agents)
   - [Registry](#registry)
   - [Extensions](#extensions)
@@ -489,6 +490,111 @@ Tail a session's recorded conversation as NDJSON. One-shot by default; `?follow=
 **Errors**
 
 - `404` — session unknown.
+
+### Session events
+
+#### `GET /v1/sessions/:id/events`
+
+Stream selected session/update kinds from a single session's `history.jsonl` as NDJSON. One entry per line, filtered by the `kinds` query parameter and optionally time-bounded by `since`. Consumed by [hydra-acp-budgeter](https://github.com/smagnuso/hydra-acp-budgeter) for time-bucketed cost reporting.
+
+**Query parameters**
+
+| Param | Required | Type | Description |
+|-------|----------|------|-------------|
+| `kinds` | **Yes** | `string` | Comma-separated list of event kinds to include. Must be a subset of the allowlist below. Unknown kinds → `400`. |
+| `since` | No | ISO-8601 timestamp | Lower bound on `ts`; only entries with `recordedAt >= since` are emitted. |
+
+**Kind allowlist**
+
+The following session-update kinds may be queried. The list is additive — new kinds may be added without a version bump; removing or renaming entries requires one.
+
+| Kind | Description |
+|------|-------------|
+| `usage_update` | Cost/token snapshot at turn boundary (persisted once per turn by `recordCurrentUsageSnapshot`, session.ts:1832). Cumulative running total — consumers diff successive rows to get per-turn deltas. |
+| `tool_call` | Tool call placed |
+| `tool_call_update` | Tool call updated (status, args, result refs) |
+| `prompt_received` | User turn boundary marker |
+| `turn_complete` | Assistant turn boundary marker |
+| `permission_resolved` | Permission request resolved |
+
+Other kinds (notably `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk`, `plan`, `current_model_update`, etc.) may exist on disk but are **not** queryable via this endpoint. Requesting one returns `400`. Rationale: chunk kinds can stream megabytes per session and need a separate pagination/byte-cap decision; state-snapshot kinds are already served via `meta.json` + attach-time synthesis.
+
+**Response — `200 OK`**
+
+- `Content-Type: application/x-ndjson`
+- Body: one JSON object per line, sorted by `ts` ascending (oldest-first, matching the append order in `history.jsonl`). Each row has the shape:
+
+```jsonc
+{
+  "ts":        "2026-06-17T08:18:32.123Z",   // recordedAt as ISO-8601
+  "kind":      "usage_update",                // from params.update.sessionUpdate
+  "update":    { ... raw params.update ... }, // pass-through envelope
+  "messageId": "msg_..."                      // present when stamped; omitted otherwise
+}
+```
+
+The `update` field carries the full `params.update` object (with `sessionUpdate`, `cost`, `tokenUsage`, etc. as recorded). The `messageId` field is included only when the original entry had one (`update.messageId !== undefined && update.messageId !== null`).
+
+**Stability guarantee**
+
+Consumers may rely on all documented fields being present in every row. New optional fields may be added to the `update` envelope or as top-level keys without a version bump. The daemon never removes or renames documented fields without a major version bump.
+
+**Errors**
+
+- `400` — `kinds` parameter missing, empty, or contains an unknown kind. Body: `{ "error": "kind \"X\" is not queryable; allowed kinds: usage_update, tool_call, ..." }`.
+- `400` — `since` is not a valid ISO-8601 timestamp.
+- `404` — session unknown (no live session and no on-disk record).
+
+**Worked example**
+
+Query a session's usage events from midnight UTC:
+
+```bash
+curl -H "Authorization: Bearer hydra_token_abc123" \
+  "http://127.0.0.1:55514/v1/sessions/hydra_session_xyz/events?kinds=usage_update&since=2026-06-17T00:00:00Z"
+```
+
+Sample response (`application/x-ndjson`):
+
+```jsonc
+{"ts":"2026-06-17T08:15:01.432Z","kind":"usage_update","update":{"sessionUpdate":"usage_update","cost":{"amount":0.12,"currency":"USD"},"tokenUsage":{"prompt":1024,"completion":512}}}
+{"ts":"2026-06-17T08:17:45.891Z","kind":"usage_update","update":{"sessionUpdate":"usage_update","cost":{"amount":0.34,"currency":"USD"},"tokenUsage":{"prompt":4096,"completion":2048}}}
+{"ts":"2026-06-17T08:18:32.123Z","kind":"usage_update","update":{"sessionUpdate":"usage_update","cost":{"amount":0.48,"currency":"USD"},"tokenUsage":{"prompt":8192,"completion":4096}}}
+```
+
+Each row carries a cumulative running total — diff successive rows to get per-turn spend. The `messageId` field is omitted here because `recordCurrentUsageSnapshot` does not stamp it; when querying `tool_call` or `turn_complete`, `messageId` is present.
+
+#### `GET /v1/sessions/events`
+
+Stream selected session/update kinds from **every** session's `history.jsonl`, interleaved by `ts` ascending (k-way merge). Each emitted row carries an additional top-level `sessionId` field. Useful for cross-session cost aggregation and time-bucketed analytics.
+
+**Query parameters** — identical to [`GET /v1/sessions/:id/events`](#get-v1sessionsidevents): `kinds` (required) and `since` (optional).
+
+**Response — `200 OK`**
+
+- `Content-Type: application/x-ndjson`
+- Body: one JSON object per line, sorted by `ts` ascending across all sessions. Each row has the shape:
+
+```jsonc
+{
+  "sessionId": "hydra_session_xyz",          // present on every row
+  "ts":        "2026-06-17T08:15:01.432Z",   // recordedAt as ISO-8601
+  "kind":      "usage_update",
+  "update":    { ... raw params.update ... },
+  "messageId": "msg_..."                     // present when stamped; omitted otherwise
+}
+```
+
+**Pre-filter optimization**: sessions whose `meta.updatedAt` falls before the `since` timestamp are excluded via a cheap stat-only check — their `history.jsonl` is never opened. This avoids unnecessary disk I/O on long-lived installs with thousands of cold sessions.
+
+**Client disconnect handling**: if the client disconnects mid-stream, all open file handles (one per session iterator) are closed immediately to avoid leaking file descriptors.
+
+**Stability guarantee** — same as [`GET /v1/sessions/:id/events`](#get-v1sessionsidevents).
+
+**Errors**
+
+- `400` — same validation rules as the per-session endpoint.
+- `500` — internal error (e.g., failure to open a session's `history.jsonl` that isn't ENOENT).
 
 ### Agents
 

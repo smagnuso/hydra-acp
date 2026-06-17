@@ -393,6 +393,11 @@ export class Session {
   // stale-prone for snapshot-shaped events).
   currentModel: string | undefined;
   currentMode: string | undefined;
+  // Persisted compaction state (mirrors SessionInit.compactionState).
+  // Surfaces through session-manager.list() so /v1/sessions can report
+  // it without resurrecting the session. Settable by tests and the
+  // compaction lifecycle code.
+  compactionState: CompactionState | undefined;
   // Raw per-agent-life usage. Never read directly outside this class —
   // always access via the currentUsage getter which adds cumulativeCost.
   private _currentUsage: UsageSnapshot | undefined;
@@ -697,6 +702,7 @@ export class Session {
     this._interactive = init.interactive;
     this._priority = init.priority;
     this._summarizedThroughEntry = init.summarizedThroughEntry;
+    this.compactionState = init.compactionState;
     if (init.compactionState) {
       const cs = init.compactionState;
       if (
@@ -1473,24 +1479,36 @@ export class Session {
     const maybeCoalesce = (entries: CachedNotification[]): CachedNotification[] =>
       opts.raw ? entries : coalesceReplay(entries);
     const raw = await this.getHistorySnapshot(opts.toolContent ?? "inline");
+    // Filter out state-update entries from historical data so a fresh-attaching
+    // client sees only the synthesized snapshot (buildStateSnapshotReplay) for
+    // canonical-state kinds like usage_update. Replaying historical usage_update
+    // would cause UX flicker: cost totals rewind backward then climb back to the
+    // current value — see buildStateSnapshotReplay at session.ts:1482 which
+    // already emits one usage_update carrying the current cumulative total.
+    // State-update messageIds are never used as after_message cutoffs (cutoffs
+    // target turn_complete / prompt_received entries), so searching in the
+    // filtered array for cutoff lookup is safe.
+    // usage_update is dropped from raw replay because buildStateSnapshotReplay
+    // already synthesizes the latest snapshot; raw replay would cause cost rewind.
+    const replayable = raw.filter((e) => !isStateUpdate(e.method, e.params));
     const state = this.buildStateSnapshotReplay();
     if (historyPolicy === "after_message") {
       const cutoff = opts.afterMessageId
-        ? findMessageIdIndex(raw, opts.afterMessageId)
+        ? findMessageIdIndex(replayable, opts.afterMessageId)
         : -1;
       if (cutoff < 0) {
         return {
-          entries: [...state, ...maybeCoalesce(raw)],
+          entries: [...state, ...maybeCoalesce(replayable)],
           appliedPolicy: "full",
         };
       }
       return {
-        entries: [...state, ...maybeCoalesce(raw.slice(cutoff + 1))],
+        entries: [...state, ...maybeCoalesce(replayable.slice(cutoff + 1))],
         appliedPolicy: "after_message",
       };
     }
     return {
-      entries: [...state, ...maybeCoalesce(raw)],
+      entries: [...state, ...maybeCoalesce(replayable)],
       appliedPolicy: "full",
     };
   }
@@ -1804,6 +1822,73 @@ export class Session {
     }
   }
 
+  // Persist a usage_update snapshot to history.jsonl at turn boundaries.
+  //
+  // usage_update is filtered from `recordAndBroadcast` by STATE_UPDATE_KINDS
+  // (session.ts:5502) — those kinds are "live wire only" and never recorded
+  // to on-disk history, because their canonical state lives in meta.json.
+  // However, analytics consumers need a per-turn time series, so we record
+  // directly to historyStore here (bypassing recordAndBroadcast entirely).
+  //
+  // The recorded cost.amount is the cross-life cumulative total (via the
+  // currentUsage getter at session.ts:582-590), matching the value that
+  // used to flow over the wire pre-May-13. Analytics consumers diff
+  // successive rows to get per-turn deltas.
+  //
+  // See also: GET /v1/sessions/:id/events — the HTTP endpoint that exposes
+  // these persisted lines to external consumers.
+  private recordCurrentUsageSnapshot(): void {
+    if (this.historyStore === undefined) {
+      return;
+    }
+
+    const usage = this.currentUsage;
+    if (usage === undefined) {
+      return;
+    }
+
+    const update: Record<string, unknown> = {
+      sessionUpdate: "usage_update",
+    };
+    if (typeof usage.used === "number") {
+      update.used = usage.used;
+    }
+    if (typeof usage.size === "number") {
+      update.size = usage.size;
+    }
+    if (
+      typeof usage.costAmount === "number" ||
+      typeof usage.costCurrency === "string"
+    ) {
+      const cost: Record<string, unknown> = {};
+      if (typeof usage.costAmount === "number") {
+        cost.amount = usage.costAmount;
+      }
+      if (typeof usage.costCurrency === "string") {
+        cost.currency = usage.costCurrency;
+      }
+      update.cost = cost;
+    }
+
+    // Only emit when at least one payload field is present — an empty
+    // snapshot has nothing useful to say. Mirrors the guard at
+    // buildStateSnapshotReplay (session.ts:1584).
+    if (Object.keys(update).length <= 1) {
+      return;
+    }
+
+    const params = {
+      sessionId: this.sessionId,
+      update,
+    };
+
+    void this.historyStore.append(this.sessionId, {
+      method: "session/update",
+      params,
+      recordedAt: Date.now(),
+    });
+  }
+
   private broadcastTurnComplete(
     originatorClientId: string,
     response: unknown,
@@ -1853,6 +1938,7 @@ export class Session {
     // the broadcast so their TUI can clear currentHeadMessageId and
     // adjust pendingTurns. For regular session/prompt entries, exclude
     // as before since the response itself carries the stopReason.
+    this.recordCurrentUsageSnapshot();
     this.recordAndBroadcast(
       "session/update",
       {
@@ -5522,6 +5608,16 @@ function withCode(err: Error, code: number): Error & { code: number } {
 // rather than conversation events. Broadcast live but not recorded to
 // history — the canonical state lives in meta.json and is delivered to
 // fresh attaches via the attach response _meta.
+//
+// usage_update is included here so per-chunk live updates are NOT recorded
+// by recordAndBroadcast (session.ts:5051) — recording every chunk tick would
+// bloat history.jsonl with 13–62 entries per turn. Instead,
+// recordCurrentUsageSnapshot() fires once at each turn boundary from within
+// broadcastTurnComplete (session.ts:1933), writing a single usage_update to
+// historyStore that survives on disk. That persisted entry is exposed via the
+// GET /v1/sessions/:id/events endpoint (sessions.ts:1096) so analytics
+// consumers like hydra-acp-budgeter can query per-turn cost data without
+// parsing private on-disk formats.
 const STATE_UPDATE_KINDS = new Set([
   "session_info_update",
   "current_model_update",

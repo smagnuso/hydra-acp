@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AddressInfo } from "node:net";
@@ -14,6 +16,7 @@ import { JsonRpcConnection } from "../../acp/connection.js";
 import { ExtensionMcpRegistry } from "../../core/extension-mcp.js";
 import { McpTokenRegistry } from "../mcp/token-registry.js";
 import { SessionStore } from "../../core/session-store.js";
+import { paths } from "../../core/paths.js";
 
 function fakeRegistryAgent(id = "claude-code"): RegistryAgent {
   return { id, name: id, distribution: { npx: { package: id } } };
@@ -1306,5 +1309,537 @@ describe("session routes: compaction endpoints", () => {
     expect(body.compactionState).toBeDefined();
     expect(body.compactionState?.status).toBe("running");
     expect(body.compactionState?.iter).toBe(2);
+  });
+});
+
+describe("GET /v1/sessions/:id/events", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  it("returns ndjson when kinds=usage_update for a session with recorded usage_updates", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const store = (harness.manager as unknown as { histories: { append: (s: string, e: { method: string; params: Record<string, unknown>; recordedAt: number }) => Promise<void> } }).histories;
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01, totalTokens: 100 } },
+      recordedAt: 1_000_000_000_000,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=usage_update`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson");
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBeGreaterThanOrEqual(1);
+    const row = JSON.parse(lines[0]!) as { ts: string; kind: string; update: Record<string, unknown> };
+    expect(row.kind).toBe("usage_update");
+    expect(row.update.cumulativeCost).toBe(0.01);
+    expect(row.update.totalTokens).toBe(100);
+  });
+
+  it("since filter cuts older rows", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const store = (harness.manager as unknown as { histories: { append: (s: string, e: { method: string; params: Record<string, unknown>; recordedAt: number }) => Promise<void> } }).histories;
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01, totalTokens: 100 } },
+      recordedAt: 1_000_000_000_000,
+    });
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_2", update: { sessionUpdate: "usage_update", cumulativeCost: 0.02, totalTokens: 200 } },
+      recordedAt: 2_000_000_000_000,
+    });
+
+    const since = new Date(1_500_000_000_000).toISOString();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=usage_update&since=${since}`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(1);
+    const row = JSON.parse(lines[0]!) as { kind: string; update: Record<string, unknown> };
+    expect(row.kind).toBe("usage_update");
+    expect(row.update.cumulativeCost).toBe(0.02);
+  });
+
+  it("requesting multiple kinds returns rows of each", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const store = (harness.manager as unknown as { histories: { append: (s: string, e: { method: string; params: Record<string, unknown>; recordedAt: number }) => Promise<void> } }).histories;
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01, totalTokens: 100 } },
+      recordedAt: 1_000_000_000_000,
+    });
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_2", update: { sessionUpdate: "tool_call", messageId: "msg_tool" } },
+      recordedAt: 1_500_000_000_000,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=usage_update,tool_call`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(2);
+    const kinds = lines.map((l: string) => JSON.parse(l).kind);
+    expect(kinds).toContain("usage_update");
+    expect(kinds).toContain("tool_call");
+  });
+
+  it("requesting a disallowed kind returns 400 with a useful message", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=agent_message_chunk`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("not queryable");
+    expect(body.error).toContain("agent_message_chunk");
+  });
+
+  it("missing kinds param returns 400", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("kinds parameter is required");
+  });
+
+  it("unknown sessionId returns 404", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_ghost/events?kinds=usage_update`,
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("session not found");
+  });
+
+  it("session with no recorded events returns an empty 200 body", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=usage_update`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson");
+    const text = await res.text();
+    expect(text.trim()).toBe("");
+  });
+
+  it("messageId is included when present, omitted when absent", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const store = (harness.manager as unknown as { histories: { append: (s: string, e: { method: string; params: Record<string, unknown>; recordedAt: number }) => Promise<void> } }).histories;
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_1", update: { sessionUpdate: "tool_call", messageId: "msg_id_123" } },
+      recordedAt: 1_000_000_000_000,
+    });
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_2", update: { sessionUpdate: "turn_complete", stopReason: "end_turn" } },
+      recordedAt: 1_500_000_000_000,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=tool_call,turn_complete`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(2);
+
+    const toolRow = JSON.parse(lines[0]!) as { messageId?: string; kind: string };
+    expect(toolRow.kind).toBe("tool_call");
+    expect(toolRow.messageId).toBe("msg_id_123");
+
+    const turnRow = JSON.parse(lines[1]!) as { messageId?: string; kind: string };
+    expect(turnRow.kind).toBe("turn_complete");
+    expect(turnRow.messageId).toBeUndefined();
+  });
+
+  it("malformed JSONL lines are skipped without error", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const store = (harness.manager as unknown as { histories: { append: (s: string, e: { method: string; params: Record<string, unknown>; recordedAt: number }) => Promise<void> } }).histories;
+    await store.append(session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01, totalTokens: 100 } },
+      recordedAt: 1_000_000_000_000,
+    });
+
+    const { paths } = await import("../../core/paths.js");
+    const historyPath = paths.historyFile(session.sessionId);
+    await fsPromises.appendFile(historyPath, "this is not json\n");
+    await fsPromises.appendFile(historyPath, "\n");
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=usage_update`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(1);
+  });
+
+  it("empty kinds param returns 400", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=`,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("invalid since returns 400", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/events?kinds=usage_update&since=not-a-date`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("not a valid ISO-8601 timestamp");
+  });
+});
+
+describe("GET /v1/sessions/events (cross-session k-way merge)", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  function appendEvent(manager: SessionManager, sessionId: string, event: { method: string; params: Record<string, unknown>; recordedAt: number }): Promise<void> {
+    const store = (manager as unknown as { histories: { append: (s: string, e: { method: string; params: Record<string, unknown>; recordedAt: number }) => Promise<void> } }).histories;
+    return store.append(sessionId, event);
+  }
+
+  function setHistoryMtime(sessionId: string, date: Date): Promise<void> {
+    return fsPromises.utimes(
+      paths.historyFile(sessionId),
+      date,
+      date,
+    );
+  }
+
+  it("interleaves events from two sessions sorted by ts ascending", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const b = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    // Session A events at t=100, t=300
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01 } },
+      recordedAt: 100_000,
+    });
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a2", update: { sessionUpdate: "usage_update", cumulativeCost: 0.03 } },
+      recordedAt: 300_000,
+    });
+
+    // Session B events at t=50, t=200
+    await appendEvent(harness.manager, b.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_b1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.02 } },
+      recordedAt: 50_000,
+    });
+    await appendEvent(harness.manager, b.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_b2", update: { sessionUpdate: "usage_update", cumulativeCost: 0.04 } },
+      recordedAt: 200_000,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(4);
+
+    // Verify interleaved order: 50k (B), 100k (A), 200k (B), 300k (A)
+    const rows = lines.map((l: string) => JSON.parse(l) as { sessionId: string; update: { cumulativeCost: number } });
+    expect(rows[0].sessionId).toBe(b.sessionId);
+    expect(rows[1].sessionId).toBe(a.sessionId);
+    expect(rows[2].sessionId).toBe(b.sessionId);
+    expect(rows[3].sessionId).toBe(a.sessionId);
+
+    // Timestamps are ascending (50k, 100k, 200k, 300k) so costs follow:
+    // B@50k=0.02, A@100k=0.01, B@200k=0.04, A@300k=0.03
+    expect(rows.map((r) => r.update.cumulativeCost)).toEqual([0.02, 0.01, 0.04, 0.03]);
+  });
+
+  it("since pre-filter drops sessions whose updatedAt < since", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const b = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const c = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    // Add events to all three sessions (creates history.jsonl files).
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01 } },
+      recordedAt: 1_000_000_000_000,
+    });
+    await appendEvent(harness.manager, b.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_b1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.02 } },
+      recordedAt: 2_000_000_000_000,
+    });
+    await appendEvent(harness.manager, c.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_c1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.03 } },
+      recordedAt: 3_000_000_000_000,
+    });
+
+    // Set history.jsonl mtime on sessions A and B to an old date so
+    // manager.list() computes their updatedAt from that mtime (historyStatus
+    // returns mtime which list uses as the updatedAt fallback). Session C
+    // keeps its fresh mtime.
+    const oldTime = new Date("2025-01-01T00:00:00.000Z");
+    await setHistoryMtime(a.sessionId, oldTime);
+    await setHistoryMtime(b.sessionId, oldTime);
+
+    const sinceBoundary = new Date("2026-01-01T00:00:00.000Z").toISOString();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update&since=${encodeURIComponent(sinceBoundary)}`,
+    );
+    expect(res.status).toBe(200);
+
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(1);
+    const row = JSON.parse(lines[0]!) as { sessionId: string; update: { cumulativeCost: number } };
+    expect(row.sessionId).toBe(c.sessionId);
+    expect(row.update.cumulativeCost).toBe(0.03);
+
+    // Only session C's events appear because sessions A and B were
+    // pre-filtered out by their updatedAt timestamps — their history.jsonl
+    // files are never opened, saving I/O for stale sessions.
+  });
+
+  it("missing kinds param returns 400", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/events`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("kinds parameter is required");
+  });
+
+  it("disallowed kind returns 400", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=agent_message_chunk`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("not queryable");
+    expect(body.error).toContain("agent_message_chunk");
+  });
+
+  it("empty result when no sessions match returns empty 200 body", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    // Append an event so history.jsonl exists, then set its mtime to old.
+    await appendEvent(harness.manager, session.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01 } },
+      recordedAt: 1_000_000_000_000,
+    });
+    const oldTime = new Date("2025-01-01T00:00:00.000Z");
+    await setHistoryMtime(session.sessionId, oldTime);
+
+    const sinceBoundary = new Date("2026-01-01T00:00:00.000Z").toISOString();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update&since=${encodeURIComponent(sinceBoundary)}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson");
+    const text = await res.text();
+    expect(text.trim()).toBe("");
+  });
+
+  it("session with no matching events is skipped during merge", async () => {
+    // Create a session with only non-matching event kinds.
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const b = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello" } } },
+      recordedAt: 100_000,
+    });
+    await appendEvent(harness.manager, b.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_b1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01 } },
+      recordedAt: 200_000,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(1);
+    const row = JSON.parse(lines[0]!) as { sessionId: string };
+    expect(row.sessionId).toBe(b.sessionId);
+  });
+
+  it("each emitted row includes sessionId", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a1", update: { sessionUpdate: "tool_call", messageId: "msg_abc" } },
+      recordedAt: 100_000,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=tool_call`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(1);
+    const row = JSON.parse(lines[0]!) as { sessionId: string; kind: string; ts: string; messageId?: string };
+    expect(row.sessionId).toBe(a.sessionId);
+    expect(row.kind).toBe("tool_call");
+    expect(typeof row.ts).toBe("string");
+    expect(row.messageId).toBe("msg_abc");
+  });
+
+  it("since filter on events cuts older rows within surviving sessions", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01 } },
+      recordedAt: 1_000_000_000_000,
+    });
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a2", update: { sessionUpdate: "usage_update", cumulativeCost: 0.02 } },
+      recordedAt: 2_000_000_000_000,
+    });
+
+    const since = new Date(1_500_000_000_000).toISOString();
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update&since=${encodeURIComponent(since)}`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(1);
+    const row = JSON.parse(lines[0]!) as { update: { cumulativeCost: number } };
+    expect(row.update.cumulativeCost).toBe(0.02);
+  });
+
+  it("invalid since returns 400", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update&since=not-a-date`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("not a valid ISO-8601 timestamp");
+  });
+
+  it("empty kinds param returns 400", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/events?kinds=`);
+    expect(res.status).toBe(400);
+  });
+
+  it("multiple kinds returns rows of each kind with correct sessionId", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const b = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    await appendEvent(harness.manager, a.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_a1", update: { sessionUpdate: "usage_update", cumulativeCost: 0.01 } },
+      recordedAt: 100_000,
+    });
+    await appendEvent(harness.manager, b.sessionId, {
+      method: "session/update",
+      params: { sessionId: "u_b1", update: { sessionUpdate: "tool_call", messageId: "tc1" } },
+      recordedAt: 50_000,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update,tool_call`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(2);
+
+    const rows = lines.map((l: string) => JSON.parse(l) as { kind: string; sessionId: string });
+    // t=50k (B, tool_call), t=100k (A, usage_update)
+    expect(rows[0].kind).toBe("tool_call");
+    expect(rows[0].sessionId).toBe(b.sessionId);
+    expect(rows[1].kind).toBe("usage_update");
+    expect(rows[1].sessionId).toBe(a.sessionId);
   });
 });
