@@ -89,6 +89,10 @@ import {
   setAmbiguousWide,
 } from "./screen.js";
 import {
+  formatApproxTokens,
+  shouldShowCompactionPrompt,
+} from "./compaction-prompt.js";
+import {
   InputDispatcher,
   type Attachment,
   type InputEffect,
@@ -772,6 +776,9 @@ async function runSession(
   // Hydra serializes session/prompt requests on the wire so we don't
   // gate sending on this — it's purely for the banner busy state.
   let pendingTurns = 0;
+  // True while the attach-time compaction prompt is showing. Dismisses
+  // on y (triggers compact), n (dismiss), or d (same as n for now).
+  let compactionPromptActive = false;
   // Set when the user has ^C-cancelled the in-flight turn but it hasn't
   // settled yet. While true the banner shows "cancelling" and the OS
   // progress pulse (OSC 9;4) stays off — session/cancel is fire-and-forget,
@@ -908,6 +915,7 @@ async function runSession(
     "available_modes_update",
     "usage_update",
     "config_option_update",
+    "hydra_compaction",
   ]);
   const handleSessionUpdate = (params: unknown): void => {
     const { update } = (params ?? {}) as { update?: unknown };
@@ -950,6 +958,10 @@ async function runSession(
     // everyone including the originator.
     if (rawTag === "permission_resolved") {
       handlePermissionResolved(update);
+      return;
+    }
+    if (rawTag === "hydra_compaction") {
+      handleCompactionUpdate(update);
       return;
     }
     appendRender(event, update);
@@ -1213,6 +1225,31 @@ async function runSession(
       amendedMessageIds.delete(cancelledId);
     }
   });
+
+  const handleCompactionUpdate = (update: unknown): void => {
+    const u = (update ?? {}) as {
+      phase?: unknown;
+      iter?: unknown;
+      attempts?: unknown;
+      error?: unknown;
+    };
+    const phase = typeof u.phase === "string" ? u.phase : undefined;
+    if (phase === "started") {
+      screen.setCompactionIndicator("\u27f3 compacting...");
+    } else if (phase === "iteration") {
+      screen.setCompactionIndicator("\u27f3 compacting...");
+    } else if (phase === "deferred") {
+      screen.setCompactionIndicator("\u27f3 compaction queued (waiting for idle)");
+    } else if (phase === "swapped") {
+      screen.setCompactionIndicator(null);
+      screen.notify("\u2713 compacted", 2000);
+    } else if (phase === "failed") {
+      screen.setCompactionIndicator(null);
+      const raw = typeof u.error === "string" ? u.error : "unknown error";
+      const truncated = raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
+      screen.notify(`\u2717 compaction failed: ${truncated}`, 5000);
+    }
+  };
 
   const handlePermissionResolved = (update: unknown): void => {
     const u = (update ?? {}) as {
@@ -1823,6 +1860,9 @@ async function runSession(
     },
     onKey: (events: KeyEvent[]) => {
       for (const ev of events) {
+        if (compactionPromptActive && tryHandleCompactionPromptKey(ev)) {
+          continue;
+        }
         if (pendingPermission && tryHandlePermissionKey(ev)) {
           continue;
         }
@@ -2332,6 +2372,34 @@ async function runSession(
       entries: buildHelpEntries(),
       hint: "any key dismisses · /help lists commands",
     });
+  };
+
+  // Dismiss or act on the attach-time compaction prompt (y/n/d).
+  const tryHandleCompactionPromptKey = (ev: KeyEvent): boolean => {
+    if (!compactionPromptActive) {
+      return false;
+    }
+    if (ev.type === "char") {
+      const ch = ev.ch.toLowerCase();
+      if (ch === "y") {
+        compactionPromptActive = false;
+        screen.setCompactionPrompt(null);
+        const sid = resolvedSessionId;
+        fetch(`${target.baseUrl}/v1/sessions/${encodeURIComponent(sid)}/compact`, {
+          method: "POST",
+        }).catch(() => undefined);
+      } else if (ch === "n" || ch === "d") {
+        compactionPromptActive = false;
+        screen.setCompactionPrompt(null);
+      }
+      return true;
+    }
+    if (ev.type === "key" && ev.name === "escape") {
+      compactionPromptActive = false;
+      screen.setCompactionPrompt(null);
+      return true;
+    }
+    return true;
   };
 
   const tryHandleHelpKey = (ev: KeyEvent): boolean => {
@@ -5462,6 +5530,61 @@ async function runSession(
     }
   }
   livePeerHistoryRecording = true;
+
+  // Attach-time compaction prompt: if the unsummarized tail is large and
+  // no compaction is already in flight, ask the user once whether to compact.
+  void (async () => {
+    try {
+      const compactInfoRes = await fetch(
+        `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}/compact`,
+      );
+      if (!compactInfoRes.ok) {
+        return;
+      }
+      const compactInfo = (await compactInfoRes.json()) as {
+        summarizedThroughEntry?: number;
+        compactionState?: unknown;
+      };
+      const summarized = compactInfo.summarizedThroughEntry ?? 0;
+      const compactionState = compactInfo.compactionState ?? null;
+
+      // Read the history.jsonl to count entries and sum chars for the
+      // unsummarized portion. Uses the same daemon-side path — TUI and
+      // daemon share a filesystem.
+      const histPath = paths.historyFile(resolvedSessionId);
+      let raw: string;
+      try {
+        raw = await fs.readFile(histPath, "utf8");
+      } catch {
+        return;
+      }
+      const allLines = raw.split("\n").filter((l) => l.length > 0);
+      const totalEntries = allLines.length;
+      const unsummarizedLines = allLines.slice(summarized);
+      const unsummarizedChars = unsummarizedLines.reduce((sum, l) => sum + l.length, 0);
+
+      if (
+        !shouldShowCompactionPrompt({
+          summarizedThroughEntry: summarized,
+          totalEntries,
+          unsummarizedChars,
+          compactionState,
+        })
+      ) {
+        return;
+      }
+
+      const approxTokens = formatApproxTokens(
+        Math.floor(unsummarizedChars / 4),
+      );
+      compactionPromptActive = true;
+      screen.setCompactionPrompt({
+        message: `This session has ~${approxTokens} tokens of history above the compaction watermark.`,
+      });
+    } catch {
+      // Non-fatal: silently skip on any error.
+    }
+  })();
 
   // Mid-turn reattach reconcile. History replay incremented pendingTurns
   // for the unmatched prompt_received, but adjustPendingTurns ran before

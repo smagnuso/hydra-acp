@@ -13,6 +13,7 @@ import {
 import { JsonRpcConnection } from "../../acp/connection.js";
 import { ExtensionMcpRegistry } from "../../core/extension-mcp.js";
 import { McpTokenRegistry } from "../mcp/token-registry.js";
+import { SessionStore } from "../../core/session-store.js";
 
 function fakeRegistryAgent(id = "claude-code"): RegistryAgent {
   return { id, name: id, distribution: { npx: { package: id } } };
@@ -1198,5 +1199,56 @@ describe("session routes: compaction endpoints", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { summarizedThroughEntry?: number };
     expect(body.summarizedThroughEntry).toBe(7);
+  });
+
+  it("GET /v1/sessions/:id/compact includes compactionState when present", async () => {
+    // Import a cold session, then inject compactionState directly via
+    // the manager's private store so we can test the GET endpoint reads it.
+    const bundle = {
+      version: 1 as const,
+      exportedAt: "2026-05-14T00:00:00.000Z",
+      exportedFrom: { hydraVersion: "0.1.0", machine: "h" },
+      session: {
+        sessionId: "hydra_session_cs_route",
+        lineageId: "lin_cs_route",
+        agentId: "claude-code",
+        cwd: "/w",
+        createdAt: "2026-05-14T00:00:00.000Z",
+        updatedAt: "2026-05-14T00:00:00.000Z",
+        summarizedThroughEntry: 12,
+      },
+      history: [] as Array<{
+        method: string;
+        params: Record<string, unknown>;
+        recordedAt: number;
+      }>,
+    };
+    const imported = await harness.manager.importBundle(bundle);
+    // Inject compactionState by writing directly through the manager's store.
+    const store = (harness.manager as unknown as { store: SessionStore }).store;
+    const existing = await store.read(imported.sessionId);
+    await store.write({
+      ...existing!,
+      compactionState: {
+        status: "running",
+        requestedAt: Date.now(),
+        iter: 2,
+        attempts: 0,
+      },
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${imported.sessionId}/compact`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      summarizedThroughEntry?: number;
+      inFlight: boolean;
+      compactionState?: { status: string; iter?: number };
+    };
+    expect(body.summarizedThroughEntry).toBe(12);
+    expect(body.compactionState).toBeDefined();
+    expect(body.compactionState?.status).toBe("running");
+    expect(body.compactionState?.iter).toBe(2);
   });
 });

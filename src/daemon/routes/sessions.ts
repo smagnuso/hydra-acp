@@ -632,7 +632,14 @@ export function registerSessionRoutes(
     }
     // synopsisCoordinator.size() is global; if any compaction is
     // in flight or queued session-wide, report inFlight=true.
-    return { summarizedThroughEntry: summarizedThroughEntry ?? undefined, inFlight: manager.getCompactionInFlight() };
+    const compactionState = await manager.getCompactionState(id);
+    const rollbackBreadcrumb = await manager.getRollbackBreadcrumb(id);
+    return {
+      summarizedThroughEntry: summarizedThroughEntry ?? undefined,
+      inFlight: manager.getCompactionInFlight(),
+      ...(compactionState != null ? { compactionState } : {}),
+      ...(rollbackBreadcrumb != null ? { rollbackBreadcrumb } : {}),
+    };
   });
 
   // Trigger compaction on a session. Fire-and-forget: returns 202
@@ -655,6 +662,26 @@ export function registerSessionRoutes(
     // Cold session — still schedule (coordinator reads from disk).
     manager.scheduleCompaction(id);
     reply.code(202).send({ scheduled: true });
+  });
+
+  // Roll back the most recent compaction swap on a session. Only
+  // succeeds when a rollback breadcrumb exists and the session is
+  // quiesced with no new turns since the swap. Returns 202 on success,
+  // 404 for unknown sessions, 409 for guard failures.
+  app.post("/v1/sessions/:id/compact/rollback", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    if (!(await manager.hasRecord(id))) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+    try {
+      await manager.performUncompact(id);
+      reply.code(202).send({ rolledBack: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      reply.code(409).send({ error: message });
+    }
   });
 
   // Tail a session's recorded conversation as NDJSON (one entry per

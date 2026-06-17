@@ -1006,6 +1006,47 @@ Fires once when a session is closed (cold demotion, delete, daemon shutdown, imp
 { "sessionId": "<id>" }
 ```
 
+### session/update — compaction lifecycle
+
+Attached clients receive `session/update` notifications as compaction progresses. The `update.sessionUpdate` field is `"hydra_compaction"` for all five phases.
+
+**Envelope shape** (all phases):
+
+```jsonc
+{
+  "sessionId": "<upstream session id>",
+  "update": {
+    "sessionUpdate": "hydra_compaction",
+    "phase": "started" | "iteration" | "deferred" | "swapped" | "failed",
+    // ... phase-specific fields below
+  }
+}
+```
+
+**Phase payloads:**
+
+```jsonc
+// started — emitted once when the catch-up loop begins
+{ "sessionUpdate": "hydra_compaction", "phase": "started", "requestedAt": 1717012800000 }
+
+// iteration — emitted once per successful catch-up loop iteration
+{ "sessionUpdate": "hydra_compaction", "phase": "iteration", "iter": 1, "historyLen": 42 }
+
+// deferred — emitted each time the swap is deferred because the session is not quiesced
+{ "sessionUpdate": "hydra_compaction", "phase": "deferred", "attempts": 1 }
+
+// swapped — emitted once when the upstream agent is replaced successfully;
+//            replaces the old empty session_info_update signal
+{ "sessionUpdate": "hydra_compaction", "phase": "swapped", "title": "My Session", "summarizedThroughEntry": 42 }
+
+// failed — emitted when retrySwap exhausts deferrals or encounters a fatal error
+{ "sessionUpdate": "hydra_compaction", "phase": "failed", "error": "deferral cap reached — session never quiesced" }
+```
+
+**Ordering guarantee:** S1 (state persistence) writes happen before the corresponding broadcast fires. A broadcast never implies that something happened that wasn't persisted — if the write fails, the broadcast is suppressed.
+
+**Cold sessions:** broadcasts are dropped for sessions with no attached clients. The persistent `compactionState` field in the session record provides visibility for cold sessions.
+
 ### Local fork
 
 #### Request: `hydra-acp/session/fork`

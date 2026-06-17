@@ -97,6 +97,27 @@ describe("SessionStore", () => {
     });
   });
 
+  it("round-trips a compactionState block", async () => {
+    const store = new SessionStore();
+    const compactionState = {
+      status: "running" as const,
+      requestedAt: 1700000000000,
+      iter: 2,
+      worker: { upstreamSessionId: "upstream_abc", pid: 12345 },
+    };
+    await store.write(
+      recordFromMemorySession({
+        sessionId: "hydra_session_compaction",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        cwd: "/w",
+        compactionState,
+      }),
+    );
+    const r = await store.read("hydra_session_compaction");
+    expect(r?.compactionState).toEqual(compactionState);
+  });
+
   it("list returns all valid records", async () => {
     const store = new SessionStore();
     for (const id of ["hydra_session_a", "hydra_session_b"]) {

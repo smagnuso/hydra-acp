@@ -26,6 +26,23 @@
 
 import { z } from "zod";
 
+// Persistent state for an in-flight compaction job. Written before the
+// ephemeral agent spawns (so a crash between trigger and spawn is
+// recoverable). Cleared on successful swap or exhausted deferrals.
+// worker is diagnostic only — never used as load-bearing logic.
+export const CompactionState = z.object({
+  status: z.enum(["requested", "running", "swap_pending", "swap_deferred"]),
+  requestedAt: z.number(),
+  iter: z.number().int().nonnegative().optional(),
+  attempts: z.number().int().nonnegative().optional(),
+  lastError: z.string().optional(),
+  worker: z.object({
+    upstreamSessionId: z.string(),
+    pid: z.number().int().nonnegative(),
+  }).optional(),
+});
+export type CompactionState = z.infer<typeof CompactionState>;
+
 export const SessionSynopsis = z.object({
   goal: z.string().optional(),
   outcome: z.string().optional(),

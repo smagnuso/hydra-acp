@@ -11,7 +11,7 @@ describe("HYDRA_COMMANDS", () => {
     expect(compact).toBeDefined();
     expect(compact!.name).toBe("hydra compact");
     expect(compact!.description).toContain("Compact this session's history");
-    expect(compact!.description).toContain("recall_* tools");
+    expect(compact!.description).toContain("/hydra compact status");
   });
 
   it('places "compact" after "restart"', () => {

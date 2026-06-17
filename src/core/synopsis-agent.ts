@@ -46,6 +46,9 @@ export interface GenerateSynopsisOpts {
   // Cap on the rendered transcript size fed to the agent. Anything older
   // than the tail-fitting window is dropped (see renderTranscript).
   maxTranscriptChars?: number;
+  // Called after the ephemeral agent spawns and session/new returns.
+  // Provides the upstreamSessionId and pid for diagnostic recording only.
+  onWorkerSpawned?: (upstreamSessionId: string, pid: number | undefined) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -94,6 +97,7 @@ async function runEphemeralRegen(
         );
         return undefined;
       }
+      opts.onWorkerSpawned?.(upstreamSessionId, agent.pid);
       if (opts.modelId) {
         const advertised = collectAdvertisedModelIds(newResult);
         if (advertised.size === 0 || advertised.has(opts.modelId)) {

@@ -92,6 +92,11 @@ export const RegistryAgent = z.object({
   website: z.string().optional(),
   distribution: Distribution,
   onboarding: Onboarding.optional(),
+  // Per-agent allowlist of env var names the client may opportunistically
+  // forward at session/new time (e.g. ["OPENAI_API_KEY","OPENAI_BASE_URL"]).
+  // Pure hint — the daemon does not enforce it; the bearer token already
+  // gates the trust boundary.
+  requiredEnv: z.array(z.string().min(1)).optional(),
 });
 export type RegistryAgent = z.infer<typeof RegistryAgent>;
 

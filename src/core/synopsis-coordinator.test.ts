@@ -623,4 +623,70 @@ describe("SynopsisCoordinator", () => {
     expect(compactionArtifacts).toHaveLength(1);
     expect(compactionArtifacts[0]!.goal).toBe("round 1");
   });
+
+  it("onCompactionStateChange fires requested → running(iter) during happy-path compaction", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const sharedHistory: unknown[] = [{}, {}, {}];
+
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "done" } });
+
+    const stateChanges: Array<{ status: string; iter?: number }> = [];
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, sharedHistory]])),
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      onCompactionStateChange: async (_sid, state) => {
+        stateChanges.push({ status: state.status, iter: state.iter });
+      },
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    // First call must be requested (no iter).
+    expect(stateChanges[0]?.status).toBe("requested");
+    expect(stateChanges[0]?.iter).toBeUndefined();
+    // At least one running transition must have been recorded.
+    const runningEntries = stateChanges.filter((s) => s.status === "running");
+    expect(runningEntries.length).toBeGreaterThan(0);
+    // The coordinator never fires swap_pending / swap_deferred — those are session-manager's job.
+    const otherEntries = stateChanges.filter(
+      (s) => s.status !== "requested" && s.status !== "running",
+    );
+    expect(otherEntries).toHaveLength(0);
+  });
+
+  it("broadcastHydraCompaction fires phase:started then phase:iteration in order", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const sharedHistory: unknown[] = [{}, {}, {}];
+
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "done" } });
+
+    const broadcasts: Array<{ phase: string; iter?: number; historyLen?: number }> = [];
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(new Map([[record.sessionId, sharedHistory]])),
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      broadcastHydraCompaction: (_sid, payload) => {
+        if (payload.phase === "started") {
+          broadcasts.push({ phase: "started" });
+        } else if (payload.phase === "iteration") {
+          broadcasts.push({ phase: "iteration", iter: payload.iter, historyLen: payload.historyLen });
+        }
+      },
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(broadcasts[0]?.phase).toBe("started");
+    const iterations = broadcasts.filter((b) => b.phase === "iteration");
+    expect(iterations.length).toBeGreaterThan(0);
+    expect(iterations[0]?.iter).toBe(1);
+    expect(iterations[0]?.historyLen).toBe(sharedHistory.length);
+  });
 });

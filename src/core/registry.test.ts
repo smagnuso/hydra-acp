@@ -591,6 +591,46 @@ describe("Registry disk cache", () => {
     expect(parsed.agents[1]!.onboarding).toBeUndefined();
   });
 
+  it("round-trips an optional requiredEnv field on agent entries", async () => {
+    const doc = {
+      version: "1.0.0",
+      agents: [
+        {
+          id: "needs-env",
+          name: "Needs Env",
+          distribution: { npx: { package: "needs-env@1.0.0" } },
+          requiredEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+        },
+        {
+          id: "plain",
+          name: "Plain",
+          distribution: { npx: { package: "plain@1.0.0" } },
+        },
+      ],
+    };
+    const parsed = RegistryDocument.parse(doc);
+    expect(parsed.agents[0]!.requiredEnv).toEqual([
+      "OPENAI_API_KEY",
+      "OPENAI_BASE_URL",
+    ]);
+    expect(parsed.agents[1]!.requiredEnv).toBeUndefined();
+  });
+
+  it("rejects malformed requiredEnv shapes", () => {
+    const base = {
+      id: "a",
+      name: "A",
+      distribution: { npx: { package: "a@1.0.0" } },
+    };
+    const wrap = (requiredEnv: unknown) => ({
+      version: "1.0.0",
+      agents: [{ ...base, requiredEnv }],
+    });
+    expect(() => RegistryDocument.parse(wrap("OPENAI_API_KEY"))).toThrow();
+    expect(() => RegistryDocument.parse(wrap([123]))).toThrow();
+    expect(() => RegistryDocument.parse(wrap([""]))).toThrow();
+  });
+
   it("writes atomically — no .tmp- siblings remain after a successful write", async () => {
     const fixture = { version: "1.0.0", agents: [] };
     const { url, close } = await serve(JSON.stringify(fixture));

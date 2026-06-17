@@ -54,7 +54,8 @@ import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import { coalesceReplay } from "./coalesce-replay.js";
 import { renderCompactionSeed } from "./compaction-seed.js";
-import type { SessionSynopsis } from "./snapshot.js";
+import type { CompactionState, SessionSynopsis } from "./snapshot.js";
+import type { RollbackBreadcrumb } from "./session-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
 import {
   deleteQueue,
@@ -119,6 +120,14 @@ export interface SpawnReplacementAgentResult {
 }
 
 export type SpawnReplacementAgent = (
+  params: SpawnReplacementAgentParams,
+) => Promise<SpawnReplacementAgentResult>;
+
+// Callback type for rollback: spawns a fresh agent process and resumes
+// the given upstream session via session/load (not session/new). Provided
+// by SessionManager; absent in tests that don't need rollback.
+export type LoadExistingAgentSession = (
+  upstreamSessionId: string,
   params: SpawnReplacementAgentParams,
 ) => Promise<SpawnReplacementAgentResult>;
 
@@ -187,6 +196,7 @@ export interface SessionInit {
   // compaction job on the SessionManager. Returns immediately; the
   // compaction artifact lands later via persistSynopsis + onCompactionArtifact.
   scheduleCompaction?: () => void;
+  getCompactionState?: () => Promise<CompactionState | undefined>;
   createdAt?: number;
   transformChain?: TransformerRef[];
   // How long after the last recordable broadcast before session.idle fires to
@@ -236,11 +246,32 @@ export interface SessionInit {
   // persisted record on cold resurrect so the MCP server can gate
   // recall_* tools accordingly.
   summarizedThroughEntry?: number;
+  // Persisted compaction state restored from meta.json on resurrect.
+  // Seeded into _liveCompactionPhase so buildStateSnapshotReplay can
+  // deliver the current compaction status to freshly-attaching clients
+  // before any live broadcast fires.
+  compactionState?: CompactionState;
   // MCP server configs to forward to spawnReplacementAgent on swap.
   // Stored verbatim; never re-minted — the per-session MCP tokens are
   // keyed by hydraSessionId (unchanged across swap), so the same config
   // is correct for the replacement agent.
   mcpServers?: unknown[];
+  // Spawns a fresh agent process and resumes a previous upstream session
+  // via session/load. Used exclusively by rollbackToUpstream to restore
+  // the pre-compaction agent context. Provided by SessionManager.
+  loadExistingAgentSession?: LoadExistingAgentSession;
+  // Called when a real (non-slash, non-ancillary) user turn is dispatched
+  // to the agent. SessionManager uses this to clear the rollback breadcrumb
+  // so the window closes as soon as conversation continues.
+  clearRollbackBreadcrumbHook?: () => void;
+  // Called right after a compaction swap completes, with the breadcrumb
+  // data needed for rollback. SessionManager uses this to persist the
+  // breadcrumb to meta.json.
+  onCompactionSwapHook?: (breadcrumb: RollbackBreadcrumb) => void;
+  // Called when /hydra uncompact is invoked. Provided by SessionManager;
+  // performs all guards and the actual rollback. Returns a rejected
+  // promise with a descriptive Error on guard failure.
+  uncompactHook?: () => Promise<void>;
 }
 
 export interface CloseOptions {
@@ -413,6 +444,12 @@ export class Session {
   // manager's compaction scheduler so the slash command doesn't need
   // a direct dependency on SynopsisCoordinator.
   private scheduleCompactionHook?: () => void;
+  private getCompactionStateHook?: () => Promise<CompactionState | undefined>;
+  // In-memory mirror of the last hydra_compaction phase broadcast.
+  // Kept so buildStateSnapshotReplay can deliver the current phase to
+  // freshly-attaching clients without an async disk read.
+  // Cleared when phase is "swapped" or "failed".
+  private _liveCompactionPhase: Record<string, unknown> | undefined;
   // Subscribers notified after every entry that's actually persisted to
   // history (skipping snapshot-shaped events filtered by
   // recordAndBroadcast). The HTTP /v1/sessions/:id/history?follow=1
@@ -476,6 +513,10 @@ export class Session {
   // and noisy state churn keep a quiet session alive forever.
   private lastRecordedAt: number;
   private spawnReplacementAgent: SpawnReplacementAgent | undefined;
+  private loadExistingAgentSession: LoadExistingAgentSession | undefined;
+  private clearRollbackBreadcrumbHook: (() => void) | undefined;
+  private onCompactionSwapHook: ((breadcrumb: RollbackBreadcrumb) => void) | undefined;
+  private uncompactHook: (() => Promise<void>) | undefined;
   private readonly mcpServersConfig: unknown[] | undefined;
   // See SessionInit.forwardedEnv. Mutable so a fresh session/attach can
   // overwrite it; read by respawnAgent to thread into the replacement
@@ -615,6 +656,7 @@ export class Session {
     this.title = init.title;
     this.scheduleSynopsisHook = init.scheduleSynopsis;
     this.scheduleCompactionHook = init.scheduleCompaction;
+    this.getCompactionStateHook = init.getCompactionState;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
     this._currentUsage = init.currentUsage;
@@ -631,6 +673,10 @@ export class Session {
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
     this.spawnReplacementAgent = init.spawnReplacementAgent;
+    this.loadExistingAgentSession = init.loadExistingAgentSession;
+    this.clearRollbackBreadcrumbHook = init.clearRollbackBreadcrumbHook;
+    this.onCompactionSwapHook = init.onCompactionSwapHook;
+    this.uncompactHook = init.uncompactHook;
     this.mcpServersConfig = init.mcpServers;
     this.forwardedEnv = init.forwardedEnv;
     this.availableAgentsFn = init.availableAgents;
@@ -651,6 +697,27 @@ export class Session {
     this._interactive = init.interactive;
     this._priority = init.priority;
     this._summarizedThroughEntry = init.summarizedThroughEntry;
+    if (init.compactionState) {
+      const cs = init.compactionState;
+      if (
+        cs.status === "requested" ||
+        cs.status === "running" ||
+        cs.status === "swap_pending" ||
+        cs.status === "swap_deferred"
+      ) {
+        if (cs.status === "swap_deferred") {
+          this._liveCompactionPhase = {
+            phase: "deferred",
+            attempts: cs.attempts,
+          };
+        } else {
+          this._liveCompactionPhase = {
+            phase: cs.status === "requested" ? "started" : "iteration",
+            iter: cs.iter,
+          };
+        }
+      }
+    }
     this.historyStore = init.historyStore;
     this.historyMaxEntries = init.historyMaxEntries ?? DEFAULT_HISTORY_MAX_ENTRIES;
     this.compactEvery = Math.max(1, Math.floor(this.historyMaxEntries * 0.2));
@@ -981,6 +1048,7 @@ export class Session {
     artifact: SessionSynopsis;
     title?: string;
     tailK: number;
+    summarizedThroughEntry?: number;
   }): Promise<void> {
     const quiesced = await this.isQuiescedForSwap();
     if (!quiesced) {
@@ -1064,6 +1132,12 @@ export class Session {
       prompt: [{ type: "text", text: seedText }],
     });
 
+    // Capture the pre-swap upstream id + summarizedThroughEntry so the
+    // onCompactionSwapHook can persist a rollback breadcrumb before we
+    // overwrite the fields below.
+    const previousUpstreamSessionId = this.upstreamSessionId;
+    const previousSummarizedThroughEntry = this._summarizedThroughEntry;
+
     // Atomically swap: kill the old agent, point this.agent and
     // this.upstreamSessionId at the new one.
     const oldAgent = this.agent;
@@ -1078,18 +1152,11 @@ export class Session {
 
     await oldAgent.kill().catch(() => undefined);
 
-    // Signal to attached clients that a compaction swap occurred. Uses
-    // the same session/update channel as agent switches, with a hydra-acp
-    // _meta flag so clients can distinguish this from a normal /hydra agent.
-    // Include title so mapSessionInfo produces a non-null render event
-    // (option b: simpler than adding a new sessionUpdate kind).
-    this.recordAndBroadcast("session/update", {
-      sessionId: this.upstreamSessionId,
-      update: {
-        sessionUpdate: "session_info_update",
-        title: this.title,
-        _meta: { "hydra-acp": { synthetic: true, compactionSwap: true } },
-      },
+    // Signal to attached clients that the compaction swap completed.
+    this.broadcastCompactionPhase({
+      phase: "swapped",
+      ...(this.title !== undefined ? { title: this.title } : {}),
+      summarizedThroughEntry: opts.summarizedThroughEntry ?? this._summarizedThroughEntry ?? 0,
     });
 
     // Notify agent change handlers so SessionManager's persistAgentChange
@@ -1099,6 +1166,113 @@ export class Session {
         handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId });
       } catch (err) {
         this.logger?.warn(`swapUpstream: agentChange handler failed: ${(err as Error).message}`);
+      }
+    }
+
+    // Notify the rollback breadcrumb hook so SessionManager can persist the
+    // pre-swap upstream id. Done after agentChangeHandlers so the new
+    // upstreamSessionId is already in meta.json before the breadcrumb write.
+    if (this.onCompactionSwapHook) {
+      try {
+        this.onCompactionSwapHook({
+          previousUpstreamSessionId,
+          ...(previousSummarizedThroughEntry !== undefined
+            ? { previousSummarizedThroughEntry }
+            : {}),
+        });
+      } catch (err) {
+        this.logger?.warn(`swapUpstream: onCompactionSwapHook failed: ${(err as Error).message}`);
+      }
+    }
+
+    this.updatedAt = Date.now();
+  }
+
+  // Roll back the most recent compaction swap. Spawns a fresh agent
+  // process and resumes the previous upstream session via session/load,
+  // then atomically swaps it in, kills the post-compaction agent, clears
+  // the current synopsis, and broadcasts phase: "rolled_back".
+  //
+  // Guards (all checked before any side effects):
+  //   - loadExistingAgentSession must be configured
+  //   - session must be quiesced
+  async rollbackToUpstream(opts: {
+    previousUpstreamSessionId: string;
+    previousSummarizedThroughEntry?: number;
+  }): Promise<void> {
+    const quiesced = await this.isQuiescedForSwap();
+    if (!quiesced) {
+      throw new Error(
+        "session is not quiesced for rollback — wait for in-flight work to complete",
+      );
+    }
+
+    const loadAgent = this.loadExistingAgentSession;
+    if (!loadAgent) {
+      throw new Error("loadExistingAgentSession not configured for this session");
+    }
+
+    const agentId = this.agentId;
+    const cwd = this.cwd;
+    const agentArgs = this.agentArgs;
+    const forwardedEnv = this.forwardedEnv;
+    const persistedModel = this.currentModel;
+    const persistedMode = this.currentMode;
+
+    const fresh = await loadAgent(opts.previousUpstreamSessionId, {
+      agentId,
+      cwd,
+      agentArgs,
+      ...(forwardedEnv ? { forwardedEnv } : {}),
+      mcpServers: this.mcpServersConfig ?? [],
+    });
+
+    this.accumulateAndResetCost();
+    this.wireAgent(fresh.agent);
+
+    await restoreCurrentModel({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedModel,
+      agentReportedModel: fresh.initialModel,
+      logger: this.logger,
+    });
+    await restoreCurrentMode({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedMode,
+      agentReportedMode: fresh.initialMode,
+      logger: this.logger,
+    });
+
+    fresh.agent.connection.drainBuffered("session/update");
+
+    const oldAgent = this.agent;
+    this.agent = fresh.agent;
+    this.upstreamSessionId = fresh.upstreamSessionId;
+    this.agentMeta = fresh.agentMeta;
+    this.agentCapabilities = fresh.agentCapabilities;
+
+    this.broadcastMergedCommands();
+    this.broadcastConfigOptions();
+
+    await oldAgent.kill().catch(() => undefined);
+
+    // Restore the pre-compaction summarizedThroughEntry watermark.
+    this._summarizedThroughEntry = opts.previousSummarizedThroughEntry;
+
+    this.broadcastCompactionPhase({
+      phase: "rolled_back",
+      summarizedThroughEntry: opts.previousSummarizedThroughEntry ?? 0,
+    });
+
+    // Notify agent change handlers so SessionManager's persistAgentChange
+    // fires and persists the restored upstreamSessionId to meta.json.
+    for (const handler of this.agentChangeHandlers) {
+      try {
+        handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId });
+      } catch (err) {
+        this.logger?.warn(`rollbackToUpstream: agentChange handler failed: ${(err as Error).message}`);
       }
     }
 
@@ -1178,6 +1352,33 @@ export class Session {
         this.broadcastHandlers.splice(i, 1);
       }
     };
+  }
+
+  // Broadcast a hydra_compaction phase event to attached clients.
+  // Send a hydra_compaction lifecycle event to attached clients.
+  // These are ephemeral push notifications — they are NOT appended to
+  // history.jsonl so they don't cause the catch-up loop to re-iterate.
+  broadcastCompactionPhase(update: Record<string, unknown>): void {
+    const phase = update.phase;
+    if (phase === "swapped" || phase === "failed") {
+      this._liveCompactionPhase = undefined;
+    } else {
+      this._liveCompactionPhase = update;
+    }
+    const params = this.rewriteForClient({
+      sessionId: this.upstreamSessionId,
+      update: { sessionUpdate: "hydra_compaction", ...update },
+    });
+    for (const handler of this.broadcastHandlers) {
+      try {
+        handler({ method: "session/update", params, recordedAt: Date.now() });
+      } catch {
+        void 0;
+      }
+    }
+    for (const client of this.clients.values()) {
+      void client.connection.notify("session/update", params).catch(() => undefined);
+    }
   }
 
   // Register a client and (asynchronously) load the replay slice it
@@ -1387,6 +1588,19 @@ export class Session {
           recordedAt,
         });
       }
+    }
+    if (this._liveCompactionPhase !== undefined) {
+      out.push({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "hydra_compaction",
+            ...this._liveCompactionPhase,
+          },
+        },
+        recordedAt,
+      });
     }
     return out;
   }
@@ -3305,7 +3519,9 @@ export class Session {
         case "restart":
           return inline ? this.runRestartCommandInline() : this.runRestartCommand();
         case "compact":
-          return inline ? this.runCompactCommandInline() : this.runCompactCommand();
+          return inline ? this.runCompactCommandInline(remainder) : this.runCompactCommand(remainder);
+        case "uncompact":
+          return inline ? this.runUncompactCommandInline() : this.runUncompactCommand();
         default: {
           const err = new Error(
             `no dispatcher for /hydra verb ${first}`,
@@ -4037,11 +4253,14 @@ export class Session {
   // emits a synthetic confirmation. The actual compaction (summarization
   // + upstream swap) runs asynchronously via the coordinator; this
   // method returns end_turn immediately.
-  private runCompactCommand(): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runCompactCommandInline());
+  private runCompactCommand(arg?: string): Promise<unknown> {
+    return this.enqueuePrompt(() => this.runCompactCommandInline(arg));
   }
 
-  private async runCompactCommandInline(): Promise<unknown> {
+  private async runCompactCommandInline(arg?: string): Promise<unknown> {
+    if (arg === "status") {
+      return this.runCompactStatusCommandInline();
+    }
     if (!this.scheduleCompactionHook) {
       this.emitExtensionReply(
         "compaction scheduling not configured for this session",
@@ -4052,6 +4271,52 @@ export class Session {
     this.emitExtensionReply(
       "Compaction scheduled. The session will rotate to a fresh upstream once summarization completes.",
     );
+    return { stopReason: "end_turn" };
+  }
+
+  private async runCompactStatusCommandInline(): Promise<unknown> {
+    const state = await this.getCompactionStateHook?.();
+    const summarized = this._summarizedThroughEntry;
+    if (state == null && summarized == null) {
+      this.emitExtensionReply("This session has never been compacted.");
+      return { stopReason: "end_turn" };
+    }
+    if (state == null) {
+      this.emitExtensionReply(
+        `No compaction in progress. Last summarized through entry: ${summarized}`,
+      );
+      return { stopReason: "end_turn" };
+    }
+    const lines: string[] = [
+      `Compaction state: ${state.status}${state.iter != null ? ` (iteration ${state.iter})` : ""}`,
+      `Summarized through entry: ${summarized ?? 0}`,
+      `Pending attempts: ${state.attempts ?? 0}`,
+    ];
+    this.emitExtensionReply(lines.join("\n"));
+    return { stopReason: "end_turn" };
+  }
+
+  private runUncompactCommand(): Promise<unknown> {
+    return this.enqueuePrompt(() => this.runUncompactCommandInline());
+  }
+
+  private async runUncompactCommandInline(): Promise<unknown> {
+    if (!this.uncompactHook) {
+      this.emitExtensionReply(
+        "Rollback not available: uncompact hook not configured for this session.",
+      );
+      return { stopReason: "end_turn" };
+    }
+    try {
+      await this.uncompactHook();
+      this.emitExtensionReply(
+        "Rolled back to pre-compaction upstream. The session is now using the previous agent context.",
+      );
+    } catch (err) {
+      this.emitExtensionReply(
+        `Rollback failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return { stopReason: "end_turn" };
   }
 
@@ -5161,6 +5426,16 @@ export class Session {
       this.clearAmendIfMatches(entry.messageId);
       return result;
     }
+    // A real agent turn closes the rollback window. Fire the hook before
+    // the round-trip so the breadcrumb is gone on disk even if the turn
+    // later fails or is cancelled.
+    if (this.clearRollbackBreadcrumbHook) {
+      try {
+        this.clearRollbackBreadcrumbHook();
+      } catch {
+        void 0;
+      }
+    }
     let response: unknown;
     try {
       response = await this.agent.connection.request<unknown>(
@@ -5236,6 +5511,8 @@ const STATE_UPDATE_KINDS = new Set([
   // recording it would just give never-prompted sessions a non-empty
   // history and make them look interactive in the picker.
   "config_option_update",
+  // Ephemeral compaction-phase signals — never conversation history.
+  "hydra_compaction",
 ]);
 
 function isStateUpdate(method: string, params: unknown): boolean {

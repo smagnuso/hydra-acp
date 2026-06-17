@@ -11,6 +11,11 @@ import {
   truncate,
   wrap,
 } from "./screen.js";
+import {
+  shouldShowCompactionPrompt,
+  estimateTokens,
+  COMPACTION_PROMPT_TOKEN_THRESHOLD,
+} from "./compaction-prompt.js";
 
 // Minimal mock term: width 10/height 10 makes repaint() short-circuit
 // (it bails when width < 20), so we never exercise the draw path. We
@@ -829,6 +834,69 @@ describe("Screen banner right slot", () => {
   it("empty right slot when nothing set", () => {
     const screen = makeScreen();
     expect(rightContent(screen)).toBe(null);
+  });
+
+  it("compaction indicator appears in right slot at lowest priority", () => {
+    const screen = makeScreen();
+    screen.setCompactionIndicator("\u27f3 compacting...");
+    const r = rightContent(screen);
+    expect(r?.kind).toBe("compaction");
+    expect(r?.text).toBe("\u27f3 compacting...");
+  });
+
+  it("transient notify takes priority over compaction indicator", () => {
+    const screen = makeScreen();
+    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.notify("model changed", 60_000);
+    expect(rightContent(screen)?.kind).toBe("notify");
+    expect(rightContent(screen)?.text).toBe("model changed");
+  });
+
+  it("compaction indicator shows again after transient notify clears", async () => {
+    const screen = makeScreen();
+    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.notify("model changed", 30);
+    expect(rightContent(screen)?.kind).toBe("notify");
+    await new Promise((res) => setTimeout(res, 60));
+    expect(rightContent(screen)?.kind).toBe("compaction");
+    expect(rightContent(screen)?.text).toBe("\u27f3 compacting...");
+  });
+
+  it("setCompactionIndicator null clears the indicator", () => {
+    const screen = makeScreen();
+    screen.setCompactionIndicator("\u27f3 compacting...");
+    screen.setCompactionIndicator(null);
+    expect(rightContent(screen)).toBe(null);
+  });
+
+  it("hydra_compaction phase sequence updates indicator correctly", async () => {
+    const screen = makeScreen();
+
+    // started → show compacting
+    screen.setCompactionIndicator("\u27f3 compacting...");
+    expect(rightContent(screen)?.text).toBe("\u27f3 compacting...");
+
+    // deferred → show queued
+    screen.setCompactionIndicator("\u27f3 compaction queued (waiting for idle)");
+    expect(rightContent(screen)?.text).toBe("\u27f3 compaction queued (waiting for idle)");
+
+    // swapped → clear indicator, brief notify
+    screen.setCompactionIndicator(null);
+    screen.notify("\u2713 compacted", 2000);
+    expect(rightContent(screen)?.kind).toBe("notify");
+    expect(rightContent(screen)?.text).toBe("\u2713 compacted");
+    expect((screen as unknown as { compactionIndicator: string | null }).compactionIndicator).toBe(null);
+  });
+
+  it("failed phase clears indicator and shows error notify", async () => {
+    const screen = makeScreen();
+    screen.setCompactionIndicator("\u27f3 compacting...");
+
+    screen.setCompactionIndicator(null);
+    screen.notify("\u2717 compaction failed: deferral cap reached", 5000);
+    expect(rightContent(screen)?.kind).toBe("notify");
+    expect(rightContent(screen)?.text).toContain("\u2717 compaction failed");
+    expect((screen as unknown as { compactionIndicator: string | null }).compactionIndicator).toBe(null);
   });
 });
 
@@ -2504,5 +2572,80 @@ describe("Screen block-click routing", () => {
     expect(r).not.toBeNull();
     expect(r!.offset).toBeGreaterThanOrEqual(0);
     expect(r!.offset).toBeLessThan(body.length);
+  });
+});
+
+describe("shouldShowCompactionPrompt", () => {
+  const BIG_CHARS = COMPACTION_PROMPT_TOKEN_THRESHOLD * 4; // exactly at threshold
+
+  it("returns true when unsummarized chars exceed threshold", () => {
+    expect(
+      shouldShowCompactionPrompt({
+        summarizedThroughEntry: 0,
+        totalEntries: 100,
+        unsummarizedChars: BIG_CHARS,
+        compactionState: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when compactionState is active", () => {
+    expect(
+      shouldShowCompactionPrompt({
+        summarizedThroughEntry: 0,
+        totalEntries: 100,
+        unsummarizedChars: BIG_CHARS,
+        compactionState: { status: "running" },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when totalEntries is 0", () => {
+    expect(
+      shouldShowCompactionPrompt({
+        summarizedThroughEntry: 0,
+        totalEntries: 0,
+        unsummarizedChars: BIG_CHARS,
+        compactionState: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when threshold is not exceeded", () => {
+    expect(
+      shouldShowCompactionPrompt({
+        summarizedThroughEntry: 0,
+        totalEntries: 100,
+        unsummarizedChars: BIG_CHARS - 4, // one token below
+        compactionState: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("estimateTokens returns floor(chars / 4)", () => {
+    expect(estimateTokens(400)).toBe(100);
+    expect(estimateTokens(401)).toBe(100);
+    expect(estimateTokens(0)).toBe(0);
+  });
+});
+
+describe("screen compaction prompt", () => {
+  it("setCompactionPrompt makes prompt active", () => {
+    const screen = makeScreen();
+    expect(screen.isCompactionPromptActive()).toBe(false);
+    screen.setCompactionPrompt({ message: "Test message" });
+    expect(screen.isCompactionPromptActive()).toBe(true);
+  });
+
+  it("setCompactionPrompt null clears the prompt", () => {
+    const screen = makeScreen();
+    screen.setCompactionPrompt({ message: "Test message" });
+    screen.setCompactionPrompt(null);
+    expect(screen.isCompactionPromptActive()).toBe(false);
+  });
+
+  it("compaction prompt is inactive by default", () => {
+    const screen = makeScreen();
+    expect(screen.isCompactionPromptActive()).toBe(false);
   });
 });

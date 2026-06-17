@@ -334,4 +334,169 @@ describe("compaction swap — onCompactionArtifact hook", () => {
     // re-entered on deferred retry.
     expect(mockCompaction).toHaveBeenCalledTimes(1);
   });
+
+  it("broadcasts phase:swapped after a successful swap, including title field", async () => {
+    let spawnCount = 0;
+    const oldAgents: ReturnType<typeof makeMockAgent>[] = [];
+    const newAgents: ReturnType<typeof makeMockAgent>[] = [];
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        if (spawnCount === 0) {
+          const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+          oldAgents.push(m);
+          const reqMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+          reqMock
+            .mockResolvedValueOnce({ protocolVersion: 1 })
+            .mockResolvedValueOnce({ sessionId: `u_swap_bcast_${spawnCount++}` });
+          return m.agent;
+        } else {
+          const newM = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+          newAgents.push(newM);
+          const reqMock = newM.agent.connection.request as ReturnType<typeof vi.fn>;
+          reqMock.mockImplementation(async (method: string) => {
+            if (method === "session/new") {
+              return { sessionId: `fresh_bcast_${spawnCount++}` };
+            }
+            return {};
+          });
+          return newM.agent;
+        }
+      },
+      undefined,
+      { compaction: { tailK: 5 } },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "claude-code" });
+    const sessionId = session.sessionId;
+
+    const clientStream = makeControlledStream();
+    const conn = new JsonRpcConnection(clientStream);
+    await session.attach({ clientId: "c1", connection: conn }, "full");
+
+    const swappedEvents: Array<{ phase: string; title?: string; summarizedThroughEntry?: number }> = [];
+    session.onBroadcast((entry) => {
+      if (
+        entry.method === "session/update" &&
+        typeof entry.params === "object" &&
+        entry.params !== null &&
+        "update" in entry.params
+      ) {
+        const update = (entry.params as { update: unknown }).update;
+        if (
+          typeof update === "object" &&
+          update !== null &&
+          "sessionUpdate" in update &&
+          (update as Record<string, unknown>).sessionUpdate === "hydra_compaction" &&
+          (update as Record<string, unknown>).phase === "swapped"
+        ) {
+          swappedEvents.push(update as unknown as { phase: string; title?: string; summarizedThroughEntry?: number });
+        }
+      }
+    });
+
+    const oldReqMock = oldAgents[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    for (let i = 0; i < 3; i++) {
+      oldReqMock.mockResolvedValueOnce({ stopReason: "end_turn" });
+      await session.prompt("c1", { prompt: [{ type: "text", text: `hello ${i}` }] });
+    }
+    await manager.flushHistoryWrites();
+
+    mockCompaction.mockResolvedValue({ synopsis: makeArtifact() });
+
+    const originalUpstream = session.upstreamSessionId;
+    (manager as unknown as { synopsisCoordinator: { scheduleCompaction: (id: string) => void } })
+      .synopsisCoordinator.scheduleCompaction(sessionId);
+
+    await waitFor(() => {
+      const cur = manager.get(sessionId);
+      return !!cur && cur.upstreamSessionId !== originalUpstream;
+    }, 10_000);
+    // Allow any async state writes a tick to settle.
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(swappedEvents.length).toBeGreaterThan(0);
+    expect(swappedEvents[0]!.phase).toBe("swapped");
+    expect(typeof swappedEvents[0]!.summarizedThroughEntry).toBe("number");
+
+    await manager.flushHistoryWrites();
+  });
+
+  it("broadcasts phase:deferred when the session is not quiesced", async () => {
+    let spawnCount = 0;
+    const oldAgents: ReturnType<typeof makeMockAgent>[] = [];
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+        oldAgents.push(m);
+        const reqMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        reqMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: `u_defer_bcast_${spawnCount++}` });
+        return m.agent;
+      },
+      undefined,
+      { compaction: { tailK: 5 } },
+    );
+
+    const session = await manager.create({ cwd: WORK_CWD, agentId: "claude-code" });
+    const sessionId = session.sessionId;
+
+    const clientStream = makeControlledStream();
+    const conn = new JsonRpcConnection(clientStream);
+    await session.attach({ clientId: "c1", connection: conn }, "full");
+
+    const deferredEvents: Array<{ phase: string; attempts: number }> = [];
+    session.onBroadcast((entry) => {
+      if (
+        entry.method === "session/update" &&
+        typeof entry.params === "object" &&
+        entry.params !== null &&
+        "update" in entry.params
+      ) {
+        const update = (entry.params as { update: unknown }).update;
+        if (
+          typeof update === "object" &&
+          update !== null &&
+          "sessionUpdate" in update &&
+          (update as Record<string, unknown>).sessionUpdate === "hydra_compaction" &&
+          (update as Record<string, unknown>).phase === "deferred"
+        ) {
+          deferredEvents.push(update as unknown as { phase: string; attempts: number });
+        }
+      }
+    });
+
+    const oldReqMock = oldAgents[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    oldReqMock.mockImplementation(async (method: string) => {
+      if (method === "session/prompt") {
+        return new Promise<unknown>(() => undefined);
+      }
+      return {};
+    });
+    void session.prompt("c1", { prompt: [{ type: "text", text: "hello" }] });
+    await new Promise((r) => setImmediate(r));
+
+    mockCompaction.mockResolvedValue({ synopsis: makeArtifact() });
+
+    (manager as unknown as { synopsisCoordinator: { scheduleCompaction: (id: string) => void } })
+      .synopsisCoordinator.scheduleCompaction(sessionId);
+
+    await waitFor(
+      () => {
+        const state = (manager as unknown as { synopsisCoordinator: { size: () => { queued: number; inflight: number } } })
+          .synopsisCoordinator.size();
+        return state.queued === 0 && state.inflight === 0;
+      },
+      8_000,
+    );
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(deferredEvents.length).toBeGreaterThan(0);
+    expect(deferredEvents[0]!.phase).toBe("deferred");
+    expect(typeof deferredEvents[0]!.attempts).toBe("number");
+  });
 });

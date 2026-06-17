@@ -231,6 +231,13 @@ export interface ConfirmPromptSpec {
   hint: string;
 }
 
+// Three-line modal shown once per attach when the unsummarized history
+// tail exceeds the compaction-prompt threshold. Dismissed by y/n/d.
+export interface CompactionPromptSpec {
+  // E.g. "This session has ~85K tokens of history above the compaction watermark."
+  message: string;
+}
+
 // Modal that displays a hotkey cheatsheet. `entries` is an ordered list
 // of [keys, description] pairs (or null for a visual separator) and is
 // rendered as a left-padded two-column block above the prompt area.
@@ -281,6 +288,8 @@ const MAX_HELP_ROWS = 30;
 const MAX_COMPLETION_ROWS = 6;
 const MAX_CHIP_ROWS = 4;
 const CONFIRM_PROMPT_ROWS = 2;
+// message line + options line + hint line
+const COMPACTION_PROMPT_ROWS = 3;
 // Default minimum interval between content-driven repaints (agent text
 // chunks, tool/plan upserts, elapsed ticks). Without this we full-redraw
 // 10–50× per second during streaming, which is wasteful and made flicker
@@ -397,6 +406,7 @@ export class Screen {
   private permissionPrompt: PermissionPromptSpec | null = null;
   private optionsPrompt: OptionsPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
+  private compactionPrompt: CompactionPromptSpec | null = null;
   private helpPrompt: HelpPromptSpec | null = null;
   private completions: CompletionItem[] = [];
   // Scrollback offset: 0 = pinned to bottom (live), N = N wrapped lines
@@ -441,16 +451,20 @@ export class Screen {
   private selectionRenderBounds:
     | Map<number, { start: number; end: number; toEnd: boolean }>
     | null = null;
-  // Right-side banner slot. Three sources, in priority order:
-  //   1. Active scrollback search term (auto, from this.scrollbackSearch)
-  //   2. External search indicator pushed by the app while prompt-
-  //      history reverse-search is active (gives that mode visible
-  //      feedback for its otherwise-hidden query)
-  //   3. Transient notification set via notify(), auto-cleared after
-  //      durationMs
-  private bannerNotification: string | null = null;
-  private bannerNotificationTimer: NodeJS.Timeout | null = null;
-  private bannerSearchIndicator: string | null = null;
+   // Right-side banner slot. Four sources, in priority order:
+   //   1. Active scrollback search term (auto, from this.scrollbackSearch)
+   //   2. External search indicator pushed by the app while prompt-
+   //      history reverse-search is active (gives that mode visible
+   //      feedback for its otherwise-hidden query)
+   //   3. Transient notification set via notify(), auto-cleared after
+   //      durationMs
+   //   4. Persistent compaction status indicator (set via
+   //      setCompactionIndicator); stays until explicitly cleared or
+   //      replaced by a transient notify() call that takes priority.
+   private bannerNotification: string | null = null;
+   private bannerNotificationTimer: NodeJS.Timeout | null = null;
+   private bannerSearchIndicator: string | null = null;
+   private compactionIndicator: string | null = null;
   // Bottom-of-screen "btw" overlay pane. Closed by default; when open,
   // reserves `btwOverlayHeight` rows from the bottom (1 separator + 1
   // header + height-2 content). The main scrollback area shrinks to make
@@ -1548,6 +1562,18 @@ export class Screen {
     this.syncedPartialRepaint(() => this.drawBanner());
   }
 
+  // Persistent compaction status indicator shown in the right-side banner
+  // slot (lower priority than search and transient notify). Pass null to
+  // clear. Does not use a timer — the caller is responsible for clearing
+  // when the phase ends (or when a transient notify supersedes it).
+  setCompactionIndicator(text: string | null): void {
+    if (this.compactionIndicator === text) {
+      return;
+    }
+    this.compactionIndicator = text;
+    this.syncedPartialRepaint(() => this.drawBanner());
+  }
+
   // Runtime toggle for terminal mouse capture. With capture on, the
   // wheel drives scrollback but text selection requires shift+drag
   // (terminals route mouse events to the app). With capture off, plain
@@ -1865,7 +1891,7 @@ export class Screen {
   // since the user can't see which match they're on from the highlight
   // alone; prompt-history's match is visible in the buffer, so no
   // counter needed there.
-  private bannerRightContent(): { text: string; kind: "search" | "notify" } | null {
+  private bannerRightContent(): { text: string; kind: "search" | "notify" | "compaction" } | null {
     if (this.scrollbackSearch !== null) {
       const sb = this.scrollbackSearch;
       const counter =
@@ -1881,6 +1907,9 @@ export class Screen {
     }
     if (this.bannerNotification !== null) {
       return { text: this.bannerNotification, kind: "notify" };
+    }
+    if (this.compactionIndicator !== null) {
+      return { text: this.compactionIndicator, kind: "compaction" };
     }
     return null;
   }
@@ -2242,6 +2271,20 @@ export class Screen {
       this.clearSelection();
     }
     this.confirmPrompt = spec ? { ...spec } : null;
+    this.repaint();
+  }
+
+  isCompactionPromptActive(): boolean {
+    return this.compactionPrompt !== null;
+  }
+
+  // Three-line compaction prompt shown once per attach when the unsummarized
+  // tail is large. Pass null to dismiss.
+  setCompactionPrompt(spec: CompactionPromptSpec | null): void {
+    if (spec !== null && this.compactionPrompt === null) {
+      this.clearSelection();
+    }
+    this.compactionPrompt = spec ? { ...spec } : null;
     this.repaint();
   }
 
@@ -3677,6 +3720,7 @@ export class Screen {
         this.permissionPrompt ||
         this.optionsPrompt ||
         this.confirmPrompt ||
+        this.compactionPrompt ||
         this.helpPrompt
       ) {
         this.term.hideCursor(false);
@@ -4167,6 +4211,10 @@ export class Screen {
       this.drawConfirmPrompt();
       return;
     }
+    if (this.compactionPrompt) {
+      this.drawCompactionPrompt();
+      return;
+    }
     if (this.helpPrompt) {
       this.drawHelpPrompt();
       return;
@@ -4257,6 +4305,30 @@ export class Screen {
     });
     this.paintRow(top + 1, `confirm|h|${w}|${spec.hint}`, () => {
       this.term.dim(` ${truncate(spec.hint, w - 2)}`);
+    });
+  }
+
+  private drawCompactionPrompt(): void {
+    const spec = this.compactionPrompt;
+    if (!spec) {
+      return;
+    }
+    const w = this.term.width;
+    const top =
+      this.term.height -
+      COMPACTION_PROMPT_ROWS -
+      BANNER_ROWS -
+      SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1;
+    this.paintRow(top, `cpct|msg|${w}|${spec.message}`, () => {
+      this.term.brightBlue(` ⊙ ${truncate(spec.message, w - 4)}`);
+    });
+    this.paintRow(top + 1, `cpct|opts|${w}`, () => {
+      this.term.dim("   Compact now to reduce future per-turn token cost?");
+    });
+    this.paintRow(top + 2, `cpct|hint|${w}`, () => {
+      this.term.dim("   [y] yes  [n] not now  [d] don't ask again");
     });
   }
 
@@ -4451,6 +4523,8 @@ export class Screen {
         this.term.moveTo(col, row).eraseLineAfter();
         if (right.kind === "search") {
           this.term.brightCyan.noFormat(right.text);
+        } else if (right.kind === "compaction") {
+          this.term.brightBlue.noFormat(right.text);
         } else {
           this.term.brightYellow.noFormat(right.text);
         }
@@ -4501,6 +4575,17 @@ export class Screen {
       const top =
         this.term.height -
         CONFIRM_PROMPT_ROWS -
+        BANNER_ROWS -
+        SEPARATOR_ROWS -
+        SESSIONBAR_ROWS +
+        1;
+      this.term.moveTo(2, top);
+      return;
+    }
+    if (this.compactionPrompt) {
+      const top =
+        this.term.height -
+        COMPACTION_PROMPT_ROWS -
         BANNER_ROWS -
         SEPARATOR_ROWS -
         SESSIONBAR_ROWS +
@@ -4574,6 +4659,9 @@ export class Screen {
     }
     if (this.confirmPrompt) {
       return CONFIRM_PROMPT_ROWS;
+    }
+    if (this.compactionPrompt) {
+      return COMPACTION_PROMPT_ROWS;
     }
     if (this.helpPrompt) {
       return this.helpRows();

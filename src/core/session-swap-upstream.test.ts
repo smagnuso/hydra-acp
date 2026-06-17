@@ -710,8 +710,8 @@ describe("Session.swapUpstream", () => {
       if ("method" in msg && typeof msg.method === "string" && msg.method === "session/update") {
         const m = msg as { method: string; params?: unknown };
         if (m.params && typeof m.params === "object") {
-          const update = (m.params as { update?: { _meta?: { "hydra-acp"?: { compactionSwap?: boolean } } } }).update;
-          if (update?._meta?.["hydra-acp"]?.compactionSwap === true) {
+          const update = (m.params as { update?: { sessionUpdate?: string; phase?: string } }).update;
+          if (update?.sessionUpdate === "hydra_compaction" && update?.phase === "swapped") {
             foundSwapNotification = true;
             break;
           }

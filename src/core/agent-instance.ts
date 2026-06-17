@@ -48,6 +48,11 @@ export class AgentInstance {
   // construction rather than via the constructor signature.
   authMethods?: AuthMethod[];
   private child: ChildProcess;
+  // Diagnostic: pid of the child process. Undefined until the OS assigns
+  // one, which happens synchronously at spawn time in practice.
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
   private exited = false;
   private killed = false;
   private stderrTail = "";

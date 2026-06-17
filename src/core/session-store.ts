@@ -4,7 +4,7 @@ import { customAlphabet } from "nanoid";
 import { z } from "zod";
 import { paths } from "./paths.js";
 import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
-import { SessionSynopsis } from "./snapshot.js";
+import { CompactionState, SessionSynopsis } from "./snapshot.js";
 
 // Mirror the alphabet/length used for session ids (see session.ts). Plain
 // alphanumeric, length 16 → ~95 bits — collisions across a personal
@@ -78,6 +78,16 @@ export type PersistedOriginatingClient = z.infer<
   typeof PersistedOriginatingClient
 >;
 
+// Breadcrumb written to meta.json immediately after a compaction swap
+// completes. Allows rollback to the pre-swap upstream session while the
+// window is still safe (no new turns since the swap). Cleared on:
+// rollback success, any subsequent real agent turn, and any subsequent swap.
+export const RollbackBreadcrumb = z.object({
+  previousUpstreamSessionId: z.string(),
+  previousSummarizedThroughEntry: z.number().int().nonnegative().optional(),
+});
+export type RollbackBreadcrumb = z.infer<typeof RollbackBreadcrumb>;
+
 export const SessionRecord = z.object({
   version: z.literal(1),
   sessionId: z.string(),
@@ -115,6 +125,14 @@ export const SessionRecord = z.object({
   // picker T, and /hydra title with no arg — every regen caller checks
   // `summarizedThroughEntry` first and no-ops if history hasn't grown.
   synopsis: SessionSynopsis.optional(),
+  // Persistent state for an in-flight async compaction job. Present from
+  // the moment compaction is scheduled until the swap completes or is
+  // abandoned. S2-S4 read this field; nothing else should invent state.
+  compactionState: CompactionState.optional(),
+  // Set after a compaction swap so the user can roll back within the
+  // safe window (no new turns). Cleared on first post-swap agent turn,
+  // on successful rollback, and when a subsequent swap supersedes it.
+  rollbackBreadcrumb: RollbackBreadcrumb.optional(),
   // history.length at the last successful snapshot regen. Idempotency
   // guard: if current history length <= this value, regen is a no-op.
   summarizedThroughEntry: z.number().int().nonnegative().optional(),
@@ -313,6 +331,8 @@ export function recordFromMemorySession(args: {
   interactive?: boolean;
   priority?: number;
   forwardedEnv?: Record<string, string>;
+  compactionState?: CompactionState;
+  rollbackBreadcrumb?: RollbackBreadcrumb;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -329,6 +349,8 @@ export function recordFromMemorySession(args: {
     title: args.title,
     synopsis: args.synopsis,
     summarizedThroughEntry: args.summarizedThroughEntry,
+    compactionState: args.compactionState,
+    rollbackBreadcrumb: args.rollbackBreadcrumb,
     agentArgs: args.agentArgs,
     currentModel: args.currentModel,
     currentMode: args.currentMode,

@@ -32,7 +32,7 @@ import {
 } from "./registry.js";
 import type { HistoryStore } from "./history-store.js";
 import type { SessionStore } from "./session-store.js";
-import type { SessionSynopsis } from "./snapshot.js";
+import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import { extractFilesTouched, extractToolsUsed } from "./history-aggregate.js";
 import { paths } from "./paths.js";
 
@@ -68,7 +68,28 @@ export interface SynopsisCoordinatorOptions {
   ) => Promise<void>;
   // Max iterations for the compaction catch-up loop. Default 3.
   compactionMaxIterations?: number;
+  // Called on each compaction state transition so the caller can persist
+  // the state machine. null means "clear the state" (not used by the
+  // coordinator; the coordinator only writes requested/running/iter).
+  onCompactionStateChange?: (
+    sessionId: string,
+    state: CompactionState,
+  ) => Promise<void>;
+  // Called to push a hydra_compaction session/update notification to
+  // any attached clients. The coordinator only fires started/iteration
+  // phases; session-manager fires deferred/swapped/failed from its paths.
+  broadcastHydraCompaction?: (
+    sessionId: string,
+    payload: HydraCompactionPayload,
+  ) => void;
 }
+
+export type HydraCompactionPayload =
+  | { sessionUpdate: "hydra_compaction"; phase: "started"; requestedAt: number }
+  | { sessionUpdate: "hydra_compaction"; phase: "iteration"; iter: number; historyLen: number }
+  | { sessionUpdate: "hydra_compaction"; phase: "deferred"; attempts: number }
+  | { sessionUpdate: "hydra_compaction"; phase: "swapped"; title?: string; summarizedThroughEntry: number }
+  | { sessionUpdate: "hydra_compaction"; phase: "failed"; error: string };
 
 const DEFAULT_MAX_CONCURRENT = 2;
 type JobKind = "title" | "compaction";
@@ -229,6 +250,16 @@ export class SynopsisCoordinator {
         let through = last ?? 0;
         let latestArtifact: SessionSynopsis | undefined;
         let latestThrough = 0;
+        const requestedAt = Date.now();
+        await this.opts.onCompactionStateChange?.(sessionId, {
+          status: "requested",
+          requestedAt,
+        });
+        this.opts.broadcastHydraCompaction?.(sessionId, {
+          sessionUpdate: "hydra_compaction",
+          phase: "started",
+          requestedAt,
+        });
 
         do {
           iter++;
@@ -249,6 +280,17 @@ export class SynopsisCoordinator {
             modelId,
             logger: this.opts.logger,
             timeoutMs: this.opts.generateTimeoutMs,
+            onWorkerSpawned: (upstreamSessionId, pid) => {
+              void this.opts.onCompactionStateChange?.(sessionId, {
+                status: "running",
+                requestedAt,
+                iter,
+                worker: {
+                  upstreamSessionId,
+                  pid: pid ?? 0,
+                },
+              });
+            },
           });
 
           if (result) {
@@ -257,6 +299,17 @@ export class SynopsisCoordinator {
               await this.opts.persistSynopsis(sessionId, merged, historyAtStart.length);
               latestArtifact = merged;
               latestThrough = historyAtStart.length;
+              await this.opts.onCompactionStateChange?.(sessionId, {
+                status: "running",
+                requestedAt,
+                iter,
+              });
+              this.opts.broadcastHydraCompaction?.(sessionId, {
+                sessionUpdate: "hydra_compaction",
+                phase: "iteration",
+                iter,
+                historyLen: historyAtStart.length,
+              });
               await this.opts.onCompactionArtifact?.(sessionId, merged, latestThrough);
               this.opts.logger?.info(
                 `synopsis: persisted compaction sessionId=${sessionId} iteration=${iter} fields=${describeFields(merged)}`,

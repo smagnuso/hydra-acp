@@ -2053,6 +2053,128 @@ describe("Session", () => {
       expect(content.text).toContain("Compaction scheduled");
     });
 
+    it("/hydra compact status emits running state when compactionState is present", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const getCompactionState = vi.fn().mockResolvedValue({
+        status: "running",
+        requestedAt: Date.now(),
+        iter: 2,
+        attempts: 0,
+      });
+      const session = new Session({
+        sessionId: "hydra_session_CS1",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_CS1",
+        historyStore: new HistoryStore(),
+        scheduleCompaction: vi.fn(),
+        getCompactionState,
+        summarizedThroughEntry: 47,
+      });
+      const { client: alice, stream } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra compact status" }],
+      });
+
+      const chunkUpdate = stream.sent.find(
+        (msg) =>
+          msg.method === "session/update" &&
+          typeof msg.params === "object" &&
+          msg.params !== null &&
+          "update" in msg.params &&
+          typeof msg.params.update === "object" &&
+          msg.params.update !== null &&
+          "sessionUpdate" in msg.params.update &&
+          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
+            "agent_message_chunk",
+      );
+      expect(chunkUpdate).toBeDefined();
+      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      expect(content.text).toContain("running");
+      expect(content.text).toContain("iteration 2");
+      expect(content.text).toContain("47");
+      expect(getCompactionState).toHaveBeenCalledTimes(1);
+    });
+
+    it("/hydra compact status emits 'no compaction in progress' when no state but has summarized entry", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const getCompactionState = vi.fn().mockResolvedValue(undefined);
+      const session = new Session({
+        sessionId: "hydra_session_CS2",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_CS2",
+        historyStore: new HistoryStore(),
+        scheduleCompaction: vi.fn(),
+        getCompactionState,
+        summarizedThroughEntry: 12,
+      });
+      const { client: alice, stream } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra compact status" }],
+      });
+
+      const chunkUpdate = stream.sent.find(
+        (msg) =>
+          msg.method === "session/update" &&
+          typeof msg.params === "object" &&
+          msg.params !== null &&
+          "update" in msg.params &&
+          typeof msg.params.update === "object" &&
+          msg.params.update !== null &&
+          "sessionUpdate" in msg.params.update &&
+          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
+            "agent_message_chunk",
+      );
+      expect(chunkUpdate).toBeDefined();
+      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      expect(content.text).toContain("No compaction in progress");
+      expect(content.text).toContain("12");
+    });
+
+    it("/hydra compact status emits 'never been compacted' when no state and no summarized entry", async () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const getCompactionState = vi.fn().mockResolvedValue(undefined);
+      const session = new Session({
+        sessionId: "hydra_session_CS3",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_CS3",
+        historyStore: new HistoryStore(),
+        scheduleCompaction: vi.fn(),
+        getCompactionState,
+      });
+      const { client: alice, stream } = makeClient();
+      session.attach(alice, "full");
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra compact status" }],
+      });
+
+      const chunkUpdate = stream.sent.find(
+        (msg) =>
+          msg.method === "session/update" &&
+          typeof msg.params === "object" &&
+          msg.params !== null &&
+          "update" in msg.params &&
+          typeof msg.params.update === "object" &&
+          msg.params.update !== null &&
+          "sessionUpdate" in msg.params.update &&
+          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
+            "agent_message_chunk",
+      );
+      expect(chunkUpdate).toBeDefined();
+      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      expect(content.text).toContain("never been compacted");
+    });
+
     it("/hydra compact without scheduleCompaction hook emits error message", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       // No scheduleCompaction provided

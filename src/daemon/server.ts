@@ -312,6 +312,14 @@ export async function startDaemon(
     );
   });
 
+  // Fire-and-forget: resume any in-flight compactions from the prior
+  // daemon run. Sequential iteration avoids a startup thundering herd.
+  void manager.resumePendingCompactions().catch((err: unknown) => {
+    app.log.warn(
+      `compaction resume scan failed: ${(err as Error).message}`,
+    );
+  });
+
   // Background poll: walk every installed agent on a staggered
   // schedule and run syncFromAgent so sessions created outside hydra
   // (or by other tools) show up in `sessions list` without the user
