@@ -399,17 +399,42 @@ describe("Session.swapUpstream", () => {
       spawnReplacementAgent,
     });
 
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    await session.attach(
+      {
+        clientId: "client-watch",
+        connection: {
+          notify: async (method: string, params: unknown): Promise<void> => {
+            notifications.push({ method, params });
+          },
+        } as unknown as Parameters<typeof session.attach>[0]["connection"],
+      },
+      "none",
+    );
+
     await session.swapUpstream({ artifact: makeSynopsis(), tailK: 0 });
 
+    // history.jsonl must NOT pick up the seed response or the synthetic
+    // "Compaction completed." notification. Recording the synthetic
+    // would grow history length and trigger the catch-up loop into a
+    // spurious second swap.
     const history = await store.load("hydra_swap_no_history");
-    // Exactly one entry: our synthetic confirmation. The agent's
-    // seed-prompt reply was captured via internalPromptCapture and
-    // discarded.
-    expect(history).toHaveLength(1);
-    const entry = history[0]!;
-    expect(entry.method).toBe("session/update");
-    const update = (entry.params as { update?: { content?: { text?: string }; _meta?: unknown } }).update;
-    expect(update?.content?.text).toContain("Compaction completed.");
+    expect(history).toHaveLength(0);
+
+    // The synthetic "Compaction completed." goes out to attached
+    // clients via the live session/update channel (broadcast-only).
+    const chunkUpdate = notifications.find((n) => {
+      if (n.method !== "session/update") {
+        return false;
+      }
+      const update = (n.params as { update?: { sessionUpdate?: string; content?: { text?: string } } }).update;
+      return (
+        update?.sessionUpdate === "agent_message_chunk" &&
+        update?.content?.text?.includes("Compaction completed.") === true
+      );
+    });
+    expect(chunkUpdate).toBeDefined();
+    const update = (chunkUpdate?.params as { update?: { _meta?: unknown } }).update;
     expect(update?._meta).toEqual({ "hydra-acp": { synthetic: true } });
   });
 

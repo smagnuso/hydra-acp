@@ -1179,7 +1179,17 @@ export class Session {
     // "Compaction completed." in the conversation stream instead of the
     // agent's seed-prompt acknowledgement (which we just suppressed via
     // internalPromptCapture above).
-    this.recordAndBroadcast("session/update", {
+    //
+    // Broadcast-only — NOT recorded to history.jsonl. Recording would
+    // grow history by 1 entry, which the synopsis-coordinator catch-up
+    // loop interprets as "new user conversation arrived during
+    // compaction" and would trigger a second swap, overwriting the
+    // rollback breadcrumb we just wrote. The TUI / attached clients
+    // receive this notification live; fresh attachers see compaction
+    // completion via the hydra_compaction phase:"swapped" event
+    // already broadcast above plus the cleared compactionState in
+    // meta.json.
+    const completedParams = this.rewriteForClient({
       sessionId: this.upstreamSessionId,
       update: {
         sessionUpdate: "agent_message_chunk",
@@ -1187,6 +1197,9 @@ export class Session {
         _meta: { "hydra-acp": { synthetic: true } },
       },
     });
+    for (const client of this.clients.values()) {
+      void client.connection.notify("session/update", completedParams).catch(() => undefined);
+    }
 
     // Notify agent change handlers so SessionManager's persistAgentChange
     // fires — this rewrites meta.json with the new upstreamSessionId.
