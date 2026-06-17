@@ -230,6 +230,7 @@ export async function startDaemon(
       publicHost: config.daemon.publicHost,
       host: config.daemon.host,
       port: config.daemon.port,
+      compaction: config.compaction,
     },
     { extensionMcp, mcpTokenRegistry, getDaemonOrigin },
   );

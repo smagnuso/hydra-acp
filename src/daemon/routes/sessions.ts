@@ -1,8 +1,10 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FastifyInstance } from "fastify";
-import { expandHome } from "../../core/config.js";
+import { expandHome, type CompactionConfig } from "../../core/config.js";
+import { shouldPromptForCompaction, estimateTokens } from "../../core/compaction-heuristic.js";
 import type { SessionManager } from "../../core/session-manager.js";
+import type { HistoryEntry as HistoryStoreEntry } from "../../core/history-store.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
 import { aggregateFileEdits, foldHunks } from "../../core/history-edits.js";
 import {
@@ -31,6 +33,9 @@ export interface SessionRouteDefaults {
   publicHost?: string;
   host?: string;
   port?: number;
+  // Compaction heuristic config used by the GET /compact endpoint to
+  // compute shouldPrompt for the TUI attach-time prompt.
+  compaction?: CompactionConfig;
 }
 
 function resolveHydraHost(defaults: SessionRouteDefaults): string | undefined {
@@ -634,9 +639,42 @@ export function registerSessionRoutes(
     // in flight or queued session-wide, report inFlight=true.
     const compactionState = await manager.getCompactionState(id);
     const rollbackBreadcrumb = await manager.getRollbackBreadcrumb(id);
+
+    // Compute shouldPrompt for the TUI attach-time compaction prompt.
+    let shouldPrompt = false;
+    let approxTokens: number | undefined;
+    const rawHistory = await manager.getHistory(id).catch(() => [] as HistoryStoreEntry[]);
+    const history = rawHistory ?? [];
+    if (history.length > 0 && defaults.compaction) {
+      const summarized = summarizedThroughEntry ?? 0;
+      const totalEntries = history.length;
+      const unsummarizedLines = history.slice(summarized);
+      // Use a rough char estimate from the raw line lengths stored in
+      // history.jsonl (each line is a JSON stringified entry).
+      const unsummarizedChars = unsummarizedLines.reduce(
+        (sum, entry) => sum + JSON.stringify(entry.params).length,
+        0,
+      );
+      approxTokens = estimateTokens(unsummarizedChars);
+      const currentModel = session?.currentModel;
+      const lastActivityMs = history.at(-1)!.recordedAt;
+      shouldPrompt = shouldPromptForCompaction({
+        summarizedThroughEntry: summarized,
+        totalEntries,
+        unsummarizedChars,
+        compactionInFlight: manager.getCompactionInFlight(),
+        currentModel,
+        lastActivityMs,
+        nowMs: Date.now(),
+        config: defaults.compaction as unknown as import("../../core/compaction-heuristic.js").CompactionHeuristicConfig,
+      });
+    }
+
     return {
       summarizedThroughEntry: summarizedThroughEntry ?? undefined,
       inFlight: manager.getCompactionInFlight(),
+      shouldPrompt,
+      ...(approxTokens != null ? { approxTokens } : {}),
       ...(compactionState != null ? { compactionState } : {}),
       ...(rollbackBreadcrumb != null ? { rollbackBreadcrumb } : {}),
     };

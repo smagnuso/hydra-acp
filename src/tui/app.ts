@@ -88,10 +88,7 @@ import {
   Screen,
   setAmbiguousWide,
 } from "./screen.js";
-import {
-  formatApproxTokens,
-  shouldShowCompactionPrompt,
-} from "./compaction-prompt.js";
+import { formatApproxTokens } from "../core/compaction-heuristic.js";
 import {
   InputDispatcher,
   type Attachment,
@@ -5534,8 +5531,10 @@ async function runSession(
   }
   livePeerHistoryRecording = true;
 
-  // Attach-time compaction prompt: if the unsummarized tail is large and
-  // no compaction is already in flight, ask the user once whether to compact.
+  // Attach-time compaction prompt: delegate the decision to the daemon
+  // which computes the two-signal heuristic (context utilization + idle
+  // time). The TUI simply reads shouldPrompt from the GET /compact
+  // endpoint and shows the message when true.
   void (async () => {
     try {
       const compactInfoRes = await fetch(
@@ -5545,44 +5544,16 @@ async function runSession(
         return;
       }
       const compactInfo = (await compactInfoRes.json()) as {
-        summarizedThroughEntry?: number;
-        compactionState?: unknown;
+        shouldPrompt?: boolean;
+        approxTokens?: number;
       };
-      const summarized = compactInfo.summarizedThroughEntry ?? 0;
-      const compactionState = compactInfo.compactionState ?? null;
-
-      // Read the history.jsonl to count entries and sum chars for the
-      // unsummarized portion. Uses the same daemon-side path — TUI and
-      // daemon share a filesystem.
-      const histPath = paths.historyFile(resolvedSessionId);
-      let raw: string;
-      try {
-        raw = await fs.readFile(histPath, "utf8");
-      } catch {
+      if (compactInfo.shouldPrompt !== true) {
         return;
       }
-      const allLines = raw.split("\n").filter((l) => l.length > 0);
-      const totalEntries = allLines.length;
-      const unsummarizedLines = allLines.slice(summarized);
-      const unsummarizedChars = unsummarizedLines.reduce((sum, l) => sum + l.length, 0);
-
-      if (
-        !shouldShowCompactionPrompt({
-          summarizedThroughEntry: summarized,
-          totalEntries,
-          unsummarizedChars,
-          compactionState,
-        })
-      ) {
-        return;
-      }
-
-      const approxTokens = formatApproxTokens(
-        Math.floor(unsummarizedChars / 4),
-      );
+      const approxTokens = compactInfo.approxTokens ?? 0;
       compactionPromptActive = true;
       screen.setCompactionPrompt({
-        message: `This session has ~${approxTokens} tokens of history above the compaction watermark.`,
+        message: `This session has ~${formatApproxTokens(approxTokens)} tokens of history above the compaction watermark.`,
       });
     } catch {
       // Non-fatal: silently skip on any error.

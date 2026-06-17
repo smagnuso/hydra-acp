@@ -330,6 +330,25 @@ export const HydraConfig = z.object({
       tailK: z.number().int().nonnegative().default(20),
       // Circuit-breaker on the catch-up loop during compaction.
       maxIterations: z.number().int().positive().default(3),
+      // Fraction of the model's context window at which to prompt
+      // (composed with idleBeforePromptMs). Default 0.5 → prompt at
+      // 50% utilization if the session has been idle long enough.
+      contextFraction: z.number().min(0).max(1).default(0.5),
+      // Hard-ceiling utilization at which to prompt regardless of idle
+      // time. Safety net against running out of context mid-task;
+      // bypasses idleBeforePromptMs entirely per the two-signal rule.
+      hardCeilingFraction: z.number().min(0).max(1).default(0.85),
+      // Absolute token threshold used when the model's context window
+      // is unknown (modelContextWindows lookup miss). Default 120k.
+      absoluteFallback: z.number().int().positive().default(120_000),
+      // Only prompt after the session has been idle this long, on the
+      // assumption that the prompt-prefix cache has expired by then and
+      // compaction is free in cache terms. Skipped entirely when
+      // hardCeilingFraction is crossed. Default 300_000ms (5 minutes).
+      idleBeforePromptMs: z.number().int().nonnegative().default(300_000),
+      // Per-model context window sizes keyed by model id. Unknown
+      // models fall back to absoluteFallback.
+      modelContextWindows: z.record(z.string(), z.number().int().positive()).default({}),
     })
     .default({}),
   // Where new sessions land when POST /v1/sessions omits cwd. Stored as

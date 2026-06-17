@@ -11,12 +11,6 @@ import {
   truncate,
   wrap,
 } from "./screen.js";
-import {
-  shouldShowCompactionPrompt,
-  estimateTokens,
-  COMPACTION_PROMPT_TOKEN_THRESHOLD,
-} from "./compaction-prompt.js";
-
 // Minimal mock term: width 10/height 10 makes repaint() short-circuit
 // (it bails when width < 20), so we never exercise the draw path. We
 // access private state via casts; TS privates are compile-time only.
@@ -2572,60 +2566,6 @@ describe("Screen block-click routing", () => {
     expect(r).not.toBeNull();
     expect(r!.offset).toBeGreaterThanOrEqual(0);
     expect(r!.offset).toBeLessThan(body.length);
-  });
-});
-
-describe("shouldShowCompactionPrompt", () => {
-  const BIG_CHARS = COMPACTION_PROMPT_TOKEN_THRESHOLD * 4; // exactly at threshold
-
-  it("returns true when unsummarized chars exceed threshold", () => {
-    expect(
-      shouldShowCompactionPrompt({
-        summarizedThroughEntry: 0,
-        totalEntries: 100,
-        unsummarizedChars: BIG_CHARS,
-        compactionState: null,
-      }),
-    ).toBe(true);
-  });
-
-  it("returns false when compactionState is active", () => {
-    expect(
-      shouldShowCompactionPrompt({
-        summarizedThroughEntry: 0,
-        totalEntries: 100,
-        unsummarizedChars: BIG_CHARS,
-        compactionState: { status: "running" },
-      }),
-    ).toBe(false);
-  });
-
-  it("returns false when totalEntries is 0", () => {
-    expect(
-      shouldShowCompactionPrompt({
-        summarizedThroughEntry: 0,
-        totalEntries: 0,
-        unsummarizedChars: BIG_CHARS,
-        compactionState: null,
-      }),
-    ).toBe(false);
-  });
-
-  it("returns false when threshold is not exceeded", () => {
-    expect(
-      shouldShowCompactionPrompt({
-        summarizedThroughEntry: 0,
-        totalEntries: 100,
-        unsummarizedChars: BIG_CHARS - 4, // one token below
-        compactionState: null,
-      }),
-    ).toBe(false);
-  });
-
-  it("estimateTokens returns floor(chars / 4)", () => {
-    expect(estimateTokens(400)).toBe(100);
-    expect(estimateTokens(401)).toBe(100);
-    expect(estimateTokens(0)).toBe(0);
   });
 });
 
