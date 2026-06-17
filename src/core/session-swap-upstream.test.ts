@@ -385,7 +385,7 @@ describe("Session.swapUpstream", () => {
     expect(callArgs.tail.length).toBeGreaterThan(0);
   });
 
-  it("does not append seed response to history.jsonl", async () => {
+  it("suppresses the agent's seed-response and surfaces a synthetic 'Compaction completed.' instead", async () => {
     const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
 
     const store = new HistoryStore();
@@ -402,7 +402,15 @@ describe("Session.swapUpstream", () => {
     await session.swapUpstream({ artifact: makeSynopsis(), tailK: 0 });
 
     const history = await store.load("hydra_swap_no_history");
-    expect(history).toHaveLength(0);
+    // Exactly one entry: our synthetic confirmation. The agent's
+    // seed-prompt reply was captured via internalPromptCapture and
+    // discarded.
+    expect(history).toHaveLength(1);
+    const entry = history[0]!;
+    expect(entry.method).toBe("session/update");
+    const update = (entry.params as { update?: { content?: { text?: string }; _meta?: unknown } }).update;
+    expect(update?.content?.text).toContain("Compaction completed.");
+    expect(update?._meta).toEqual({ "hydra-acp": { synthetic: true } });
   });
 
   it("restores model when old session had non-default model", async () => {

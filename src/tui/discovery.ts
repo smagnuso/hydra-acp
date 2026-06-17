@@ -115,6 +115,9 @@ export interface DiscoveredSession {
   // picker; absent / 0 means normal priority. Toggled from the picker
   // with `*`.
   priority?: number;
+  // Present when compaction is in progress. Lets list views surface a
+  // badge without needing a per-session GET /compact call.
+  compactionState?: unknown;
 }
 
 export interface DiscoveredUsage {
@@ -191,6 +194,7 @@ export async function listSessions(
     originatingClient: s.originatingClient,
     interactive: s.interactive,
     priority: s.priority,
+    compactionState: s.compactionState,
   }));
 }
 

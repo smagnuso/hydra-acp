@@ -326,6 +326,15 @@ export const HydraConfig = z.object({
   // not auto-detect when to compact — the TUI decides.
   compaction: z
     .object({
+      // Optional override: agent for compaction jobs. Falls through to
+      // top-level synopsisAgent when unset (which is the same agent used
+      // for /hydra title regen). Useful when you want a higher-reasoning
+      // model for compaction's structured output but a cheaper model for
+      // title regen.
+      agent: z.string().optional(),
+      // Optional override: model for compaction jobs. Falls through to
+      // top-level synopsisModel when unset.
+      model: z.string().optional(),
       // Number of recent turns kept verbatim in the seed after compaction.
       tailK: z.number().int().nonnegative().default(20),
       // Circuit-breaker on the catch-up loop during compaction.

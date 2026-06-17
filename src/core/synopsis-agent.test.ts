@@ -303,6 +303,81 @@ describe("generateSynopsis", () => {
     expect(promptSent).toBe(true);
     expect(result?.title).toBe("fallback");
   });
+
+  it("includes sessionId tag when sessionId is provided", async () => {
+    let receivedPrompt: string | undefined;
+    let notificationHandler: ((params: unknown) => void) | undefined;
+    fakeOnNotification = (_method, handler) => {
+      notificationHandler = handler;
+    };
+    fakeRequestImpl = async (method, params) => {
+      if (method === "initialize") {
+        return {};
+      }
+      if (method === "session/new") {
+        return { sessionId: "u_test" };
+      }
+      if (method === "session/prompt") {
+        receivedPrompt = (params as { prompt?: Array<{ text: string }> })?.prompt?.[0]?.text;
+        notificationHandler?.({
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: '{"title":"x"}' },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+      return {};
+    };
+
+    await generateSynopsis({
+      agentId: "test-agent",
+      cwd: "/w",
+      plan: { command: "/bin/true", args: [], env: {}, version: "test" },
+      history: [],
+      sessionId: "abc123",
+    });
+
+    expect(receivedPrompt).toBeDefined();
+    expect(receivedPrompt!.startsWith("[hydra-acp title-regen worker for session abc123]")).toBe(true);
+  });
+
+  it("includes bare tag when sessionId is not provided", async () => {
+    let receivedPrompt: string | undefined;
+    let notificationHandler: ((params: unknown) => void) | undefined;
+    fakeOnNotification = (_method, handler) => {
+      notificationHandler = handler;
+    };
+    fakeRequestImpl = async (method, params) => {
+      if (method === "initialize") {
+        return {};
+      }
+      if (method === "session/new") {
+        return { sessionId: "u_test" };
+      }
+      if (method === "session/prompt") {
+        receivedPrompt = (params as { prompt?: Array<{ text: string }> })?.prompt?.[0]?.text;
+        notificationHandler?.({
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: '{"title":"x"}' },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+      return {};
+    };
+
+    await generateSynopsis({
+      agentId: "test-agent",
+      cwd: "/w",
+      plan: { command: "/bin/true", args: [], env: {}, version: "test" },
+      history: [],
+    });
+
+    expect(receivedPrompt).toBeDefined();
+    expect(receivedPrompt!.startsWith("[hydra-acp title-regen worker]")).toBe(true);
+  });
 });
 
 describe("generateCompaction", () => {
@@ -611,5 +686,80 @@ describe("generateCompaction", () => {
     expect(receivedPrompt).toContain("tool_state");
     // SNAPSHOT_PROMPT wraps in "synopsis:" — compaction should not.
     expect(receivedPrompt).not.toContain('"synopsis":');
+  });
+
+  it("includes sessionId tag when sessionId is provided", async () => {
+    let receivedPrompt: string | undefined;
+    let notificationHandler: ((params: unknown) => void) | undefined;
+    fakeOnNotification = (_method, handler) => {
+      notificationHandler = handler;
+    };
+    fakeRequestImpl = async (method, params) => {
+      if (method === "initialize") {
+        return {};
+      }
+      if (method === "session/new") {
+        return { sessionId: "u_test" };
+      }
+      if (method === "session/prompt") {
+        receivedPrompt = (params as { prompt?: Array<{ text: string }> })?.prompt?.[0]?.text;
+        notificationHandler?.({
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: '{"title":"t","goal":"g"}' },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+      return {};
+    };
+
+    await generateCompaction({
+      agentId: "test-agent",
+      cwd: "/w",
+      plan: { command: "/bin/true", args: [], env: {}, version: "test" },
+      history: [],
+      sessionId: "xyz789",
+    });
+
+    expect(receivedPrompt).toBeDefined();
+    expect(receivedPrompt!.startsWith("[hydra-acp compaction worker for session xyz789]")).toBe(true);
+  });
+
+  it("includes bare tag when sessionId is not provided", async () => {
+    let receivedPrompt: string | undefined;
+    let notificationHandler: ((params: unknown) => void) | undefined;
+    fakeOnNotification = (_method, handler) => {
+      notificationHandler = handler;
+    };
+    fakeRequestImpl = async (method, params) => {
+      if (method === "initialize") {
+        return {};
+      }
+      if (method === "session/new") {
+        return { sessionId: "u_test" };
+      }
+      if (method === "session/prompt") {
+        receivedPrompt = (params as { prompt?: Array<{ text: string }> })?.prompt?.[0]?.text;
+        notificationHandler?.({
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: '{"title":"t","goal":"g"}' },
+          },
+        });
+        return { stopReason: "end_turn" };
+      }
+      return {};
+    };
+
+    await generateCompaction({
+      agentId: "test-agent",
+      cwd: "/w",
+      plan: { command: "/bin/true", args: [], env: {}, version: "test" },
+      history: [],
+    });
+
+    expect(receivedPrompt).toBeDefined();
+    expect(receivedPrompt!.startsWith("[hydra-acp compaction worker]")).toBe(true);
   });
 });

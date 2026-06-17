@@ -2,7 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { expandHome, type CompactionConfig } from "../../core/config.js";
-import { shouldPromptForCompaction, estimateTokens } from "../../core/compaction-heuristic.js";
+import { shouldCompactSession, estimateTokens } from "../../core/compaction-heuristic.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { HistoryEntry as HistoryStoreEntry } from "../../core/history-store.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
@@ -34,7 +34,7 @@ export interface SessionRouteDefaults {
   host?: string;
   port?: number;
   // Compaction heuristic config used by the GET /compact endpoint to
-  // compute shouldPrompt for the TUI attach-time prompt.
+  // compute shouldCompact for clients deciding whether to surface a compaction prompt.
   compaction?: CompactionConfig;
 }
 
@@ -640,8 +640,8 @@ export function registerSessionRoutes(
     const compactionState = await manager.getCompactionState(id);
     const rollbackBreadcrumb = await manager.getRollbackBreadcrumb(id);
 
-    // Compute shouldPrompt for the TUI attach-time compaction prompt.
-    let shouldPrompt = false;
+    // Compute shouldCompact for clients deciding whether to surface a compaction prompt.
+    let shouldCompact = false;
     let approxTokens: number | undefined;
     const rawHistory = await manager.getHistory(id).catch(() => [] as HistoryStoreEntry[]);
     const history = rawHistory ?? [];
@@ -658,7 +658,7 @@ export function registerSessionRoutes(
       approxTokens = estimateTokens(unsummarizedChars);
       const currentModel = session?.currentModel;
       const lastActivityMs = history.at(-1)!.recordedAt;
-      shouldPrompt = shouldPromptForCompaction({
+      shouldCompact = shouldCompactSession({
         summarizedThroughEntry: summarized,
         totalEntries,
         unsummarizedChars,
@@ -673,7 +673,7 @@ export function registerSessionRoutes(
     return {
       summarizedThroughEntry: summarizedThroughEntry ?? undefined,
       inFlight: manager.getCompactionInFlight(),
-      shouldPrompt,
+      shouldCompact,
       ...(approxTokens != null ? { approxTokens } : {}),
       ...(compactionState != null ? { compactionState } : {}),
       ...(rollbackBreadcrumb != null ? { rollbackBreadcrumb } : {}),

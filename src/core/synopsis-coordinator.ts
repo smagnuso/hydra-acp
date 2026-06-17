@@ -46,6 +46,12 @@ export interface SynopsisCoordinatorOptions {
   // Optional override: model id to set on the ephemeral agent. When
   // unset, the agent picks its own default.
   synopsisModel?: string;
+  // Optional override: agent for compaction jobs. Falls through to
+  // synopsisAgent when unset.
+  compactionAgent?: string;
+  // Optional override: model for compaction jobs. Falls through to
+  // synopsisModel when unset.
+  compactionModel?: string;
   persistTitle: (sessionId: string, title: string) => Promise<void>;
   persistSynopsis: (
     sessionId: string,
@@ -216,10 +222,12 @@ export class SynopsisCoordinator {
         );
         return;
       }
-      // Pick agent: explicit synopsisAgent override wins; otherwise the
-      // session's source agent. If neither resolves to a registered
-      // agent we skip the job rather than block the daemon.
-      const synopsisAgentId = this.opts.synopsisAgent ?? record.agentId;
+      // Pick agent: compactionAgent wins for compaction jobs, synopsisAgent
+      // wins for title jobs; otherwise fall through to the session's own
+      // agentId. If neither resolves to a registered agent we skip the job.
+      const synopsisAgentId = jobKind === "compaction"
+        ? (this.opts.compactionAgent ?? this.opts.synopsisAgent ?? record.agentId)
+        : (this.opts.synopsisAgent ?? record.agentId);
       const agentDef = await this.opts.registry.getAgent(synopsisAgentId);
       if (!agentDef) {
         this.opts.logger?.warn(
@@ -230,7 +238,9 @@ export class SynopsisCoordinator {
       const plan = await planSpawn(agentDef, [], {
         npmRegistry: this.opts.npmRegistry,
       });
-      const modelId = this.opts.synopsisModel;
+      const modelId = jobKind === "compaction"
+        ? (this.opts.compactionModel ?? this.opts.synopsisModel)
+        : this.opts.synopsisModel;
       // Run the ephemeral agent in the session's own hydra directory
       // rather than the user's project cwd. Two reasons: (a) if a prompt
       // injection ever coaxed it into a filesystem tool call, the blast
@@ -278,6 +288,7 @@ export class SynopsisCoordinator {
             plan,
             history: historyAtStart,
             modelId,
+            sessionId,
             logger: this.opts.logger,
             timeoutMs: this.opts.generateTimeoutMs,
             onWorkerSpawned: (upstreamSessionId, pid) => {
@@ -344,6 +355,7 @@ export class SynopsisCoordinator {
           plan,
           history,
           modelId,
+          sessionId,
           logger: this.opts.logger,
           timeoutMs: this.opts.generateTimeoutMs,
         });

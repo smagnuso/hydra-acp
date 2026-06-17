@@ -192,6 +192,12 @@ export interface SessionManagerOptions {
   // Optional override: model id passed to session/set_model on the
   // ephemeral synopsis agent. Unset → agent picks its default.
   synopsisModel?: string;
+  // Optional override: agent for compaction jobs. Falls through to
+  // synopsisAgent when unset.
+  compactionAgent?: string;
+  // Optional override: model for compaction jobs. Falls through to
+  // synopsisModel when unset.
+  compactionModel?: string;
   // Cap on entries kept in each session's on-disk history.jsonl. Forwarded
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
@@ -248,6 +254,8 @@ export class SessionManager {
   private defaultModels: Record<string, string>;
   private synopsisAgent?: string;
   private synopsisModel?: string;
+  private compactionAgent?: string;
+  private compactionModel?: string;
   readonly defaultTransformers: string[];
   private idleEventTimeoutMs: number;
   private sessionHistoryMaxEntries: number;
@@ -306,6 +314,8 @@ export class SessionManager {
     this.defaultModels = options.defaultModels ?? {};
     this.synopsisAgent = options.synopsisAgent;
     this.synopsisModel = options.synopsisModel;
+    this.compactionAgent = options.compactionAgent;
+    this.compactionModel = options.compactionModel;
     this.defaultTransformers = options.defaultTransformers ?? [];
     this.logger = options.logger;
     this.npmRegistry = options.npmRegistry;
@@ -320,6 +330,8 @@ export class SessionManager {
       histories: this.histories,
       synopsisAgent: this.synopsisAgent,
       synopsisModel: this.synopsisModel,
+      compactionAgent: this.compactionAgent,
+      compactionModel: this.compactionModel,
       compactionMaxIterations: compactionConfig.maxIterations,
       persistTitle: async (id, title) => {
         // Route through the live session when one exists (e.g. bare
@@ -2117,6 +2129,7 @@ export class SessionManager {
         status: "live",
         busy: session.turnStartedAt !== undefined,
         awaitingInput: session.awaitingInput,
+        compactionState: session.compactionState,
       });
     }
     // Propagate disk errors so list()'s cache entry evicts and the next
@@ -2170,6 +2183,7 @@ export class SessionManager {
         status: "cold",
         busy: false,
         awaitingInput: false,
+        compactionState: r.compactionState,
       });
     }
     entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));

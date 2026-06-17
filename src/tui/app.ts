@@ -5533,7 +5533,7 @@ async function runSession(
 
   // Attach-time compaction prompt: delegate the decision to the daemon
   // which computes the two-signal heuristic (context utilization + idle
-  // time). The TUI simply reads shouldPrompt from the GET /compact
+  // time). The TUI simply reads shouldCompact from the GET /compact
   // endpoint and shows the message when true.
   void (async () => {
     try {
@@ -5544,10 +5544,10 @@ async function runSession(
         return;
       }
       const compactInfo = (await compactInfoRes.json()) as {
-        shouldPrompt?: boolean;
+        shouldCompact?: boolean;
         approxTokens?: number;
       };
-      if (compactInfo.shouldPrompt !== true) {
+      if (compactInfo.shouldCompact !== true) {
         return;
       }
       const approxTokens = compactInfo.approxTokens ?? 0;

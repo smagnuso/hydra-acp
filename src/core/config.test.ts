@@ -246,6 +246,20 @@ describe("compaction config", () => {
     const c: CompactionConfig = { tailK: 10, maxIterations: 5 };
     expect(c.tailK).toBe(10);
   });
+
+  it("compaction.agent and compaction.model parse correctly when set", () => {
+    const cfg = HydraConfig.parse({
+      compaction: { agent: "compact-agent", model: "gpt-5-turbo" },
+    });
+    expect(cfg.compaction.agent).toBe("compact-agent");
+    expect(cfg.compaction.model).toBe("gpt-5-turbo");
+  });
+
+  it("compaction.agent and compaction.model are optional when omitted", () => {
+    const cfg = HydraConfig.parse({ compaction: {} });
+    expect(cfg.compaction.agent).toBeUndefined();
+    expect(cfg.compaction.model).toBeUndefined();
+  });
 });
 
 describe("expandHome", () => {

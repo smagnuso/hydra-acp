@@ -30,7 +30,7 @@ export function estimateTokens(chars: number): number {
   return Math.floor(chars / 4);
 }
 
-export function shouldPromptForCompaction(input: CompactionHeuristicInput): boolean {
+export function shouldCompactSession(input: CompactionHeuristicInput): boolean {
   if (input.compactionInFlight) {
     return false;
   }

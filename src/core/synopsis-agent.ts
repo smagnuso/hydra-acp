@@ -49,6 +49,9 @@ export interface GenerateSynopsisOpts {
   // Called after the ephemeral agent spawns and session/new returns.
   // Provides the upstreamSessionId and pid for diagnostic recording only.
   onWorkerSpawned?: (upstreamSessionId: string, pid: number | undefined) => void;
+  // Parent Hydra session id — used to tag the worker prompt so users can
+  // identify ephemeral synopsis/compaction sessions in agent storage.
+  sessionId?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -189,10 +192,13 @@ export async function generateSynopsis(
   const transcript = renderTranscript(opts.history, {
     maxChars: opts.maxTranscriptChars,
   });
+  const tag = opts.sessionId !== undefined
+    ? `[hydra-acp title-regen worker for session ${opts.sessionId}]`
+    : `[hydra-acp title-regen worker]`;
   const promptText =
     transcript.length > 0
-      ? `${transcript}\n\n${SNAPSHOT_PROMPT}`
-      : SNAPSHOT_PROMPT;
+      ? `${tag}\n\n${transcript}\n\n${SNAPSHOT_PROMPT}`
+      : `${tag}\n\n${SNAPSHOT_PROMPT}`;
   return runEphemeralRegen(opts, promptText, tryParseSnapshot);
 }
 
@@ -202,10 +208,13 @@ export async function generateCompaction(
   const transcript = renderTranscript(opts.history, {
     maxChars: opts.maxTranscriptChars,
   });
+  const tag = opts.sessionId !== undefined
+    ? `[hydra-acp compaction worker for session ${opts.sessionId}]`
+    : `[hydra-acp compaction worker]`;
   const promptText =
     transcript.length > 0
-      ? `${transcript}\n\n${COMPACTION_PROMPT}`
-      : COMPACTION_PROMPT;
+      ? `${tag}\n\n${transcript}\n\n${COMPACTION_PROMPT}`
+      : `${tag}\n\n${COMPACTION_PROMPT}`;
   return runEphemeralRegen(opts, promptText, tryParseCompaction);
 }
 

@@ -41,6 +41,10 @@ export interface SessionSummary {
   // distinct from the busy dot. Takes precedence over `busy` since a
   // session awaiting input is mid-turn but stalled on the human.
   awaitingInput?: boolean;
+  // Present when compaction is in progress. Drives the trailing ⟳ in
+  // the STATE cell (`LIVE⟳`) so operators can spot mid-compaction
+  // sessions at a glance without a per-session GET /compact call.
+  compactionState?: unknown;
 }
 
 export interface Row {
@@ -179,7 +183,7 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
     session: stripHydraSessionPrefix(s.sessionId),
     upstream: formatUpstreamCell(s.upstreamSessionId, s.importedFromMachine),
     host: s.importedFromMachine ?? "-",
-    state: formatState(s.status, s.busy, s.awaitingInput),
+    state: formatState(s.status, s.busy, s.awaitingInput, s.compactionState != null),
     agent: formatAgentCell(s.agentId),
     model: shortenModel(s.currentModel) ?? "-",
     age: formatRelativeAge(s.updatedAt, now),
@@ -211,22 +215,31 @@ export function formatUpstreamCell(
 // Live/cold state cell. Cold sessions render as `COLD`. Live sessions
 // render as `LIVE◦` when the agent is blocked awaiting the user (a
 // permission request / posed question), `LIVE•` when actively mid-turn,
-// or plain `LIVE` when idle. Awaiting-input wins over busy: such a
-// session is mid-turn but stalled on the human, and the hollow dot is
-// the more useful signal. The HEADER row reuses formatRow's plumbing
-// but its `state` cell is literal "STATE".
+// `LIVE⟳` when background compaction is running, or plain `LIVE` when
+// idle. Precedence: awaiting-input > busy > compacting > idle. The two
+// user-attention signals (◦, •) outrank the background-work signal (⟳)
+// because they indicate something the operator may need to react to.
+// The HEADER row reuses formatRow's plumbing but its `state` cell is
+// literal "STATE".
 function formatState(
   status: "live" | "cold" | undefined,
   busy: boolean | undefined,
   awaitingInput: boolean | undefined,
+  compacting: boolean | undefined,
 ): string {
   if (status === "cold") {
     return "COLD";
   }
   if (awaitingInput) {
-    return "LIVE◦";
+    return "LIVE\u25e6";
   }
-  return busy ? "LIVE•" : "LIVE";
+  if (busy) {
+    return "LIVE\u2022";
+  }
+  if (compacting) {
+    return "LIVE\u27f3";
+  }
+  return "LIVE";
 }
 
 // Header-aware natural width per column. Only the selected columns are

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldPromptForCompaction, estimateTokens } from "./compaction-heuristic.js";
+import { shouldCompactSession, estimateTokens } from "./compaction-heuristic.js";
 
 const config = {
   contextFraction: 0.5,
@@ -25,13 +25,13 @@ function baseInput(overrides: Partial<import("./compaction-heuristic.js").Compac
   };
 }
 
-describe("shouldPromptForCompaction", () => {
+describe("shouldCompactSession", () => {
   it("returns false when compactionInFlight is true regardless of utilization", () => {
     const input = baseInput({
       unsummarizedChars: 408_000, // well above hard ceiling
       compactionInFlight: true,
     });
-    expect(shouldPromptForCompaction(input)).toBe(false);
+    expect(shouldCompactSession(input)).toBe(false);
   });
 
   it("returns false when totalEntries is 0", () => {
@@ -39,7 +39,7 @@ describe("shouldPromptForCompaction", () => {
       totalEntries: 0,
       unsummarizedChars: 408_000,
     });
-    expect(shouldPromptForCompaction(input)).toBe(false);
+    expect(shouldCompactSession(input)).toBe(false);
   });
 
   it("returns false when utilization exceeds contextFraction but idle time is too short", () => {
@@ -48,7 +48,7 @@ describe("shouldPromptForCompaction", () => {
       unsummarizedChars: 240_000,
       lastActivityMs: nowMs - 150_000, // idle only 2.5 min, below 5 min threshold
     });
-    expect(shouldPromptForCompaction(input)).toBe(false);
+    expect(shouldCompactSession(input)).toBe(false);
   });
 
   it("returns true when utilization exceeds contextFraction AND idle past TTL", () => {
@@ -57,7 +57,7 @@ describe("shouldPromptForCompaction", () => {
       unsummarizedChars: 240_000,
       lastActivityMs: nowMs - 300_000, // idle exactly 5 min
     });
-    expect(shouldPromptForCompaction(input)).toBe(true);
+    expect(shouldCompactSession(input)).toBe(true);
   });
 
   it("returns true when utilization exceeds hardCeilingFraction regardless of idle", () => {
@@ -66,7 +66,7 @@ describe("shouldPromptForCompaction", () => {
       unsummarizedChars: 408_000,
       lastActivityMs: nowMs, // zero idle time
     });
-    expect(shouldPromptForCompaction(input)).toBe(true);
+    expect(shouldCompactSession(input)).toBe(true);
   });
 
   it("unknown model falls back to absoluteFallback", () => {
@@ -77,7 +77,7 @@ describe("shouldPromptForCompaction", () => {
       currentModel: "unknown-model-v9",
       lastActivityMs: nowMs - 300_000,
     });
-    expect(shouldPromptForCompaction(input)).toBe(true);
+    expect(shouldCompactSession(input)).toBe(true);
   });
 
   it("known model with custom context window uses that window for utilization", () => {
@@ -89,7 +89,7 @@ describe("shouldPromptForCompaction", () => {
       currentModel: "claude-opus-4-7",
       lastActivityMs: nowMs - 600_000, // idle 10 min
     });
-    expect(shouldPromptForCompaction(input)).toBe(false);
+    expect(shouldCompactSession(input)).toBe(false);
 
     // 400_000 chars = 100_000 tokens = 50% of 200k — exactly contextFraction
     const input2 = baseInput({
@@ -97,7 +97,7 @@ describe("shouldPromptForCompaction", () => {
       currentModel: "claude-opus-4-7",
       lastActivityMs: nowMs - 300_000,
     });
-    expect(shouldPromptForCompaction(input2)).toBe(true);
+    expect(shouldCompactSession(input2)).toBe(true);
   });
 });
 

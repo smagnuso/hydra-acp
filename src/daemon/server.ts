@@ -188,6 +188,8 @@ export async function startDaemon(
     defaultModels: config.defaultModels,
     synopsisAgent: config.synopsisAgent,
     synopsisModel: config.synopsisModel,
+    compactionAgent: config.compaction?.agent,
+    compactionModel: config.compaction?.model,
     defaultTransformers: config.defaultTransformers,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
     logger: agentLogger,

@@ -1123,14 +1123,24 @@ export class Session {
       tailK: opts.tailK,
     });
 
-    // Send the seed as a single session/prompt on the fresh agent. Wait
-    // for the response and discard chunks — this is not real conversation,
-    // it's the agent acknowledging the compacted context. Do NOT append
-    // to history.jsonl.
-    await fresh.agent.connection.request<unknown>("session/prompt", {
-      sessionId: fresh.upstreamSessionId,
-      prompt: [{ type: "text", text: seedText }],
-    });
+    // Send the seed as a single session/prompt on the fresh agent. The
+    // agent will produce an acknowledgement reply — that reply is not
+    // real conversation; we capture it via internalPromptCapture so it
+    // is neither broadcast to clients nor written to history.jsonl. The
+    // user instead sees the synthetic "Compaction completed." message
+    // emitted after the swap settles below.
+    if (this.internalPromptCapture) {
+      throw new Error("swapUpstream: internal prompt already in flight");
+    }
+    this.internalPromptCapture = { chunks: [] };
+    try {
+      await fresh.agent.connection.request<unknown>("session/prompt", {
+        sessionId: fresh.upstreamSessionId,
+        prompt: [{ type: "text", text: seedText }],
+      });
+    } finally {
+      this.internalPromptCapture = undefined;
+    }
 
     // Capture the pre-swap upstream id + summarizedThroughEntry so the
     // onCompactionSwapHook can persist a rollback breadcrumb before we
@@ -1157,6 +1167,19 @@ export class Session {
       phase: "swapped",
       ...(this.title !== undefined ? { title: this.title } : {}),
       summarizedThroughEntry: opts.summarizedThroughEntry ?? this._summarizedThroughEntry ?? 0,
+    });
+
+    // Surface a synthetic agent_message_chunk so the user sees a clean
+    // "Compaction completed." in the conversation stream instead of the
+    // agent's seed-prompt acknowledgement (which we just suppressed via
+    // internalPromptCapture above).
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.upstreamSessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nCompaction completed.\n" },
+        _meta: { "hydra-acp": { synthetic: true } },
+      },
     });
 
     // Notify agent change handlers so SessionManager's persistAgentChange

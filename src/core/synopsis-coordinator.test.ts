@@ -689,4 +689,49 @@ describe("SynopsisCoordinator", () => {
     expect(iterations[0]?.iter).toBe(1);
     expect(iterations[0]?.historyLen).toBe(sharedHistory.length);
   });
+
+  it("compaction job uses compactionAgent when set, ignores synopsisAgent", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compact" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      synopsisAgent: "synopsis-override",
+      compactionAgent: "compaction-only",
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    const call = mockCompaction.mock.calls[0]?.[0];
+    expect(call?.agentId).toBe("compaction-only");
+  });
+
+  it("compaction job falls back to synopsisAgent when compactionAgent is unset", async () => {
+    const record = makeRecord();
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "compact" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+      
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+      synopsisAgent: "synopsis-only",
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    const call = mockCompaction.mock.calls[0]?.[0];
+    expect(call?.agentId).toBe("synopsis-only");
+  });
 });

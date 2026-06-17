@@ -427,6 +427,30 @@ describe("sortSessions", () => {
       "hydra-older",
     ]);
   });
+
+  it("preserves compactionState on sessions through sorting", () => {
+    const compacting = session({
+      sessionId: "hydra-compacting",
+      status: "live",
+      cwd,
+      updatedAt: "2026-05-20T13:00:00Z",
+      compactionState: { status: "running", requestedAt: Date.now() },
+    });
+    const idle = session({
+      sessionId: "hydra-idle",
+      status: "live",
+      cwd,
+      updatedAt: "2026-05-20T14:00:00Z",
+    });
+    const out = sortSessions([idle, compacting], cwd);
+    expect(out[0]!.sessionId).toBe("hydra-idle");
+    expect(out[1]!.sessionId).toBe("hydra-compacting");
+    // compactionState survives the sort.
+    expect((out[1] as { compactionState?: unknown }).compactionState).toEqual({
+      status: "running",
+      requestedAt: expect.any(Number),
+    });
+  });
 });
 
 describe("pickSession composer", () => {

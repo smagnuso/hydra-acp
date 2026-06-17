@@ -355,6 +355,62 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry?.awaitingInput).toBe(false);
   });
 
+  it("GET /v1/sessions includes compactionState when present on a session", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    // Inject compactionState — for live sessions it must be set on the
+    // in-memory object (listUncached reads session.compactionState);
+    // the store write covers cold-session exposure.
+    session.compactionState = {
+      status: "running",
+      requestedAt: Date.now(),
+      iter: 1,
+      attempts: 0,
+    };
+    const store = (harness.manager as unknown as { store: SessionStore }).store;
+    const existing = await store.read(session.sessionId);
+    await store.write({
+      ...existing!,
+      compactionState: session.compactionState,
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{
+        sessionId: string;
+        compactionState?: { status: string; iter?: number };
+      }>;
+    };
+    const entry = body.sessions.find((s) => s.sessionId === session.sessionId);
+    expect(entry).toBeDefined();
+    expect(entry?.compactionState).toBeDefined();
+    expect(entry?.compactionState?.status).toBe("running");
+    expect(entry?.compactionState?.iter).toBe(1);
+  });
+
+  it("GET /v1/sessions omits compactionState when not present", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions?includeNonInteractive=true`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string; compactionState?: unknown }>;
+    };
+    const entry = body.sessions.find((s) => s.sessionId === session.sessionId);
+    expect(entry).toBeDefined();
+    expect(entry?.compactionState).toBeUndefined();
+  });
+
   it("GET /v1/sessions/:id returns the single entry", async () => {
     const session = await harness.manager.create({
       cwd: "/w",

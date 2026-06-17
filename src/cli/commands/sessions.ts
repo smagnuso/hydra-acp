@@ -61,6 +61,7 @@ export async function runSessionsList(
       status?: "live" | "cold";
       importedFromMachine?: string;
       originatingClient?: { name: string; version?: string };
+      compactionState?: unknown;
     }>;
   };
   // The daemon already applied the interactive filter unless we asked
@@ -477,6 +478,7 @@ export function bundleToSummary(parsed: Bundle): SessionSummary {
     attachedClients: 0,
     updatedAt: parsed.session.updatedAt,
     status: "cold",
+    compactionState: (parsed.session as Record<string, unknown>).compactionState,
   };
 }
 

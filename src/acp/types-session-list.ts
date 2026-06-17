@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { mergeMeta } from "./types-hydra-meta.js";
+import type { CompactionState } from "../core/snapshot.js";
 
 export const SessionDetachParams = z.object({
   sessionId: z.string(),
@@ -82,6 +83,11 @@ export const SessionListEntry = z.object({
   // questions). Always false for cold sessions. Lets pickers render a
   // distinct "waiting on you" glyph instead of the busy dot.
   awaitingInput: z.boolean().default(false),
+  // Present when compaction is in progress (requested, running,
+  // swap_pending, or swap_deferred). Absent for idle sessions and
+  // those that have never been compacted. Lets list views surface a
+  // badge without needing a per-session GET /compact call.
+  compactionState: z.any().optional(),
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -189,6 +195,9 @@ export function buildHydraSessionMeta(
   }
   if (entry.priority !== undefined && entry.priority > 0) {
     meta.priority = entry.priority;
+  }
+  if (entry.compactionState !== undefined) {
+    meta.compactionState = entry.compactionState;
   }
   if (extras) {
     if (extras.clientId !== undefined) {

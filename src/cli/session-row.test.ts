@@ -302,3 +302,57 @@ describe("formatRow column selection", () => {
     expect(header).toContain("HOST");
   });
 });
+
+describe("toRow compaction badge in STATE column", () => {
+  const base = {
+    sessionId: "hydra_session_xyz",
+    cwd: "/work",
+    agentId: "opencode",
+    attachedClients: 1,
+    updatedAt: new Date().toISOString(),
+    status: "live" as const,
+  };
+
+  it("renders LIVE\u27f3 when compactionState is populated", () => {
+    const r = toRow({
+      ...base,
+      title: "Auth refactor",
+      compactionState: { status: "running", requestedAt: Date.now() },
+    });
+    expect(r.state).toBe("LIVE\u27f3");
+    expect(r.title).toBe("Auth refactor");
+  });
+
+  it("leaves state as LIVE when compactionState is absent", () => {
+    const r = toRow({ ...base, title: "Auth refactor" });
+    expect(r.state).toBe("LIVE");
+    expect(r.title).toBe("Auth refactor");
+  });
+
+  it("busy takes precedence over compacting", () => {
+    const r = toRow({
+      ...base,
+      busy: true,
+      compactionState: { status: "running", requestedAt: Date.now() },
+    });
+    expect(r.state).toBe("LIVE\u2022");
+  });
+
+  it("awaitingInput takes precedence over compacting", () => {
+    const r = toRow({
+      ...base,
+      awaitingInput: true,
+      compactionState: { status: "running", requestedAt: Date.now() },
+    });
+    expect(r.state).toBe("LIVE\u25e6");
+  });
+
+  it("cold sessions render plain COLD regardless of compactionState", () => {
+    const r = toRow({
+      ...base,
+      status: "cold",
+      compactionState: { status: "swap_pending", requestedAt: Date.now() },
+    });
+    expect(r.state).toBe("COLD");
+  });
+});
