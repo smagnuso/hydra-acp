@@ -306,7 +306,35 @@ function applyInlineMarkupWithLinks(
         text[closeBracket + 1] === "(" &&
         closeBracket > i + 1
       ) {
-        const closeParen = text.indexOf(")", closeBracket + 2);
+        // Find the matching `)` that closes the URL, honoring
+        // CommonMark's "balanced parens inside the URL are allowed"
+        // rule plus backslash-escapes. This matters for Kibana /
+        // Grafana / Sourcegraph URLs whose query strings embed
+        // structures like `_a=(filters:!((…)))` — a naive
+        // `indexOf(")")` truncates the URL at the first inner `)`
+        // and spills the trailing `))…` into the visible text.
+        let closeParen = -1;
+        {
+          let depth = 1;
+          let j = closeBracket + 2;
+          while (j < text.length) {
+            const ch = text[j];
+            if (ch === "\\" && j + 1 < text.length) {
+              j += 2;
+              continue;
+            }
+            if (ch === "(") {
+              depth += 1;
+            } else if (ch === ")") {
+              depth -= 1;
+              if (depth === 0) {
+                closeParen = j;
+                break;
+              }
+            }
+            j += 1;
+          }
+        }
         if (closeParen !== -1 && closeParen > closeBracket + 2) {
           const linkText = text.slice(i + 1, closeBracket);
           const url = text.slice(closeBracket + 2, closeParen);
@@ -646,8 +674,11 @@ export function parseThoughtMarkdown(text: string): FormattedLine[] {
 
 // Split a `| a | b | c |` row into trimmed cells. Outer pipes are
 // optional in GFM — strip them when present so `a | b` and `| a | b |`
-// both parse to the same two cells. We don't support escaped `\|` inside
-// cells; agent output overwhelmingly uses plain pipes.
+// both parse to the same two cells. Pipes inside an inline code span
+// (`` `…|…` ``) are NOT separators — agent output occasionally embeds a
+// literal `|` in a column value (e.g. a crash signature wrapped in
+// backticks) and splitting it would shred the row. Backslash-escaped
+// `\|` is also treated as a literal pipe (GFM rule).
 function parseTableRow(line: string): string[] {
   let s = line.trim();
   if (s.startsWith("|")) {
@@ -656,7 +687,30 @@ function parseTableRow(line: string): string[] {
   if (s.endsWith("|")) {
     s = s.slice(0, -1);
   }
-  return s.split("|").map((c) => c.trim());
+  const cells: string[] = [];
+  let buf = "";
+  let inCode = false;
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === "\\" && i + 1 < s.length && s[i + 1] === "|") {
+      buf += "|";
+      i += 1;
+      continue;
+    }
+    if (ch === "`") {
+      inCode = !inCode;
+      buf += ch;
+      continue;
+    }
+    if (ch === "|" && !inCode) {
+      cells.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  cells.push(buf.trim());
+  return cells;
 }
 
 // GFM separator row: every cell is `-+` with optional leading/trailing

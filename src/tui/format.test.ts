@@ -58,6 +58,27 @@ describe("parseAgentMarkdown", () => {
     expect(lines[1]?.body).toBe("more code");
   });
 
+  it("[text](url) keeps balanced parens inside URL (Kibana-style)", () => {
+    const url =
+      "https://kibana.example.net/app/discover#/?_a=(filters:!((meta:(alias:signature,disabled:!f),query:(match_phrase:(crash_properties.coarseSignature:'ABORT:V8_OOM:6096e1')))))";
+    const lines = parseAgentMarkdown(`[Open in Kibana](${url})`);
+    expect(lines).toHaveLength(1);
+    const body = lines[0]?.body ?? "";
+    expect(body).toContain(`\x1b]8;;${url}\x1b\\`);
+    // No stray ')))' should spill into the visible label after the
+    // OSC 8 terminator (the bug truncated the URL at the first inner
+    // ')' and left the rest as literal text).
+    const afterTerminator = body.split("\x1b]8;;\x1b\\")[1] ?? "";
+    expect(afterTerminator).not.toContain(")");
+  });
+
+  it("[text](url) honors backslash-escaped closing paren in URL", () => {
+    const url = "https://example.com/a\\)b";
+    const lines = parseAgentMarkdown(`[x](${url})`);
+    const body = lines[0]?.body ?? "";
+    expect(body).toContain(`\x1b]8;;${url}\x1b\\`);
+  });
+
   it("highlights a ```diff block — +/- lines carry ANSI", () => {
     const lines = parseAgentMarkdown(
       "```diff\n- old line\n+ new line\n@@ -1,1 +1,1 @@\n```",
@@ -168,6 +189,31 @@ describe("parseAgentMarkdown", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]?.bodyStyle).toBe("agent");
     expect(lines[0]?.body).toBe("here is a thing: a | b in a sentence");
+  });
+
+  it("treats `|` inside an inline code span as literal, not a separator", () => {
+    // Regression: the Ayuda crashes table had a signature
+    // `` `EXCEPTION|std::exception:terminate_exception:d06da1` `` in
+    // column 2 which the row-splitter cleaved into a 4th column,
+    // shoving the count out to a phantom cell.
+    const lines = parseAgentMarkdown(
+      "| # | Signature | Count |\n|---|---|---|\n| 4 | `EXCEPTION|std::exception:terminate_exception:d06da1` | 217,403 |",
+    );
+    expect(lines).toHaveLength(3);
+    const dataRow = lines[2]?.body ?? "";
+    expect(dataRow).toContain("EXCEPTION|std::exception:terminate_exception");
+    expect(dataRow).toContain("217,403");
+    // Count must be in the last column, not orphaned past a phantom 4th.
+    expect(dataRow.split("│")).toHaveLength(3);
+  });
+
+  it("treats `\\|` as a literal pipe inside a cell", () => {
+    const lines = parseAgentMarkdown(
+      "| a | b |\n|---|---|\n| x \\| y | z |",
+    );
+    expect(lines).toHaveLength(3);
+    expect(lines[2]?.body).toContain("x | y");
+    expect(lines[2]?.body?.split("│")).toHaveLength(2);
   });
 
   it("renders mid-stream: header + separator with no body rows yet", () => {
