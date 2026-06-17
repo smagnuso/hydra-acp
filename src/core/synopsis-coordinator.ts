@@ -212,7 +212,11 @@ export class SynopsisCoordinator {
         );
         return;
       }
-      const history = await this.opts.histories.load(sessionId);
+      // Uncapped: the watermark/length comparison below must see ALL
+      // entries on disk, otherwise once history.jsonl exceeds the store's
+      // default cap (10k) the array length silently freezes at the cap
+      // and every subsequent compaction reports "history unchanged".
+      const history = await this.opts.histories.load(sessionId, { maxEntries: Infinity });
       const last = record.summarizedThroughEntry;
       // First-ever run: regardless of history length. Subsequent: only
       // when history grew past the last offset.
@@ -308,7 +312,7 @@ export class SynopsisCoordinator {
               `synopsis: compaction iteration ${iter} sessionId=${sessionId} historyLen=${history.length} watermark=${through}`,
             );
 
-            const historyAtStart = await this.opts.histories.load(sessionId);
+            const historyAtStart = await this.opts.histories.load(sessionId, { maxEntries: Infinity });
             if (historyAtStart.length <= through) {
               break;
             }
@@ -370,7 +374,7 @@ export class SynopsisCoordinator {
             }
 
             through = historyAtStart.length;
-            const historyAfter = await this.opts.histories.load(sessionId);
+            const historyAfter = await this.opts.histories.load(sessionId, { maxEntries: Infinity });
             if (historyAfter.length === through) {
               break;
             }

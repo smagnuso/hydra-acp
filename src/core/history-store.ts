@@ -121,7 +121,15 @@ export class HistoryStore {
   //                        clients that fetch tool content on demand.
   async load(
     sessionId: string,
-    opts: { tools?: "inline" | "references" } = {},
+    opts: {
+      tools?: "inline" | "references";
+      // Override the store's default per-load entry cap. Compaction
+      // passes Infinity so it sees every entry on disk and can detect
+      // growth past the last summarization watermark; consumers that
+      // only care about recent history (TUI replay etc.) accept the
+      // default cap.
+      maxEntries?: number;
+    } = {},
   ): Promise<HistoryEntry[]> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return [];
@@ -173,8 +181,9 @@ export class HistoryStore {
         recordedAt: obj.recordedAt,
       });
     }
+    const effectiveCap = opts.maxEntries ?? this.maxEntries;
     const kept =
-      out.length > this.maxEntries ? out.slice(-this.maxEntries) : out;
+      out.length > effectiveCap ? out.slice(-effectiveCap) : out;
     if (!expand) {
       return kept;
     }
