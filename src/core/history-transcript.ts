@@ -28,7 +28,7 @@ type HistoryEntryLike = {
   [key: string]: unknown;
 };
 
-interface SessionUpdate {
+export interface SessionUpdate {
   sessionUpdate?: string;
   prompt?: unknown;
   content?: unknown;
@@ -46,7 +46,8 @@ const TRUNCATION_MARKER = "[older history truncated]\n";
 
 // Argument keys we surface in tool lines, in display order. Anything not
 // in this list is omitted to keep tool lines compact.
-const TOOL_ARG_KEYS = ["file_path", "path", "command", "pattern", "query"];
+// Shared with compaction-seed.ts.
+export const TOOL_ARG_KEYS = ["file_path", "path", "command", "pattern", "query"];
 
 export function renderTranscript(
   history: HistoryEntryLike[],
@@ -97,7 +98,8 @@ export function renderTranscript(
   return truncateHead(lines.join("\n"), maxChars);
 }
 
-function renderToolCall(update: SessionUpdate): string {
+// Shared with compaction-seed.ts.
+export function renderToolCall(update: SessionUpdate): string {
   const name = readToolName(update);
   const args = readToolArgs(update.rawInput);
   if (args.length === 0) {
@@ -106,7 +108,8 @@ function renderToolCall(update: SessionUpdate): string {
   return `Tool: ${name}(${args.join(", ")})`;
 }
 
-function readToolName(update: SessionUpdate): string {
+// Shared with compaction-seed.ts.
+export function readToolName(update: SessionUpdate): string {
   if (typeof update.name === "string" && update.name.length > 0) {
     return update.name;
   }
@@ -116,7 +119,8 @@ function readToolName(update: SessionUpdate): string {
   return "(unnamed)";
 }
 
-function readToolArgs(rawInput: unknown): string[] {
+// Shared with compaction-seed.ts.
+export function readToolArgs(rawInput: unknown): string[] {
   if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
     return [];
   }
@@ -131,7 +135,8 @@ function readToolArgs(rawInput: unknown): string[] {
   return out;
 }
 
-function extractText(prompt: unknown): string {
+// Shared with compaction-seed.ts.
+export function extractText(prompt: unknown): string {
   if (typeof prompt === "string") {
     return prompt;
   }
@@ -151,7 +156,8 @@ function extractText(prompt: unknown): string {
     .join("");
 }
 
-function extractContentText(content: unknown): string {
+// Shared with compaction-seed.ts.
+export function extractContentText(content: unknown): string {
   if (!content || typeof content !== "object") {
     return "";
   }
@@ -159,7 +165,8 @@ function extractContentText(content: unknown): string {
   return typeof text === "string" ? text : "";
 }
 
-function truncateInline(s: string, max: number): string {
+// Shared with compaction-seed.ts.
+export function truncateInline(s: string, max: number): string {
   if (s.length <= max) {
     return s;
   }

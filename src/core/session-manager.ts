@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { customAlphabet } from "nanoid";
 import { AgentInstance, type AgentInstanceOptions, type AgentLogger } from "./agent-instance.js";
+import { restoreCurrentMode, restoreCurrentModel } from "./restore-agent-settings.js";
 import {
   Registry,
   listAgents,
@@ -348,8 +349,8 @@ export class SessionManager {
           const quiesced = await live.isQuiescedForSwap();
           if (!quiesced) {
             // Defer: re-schedule after a short delay. Track deferrals
-            // with a WeakMap keyed by the session object so we can cap
-            // at 3 before giving up until the next trigger.
+            // with a Map keyed by sessionId so we can cap at 3 before
+            // giving up until the next trigger.
             let count = this.compactionDeferrals.get(sessionId) ?? 0;
             count++;
             if (count > MAX_SWAP_DEFERRALS) {
@@ -3160,117 +3161,7 @@ export function extractInitialCurrentMode(
   });
 }
 
-// Push a persisted mode back to a freshly loaded/spawned agent so a
-// session that was in plan (or any non-default) mode doesn't silently
-// revert on daemon restart. The agent boots in its own default after
-// session/load and would otherwise emit a current_mode_update that
-// overwrites our snapshot. Returns the mode we should record on the
-// Session — either the persisted one (when we successfully pushed it,
-// or the agent already agrees) or what the agent reported (when we
-// skipped the push because the mode isn't advertised, or the call
-// failed).
-async function restoreCurrentMode(opts: {
-  agent: AgentInstance;
-  upstreamSessionId: string;
-  persistedMode: string | undefined;
-  agentReportedMode: string | undefined;
-  advertisedModes: AdvertisedMode[] | undefined;
-  logger?: AgentLogger;
-}): Promise<string | undefined> {
-  const {
-    agent,
-    upstreamSessionId,
-    persistedMode,
-    agentReportedMode,
-    advertisedModes,
-    logger,
-  } = opts;
-  if (!persistedMode) {
-    return agentReportedMode;
-  }
-  if (persistedMode === agentReportedMode) {
-    return persistedMode;
-  }
-  if (
-    advertisedModes &&
-    advertisedModes.length > 0 &&
-    !advertisedModes.some((m) => m.id === persistedMode)
-  ) {
-    const known = advertisedModes.map((m) => m.id).join(", ");
-    logger?.warn(
-      `resurrect: persisted currentMode=${JSON.stringify(persistedMode)} not in agent's availableModes ([${known}]); skipping session/set_mode, session will use ${JSON.stringify(agentReportedMode)}`,
-    );
-    return agentReportedMode;
-  }
-  try {
-    logger?.info(
-      `resurrect: pushing persisted modeId=${JSON.stringify(persistedMode)} to agent (agentReported=${JSON.stringify(agentReportedMode)})`,
-    );
-    await agent.connection.request("session/set_mode", {
-      sessionId: upstreamSessionId,
-      modeId: persistedMode,
-    });
-    logger?.info(
-      `resurrect: session/set_mode accepted, effectiveMode=${JSON.stringify(persistedMode)}`,
-    );
-    return persistedMode;
-  } catch (err) {
-    logger?.warn(
-      `resurrect: session/set_mode rejected by agent for modeId=${JSON.stringify(persistedMode)} (${(err as Error).message}); session will use ${JSON.stringify(agentReportedMode)}`,
-    );
-    return agentReportedMode;
-  }
-}
 
-// Push a persisted model back to a freshly loaded agent so a session
-// that was on opus[1m] (or any non-default model) doesn't silently
-// revert to the agent's default on daemon restart. The agent boots in
-// its own default after session/load and would otherwise emit a
-// current_model_update that overwrites our snapshot. Returns the model
-// we should record on the Session — either the persisted one (when we
-// successfully pushed it, or the agent already agrees) or what the
-// agent reported (when the call failed).
-//
-// Unlike restoreCurrentMode, we do NOT skip when the id is absent from
-// the advertised list. The persisted model came from an actual
-// current_model_update the agent emitted in a prior session — the
-// agent confirmed it works. Hydra aliases like "opus[1m]" are valid
-// but may not appear in the advertised list (which uses canonical ids
-// like "claude-opus-4-7"). Let the agent be the authority; if it
-// rejects, we fall back.
-async function restoreCurrentModel(opts: {
-  agent: AgentInstance;
-  upstreamSessionId: string;
-  persistedModel: string | undefined;
-  agentReportedModel: string | undefined;
-  logger?: AgentLogger;
-}): Promise<string | undefined> {
-  const { agent, upstreamSessionId, persistedModel, agentReportedModel, logger } = opts;
-  if (!persistedModel) {
-    return agentReportedModel;
-  }
-  if (persistedModel === agentReportedModel) {
-    return persistedModel;
-  }
-  try {
-    logger?.info(
-      `resurrect: pushing persisted modelId=${JSON.stringify(persistedModel)} to agent (agentReported=${JSON.stringify(agentReportedModel)})`,
-    );
-    await agent.connection.request("session/set_model", {
-      sessionId: upstreamSessionId,
-      modelId: persistedModel,
-    });
-    logger?.info(
-      `resurrect: session/set_model accepted, effectiveModel=${JSON.stringify(persistedModel)}`,
-    );
-    return persistedModel;
-  } catch (err) {
-    logger?.warn(
-      `resurrect: session/set_model rejected by agent for modelId=${JSON.stringify(persistedModel)} (${(err as Error).message}); session will use ${JSON.stringify(agentReportedModel)}`,
-    );
-    return agentReportedModel;
-  }
-}
 
 // Walk history in reverse for the most recent turn_complete session/update
 // and return its index + messageId. Returns undefined when no completed

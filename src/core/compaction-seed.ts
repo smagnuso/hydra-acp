@@ -7,6 +7,12 @@
 // [Title] which always renders (defaulting to "(untitled)").
 
 import { type SessionSynopsis } from "./snapshot.js";
+import {
+  type SessionUpdate,
+  renderToolCall,
+  extractText,
+  extractContentText,
+} from "./history-transcript.js";
 
 // Shared entry shape so callers that hold full HistoryEntry records can
 // pass them without casts.
@@ -16,15 +22,6 @@ type HistoryEntryLike = {
   [key: string]: unknown;
 };
 
-interface SessionUpdate {
-  sessionUpdate?: string;
-  prompt?: unknown;
-  content?: unknown;
-  name?: unknown;
-  title?: unknown;
-  rawInput?: unknown;
-}
-
 export interface RenderCompactionSeedOptions {
   synopsis: SessionSynopsis;
   title?: string;
@@ -33,9 +30,6 @@ export interface RenderCompactionSeedOptions {
 }
 
 const UNTITLED = "(untitled)";
-
-// Argument keys surfaced in tool lines (same as history-transcript).
-const TOOL_ARG_KEYS = ["file_path", "path", "command", "pattern", "query"];
 
 export function renderCompactionSeed(
   opts: RenderCompactionSeedOptions,
@@ -240,73 +234,4 @@ function extractTurns(history: HistoryEntryLike[]): Array<{
   return turns;
 }
 
-// --- helpers mirroring history-transcript.ts internals ---
 
-function renderToolCall(update: SessionUpdate): string {
-  const name = readToolName(update);
-  const args = readToolArgs(update.rawInput);
-  if (args.length === 0) {
-    return "Tool: " + name;
-  }
-  return "Tool: " + name + "(" + args.join(", ") + ")";
-}
-
-function readToolName(update: SessionUpdate): string {
-  if (typeof update.name === "string" && update.name.length > 0) {
-    return update.name;
-  }
-  if (typeof update.title === "string" && update.title.length > 0) {
-    return update.title;
-  }
-  return "(unnamed)";
-}
-
-function readToolArgs(rawInput: unknown): string[] {
-  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
-    return [];
-  }
-  const obj = rawInput as Record<string, unknown>;
-  const out: string[] = [];
-  for (const key of TOOL_ARG_KEYS) {
-    const v = obj[key];
-    if (typeof v === "string" && v.length > 0) {
-      out.push(key + "=" + truncateInline(v, 200));
-    }
-  }
-  return out;
-}
-
-function extractText(prompt: unknown): string {
-  if (typeof prompt === "string") {
-    return prompt;
-  }
-  if (!Array.isArray(prompt)) {
-    return "";
-  }
-  return prompt
-    .map((b) => {
-      if (b && typeof b === "object") {
-        const text = (b as { text?: unknown }).text;
-        if (typeof text === "string") {
-          return text;
-        }
-      }
-      return "";
-    })
-    .join("");
-}
-
-function extractContentText(content: unknown): string {
-  if (!content || typeof content !== "object") {
-    return "";
-  }
-  const text = (content as { text?: unknown }).text;
-  return typeof text === "string" ? text : "";
-}
-
-function truncateInline(s: string, max: number): string {
-  if (s.length <= max) {
-    return s;
-  }
-  return s.slice(0, max - 1) + "\u2026";
-}

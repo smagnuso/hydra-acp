@@ -1,4 +1,5 @@
 import { customAlphabet } from "nanoid";
+import { restoreCurrentMode, restoreCurrentModel } from "./restore-agent-settings.js";
 
 // nanoid's default alphabet is URL-safe (alphanumerics + `-` + `_`). We
 // drop both punctuation chars: `-` collides with parsers that treat dashes
@@ -1014,33 +1015,23 @@ export class Session {
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent);
 
-    // Restore model on the new agent if the old session had a non-default
-    // value. Mirrors restoreCurrentModel from session-manager.ts:3093.
-    const freshInitialModel = fresh.initialModel;
-    if (persistedModel && persistedModel !== freshInitialModel) {
-      try {
-        await fresh.agent.connection.request("session/set_model", {
-          sessionId: fresh.upstreamSessionId,
-          modelId: persistedModel,
-        });
-      } catch (err) {
-        this.logger?.warn(`swapUpstream: set_model failed: ${(err as Error).message}`);
-      }
-    }
-
-    // Restore mode on the new agent if the old session had a non-default
-    // value. Mirrors restoreCurrentMode from session-manager.ts:3024.
-    const freshInitialMode = fresh.initialMode;
-    if (persistedMode && persistedMode !== freshInitialMode) {
-      try {
-        await fresh.agent.connection.request("session/set_mode", {
-          sessionId: fresh.upstreamSessionId,
-          modeId: persistedMode,
-        });
-      } catch (err) {
-        this.logger?.warn(`swapUpstream: set_mode failed: ${(err as Error).message}`);
-      }
-    }
+    // Restore model and mode on the new agent if the old session had
+    // non-default values. Uses the shared helpers from restore-agent-settings.ts
+    // so both the resurrect path and the swap path get identical semantics.
+    await restoreCurrentModel({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedModel,
+      agentReportedModel: fresh.initialModel,
+      logger: this.logger,
+    });
+    await restoreCurrentMode({
+      agent: fresh.agent,
+      upstreamSessionId: fresh.upstreamSessionId,
+      persistedMode,
+      agentReportedMode: fresh.initialMode,
+      logger: this.logger,
+    });
 
     // Drop any buffered session/update notifications that arrived during
     // the restore calls — same race as doResurrect in session-manager.ts.

@@ -102,6 +102,8 @@ describe("compaction swap — onCompactionArtifact hook", () => {
       mcpServers?: unknown[];
     }> = [];
 
+    const mcpServers = [{ name: "test-mcp", url: "http://test/mcp" }];
+
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
@@ -115,15 +117,21 @@ describe("compaction swap — onCompactionArtifact hook", () => {
             .mockResolvedValueOnce({ sessionId: `u_initial_${spawnCount++}` });
           return m.agent;
         } else {
-          // Subsequent spawns: compaction swap replacement.
+          // Subsequent spawns: compaction swap replacement. Capture the real
+          // mcpServers from the session/new request to verify C1's fix.
           const newM = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
           newAgents.push(newM);
           const reqMock = newM.agent.connection.request as ReturnType<typeof vi.fn>;
-          reqMock.mockResolvedValue({ sessionId: `fresh_${spawnCount++}` });
-          spawnCalls.push({
-            agentId: "claude-code",
-            cwd: WORK_CWD,
-            mcpServers: [],
+          reqMock.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+            if (method === "session/new") {
+              spawnCalls.push({
+                agentId: "claude-code",
+                cwd: WORK_CWD,
+                mcpServers: params.mcpServers as unknown[],
+              });
+              return { sessionId: `fresh_${spawnCount++}` };
+            }
+            return {};
           });
           return newM.agent;
         }
@@ -138,8 +146,10 @@ describe("compaction swap — onCompactionArtifact hook", () => {
     const session = await manager.create({
       cwd: WORK_CWD,
       agentId: "claude-code",
+      mcpServers,
     });
     const sessionId = session.sessionId;
+    const initialSessionId = sessionId;
     const originalUpstream = session.upstreamSessionId;
 
     // Attach a client so we can send prompts.
@@ -178,6 +188,8 @@ describe("compaction swap — onCompactionArtifact hook", () => {
     const swapped = manager.get(sessionId)!;
     expect(swapped.upstreamSessionId).not.toBe(originalUpstream);
     expect(spawnCalls.length).toBeGreaterThanOrEqual(1);
+    expect(spawnCalls[0]?.mcpServers).toEqual(mcpServers);
+    expect(session.sessionId).toBe(initialSessionId);
 
     // Verify history.jsonl was preserved.
     const histStore = (session as unknown as { historyStore: { load: (id: string) => Promise<unknown[]> } }).historyStore;
@@ -246,11 +258,16 @@ describe("compaction swap — onCompactionArtifact hook", () => {
           const newM = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
           newAgents.push(newM);
           const reqMock = newM.agent.connection.request as ReturnType<typeof vi.fn>;
-          reqMock.mockResolvedValue({ sessionId: `fresh_${spawnCount++}` });
-          spawnCalls.push({
-            agentId: "claude-code",
-            cwd: WORK_CWD,
-            mcpServers: [],
+          reqMock.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+            if (method === "session/new") {
+              spawnCalls.push({
+                agentId: "claude-code",
+                cwd: WORK_CWD,
+                mcpServers: params.mcpServers as unknown[],
+              });
+              return { sessionId: `fresh_${spawnCount++}` };
+            }
+            return {};
           });
           return newM.agent;
         }
@@ -313,5 +330,8 @@ describe("compaction swap — onCompactionArtifact hook", () => {
     const current = manager.get(sessionId);
     expect(current!.upstreamSessionId).toBe(originalUpstream);
     expect(spawnCalls.length).toBe(0);
+    // Compaction (LLM summarization) must have run exactly once — not
+    // re-entered on deferred retry.
+    expect(mockCompaction).toHaveBeenCalledTimes(1);
   });
 });

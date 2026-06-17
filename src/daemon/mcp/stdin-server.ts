@@ -23,6 +23,7 @@ import { z } from "zod";
 import type { Session } from "../../core/session.js";
 import type { StreamGrepOptions as RawStreamGrepOptions } from "../../core/stream-buffer.js";
 import { renderTranscript } from "../../core/history-transcript.js";
+import { iterSessionUpdates, mcpJsonResult } from "./helpers.js";
 import { extractBearer } from "./bearer.js";
 import type { McpTokenRegistry } from "./token-registry.js";
 
@@ -108,15 +109,7 @@ function buildMcpServer(session: Session): McpServer {
     },
     async ({ bytes }) => {
       const r = session.streamTail(bytes);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(r),
-          },
-        ],
-        structuredContent: r,
-      };
+      return mcpJsonResult(r);
     },
   );
 
@@ -135,15 +128,7 @@ function buildMcpServer(session: Session): McpServer {
     },
     async ({ bytes }) => {
       const r = session.streamHead(bytes);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(r),
-          },
-        ],
-        structuredContent: r,
-      };
+      return mcpJsonResult(r);
     },
   );
 
@@ -180,15 +165,7 @@ function buildMcpServer(session: Session): McpServer {
     },
     async ({ cursor, max_bytes, wait_ms }) => {
       const r = await session.streamRead(cursor, max_bytes, wait_ms);
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(r),
-          },
-        ],
-        structuredContent: r,
-      };
+      return mcpJsonResult(r);
     },
   );
 
@@ -213,16 +190,7 @@ function buildMcpServer(session: Session): McpServer {
     async ({ cursor, timeout_ms }) => {
       const outcome = await session.streamWaitFor(cursor, timeout_ms);
       const info = session.streamInfo();
-      const payload = { outcome, writeCursor: info.writeCursor, closed: info.closed };
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(payload),
-          },
-        ],
-        structuredContent: payload,
-      };
+      return mcpJsonResult({ outcome, writeCursor: info.writeCursor, closed: info.closed });
     },
   );
 
@@ -311,11 +279,7 @@ function buildMcpServer(session: Session): McpServer {
         opts.cursor = args.cursor;
       }
       const r = session.streamGrep(opts);
-      const payload = r as unknown as Record<string, unknown>;
-      return {
-        content: [{ type: "text", text: JSON.stringify(r) }],
-        structuredContent: payload,
-      };
+      return mcpJsonResult(r as unknown as Record<string, unknown>);
     },
   );
 
@@ -328,15 +292,7 @@ function buildMcpServer(session: Session): McpServer {
     },
     async () => {
       const r = session.streamInfo();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(r),
-          },
-        ],
-        structuredContent: r,
-      };
+      return mcpJsonResult(r);
     },
   );
 
@@ -370,21 +326,7 @@ function buildMcpServer(session: Session): McpServer {
           timestamp?: string;
         }> = [];
 
-        for (let i = 0; i < history.length; i++) {
-          const entry = history[i];
-          if (!entry) {
-            continue;
-          }
-          if (entry.method !== "session/update") {
-            continue;
-          }
-          const params = entry.params as { update?: Record<string, unknown> } | undefined;
-          const update = params?.update;
-          if (!update || typeof update.sessionUpdate !== "string") {
-            continue;
-          }
-
-          const kind = update.sessionUpdate;
+        for (const { entryId, entry, kind } of iterSessionUpdates(history)) {
           if (kind === "tool_call" && !include_tool_calls) {
             continue;
           }
@@ -402,7 +344,7 @@ function buildMcpServer(session: Session): McpServer {
           const snippet = makeSnippet(rendered, idx);
           const timestamp = typeof entry.recordedAt === "number" ? String(entry.recordedAt) : undefined;
 
-          matches.push({ entryId: i, speaker, snippet, timestamp });
+          matches.push({ entryId, speaker, snippet, timestamp });
 
           if (matches.length >= limit) {
             break;
@@ -410,23 +352,11 @@ function buildMcpServer(session: Session): McpServer {
         }
 
         const truncated = matches.length >= limit && matches.length < history.length;
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                matches,
-                total_matched: matches.length,
-                truncated,
-              }),
-            },
-          ],
-          structuredContent: {
-            matches,
-            total_matched: matches.length,
-            truncated,
-          },
-        };
+        return mcpJsonResult({
+          matches,
+          total_matched: matches.length,
+          truncated,
+        });
       },
     );
 
@@ -515,20 +445,8 @@ function buildMcpServer(session: Session): McpServer {
           timestamp?: string;
         }> = [];
 
-        for (let i = 0; i < history.length; i++) {
-          const entry = history[i];
-          if (!entry) {
-            continue;
-          }
-          if (entry.method !== "session/update") {
-            continue;
-          }
-          const params = entry.params as { update?: Record<string, unknown> } | undefined;
-          const update = params?.update;
-          if (!update || typeof update.sessionUpdate !== "string") {
-            continue;
-          }
-          if (update.sessionUpdate !== "tool_call") {
+        for (const { entryId, entry, kind, update } of iterSessionUpdates(history)) {
+          if (kind !== "tool_call") {
             continue;
           }
 
@@ -588,7 +506,7 @@ function buildMcpServer(session: Session): McpServer {
 
           const timestamp = typeof entry.recordedAt === "number" ? String(entry.recordedAt) : undefined;
 
-          calls.push({ entryId: i, tool: toolName, args, status, timestamp });
+          calls.push({ entryId, tool: toolName, args, status, timestamp });
 
           if (calls.length >= limit) {
             break;
@@ -596,15 +514,7 @@ function buildMcpServer(session: Session): McpServer {
         }
 
         const truncated = calls.length >= limit;
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ calls, truncated }),
-            },
-          ],
-          structuredContent: { calls, truncated },
-        };
+        return mcpJsonResult({ calls, truncated });
       },
     );
   }
