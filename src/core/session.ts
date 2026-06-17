@@ -1933,11 +1933,20 @@ export class Session {
       update,
     };
 
-    void this.historyStore.append(this.sessionId, {
-      method: "session/update",
-      params,
-      recordedAt: Date.now(),
-    });
+    // .catch on the void: HistoryStore returns the raw task promise so
+    // daemon shutdown can observe rejections via flushAll(), but
+    // fire-and-forget callers must not surface unhandled rejections —
+    // e.g. when a test's temp dir is torn down before the queued
+    // mkdir runs (ENOENT). The store's internal `settled` chain still
+    // logs/swallows for queue continuity; this catch is purely for the
+    // local promise.
+    void this.historyStore
+      .append(this.sessionId, {
+        method: "session/update",
+        params,
+        recordedAt: Date.now(),
+      })
+      .catch(() => undefined);
   }
 
   private broadcastTurnComplete(
