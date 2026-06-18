@@ -374,7 +374,7 @@ async function probeChainValidation(
       }
       resolve(result);
     };
-    const socket = tls.connect({ host, port, servername: host });
+    const socket = tls.connect({ host, port, servername: host, autoSelectFamily: true });
     const timer = setTimeout(
       () => finish({ kind: "error", message: `TLS connect timed out after ${timeoutMs}ms` }),
       timeoutMs,
@@ -402,7 +402,11 @@ async function probeChainValidation(
         });
         return;
       }
-      finish({ kind: "error", message: err.message });
+      const parts = [code, err.message].filter((s) => s && s.length > 0);
+      finish({ kind: "error", message: parts.join(": ") || "unknown TLS error" });
+    });
+    socket.once("close", () => {
+      finish({ kind: "error", message: "connection closed before TLS handshake completed" });
     });
   });
 }

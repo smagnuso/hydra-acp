@@ -75,6 +75,7 @@ export async function fetchPeerFingerprint(
       port,
       servername: host,
       rejectUnauthorized: false,
+      autoSelectFamily: true,
     });
     let settled = false;
     const finish = (err: Error | null, fp?: string): void => {
@@ -148,6 +149,7 @@ export function installGlobalTlsTrust(): void {
       // chain validation is bypassed because the pin IS our root of
       // trust; if the fingerprint doesn't match, we reject below.
       rejectUnauthorized: false,
+      autoSelectFamily: true,
       checkServerIdentity: (servername, cert) =>
         verifyAgainstPins(servername, cert),
     }),
@@ -238,16 +240,18 @@ function splitKey(key: string): { host: string; port: number } | null {
 // when the host isn't pinned so the ws library uses its defaults.
 export function wsTlsOptions(host: string): {
   rejectUnauthorized?: boolean;
+  autoSelectFamily?: boolean;
   checkServerIdentity?: (
     servername: string,
     cert: tls.PeerCertificate,
   ) => Error | undefined;
 } {
   if (!hasPinForHost(host)) {
-    return {};
+    return { autoSelectFamily: true };
   }
   return {
     rejectUnauthorized: false,
+    autoSelectFamily: true,
     checkServerIdentity: (servername, cert) =>
       verifyAgainstPins(servername, cert),
   };

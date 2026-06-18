@@ -35,6 +35,9 @@ export async function openWs(
       if (pin.rejectUnauthorized !== undefined) {
         tlsOpts.rejectUnauthorized = pin.rejectUnauthorized;
       }
+      if (pin.autoSelectFamily !== undefined) {
+        (tlsOpts as { autoSelectFamily?: boolean }).autoSelectFamily = pin.autoSelectFamily;
+      }
       if (pin.checkServerIdentity !== undefined) {
         // @types/ws's signature for checkServerIdentity is out of
         // date — ws forwards the option to tls.connect, which uses

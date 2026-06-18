@@ -58,6 +58,9 @@ function defaultOpenWs(
       if (pin.rejectUnauthorized !== undefined) {
         tlsOpts.rejectUnauthorized = pin.rejectUnauthorized;
       }
+      if (pin.autoSelectFamily !== undefined) {
+        (tlsOpts as { autoSelectFamily?: boolean }).autoSelectFamily = pin.autoSelectFamily;
+      }
       if (pin.checkServerIdentity !== undefined) {
         tlsOpts.checkServerIdentity =
           pin.checkServerIdentity as unknown as ClientOptions["checkServerIdentity"];
