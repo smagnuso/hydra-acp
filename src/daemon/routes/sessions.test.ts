@@ -1617,10 +1617,10 @@ describe("GET /v1/sessions/events (cross-session k-way merge)", () => {
 
     // Verify interleaved order: 50k (B), 100k (A), 200k (B), 300k (A)
     const rows = lines.map((l: string) => JSON.parse(l) as { sessionId: string; update: { cumulativeCost: number } });
-    expect(rows[0].sessionId).toBe(b.sessionId);
-    expect(rows[1].sessionId).toBe(a.sessionId);
-    expect(rows[2].sessionId).toBe(b.sessionId);
-    expect(rows[3].sessionId).toBe(a.sessionId);
+    expect(rows[0]!.sessionId).toBe(b.sessionId);
+    expect(rows[1]!.sessionId).toBe(a.sessionId);
+    expect(rows[2]!.sessionId).toBe(b.sessionId);
+    expect(rows[3]!.sessionId).toBe(a.sessionId);
 
     // Timestamps are ascending (50k, 100k, 200k, 300k) so costs follow:
     // B@50k=0.02, A@100k=0.01, B@200k=0.04, A@300k=0.03
@@ -1837,9 +1837,9 @@ describe("GET /v1/sessions/events (cross-session k-way merge)", () => {
 
     const rows = lines.map((l: string) => JSON.parse(l) as { kind: string; sessionId: string });
     // t=50k (B, tool_call), t=100k (A, usage_update)
-    expect(rows[0].kind).toBe("tool_call");
-    expect(rows[0].sessionId).toBe(b.sessionId);
-    expect(rows[1].kind).toBe("usage_update");
-    expect(rows[1].sessionId).toBe(a.sessionId);
+    expect(rows[0]!.kind).toBe("tool_call");
+    expect(rows[0]!.sessionId).toBe(b.sessionId);
+    expect(rows[1]!.kind).toBe("usage_update");
+    expect(rows[1]!.sessionId).toBe(a.sessionId);
   });
 });

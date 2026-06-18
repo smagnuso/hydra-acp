@@ -65,7 +65,7 @@ describe("buildAuthBannerLines", () => {
       { id: "api-key", description: "Use ANTHROPIC_API_KEY", type: "terminal" },
     ]);
     expect(lines.authMethods).toHaveLength(2);
-    expect(lines.authMethods?.[0].id).toBe("oauth");
+    expect(lines.authMethods?.[0]!.id).toBe("oauth");
   });
 
   it("omits authMethods when the list is empty", () => {

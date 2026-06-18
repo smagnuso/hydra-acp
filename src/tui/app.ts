@@ -2464,7 +2464,7 @@ async function runSession(
         cycleCompactionSelection(1);
         return true;
       }
-      if (ev.name === "enter" || ev.name === "return") {
+      if (ev.name === "enter") {
         const current = screen.compactionPromptSpec();
         const selected = current?.options[current.selectedIndex];
         if (selected?.key === "y") {

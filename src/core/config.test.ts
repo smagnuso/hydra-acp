@@ -243,7 +243,15 @@ describe("compaction config", () => {
   });
 
   it("CompactionConfig type is available", () => {
-    const c: CompactionConfig = { tailK: 10, maxIterations: 5 };
+    const c: CompactionConfig = {
+      tailK: 10,
+      maxIterations: 5,
+      contextFraction: 0.5,
+      hardCeilingFraction: 0.85,
+      absoluteFallback: 120_000,
+      idleBeforePromptMs: 300_000,
+      modelContextWindows: {},
+    };
     expect(c.tailK).toBe(10);
   });
 

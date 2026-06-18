@@ -9,9 +9,36 @@ import {
 } from "../__tests__/test-utils.js";
 import {
   JsonRpcErrorCodes,
+  type JsonRpcMessage,
   type JsonRpcNotification,
   type JsonRpcRequest,
 } from "../acp/types.js";
+
+// Narrow a JsonRpcMessage stream entry to a session/update notification
+// (or request) whose .update.sessionUpdate matches the given kind.
+// Tests use this to assert on broadcast updates without each callsite
+// re-doing the union narrowing dance — JsonRpcMessage is a union with
+// JsonRpcResponse, which has neither `.method` nor `.params`.
+type SessionUpdateMessage = (JsonRpcRequest | JsonRpcNotification) & {
+  params: { sessionId?: string; update: Record<string, unknown> };
+};
+function findSessionUpdate(
+  sent: ReadonlyArray<JsonRpcMessage>,
+  sessionUpdate: string,
+): SessionUpdateMessage | undefined {
+  for (const msg of sent) {
+    if (!("method" in msg)) continue;
+    if (msg.method !== "session/update") continue;
+    if (typeof msg.params !== "object" || msg.params === null) continue;
+    const params = msg.params as { update?: unknown };
+    if (typeof params.update !== "object" || params.update === null) continue;
+    const update = params.update as { sessionUpdate?: unknown };
+    if (update.sessionUpdate === sessionUpdate) {
+      return msg as SessionUpdateMessage;
+    }
+  }
+  return undefined;
+}
 
 // Tests want replay-from-disk to settle before they assert, since
 // recordAndBroadcast appends fire-and-forget. Use this after triggering
@@ -2034,22 +2061,9 @@ describe("Session", () => {
       });
 
       // The synthetic confirmation is broadcast as an agent_message_chunk.
-      const sent = stream.sent;
-      const chunkUpdate = sent.find(
-        (msg) =>
-          msg.method === "session/update" &&
-          typeof msg.params === "object" &&
-          msg.params !== null &&
-          "sessionId" in msg.params &&
-          "update" in msg.params &&
-          typeof msg.params.update === "object" &&
-          msg.params.update !== null &&
-          "sessionUpdate" in msg.params.update &&
-          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
-            "agent_message_chunk",
-      );
+      const chunkUpdate = findSessionUpdate(stream.sent, "agent_message_chunk");
       expect(chunkUpdate).toBeDefined();
-      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      const content = (chunkUpdate!.params.update as { content: { text?: string } }).content;
       expect(content.text).toContain("Compaction scheduled");
     });
 
@@ -2079,20 +2093,9 @@ describe("Session", () => {
         prompt: [{ type: "text", text: "/hydra compact status" }],
       });
 
-      const chunkUpdate = stream.sent.find(
-        (msg) =>
-          msg.method === "session/update" &&
-          typeof msg.params === "object" &&
-          msg.params !== null &&
-          "update" in msg.params &&
-          typeof msg.params.update === "object" &&
-          msg.params.update !== null &&
-          "sessionUpdate" in msg.params.update &&
-          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
-            "agent_message_chunk",
-      );
+      const chunkUpdate = findSessionUpdate(stream.sent, "agent_message_chunk");
       expect(chunkUpdate).toBeDefined();
-      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      const content = (chunkUpdate!.params.update as { content: { text?: string } }).content;
       expect(content.text).toContain("running");
       expect(content.text).toContain("iteration 2");
       expect(content.text).toContain("47");
@@ -2120,20 +2123,9 @@ describe("Session", () => {
         prompt: [{ type: "text", text: "/hydra compact status" }],
       });
 
-      const chunkUpdate = stream.sent.find(
-        (msg) =>
-          msg.method === "session/update" &&
-          typeof msg.params === "object" &&
-          msg.params !== null &&
-          "update" in msg.params &&
-          typeof msg.params.update === "object" &&
-          msg.params.update !== null &&
-          "sessionUpdate" in msg.params.update &&
-          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
-            "agent_message_chunk",
-      );
+      const chunkUpdate = findSessionUpdate(stream.sent, "agent_message_chunk");
       expect(chunkUpdate).toBeDefined();
-      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      const content = (chunkUpdate!.params.update as { content: { text?: string } }).content;
       expect(content.text).toContain("No compaction in progress");
       expect(content.text).toContain("12");
     });
@@ -2158,20 +2150,9 @@ describe("Session", () => {
         prompt: [{ type: "text", text: "/hydra compact status" }],
       });
 
-      const chunkUpdate = stream.sent.find(
-        (msg) =>
-          msg.method === "session/update" &&
-          typeof msg.params === "object" &&
-          msg.params !== null &&
-          "update" in msg.params &&
-          typeof msg.params.update === "object" &&
-          msg.params.update !== null &&
-          "sessionUpdate" in msg.params.update &&
-          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
-            "agent_message_chunk",
-      );
+      const chunkUpdate = findSessionUpdate(stream.sent, "agent_message_chunk");
       expect(chunkUpdate).toBeDefined();
-      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      const content = (chunkUpdate!.params.update as { content: { text?: string } }).content;
       expect(content.text).toContain("never been compacted");
     });
 
@@ -2193,22 +2174,9 @@ describe("Session", () => {
         prompt: [{ type: "text", text: "/hydra compact" }],
       });
 
-      const sent = stream.sent;
-      const chunkUpdate = sent.find(
-        (msg) =>
-          msg.method === "session/update" &&
-          typeof msg.params === "object" &&
-          msg.params !== null &&
-          "sessionId" in msg.params &&
-          "update" in msg.params &&
-          typeof msg.params.update === "object" &&
-          msg.params.update !== null &&
-          "sessionUpdate" in msg.params.update &&
-          (msg.params.update as { sessionUpdate?: string }).sessionUpdate ===
-            "agent_message_chunk",
-      );
+      const chunkUpdate = findSessionUpdate(stream.sent, "agent_message_chunk");
       expect(chunkUpdate).toBeDefined();
-      const content = (chunkUpdate!.params as { update: { content: { text?: string } } }).update.content;
+      const content = (chunkUpdate!.params.update as { content: { text?: string } }).content;
       expect(content.text).toContain("compaction scheduling not configured");
     });
 

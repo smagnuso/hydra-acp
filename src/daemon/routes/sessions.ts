@@ -895,7 +895,10 @@ export function registerSessionRoutes(
     if (!kindSet.has(kind)) {
       return null;
     }
-    return { recordedAt: entry.recordedAt, entry: parsed };
+    return {
+      recordedAt: entry.recordedAt,
+      entry: parsed as Record<string, unknown>,
+    };
   }
 
   // Build the output row for a cross-session event (includes sessionId).
@@ -908,7 +911,7 @@ export function registerSessionRoutes(
     const updateObj = params.update as Record<string, unknown>;
     const row: Record<string, unknown> = {
       sessionId,
-      ts: new Date(entry.recordedAt).toISOString(),
+      ts: new Date(entry.recordedAt as number).toISOString(),
       kind,
       update: updateObj,
     };
@@ -938,7 +941,8 @@ export function registerSessionRoutes(
     for await (const line of rl) {
       const parsed = parseHistoryLine(line, kindSet, sinceMs);
       if (parsed) {
-        const kind = (parsed.entry.params as Record<string, unknown>).update.sessionUpdate as string;
+        const kind = ((parsed.entry.params as Record<string, unknown>)
+          .update as Record<string, unknown>).sessionUpdate as string;
         current = { ts: parsed.recordedAt, row: buildCrossSessionRow(sessionId, parsed.entry, kind) };
         break;
       }
@@ -955,7 +959,8 @@ export function registerSessionRoutes(
     for await (const line of it.rl) {
       const parsed = parseHistoryLine(line, kindSet, sinceMs);
       if (parsed) {
-        const kind = (parsed.entry.params as Record<string, unknown>).update.sessionUpdate as string;
+        const kind = ((parsed.entry.params as Record<string, unknown>)
+          .update as Record<string, unknown>).sessionUpdate as string;
         it.current = { ts: parsed.recordedAt, row: buildCrossSessionRow(it.sessionId, parsed.entry, kind) };
         return;
       }
@@ -1057,21 +1062,23 @@ export function registerSessionRoutes(
           let minIdx = -1;
           let minTs = Infinity;
           for (let i = 0; i < iterators.length; i++) {
-            if (iterators[i].current !== null && iterators[i].current.ts < minTs) {
-              minTs = iterators[i].current.ts;
+            const it = iterators[i]!;
+            if (it.current !== null && it.current.ts < minTs) {
+              minTs = it.current.ts;
               minIdx = i;
             }
           }
 
           if (minIdx === -1) break;
+          const chosen = iterators[minIdx]!;
 
-          reply.raw.write(JSON.stringify(iterators[minIdx].current.row) + "\n");
+          reply.raw.write(JSON.stringify(chosen.current!.row) + "\n");
 
-          await advanceIterator(iterators[minIdx], kindSet, sinceMs);
+          await advanceIterator(chosen, kindSet, sinceMs);
 
-          if (iterators[minIdx].exhausted) {
+          if (chosen.exhausted) {
             try {
-              iterators[minIdx].rl.close();
+              chosen.rl.close();
             } catch {
               /* ignore */
             }

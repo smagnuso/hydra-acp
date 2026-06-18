@@ -57,7 +57,15 @@ function testConfig(): HydraConfig {
       showFileUpdates: "none" as const,
       selectionClipboard: "both" as const,
     },
-    compaction: { tailK: 0, maxIterations: 1 },
+    compaction: {
+      tailK: 0,
+      maxIterations: 1,
+      contextFraction: 0.5,
+      hardCeilingFraction: 0.85,
+      absoluteFallback: 120_000,
+      idleBeforePromptMs: 300_000,
+      modelContextWindows: {},
+    },
   };
 }
 
@@ -1364,7 +1372,15 @@ describe("startDaemon — extensions REST lifecycle", () => {
         showFileUpdates: "none" as const,
         selectionClipboard: "both" as const,
       },
-   compaction: { tailK: 0, maxIterations: 1 },
+      compaction: {
+        tailK: 0,
+        maxIterations: 1,
+        contextFraction: 0.5,
+        hardCeilingFraction: 0.85,
+        absoluteFallback: 120_000,
+        idleBeforePromptMs: 300_000,
+        modelContextWindows: {},
+      },
     };
     handle = await startDaemon(cfg, TEST_TOKEN);
     const p = port(handle);

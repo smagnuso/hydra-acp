@@ -1,4 +1,4 @@
-import type { HistoryEntry } from "../core/history-store.js";
+import type { HistoryEntry } from "../../core/history-store.js";
 
 export function* iterSessionUpdates(
   history: ReadonlyArray<unknown>,
