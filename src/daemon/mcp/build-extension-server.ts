@@ -8,10 +8,17 @@
 // Two request handlers:
 //   tools/list  → returns the spec captured in the closure verbatim
 //   tools/call  → forwards via JSON-RPC to the owning extension's
-//                  connection as hydra-acp/mcp_tools/invoke, with a
-//                  timeout. Every error path (timeout, RPC reject,
-//                  malformed result) is converted to an MCP isError:true
-//                  response — the daemon never throws to the SDK.
+//                  connection as hydra-acp/mcp_tools/invoke. Errors
+//                  (connection close, RPC reject, malformed result)
+//                  are converted to MCP isError:true responses — the
+//                  daemon never throws to the SDK.
+//
+// No per-call timeout: liveness comes from connection close (extension
+// crash/disconnect rejects in-flight requests) and user cancel (agent
+// turn cancel propagates to tools/call). Long-running extension tools
+// (e.g. the planner's execute_plan, which blocks for the lifetime of
+// a multi-task project) are first-class — they take as long as they
+// take, and the user is the timeout.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -24,14 +31,6 @@ import type {
   ExtensionMcpEntry,
   ExtensionMcpToolSpec,
 } from "../../core/extension-mcp.js";
-
-export const DEFAULT_INVOKE_TIMEOUT_MS = 60_000;
-
-export interface BuildExtensionServerOptions {
-  // Override the per-call timeout. Tests pass a small value (e.g. 50ms)
-  // to exercise the timeout path quickly; production uses the default.
-  invokeTimeoutMs?: number;
-}
 
 export function buildExtensionServer(
   extensionName: string,
@@ -54,10 +53,7 @@ export function buildExtensionServer(
   // only place that actually needs the sessionId, and by the time
   // tools/call fires the session has long since been bound.
   sessionId: string | (() => string | Promise<string>),
-  options: BuildExtensionServerOptions = {},
 ): Server {
-  const invokeTimeoutMs =
-    options.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
   const resolveSessionId: () => Promise<string> =
     typeof sessionId === "function"
       ? async () => sessionId()
@@ -103,13 +99,12 @@ export function buildExtensionServer(
       }
       try {
         const resolvedSessionId = await resolveSessionId();
-        const raw = await invokeWithTimeout(
+        const raw = await invokeExtension(
           entry.connection,
           extensionName,
           toolName,
           req.params.arguments ?? {},
           resolvedSessionId,
-          invokeTimeoutMs,
         );
         return normalizeToolResult(raw, toolName);
       } catch (err) {
@@ -123,36 +118,19 @@ export function buildExtensionServer(
   return server;
 }
 
-async function invokeWithTimeout(
+async function invokeExtension(
   connection: JsonRpcConnection,
   server: string,
   tool: string,
   args: unknown,
   sessionId: string,
-  timeoutMs: number,
 ): Promise<unknown> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`extension timeout after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
+  return await connection.request("hydra-acp/mcp_tools/invoke", {
+    server,
+    tool,
+    args,
+    sessionId,
   });
-  try {
-    return await Promise.race([
-      connection.request("hydra-acp/mcp_tools/invoke", {
-        server,
-        tool,
-        args,
-        sessionId,
-      }),
-      timeout,
-    ]);
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  }
 }
 
 function normalizeToolResult(raw: unknown, toolName: string): CallToolResult {

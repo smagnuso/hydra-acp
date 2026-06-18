@@ -57,19 +57,14 @@ interface Harness {
   baseUrl: string;
 }
 
-async function makeHarness(opts?: { invokeTimeoutMs?: number }): Promise<Harness> {
+async function makeHarness(): Promise<Harness> {
   const tokenRegistry = new McpTokenRegistry();
   const extensionMcp = new ExtensionMcpRegistry();
   const app = Fastify({ logger: false });
   // Register stdin too — verifies that /mcp/hydra-acp-stdin still wins the route
   // race against /mcp/:name.
   registerStdinMcpRoutes(app, tokenRegistry);
-  registerExtensionMcpRoutes(app, tokenRegistry, extensionMcp, {
-    buildOptions:
-      opts?.invokeTimeoutMs !== undefined
-        ? { invokeTimeoutMs: opts.invokeTimeoutMs }
-        : undefined,
-  });
+  registerExtensionMcpRoutes(app, tokenRegistry, extensionMcp);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address() as AddressInfo;
   return {
@@ -244,50 +239,6 @@ describe("extension MCP route — happy path", () => {
     mock.setResponder(async () => ({ no_content: true }));
     const r = await client!.callTool({ name: "ping", arguments: {} });
     expect(r.isError).toBe(true);
-  });
-});
-
-describe("extension MCP route — timeout", () => {
-  let h: Harness | null = null;
-  let mock: MockConnection;
-  let client: Client | null = null;
-  const token = "tok-timeout";
-
-  beforeEach(async () => {
-    h = await makeHarness({ invokeTimeoutMs: 50 });
-    mock = makeMockConnection();
-    h.tokenRegistry.bind(token, makeSession());
-    h.extensionMcp.register("memory", mock.conn, undefined, [pingTool()]);
-    const transport = new StreamableHTTPClientTransport(
-      new URL(`${h.baseUrl}/mcp/memory`),
-      {
-        requestInit: { headers: { Authorization: `Bearer ${token}` } },
-      },
-    );
-    client = new Client({ name: "test", version: "0.0.1" });
-    await client.connect(transport);
-  });
-
-  afterEach(async () => {
-    if (client) {
-      await client.close().catch(() => undefined);
-      client = null;
-    }
-    if (h) {
-      await h.app.close().catch(() => undefined);
-      h = null;
-    }
-  });
-
-  it("hung extension yields isError within the configured timeout", async () => {
-    mock.setResponder(() => new Promise(() => undefined));
-    const start = Date.now();
-    const r = await client!.callTool({ name: "ping", arguments: {} });
-    const elapsed = Date.now() - start;
-    expect(r.isError).toBe(true);
-    const content = r.content as Array<{ type: string; text: string }>;
-    expect(content[0]!.text).toMatch(/timeout/);
-    expect(elapsed).toBeLessThan(2000);
   });
 });
 

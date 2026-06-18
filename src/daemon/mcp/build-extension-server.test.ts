@@ -282,30 +282,6 @@ describe("buildExtensionServer — tools/call error paths", () => {
     expect(content[0]!.text).toMatch(/memory backend down/);
   });
 
-  it("extension hang past timeout yields isError without blocking the daemon", async () => {
-    mock.setResponder(
-      () =>
-        // Never resolves — the timeout should fire first.
-        new Promise(() => {
-          // intentional
-        }),
-    );
-    const entry = entryFor(mock.conn, [
-      { name: "ping", description: "", inputSchema: { type: "object" } },
-    ]);
-    server = buildExtensionServer("memory", entry, "hydra_session_test", { invokeTimeoutMs: 50 });
-    client = await connect(server);
-    const start = Date.now();
-    const r = await client.callTool({ name: "ping", arguments: {} });
-    const elapsed = Date.now() - start;
-    expect(r.isError).toBe(true);
-    const content = r.content as Array<{ type: string; text: string }>;
-    expect(content[0]!.text).toMatch(/timeout/);
-    // Should fire close to the configured timeout — generous upper bound
-    // accommodates CI scheduler jitter without being weak.
-    expect(elapsed).toBeLessThan(2000);
-  });
-
   it("malformed extension result (non-object) yields isError", async () => {
     mock.setResponder(async () => 42 as unknown);
     const entry = entryFor(mock.conn, [

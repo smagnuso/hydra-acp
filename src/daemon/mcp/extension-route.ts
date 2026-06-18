@@ -28,10 +28,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import type { ExtensionMcpRegistry } from "../../core/extension-mcp.js";
 import { extractBearer } from "./bearer.js";
-import {
-  buildExtensionServer,
-  type BuildExtensionServerOptions,
-} from "./build-extension-server.js";
+import { buildExtensionServer } from "./build-extension-server.js";
 import type { McpTokenRegistry } from "./token-registry.js";
 
 interface BuiltPair {
@@ -47,15 +44,10 @@ interface BuiltPair {
 // safety net for pathological cases (session abandoned mid-call).
 const SESSION_READY_TIMEOUT_MS = 10_000;
 
-export interface RegisterExtensionMcpRoutesOptions {
-  buildOptions?: BuildExtensionServerOptions;
-}
-
 export function registerExtensionMcpRoutes(
   app: FastifyInstance,
   tokenRegistry: McpTokenRegistry,
   extensionMcp: ExtensionMcpRegistry,
-  options: RegisterExtensionMcpRoutesOptions = {},
 ): void {
   // Per-registration lazy build cache, keyed (token, extName). Two-level
   // map so we can evict efficiently in either direction: by token (session
@@ -159,12 +151,7 @@ export function registerExtensionMcpRoutes(
       return resolved.sessionId;
     };
 
-    const server = buildExtensionServer(
-      extName,
-      entry,
-      resolveSessionId,
-      options.buildOptions,
-    );
+    const server = buildExtensionServer(extName, entry, resolveSessionId);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
