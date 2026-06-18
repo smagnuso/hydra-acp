@@ -19,6 +19,24 @@
 // (e.g. the planner's execute_plan, which blocks for the lifetime of
 // a multi-task project) are first-class — they take as long as they
 // take, and the user is the timeout.
+//
+// To keep agent-side MCP clients from imposing their OWN tool-call
+// timeouts on long extension calls, we emit MCP `notifications/progress`
+// on a heartbeat while a tools/call is in flight. Clients like opencode
+// pass `resetTimeoutOnProgress: true` to the SDK callTool helper, so
+// each heartbeat resets their per-call timer.
+//
+// The MCP TypeScript SDK only auto-includes a `_meta.progressToken` in
+// the request when the caller also passes an `onprogress` handler —
+// opencode passes `resetTimeoutOnProgress: true` but not `onprogress`,
+// so requests arrive here without a progressToken even though the
+// client wants timer resets. To work around that, when the client
+// didn't supply a token we synthesize one from the JSON-RPC requestId
+// (the client SDK's `_setupTimeout` keys timeoutInfo by messageId, and
+// its progress-reset path does `Number(progressToken)` and resets if
+// the lookup hits — see protocol.js _setupTimeout / handleProgress).
+// Result: heartbeats reset the client's timer regardless of whether
+// the client requested progress.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -92,11 +110,20 @@ export function buildExtensionServer(
 
   server.setRequestHandler(
     CallToolRequestSchema,
-    async (req): Promise<CallToolResult> => {
+    async (req, extra): Promise<CallToolResult> => {
       const toolName = req.params.name;
       if (!toolsByName.has(toolName)) {
         return errorResult(`unknown tool: ${toolName}`);
       }
+      // Prefer a client-supplied progressToken when present; otherwise
+      // fall back to the JSON-RPC requestId so the heartbeat addresses
+      // notifications to a token the client SDK will still resolve
+      // against its per-message timeout (see file header).
+      const progressToken = extra._meta?.progressToken ?? extra.requestId;
+      const stopHeartbeat = startProgressHeartbeat(
+        progressToken,
+        extra.sendNotification,
+      );
       try {
         const resolvedSessionId = await resolveSessionId();
         const raw = await invokeExtension(
@@ -111,11 +138,48 @@ export function buildExtensionServer(
         return errorResult(
           err instanceof Error ? err.message : String(err),
         );
+      } finally {
+        stopHeartbeat();
       }
     },
   );
 
   return server;
+}
+
+// Default heartbeat interval. Tuned so that clients with the SDK's
+// default 60s `resetTimeoutOnProgress` window stay alive comfortably,
+// and clients with shorter defaults (opencode's 30s) also stay alive
+// without flooding the wire. Overridable for tests.
+export const PROGRESS_HEARTBEAT_MS = 15_000;
+
+export function startProgressHeartbeat(
+  progressToken: string | number | undefined,
+  sendNotification: (n: {
+    method: "notifications/progress";
+    params: { progressToken: string | number; progress: number; total?: number };
+  }) => Promise<void>,
+  intervalMs: number = PROGRESS_HEARTBEAT_MS,
+): () => void {
+  if (progressToken === undefined) {
+    return () => undefined;
+  }
+  let tick = 0;
+  const timer = setInterval(() => {
+    tick += 1;
+    void sendNotification({
+      method: "notifications/progress",
+      params: { progressToken, progress: tick },
+    }).catch(() => {
+      // Client disconnected or transport closed mid-call. Nothing to do —
+      // the underlying extension call will resolve or be aborted via
+      // connection close; either way the finally block will clear the
+      // interval. Swallow to avoid an unhandled rejection log.
+    });
+  }, intervalMs);
+  // Don't hold the daemon's event loop open for this timer.
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 async function invokeExtension(
