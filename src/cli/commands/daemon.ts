@@ -45,9 +45,37 @@ export async function runDaemonStart(
       `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,
     );
 
+    const SHUTDOWN_HARD_TIMEOUT_MS = 10_000;
+    let shuttingDown = false;
     const shutdown = async (): Promise<void> => {
+      // Second SIGTERM/SIGINT while a graceful shutdown is in flight
+      // means the operator gave up waiting — exit immediately so they
+      // can recover without resorting to SIGKILL.
+      if (shuttingDown) {
+        process.stderr.write("Second signal received; exiting immediately.\n");
+        process.exit(1);
+      }
+      shuttingDown = true;
       process.stdout.write("Shutting down...\n");
-      await handle.shutdown();
+      // Safety net: if a shutdown step hangs (extension child ignoring
+      // SIGTERM, lingering WebSocket keeping app.close() pending, etc.)
+      // force-exit so `hydra daemon restart` doesn't strand the
+      // operator with a half-dead daemon.
+      const killer = setTimeout(() => {
+        process.stderr.write(
+          `Graceful shutdown did not complete within ${SHUTDOWN_HARD_TIMEOUT_MS}ms; forcing exit.\n`,
+        );
+        process.exit(1);
+      }, SHUTDOWN_HARD_TIMEOUT_MS);
+      killer.unref();
+      try {
+        await handle.shutdown();
+      } catch (err) {
+        process.stderr.write(
+          `shutdown failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+      clearTimeout(killer);
       process.exit(0);
     };
     process.on("SIGINT", () => void shutdown());
