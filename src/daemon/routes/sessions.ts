@@ -922,11 +922,36 @@ export function registerSessionRoutes(
   }
 
   // K-way merge iterator state for cross-session events.
+  //
+  // Each iterator owns one async generator over its session's history.jsonl
+  // that yields only matching parsed lines. We deliberately do NOT use two
+  // separate `for await` blocks on the same readline.Interface — breaking
+  // out of `for await` calls the async iterator's `return()` method, which
+  // closes the readline. A subsequent `for await` on the same `rl` yields
+  // nothing, which silently truncated the cross-session stream (each
+  // session emitted at most its first matching event).
   interface SessionIterator {
     sessionId: string;
     rl: readline.Interface;
+    gen: AsyncGenerator<{ ts: number; row: Record<string, unknown> }, void, undefined>;
     current: { ts: number; row: Record<string, unknown> } | null;
     exhausted: boolean;
+  }
+
+  async function* matchingEvents(
+    sessionId: string,
+    rl: readline.Interface,
+    kindSet: Set<string>,
+    sinceMs: number | undefined,
+  ): AsyncGenerator<{ ts: number; row: Record<string, unknown> }, void, undefined> {
+    for await (const line of rl) {
+      const parsed = parseHistoryLine(line, kindSet, sinceMs);
+      if (parsed) {
+        const kind = ((parsed.entry.params as Record<string, unknown>)
+          .update as Record<string, unknown>).sessionUpdate as string;
+        yield { ts: parsed.recordedAt, row: buildCrossSessionRow(sessionId, parsed.entry, kind) };
+      }
+    }
   }
 
   async function initIterator(
@@ -936,36 +961,20 @@ export function registerSessionRoutes(
     sinceMs: number | undefined,
   ): Promise<SessionIterator> {
     const rl = readline.createInterface({ input: fs.createReadStream(historyPath), crlfDelay: Infinity });
-    let current: { ts: number; row: Record<string, unknown> } | null = null;
-
-    for await (const line of rl) {
-      const parsed = parseHistoryLine(line, kindSet, sinceMs);
-      if (parsed) {
-        const kind = ((parsed.entry.params as Record<string, unknown>)
-          .update as Record<string, unknown>).sessionUpdate as string;
-        current = { ts: parsed.recordedAt, row: buildCrossSessionRow(sessionId, parsed.entry, kind) };
-        break;
-      }
-    }
-
-    return { sessionId, rl, current, exhausted: current === null };
+    const gen = matchingEvents(sessionId, rl, kindSet, sinceMs);
+    const first = await gen.next();
+    const current = first.done ? null : first.value;
+    return { sessionId, rl, gen, current, exhausted: current === null };
   }
 
-  async function advanceIterator(
-    it: SessionIterator,
-    kindSet: Set<string>,
-    sinceMs: number | undefined,
-  ): Promise<void> {
-    for await (const line of it.rl) {
-      const parsed = parseHistoryLine(line, kindSet, sinceMs);
-      if (parsed) {
-        const kind = ((parsed.entry.params as Record<string, unknown>)
-          .update as Record<string, unknown>).sessionUpdate as string;
-        it.current = { ts: parsed.recordedAt, row: buildCrossSessionRow(it.sessionId, parsed.entry, kind) };
-        return;
-      }
+  async function advanceIterator(it: SessionIterator): Promise<void> {
+    const next = await it.gen.next();
+    if (next.done) {
+      it.exhausted = true;
+      it.current = null;
+    } else {
+      it.current = next.value;
     }
-    it.exhausted = true;
   }
 
  // Stream selected session/update kinds from every session's history.jsonl,
@@ -1074,7 +1083,7 @@ export function registerSessionRoutes(
 
           reply.raw.write(JSON.stringify(chosen.current!.row) + "\n");
 
-          await advanceIterator(chosen, kindSet, sinceMs);
+          await advanceIterator(chosen);
 
           if (chosen.exhausted) {
             try {

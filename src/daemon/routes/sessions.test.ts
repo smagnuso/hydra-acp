@@ -1842,4 +1842,47 @@ describe("GET /v1/sessions/events (cross-session k-way merge)", () => {
     expect(rows[1]!.kind).toBe("usage_update");
     expect(rows[1]!.sessionId).toBe(a.sessionId);
   });
+
+  it("emits every matching event from each session (regression: k-way merge truncation)", async () => {
+    // Regression for a bug where the cross-session merge emitted at most
+    // the first matching event per session because initIterator did
+    // `for await ... break`, which closes the readline and prevents
+    // advanceIterator from reading further lines.
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const b = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const N = 25;
+    for (let i = 0; i < N; i++) {
+      await appendEvent(harness.manager, a.sessionId, {
+        method: "session/update",
+        params: { sessionId: `u_a${i}`, update: { sessionUpdate: "usage_update", cumulativeCost: 0.01 * (i + 1) } },
+        recordedAt: 100_000 + i * 2,
+      });
+      await appendEvent(harness.manager, b.sessionId, {
+        method: "session/update",
+        params: { sessionId: `u_b${i}`, update: { sessionUpdate: "usage_update", cumulativeCost: 0.02 * (i + 1) } },
+        recordedAt: 100_001 + i * 2,
+      });
+    }
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/events?kinds=usage_update`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(N * 2);
+
+    const rows = lines.map((l: string) => JSON.parse(l) as { sessionId: string; ts: string });
+    const aCount = rows.filter((r) => r.sessionId === a.sessionId).length;
+    const bCount = rows.filter((r) => r.sessionId === b.sessionId).length;
+    expect(aCount).toBe(N);
+    expect(bCount).toBe(N);
+
+    for (let i = 1; i < rows.length; i++) {
+      expect(new Date(rows[i]!.ts).getTime()).toBeGreaterThanOrEqual(
+        new Date(rows[i - 1]!.ts).getTime(),
+      );
+    }
+  });
 });
