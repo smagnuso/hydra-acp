@@ -94,7 +94,7 @@ describe("resolveSessionFlag", () => {
 
   it("non-loopback URL with cached token resolves cleanly", async () => {
     const store = await RemotesStore.load();
-    await store.set("abc.ngrok.app", 443, {
+    await store.set("abc.ngrok.app", 55514, {
       token: "tok-cached",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });

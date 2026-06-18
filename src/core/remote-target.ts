@@ -78,7 +78,7 @@ export function targetFromParsedUrl(
   parsed: ParsedHydraUrl,
   token: string,
 ): RemoteTarget {
-  const { httpScheme, wsScheme } = transportFor(parsed.host);
+  const { httpScheme, wsScheme } = transportFor(parsed.port);
   return {
     baseUrl: `${httpScheme}://${parsed.host}:${parsed.port}`,
     wsUrl: `${wsScheme}://${parsed.host}:${parsed.port}/acp`,
@@ -125,7 +125,7 @@ export class NoCachedCredentialError extends Error {
   readonly host: string;
   readonly port: number;
   constructor(host: string, port: number) {
-    const portSuffix = port === 443 ? "" : `:${port}`;
+    const portSuffix = port === DEFAULT_DAEMON_PORT ? "" : `:${port}`;
     super(
       `No cached credentials for ${host}:${port}. ` +
         `Run \`${invokedBinName()} --session hydra://${host}${portSuffix}/\` once in a terminal to log in.`,
@@ -185,7 +185,7 @@ export async function resolveRemoteTarget(
     throw new Error("Password is required to attach to a remote daemon.");
   }
 
-  const { httpScheme } = transportFor(parsed.host);
+  const { httpScheme } = transportFor(parsed.port);
   const baseUrl = `${httpScheme}://${parsed.host}:${parsed.port}`;
   const response = await fetchImpl(`${baseUrl}/v1/auth/login`, {
     method: "POST",
@@ -239,8 +239,7 @@ function defaultLabel(): string {
 }
 
 function displayFor(parsed: ParsedHydraUrl): string {
-  const defaultPort = parsed.isLoopback ? DEFAULT_DAEMON_PORT : 443;
-  if (parsed.port === defaultPort) {
+  if (parsed.port === DEFAULT_DAEMON_PORT) {
     return parsed.host;
   }
   return `${parsed.host}:${parsed.port}`;

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { loadConfig } from "../../core/config.js";
+import { DEFAULT_DAEMON_PORT, loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { daemonFetch, formatRelative, httpBase } from "./_shared.js";
 import { resolveLocalTarget } from "../../core/remote-target.js";
@@ -585,23 +585,25 @@ export async function runSessionsShare(
 }
 
 // Pick the host (and port) to advertise. Precedence:
-//   1. --host flag — assume tunneled / public, default port 443.
-//   2. config.daemon.publicHost — same: public-facing name on 443.
+//   1. --host flag — caller-supplied advertised name. Port defaults
+//      to the daemon's native port when not specified; a TLS-fronted
+//      tunnel deployment writes `:443` explicitly.
+//   2. config.daemon.publicHost — same shape, same default.
 //   3. config.daemon.host (when non-loopback) — direct connection, so
 //      use the daemon's actual bound port.
 //   4. "127.0.0.1" + the daemon's port (with isFallback=true).
 // Either of #1 or #2 may carry an explicit ":port" suffix, which wins
-// over the 443 default.
+// over the default.
 function resolveShareHost(
   flag: string | undefined,
   config: { daemon: { host: string; port: number; publicHost?: string } },
 ): { host: string; port: number; isFallback: boolean } {
   if (flag !== undefined && flag.length > 0) {
-    const { host, port } = splitHostPort(flag, 443);
+    const { host, port } = splitHostPort(flag, DEFAULT_DAEMON_PORT);
     return { host, port, isFallback: false };
   }
   if (config.daemon.publicHost && config.daemon.publicHost.length > 0) {
-    const { host, port } = splitHostPort(config.daemon.publicHost, 443);
+    const { host, port } = splitHostPort(config.daemon.publicHost, DEFAULT_DAEMON_PORT);
     return { host, port, isFallback: false };
   }
   if (!isLoopbackHost(config.daemon.host)) {

@@ -66,13 +66,21 @@ describe("targetFromParsedUrl", () => {
     expect(target.isLocal).toBe(true);
   });
 
-  it("builds an https/wss target for non-loopback", () => {
+  it("builds a plain-http target for a non-loopback host on the daemon port", () => {
     const parsed = parseHydraUrl("hydra://abc.ngrok.app/sess_abc");
+    const target = targetFromParsedUrl(parsed, "tok123");
+    expect(target.baseUrl).toBe("http://abc.ngrok.app:55514");
+    expect(target.wsUrl).toBe("ws://abc.ngrok.app:55514/acp");
+    expect(target.display).toBe("abc.ngrok.app");
+    expect(target.isLocal).toBe(false);
+  });
+
+  it("builds an https/wss target when the URL points at :443", () => {
+    const parsed = parseHydraUrl("hydra://abc.ngrok.app:443/sess_abc");
     const target = targetFromParsedUrl(parsed, "tok123");
     expect(target.baseUrl).toBe("https://abc.ngrok.app:443");
     expect(target.wsUrl).toBe("wss://abc.ngrok.app:443/acp");
-    expect(target.display).toBe("abc.ngrok.app");
-    expect(target.isLocal).toBe(false);
+    expect(target.display).toBe("abc.ngrok.app:443");
   });
 
   it("includes non-default port in display", () => {
@@ -82,10 +90,11 @@ describe("targetFromParsedUrl", () => {
     expect(target.baseUrl).toBe("http://127.0.0.1:8080");
   });
 
-  it("includes non-443 port in display for non-loopback", () => {
+  it("includes a non-default port in display for non-loopback", () => {
     const parsed = parseHydraUrl("hydra://abc.ngrok.app:7000/sess_abc");
     const target = targetFromParsedUrl(parsed, "tok123");
     expect(target.display).toBe("abc.ngrok.app:7000");
+    expect(target.baseUrl).toBe("http://abc.ngrok.app:7000");
   });
 });
 
@@ -141,10 +150,10 @@ describe("resolveRemoteTarget", () => {
       fetchImpl,
       promptImpl,
     });
-    expect(captured.url).toBe("https://abc.ngrok.app:443/v1/auth/login");
+    expect(captured.url).toBe("http://abc.ngrok.app:55514/v1/auth/login");
     expect((captured.body as { password: string }).password).toBe("hunter2");
     expect(target.token).toBe("tok-fresh");
-    expect(target.baseUrl).toBe("https://abc.ngrok.app:443");
+    expect(target.baseUrl).toBe("http://abc.ngrok.app:55514");
   });
 
   it("caches the fresh token under host:port", async () => {
@@ -163,7 +172,7 @@ describe("resolveRemoteTarget", () => {
       promptImpl: async () => "hunter2",
     });
     const reloaded = await RemotesStore.load();
-    expect(reloaded.get("abc.ngrok.app", 443)?.token).toBe("tok-fresh");
+    expect(reloaded.get("abc.ngrok.app", 55514)?.token).toBe("tok-fresh");
   });
 
   it("surfaces a friendly error on 401", async () => {
@@ -239,7 +248,7 @@ describe("resolveRemoteTarget", () => {
         });
         throw new Error("expected throw");
       } catch (err) {
-        // Default port (443) elided in the suggested command, even
+        // Default port (55514) elided in the suggested command, even
         // though the diagnostic prefix still mentions it.
         expect((err as Error).message).toMatch(
           /hydra --session hydra:\/\/abc\.ngrok\.app\/[^:]/,
@@ -277,7 +286,7 @@ describe("resolveRemoteTarget", () => {
 
   it("allowPrompt=false still uses a cached token on remote hosts", async () => {
     const store = await RemotesStore.load();
-    await store.set("abc.ngrok.app", 443, {
+    await store.set("abc.ngrok.app", 55514, {
       token: "tok-cached",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });

@@ -104,17 +104,23 @@ describe("runSessionsShare", () => {
     expect(stdio.out().trim()).toBe("hydra://127.0.0.1/xyzXYZ7890123456");
   });
 
-  it("uses --host when supplied and defaults port to 443 (elided)", async () => {
+  it("uses --host when supplied and defaults port to the daemon port (elided)", async () => {
     await configWith();
     await runSessionsShare("abc", { host: "demo.ngrok.app" });
     expect(stdio.out().trim()).toBe("hydra://demo.ngrok.app/abc");
     expect(stdio.err()).toBe("");
   });
 
-  it("ignores daemon.port when --host is set (tunneled hosts speak 443)", async () => {
+  it("ignores daemon.port when --host is set (advertised host stands alone)", async () => {
     await configWith({ port: 8080 });
     await runSessionsShare("abc", { host: "demo.ngrok.app" });
     expect(stdio.out().trim()).toBe("hydra://demo.ngrok.app/abc");
+  });
+
+  it("renders an explicit :443 in --host (TLS-fronted tunnel)", async () => {
+    await configWith();
+    await runSessionsShare("abc", { host: "demo.ngrok.app:443" });
+    expect(stdio.out().trim()).toBe("hydra://demo.ngrok.app:443/abc");
   });
 
   it("respects an explicit port suffix on --host", async () => {
@@ -145,7 +151,7 @@ describe("runSessionsShare", () => {
   it("uses daemon.host and daemon.port for direct LAN advertising", async () => {
     await configWith({ host: "192.168.1.5" });
     await runSessionsShare("abc");
-    expect(stdio.out().trim()).toBe("hydra://192.168.1.5:55514/abc");
+    expect(stdio.out().trim()).toBe("hydra://192.168.1.5/abc");
     expect(stdio.err()).toBe("");
   });
 

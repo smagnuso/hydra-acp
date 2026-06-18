@@ -7,12 +7,23 @@
 
 import { DEFAULT_DAEMON_PORT } from "./config.js";
 
+// The well-known TLS port. When a hydra:// URL points at this port we
+// assume the daemon is fronted by a TLS terminator (ngrok, Tailscale
+// Funnel, an nginx in front of a VPS, …) and switch the client to
+// https/wss. Every other port is treated as plain HTTP, including the
+// canonical daemon port — that's why a bare LAN URL like
+// `hydra://blackbox.local/<id>` Just Works against the daemon's
+// default :55514.
+export const TLS_PORT = 443;
+
 export interface ParsedHydraUrl {
   // Raw hostname from the URL, with no brackets for IPv6 literals.
   host: string;
-  // Resolved port. Defaults: loopback host -> DEFAULT_DAEMON_PORT,
-  // non-loopback host -> 443 (HTTPS via tunnel/public TLS). An
-  // explicit ":port" in the URL always wins.
+  // Resolved port. Defaults to DEFAULT_DAEMON_PORT (the daemon's
+  // native port) regardless of host. Operators who front the daemon
+  // on a different port — typically :443 for a public tunnel —
+  // advertise that port explicitly via daemon.publicHost so the
+  // shared URL carries it.
   port: number;
   // Session id (the URL path with leading slashes stripped). Empty
   // path yields undefined, which callers treat as "no session
@@ -41,11 +52,18 @@ export function isLoopbackHost(host: string): boolean {
   );
 }
 
-export function transportFor(host: string): HydraTransport {
-  if (isLoopbackHost(host)) {
-    return { httpScheme: "http", wsScheme: "ws" };
+// Scheme is tied to port, not host: :443 → TLS, anything else →
+// plain. This matches universal web convention (a tunnel/proxy that
+// terminates TLS lives on :443; the daemon's native :55514 is plain
+// HTTP) and lets LAN deployments like `hydra://blackbox.local/<id>`
+// work without TLS. A non-443 port that nevertheless terminates TLS
+// is unusual; in that case the operator should put the terminator on
+// :443 (and advertise `publicHost: name:443`).
+export function transportFor(port: number): HydraTransport {
+  if (port === TLS_PORT) {
+    return { httpScheme: "https", wsScheme: "wss" };
   }
-  return { httpScheme: "https", wsScheme: "wss" };
+  return { httpScheme: "http", wsScheme: "ws" };
 }
 
 export function parseHydraUrl(input: string): ParsedHydraUrl {
@@ -93,7 +111,7 @@ export function parseHydraUrl(input: string): ParsedHydraUrl {
     }
     port = parsedPort;
   } else {
-    port = loopback ? DEFAULT_DAEMON_PORT : 443;
+    port = DEFAULT_DAEMON_PORT;
   }
   const rawPath = parsedAsHttp.pathname.replace(/^\/+/, "");
   const sessionId = rawPath === "" ? undefined : rawPath;
@@ -102,17 +120,16 @@ export function parseHydraUrl(input: string): ParsedHydraUrl {
 
 // Inverse of parseHydraUrl. Used by `hydra session share` to print a
 // URL the user can paste into `hydra session attach`. Omits the port
-// when it matches the default for the chosen transport so URLs stay
-// short for the common cases (loopback :55514, public :443).
+// only when it matches DEFAULT_DAEMON_PORT — every other port,
+// including :443 for a TLS-fronted tunnel, is rendered explicitly so
+// the recipient gets the transport right on first attach.
 export function formatHydraUrl(parts: {
   host: string;
   port?: number;
   sessionId?: string;
 }): string {
-  const loopback = isLoopbackHost(parts.host);
-  const defaultPort = loopback ? DEFAULT_DAEMON_PORT : 443;
   const portSuffix =
-    parts.port !== undefined && parts.port !== defaultPort
+    parts.port !== undefined && parts.port !== DEFAULT_DAEMON_PORT
       ? `:${parts.port}`
       : "";
   const pathSuffix = parts.sessionId ? `/${parts.sessionId}` : "/";
