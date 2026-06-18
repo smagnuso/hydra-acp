@@ -83,23 +83,23 @@ describe("isLoopbackHost", () => {
 });
 
 describe("transportFor", () => {
-  it("uses plain http/ws for the daemon's native port", () => {
-    expect(transportFor(DEFAULT_DAEMON_PORT)).toEqual({
-      httpScheme: "http",
-      wsScheme: "ws",
-    });
-  });
-
-  it("uses https/wss for :443 (TLS-fronted tunnel)", () => {
-    expect(transportFor(443)).toEqual({
+  // hydra:// is unconditionally TLS; the daemon's only external
+  // listener is its TLS terminator. Loopback URLs are short-circuited
+  // upstream so this function never sees them in practice; the rule
+  // here is still https/wss for everything.
+  it("always reports https/wss", () => {
+    expect(transportFor("abc.ngrok.app")).toEqual({
       httpScheme: "https",
       wsScheme: "wss",
     });
-  });
-
-  it("treats every other port as plain HTTP", () => {
-    expect(transportFor(8080)).toEqual({ httpScheme: "http", wsScheme: "ws" });
-    expect(transportFor(7000)).toEqual({ httpScheme: "http", wsScheme: "ws" });
+    expect(transportFor("blackbox.local")).toEqual({
+      httpScheme: "https",
+      wsScheme: "wss",
+    });
+    expect(transportFor("127.0.0.1")).toEqual({
+      httpScheme: "https",
+      wsScheme: "wss",
+    });
   });
 });
 

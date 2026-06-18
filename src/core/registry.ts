@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { z } from "zod";
 import { paths } from "./paths.js";
-import type { HydraConfig } from "./config.js";
+import { expandHome, type HydraConfig } from "./config.js";
 import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
 import {
   currentPlatformKey,
@@ -189,6 +189,8 @@ export class Registry {
 
   // Synthesize RegistryAgent entries from config.agents. These carry an
   // `exec` distribution and a fixed "local" version key (no install dir).
+  // `~/...` and `$HOME/...` are expanded in the command and args so users
+  // can write portable entries pointing at scripts under their home dir.
   localAgents(): RegistryAgent[] {
     return Object.entries(this.config.agents ?? {}).map(([id, def]) => ({
       id,
@@ -199,8 +201,8 @@ export class Registry {
         exec: {
           // Default the command to the agent id (like extensions default
           // theirs to the extension name) — resolved off PATH at spawn.
-          command: def.command ?? id,
-          args: def.args,
+          command: expandHome(def.command ?? id),
+          args: def.args?.map(expandHome),
           env: def.env,
         },
       },

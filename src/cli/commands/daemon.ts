@@ -1,7 +1,11 @@
-import * as fsp from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import chalk from "chalk";
 import { paths } from "../../core/paths.js";
+import {
+  isProcessAlive,
+  readDaemonPidFile,
+  type DaemonPidInfo,
+} from "../../core/daemon-pidfile.js";
 import { loadConfig } from "../../core/config.js";
 import { ensureServiceToken } from "../../core/service-token.js";
 import { startDaemon } from "../../daemon/server.js";
@@ -198,31 +202,8 @@ export async function runDaemonStatus(): Promise<void> {
   }
 }
 
-interface PidInfo {
-  pid: number;
-  host: string;
-  port: number;
-  startedAt: string;
-}
+type PidInfo = DaemonPidInfo;
 
 async function readPidFile(): Promise<PidInfo | undefined> {
-  try {
-    const raw = await fsp.readFile(paths.pidFile(), "utf8");
-    return JSON.parse(raw) as PidInfo;
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
-      return undefined;
-    }
-    throw err;
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return readDaemonPidFile();
 }

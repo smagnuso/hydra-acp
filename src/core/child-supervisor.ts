@@ -4,6 +4,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { ProcessTokenRegistry } from "../daemon/auth.js";
 import { RestartBreaker, type BreakerOptions } from "./restart-breaker.js";
+import { expandHome } from "./config.js";
 
 // Shared lifecycle for daemon-supervised child processes (extensions and
 // transformers). Each kind passes a SupervisorAdapter for the bits that
@@ -477,15 +478,19 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       ...cfg.env,
     };
 
-    const [cmd, ...baseArgs] = command;
-    if (cmd === undefined) {
+    const [rawCmd, ...baseArgs] = command;
+    if (rawCmd === undefined) {
       logStream.write(
         `[hydra-acp] ${this.adapter.kind} ${cfg.name} has empty command\n`,
       );
       logStream.end();
       return;
     }
-    const args = [...baseArgs, ...cfg.args];
+    // Expand `~/...` / `$HOME/...` in the executable path and any
+    // string-valued argument so users can write portable config
+    // entries like `command: ["~/bin/wrapper.sh"]`.
+    const cmd = expandHome(rawCmd);
+    const args = [...baseArgs, ...cfg.args].map(expandHome);
 
     let child: ChildProcess;
     try {

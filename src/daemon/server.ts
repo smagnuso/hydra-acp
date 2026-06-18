@@ -1,11 +1,18 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as net from "node:net";
+import * as tls from "node:tls";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocketPlugin from "@fastify/websocket";
 import { selectAcpSubprotocol } from "./ws-protocol.js";
 import pino, { type Level } from "pino";
 import createPinoRoll from "pino-roll";
-import { type HydraConfig, extensionList, transformerList } from "../core/config.js";
+import {
+  expandHome,
+  type HydraConfig,
+  extensionList,
+  transformerList,
+} from "../core/config.js";
 import { setToolBlobCompression } from "../core/tool-store.js";
 import { Registry } from "../core/registry.js";
 import { AgentInstance } from "../core/agent-instance.js";
@@ -14,6 +21,7 @@ import { ExtensionManager } from "../core/extensions.js";
 import { TransformerManager } from "../core/transformer-manager.js";
 import { ExtensionCommandRegistry } from "../core/extension-commands.js";
 import { paths } from "../core/paths.js";
+import { writeDaemonPidFile } from "../core/daemon-pidfile.js";
 import { setBinaryInstallLogger } from "../core/binary-install.js";
 import { setNpmInstallLogger } from "../core/npm-install.js";
 import {
@@ -73,11 +81,19 @@ export async function startDaemon(
 ): Promise<DaemonHandle> {
   ensureLoopbackOrTls(config);
 
-  const httpsOptions = config.daemon.tls
-    ? {
-        key: await fsp.readFile(config.daemon.tls.key),
-        cert: await fsp.readFile(config.daemon.tls.cert),
-      }
+  // ~/.hydra-acp/tls/cert.pem etc. — expand leading ~ / $HOME so a
+  // portable config.json works regardless of the user's home dir.
+  // The cert/key are NOT handed to Fastify directly; Fastify always
+  // speaks plain HTTP so co-resident extensions can dial it without
+  // any TLS trust story. When TLS is configured, a bare TCP-level
+  // tls.Server (set up further down) terminates TLS on the public
+  // interface and pipes decrypted bytes to the plain Fastify on a
+  // loopback ephemeral port.
+  const tlsKey = config.daemon.tls
+    ? await fsp.readFile(expandHome(config.daemon.tls.key))
+    : undefined;
+  const tlsCert = config.daemon.tls
+    ? await fsp.readFile(expandHome(config.daemon.tls.cert))
     : undefined;
 
   await fsp.mkdir(paths.home(), { recursive: true });
@@ -90,7 +106,6 @@ export async function startDaemon(
       level: config.daemon.logLevel,
       stream: logStream,
     },
-    https: httpsOptions ?? null,
     // Session bundles can be large (full history + tool output);
     // the 1MB Fastify default rejects ordinary imports.
     bodyLimit: 256 * 1024 * 1024,
@@ -209,9 +224,10 @@ export async function startDaemon(
   registerHealthRoutes(app, HYDRA_VERSION, computeConfigDigest(config));
   const mcpTokenRegistry = new McpTokenRegistry();
   const extensionMcp = new ExtensionMcpRegistry();
-  // Captured lazily by handlers that need to mint MCP descriptors. The
-  // bound port isn't known until app.listen() completes below, so we
-  // defer composition until request time.
+  // Captured lazily by handlers that need to mint MCP descriptors.
+  // MCP servers run as co-resident extensions, so we hand them the
+  // plain-HTTP loopback URL — same reason we point extensions there:
+  // no TLS trust story to inherit.
   let daemonOriginCached: string | undefined;
   const getDaemonOrigin = (): string => {
     if (daemonOriginCached !== undefined) {
@@ -220,8 +236,7 @@ export async function startDaemon(
     const addr = app.server.address();
     const port =
       addr && typeof addr === "object" ? addr.port : config.daemon.port;
-    const scheme = config.daemon.tls ? "https" : "http";
-    daemonOriginCached = `${scheme}://${config.daemon.host}:${port}`;
+    daemonOriginCached = `http://127.0.0.1:${port}`;
     return daemonOriginCached;
   };
   registerSessionRoutes(
@@ -274,32 +289,62 @@ export async function startDaemon(
     registry,
   });
 
-  await app.listen({ host: config.daemon.host, port: config.daemon.port });
+  // Plain-HTTP listener placement:
+  //   - TLS configured  → Fastify on 127.0.0.1:<ephemeral>, and a TCP-
+  //                       level TLS terminator on config.daemon.host:
+  //                       config.daemon.port forwards decrypted bytes
+  //                       to it. Co-resident extensions dial the
+  //                       loopback ephemeral URL and never see TLS.
+  //   - TLS not set     → Fastify on config.daemon.host:config.daemon.port
+  //                       as before. ensureLoopbackOrTls keeps this from
+  //                       binding a wildcard without TLS.
+  const tlsConfigured = !!config.daemon.tls;
+  await app.listen({
+    host: tlsConfigured ? "127.0.0.1" : config.daemon.host,
+    port: tlsConfigured ? 0 : config.daemon.port,
+  });
 
-  const address = app.server.address();
-  const boundPort =
-    address && typeof address === "object" ? address.port : config.daemon.port;
+  const plainAddress = app.server.address();
+  const plainBoundPort =
+    plainAddress && typeof plainAddress === "object"
+      ? plainAddress.port
+      : config.daemon.port;
+
+  let tlsTerminator: tls.Server | undefined;
+  let publicHost = config.daemon.host;
+  let publicPort = plainBoundPort;
+  if (tlsConfigured && tlsKey && tlsCert) {
+    tlsTerminator = startTlsTerminator({
+      listenHost: config.daemon.host,
+      listenPort: config.daemon.port,
+      upstreamHost: "127.0.0.1",
+      upstreamPort: plainBoundPort,
+      tlsOptions: { key: tlsKey, cert: tlsCert },
+      logger: app.log,
+    });
+    const addr = tlsTerminator.address();
+    if (addr && typeof addr === "object") {
+      publicPort = addr.port;
+    }
+  }
 
   await fsp.mkdir(paths.home(), { recursive: true });
-  await fsp.writeFile(
-    paths.pidFile(),
-    JSON.stringify({
-      pid: process.pid,
-      host: config.daemon.host,
-      port: boundPort,
-      startedAt: new Date().toISOString(),
-    }) + "\n",
-    { encoding: "utf8", mode: 0o600 },
-  );
+  await writeDaemonPidFile({
+    pid: process.pid,
+    host: publicHost,
+    port: publicPort,
+    loopbackPort: plainBoundPort,
+    startedAt: new Date().toISOString(),
+  });
 
-  const scheme = config.daemon.tls ? "https" : "http";
-  const wsScheme = config.daemon.tls ? "wss" : "ws";
+  // Children always dial plain HTTP on loopback — no TLS trust story
+  // for them to inherit, regardless of what the public listener does.
   const processContext = {
-    daemonUrl: `${scheme}://${config.daemon.host}:${boundPort}`,
-    daemonHost: config.daemon.host,
-    daemonPort: boundPort,
+    daemonUrl: `http://127.0.0.1:${plainBoundPort}`,
+    daemonHost: "127.0.0.1",
+    daemonPort: plainBoundPort,
     serviceToken,
-    daemonWsUrl: `${wsScheme}://${config.daemon.host}:${boundPort}/acp`,
+    daemonWsUrl: `ws://127.0.0.1:${plainBoundPort}/acp`,
     hydraHome: paths.home(),
   };
   extensions.setContext(processContext);
@@ -400,6 +445,13 @@ export async function startDaemon(
     setBinaryInstallLogger(null);
     setNpmInstallLogger(null);
     setAgentPruneLogger(null);
+    if (tlsTerminator) {
+      await safeStep("tlsTerminator.close", () =>
+        new Promise<void>((resolve) =>
+          tlsTerminator!.close(() => resolve()),
+        ),
+      );
+    }
     await safeStep("app.close", () => app.close());
     try {
       fs.unlinkSync(paths.pidFile());
@@ -436,6 +488,65 @@ async function buildLogStream(level: string) {
     { stream: stderrStream, level: level as Level },
   ]);
   return { stream, fileStream };
+}
+
+// TCP-level TLS terminator. Accepts TLS connections on (listenHost,
+// listenPort), opens a plain TCP connection to (upstreamHost,
+// upstreamPort), and pipes decrypted bytes between them. HTTP and
+// WebSocket upgrades both pass through transparently because the
+// forwarder doesn't speak HTTP — it just shuttles raw bytes after
+// the TLS handshake completes. Used so co-resident extensions can
+// dial a plain-HTTP Fastify on loopback while off-box clients still
+// reach a TLS endpoint on the configured public address.
+interface TlsTerminatorOptions {
+  listenHost: string;
+  listenPort: number;
+  upstreamHost: string;
+  upstreamPort: number;
+  tlsOptions: tls.SecureContextOptions;
+  logger: { warn: (msg: string) => void };
+}
+
+function startTlsTerminator(opts: TlsTerminatorOptions): tls.Server {
+  const server = tls.createServer(opts.tlsOptions, (clientSocket) => {
+    const upstream = net.connect({
+      host: opts.upstreamHost,
+      port: opts.upstreamPort,
+    });
+    let closed = false;
+    const teardown = (err?: Error): void => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (err) {
+        opts.logger.warn(
+          `tls terminator forwarder error: ${err.message ?? String(err)}`,
+        );
+      }
+      try {
+        clientSocket.destroy();
+      } catch {
+        // best effort
+      }
+      try {
+        upstream.destroy();
+      } catch {
+        // best effort
+      }
+    };
+    clientSocket.on("error", teardown);
+    upstream.on("error", teardown);
+    clientSocket.on("close", () => teardown());
+    upstream.on("close", () => teardown());
+    clientSocket.pipe(upstream);
+    upstream.pipe(clientSocket);
+  });
+  server.on("tlsClientError", (err) => {
+    opts.logger.warn(`tls handshake error: ${err.message}`);
+  });
+  server.listen({ host: opts.listenHost, port: opts.listenPort });
+  return server;
 }
 
 function ensureLoopbackOrTls(config: HydraConfig): void {

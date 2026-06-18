@@ -7,15 +7,6 @@
 
 import { DEFAULT_DAEMON_PORT } from "./config.js";
 
-// The well-known TLS port. When a hydra:// URL points at this port we
-// assume the daemon is fronted by a TLS terminator (ngrok, Tailscale
-// Funnel, an nginx in front of a VPS, …) and switch the client to
-// https/wss. Every other port is treated as plain HTTP, including the
-// canonical daemon port — that's why a bare LAN URL like
-// `hydra://blackbox.local/<id>` Just Works against the daemon's
-// default :55514.
-export const TLS_PORT = 443;
-
 export interface ParsedHydraUrl {
   // Raw hostname from the URL, with no brackets for IPv6 literals.
   host: string;
@@ -52,18 +43,14 @@ export function isLoopbackHost(host: string): boolean {
   );
 }
 
-// Scheme is tied to port, not host: :443 → TLS, anything else →
-// plain. This matches universal web convention (a tunnel/proxy that
-// terminates TLS lives on :443; the daemon's native :55514 is plain
-// HTTP) and lets LAN deployments like `hydra://blackbox.local/<id>`
-// work without TLS. A non-443 port that nevertheless terminates TLS
-// is unusual; in that case the operator should put the terminator on
-// :443 (and advertise `publicHost: name:443`).
-export function transportFor(port: number): HydraTransport {
-  if (port === TLS_PORT) {
-    return { httpScheme: "https", wsScheme: "wss" };
-  }
-  return { httpScheme: "http", wsScheme: "ws" };
+// `hydra://` always means TLS. The daemon's only external listener
+// is its TLS terminator; plain HTTP is loopback-only, internal to
+// the box, never advertised via a hydra:// URL. Loopback URLs are
+// handled by short-circuiting upstream (resolveRemoteTarget swaps in
+// the pidfile's plain-HTTP loopback port for `hydra://127.0.0.1/...`),
+// so this function unconditionally reports https/wss.
+export function transportFor(_host: string): HydraTransport {
+  return { httpScheme: "https", wsScheme: "wss" };
 }
 
 export function parseHydraUrl(input: string): ParsedHydraUrl {

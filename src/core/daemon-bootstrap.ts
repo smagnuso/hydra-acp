@@ -3,6 +3,24 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { invokedBinName } from "./bin-name.js";
 import type { HydraConfig } from "./config.js";
 import { computeConfigDigest } from "./config-digest.js";
+import { isProcessAlive, readDaemonPidFile } from "./daemon-pidfile.js";
+
+// Read the daemon's pidfile to learn the plain-HTTP loopback URL it's
+// serving on. Returns undefined when no daemon is running (pidfile
+// absent or pid is dead). Co-resident callers dial this URL directly;
+// it's always plain HTTP on 127.0.0.1 so no TLS trust story is needed
+// even when the daemon also exposes a TLS terminator for off-box
+// clients.
+async function loopbackHealthUrl(): Promise<string | undefined> {
+  const info = await readDaemonPidFile();
+  if (!info) {
+    return undefined;
+  }
+  if (!isProcessAlive(info.pid)) {
+    return undefined;
+  }
+  return `http://127.0.0.1:${info.loopbackPort}/v1/health`;
+}
 
 // Result of probing the daemon port against our local config.
 //   "match"    — a daemon answered and its configDigest equals ours;
@@ -45,9 +63,11 @@ export async function ensureDaemonReachable(config: HydraConfig): Promise<void> 
   await waitForDaemonReady(config);
 }
 
-export async function pingHealth(config: HydraConfig): Promise<boolean> {
-  const protocol = config.daemon.tls ? "https" : "http";
-  const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/v1/health`;
+export async function pingHealth(_config: HydraConfig): Promise<boolean> {
+  const url = await loopbackHealthUrl();
+  if (!url) {
+    return false;
+  }
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(500),
@@ -65,11 +85,13 @@ export interface DaemonHealth {
 }
 
 export async function fetchDaemonHealth(
-  config: HydraConfig,
+  _config: HydraConfig,
   timeoutMs = 1_000,
 ): Promise<DaemonHealth | undefined> {
-  const protocol = config.daemon.tls ? "https" : "http";
-  const url = `${protocol}://${config.daemon.host}:${config.daemon.port}/v1/health`;
+  const url = await loopbackHealthUrl();
+  if (!url) {
+    return undefined;
+  }
   try {
     // Connection: close prevents undici from pooling the socket on
     // keep-alive. The post-TUI exit path calls this right before

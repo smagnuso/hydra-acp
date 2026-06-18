@@ -7,7 +7,8 @@
 // path via the `ancillary` flag.
 
 import { EventEmitter } from "node:events";
-import { WebSocket } from "ws";
+import { WebSocket, type ClientOptions } from "ws";
+import { wsTlsOptions } from "../../core/tls-trust.js";
 import type { MessageStream } from "../../acp/framing.js";
 import type { RemoteTarget } from "../../core/remote-target.js";
 import { forkSession, killSession } from "../discovery.js";
@@ -49,8 +50,24 @@ function defaultOpenWs(
   url: string,
   subprotocols: string[],
 ): Promise<MessageStream> {
+  const tlsOpts: ClientOptions = {};
+  try {
+    const u = new URL(url);
+    if (u.protocol === "wss:") {
+      const pin = wsTlsOptions(u.hostname);
+      if (pin.rejectUnauthorized !== undefined) {
+        tlsOpts.rejectUnauthorized = pin.rejectUnauthorized;
+      }
+      if (pin.checkServerIdentity !== undefined) {
+        tlsOpts.checkServerIdentity =
+          pin.checkServerIdentity as unknown as ClientOptions["checkServerIdentity"];
+      }
+    }
+  } catch {
+    // malformed url — ws will surface the error
+  }
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, subprotocols);
+    const ws = new WebSocket(url, subprotocols, tlsOpts);
     const onOpen = (): void => {
       ws.off("error", onError);
       resolve(wsToMessageStream(ws));

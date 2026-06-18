@@ -114,6 +114,12 @@ function warnIfDangerouslySkipping(active: boolean): void {
 }
 
 async function main(): Promise<void> {
+  // Install our pin-aware undici dispatcher up front so every fetch()
+  // — local daemon probes, `hydra extension`, remote attach, etc. —
+  // benefits from loopback-bypass and TOFU pin verification without
+  // each call site having to opt in.
+  const { installGlobalTlsTrust } = await import("./core/tls-trust.js");
+  installGlobalTlsTrust();
   const argv = process.argv.slice(2);
 
   const launchIdx = argv.indexOf("launch");

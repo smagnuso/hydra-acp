@@ -17,7 +17,10 @@ import {
   AGENT_INSTALL_PROGRESS_METHOD,
   AgentInstallProgressParams,
 } from "../acp/types.js";
-import { ResilientWsStream } from "../shim/resilient-ws.js";
+import {
+  ResilientWsStream,
+  type ResilientWsUrl,
+} from "../shim/resilient-ws.js";
 import {
   loadConfig,
   expandHome,
@@ -680,7 +683,16 @@ async function runSession(
   const installStatus = createInstallStatusLine(term, launchLabelBase);
   installStatus.write(launchLabelBase);
 
-  const wsUrl = target.wsUrl;
+  // For local targets the URL embeds the daemon's plain-HTTP loopback
+  // port — an ephemeral that changes across `daemon restart`. Pass a
+  // resolver so each reconnect re-reads the pidfile and picks up the
+  // current port. Remote targets stay with a fixed URL.
+  const wsUrl: ResilientWsUrl = target.isLocal
+    ? async (): Promise<string> => {
+        const fresh = await resolveLocalTarget(await loadConfig());
+        return fresh.wsUrl;
+      }
+    : target.wsUrl;
   const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];
   // Forward-declared so the resilient stream's onConnect/onDisconnect
   // hooks (which fire before the Screen is built on first connect) can

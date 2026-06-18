@@ -1,8 +1,14 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_DAEMON_PORT, loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
-import { daemonFetch, formatRelative, httpBase } from "./_shared.js";
+import {
+  daemonFetch,
+  formatRelative,
+  httpBase,
+  localDaemonBaseUrl,
+} from "./_shared.js";
 import { resolveLocalTarget } from "../../core/remote-target.js";
 import { formatHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
 import { stripHydraSessionPrefix } from "../../core/session.js";
@@ -264,9 +270,8 @@ export async function runSessionsExport(
     );
     process.exit(2);
   }
-  const config = await loadConfig();
   const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+  const baseUrl = await localDaemonBaseUrl();
   // `--tools summary` trims tool diff bodies / stdout from the bundle;
   // default (inline) is the full recorded history.
   const query = tools === "summary" ? "?tools=summary" : "";
@@ -320,9 +325,8 @@ export async function runSessionsTranscript(
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     defaultName = `${path.basename(idOrFile, path.extname(idOrFile))}-${stamp}.md`;
   } else {
-    const config = await loadConfig();
     const serviceToken = await loadServiceToken();
-    const baseUrl = httpBase(config.daemon.host, config.daemon.port, !!config.daemon.tls);
+    const baseUrl = await localDaemonBaseUrl();
     const response = await fetch(
       `${baseUrl}/v1/sessions/${encodeURIComponent(idOrFile)}/transcript`,
       {
@@ -589,9 +593,17 @@ export async function runSessionsShare(
 //      to the daemon's native port when not specified; a TLS-fronted
 //      tunnel deployment writes `:443` explicitly.
 //   2. config.daemon.publicHost — same shape, same default.
-//   3. config.daemon.host (when non-loopback) — direct connection, so
-//      use the daemon's actual bound port.
-//   4. "127.0.0.1" + the daemon's port (with isFallback=true).
+//   3. config.daemon.host when it's a real hostname / IP — direct
+//      connection, use the daemon's actual bound port.
+//   4. Wildcard bind (0.0.0.0 / ::) → guess the machine's mDNS name
+//      via os.hostname() (appending `.local` when missing). The user
+//      explicitly wanted LAN access; advertising the wildcard is
+//      useless to recipients, but the mDNS name almost always works
+//      on the same LAN. Not flagged as a fallback — it's the
+//      intended share form on a wildcard bind.
+//   5. Otherwise (loopback bind) "127.0.0.1" + the daemon's port,
+//      with isFallback=true so the caller can warn that the URL is
+//      same-machine only.
 // Either of #1 or #2 may carry an explicit ":port" suffix, which wins
 // over the default.
 function resolveShareHost(
@@ -606,10 +618,34 @@ function resolveShareHost(
     const { host, port } = splitHostPort(config.daemon.publicHost, DEFAULT_DAEMON_PORT);
     return { host, port, isFallback: false };
   }
+  if (isWildcardHost(config.daemon.host)) {
+    return { host: mdnsHostname(), port: config.daemon.port, isFallback: false };
+  }
   if (!isLoopbackHost(config.daemon.host)) {
     return { host: config.daemon.host, port: config.daemon.port, isFallback: false };
   }
   return { host: "127.0.0.1", port: config.daemon.port, isFallback: true };
+}
+
+function isWildcardHost(host: string): boolean {
+  return host === "0.0.0.0" || host === "::" || host === "0.0.0.0/0";
+}
+
+// Best-effort guess at a LAN-reachable name for this machine. On most
+// systems (macOS via Bonjour, Linux via Avahi, Windows with mDNS
+// enabled) the machine answers to `<hostname>.local`. We append the
+// `.local` suffix only when os.hostname() returns a bare label —
+// FQDNs and already-suffixed names pass through unchanged so a host
+// with a real DNS entry doesn't get a stray `.local` glued on.
+function mdnsHostname(): string {
+  const raw = os.hostname();
+  if (!raw || raw.length === 0) {
+    return "127.0.0.1";
+  }
+  if (raw.includes(".")) {
+    return raw;
+  }
+  return `${raw}.local`;
 }
 
 // Parse a "host:port" or bare "host" value, returning the explicit

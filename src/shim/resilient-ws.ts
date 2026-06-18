@@ -9,8 +9,18 @@ import {
   type JsonRpcResponse,
 } from "../acp/types.js";
 
+// The dial URL can be either a fixed string or a resolver that's
+// invoked on every reconnect attempt. The resolver form is for the
+// local-attach case where the daemon's plain-HTTP loopback Fastify
+// lives on an ephemeral port that changes across restarts — the
+// resolver re-reads the pidfile each time so a `hydra daemon
+// restart` doesn't strand the live TUI's reconnect loop.
+export type ResilientWsUrl =
+  | string
+  | (() => string | Promise<string>);
+
 export interface ResilientWsOptions {
-  url: string;
+  url: ResilientWsUrl;
   subprotocols: string[];
   // onConnect runs after WS open. During its execution, regular send() is
   // gated (queued) and the queued downstream backlog is held back; use
@@ -148,7 +158,11 @@ export class ResilientWsStream implements MessageStream {
     let backoff = BACKOFF_INITIAL_MS;
     while (!this.destroyed) {
       try {
-        const ws = await openWs(this.opts.url, this.opts.subprotocols);
+        const url =
+          typeof this.opts.url === "function"
+            ? await this.opts.url()
+            : this.opts.url;
+        const ws = await openWs(url, this.opts.subprotocols);
         this.bindStream(wsToMessageStream(ws));
         const wasFirst = this.firstConnect;
         this.firstConnect = false;

@@ -2,7 +2,7 @@ import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { fetchDaemonHealth } from "../../core/daemon-bootstrap.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
-import { httpBase } from "./_shared.js";
+import { localDaemonBaseUrl } from "./_shared.js";
 
 interface ComponentInfo {
   name: string;
@@ -88,11 +88,7 @@ async function collectVersionReport(): Promise<{
   } catch {
     return { report, configLoaded: true };
   }
-  const baseUrl = httpBase(
-    config.daemon.host,
-    config.daemon.port,
-    !!config.daemon.tls,
-  );
+  const baseUrl = await localDaemonBaseUrl();
   const auth = { Authorization: `Bearer ${serviceToken}` };
   report.extensions = await fetchComponents(
     `${baseUrl}/v1/extensions`,

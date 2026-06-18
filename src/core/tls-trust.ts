@@ -143,13 +143,14 @@ export function installGlobalTlsTrust(): void {
     new Agent({
       connect: (opts, cb) => {
         const host = String(opts.hostname ?? opts.host ?? "");
-        const isPinned = hasPinForHost(host);
-        const connect = isPinned ? pinnedConnect : defaultConnect;
+        const connect = hasPinForHost(host) ? pinnedConnect : defaultConnect;
         return connect(opts, cb);
       },
     }),
   );
 }
+
+
 
 // Pin lookup is by host alone (not host:port) because the TLS layer
 // doesn't surface the port in checkServerIdentity callbacks. If two

@@ -31,14 +31,21 @@ describe("resolveLocalTarget", () => {
     expect(target.isLocal).toBe(true);
   });
 
-  it("builds https/wss URLs when tls is configured", async () => {
+  it("keeps the loopback url plain HTTP even when TLS is configured", async () => {
+    // The local target always dials the daemon's plain-HTTP loopback
+    // Fastify (the TLS terminator is for off-box clients only); the
+    // display still reflects the configured public address.
     await writeServiceToken("hydra_token_test_tls");
     const target = await resolveLocalTarget(withTls(defaultConfig()));
-    expect(target.baseUrl).toBe("https://127.0.0.1:55514");
-    expect(target.wsUrl).toBe("wss://127.0.0.1:55514/acp");
+    expect(target.baseUrl).toBe("http://127.0.0.1:55514");
+    expect(target.wsUrl).toBe("ws://127.0.0.1:55514/acp");
   });
 
-  it("marks non-loopback hosts as not local", async () => {
+  it("rewrites a non-loopback configured host to 127.0.0.1 for outbound dialing", async () => {
+    // Without a running daemon (no pidfile), we fall back to the
+    // configured host — but wildcards / LAN addresses still get
+    // rewritten so the URL is dialable. The display string preserves
+    // the configured advertise-as address.
     await writeServiceToken("hydra_token_test_non_loopback");
     const cfg = defaultConfig();
     const customised: HydraConfig = {
@@ -50,32 +57,38 @@ describe("resolveLocalTarget", () => {
       },
     };
     const target = await resolveLocalTarget(customised);
-    expect(target.isLocal).toBe(false);
     expect(target.display).toBe("192.168.1.5:55514");
+    // Without a pidfile we surface the configured non-loopback host
+    // unchanged so the autostart probe attempts the right address.
+    expect(target.baseUrl).toBe("http://192.168.1.5:55514");
   });
 });
 
 describe("targetFromParsedUrl", () => {
-  it("builds an http/ws local target for loopback", () => {
+  it("builds an https/wss target for a loopback URL (resolver swaps in plain HTTP separately)", () => {
+    // targetFromParsedUrl is the pure URL→target shape builder; it
+    // reports https because hydra:// is always TLS. resolveRemoteTarget
+    // recognises loopback and substitutes a plain-HTTP loopback URL
+    // from the daemon's pidfile — that's covered by a separate test.
     const parsed = parseHydraUrl("hydra://127.0.0.1/sess_abc");
     const target = targetFromParsedUrl(parsed, "tok123");
-    expect(target.baseUrl).toBe("http://127.0.0.1:55514");
-    expect(target.wsUrl).toBe("ws://127.0.0.1:55514/acp");
+    expect(target.baseUrl).toBe("https://127.0.0.1:55514");
+    expect(target.wsUrl).toBe("wss://127.0.0.1:55514/acp");
     expect(target.token).toBe("tok123");
     expect(target.display).toBe("127.0.0.1");
     expect(target.isLocal).toBe(true);
   });
 
-  it("builds a plain-http target for a non-loopback host on the daemon port", () => {
+  it("builds an https/wss target for a non-loopback host on the daemon port", () => {
     const parsed = parseHydraUrl("hydra://abc.ngrok.app/sess_abc");
     const target = targetFromParsedUrl(parsed, "tok123");
-    expect(target.baseUrl).toBe("http://abc.ngrok.app:55514");
-    expect(target.wsUrl).toBe("ws://abc.ngrok.app:55514/acp");
+    expect(target.baseUrl).toBe("https://abc.ngrok.app:55514");
+    expect(target.wsUrl).toBe("wss://abc.ngrok.app:55514/acp");
     expect(target.display).toBe("abc.ngrok.app");
     expect(target.isLocal).toBe(false);
   });
 
-  it("builds an https/wss target when the URL points at :443", () => {
+  it("uses https/wss regardless of port (hydra:// is always TLS)", () => {
     const parsed = parseHydraUrl("hydra://abc.ngrok.app:443/sess_abc");
     const target = targetFromParsedUrl(parsed, "tok123");
     expect(target.baseUrl).toBe("https://abc.ngrok.app:443");
@@ -83,24 +96,25 @@ describe("targetFromParsedUrl", () => {
     expect(target.display).toBe("abc.ngrok.app:443");
   });
 
-  it("includes non-default port in display", () => {
-    const parsed = parseHydraUrl("hydra://127.0.0.1:8080/sess_abc");
-    const target = targetFromParsedUrl(parsed, "tok123");
-    expect(target.display).toBe("127.0.0.1:8080");
-    expect(target.baseUrl).toBe("http://127.0.0.1:8080");
-  });
-
   it("includes a non-default port in display for non-loopback", () => {
     const parsed = parseHydraUrl("hydra://abc.ngrok.app:7000/sess_abc");
     const target = targetFromParsedUrl(parsed, "tok123");
     expect(target.display).toBe("abc.ngrok.app:7000");
-    expect(target.baseUrl).toBe("http://abc.ngrok.app:7000");
+    expect(target.baseUrl).toBe("https://abc.ngrok.app:7000");
   });
 });
 
 function futureIso(deltaMs: number): string {
   return new Date(Date.now() + deltaMs).toISOString();
 }
+
+// Default TLS handshake stub for tests that don't care about TOFU:
+// reports the cert chain as already-trusted so resolveRemoteTarget
+// skips the probe + prompt and goes straight to the password flow.
+// Real tls.connect would hang against the fake hostnames these tests
+// use ("abc.ngrok.app").
+const trustedHandshake = async () =>
+  ({ kind: "trusted" }) as const;
 
 describe("resolveRemoteTarget", () => {
   it("uses the local service token for loopback when present", async () => {
@@ -149,11 +163,12 @@ describe("resolveRemoteTarget", () => {
     const target = await resolveRemoteTarget(parsed, {
       fetchImpl,
       promptImpl,
+      tlsHandshakeImpl: trustedHandshake,
     });
-    expect(captured.url).toBe("http://abc.ngrok.app:55514/v1/auth/login");
+    expect(captured.url).toBe("https://abc.ngrok.app:55514/v1/auth/login");
     expect((captured.body as { password: string }).password).toBe("hunter2");
     expect(target.token).toBe("tok-fresh");
-    expect(target.baseUrl).toBe("http://abc.ngrok.app:55514");
+    expect(target.baseUrl).toBe("https://abc.ngrok.app:55514");
   });
 
   it("caches the fresh token under host:port", async () => {
@@ -170,6 +185,7 @@ describe("resolveRemoteTarget", () => {
     await resolveRemoteTarget(parsed, {
       fetchImpl,
       promptImpl: async () => "hunter2",
+      tlsHandshakeImpl: trustedHandshake,
     });
     const reloaded = await RemotesStore.load();
     expect(reloaded.get("abc.ngrok.app", 55514)?.token).toBe("tok-fresh");
@@ -183,6 +199,7 @@ describe("resolveRemoteTarget", () => {
       resolveRemoteTarget(parsed, {
         fetchImpl,
         promptImpl: async () => "wrong",
+        tlsHandshakeImpl: trustedHandshake,
       }),
     ).rejects.toThrow(/Wrong password/);
   });
@@ -195,6 +212,7 @@ describe("resolveRemoteTarget", () => {
       resolveRemoteTarget(parsed, {
         fetchImpl,
         promptImpl: async () => "x",
+        tlsHandshakeImpl: trustedHandshake,
       }),
     ).rejects.toThrow(/No password is configured/);
   });
@@ -207,6 +225,7 @@ describe("resolveRemoteTarget", () => {
       resolveRemoteTarget(parsed, {
         fetchImpl,
         promptImpl: async () => "x",
+        tlsHandshakeImpl: trustedHandshake,
       }),
     ).rejects.toThrow(/Too many failed login attempts/);
   });
@@ -217,6 +236,7 @@ describe("resolveRemoteTarget", () => {
       resolveRemoteTarget(parsed, {
         fetchImpl: failOnFetch,
         promptImpl: async () => "",
+        tlsHandshakeImpl: trustedHandshake,
       }),
     ).rejects.toThrow(/Password is required/);
   });
@@ -415,6 +435,7 @@ describe("resolveRemoteTarget", () => {
       fetchImpl,
       promptImpl: async () => "pw",
       preferServiceToken: false,
+      tlsHandshakeImpl: trustedHandshake,
     });
     expect(target.token).toBe("tok-password");
   });

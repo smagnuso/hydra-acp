@@ -20,6 +20,7 @@ import {
 import { RemotesStore } from "./remotes-store.js";
 import { promptPassword } from "./prompt-password.js";
 import { invokedBinName } from "./bin-name.js";
+import { isProcessAlive, readDaemonPidFile } from "./daemon-pidfile.js";
 import {
   fetchPeerFingerprint,
   formatFingerprint,
@@ -62,17 +63,40 @@ export async function resolveLocalTarget(
   config: HydraConfig,
 ): Promise<RemoteTarget> {
   const token = await ensureServiceToken();
-  const host = config.daemon.host;
+  // Prefer the pidfile-reported loopback port. The daemon may be
+  // bound on a wildcard with TLS in front for off-box clients; the
+  // plain-HTTP loopback Fastify lives on an ephemeral port that's
+  // only discoverable via the pidfile. Falling back to the
+  // configured host:port keeps us working before the daemon has
+  // written its pidfile (e.g. the autostart path probing whether
+  // there's anything to talk to).
+  const info = await readDaemonPidFile();
+  if (info && isProcessAlive(info.pid)) {
+    return {
+      baseUrl: `http://127.0.0.1:${info.loopbackPort}`,
+      wsUrl: `ws://127.0.0.1:${info.loopbackPort}/acp`,
+      token,
+      display: `${info.host}:${info.port}`,
+      isLocal: true,
+    };
+  }
+  const configuredHost = config.daemon.host;
+  const dialHost =
+    configuredHost === "0.0.0.0" ||
+    configuredHost === "::" ||
+    configuredHost === "0.0.0.0/0"
+      ? "127.0.0.1"
+      : configuredHost;
   const port = config.daemon.port;
-  const tls = !!config.daemon.tls;
-  const httpScheme = tls ? "https" : "http";
-  const wsScheme = tls ? "wss" : "ws";
+  // No pidfile → daemon not running. Synthesize a plain-HTTP URL
+  // for the autostart-and-probe loop; once the daemon writes its
+  // pidfile this branch is never taken again.
   return {
-    baseUrl: `${httpScheme}://${host}:${port}`,
-    wsUrl: `${wsScheme}://${host}:${port}/acp`,
+    baseUrl: `http://${dialHost}:${port}`,
+    wsUrl: `ws://${dialHost}:${port}/acp`,
     token,
-    display: `${host}:${port}`,
-    isLocal: isLoopbackHost(host),
+    display: `${configuredHost}:${port}`,
+    isLocal: isLoopbackHost(dialHost),
   };
 }
 
@@ -86,7 +110,7 @@ export function targetFromParsedUrl(
   parsed: ParsedHydraUrl,
   token: string,
 ): RemoteTarget {
-  const { httpScheme, wsScheme } = transportFor(parsed.port);
+  const { httpScheme, wsScheme } = transportFor(parsed.host);
   return {
     baseUrl: `${httpScheme}://${parsed.host}:${parsed.port}`,
     wsUrl: `${wsScheme}://${parsed.host}:${parsed.port}/acp`,
@@ -176,12 +200,17 @@ export async function resolveRemoteTarget(
   const preferServiceToken = deps.preferServiceToken ?? true;
   const allowPrompt = deps.allowPrompt ?? true;
 
-  // Loopback shortcut: same-machine attach reuses the service token
-  // so a user who set up the daemon doesn't have to set a password.
+  // Loopback shortcut: a `hydra://127.0.0.1/<id>` URL is a same-box
+  // attach. The TLS terminator does bind loopback, but routing
+  // through it (a) requires the cert to cover 127.0.0.1 and (b) is
+  // wasteful for a connection that never leaves the kernel. Swap in
+  // the daemon's plain-HTTP loopback URL (from the pidfile) so the
+  // attach Just Works regardless of TLS config — same behavior as
+  // bare `--session <id>`.
   if (parsed.isLoopback && preferServiceToken) {
     const serviceToken = await readServiceToken();
     if (serviceToken) {
-      return targetFromParsedUrl(parsed, serviceToken);
+      return loopbackTargetForUrl(parsed, serviceToken);
     }
   }
 
@@ -209,7 +238,7 @@ export async function resolveRemoteTarget(
   }
 
   const display = displayFor(parsed);
-  const { httpScheme } = transportFor(parsed.port);
+  const { httpScheme } = transportFor(parsed.host);
 
   // TOFU step: if we're about to talk TLS to a host we've never seen,
   // try a chain-validating probe first. If it fails specifically
@@ -388,6 +417,30 @@ function formatDn(dn: Record<string, string | string[]> | undefined): string {
     parts.push(`${k}=${value}`);
   }
   return parts.join(", ");
+}
+
+// Build a loopback target from a `hydra://127.0.0.1/<id>` URL,
+// consulting the pidfile so we land on the plain-HTTP ephemeral
+// port the daemon's Fastify actually serves. Falls back to the
+// parsed URL's port when the pidfile is missing (so the autostart
+// path during boot still finds something to dial).
+async function loopbackTargetForUrl(
+  parsed: ParsedHydraUrl,
+  token: string,
+): Promise<RemoteTarget> {
+  const info = await readDaemonPidFile();
+  const alive = info && isProcessAlive(info.pid);
+  const port = alive ? info.loopbackPort : parsed.port;
+  const display = parsed.port === DEFAULT_DAEMON_PORT
+    ? parsed.host
+    : `${parsed.host}:${parsed.port}`;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    wsUrl: `ws://127.0.0.1:${port}/acp`,
+    token,
+    display,
+    isLocal: true,
+  };
 }
 
 async function promptYesNo(prompt: string): Promise<boolean> {

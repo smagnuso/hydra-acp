@@ -8,9 +8,42 @@ import * as fsp from "node:fs/promises";
 import { loadConfig } from "../../core/config.js";
 import { loadServiceToken } from "../../core/service-token.js";
 import { paths } from "../../core/paths.js";
+import {
+  isProcessAlive,
+  readDaemonPidFile,
+} from "../../core/daemon-pidfile.js";
+// Wildcard addresses (0.0.0.0, ::) are bind-only; rewrite them to
+// loopback for outbound dialing so commands keep working after the
+// daemon is configured to listen on every interface.
+function dialableHost(host: string): string {
+  if (host === "0.0.0.0" || host === "::" || host === "0.0.0.0/0") {
+    return "127.0.0.1";
+  }
+  return host;
+}
+
+// Build a base URL for talking to the local daemon. Prefers the
+// pidfile's loopbackPort + plain HTTP so the call works regardless
+// of whether the daemon is fronting a TLS terminator for off-box
+// clients. Falls back to the configured host:port when no pidfile
+// exists yet (e.g. immediately after `daemon start` before the file
+// has landed).
+export async function localDaemonBaseUrl(): Promise<string> {
+  const info = await readDaemonPidFile();
+  if (info && isProcessAlive(info.pid)) {
+    return `http://127.0.0.1:${info.loopbackPort}`;
+  }
+  const config = await loadConfig();
+  return httpBase(
+    config.daemon.host,
+    config.daemon.port,
+    !!config.daemon.tls,
+  );
+}
+
 export function httpBase(host: string, port: number, tls: boolean): string {
   const protocol = tls ? "https" : "http";
-  return `${protocol}://${host}:${port}`;
+  return `${protocol}://${dialableHost(host)}:${port}`;
 }
 
 export { openWs } from "../../shim/open-ws.js";
@@ -44,13 +77,8 @@ export async function daemonFetch(
   path: string,
   opts: DaemonFetchOpts = {},
 ): Promise<DaemonFetchResult> {
-  const config = await loadConfig();
   const serviceToken = await loadServiceToken();
-  const baseUrl = httpBase(
-    config.daemon.host,
-    config.daemon.port,
-    !!config.daemon.tls,
-  );
+  const baseUrl = await localDaemonBaseUrl();
   const url = path.startsWith("http") ? path : `${baseUrl}${path}`;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${serviceToken}`,

@@ -11,7 +11,10 @@ import {
   type JsonRpcNotification,
   type JsonRpcRequest,
 } from "../acp/types.js";
-import { ResilientWsStream } from "./resilient-ws.js";
+import {
+  ResilientWsStream,
+  type ResilientWsUrl,
+} from "./resilient-ws.js";
 import { SessionTracker, type ResumeContext } from "./session-tracker.js";
 import type { MessageStream } from "../acp/framing.js";
 import { buildApproveResponse } from "../acp/permission-pick.js";
@@ -67,7 +70,15 @@ export async function runShim(opts: ShimOptions): Promise<void> {
   const tracker = new SessionTracker();
   const downstream = ndjsonStreamFromStdio(process.stdin, process.stdout);
 
-  const url = target.wsUrl;
+  // Local-daemon URL uses an ephemeral loopback port that changes
+  // across daemon restarts — pass a resolver so reconnects pick up
+  // the latest port from the pidfile. Remote stays fixed.
+  const url: ResilientWsUrl = target.isLocal
+    ? async (): Promise<string> => {
+        const fresh = await resolveLocalTarget(await loadConfig());
+        return fresh.wsUrl;
+      }
+    : target.wsUrl;
   const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];
   const upstream = new ResilientWsStream({
     url,
