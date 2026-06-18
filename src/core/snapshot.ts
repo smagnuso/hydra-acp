@@ -110,17 +110,26 @@ export function tryParseSnapshot(raw: string): SnapshotParseResult | undefined {
   // Fall back to extracting the first {...} block. Greedy: take the first
   // `{` through the last `}`. This handles preambles ("Here is your
   // summary: { ... }") and trailing prose ("{ ... } let me know if...").
-  // It does NOT try to handle multiple JSON blocks — first wins.
   if (parsed === undefined) {
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
-    if (start < 0 || end <= start) {
-      return undefined;
+    if (start >= 0 && end > start) {
+      parsed = safeJsonParse(trimmed.slice(start, end + 1));
     }
-    parsed = safeJsonParse(trimmed.slice(start, end + 1));
-    if (parsed === undefined) {
-      return undefined;
+  }
+
+  // Third fallback: brace-balanced first object. Recovers from claude-acp
+  // emitting the same object twice concatenated (`{...}{...}`), which both
+  // earlier strategies fail on.
+  if (parsed === undefined) {
+    const balanced = extractFirstBalancedObject(trimmed);
+    if (balanced !== undefined) {
+      parsed = safeJsonParse(balanced);
     }
+  }
+
+  if (parsed === undefined) {
+    return undefined;
   }
 
   if (parsed === null || typeof parsed !== "object") {
@@ -203,13 +212,20 @@ export function tryParseCompaction(raw: string): SnapshotParseResult | undefined
   if (parsed === undefined) {
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
-    if (start < 0 || end <= start) {
-      return undefined;
+    if (start >= 0 && end > start) {
+      parsed = safeJsonParse(trimmed.slice(start, end + 1));
     }
-    parsed = safeJsonParse(trimmed.slice(start, end + 1));
-    if (parsed === undefined) {
-      return undefined;
+  }
+
+  if (parsed === undefined) {
+    const balanced = extractFirstBalancedObject(trimmed);
+    if (balanced !== undefined) {
+      parsed = safeJsonParse(balanced);
     }
+  }
+
+  if (parsed === undefined) {
+    return undefined;
   }
 
   if (parsed === null || typeof parsed !== "object") {
@@ -285,6 +301,49 @@ function safeJsonParse(text: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+// Extract the first balanced top-level {...} object via brace counting,
+// respecting string boundaries (so `{` / `}` inside strings don't shift
+// the depth). Used as a third fallback after strict parse and the
+// first-{ to last-} slice both fail — handles agents that emit the same
+// object twice concatenated (claude-acp streams a delta then a final
+// aggregate; concatenating yields `{...}{...}` which neither earlier
+// strategy can recover).
+function extractFirstBalancedObject(text: string): string | undefined {
+  const start = text.indexOf("{");
+  if (start < 0) {
+    return undefined;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+  return undefined;
 }
 
 // At least one field must carry content for the synopsis to count.

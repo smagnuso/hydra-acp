@@ -463,3 +463,42 @@ describe("tryParseCompaction — compaction fields only", () => {
     expect(r!.synopsis).toBeUndefined();
   });
 });
+
+describe("tryParseSnapshot — concatenated duplicate objects (claude-acp quirk)", () => {
+  it("picks the first balanced object when the agent emits {…}{…}", () => {
+    const obj = JSON.stringify({
+      title: "first object",
+      synopsis: { goal: "the goal" },
+    });
+    const r = tryParseSnapshot(obj + obj);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("first object");
+    expect(r!.synopsis?.goal).toBe("the goal");
+  });
+
+  it("tolerates braces inside string values during balanced extraction", () => {
+    const obj = JSON.stringify({
+      title: "has }{ in title",
+      synopsis: { goal: "code: function() {} more {{}}" },
+    });
+    const r = tryParseSnapshot(obj + obj);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("has }{ in title");
+    expect(r!.synopsis?.goal).toBe("code: function() {} more {{}}");
+  });
+});
+
+describe("tryParseCompaction — concatenated duplicate objects", () => {
+  it("picks the first balanced object when the agent emits {…}{…}", () => {
+    const obj = JSON.stringify({
+      title: "comp first",
+      goal: "g",
+      outcome: "o",
+    });
+    const r = tryParseCompaction(obj + obj);
+    expect(r).toBeDefined();
+    expect(r!.title).toBe("comp first");
+    expect(r!.synopsis?.goal).toBe("g");
+    expect(r!.synopsis?.outcome).toBe("o");
+  });
+});
