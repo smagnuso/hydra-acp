@@ -679,28 +679,41 @@ function extractToolDetail(u: UpdateLike): string | undefined {
 
 function extractToolDetailFull(u: UpdateLike): string | undefined {
   const rawInput = u.rawInput;
-  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) {
-    return undefined;
+  if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
+    const r = rawInput as Record<string, unknown>;
+    if (typeof r.command === "string" && r.command.trim().length > 0) {
+      // Preserve newlines — multi-line bash commands render across rows
+      // in the expanded view. Strip a leading `cd <path> &&` only when
+      // it sits on the first line, matching the summary form's intent.
+      return sanitizeWireText(r.command)
+        .trim()
+        .replace(/^cd\s+\S+\s+&&\s+/, "");
+    }
+    const path =
+      typeof r.file_path === "string"
+        ? r.file_path
+        : typeof r.filePath === "string"
+          ? r.filePath
+          : typeof r.path === "string"
+            ? r.path
+            : undefined;
+    if (path !== undefined && path.length > 0) {
+      return shortenHomePath(sanitizeSingleLine(path));
+    }
   }
-  const r = rawInput as Record<string, unknown>;
-  if (typeof r.command === "string" && r.command.trim().length > 0) {
-    // Preserve newlines — multi-line bash commands render across rows
-    // in the expanded view. Strip a leading `cd <path> &&` only when
-    // it sits on the first line, matching the summary form's intent.
-    return sanitizeWireText(r.command)
-      .trim()
-      .replace(/^cd\s+\S+\s+&&\s+/, "");
-  }
-  const path =
-    typeof r.file_path === "string"
-      ? r.file_path
-      : typeof r.filePath === "string"
-        ? r.filePath
-        : typeof r.path === "string"
-          ? r.path
-          : undefined;
-  if (path !== undefined && path.length > 0) {
-    return shortenHomePath(sanitizeSingleLine(path));
+  // Fallback: agents that send the initial tool_call with empty rawInput
+  // (so we can't see the file yet) often still populate ACP locations[].
+  // Use the first location's path so the in-flight row says "edit ·
+  // ~/foo/bar.ts · 12s" instead of a bare "edit · 12s".
+  if (Array.isArray(u.locations)) {
+    for (const entry of u.locations) {
+      if (entry && typeof entry === "object") {
+        const p = (entry as { path?: unknown }).path;
+        if (typeof p === "string" && p.length > 0) {
+          return shortenHomePath(sanitizeSingleLine(p));
+        }
+      }
+    }
   }
   return undefined;
 }

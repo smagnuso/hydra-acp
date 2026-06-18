@@ -97,6 +97,31 @@ describe("tool-call detail (rawInput hint)", () => {
     expect(detail.startsWith("…/")).toBe(true);
   });
 
+  it("falls back to locations[0].path when rawInput is empty", () => {
+    const initial = mapUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "edit",
+      kind: "edit",
+      rawInput: {},
+      locations: [{ path: "/repo/src/tui/format.ts" }],
+    });
+    expect(initial).toMatchObject({
+      kind: "tool-call",
+      detail: "/repo/src/tui/format.ts",
+    });
+
+    const update = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      locations: [{ path: "/repo/src/tui/format.ts" }],
+    });
+    expect(update).toMatchObject({
+      kind: "tool-call-update",
+      detail: "/repo/src/tui/format.ts",
+    });
+  });
+
   it("recognizes camelCase filePath (Claude Code) as a path source", () => {
     const ev = mapUpdate({
       sessionUpdate: "tool_call",
