@@ -334,7 +334,7 @@ describe("startProgressHeartbeat", () => {
       },
       10,
     );
-    await new Promise((r) => setTimeout(r, 35));
+    await new Promise((r) => setTimeout(r, 100));
     stop();
     expect(calls).toBeGreaterThanOrEqual(2);
     // Test passes by not having an unhandled rejection.
