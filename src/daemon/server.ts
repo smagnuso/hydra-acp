@@ -478,9 +478,18 @@ async function buildLogStream(level: string) {
   const fileStream = await createPinoRoll({
     file: paths.logFile(),
     size: "10m",
-    frequency: "daily",
     mkdir: true,
     symlink: true,
+    // Retain only the most recent files. Without this pino-roll
+    // happily rotates forever; we've seen the directory grow into
+    // the hundreds-of-MB range. Combined with the size cap above,
+    // total disk use is bounded at ~200MB.
+    //
+    // Note: `frequency` was previously also set to "daily", but in
+    // pino-roll v4 the size accountant under-counts when both knobs
+    // are engaged via pino.multistream — single files grew into
+    // the hundreds of MB despite the 10m cap. Size-only is reliable.
+    limit: { count: 20 },
   });
   const stderrStream = pino.destination(2);
   const stream = pino.multistream([
