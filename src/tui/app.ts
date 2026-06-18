@@ -534,10 +534,27 @@ export function _buildToolsLines(args: {
   // limit <= 0 disables the cap — render every row regardless of
   // expanded so the ^O toggle is a no-op in unlimited mode.
   const capped = collapsedLimit > 0;
-  const visibleIds =
-    !capped || args.expanded
-      ? order
-      : order.slice(Math.max(0, total - collapsedLimit));
+  // Collapsed view: show the most recent `collapsedLimit` rows, plus any
+  // earlier rows whose tool call is still running (non-terminal) so the
+  // user never loses sight of in-flight work just because newer tools
+  // have piled on top of it.
+  let visibleIds: string[];
+  if (!capped || args.expanded) {
+    visibleIds = order;
+  } else {
+    const tailStart = Math.max(0, total - collapsedLimit);
+    const recent = order.slice(tailStart);
+    const earlierRunning: string[] = [];
+    for (let i = 0; i < tailStart; i++) {
+      const id = order[i];
+      if (id === undefined) continue;
+      const st = states.get(id);
+      if (st && !isTerminalToolStatus(st.status)) {
+        earlierRunning.push(id);
+      }
+    }
+    visibleIds = [...earlierRunning, ...recent];
+  }
   const hidden = total - visibleIds.length;
   const inProgress = endedAt === null;
   const end = endedAt ?? Date.now();
