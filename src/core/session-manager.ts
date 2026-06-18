@@ -407,6 +407,8 @@ export class SessionManager {
                 `compaction: deferral cap reached for sessionId=${sessionId}, skipping swap until next trigger`,
               );
               this.compactionDeferrals.delete(sessionId);
+              live.compactionState = undefined;
+              await this.mutateRecord(sessionId, {}, ["compactionState"]);
               live.broadcastCompactionPhase({ phase: "failed", error: "deferral cap reached" });
               return;
             }
@@ -456,6 +458,8 @@ export class SessionManager {
             `compaction: deferral cap reached on retry for sessionId=${sessionId}, giving up`,
           );
           this.compactionDeferrals.delete(sessionId);
+          live.compactionState = undefined;
+          await this.mutateRecord(sessionId, {}, ["compactionState"]);
           live.broadcastCompactionPhase({ phase: "failed", error: "deferral cap reached on retry" });
           return;
         }
@@ -474,6 +478,8 @@ export class SessionManager {
           `compaction: persisted artifact missing on retry for sessionId=${sessionId}, skipping swap`,
         );
         this.compactionDeferrals.delete(sessionId);
+        live.compactionState = undefined;
+        await this.mutateRecord(sessionId, {}, ["compactionState"]);
         return;
       }
       this.compactionDeferrals.delete(sessionId);
