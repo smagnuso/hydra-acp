@@ -208,7 +208,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["k", "kill the selected live session"],
   ["d", "delete the selected session (kills first if live)"],
   ["t", "retitle the selected session"],
-  ["T", "regenerate title + synopsis via agent (live session)"],
+  ["T", "regenerate title + synopsis via agent"],
   ["*", "toggle high priority on the selected session (floats to top)"],
   null,
   ["?", "toggle this help"],
@@ -2733,7 +2733,7 @@ export async function pickSession(
         }
         if (name === "T" && selectedIdx > 0) {
           const session = visible[selectedIdx - 1];
-          if (!session || session.status !== "live") {
+          if (!session) {
             return;
           }
           void performRegen({ sessionId: session.sessionId });
