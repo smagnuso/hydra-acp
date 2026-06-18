@@ -157,6 +157,7 @@ describe("compaction uncompact — rollback", () => {
     expect(postSwapUpstream).not.toBe(originalUpstream);
 
     // Breadcrumb should be present in meta.json.
+    await manager.flushMetaWrites();
     const store = new SessionStore();
     const record = await store.read(sessionId);
     expect(record?.rollbackBreadcrumb).toBeDefined();
