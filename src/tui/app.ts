@@ -718,7 +718,7 @@ async function runSession(
         onDisconnectHook(err);
       }
     },
-    log: () => undefined,
+    log: (line) => writeDebugLine({ src: "resilient-ws", line }),
   });
   const conn = new JsonRpcConnection(stream);
   await stream.start();
@@ -5763,7 +5763,12 @@ async function runSession(
   // reconnect is queued. Flag the banner so the user has feedback while
   // we retry; the prompt queue keeps accepting input and ResilientWsStream
   // buffers outbound sends until the new connection is live.
-  onDisconnectHook = (): void => {
+  onDisconnectHook = (err): void => {
+    writeDebugLine({
+      src: "reconnect",
+      step: "disconnect",
+      message: err?.message,
+    });
     screen.setBanner({ status: "disconnected", elapsedMs: undefined });
   };
 
@@ -5779,6 +5784,7 @@ async function runSession(
   // reconnectReplayBuffer and only flushed when appliedPolicy confirms
   // an incremental replay.
   onReconnect = async (): Promise<void> => {
+    writeDebugLine({ src: "reconnect", step: "begin", sessionId: resolvedSessionId });
     resetInFlightUiState();
     const initReq: JsonRpcRequest = {
       jsonrpc: "2.0",
@@ -5793,11 +5799,16 @@ async function runSession(
         clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
       },
     };
+    writeDebugLine({ src: "reconnect", step: "initialize-send" });
     try {
       await stream.request(initReq);
-    } catch {
-      // initialize failing on reconnect is non-fatal; the daemon may
-      // still accept the attach below.
+      writeDebugLine({ src: "reconnect", step: "initialize-ok" });
+    } catch (err) {
+      writeDebugLine({
+        src: "reconnect",
+        step: "initialize-fail",
+        message: (err as Error).message,
+      });
     }
     const useAfterMessage = lastSeenMessageId !== undefined;
     const attachReq: JsonRpcRequest = {
@@ -5836,8 +5847,19 @@ async function runSession(
     let appliedPolicy: string | undefined;
     let attachErr: Error | undefined;
     let fields: ReattachResponseFields | undefined;
+    writeDebugLine({
+      src: "reconnect",
+      step: "attach-send",
+      useAfterMessage,
+      lastSeenMessageId,
+    });
     try {
       const resp = await stream.request(attachReq);
+      writeDebugLine({
+        src: "reconnect",
+        step: "attach-resp",
+        hasError: Boolean(resp.error),
+      });
       if (resp.error) {
         throw new Error(resp.error.message);
       }
@@ -5854,6 +5876,11 @@ async function runSession(
       }
     } catch (err) {
       attachErr = err as Error;
+      writeDebugLine({
+        src: "reconnect",
+        step: "attach-fail",
+        message: attachErr.message,
+      });
     }
     const buffered = reconnectReplayBuffer ?? [];
     reconnectReplayBuffer = null;
@@ -5932,6 +5959,7 @@ async function runSession(
         elapsedMs: pendingTurns > 0 ? 0 : undefined,
       });
     }
+    writeDebugLine({ src: "reconnect", step: "end" });
   };
 
   // With ResilientWsStream this only fires once we've exhausted reconnect
