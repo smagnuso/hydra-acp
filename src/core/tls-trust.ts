@@ -20,7 +20,13 @@
 
 import { createHash } from "node:crypto";
 import * as tls from "node:tls";
-import { Agent, buildConnector, setGlobalDispatcher } from "undici";
+import {
+  Agent,
+  Dispatcher,
+  buildConnector,
+  getGlobalDispatcher,
+  setGlobalDispatcher,
+} from "undici";
 import { hostKey, type RemotesStore } from "./remotes-store.js";
 
 // In-memory pin map. Keyed by "host:port" to match RemotesStore. The
@@ -130,24 +136,54 @@ export function installGlobalTlsTrust(): void {
   }
   dispatcherInstalled = true;
 
-  const defaultConnect = buildConnector({});
-  const pinnedConnect = buildConnector({
-    // chain validation is bypassed because the pin IS our root of
-    // trust; if the fingerprint doesn't match, we reject below.
-    rejectUnauthorized: false,
-    checkServerIdentity: (servername, cert) =>
-      verifyAgainstPins(servername, cert),
+  // Capture whatever dispatcher was already installed (typically
+  // Node's bundled one backing globalThis.fetch). Unpinned hosts get
+  // delegated straight to it so Node's native fetch + RedirectHandler
+  // pipeline stays fully intact — wrapping unpinned traffic in our
+  // own v8 Agent breaks cross-version composition (e.g. 302s stop
+  // following).
+  const original = getGlobalDispatcher();
+  const pinnedAgent = new Agent({
+    connect: buildConnector({
+      // chain validation is bypassed because the pin IS our root of
+      // trust; if the fingerprint doesn't match, we reject below.
+      rejectUnauthorized: false,
+      checkServerIdentity: (servername, cert) =>
+        verifyAgainstPins(servername, cert),
+    }),
   });
 
-  setGlobalDispatcher(
-    new Agent({
-      connect: (opts, cb) => {
-        const host = String(opts.hostname ?? opts.host ?? "");
-        const connect = hasPinForHost(host) ? pinnedConnect : defaultConnect;
-        return connect(opts, cb);
-      },
-    }),
-  );
+  const proxy = new Dispatcher();
+  proxy.dispatch = (
+    opts: Dispatcher.DispatchOptions,
+    handler: Dispatcher.DispatchHandler,
+  ): boolean => {
+    const host = hostFromOrigin(opts.origin);
+    const target = host && hasPinForHost(host) ? pinnedAgent : original;
+    return target.dispatch(opts, handler);
+  };
+  proxy.close = ((): Promise<void> =>
+    Promise.all([pinnedAgent.close(), original.close()]).then(
+      () => undefined,
+    )) as typeof proxy.close;
+  proxy.destroy = ((err?: Error | null): Promise<void> =>
+    Promise.all([
+      pinnedAgent.destroy(err ?? null),
+      original.destroy(err ?? null),
+    ]).then(() => undefined)) as typeof proxy.destroy;
+
+  setGlobalDispatcher(proxy);
+}
+
+function hostFromOrigin(origin: unknown): string | null {
+  if (!origin) {
+    return null;
+  }
+  try {
+    return new URL(String(origin)).hostname;
+  } catch {
+    return null;
+  }
 }
 
 
