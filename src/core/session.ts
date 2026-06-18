@@ -1182,6 +1182,10 @@ export class Session {
     const previousUpstreamSessionId = this.upstreamSessionId;
     const previousSummarizedThroughEntry = this._summarizedThroughEntry;
 
+    if (opts.summarizedThroughEntry !== undefined) {
+      this._summarizedThroughEntry = opts.summarizedThroughEntry;
+    }
+
     // Atomically swap: kill the old agent, point this.agent and
     // this.upstreamSessionId at the new one. The in-memory rotation
     // (this.agent / this.upstreamSessionId) and ALL meta-write-triggering
