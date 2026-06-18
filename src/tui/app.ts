@@ -86,6 +86,7 @@ import {
   formatElapsed,
   guardTerminalDimensions,
   Screen,
+  resolveAmbiguousWide,
   setAmbiguousWide,
 } from "./screen.js";
 import { formatApproxTokens } from "../core/compaction-heuristic.js";
@@ -1770,7 +1771,7 @@ async function runSession(
   // Tell the wrap/truncate engine how this terminal draws ambiguous-width
   // glyphs before any line is measured, so the column budget matches the
   // render (prevents right-margin bleed on ambiguous-wide terminals).
-  setAmbiguousWide(config.tui.ambiguousWidth === "wide");
+  setAmbiguousWide(resolveAmbiguousWide(config.tui.ambiguousWidth, process.env));
   // Bound expanded-diff context so full-file edit payloads (e.g. pi's ACP
   // diff blocks) render a hunk around the change, not the whole file.
   setDiffContextLines(config.tui.diffContextLines);

@@ -180,13 +180,13 @@ const TuiConfig = z.object({
   showThoughts: z.boolean().default(true),
   // How the terminal renders East-Asian "Ambiguous" width glyphs (em-dash
   // —, smart quotes “ ”, ellipsis …, middle-dot ·). Most modern terminals
-  // draw them 1 col wide ("narrow"); CJK-locale / legacy setups draw them 2
-  // cols wide ("wide"). Defaults to "wide": counting ambiguous glyphs as 2
-  // cols never overflows the right margin (the worst case is wrapping a
-  // column early on narrow terminals, which is benign), whereas "narrow"
-  // bleeds past the margin on wide terminals. The thought gutter uses an
-  // ASCII marker, so this no longer affects marker alignment either way.
-  ambiguousWidth: z.enum(["narrow", "wide"]).default("wide"),
+  // draw them 1 col wide ("narrow"); CJK-locale / legacy setups (and
+  // macOS Terminal.app) draw them 2 cols wide ("wide"). Defaults to "auto"
+  // which sniffs LC_*/LANG for a CJK locale and TERM_PROGRAM for known
+  // wide-by-default emulators, falling back to "narrow" — the right answer
+  // for xterm, gnome-terminal, iTerm2, Alacritty, Kitty, WezTerm, Ghostty,
+  // VS Code terminal, and Windows Terminal. Set explicitly to override.
+  ambiguousWidth: z.enum(["auto", "narrow", "wide"]).default("auto"),
   // How the TUI receives tool payload on attach/replay.
   //   "references" — the lean path (default): the daemon ships blob refs and
   //                  the TUI fetches a diff/output body on demand when
@@ -391,7 +391,7 @@ export const HydraConfig = z.object({
     progressIndicator: true,
     defaultEnterAction: "amend",
     showThoughts: true,
-    ambiguousWidth: "wide",
+    ambiguousWidth: "auto",
     toolContent: "references",
     diffContextLines: 3,
     promptHistoryMaxEntries: 2_000,

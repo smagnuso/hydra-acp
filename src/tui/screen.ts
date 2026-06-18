@@ -5615,6 +5615,26 @@ let ambiguousWide = false;
 export function setAmbiguousWide(wide: boolean): void {
   ambiguousWide = wide;
 }
+
+// Resolve the user's ambiguousWidth config to a concrete boolean. "auto" sniffs
+// the environment: CJK locales (ja/ko/zh in LC_ALL/LC_CTYPE/LANG) and known
+// wide-by-default emulators (Apple Terminal.app) get wide; everything else
+// gets narrow. Pure function — takes env as input so it's trivially testable.
+export function resolveAmbiguousWide(
+  mode: "auto" | "narrow" | "wide",
+  env: NodeJS.ProcessEnv,
+): boolean {
+  if (mode === "wide")
+    return true;
+  if (mode === "narrow")
+    return false;
+  const locale = env.LC_ALL || env.LC_CTYPE || env.LANG || "";
+  if (/^(ja|ko|zh)(_|\.|@|$)/i.test(locale))
+    return true;
+  if (env.TERM_PROGRAM === "Apple_Terminal")
+    return true;
+  return false;
+}
 // Single source of truth for visible-column measurement across the wrap and
 // truncate paths. Honors the ambiguous-width mode above.
 function cellWidth(text: string): number {
