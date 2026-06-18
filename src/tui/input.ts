@@ -43,6 +43,8 @@ export type KeyName =
   | "ctrl-w"
   | "ctrl-x"
   | "ctrl-y"
+  | "ctrl-underscore"
+  | "alt-underscore"
   | "escape";
 
 // One attached image, ready to be sent as an ACP image content block. data
@@ -172,6 +174,18 @@ function formatPasteToken(id: number, lineCount: number): string {
   return `[pasted #${id} +${lineCount} lines]`;
 }
 
+interface UndoSnapshot {
+  buffer: string[];
+  row: number;
+  col: number;
+  planMode: boolean;
+  attachments: Attachment[];
+}
+
+// Maximum number of undo steps retained. Older snapshots fall off the
+// bottom so a long-lived session can't grow the stack without bound.
+const UNDO_LIMIT = 500;
+
 export class InputDispatcher {
   private buffer: string[] = [""];
   private row = 0;
@@ -233,6 +247,16 @@ export class InputDispatcher {
   // opens the session picker, mirroring ^P. Reset on any other input.
   private lastEscapeAt: number | null = null;
 
+  // Undo/redo. Snapshots capture the user-visible draft state (buffer +
+  // cursor + plan mode + attachments). Recorded BEFORE each mutating
+  // edit so undo restores the pre-edit state. One snapshot per
+  // keystroke — bash readline ^_ undoes one character at a time, and
+  // matching that is more predictable than any coalescing heuristic.
+  // History walks, history-search, and cursor moves are not recorded —
+  // undo is for text edits only.
+  private undoStack: UndoSnapshot[] = [];
+  private redoStack: UndoSnapshot[] = [];
+
   constructor(opts: InputOptions = {}) {
     this.history = [...(opts.history ?? [])];
     this.planMode = opts.planMode ?? false;
@@ -267,6 +291,7 @@ export class InputDispatcher {
   // file read, clipboard shellout). The dispatcher just records it;
   // chip rendering and capability gating live in the app/screen layer.
   addAttachment(attachment: Attachment): void {
+    this.recordEdit();
     this.attachments.push(attachment);
   }
 
@@ -274,7 +299,62 @@ export class InputDispatcher {
     if (index < 0 || index >= this.attachments.length) {
       return;
     }
+    this.recordEdit();
     this.attachments.splice(index, 1);
+  }
+
+  // Snapshot the current draft for the undo stack. Arrays are copied so
+  // later mutations don't bleed into stored entries.
+  private snapshotState(): UndoSnapshot {
+    return {
+      buffer: [...this.buffer],
+      row: this.row,
+      col: this.col,
+      planMode: this.planMode,
+      attachments: [...this.attachments],
+    };
+  }
+
+  private restoreSnapshot(s: UndoSnapshot): void {
+    this.buffer = [...s.buffer];
+    this.row = s.row;
+    this.col = s.col;
+    this.planMode = s.planMode;
+    this.attachments = [...s.attachments];
+  }
+
+  // Push a snapshot for `undo` to restore. Called BEFORE each mutating
+  // edit. Every keystroke gets its own snapshot — matches bash readline,
+  // where ^_ undoes one character at a time.
+  private recordEdit(): void {
+    this.undoStack.push(this.snapshotState());
+    if (this.undoStack.length > UNDO_LIMIT) {
+      this.undoStack.shift();
+    }
+    this.redoStack = [];
+  }
+
+  private clearUndoHistory(): void {
+    this.undoStack = [];
+    this.redoStack = [];
+  }
+
+  private undo(): void {
+    const prev = this.undoStack.pop();
+    if (prev === undefined) {
+      return;
+    }
+    this.redoStack.push(this.snapshotState());
+    this.restoreSnapshot(prev);
+  }
+
+  private redo(): void {
+    const next = this.redoStack.pop();
+    if (next === undefined) {
+      return;
+    }
+    this.undoStack.push(this.snapshotState());
+    this.restoreSnapshot(next);
   }
 
   setTurnRunning(running: boolean): void {
@@ -286,6 +366,7 @@ export class InputDispatcher {
     this.historyIndex = -1;
     this.savedDraft = null;
     this.historySearch = null;
+    this.clearUndoHistory();
   }
 
   // Snapshot of the waiting queue (head excluded). Called by the app after
@@ -303,6 +384,7 @@ export class InputDispatcher {
   // Used by slash-command completion: the partial /foo gets swapped for the
   // matched command name. Cursor moves to the end of the replacement.
   replaceFirstLine(text: string): void {
+    this.recordEdit();
     this.buffer[0] = text;
     if (this.row === 0) {
       this.col = text.length;
@@ -314,6 +396,7 @@ export class InputDispatcher {
   // completion: the typed path token gets swapped for the completed one.
   // Out-of-range bounds are clamped to the line length.
   replaceRangeOnCurrentLine(start: number, end: number, text: string): void {
+    this.recordEdit();
     const line = this.currentLine();
     const s = Math.max(0, Math.min(start, line.length));
     const e = Math.max(s, Math.min(end, line.length));
@@ -334,6 +417,10 @@ export class InputDispatcher {
     this.savedAttachments = null;
     this.historySearch = null;
     this.attachments = [...attachments];
+    // Treat a setBuffer (Escape pre-fill) as a fresh draft — anything
+    // previously on the stack belonged to the cancelled turn's draft
+    // and would be confusing to undo into.
+    this.clearUndoHistory();
   }
 
   feed(event: KeyEvent): InputEffect[] {
@@ -390,11 +477,13 @@ export class InputDispatcher {
     }
     if (event.type === "char") {
       this.lastEscapeAt = null;
+      this.recordEdit();
       this.insertChar(event.ch);
       return [];
     }
     if (event.type === "paste") {
       this.lastEscapeAt = null;
+      this.recordEdit();
       const lineCount = event.text.split("\n").length;
       if (this.collapsePastes && lineCount > PASTE_LINE_THRESHOLD) {
         const id = this.nextPasteId++;
@@ -430,15 +519,18 @@ export class InputDispatcher {
         // terminal can send. Both chords map to the same effect.
         return this.amend();
       case "alt-enter":
+        this.recordEdit();
         this.insertNewline();
         return [];
       case "shift-tab":
+        this.recordEdit();
         this.planMode = !this.planMode;
         return [
           { type: "plan-toggle", on: this.planMode },
           { type: "redraw-banner" },
         ];
       case "tab":
+        this.recordEdit();
         this.insertText("  ");
         return [];
       case "up":
@@ -476,6 +568,7 @@ export class InputDispatcher {
         this.moveWordForward();
         return [];
       case "ctrl-k":
+        this.recordEdit();
         this.killToEnd();
         return [];
       case "ctrl-n":
@@ -483,9 +576,11 @@ export class InputDispatcher {
       case "ctrl-o":
         return [{ type: "toggle-options" }];
       case "backspace":
+        this.recordEdit();
         this.backspace();
         return [];
       case "delete":
+        this.recordEdit();
         this.deleteForward();
         return [];
       case "ctrl-c":
@@ -497,6 +592,7 @@ export class InputDispatcher {
         if (this.bufferIsEmpty()) {
           return [{ type: "exit" }];
         }
+        this.recordEdit();
         this.deleteForward();
         return [];
       }
@@ -523,17 +619,26 @@ export class InputDispatcher {
         // ^S there and routes it to retreatHistorySearch.
         return this.amend();
       case "ctrl-u":
+        this.recordEdit();
         this.killLine();
         return [];
       case "ctrl-v":
         return [{ type: "attachment-request", source: "clipboard" }];
       case "ctrl-w":
+        this.recordEdit();
         this.killWord();
         return [];
       case "ctrl-x":
         return [{ type: "toggle-mouse" }];
       case "ctrl-y":
+        this.recordEdit();
         this.yank();
+        return [];
+      case "ctrl-underscore":
+        this.undo();
+        return [];
+      case "alt-underscore":
+        this.redo();
         return [];
       case "escape": {
         // Modal flows (permission prompt, exit confirm) intercept Escape
@@ -599,6 +704,7 @@ export class InputDispatcher {
     this.savedAttachments = null;
     this.historySearch = null;
     this.attachments = [];
+    this.clearUndoHistory();
   }
 
   private insertChar(ch: string): void {
@@ -1249,6 +1355,7 @@ export class InputDispatcher {
       return [{ type: "queue-remove", index }];
     }
     if (!this.bufferIsEmpty() || this.attachments.length > 0) {
+      this.recordEdit();
       this.buffer = [""];
       this.row = 0;
       this.col = 0;

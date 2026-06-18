@@ -1024,6 +1024,20 @@ export class Screen {
       this.onSuspend();
       return;
     }
+    // Ctrl-_ (== Ctrl-/) — byte 0x1f. Universal readline "undo" chord.
+    // terminal-kit has no name for this byte, so we intercept the raw
+    // chunk here and route it to ctrl-underscore. Alt+Ctrl-_ (the meta-
+    // prefixed form, our redo binding) arrives as the two-byte ESC 0x1f
+    // sequence — match exactly so an unrelated paste containing 0x1f
+    // doesn't trip it.
+    if (text === "\x1f") {
+      this.onKey([{ type: "key", name: "ctrl-underscore" }]);
+      return;
+    }
+    if (text === "\x1b\x1f" || text === "\x1b_") {
+      this.onKey([{ type: "key", name: "alt-underscore" }]);
+      return;
+    }
     // Two families of "modified key" sequences leak through terminal-kit
     // because it doesn't parse them, and would otherwise insert literal
     // "[27;2;73~" / "[13;2u" etc. into the buffer:
@@ -6327,6 +6341,16 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
   if (code === 127 && mod === 1) {
     return "backspace";
   }
+  // Ctrl-_ (readline undo) and Alt-_ (our redo). codepoint 95 = '_'.
+  // Some terminals advertise these as code 47 ('/') with ctrl, since
+  // Ctrl-/ and Ctrl-_ collapse to the same byte 0x1f outside the
+  // protocol; we accept both spellings.
+  if ((code === 95 || code === 47) && mod === 5) {
+    return "ctrl-underscore";
+  }
+  if ((code === 95 || code === 47) && mod === 7) {
+    return "alt-underscore";
+  }
   if (mod === 3) {
     if (code === 98 || code === 66) {
       return "alt-b";
@@ -6336,6 +6360,9 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
     }
     if (code === 110 || code === 78) {
       return "alt-n";
+    }
+    if (code === 95) {
+      return "alt-underscore";
     }
     return null;
   }

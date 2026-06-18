@@ -1363,4 +1363,134 @@ describe("InputDispatcher", () => {
       expect(d.expandedText()).toBe(lines(11));
     });
   });
+
+  describe("undo / redo", () => {
+    it("undo restores buffer and cursor before the last edit", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h"), ch("i")]);
+      feed(d, [k("alt-enter")]);
+      feed(d, [ch("x")]);
+      expect(d.state().buffer).toEqual(["hi", "x"]);
+      feed(d, [k("ctrl-underscore")]); // undo "x"
+      expect(d.state().buffer).toEqual(["hi", ""]);
+      feed(d, [k("ctrl-underscore")]); // undo newline
+      expect(d.state().buffer).toEqual(["hi"]);
+      feed(d, [k("ctrl-underscore")]); // undo "i"
+      expect(d.state().buffer).toEqual(["h"]);
+      feed(d, [k("ctrl-underscore")]); // undo "h"
+      expect(d.state().buffer).toEqual([""]);
+    });
+
+    it("redo replays an undone edit", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("a")]);
+      feed(d, [k("alt-enter")]);
+      expect(d.state().buffer).toEqual(["a", ""]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual(["a"]);
+      feed(d, [k("alt-underscore")]);
+      expect(d.state().buffer).toEqual(["a", ""]);
+    });
+
+    it("new edit after undo clears the redo stack", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("a")]);
+      feed(d, [k("alt-enter")]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual(["a"]);
+      feed(d, [k("alt-enter")]);
+      feed(d, [ch("b")]);
+      feed(d, [k("alt-underscore")]);
+      // Redo is now empty; the alt-_ is a no-op.
+      expect(d.state().buffer).toEqual(["a", "b"]);
+    });
+
+    it("alt-_ on empty redo stack is a no-op", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("x")]);
+      feed(d, [k("alt-underscore")]);
+      expect(d.state().buffer).toEqual(["x"]);
+    });
+
+    it("ctrl-_ on empty undo stack is a no-op", () => {
+      const d = new InputDispatcher();
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual([""]);
+    });
+
+    it("undoes one character at a time (no coalescing)", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("a"), ch("b"), ch("c"), ch("d")]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual(["abc"]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual(["ab"]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual(["a"]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual([""]);
+    });
+
+    it("paste is one undo step (the whole inserted block)", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("a"), ch("b")]);
+      feed(d, [{ type: "paste", text: "XYZ" }]);
+      feed(d, [ch("c")]);
+      expect(d.state().buffer).toEqual(["abXYZc"]);
+      feed(d, [k("ctrl-underscore")]); // undo "c"
+      expect(d.state().buffer).toEqual(["abXYZ"]);
+      feed(d, [k("ctrl-underscore")]); // undo paste
+      expect(d.state().buffer).toEqual(["ab"]);
+      feed(d, [k("ctrl-underscore")]); // undo "b"
+      expect(d.state().buffer).toEqual(["a"]);
+      feed(d, [k("ctrl-underscore")]); // undo "a"
+      expect(d.state().buffer).toEqual([""]);
+    });
+
+    it("undo restores buffer state after backspace", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h"), ch("i")]);
+      feed(d, [k("alt-enter")]); // boundary
+      feed(d, [k("backspace")]);
+      expect(d.state().buffer).toEqual(["hi"]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual(["hi", ""]);
+    });
+
+    it("undo reverses ^K kill-to-end", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h"), ch("i")]);
+      feed(d, [k("ctrl-a"), k("ctrl-k")]);
+      expect(d.state().buffer).toEqual([""]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual(["hi"]);
+    });
+
+    it("undo restores attachments", () => {
+      const d = new InputDispatcher();
+      d.addAttachment({ mimeType: "image/png", data: "AA", sizeBytes: 1 });
+      expect(d.state().attachments.length).toBe(1);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().attachments.length).toBe(0);
+      feed(d, [k("alt-underscore")]);
+      expect(d.state().attachments.length).toBe(1);
+    });
+
+    it("send clears undo history", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h"), ch("i")]);
+      feed(d, [k("enter")]);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().buffer).toEqual([""]);
+    });
+
+    it("undo round-trips through shift-tab plan-mode toggle", () => {
+      const d = new InputDispatcher();
+      expect(d.state().planMode).toBe(false);
+      feed(d, [k("shift-tab")]);
+      expect(d.state().planMode).toBe(true);
+      feed(d, [k("ctrl-underscore")]);
+      expect(d.state().planMode).toBe(false);
+    });
+  });
 });

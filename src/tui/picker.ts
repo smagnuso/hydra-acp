@@ -398,6 +398,37 @@ export async function pickSession(
   // pressed on a live row; the user edits in-place (^U clears the line,
   // ^W deletes a word, Backspace pops a char). Enter saves, Esc cancels.
   let renameBuffer = "";
+  // Undo/redo for the rename buffer. ^_ undoes the last edit; Alt-_
+  // redoes. One snapshot per keystroke — matches bash readline.
+  let renameUndo: string[] = [];
+  let renameRedo: string[] = [];
+  const renameRecord = (): void => {
+    renameUndo.push(renameBuffer);
+    if (renameUndo.length > 500) {
+      renameUndo.shift();
+    }
+    renameRedo = [];
+  };
+  const renameUndoStep = (): void => {
+    const prev = renameUndo.pop();
+    if (prev === undefined) {
+      return;
+    }
+    renameRedo.push(renameBuffer);
+    renameBuffer = prev;
+  };
+  const renameRedoStep = (): void => {
+    const next = renameRedo.pop();
+    if (next === undefined) {
+      return;
+    }
+    renameUndo.push(renameBuffer);
+    renameBuffer = next;
+  };
+  const renameResetUndo = (): void => {
+    renameUndo = [];
+    renameRedo = [];
+  };
   // Transient one-line hint shown in the indicator slot. Cleared on the
   // next key press so it never lingers.
   let transientStatus: string | null = null;
@@ -1463,12 +1494,28 @@ export async function pickSession(
   // exists) so the suspend closure can refer to the same listeners /
   // teardown bits cleanup() uses. Null on Windows (no SIGTSTP / SIGCONT).
   let suspend: (() => void) | null = null;
+  // Forward-declared layer dispatcher. Assigned once the focus stack is
+  // constructed; rawStdinHandler uses it to route synthetic key events
+  // for terminal-kit's blind spots (Ctrl-_, Alt-_) straight to the
+  // active layer.
+  let dispatchToActiveLayer: ((name: string) => void) | null = null;
   const rawStdinHandler = (chunk: Buffer): void => {
     let text = chunk.toString("binary");
     // ^Z (SUB, 0x1a) — raw mode swallowed VSUSP. Only the bare byte
     // counts; embedded 0x1a inside a longer chunk is treated as data.
     if (!pasteActive && text === "\x1a" && suspend) {
       suspend();
+      return;
+    }
+    // Ctrl-_ (== Ctrl-/, byte 0x1f) and Alt-_ (\x1b_ or \x1b\x1f) —
+    // terminal-kit doesn't name these, so route them to the active
+    // layer as synthetic key events with the raw byte as the name. The
+    // layers' onKey handlers match on those strings.
+    if (
+      !pasteActive &&
+      (text === "\x1f" || text === "\x1b_" || text === "\x1b\x1f")
+    ) {
+      dispatchToActiveLayer?.(text);
       return;
     }
     if (pasteActive) {
@@ -1623,6 +1670,12 @@ export async function pickSession(
     const dispatchResize = (): void => {
       if (resolved) return;
       focusStack[focusStack.length - 1]?.onResize();
+    };
+    // Now that focusStack and resolved exist, expose a dispatcher to
+    // rawStdinHandler for the synthetic Ctrl-_ / Alt-_ events.
+    dispatchToActiveLayer = (name: string): void => {
+      if (resolved) return;
+      focusStack[focusStack.length - 1]?.onKey(name, null, {});
     };
 
     const cleanup = (): void => {
@@ -2134,7 +2187,11 @@ export async function pickSession(
           }
           const before = findComposer.state();
           let event: KeyEvent | null = null;
-          if (data?.isCharacter) {
+          if (name === "\x1f") {
+            event = { type: "key", name: "ctrl-underscore" };
+          } else if (name === "\x1b_" || name === "\x1b\x1f") {
+            event = { type: "key", name: "alt-underscore" };
+          } else if (data?.isCharacter) {
             event = { type: "char", ch: name };
           } else {
             const mapped = mapKeyName(name);
@@ -2347,19 +2404,24 @@ export async function pickSession(
           mode = "normal";
           pendingAction = null;
           renameBuffer = "";
+          renameResetUndo();
           paintIndicator();
           return;
         }
         if (name === "BACKSPACE") {
           if (renameBuffer.length > 0) {
+            renameRecord();
             renameBuffer = renameBuffer.slice(0, -1);
             paintIndicator();
           }
           return;
         }
         if (name === "CTRL_U") {
-          renameBuffer = "";
-          paintIndicator();
+          if (renameBuffer.length > 0) {
+            renameRecord();
+            renameBuffer = "";
+            paintIndicator();
+          }
           return;
         }
         if (name === "CTRL_W") {
@@ -2367,11 +2429,29 @@ export async function pickSession(
           // word, matching what most readline-style editors do.
           const trimmedRight = renameBuffer.replace(/\s+$/, "");
           const lastSpace = trimmedRight.lastIndexOf(" ");
-          renameBuffer = lastSpace >= 0 ? trimmedRight.slice(0, lastSpace) : "";
+          const next =
+            lastSpace >= 0 ? trimmedRight.slice(0, lastSpace) : "";
+          if (next !== renameBuffer) {
+            renameRecord();
+            renameBuffer = next;
+            paintIndicator();
+          }
+          return;
+        }
+        // ^_ undo, Alt-_ redo. Raw bytes — terminal-kit doesn't name
+        // them, so we match on the .keymap/data char directly.
+        if (name === "\x1f") {
+          renameUndoStep();
+          paintIndicator();
+          return;
+        }
+        if (name === "\x1b_" || name === "\x1b\x1f") {
+          renameRedoStep();
           paintIndicator();
           return;
         }
         if (data?.isCharacter) {
+          renameRecord();
           renameBuffer += name;
           paintIndicator();
           return;
@@ -2494,7 +2574,11 @@ export async function pickSession(
         upGuardArmed = false;
         const before = composer.state();
         let event: KeyEvent | null = null;
-        if (data?.isCharacter) {
+        if (name === "\x1f") {
+          event = { type: "key", name: "ctrl-underscore" };
+        } else if (name === "\x1b_" || name === "\x1b\x1f") {
+          event = { type: "key", name: "alt-underscore" };
+        } else if (data?.isCharacter) {
           event = { type: "char", ch: name };
         } else {
           const mapped = mapKeyName(name);

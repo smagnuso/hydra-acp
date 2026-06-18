@@ -74,6 +74,27 @@ export async function promptForImportCwd(
   let errorLine: string | null = null;
   let busy = false;
   let layout: BoxLayout | null = null;
+  // Undo/redo for the buffer. ^_ undoes, Alt-_ redoes. One snapshot per
+  // keystroke — matches bash readline.
+  let undoStack: string[] = [];
+  let redoStack: string[] = [];
+  const recordEdit = (): void => {
+    undoStack.push(buffer);
+    if (undoStack.length > 500) undoStack.shift();
+    redoStack = [];
+  };
+  const undoEdit = (): void => {
+    const prev = undoStack.pop();
+    if (prev === undefined) return;
+    redoStack.push(buffer);
+    buffer = prev;
+  };
+  const redoEdit = (): void => {
+    const next = redoStack.pop();
+    if (next === undefined) return;
+    undoStack.push(buffer);
+    buffer = next;
+  };
 
   const render = (): void => {
     const contentHeight = headerRows.length + 6;
@@ -200,6 +221,7 @@ export async function promptForImportCwd(
           if (next === buffer) {
             return;
           }
+          recordEdit();
           buffer = next;
           errorLine = null;
           repaintInput();
@@ -208,6 +230,7 @@ export async function promptForImportCwd(
       }
       if (name === "BACKSPACE") {
         if (buffer.length > 0) {
+          recordEdit();
           buffer = buffer.slice(0, -1);
           errorLine = null;
           repaintInput();
@@ -215,9 +238,12 @@ export async function promptForImportCwd(
         return;
       }
       if (name === "CTRL_U") {
-        buffer = "";
-        errorLine = null;
-        repaintInput();
+        if (buffer.length > 0) {
+          recordEdit();
+          buffer = "";
+          errorLine = null;
+          repaintInput();
+        }
         return;
       }
       if (name === "CTRL_W") {
@@ -226,12 +252,31 @@ export async function promptForImportCwd(
           trimmedRight.lastIndexOf("/"),
           trimmedRight.lastIndexOf(" "),
         );
-        buffer = lastSep >= 0 ? trimmedRight.slice(0, lastSep + 1) : "";
+        const next =
+          lastSep >= 0 ? trimmedRight.slice(0, lastSep + 1) : "";
+        if (next !== buffer) {
+          recordEdit();
+          buffer = next;
+          errorLine = null;
+          repaintInput();
+        }
+        return;
+      }
+      // ^_ undo / Alt-_ redo. Raw bytes — terminal-kit doesn't name them.
+      if (name === "\x1f") {
+        undoEdit();
+        errorLine = null;
+        repaintInput();
+        return;
+      }
+      if (name === "\x1b_" || name === "\x1b\x1f") {
+        redoEdit();
         errorLine = null;
         repaintInput();
         return;
       }
       if (data?.isCharacter) {
+        recordEdit();
         buffer += name;
         errorLine = null;
         repaintInput();
