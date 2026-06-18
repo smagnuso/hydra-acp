@@ -262,6 +262,40 @@ describe("_buildToolsLines", () => {
     expect(result.rowOwners).toEqual([null]);
   });
 
+  it("collapsed view keeps still-running earlier tools visible past the cap", () => {
+    // 7 tools, cap=5. tc-0 is still running; tc-1..tc-6 are completed.
+    // Expect: header + tc-0 (running) + tc-2..tc-6 (most recent 5) = 7 lines.
+    // tc-1 falls off and counts as 1 hidden.
+    const order = ["tc-0", "tc-1", "tc-2", "tc-3", "tc-4", "tc-5", "tc-6"];
+    const states = new Map<string, ToolLineState>([
+      ["tc-0", makeState("tc-0", { status: "in_progress" })],
+      ["tc-1", makeState("tc-1")],
+      ["tc-2", makeState("tc-2")],
+      ["tc-3", makeState("tc-3")],
+      ["tc-4", makeState("tc-4")],
+      ["tc-5", makeState("tc-5")],
+      ["tc-6", makeState("tc-6")],
+    ]);
+    const result = _buildToolsLines({
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: null,
+      stopReason: null,
+      expanded: false,
+      collapsedLimit: 5,
+    });
+    expect(result.rowOwners).toEqual([
+      null,
+      "tc-0",
+      "tc-2",
+      "tc-3",
+      "tc-4",
+      "tc-5",
+      "tc-6",
+    ]);
+  });
+
   it("when perToolExpanded is empty, output matches collapsed behavior", () => {
     const order = ["tc-x", "tc-y"];
     const states = new Map([

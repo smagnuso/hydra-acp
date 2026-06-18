@@ -300,6 +300,105 @@ describe("resolveRemoteTarget", () => {
     expect(target.token).toBe("tok-cached");
   });
 
+  it("TOFU: prompts for trust on untrusted TLS, pins on yes, persists alongside token", async () => {
+    const { _resetForTests, getPin } = await import("./tls-trust.js");
+    _resetForTests();
+    const stderrCaptured: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      stderrCaptured.push(
+        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const fetchImpl = (async () =>
+        new Response(
+          JSON.stringify({
+            session_token: "tok-after-pin",
+            id: "sid-1",
+            expires_at: futureIso(120_000),
+          }),
+          { status: 200 },
+        )) as typeof fetch;
+      const parsed = parseHydraUrl("hydra://blackbox.local:443/sess_abc");
+      const target = await resolveRemoteTarget(parsed, {
+        fetchImpl,
+        promptImpl: async () => "hunter2",
+        confirmImpl: async () => true,
+        tlsHandshakeImpl: async () => ({
+          kind: "untrusted",
+          fingerprint: "deadbeefcafefacefeedfacedeadbeefcafefacefeedfacedeadbeefcafeface",
+          subject: "CN=blackbox.local",
+          issuer: "CN=blackbox.local",
+        }),
+      });
+      expect(target.token).toBe("tok-after-pin");
+      expect(getPin("blackbox.local", 443)).toBe(
+        "deadbeefcafefacefeedfacedeadbeefcafefacefeedfacedeadbeefcafeface",
+      );
+      const reloaded = await RemotesStore.load();
+      const entry = reloaded.get("blackbox.local", 443);
+      expect(entry?.pinnedFingerprint).toBe(
+        "deadbeefcafefacefeedfacedeadbeefcafefacefeedfacedeadbeefcafeface",
+      );
+      expect(entry?.pinnedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(stderrCaptured.join("")).toMatch(/is not signed by a trusted CA/);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  });
+
+  it("TOFU: aborts the login when the user declines to trust the cert", async () => {
+    const { _resetForTests } = await import("./tls-trust.js");
+    _resetForTests();
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try {
+      const parsed = parseHydraUrl("hydra://blackbox.local:443/sess_abc");
+      await expect(
+        resolveRemoteTarget(parsed, {
+          fetchImpl: failOnFetch,
+          promptImpl: failOnPrompt,
+          confirmImpl: async () => false,
+          tlsHandshakeImpl: async () => ({
+            kind: "untrusted",
+            fingerprint: "ff".repeat(32),
+          }),
+        }),
+      ).rejects.toThrow(/not trusted/);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  });
+
+  it("TOFU: skipped when the cert chain validates against the system trust store", async () => {
+    const { _resetForTests, getPin } = await import("./tls-trust.js");
+    _resetForTests();
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          session_token: "tok-ca-signed",
+          id: "sid-1",
+          expires_at: futureIso(120_000),
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    const parsed = parseHydraUrl("hydra://abc.ngrok.app:443/sess_abc");
+    const target = await resolveRemoteTarget(parsed, {
+      fetchImpl,
+      promptImpl: async () => "pw",
+      confirmImpl: async () => {
+        throw new Error("confirm should not be called when cert is trusted");
+      },
+      tlsHandshakeImpl: async () => ({ kind: "trusted" }),
+    });
+    expect(target.token).toBe("tok-ca-signed");
+    expect(getPin("abc.ngrok.app", 443)).toBeUndefined();
+    const reloaded = await RemotesStore.load();
+    expect(reloaded.get("abc.ngrok.app", 443)?.pinnedFingerprint).toBeUndefined();
+  });
+
   it("loopback can be forced through the password flow with preferServiceToken=false", async () => {
     await writeServiceToken("hydra_token_local");
     const fetchImpl = (async () =>

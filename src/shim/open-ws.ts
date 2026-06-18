@@ -1,4 +1,5 @@
-import { WebSocket } from "ws";
+import { WebSocket, type ClientOptions } from "ws";
+import { wsTlsOptions } from "../core/tls-trust.js";
 
 export const DEFAULT_WS_CONNECT_TIMEOUT_MS = 10_000;
 
@@ -22,8 +23,32 @@ export async function openWs(
   subprotocols: string[],
   timeoutMs: number = DEFAULT_WS_CONNECT_TIMEOUT_MS,
 ): Promise<WebSocket> {
+  // For wss:// upgrades, fish out the pin (if any) for this host so
+  // self-signed certs the user already accepted via the login TOFU
+  // prompt continue to verify. Plain ws:// is a no-op — the options
+  // are silently ignored.
+  const tlsOpts: ClientOptions = {};
+  try {
+    const u = new URL(url);
+    if (u.protocol === "wss:") {
+      const pin = wsTlsOptions(u.hostname);
+      if (pin.rejectUnauthorized !== undefined) {
+        tlsOpts.rejectUnauthorized = pin.rejectUnauthorized;
+      }
+      if (pin.checkServerIdentity !== undefined) {
+        // @types/ws's signature for checkServerIdentity is out of
+        // date — ws forwards the option to tls.connect, which uses
+        // (servername, cert) => Error | undefined. Cast around the
+        // stale type so we don't fight the dependency.
+        tlsOpts.checkServerIdentity =
+          pin.checkServerIdentity as unknown as ClientOptions["checkServerIdentity"];
+      }
+    }
+  } catch {
+    // malformed URL — let ws surface the error normally
+  }
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, subprotocols);
+    const ws = new WebSocket(url, subprotocols, tlsOpts);
     const start = Date.now();
     const timer = setTimeout(() => {
       ws.off("open", onOpen);

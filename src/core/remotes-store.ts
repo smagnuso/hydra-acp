@@ -26,6 +26,18 @@ export interface RemoteCredential {
   // on the daemon side and surfaced in CLI listings on this side.
   // Falls back to the hostname when unset.
   label?: string;
+  // sha256 of the daemon's leaf TLS cert (DER), lowercase hex, no
+  // separators. Captured during login when the user accepts the
+  // cert presented by a self-signed daemon. The TLS trust layer
+  // pins to this value on subsequent connections; a mismatch
+  // (different cert) aborts the connection. Absent for daemons
+  // reachable over plain HTTP (LAN, loopback) or fronted by a
+  // CA-signed cert that validates against the system trust store.
+  pinnedFingerprint?: string;
+  // ISO-8601 UTC timestamp recording when the user accepted the
+  // pin. Surfaced to a future `hydra remotes list` so people can
+  // tell at a glance which trust decisions are stale.
+  pinnedAt?: string;
 }
 
 interface RemotesFile {
@@ -163,6 +175,12 @@ function normalise(raw: unknown): RemotesFile {
     };
     if (typeof v.label === "string") {
       cred.label = v.label;
+    }
+    if (typeof v.pinnedFingerprint === "string") {
+      cred.pinnedFingerprint = v.pinnedFingerprint;
+    }
+    if (typeof v.pinnedAt === "string") {
+      cred.pinnedAt = v.pinnedAt;
     }
     out[key] = cred;
   }
