@@ -1846,10 +1846,37 @@ export function registerAcpWsEndpoint(
     });
 
     connection.setDefaultHandler(async (rawParams, method) => {
+      // Two method namespaces fall through to the transformer chain when
+      // no explicit handler claimed them above:
+      //
+      //   session/*    — standard ACP session methods (e.g. set_model,
+      //                  set_mode). Tail dispatches to the agent.
+      //   hydra-acp/*  — vendor-prefixed methods that transformers may
+      //                  invent and intercept (e.g. clarifier's
+      //                  hydra-acp/question/answer). Any transformer in
+      //                  the chain that declared `request:<method>` as
+      //                  an intercept will be given a chance to reply
+      //                  with `{action: "stop", payload}`.
+      //
+      // Exception: the daemon ships explicit handlers for a fixed set of
+      // `hydra-acp/*` methods that are gated to transformer-kind
+      // connections. For non-transformer callers those explicit handlers
+      // aren't registered, so the call reaches this default handler.
+      // Returning MethodNotFound (rather than chain-routing) preserves
+      // the security contract that these methods are unavailable to
+      // non-transformer callers.
+      const TRANSFORMER_ONLY_HYDRA_ACP_METHODS: ReadonlySet<string> =
+        new Set<string>([
+          "hydra-acp/attention/set",
+          "hydra-acp/attention/clear",
+        ]);
+      const isSession = method.startsWith("session/");
+      const isHydraAcp = method.startsWith("hydra-acp/");
       if (
-        !method.startsWith("session/") ||
+        (!isSession && !isHydraAcp) ||
         rawParams === null ||
-        typeof rawParams !== "object"
+        typeof rawParams !== "object" ||
+        TRANSFORMER_ONLY_HYDRA_ACP_METHODS.has(method)
       ) {
         throw rpcError(
           JsonRpcErrorCodes.MethodNotFound,
@@ -1863,9 +1890,9 @@ export function registerAcpWsEndpoint(
           `Method not found: ${method}`,
         );
       }
-      // Any unhandled session/* method that reaches the default forwarder
-      // is by definition state-changing (the read-only-safe methods all
-      // have explicit handlers above). Reject for read-only attachments
+      // Any unhandled method that reaches the default forwarder is
+      // potentially state-changing (the read-only-safe methods all have
+      // explicit handlers above). Reject for read-only attachments
       // before forwarding to the agent.
       denyIfReadonly(sessionId, method);
       const session = requireLiveSession(deps.manager, sessionId);
