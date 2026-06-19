@@ -800,11 +800,23 @@ Same shapes, parameters, response codes, and errors as the Extensions endpoints 
 
 ## MCP endpoints
 
-Two HTTP routes are reachable from spawned agents (not from generic REST clients):
+Several HTTP routes are reachable from spawned agents (not from generic REST clients). All daemon-owned MCP servers share the same Streamable HTTP transport, the same per-session bearer model (a capability token minted at `session/new` and embedded in the agent's `mcpServers` descriptor), and bypass the daemon's global Bearer hook.
 
 #### `POST/GET/DELETE /mcp/hydra-acp-stdin`
 
-In-memory `hydra cat --stream` ring buffer, exposed as MCP tools (`head`, `tail`, `read`, `grep`, `wait_for_more`, `info`). Bearer is a per-session capability token minted at `session/new` time and embedded in the agent's `mcpServers`. The route uses the Streamable HTTP MCP transport and bypasses the daemon's global Bearer hook.
+In-memory `hydra cat --stream` ring buffer, exposed as MCP tools (`head`, `tail`, `read`, `grep`, `wait_for_more`, `info`).
+
+#### `POST/GET/DELETE /mcp/hydra-acp-recall`
+
+Pre-compaction conversation history, exposed so the agent can page back specifics after a compaction summary has replaced earlier content in working memory. Tools:
+
+| Tool | Input | Returns | Semantics |
+|---|---|---|---|
+| `recall_search` | `{ query, limit?, include_tool_calls? }` | Match list with snippets | Case-insensitive substring search across pre-compaction entries. |
+| `recall_range` | `{ from_entry, to_entry }` | Verbatim entries | Pull a contiguous slice of the pre-compaction log. |
+| `recall_tool_calls` | `{ tool_name?, limit? }` | Tool-call entries | Enumerate prior tool invocations, optionally filtered by tool name. |
+
+All three return a short "no compacted history yet" payload until the session has been compacted at least once.
 
 #### `POST/GET/DELETE /mcp/:name`
 
