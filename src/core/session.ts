@@ -530,7 +530,16 @@ export class Session {
   // /hydra slash-command sub-prompts (e.g. title regeneration) so
   // the conversation log doesn't get polluted with the meta-prompt
   // and its reply.
-  private internalPromptCapture: { chunks: string[] } | undefined;
+  private internalPromptCapture:
+    | {
+        chunks: string[];
+        toolCalls: number;
+        thinkingChars: number;
+        messageChars: number;
+        lastUsed?: number;
+        lastSize?: number;
+      }
+    | undefined;
   private idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
   // Separate timer that fires session.idle to the transformer chain after
@@ -1185,12 +1194,21 @@ export class Session {
     if (this.internalPromptCapture) {
       throw new Error("swapUpstream: internal prompt already in flight");
     }
-    this.internalPromptCapture = { chunks: [] };
+    this.internalPromptCapture = {
+      chunks: [],
+      toolCalls: 0,
+      thinkingChars: 0,
+      messageChars: 0,
+    };
     try {
       await fresh.agent.connection.request<unknown>("session/prompt", {
         sessionId: fresh.upstreamSessionId,
         prompt: [{ type: "text", text: seedText }],
       });
+      const cap = this.internalPromptCapture;
+      this.logger?.info(
+        `swapUpstream: seed processed sessionId=${this.sessionId} seedChars=${seedText.length} toolCalls=${cap.toolCalls} thinkingChars=${cap.thinkingChars} messageChars=${cap.messageChars} used=${cap.lastUsed ?? "?"} size=${cap.lastSize ?? "?"} reply=${JSON.stringify(cap.chunks.join("").slice(0, 200))}`,
+      );
     } finally {
       this.internalPromptCapture = undefined;
     }
@@ -4364,7 +4382,12 @@ export class Session {
     if (this.internalPromptCapture) {
       throw new Error("internal prompt already in flight");
     }
-    const capture: { chunks: string[] } = { chunks: [] };
+    const capture = {
+      chunks: [] as string[],
+      toolCalls: 0,
+      thinkingChars: 0,
+      messageChars: 0,
+    };
     this.internalPromptCapture = capture;
     try {
       await this.agent.connection.request<unknown>("session/prompt", {
@@ -6041,20 +6064,51 @@ function extractAdvertisedModes(params: unknown): AdvertisedMode[] | null {
 // Other update kinds (thoughts, tool calls, plans, etc.) are swallowed
 // — we only need the prose reply.
 function captureInternalChunk(
-  capture: { chunks: string[] },
+  capture: {
+    chunks: string[];
+    toolCalls: number;
+    thinkingChars: number;
+    messageChars: number;
+    lastUsed?: number;
+    lastSize?: number;
+  },
   params: unknown,
 ): void {
   const obj = (params ?? {}) as { update?: unknown };
   const update = (obj.update ?? {}) as {
     sessionUpdate?: unknown;
     content?: unknown;
+    used?: unknown;
+    size?: unknown;
   };
-  if (update.sessionUpdate !== "agent_message_chunk") {
+  const kind = update.sessionUpdate;
+  if (kind === "agent_message_chunk") {
+    const content = (update.content ?? {}) as { text?: unknown };
+    if (typeof content.text === "string") {
+      capture.chunks.push(content.text);
+      capture.messageChars += content.text.length;
+    }
     return;
   }
-  const content = (update.content ?? {}) as { text?: unknown };
-  if (typeof content.text === "string") {
-    capture.chunks.push(content.text);
+  if (kind === "agent_thought_chunk") {
+    const content = (update.content ?? {}) as { text?: unknown };
+    if (typeof content.text === "string") {
+      capture.thinkingChars += content.text.length;
+    }
+    return;
+  }
+  if (kind === "tool_call") {
+    capture.toolCalls++;
+    return;
+  }
+  if (kind === "usage_update") {
+    if (typeof update.used === "number") {
+      capture.lastUsed = update.used;
+    }
+    if (typeof update.size === "number") {
+      capture.lastSize = update.size;
+    }
+    return;
   }
 }
 

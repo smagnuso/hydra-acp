@@ -221,7 +221,7 @@ describe("renderCompactionSeed", () => {
     });
 
     expect(seed).toContain(
-      "(Hydra has compacted earlier conversation. Detail is retrievable via the hydra-recall tools if you need to look up specifics. Acknowledge briefly and wait for the next user message.)",
+      "(Hydra has compacted earlier conversation. Do NOT call any tools yet. Do NOT read any files, run any commands, or invoke hydra-recall. Reply with the single word 'OK' and wait for the next user message — at that point you can use the hydra-recall tools to look up specifics on demand if needed.)",
     );
   });
 });
