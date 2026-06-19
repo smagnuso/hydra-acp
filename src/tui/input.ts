@@ -35,6 +35,7 @@ export type KeyName =
   | "ctrl-n"
   | "ctrl-o"
   | "ctrl-p"
+  | "ctrl-q"
   | "ctrl-r"
   | "ctrl-s"
   | "ctrl-u"
@@ -112,6 +113,7 @@ export type InputEffect =
   | { type: "switch-session" }
   | { type: "next-live-session" }
   | { type: "toggle-options" }
+  | { type: "toggle-questions" }
   | { type: "toggle-thoughts" }
   | { type: "toggle-mouse" }
   | { type: "show-help" }
@@ -575,6 +577,11 @@ export class InputDispatcher {
         return this.handleDown();
       case "ctrl-o":
         return [{ type: "toggle-options" }];
+      // ^Q is the XOFF flow-control character; terminals with IXON enabled
+      // (`stty -ixon` not set) will swallow it before it reaches us.
+      // This binding only works when IXON is disabled.
+      case "ctrl-q":
+        return [{ type: "toggle-questions" }];
       case "backspace":
         this.recordEdit();
         this.backspace();

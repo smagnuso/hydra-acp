@@ -577,8 +577,11 @@ export function registerAcpWsEndpoint(
         const envelope = params.envelope;
         const route = params.route;
 
-        if (!sessionId || !method) {
-          throw rpcError(-32602, "emit_message requires sessionId and method");
+        if (!sessionId) {
+          throw rpcError(-32602, "emit_message requires sessionId");
+        }
+        if (!method && route !== "client_broadcast") {
+          throw rpcError(-32602, "emit_message requires method");
         }
 
         const session = requireLiveSession(deps.manager, sessionId);
@@ -605,6 +608,20 @@ export function registerAcpWsEndpoint(
         if (route === "daemon") {
           const response = await session.emitToChain(processIdentity.name, method, envelope);
           return { ok: true, response };
+        }
+
+        // Push an ephemeral session/update notification to every client
+        // attached to the session. Not recorded in history, not routed
+        // through the transformer chain — for UI signals like
+        // "clarifier_question_asked" that the user-facing TUI should
+        // react to. `envelope` is the full update payload, including its
+        // `sessionUpdate: "..."` discriminator.
+        if (route === "client_broadcast") {
+          if (!envelope || typeof envelope !== "object") {
+            throw rpcError(-32602, "client_broadcast requires an envelope object");
+          }
+          session.broadcastClientUpdate(envelope as Record<string, unknown>);
+          return { ok: true };
         }
 
         throw rpcError(-32602, `unsupported route: ${JSON.stringify(route)}`);

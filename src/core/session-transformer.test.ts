@@ -124,6 +124,78 @@ describe("Session transformer chain — forwardRequest", () => {
     expect(requestMock).not.toHaveBeenCalled();
   });
 
+  it("continue action with payload rewrites the envelope sent to the agent", async () => {
+    // Regression for the clarifier deviation-injection bug: a transformer
+    // returns { action: "continue", payload: <rewritten envelope> } to
+    // mean "let the chain keep going, but with these modifications".
+    // forwardRequest must adopt the payload before forwarding to the
+    // agent — silently dropping it makes prompt-rewriting transformers
+    // invisible to the agent (the clarifier's deviation block was being
+    // discarded before this fix).
+    const rewritten = {
+      sessionId: "upstream_test",
+      prompt: [
+        { type: "text", text: "[injected by transformer]" },
+        { type: "text", text: "original" },
+      ],
+    };
+    const t = fakeTransformerConn({ action: "continue", payload: rewritten });
+    const { session, requestMock } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t.conn),
+    ]);
+    await session.forwardRequest("session/prompt", {
+      sessionId: "sess_test",
+      prompt: [{ type: "text", text: "original" }],
+    });
+    expect(requestMock).toHaveBeenCalledWith("session/prompt", rewritten);
+  });
+
+  it("continue action without payload leaves the envelope unchanged", async () => {
+    const t = fakeTransformerConn({ action: "continue" });
+    const { session, requestMock } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t.conn),
+    ]);
+    const original = {
+      sessionId: "sess_test",
+      prompt: [{ type: "text", text: "hi" }],
+    };
+    await session.forwardRequest("session/prompt", original);
+    const [, envelope] = requestMock.mock.calls[0]!;
+    expect((envelope as { prompt: unknown[] }).prompt).toEqual([
+      { type: "text", text: "hi" },
+    ]);
+  });
+
+  it("chained continue+payload composes — second transformer sees first's rewrite", async () => {
+    const firstRewrite = {
+      sessionId: "upstream_test",
+      prompt: [
+        { type: "text", text: "[A]" },
+        { type: "text", text: "x" },
+      ],
+    };
+    const t1 = fakeTransformerConn({ action: "continue", payload: firstRewrite });
+    const t2 = fakeTransformerConn({ action: "continue" });
+    const { session, requestMock } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t1.conn),
+      makeRef("t2", ["request:session/prompt"], t2.conn),
+    ]);
+    await session.forwardRequest("session/prompt", {
+      sessionId: "sess_test",
+      prompt: [{ type: "text", text: "x" }],
+    });
+    // t2 must observe the envelope as rewritten by t1.
+    const t2Call = t2.requests[0]!;
+    const t2Envelope = (t2Call.params as { envelope: { prompt: unknown[] } })
+      .envelope;
+    expect(t2Envelope.prompt).toEqual([
+      { type: "text", text: "[A]" },
+      { type: "text", text: "x" },
+    ]);
+    // And the agent ultimately receives t1's rewrite.
+    expect(requestMock).toHaveBeenCalledWith("session/prompt", firstRewrite);
+  });
+
   it("stop on non-prompt method returns empty object by default", async () => {
     const t = fakeTransformerConn({ action: "stop" });
     const { session } = makeSession([

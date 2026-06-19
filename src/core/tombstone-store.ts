@@ -165,7 +165,13 @@ export class TombstoneStore {
   }
 }
 
-// Resurrection rule used by syncFromAgent. The agent's reported
+// Resurrection rule used by syncFromAgent. User-initiated deletes are
+// permanent — the whole point of pressing `d` in the picker is to make
+// the session go away and stay away; the upstream agent's session file
+// almost always has a newer mtime than the snapshot we took (any
+// background activity, the kill itself, opencode's constant
+// session-file rewrites) and would otherwise immediately resurrect.
+// For non-user reasons (GC eviction by age, etc.), the agent's reported
 // updatedAt must be strictly greater than the snapshot we took at
 // delete time; an equal value means no progress since deletion. A
 // tombstone with no upstreamUpdatedAt (deleted before that field was
@@ -176,6 +182,9 @@ export function shouldResurrectFromUpstream(
   tombstone: Tombstone,
   listingUpdatedAt: string | undefined,
 ): boolean {
+  if (tombstone.reason === "user") {
+    return false;
+  }
   if (listingUpdatedAt === undefined) {
     return false;
   }

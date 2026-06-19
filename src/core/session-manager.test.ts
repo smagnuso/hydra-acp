@@ -3198,7 +3198,7 @@ describe("SessionManager.syncFromAgent", () => {
       upstreamSessionId: "u_revived",
       deletedAt: "2026-06-01T00:00:00.000Z",
       upstreamUpdatedAt: "2026-05-31T00:00:00.000Z",
-      reason: "user",
+      reason: "expired",
     });
     const { manager } = makeSyncManager({
       capability: {},

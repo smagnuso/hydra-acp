@@ -148,7 +148,7 @@ export async function sweepNonInteractiveSessions(
   let failed = 0;
   for (const { sessionId } of slice) {
     try {
-      const ok = await opts.manager.deleteRecord(sessionId);
+      const ok = await opts.manager.deleteRecord(sessionId, "expired");
       if (ok) {
         deleted += 1;
       }

@@ -221,6 +221,11 @@ export interface OptionsPromptSpec {
   title: string;
   options: Array<{ label: string; value: string }>;
   selectedIndex: number;
+  // Bottom-line hint shown under the rows. When omitted, the renderer uses
+  // the legacy hint tailored to the ^O session-options modal — the modal
+  // this widget was originally built for. The ^Q questions modal sets its
+  // own hint with the dispatch / save / discard keys.
+  hint?: string;
 }
 
 // Tiny modal used by the TUI to confirm a destructive exit (e.g. "agent
@@ -4832,8 +4837,11 @@ export class Screen {
         },
       );
     }
-    writeRow(`opts|hint|${w}`, () => {
-      this.term.dim(" ↑/↓ choose · Enter this session · s save default · Esc close");
+    const hint =
+      spec.hint ??
+      "↑/↓ choose · Enter this session · s save default · Esc close";
+    writeRow(`opts|hint|${w}|${hint}`, () => {
+      this.term.dim(` ${hint}`);
     });
   }
 
@@ -6179,6 +6187,8 @@ export function mapKeyName(name: string): KeyName | null {
       return "ctrl-o";
     case "CTRL_P":
       return "ctrl-p";
+    case "CTRL_Q":
+      return "ctrl-q";
     case "CTRL_R":
       return "ctrl-r";
     case "CTRL_S":
@@ -6296,6 +6306,7 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
     110: "ctrl-n",
     111: "ctrl-o",
     112: "ctrl-p",
+    113: "ctrl-q",
     114: "ctrl-r",
     115: "ctrl-s",
     116: "ctrl-t",

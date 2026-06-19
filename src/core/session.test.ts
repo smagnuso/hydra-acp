@@ -4183,9 +4183,15 @@ describe("Session", () => {
         );
       expect(bobPromptReceived).toBeUndefined();
 
-      // Only the head sees a terminal turn_complete (error from the
-      // upstream rejection). No synthesized turn_complete(interrupted)
-      // for bob's prompt — that's the bug this guards against.
+      // Only the head sees a terminal turn_complete. The exact stopReason
+      // depends on which of two settle paths wins the race:
+      //   - runQueueEntry's catch broadcasts "error" if the upstream
+      //     rejection lands first
+      //   - markClosed broadcasts "interrupted" if close()'s sweep gets
+      //     there first
+      // The defining property of this test is "exactly one turn_complete,
+      // not two" — the bug this guards is a synthesized interrupted on
+      // top of the error. Either label is correct.
       const turnCompletes = wireOf(bobStream).filter(
         (m) =>
           (m.params as { update?: { sessionUpdate?: string } }).update
@@ -4195,7 +4201,7 @@ describe("Session", () => {
       expect(
         (turnCompletes[0]!.params as { update: { stopReason?: string } }).update
           .stopReason,
-      ).toBe("error");
+      ).toMatch(/^(error|interrupted)$/);
 
       // bob's queued chip is removed with reason=abandoned (markClosed's
       // sweep), not started. Look up bob's entry by the messageId that

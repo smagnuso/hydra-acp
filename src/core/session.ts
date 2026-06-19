@@ -1475,6 +1475,23 @@ export class Session {
     };
   }
 
+  // Push an ephemeral session/update notification to attached clients
+  // without recording it in history or feeding it to the broadcast handlers
+  // that drive the transformer chain. Used for transient UI signals (e.g.
+  // the clarifier announcing a new question) where the daemon owns the
+  // wire fan-out but the event itself isn't part of session history.
+  broadcastClientUpdate(update: Record<string, unknown>): void {
+    const params = this.rewriteForClient({
+      sessionId: this.upstreamSessionId,
+      update,
+    });
+    for (const client of this.clients.values()) {
+      void client.connection
+        .notify("session/update", params)
+        .catch(() => undefined);
+    }
+  }
+
   // Broadcast a hydra_compaction phase event to attached clients.
   // Send a hydra_compaction lifecycle event to attached clients.
   // These are ephemeral push notifications — they are NOT appended to
@@ -2648,6 +2665,17 @@ export class Session {
         return (result?.payload as Record<string, unknown> | undefined) ??
           defaultStopPayload(method);
       }
+      if (action === "continue") {
+        // A transformer may rewrite the envelope and signal `continue` to
+        // hand the modified version on to the next transformer (and the
+        // agent). Adopt the rewritten payload — the clarifier uses this
+        // path to prepend deviation blocks to session/prompt envelopes.
+        if (result?.payload && typeof result.payload === "object") {
+          envelope = result.payload;
+        }
+        originatedBy.add(t.name);
+        continue;
+      }
       if (action === "processing") {
         const claimIdx = i;
         const claimEnvelope = envelope;
@@ -2689,6 +2717,8 @@ export class Session {
           });
         });
       }
+      // Unknown action — treat as continue without payload-adoption to be
+      // safe. Add to originatedBy so we don't loop back on re-emissions.
       originatedBy.add(t.name);
     }
     if (tailKind === "notification") {
@@ -5810,13 +5840,15 @@ export class Session {
     }
     let response: unknown;
     try {
-      response = await this.agent.connection.request<unknown>(
-        "session/prompt",
-        {
-          sessionId: this.upstreamSessionId,
-          prompt: entry.prompt,
-        },
-      );
+      // Route through the transformer chain so transformers that register
+      // a request:session/prompt intercept (e.g. the clarifier's deviation
+      // injection) get to see and potentially rewrite the prompt before it
+      // reaches the agent. forwardRequest handles rewriteForAgent
+      // (sessionId → upstreamSessionId) and tail-forwards to the agent.
+      response = await this.forwardRequest("session/prompt", {
+        sessionId: this.sessionId,
+        prompt: entry.prompt,
+      });
     } catch (err) {
       // Deliberate force-cancel: the agent was killed on purpose. Resolve
       // the originator's prompt as cancelled (markClosed already broadcast

@@ -110,4 +110,22 @@ describe("shouldResurrectFromUpstream", () => {
     const bare: Tombstone = { ...t, upstreamUpdatedAt: undefined };
     expect(shouldResurrectFromUpstream(bare, "2020-01-01T00:00:00.000Z")).toBe(true);
   });
+
+  it("user-reason tombstones never resurrect, even with newer upstream", () => {
+    const userTomb: Tombstone = { ...t, reason: "user" };
+    expect(
+      shouldResurrectFromUpstream(userTomb, "2099-01-01T00:00:00.000Z"),
+    ).toBe(false);
+  });
+
+  it("user-reason tombstones with no upstreamUpdatedAt still don't resurrect", () => {
+    const userTomb: Tombstone = {
+      ...t,
+      reason: "user",
+      upstreamUpdatedAt: undefined,
+    };
+    expect(
+      shouldResurrectFromUpstream(userTomb, "2099-01-01T00:00:00.000Z"),
+    ).toBe(false);
+  });
 });

@@ -41,6 +41,17 @@ import {
 } from "../core/daemon-bootstrap.js";
 import { computeConfigDigest } from "../core/config-digest.js";
 import { invokedBinName } from "../core/bin-name.js";
+import {
+  type Question,
+  CLARIFIER_QUESTION_LIST_METHOD,
+  CLARIFIER_QUESTION_ANSWER_METHOD,
+  CLARIFIER_QUESTION_DISMISS_METHOD,
+} from "./clarifier-types.js";
+
+export {
+  CLARIFIER_QUESTION_ANSWER_METHOD,
+  CLARIFIER_QUESTION_DISMISS_METHOD,
+};
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
@@ -145,6 +156,286 @@ import {
   type FormattedLine,
   type ToolLineState,
 } from "./format.js";
+
+// Pure helper: filter a question array down to entries that should appear
+// in the ^Q modal. Both `open` (never-answered) and `pending-delivery`
+// (answered but the deviation block hasn't been delivered to the agent yet)
+// are editable — the user can revisit and change or dismiss either. Closed
+// questions are excluded.
+export function filterOpenQuestions(questions: Question[]): Question[] {
+  return questions.filter(
+    (q) => q.status === "open" || q.status === "pending-delivery",
+  );
+}
+
+// Pure helper: pick the initial cycle-ring index for a question. For
+// pending-delivery questions we surface the user's prior answer so the
+// modal opens already showing what was committed — re-opening ^Q after
+// a save shows "tabs" (or whatever was picked), not the agent's default.
+export function initialSelectedValueIndex(question: Question): number {
+  const ring = getQuestionValueRing(question);
+  if (question.status === "pending-delivery" && question.userAnswer) {
+    const idx = ring.indexOf(question.userAnswer);
+    if (idx !== -1) {
+      return idx;
+    }
+  }
+  return 0;
+}
+
+// Display string used in the value column when a row is in dismiss-mode.
+// Dismiss is NOT a member of the cycle ring — it's a separate per-row
+// toggle (the `d` key) tracked in questionsDismissed; mixing it into the
+// ring confused users by making "drop this question" look identical to
+// picking an answer.
+export const QUESTION_VALUE_DISMISS = "dismiss";
+
+// Group identical open questions by their question text. The modal renders
+// one row per group (with a (×N) suffix when N>1); answering or dismissing
+// the row fans out the dispatch to every original question id in the group.
+export type QuestionGroup = {
+  representative: Question;
+  ids: string[];
+};
+
+export function groupQuestions(questions: Question[]): QuestionGroup[] {
+  const byKey = new Map<string, QuestionGroup>();
+  const order: string[] = [];
+  for (const q of questions) {
+    const key = q.question;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.ids.push(q.id);
+    } else {
+      byKey.set(key, { representative: q, ids: [q.id] });
+      order.push(key);
+    }
+  }
+  return order.map((k) => byKey.get(k)!);
+}
+
+// Pure helper: build the cycle ring for a single question. The ring is
+// strictly the set of valid ANSWER values — dismiss is a separate per-row
+// state (see questionsDismissed). Index 0 is the question's defaultAnswer:
+// for explicit-options questions we hoist defaultAnswer to the front so a
+// no-cycle save commits the agent-suggested default rather than "whichever
+// option happened to be listed first."
+export function getQuestionValueRing(question: Question): string[] {
+  if (question.options && question.options.length > 0) {
+    const rest = question.options.filter((o) => o !== question.defaultAnswer);
+    if (question.options.includes(question.defaultAnswer)) {
+      return [question.defaultAnswer, ...rest];
+    }
+    // defaultAnswer not in options — still surface it first so the user can
+    // commit it without typing; the options trail after.
+    return [question.defaultAnswer, ...question.options];
+  }
+  return [question.defaultAnswer];
+}
+
+function truncateQuestionLabel(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  if (max <= 1) {
+    return "…";
+  }
+  return text.slice(0, max - 1) + "…";
+}
+
+// Pure helper: build a multi-row OptionsPromptSpec showing every open
+// question group. Each row's value column renders the currently-selected
+// answer — or "dismiss" when the row is in dismiss-mode. Dedup is hidden;
+// save fans out under the hood. `touched` is still tracked by the caller
+// to decide which rows dispatch, but it has no visual representation —
+// the value column itself is enough cue.
+export function buildAllQuestionsSpec(
+  groups: QuestionGroup[],
+  selectedValues: number[],
+  dismissed: boolean[],
+  currentRow: number,
+  maxLabelWidth: number = 60,
+): {
+  title: string;
+  options: Array<{ label: string; value: string }>;
+  selectedIndex: number;
+  hint?: string;
+} {
+  const options = groups.map((g, i) => {
+    const ring = getQuestionValueRing(g.representative);
+    const idx = selectedValues[i] ?? 0;
+    const value = dismissed[i]
+      ? QUESTION_VALUE_DISMISS
+      : (ring[idx] ?? ring[0] ?? "");
+    const label = truncateQuestionLabel(
+      g.representative.question,
+      maxLabelWidth,
+    );
+    return { label, value };
+  });
+  return {
+    title: `Open questions (${groups.length})`,
+    options,
+    selectedIndex: Math.max(0, Math.min(groups.length - 1, currentRow)),
+    hint: "↑/↓ row · ←/→ cycle · d dismiss · 1-9 jump · ⏎/Esc save · ^C discard",
+  };
+}
+
+// Pure helper: given a selected option value and question, build the
+// answer-or-dismiss dispatch action. `selectedValue === QUESTION_VALUE_DISMISS`
+// routes to question/dismiss; anything else to question/answer.
+export type QuestionDispatchAction =
+  | {
+      type: "answer";
+      method: typeof CLARIFIER_QUESTION_ANSWER_METHOD;
+      params: { sessionId: string; questionId: string; answer: string };
+    }
+  | {
+      type: "dismiss";
+      method: typeof CLARIFIER_QUESTION_DISMISS_METHOD;
+      params: { sessionId: string; questionId: string };
+    };
+
+export function resolveQuestionDispatch(
+  selectedValue: string,
+  question: Question,
+  sessionId: string,
+): QuestionDispatchAction | null {
+  if (selectedValue === QUESTION_VALUE_DISMISS) {
+    return {
+      type: "dismiss",
+      method: CLARIFIER_QUESTION_DISMISS_METHOD,
+      params: { sessionId, questionId: question.id },
+    };
+  }
+  return {
+    type: "answer",
+    method: CLARIFIER_QUESTION_ANSWER_METHOD,
+    params: { sessionId, questionId: question.id, answer: selectedValue },
+  };
+}
+
+// Build the ordered list of dispatches the modal should fire on save —
+// one per question id in every touched group. Duplicate groups fan out:
+// the action applies to every id. Untouched rows are skipped. Dismissed
+// rows emit dismiss for every id; otherwise the currently-selected ring
+// value becomes the answer.
+export function buildSaveDispatches(
+  groups: QuestionGroup[],
+  selectedValues: number[],
+  touched: boolean[],
+  dismissed: boolean[],
+  sessionId: string,
+): QuestionDispatchAction[] {
+  const out: QuestionDispatchAction[] = [];
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    if (!g || !touched[i]) {
+      continue;
+    }
+    const dispatchValue = dismissed[i]
+      ? QUESTION_VALUE_DISMISS
+      : (getQuestionValueRing(g.representative)[selectedValues[i] ?? 0] ?? "");
+    if (!dispatchValue) {
+      continue;
+    }
+    for (const id of g.ids) {
+      const synthetic: Question = { ...g.representative, id };
+      const action = resolveQuestionDispatch(dispatchValue, synthetic, sessionId);
+      if (action !== null) {
+        out.push(action);
+      }
+    }
+  }
+  return out;
+}
+
+// Result of processing a key event in the multi-row questions modal.
+export type QuestionsKeyResult =
+  | { type: "noop" }
+  | { type: "row"; selectedRow: number }
+  | { type: "cycle"; selectedRow: number; newValueIndex: number }
+  | { type: "dismiss-toggle"; selectedRow: number }
+  | { type: "save"; dispatches: QuestionDispatchAction[] }
+  | { type: "discard" };
+
+/**
+ * Process a key event while the questions modal is active.
+ * Pure function — takes all state as parameters, returns an immutable result.
+ * The caller applies mutations based on the result.
+ */
+export function handleQuestionsKey(
+  ev: KeyEvent,
+  questionsActive: boolean,
+  groups: QuestionGroup[] | null,
+  selectedValues: number[],
+  touched: boolean[],
+  dismissed: boolean[],
+  currentRow: number,
+  sessionId: string,
+): QuestionsKeyResult {
+  if (!questionsActive || groups === null || groups.length === 0) {
+    return { type: "noop" };
+  }
+  if (ev.type === "char") {
+    if (ev.ch === "d" || ev.ch === "D") {
+      return { type: "dismiss-toggle", selectedRow: currentRow };
+    }
+    if (/^[1-9]$/.test(ev.ch)) {
+      const idx = parseInt(ev.ch, 10) - 1;
+      if (idx < groups.length) {
+        return { type: "row", selectedRow: idx };
+      }
+    }
+    return { type: "noop" };
+  }
+  if (ev.type !== "key") {
+    return { type: "noop" };
+  }
+  const cycle = (delta: 1 | -1): QuestionsKeyResult => {
+    const g = groups[currentRow];
+    if (!g) {
+      return { type: "noop" };
+    }
+    const ring = getQuestionValueRing(g.representative);
+    if (ring.length === 0) {
+      return { type: "noop" };
+    }
+    const cur = selectedValues[currentRow] ?? 0;
+    const next = (cur + delta + ring.length) % ring.length;
+    return { type: "cycle", selectedRow: currentRow, newValueIndex: next };
+  };
+  switch (ev.name) {
+    case "up":
+      return { type: "row", selectedRow: Math.max(0, currentRow - 1) };
+    case "down":
+      return {
+        type: "row",
+        selectedRow: Math.min(groups.length - 1, currentRow + 1),
+      };
+    case "right":
+      return cycle(1);
+    case "left":
+      return cycle(-1);
+    case "enter":
+    case "escape":
+    case "ctrl-q":
+      return {
+        type: "save",
+        dispatches: buildSaveDispatches(
+          groups,
+          selectedValues,
+          touched,
+          dismissed,
+          sessionId,
+        ),
+      };
+    case "ctrl-c":
+      return { type: "discard" };
+    default:
+      return { type: "noop" };
+  }
+}
 
 // Parse the top-level `configOptions` field off a session/new or
 // session/attach response by routing it through the same mapper used for
@@ -943,6 +1234,9 @@ async function runSession(
     "usage_update",
     "config_option_update",
     "hydra_compaction",
+    "clarifier_question_asked",
+    "clarifier_question_answered",
+    "clarifier_question_dismissed",
   ]);
   const handleSessionUpdate = (params: unknown): void => {
     const { update } = (params ?? {}) as { update?: unknown };
@@ -989,6 +1283,18 @@ async function runSession(
     }
     if (rawTag === "hydra_compaction") {
       handleCompactionUpdate(update);
+      return;
+    }
+    if (rawTag === "clarifier_question_asked") {
+      const u = update as { question?: { question?: unknown } };
+      const text = typeof u.question?.question === "string" ? u.question.question : "";
+      const short = text.length > 50 ? text.slice(0, 49) + "…" : text;
+      screen.notify(short ? `new question: ${short} — ^Q to view` : "new clarifier question — ^Q to view");
+      return;
+    }
+    if (rawTag === "clarifier_question_answered" || rawTag === "clarifier_question_dismissed") {
+      // No banner — the user just acted (or the agent self-cleaned).
+      // Future: tick a counter for the picker badge.
       return;
     }
     appendRender(event, update);
@@ -1917,6 +2223,9 @@ async function runSession(
         if (tryHandleHelpKey(ev)) {
           continue;
         }
+        if (tryHandleQuestionsKey(ev)) {
+          continue;
+        }
         if (tryHandleOptionsKey(ev)) {
           continue;
         }
@@ -2530,6 +2839,19 @@ async function runSession(
   ] as const;
   type OptionId = (typeof OPTION_IDS)[number];
   let optionsSelectedIndex = 0;
+  // Multi-row questions modal state. `openQuestionGroups` is the deduped
+  // snapshot pulled from the clarifier at open time — identical questions
+  // collapse into one group, and dispatch fans out on save.
+  // `questionsSelectedValues[i]` is the index into group i's cycle ring;
+  // `questionsCurrentRow` is the highlighted row.
+  let openQuestionGroups: QuestionGroup[] | null = null;
+  let questionsSelectedValues: number[] = [];
+  // Parallel to openQuestionGroups: touched=true for any row the user has
+  // cycled or dismissed. Save only dispatches touched rows. dismissed=true
+  // routes the row to question/dismiss instead of question/answer.
+  let questionsTouched: boolean[] = [];
+  let questionsDismissed: boolean[] = [];
+  let questionsCurrentRow = 0;
 
   const optionValue = (id: OptionId): string => {
     switch (id) {
@@ -2582,6 +2904,10 @@ async function runSession(
     if (!screen.isOptionsPromptActive()) {
       return;
     }
+    // Questions modal manages its own spec — don't overwrite it with ^O spec.
+    if (openQuestionGroups !== null) {
+      return;
+    }
     screen.setOptionsPrompt(buildOptionsSpec());
   };
 
@@ -2592,6 +2918,65 @@ async function runSession(
     }
     optionsSelectedIndex = 0;
     screen.setOptionsPrompt(buildOptionsSpec());
+  };
+
+  // Rebuild the multi-row OptionsPromptSpec from the current modal state
+  // and push it to the screen. Called after every key that changes either
+  // the highlighted row or a row's selected value.
+  const refreshQuestionsSpec = (): void => {
+    if (openQuestionGroups === null) {
+      return;
+    }
+    const spec = buildAllQuestionsSpec(
+      openQuestionGroups,
+      questionsSelectedValues,
+      questionsDismissed,
+      questionsCurrentRow,
+    );
+    screen.setOptionsPrompt(spec);
+  };
+
+  const closeQuestionsModal = (): void => {
+    openQuestionGroups = null;
+    questionsSelectedValues = [];
+    questionsTouched = [];
+    questionsDismissed = [];
+    questionsCurrentRow = 0;
+    screen.setOptionsPrompt(null);
+  };
+
+  const toggleQuestionsModal = async (): Promise<void> => {
+    if (openQuestionGroups !== null) {
+      closeQuestionsModal();
+      return;
+    }
+    try {
+      const raw = await conn.request(CLARIFIER_QUESTION_LIST_METHOD, {
+        sessionId: resolvedSessionId,
+      });
+      const res = raw as { questions: Question[] };
+      const open = filterOpenQuestions(res.questions ?? []);
+      if (open.length === 0) {
+        screen.notify("no open questions");
+        return;
+      }
+      const groups = groupQuestions(open);
+      openQuestionGroups = groups;
+      questionsCurrentRow = 0;
+      questionsSelectedValues = groups.map((g) =>
+        initialSelectedValueIndex(g.representative),
+      );
+      questionsTouched = groups.map(() => false);
+      questionsDismissed = groups.map(() => false);
+      refreshQuestionsSpec();
+    } catch (err: unknown) {
+      screen.notify("clarifier unavailable");
+      writeDebugLine({
+        src: "questions",
+        step: "list_failed",
+        error: (err as Error).message,
+      });
+    }
   };
 
   const applyOptionToggle = (id: OptionId): void => {
@@ -2682,6 +3067,10 @@ async function runSession(
   // The modal stays open after Enter / `s`. Everything else is swallowed
   // so it can't leak into the prompt buffer behind the modal.
   const tryHandleOptionsKey = (ev: KeyEvent): boolean => {
+    // Questions modal takes priority — it's handled before this in the key loop.
+    if (openQuestionGroups !== null) {
+      return false;
+    }
     if (!screen.isOptionsPromptActive()) {
       return false;
     }
@@ -2739,6 +3128,104 @@ async function runSession(
       }
     }
     return true;
+  };
+
+  // While the questions modal is open it owns input: ↑/↓ navigate rows,
+  // ←/→/Enter cycle the current row's value through its ring, 1-9 jumps
+  // to a row by index, Esc/^Q saves all touched rows, ^C discards. The
+  // modal stays open after a cycle so several rows can be set in one
+  // visit. Everything else is swallowed.
+  const tryHandleQuestionsKey = (ev: KeyEvent): boolean => {
+    if (openQuestionGroups === null) {
+      return false;
+    }
+    const result = handleQuestionsKey(
+      ev,
+      true,
+      openQuestionGroups,
+      questionsSelectedValues,
+      questionsTouched,
+      questionsDismissed,
+      questionsCurrentRow,
+      resolvedSessionId,
+    );
+    switch (result.type) {
+      case "noop":
+        return true;
+      case "row":
+        questionsCurrentRow = result.selectedRow;
+        refreshQuestionsSpec();
+        return true;
+      case "cycle":
+        questionsSelectedValues[result.selectedRow] = result.newValueIndex;
+        questionsTouched[result.selectedRow] = true;
+        // Cycling out of dismiss-mode unsets the dismiss flag — user has
+        // changed their mind and wants to commit a real answer instead.
+        questionsDismissed[result.selectedRow] = false;
+        refreshQuestionsSpec();
+        return true;
+      case "dismiss-toggle": {
+        const i = result.selectedRow;
+        if (questionsDismissed[i]) {
+          // Second press: un-dismiss back to untouched state.
+          questionsDismissed[i] = false;
+          questionsTouched[i] = false;
+        } else {
+          questionsDismissed[i] = true;
+          questionsTouched[i] = true;
+        }
+        refreshQuestionsSpec();
+        return true;
+      }
+      case "discard":
+        closeQuestionsModal();
+        return true;
+      case "save": {
+        const dispatches = result.dispatches;
+        closeQuestionsModal();
+        if (dispatches.length === 0) {
+          return true;
+        }
+        void (async (): Promise<void> => {
+          let answered = 0;
+          let dismissed = 0;
+          let failed = 0;
+          for (const action of dispatches) {
+            try {
+              await conn.request(action.method, action.params);
+              if (action.type === "dismiss") {
+                dismissed++;
+              } else {
+                answered++;
+              }
+            } catch (err: unknown) {
+              failed++;
+              writeDebugLine({
+                src: "questions",
+                step: "dispatch_failed",
+                method: action.method,
+                error: (err as Error).message,
+              });
+            }
+          }
+          const parts: string[] = [];
+          if (answered > 0) {
+            parts.push(`${answered} answered`);
+          }
+          if (dismissed > 0) {
+            parts.push(`${dismissed} dismissed`);
+          }
+          if (failed > 0) {
+            parts.push(`${failed} failed`);
+          }
+          if (parts.length > 0) {
+            screen.notify(`clarifier: ${parts.join(", ")}`);
+          }
+        })();
+        return true;
+      }
+    }
+    return false;
   };
 
   const teardown = (): void => {
@@ -3248,6 +3735,9 @@ async function runSession(
         return;
       case "toggle-options":
         toggleOptionsModal();
+        return;
+      case "toggle-questions":
+        toggleQuestionsModal();
         return;
       case "toggle-thoughts":
         viewPrefs.showThoughts = !viewPrefs.showThoughts;

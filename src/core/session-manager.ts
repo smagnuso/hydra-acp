@@ -2628,7 +2628,10 @@ export class SessionManager {
     });
   }
 
-  async deleteRecord(sessionId: string): Promise<boolean> {
+  async deleteRecord(
+    sessionId: string,
+    reason: "user" | "expired" = "user",
+  ): Promise<boolean> {
     const record = await this.store.read(sessionId);
     if (!record) {
       return false;
@@ -2649,7 +2652,7 @@ export class SessionManager {
           upstreamUpdatedAt: record.updatedAt,
           cwd: record.cwd,
           title: record.title,
-          reason: "user",
+          reason,
           ...(recordInteractive !== undefined
             ? { interactive: recordInteractive }
             : {}),
