@@ -16,6 +16,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [Auth](#auth)
   - [Config](#config)
   - [Sessions](#sessions)
+  - [Attention](#attention)
   - [Session events](#session-events)
   - [Agents](#agents)
   - [Registry](#registry)
@@ -491,6 +492,66 @@ Tail a session's recorded conversation as NDJSON. One-shot by default; `?follow=
 
 - `404` — session unknown.
 
+### Attention
+
+The daemon maintains a per-session set of **attention flags** — entries that mean "the user owes this session a response." A flag carries an opaque, raiser-defined payload that holds the state needed to render the attention UI. The daemon ORs the presence of any flag (alongside an in-flight `session/request_permission`) into [`awaitingInput`](#on-sessionlist-entries-_metahydra-acp) so the picker (and any other client) lights up regardless of which mechanism flagged the session.
+
+Flags are keyed by `(sessionId, source, reason)`:
+
+- `source` is resolved server-side from the calling connection's identity (transformer name, or `"daemon"` for internal raisers such as the permission system). Two transformers can use the same `reason` string without colliding.
+- `reason` is a raiser-chosen string. Daemon does not interpret it.
+- `payload` is opaque JSON. The shape is defined by whoever raises the flag — clients render based on `source` + `reason` and the payload they recognize.
+
+**First-class consumers:**
+
+- The permission system raises `source: "daemon", reason: "permission"` flags with a payload that includes the tool call, options, and a replay-on-attach hook. The auto-popping permission modal (`session/request_permission`) reads from these flags.
+- Transformer-owned features raise their own flags with payloads that match their use case. The daemon doesn't interpret `source` or `reason` — clients recognize the combinations they understand and ignore the rest.
+
+**Persistence.** Every flag is mirrored to its session's `meta.json` on each `set` / `clear`. The flag set is restored when the session loads (cold or live), so `awaitingInput` and the attention payload are accurate immediately on attach.
+
+**Startup reconcile.** Each raiser is responsible for reconciling stale state on its own startup — a raiser comes up, fetches its currently-persisted flags via `GET /v1/sessions/attention?source=<name>`, decides per flag whether the underlying state is still meaningful, and `clear`s the ones that aren't. For the permission system, reconcile is trivial: every persisted permission flag is dead on startup (the agent's turn crashed), so they're all cleared.
+
+#### `GET /v1/sessions/:id/attention`
+
+Returns every flag currently raised on a session. Used by clients to render attention UI (badges, modals, tooltip details).
+
+```jsonc
+{
+  "flags": [
+    {
+      "source": "daemon",
+      "reason": "permission",
+      "raisedAt": 1717012800000,
+      "payload": { /* shape defined by the raiser */ }
+    }
+  ]
+}
+```
+
+**Errors**
+
+- `404` — session unknown.
+
+#### `GET /v1/sessions/attention?source=<name>`
+
+Returns flags owned by a specific source across all sessions. Used by raisers during their startup-reconcile pass.
+
+```jsonc
+{
+  "flags": [
+    { "sessionId": "<id>", "source": "<name>", "reason": "<r>", "raisedAt": <ts>, "payload": <p> }
+  ]
+}
+```
+
+#### `POST /v1/sessions/:id/attention/clear`
+
+Emergency user-side clear, intended for the case where a raiser has gone away leaving stuck flags. Body: `{ "source": "<name>", "reason": "<r>" }` to clear one flag, or `{}` to clear all flags on the session.
+
+**Errors**
+
+- `404` — session unknown.
+
 ### Session events
 
 #### `GET /v1/sessions/:id/events`
@@ -903,7 +964,7 @@ The shared core (identical to the [`session/list` entry meta](#on-sessionlist-en
 |---|---|---|
 | `status` | `"live" \| "cold"` | Always present. `cold` on the read-only viewer attach path. |
 | `busy` | `boolean` | Always present. True while a turn is in flight. |
-| `awaitingInput` | `boolean` | Always present. True when blocked on the user (permission/question). |
+| `awaitingInput` | `boolean` | Always present. True when any [attention flag](#attention) is raised on the session — including in-flight permission requests (raised by the daemon) and any transformer-raised flags. May be true on cold sessions, since flags persist across cold/live. |
 | `attachedClients` | `number` | Always present. Count of currently-attached clients. |
 | `upstreamSessionId` | `string` | The agent's own session id (distinct from the daemon's id). |
 | `agentId` | `string` | Resolved agent id (after registry id lookup / npx-basename fallback). |
@@ -953,7 +1014,7 @@ Per the [Session List Protocol](https://agentclientprotocol.com/protocol/session
       "attachedClients": 2,
       "status": "live",         // "live" | "cold"
       "busy": false,            // mid-turn flag (live sessions only)
-      "awaitingInput": false,   // blocked on user (permission/question); live only
+      "awaitingInput": false,   // any attention flag raised (permission, transformer flag, etc.); cold sessions too
       "agentId": "claude-acp",
       "upstreamSessionId": "<agent id>",
       "currentModel": "claude-opus-4-7",
@@ -977,7 +1038,7 @@ Field reference for `_meta["hydra-acp"]` (always-present fields first, then opti
 | `attachedClients` | `number` | Count of clients currently attached. |
 | `status` | `"live" \| "cold"` | Whether the session is in memory or persisted-only. |
 | `busy` | `boolean` | Mid-turn flag (a prompt is in flight). Always `false` for cold sessions. |
-| `awaitingInput` | `boolean` | Blocked on the user (outstanding `session/request_permission` or agent question). Always `false` for cold sessions. |
+| `awaitingInput` | `boolean` | Any [attention flag](#attention) raised on the session — permission requests (daemon-raised) or transformer-raised flags. May be `true` on cold sessions; flags persist. |
 | `agentId` | `string?` | Agent that owns the session. |
 | `upstreamSessionId` | `string?` | The agent-side session id. |
 | `currentModel` | `string?` | Last-known model id. |
@@ -1122,6 +1183,18 @@ Fires once when a session is closed (cold demotion, delete, daemon shutdown, imp
 
 ```jsonc
 { "sessionId": "<id>" }
+```
+
+#### Notification: `hydra-acp/session/attention_updated`
+
+Broadcast to clients attached to a session whenever its [attention flag](#attention) set changes (a flag raised, payload updated, or cleared). Lets clients refresh their attention UI without polling. The full current flag list is included so clients don't merge deltas.
+
+```jsonc
+// params
+{
+  "sessionId": "<id>",
+  "flags": [ /* same shape as GET /v1/sessions/:id/attention */ ]
+}
 ```
 
 ### session/update — compaction lifecycle
@@ -1462,6 +1535,36 @@ Insert the calling transformer into a live session's chain. Lets a transformer s
 **Live-only.** The target session must be live; cold sessions yield `SessionNotFound`. Transformers rehydrating from their own persisted state should wait for natural client interaction to wake the session, or explicitly resurrect it via `hydra-acp/session/load` before attaching.
 
 **Errors.** `InvalidParams` if `sessionId` is missing or non-string. `SessionNotFound` if no live session matches. `InternalError` if the transformer has not yet completed `hydra-acp/transformer/initialize` (no ref to attach).
+
+#### Request (transformer → daemon): `hydra-acp/attention/set`
+
+Raise or update an [attention flag](#attention) on a session. Idempotent — `set`ting the same `(source, reason)` with the same payload is a no-op; with a different payload, the payload is replaced. The `source` is resolved server-side from the calling connection's transformer name; callers don't pass it. Triggers a [`hydra-acp/session/attention_updated`](#notification-hydra-acpsessionattention_updated) broadcast and writes the new flag set to the session's `meta.json`.
+
+```jsonc
+// params
+{
+  "sessionId": "<id>",
+  "reason":    "<raiser-chosen string>",
+  "payload":   { /* opaque to daemon; rendered by clients that recognize source+reason */ }
+}
+// result
+{ "ok": true }
+```
+
+**Errors.** `InvalidParams` if `sessionId` or `reason` is missing or non-string. `SessionNotFound` if no session matches (live or cold).
+
+#### Request (transformer → daemon): `hydra-acp/attention/clear`
+
+Clear a previously-set flag. Idempotent — clearing a `(source, reason)` that isn't raised is a no-op. Triggers a broadcast.
+
+```jsonc
+// params
+{ "sessionId": "<id>", "reason": "<r>" }
+// result
+{ "ok": true }
+```
+
+**Errors.** Same as `attention/set`.
 
 #### Request (transformer → daemon): `hydra-acp/child_session/spawn`
 

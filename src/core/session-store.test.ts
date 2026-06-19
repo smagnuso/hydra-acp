@@ -136,4 +136,58 @@ describe("SessionStore", () => {
       "hydra_session_b",
     ]);
   });
+
+  it("round-trips a single attention flag", async () => {
+    const store = new SessionStore();
+    await store.write(
+      recordFromMemorySession({
+        sessionId: "hydra_session_flag",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        cwd: "/w",
+        attentionFlags: [
+          { source: "daemon", reason: "permission_request", raisedAt: 1700000000000, payload: { tool: "read_file" } },
+        ],
+      }),
+    );
+    const r = await store.read("hydra_session_flag");
+    expect(r?.attentionFlags).toEqual([
+      { source: "daemon", reason: "permission_request", raisedAt: 1700000000000, payload: { tool: "read_file" } },
+    ]);
+  });
+
+  it("round-trips multiple flags with different sources and reasons", async () => {
+    const store = new SessionStore();
+    const flags = [
+      { source: "daemon", reason: "perm_a", raisedAt: 1700000000000, payload: {} },
+      { source: "extension-x", reason: "input_needed", raisedAt: 1700000001000, payload: { type: "confirm" } },
+      { source: "daemon", reason: "perm_b", raisedAt: 1700000002000, payload: { tool: "write_file" } },
+    ];
+    await store.write(
+      recordFromMemorySession({
+        sessionId: "hydra_session_multi_flag",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        cwd: "/w",
+        attentionFlags: flags,
+      }),
+    );
+    const r = await store.read("hydra_session_multi_flag");
+    expect(r?.attentionFlags).toEqual(flags);
+  });
+
+  it("round-trips an empty attention flags array", async () => {
+    const store = new SessionStore();
+    await store.write(
+      recordFromMemorySession({
+        sessionId: "hydra_session_empty_flag",
+        upstreamSessionId: "u",
+        agentId: "claude-acp",
+        cwd: "/w",
+        attentionFlags: [],
+      }),
+    );
+    const r = await store.read("hydra_session_empty_flag");
+    expect(r?.attentionFlags).toEqual([]);
+  });
 });

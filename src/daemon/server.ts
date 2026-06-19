@@ -352,6 +352,18 @@ export async function startDaemon(
   await extensions.start();
   await transformers.start();
 
+  // Reconcile stale permission attention flags from all persisted
+  // session records before the daemon begins any background work.
+  // This ensures fast-attaching clients never observe stale
+  // awaitingInput=true for permission requests whose agents are dead.
+  try {
+    await manager.reconcilePermissionFlags();
+  } catch (err) {
+    app.log.warn(
+      `permission flag reconcile failed: ${(err as Error).message}`,
+    );
+  }
+
   // Fire-and-forget: resurrect any sessions that had pending queued
   // prompts at the last shutdown / crash and replay them. Errors are
   // logged inside the method; not awaited so daemon boot isn't held

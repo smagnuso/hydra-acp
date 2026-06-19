@@ -182,6 +182,9 @@ export interface ResurrectParams {
   // Passed to Session so buildStateSnapshotReplay can deliver it to
   // freshly-attaching clients before any live broadcast fires.
   compactionState?: CompactionState;
+  // Attention flags restored from meta.json on cold resurrect so the
+  // session starts with the correct attention state.
+  attentionFlags?: import("../acp/types-attention.js").AttentionFlag[];
   // Daemon-supplied callback to mint fresh mcpServers on swap. Same
   // semantics as CreateSessionParams.mintMcpServersForSwap.
   mintMcpServersForSwap?: (session: import("./session.js").Session) => Promise<unknown[]>;
@@ -860,6 +863,7 @@ export class SessionManager {
       forwardedEnv: params.forwardedEnv,
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
+      attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
       scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
       getCompactionState: () => this.getCompactionState(session.sessionId),
@@ -961,6 +965,7 @@ export class SessionManager {
       forwardedEnv: params.forwardedEnv,
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
+      attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
       scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
       getCompactionState: () => this.getCompactionState(session.sessionId),
@@ -1754,6 +1759,11 @@ export class SessionManager {
         })),
       }).catch(() => undefined);
     });
+    session.onAttentionFlagsChange((flags) => {
+      void this.mutateRecord(session.sessionId, { attentionFlags: flags }).catch(
+        () => undefined,
+      );
+    });
     this.sessions.set(session.sessionId, session);
     this.invalidateListCache();
     // Read-modify-write so a resurrect preserves fields the in-memory
@@ -1849,6 +1859,10 @@ export class SessionManager {
       forkedFromMessageId: record.forkedFromMessageId,
       forwardedEnv: record.forwardedEnv,
       compactionState: record.compactionState,
+      attentionFlags: record.attentionFlags?.filter(
+        (f: import("../acp/types-attention.js").AttentionFlag) =>
+          !(f.source === "daemon" && f.reason.startsWith("permission:")),
+      ),
     };
   }
 
@@ -2605,6 +2619,7 @@ export class SessionManager {
         interactive: args.bundle.session.interactive,
         originatingClient: args.bundle.session.originatingClient,
         priority: args.bundle.session.priority,
+        attentionFlags: [],
         createdAt: args.preservedCreatedAt ?? now,
         // Fallback path for historyStatus (used when the history file
         // is missing). Keep this consistent with the utimes stamp above.
@@ -2921,6 +2936,35 @@ export class SessionManager {
     await this.histories.flushAll();
   }
 
+  // Startup reconcile: clear stale daemon permission attention flags
+  // from every persisted session record. These flags represent
+  // permission requests whose agent processes are dead (the daemon
+  // crashed or was restarted), so they would otherwise leave
+  // awaitingInput=true forever on any client that attaches to the
+  // session. Only clears flags where source==="daemon" and
+  // reason.startsWith("permission:"). Logs the total count at info.
+  async reconcilePermissionFlags(): Promise<void> {
+    const records = await this.store.list().catch(() => []);
+    let cleared = 0;
+    for (const rec of records) {
+      const flags = rec.attentionFlags ?? [];
+      const kept = flags.filter(
+        (f: import("../acp/types-attention.js").AttentionFlag) =>
+          !(f.source === "daemon" && f.reason.startsWith("permission:")),
+      );
+      if (kept.length !== flags.length) {
+        const diff = flags.length - kept.length;
+        cleared += diff;
+        await this.mutateRecord(rec.sessionId, { attentionFlags: kept }).catch(
+          () => undefined,
+        );
+      }
+    }
+    if (cleared > 0) {
+      this.logger?.info(`cleared ${cleared} stale permission attention flags on startup`);
+    }
+  }
+
   // Startup hook: scan persisted session records for in-flight
   // compactionState and resume the work. requested/running statuses
   // re-enqueue the full compaction job (idempotent against
@@ -3112,7 +3156,8 @@ function mergeForPersistence(
     // persisted record on cold-resurrect. existing? fallback only
     // matters if the Session somehow has no field at all — shouldn't
     // happen, but keeps round-trip safe for old records.
-    forwardedEnv: session.forwardedEnv ?? existing?.forwardedEnv,
+   forwardedEnv: session.forwardedEnv ?? existing?.forwardedEnv,
+    attentionFlags: session.listAttentionFlags(),
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }

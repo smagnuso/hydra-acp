@@ -18,6 +18,7 @@ import { bundleToMarkdown } from "../../core/transcript.js";
 import { JsonRpcErrorCodes } from "../../acp/types.js";
 import { HYDRA_VERSION } from "../../core/hydra-version.js";
 import { isLoopbackHost } from "../../core/remote-url.js";
+import type { AttentionFlag } from "../../acp/types-attention.js";
 import { searchHistories } from "../../core/history-search.js";
 import { sweepNonInteractiveSessions } from "../../core/session-gc.js";
 import {
@@ -1227,4 +1228,127 @@ export function registerSessionRoutes(
       return reply;
     },
   );
+
+  // GET /v1/sessions/:id/attention — return the attention flags for a
+  // single session. 404 when the session is unknown.
+  app.get<{ Params: { id: string } }>("/v1/sessions/:id/attention", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const session = manager.get(id);
+    if (!session && !(await manager.hasRecord(id))) {
+      reply.code(404).send({ error: "session not found" });
+      return reply;
+    }
+    if (session) {
+      return { flags: session.listAttentionFlags() };
+    }
+    // Cold session — read flags from the persisted record.
+    const store = (manager as unknown as { store: import("../../core/session-store.js").SessionStore }).store;
+    const record = await store.read(id);
+    const flags = record?.attentionFlags ?? [];
+    return { flags };
+  });
+
+  // GET /v1/sessions/attention?source=<name> — return attention flags
+  // from ALL sessions (live + cold) whose source matches the query
+  // parameter. Each entry includes sessionId alongside the standard
+  // AttentionFlag shape.
+  app.get<{ Querystring: { source?: string } }>("/v1/sessions/attention", async (request, reply) => {
+    const query = request.query as { source?: string };
+    if (!query.source || query.source.trim().length === 0) {
+      reply.code(400).send({ error: "source query parameter is required" });
+      return reply;
+    }
+    const allSessions = await manager.list({ includeNonInteractive: true });
+    const results: Array<AttentionFlag & { sessionId: string }> = [];
+    for (const sess of allSessions) {
+      const live = manager.get(sess.sessionId);
+      let flags: AttentionFlag[];
+      if (live) {
+        flags = live.listAttentionFlags();
+      } else {
+        // Cold session — read from the persisted store.
+        const store = (manager as unknown as { store: import("../../core/session-store.js").SessionStore }).store;
+        const record = await store.read(sess.sessionId);
+        flags = record?.attentionFlags ?? [];
+      }
+      for (const flag of flags) {
+        if (flag.source === query.source) {
+          results.push({ ...flag, sessionId: sess.sessionId });
+        }
+      }
+    }
+    return { flags: results };
+  });
+
+  // POST /v1/sessions/:id/attention/clear — clear attention flags on a
+  // session. Body `{source, reason}` clears exactly that flag; body `{}`
+  // clears all flags. For live sessions this uses the in-memory mutation
+  // path (which broadcasts to attached clients). For cold sessions it
+  // reads the persisted record, mutates the flags array, and writes back
+  // through mutateRecord so the change survives a daemon restart.
+  app.post<{ Params: { id: string } }>("/v1/sessions/:id/attention/clear", async (request, reply) => {
+    const raw = (request.params as { id: string }).id;
+    const id = (await manager.resolveCanonicalId(raw)) ?? raw;
+    const body = request.body as Record<string, unknown> | undefined;
+    const parsed = (body ?? {}) as { source?: unknown; reason?: unknown };
+
+    // Determine clear mode. Both source and reason must be non-empty strings
+    // to clear a specific flag; otherwise the body must be {} to clear all.
+    const src = typeof parsed.source === "string" ? parsed.source : "";
+    const rsn = typeof parsed.reason === "string" ? parsed.reason : "";
+    if ((src.length > 0 || rsn.length > 0) && !(src.length > 0 && rsn.length > 0)) {
+      reply.code(400).send({ error: "both source and reason are required to clear a specific flag, or omit both to clear all" });
+      return;
+    }
+    if (src.length === 0 && rsn.length === 0) {
+      // body is {} — will clear all flags.
+    }
+
+    const session = manager.get(id);
+    if (session) {
+      if (src.length > 0 && rsn.length > 0) {
+        session.clearAttentionFlag(src, rsn);
+      } else {
+        // Clear all flags by iterating a snapshot of keys.
+        const keys = Array.from(session.listAttentionFlags()).map((f) => `${f.source}::${f.reason}`);
+        for (const key of keys) {
+          session.clearAttentionFlag(key.split("::")[0]!, key.split("::").slice(1).join("::"));
+        }
+      }
+      reply.code(204).send();
+      return;
+    }
+
+    // Cold session — persist directly via mutateRecord.
+    if (!(await manager.hasRecord(id))) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+
+    const store = (manager as unknown as { store: import("../../core/session-store.js").SessionStore }).store;
+    const record = await store.read(id);
+    if (!record) {
+      reply.code(404).send({ error: "session not found" });
+      return;
+    }
+
+    const currentFlags = record.attentionFlags ?? [];
+    let nextFlags: AttentionFlag[];
+    if (src.length > 0 && rsn.length > 0) {
+      const key = `${src}::${rsn}`;
+      nextFlags = currentFlags.filter((f) => `${f.source}::${f.reason}` !== key);
+    } else {
+      nextFlags = [];
+    }
+
+    if (nextFlags.length === currentFlags.length && nextFlags.every((f, i) => f.source === currentFlags[i]!.source && f.reason === currentFlags[i]!.reason)) {
+      // No change — the flag was already absent or all flags were already empty.
+      reply.code(204).send();
+      return;
+    }
+
+    await store.write({ ...record, attentionFlags: nextFlags });
+    reply.code(204).send();
+  });
 }

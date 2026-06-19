@@ -447,6 +447,7 @@ describe("SessionManager.resurrect: dead cwd reseed", () => {
       upstreamSessionId: "u_dead",
       createdAt: new Date(Date.now() - 60_000).toISOString(),
       updatedAt: new Date(Date.now() - 30_000).toISOString(),
+      attentionFlags: [],
     });
 
     let spawnedCwd: string | undefined;
@@ -2915,6 +2916,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
       upstreamSessionId: "u_replay",
       createdAt: new Date(Date.now() - 60_000).toISOString(),
       updatedAt: new Date(Date.now() - 30_000).toISOString(),
+      attentionFlags: [],
     });
     // And drop a fresh queue file alongside it.
     await rewriteQueue("hydra_session_replay", [
@@ -2969,6 +2971,7 @@ describe("SessionManager: resurrectPendingQueues", () => {
       upstreamSessionId: "u_stale",
       createdAt: new Date(Date.now() - 86_400_000).toISOString(),
       updatedAt: new Date(Date.now() - 86_400_000).toISOString(),
+      attentionFlags: [],
     });
     // enqueuedAt well past TTL (TTL is 15 min, this is a day).
     await rewriteQueue("hydra_session_stale", [
@@ -3075,6 +3078,7 @@ describe("SessionManager.syncFromAgent", () => {
       upstreamSessionId: "u_one",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      attentionFlags: [],
     });
 
     const { manager } = makeSyncManager({
@@ -3253,6 +3257,7 @@ describe("SessionManager.deleteRecord", () => {
       title: "rip",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-05-15T10:00:00.000Z",
+      attentionFlags: [],
     });
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
@@ -3301,6 +3306,7 @@ describe("SessionManager.resurrect: pendingHistorySync", () => {
       pendingHistorySync: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      attentionFlags: [],
     });
 
     await manager.resurrect({
@@ -3355,6 +3361,7 @@ describe("SessionManager: parentSessionId", () => {
       parentSessionId: "hydra_session_parent_cold",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      attentionFlags: [],
     });
 
     const manager = new SessionManager(
@@ -3415,6 +3422,7 @@ describe("SessionManager: originatingClient", () => {
       originatingClient: { name: "hydra-acp-cat" },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      attentionFlags: [],
     });
 
     const manager = new SessionManager(

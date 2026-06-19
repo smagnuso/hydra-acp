@@ -1310,6 +1310,82 @@ describe("startDaemon", () => {
       cfg.daemon.host = "0.0.0.0";
       await expect(startDaemon(cfg, TEST_TOKEN)).rejects.toThrow(/non-loopback/);
     });
+
+    it("clears stale daemon permission attention flags on startup", async () => {
+      // Pre-populate a session record with a daemon permission flag so
+      // the reconcile pass has something to clear.
+      const sessionId = "hydra_session_perm_reconcile";
+      const now = new Date().toISOString();
+      const store = new SessionStore();
+      await store.write({
+        sessionId,
+        upstreamSessionId: "u_perm_reconcile",
+        cwd: "/work",
+        agentId: "claude-acp",
+        originatingClient: { name: "test-client" },
+        interactive: true,
+        createdAt: now,
+        updatedAt: now,
+        attentionFlags: [
+          { source: "daemon", reason: "permission:perm_req_1", raisedAt: 1000, payload: { tool: "read_file" } },
+          { source: "daemon", reason: "permission:perm_req_2", raisedAt: 1001, payload: { tool: "write_file" } },
+          { source: "hydra-acp-cli", reason: "user_prompt", raisedAt: 1002, payload: {} },
+        ],
+      });
+
+      // Restart the daemon with the pre-existing session in place.
+      await handle.shutdown().catch(() => undefined);
+      handle = null;
+      handle = await startDaemon(testConfig(), TEST_TOKEN);
+      const p = port(handle);
+      baseUrl = `http://127.0.0.1:${p}`;
+
+      // The daemon's reconcile pass should have cleared the two daemon
+      // permission flags while preserving the non-daemon flag.
+      const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/attention`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { flags: Array<{ source: string; reason: string }> };
+      const reasons = body.flags.map((f) => f.reason);
+      expect(reasons).not.toContain("permission:perm_req_1");
+      expect(reasons).not.toContain("permission:perm_req_2");
+      expect(reasons).toContain("user_prompt");
+    });
+
+    it("returns empty attention flags after reconcile when only permission flags existed", async () => {
+      const sessionId = "hydra_session_no_flags";
+      const now = new Date().toISOString();
+      const store = new SessionStore();
+      await store.write({
+        sessionId,
+        upstreamSessionId: "u_no_flags",
+        cwd: "/work",
+        agentId: "claude-acp",
+        originatingClient: { name: "test-client" },
+        interactive: true,
+        createdAt: now,
+        updatedAt: now,
+        attentionFlags: [
+          { source: "daemon", reason: "permission:old_perm", raisedAt: 500, payload: {} },
+        ],
+      });
+
+      await handle.shutdown().catch(() => undefined);
+      handle = null;
+      handle = await startDaemon(testConfig(), TEST_TOKEN);
+      const p = port(handle);
+      baseUrl = `http://127.0.0.1:${p}`;
+
+      // After reconcile the permission flag is cleared, so attention
+      // flags should be empty.
+      const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/attention`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { flags: unknown[] };
+      expect(body.flags).toHaveLength(0);
+    });
   });
 });
 

@@ -4,6 +4,8 @@ import { customAlphabet } from "nanoid";
 import { z } from "zod";
 import { paths } from "./paths.js";
 import { readJsonSafe, writeJsonAtomic } from "./json-store.js";
+import type { AttentionFlag } from "../acp/types-attention.js";
+import { AttentionFlagArraySchema } from "../acp/types-attention.js";
 import { CompactionState, SessionSynopsis } from "./snapshot.js";
 
 // Mirror the alphabet/length used for session ids (see session.ts). Plain
@@ -187,6 +189,10 @@ export const SessionRecord = z.object({
   // _meta["hydra-acp"].env map. Stored here so resurrect after a
   // daemon restart restores the same spawn-env.
   forwardedEnv: z.record(z.string(), z.string()).optional(),
+  // Per-session attention flags persisted to meta.json so cold-resurrected
+  // sessions surface the correct awaitingInput state without depending on
+  // history replay. Reconciled from disk on every load.
+  attentionFlags: AttentionFlagArraySchema.default([]).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -333,6 +339,7 @@ export function recordFromMemorySession(args: {
   forwardedEnv?: Record<string, string>;
   compactionState?: CompactionState;
   rollbackBreadcrumb?: RollbackBreadcrumb;
+  attentionFlags?: AttentionFlag[];
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -366,6 +373,7 @@ export function recordFromMemorySession(args: {
     interactive: args.interactive,
     priority: args.priority,
     forwardedEnv: args.forwardedEnv,
+      attentionFlags: args.attentionFlags ?? [],
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

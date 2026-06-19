@@ -66,6 +66,7 @@ describe("compaction resume on daemon startup", () => {
         iter: 1,
         attempts: 0,
       },
+      attentionFlags: [],
     });
 
     const manager = makeManager();
@@ -93,6 +94,7 @@ describe("compaction resume on daemon startup", () => {
         iter: 2,
         attempts: 0,
       },
+      attentionFlags: [],
     });
 
     const manager = makeManager();
@@ -120,6 +122,7 @@ describe("compaction resume on daemon startup", () => {
         iter: 1,
         attempts: 0,
       },
+      attentionFlags: [],
     });
 
     const manager = makeManager();
@@ -152,6 +155,7 @@ describe("compaction resume on daemon startup", () => {
         iter: 1,
         attempts: 1,
       },
+      attentionFlags: [],
     });
 
     const manager = makeManager();
@@ -173,6 +177,7 @@ describe("compaction resume on daemon startup", () => {
       cwd: WORK_CWD,
       createdAt: nowIso(),
       updatedAt: nowIso(),
+      attentionFlags: [],
     });
 
     const manager = makeManager();
@@ -200,6 +205,7 @@ describe("compaction resume on daemon startup", () => {
         iter: 1,
         lastError: "agent returned unparseable JSON",
       },
+      attentionFlags: [],
     });
 
     const manager = makeManager();

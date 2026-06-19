@@ -317,3 +317,292 @@ describe("acp-ws: register_mcp_tools", () => {
     }
   });
 });
+
+describe("acp-ws: attention/set and attention/clear", () => {
+  let tmpHome: string;
+  let handle: DaemonHandle | null = null;
+  let wsUrl: string;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), "hydra-acp-attention-test-"),
+    );
+    process.env.HYDRA_ACP_HOME = tmpHome;
+    handle = await startDaemon(testConfig(), TEST_TOKEN);
+    wsUrl = `ws://127.0.0.1:${port(handle)}/acp`;
+  });
+
+  afterEach(async () => {
+    if (handle) {
+      await handle.shutdown().catch(() => undefined);
+      handle = null;
+    }
+    await fs.rm(tmpHome, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  });
+
+  // Open a WS connection on behalf of a transformer named `name`,
+  // complete initialize + transformer/initialize, then return the open
+  // socket + a small helper that round-trips a JSON-RPC request.
+  async function openTransformerWs(
+    wsUrl: string,
+    handle: DaemonHandle,
+    name: string,
+  ): Promise<{
+    ws: WebSocket;
+    request: (method: string, params: unknown) => Promise<JsonRpcResponse>;
+  }> {
+    const extToken = handle.processRegistry.mint(name, "transformer");
+    const ws = new WebSocket(wsUrl, [
+      "acp.v1",
+      `hydra-acp-token.${extToken}`,
+    ]);
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+
+    let nextId = 1;
+    const inflight = new Map<number, (msg: JsonRpcResponse) => void>();
+    ws.on("message", (data) => {
+      const msg = JSON.parse(data.toString("utf8")) as JsonRpcResponse;
+      if (typeof msg.id === "number") {
+        const resolver = inflight.get(msg.id);
+        if (resolver !== undefined) {
+          inflight.delete(msg.id);
+          resolver(msg);
+        }
+      }
+    });
+
+    const request = (
+      method: string,
+      params: unknown,
+    ): Promise<JsonRpcResponse> => {
+      const id = nextId++;
+      return new Promise((resolve) => {
+        inflight.set(id, resolve);
+        ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+      });
+    };
+
+    // initialize is required before any other handler is exposed.
+    const init = await request("initialize", {
+      protocolVersion: 1,
+      clientCapabilities: {},
+      clientInfo: { name, version: "0.0.1" },
+    });
+    if (init.error !== undefined) {
+      throw new Error(`initialize failed: ${init.error.message}`);
+    }
+
+    // Complete transformer initialization so the transformer is registered.
+    const initResp = await request("hydra-acp/transformer/initialize", {});
+    if (initResp.error !== undefined) {
+      throw new Error(`transformer/initialize failed: ${initResp.error.message}`);
+    }
+
+    return { ws, request };
+  }
+
+  it("rejects non-transformer connection with MethodNotFound for attention/set", async () => {
+    const ext = await openExtensionWs(wsUrl, handle!, "memory");
+    try {
+      const resp = await ext.request("hydra-acp/attention/set", {
+        sessionId: "x",
+        reason: "r",
+        payload: {},
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.code).toBe(-32601); // MethodNotFound
+    } finally {
+      ext.ws.close();
+    }
+  });
+
+  it("rejects non-transformer connection with MethodNotFound for attention/clear", async () => {
+    const ext = await openExtensionWs(wsUrl, handle!, "memory");
+    try {
+      const resp = await ext.request("hydra-acp/attention/clear", {
+        sessionId: "x",
+        reason: "r",
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.code).toBe(-32601); // MethodNotFound
+    } finally {
+      ext.ws.close();
+    }
+  });
+
+  it("rejects attention/set with InvalidParams when sessionId is missing", async () => {
+    const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+    try {
+      const resp = await transformer.request("hydra-acp/attention/set", {
+        reason: "r",
+        payload: {},
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.code).toBe(-32602); // InvalidParams
+    } finally {
+      transformer.ws.close();
+    }
+  });
+
+  it("rejects attention/clear with InvalidParams when sessionId is missing", async () => {
+    const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+    try {
+      const resp = await transformer.request("hydra-acp/attention/clear", {
+        reason: "r",
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.code).toBe(-32602); // InvalidParams
+    } finally {
+      transformer.ws.close();
+    }
+  });
+
+  it("rejects attention/set with SessionNotFound for unknown session", async () => {
+    const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+    try {
+      const resp = await transformer.request("hydra-acp/attention/set", {
+        sessionId: "nonexistent-session-id",
+        reason: "r",
+        payload: {},
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.code).toBe(-32001); // SessionNotFound
+    } finally {
+      transformer.ws.close();
+    }
+  });
+
+  it("rejects attention/clear with SessionNotFound for unknown session", async () => {
+    const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+    try {
+      const resp = await transformer.request("hydra-acp/attention/clear", {
+        sessionId: "nonexistent-session-id",
+        reason: "r",
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.code).toBe(-32001); // SessionNotFound
+    } finally {
+      transformer.ws.close();
+    }
+  });
+
+  // These tests require a live session, which needs an agent binary to spawn.
+  // They are integration-level and depend on the test environment having a
+  // valid agent (claude-acp, opencode, etc.) available. When run in an env
+  // with agents, these confirm end-to-end flag set+clear + persistence.
+  describe("end-to-end flag lifecycle (requires agent)", () => {
+    it.skip("transformer can set attention flag", async () => {
+      const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+      try {
+        const newResp = await transformer.request("session/new", { cwd: os.homedir() });
+        expect(newResp.error).toBeUndefined();
+        const sessionId = (newResp.result as { sessionId: string }).sessionId;
+
+        const setResp = await transformer.request("hydra-acp/attention/set", {
+          sessionId,
+          reason: "waiting-for-input",
+          payload: { type: "planner" },
+        });
+        expect(setResp.error).toBeUndefined();
+        expect(setResp.result).toEqual({ ok: true });
+      } finally {
+        transformer.ws.close();
+      }
+    });
+
+    it.skip("transformer can clear attention flag set by itself", async () => {
+      const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+      try {
+        const newResp = await transformer.request("session/new", { cwd: os.homedir() });
+        expect(newResp.error).toBeUndefined();
+        const sessionId = (newResp.result as { sessionId: string }).sessionId;
+
+        const setResp = await transformer.request("hydra-acp/attention/set", {
+          sessionId,
+          reason: "waiting-for-input",
+          payload: { type: "planner" },
+        });
+        expect(setResp.error).toBeUndefined();
+
+        const clearResp = await transformer.request("hydra-acp/attention/clear", {
+          sessionId,
+          reason: "waiting-for-input",
+        });
+        expect(clearResp.error).toBeUndefined();
+        expect(clearResp.result).toEqual({ ok: true });
+      } finally {
+        transformer.ws.close();
+      }
+    });
+
+    it.skip("attention flag source is the transformer name, not a caller-supplied source", async () => {
+      const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+      try {
+        const newResp = await transformer.request("session/new", { cwd: os.homedir() });
+        expect(newResp.error).toBeUndefined();
+        const sessionId = (newResp.result as { sessionId: string }).sessionId;
+
+        const setResp = await transformer.request("hydra-acp/attention/set", {
+          sessionId,
+          reason: "test-source-attribution",
+          payload: {},
+          source: "should-be-ignored",
+        });
+        expect(setResp.error).toBeUndefined();
+
+        const attachResp = await transformer.request("session/attach", { sessionId });
+        expect(attachResp.error).toBeUndefined();
+
+        const metaPath = path.join(tmpHome, "sessions", sessionId, "meta.json");
+        const metaRaw = await fs.readFile(metaPath, "utf8");
+        const meta = JSON.parse(metaRaw) as { attentionFlags?: Array<{ source: string; reason: string }> };
+        expect(meta.attentionFlags).toBeDefined();
+        expect(meta.attentionFlags!.length).toBe(1);
+        expect(meta.attentionFlags![0]!.source).toBe("hydra-acp-planner");
+        expect(meta.attentionFlags![0]!.reason).toBe("test-source-attribution");
+      } finally {
+        transformer.ws.close();
+      }
+    });
+
+    it.skip("rejects attention/set with InvalidParams when reason is missing", async () => {
+      const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+      try {
+        const newResp = await transformer.request("session/new", { cwd: os.homedir() });
+        expect(newResp.error).toBeUndefined();
+        const sessionId = (newResp.result as { sessionId: string }).sessionId;
+
+        const resp = await transformer.request("hydra-acp/attention/set", {
+          sessionId,
+          payload: {},
+        });
+        expect(resp.error).toBeDefined();
+        expect(resp.error!.code).toBe(-32602); // InvalidParams
+      } finally {
+        transformer.ws.close();
+      }
+    });
+
+    it.skip("rejects attention/clear with InvalidParams when reason is missing", async () => {
+      const transformer = await openTransformerWs(wsUrl, handle!, "hydra-acp-planner");
+      try {
+        const newResp = await transformer.request("session/new", { cwd: os.homedir() });
+        expect(newResp.error).toBeUndefined();
+        const sessionId = (newResp.result as { sessionId: string }).sessionId;
+
+        const resp = await transformer.request("hydra-acp/attention/clear", {
+          sessionId,
+        });
+        expect(resp.error).toBeDefined();
+        expect(resp.error!.code).toBe(-32602); // InvalidParams
+      } finally {
+        transformer.ws.close();
+      }
+    });
+  });
+});

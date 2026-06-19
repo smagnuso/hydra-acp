@@ -13,6 +13,7 @@ function sampleRecord() {
     currentModel: "claude-opus",
     createdAt: "2026-05-13T10:00:00.000Z",
     updatedAt: "2026-05-13T11:00:00.000Z",
+    attentionFlags: [],
   };
 }
 

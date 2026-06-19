@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { Session, type AttachedClient } from "./session.js";
+import type { AttentionFlag } from "../acp/types-attention.js";
 import { HistoryStore } from "./history-store.js";
 import { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcConnection } from "../acp/connection.js";
@@ -158,13 +159,15 @@ describe("Session", () => {
       });
 
       await new Promise((r) => setImmediate(r));
-      expect(stream.sent).toHaveLength(1);
-      expect(stream.sent[0]).toMatchObject({
-        method: "session/request_permission",
-        params: { sessionId: "sess_hyd", toolCall: { name: "edit_file" } },
-      });
+      const permMsg = stream.sent.find(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "session/request_permission",
+      );
+      expect(stream.sent.some((m) => "method" in m && m.method === "hydra-acp/session/attention_updated")).toBe(true);
+      expect(permMsg).toBeDefined();
+      expect(permMsg!.params).toMatchObject({ sessionId: "sess_hyd", toolCall: { name: "edit_file" } });
 
-      const sentReq = stream.sent[0] as { id: string | number };
+      const sentReq = permMsg! as { id: string | number };
       stream.emitMessage({
         jsonrpc: "2.0",
         id: sentReq.id,
@@ -188,7 +191,11 @@ describe("Session", () => {
       });
 
       await new Promise((r) => setImmediate(r));
-      expect(a.stream.sent).toHaveLength(1);
+      const aReq = a.stream.sent.find(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "session/request_permission",
+      );
+      expect(aReq).toBeDefined();
 
       // Late-joining client. attach() returns history without dispatching
       // the in-flight permission; the WS handler is expected to drain history
@@ -237,10 +244,13 @@ describe("Session", () => {
       });
       await new Promise((r) => setImmediate(r));
 
-      const aReq = a.stream.sent[0] as { id: string | number };
+      const aPermReq = a.stream.sent.find(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "session/request_permission",
+      ) as { id: string | number };
       a.stream.emitMessage({
         jsonrpc: "2.0",
-        id: aReq.id,
+        id: aPermReq.id,
         result: { outcome: { kind: "allow", optionId: "allow" } },
       });
       await requestPromise;
@@ -318,13 +328,19 @@ describe("Session", () => {
       });
 
       await new Promise((r) => setImmediate(r));
-      const aReq = a.stream.sent[0] as { id: string | number };
-      const bReq = b.stream.sent[0] as { id: string | number };
-      expect(aReq.id).not.toEqual(bReq.id);
+      const aPermReq = a.stream.sent.find(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "session/request_permission",
+      ) as { id: string | number };
+      const bPermReq = b.stream.sent.find(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "session/request_permission",
+      ) as { id: string | number };
+      expect(aPermReq.id).not.toEqual(bPermReq.id);
 
       a.stream.emitMessage({
         jsonrpc: "2.0",
-        id: aReq.id,
+        id: aPermReq.id,
         result: { outcome: { kind: "selected", optionId: "allow" } },
       });
 
@@ -398,10 +414,13 @@ describe("Session", () => {
         expect(req).toBeDefined();
       }
 
-      const aReq = a.stream.sent[0] as { id: string | number };
+      const aPermReq = a.stream.sent.find(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "session/request_permission",
+      ) as { id: string | number };
       a.stream.emitMessage({
         jsonrpc: "2.0",
-        id: aReq.id,
+        id: aPermReq.id,
         result: { outcome: { kind: "allow", optionId: "allow" } },
       });
       await reqPromise;
@@ -5557,6 +5576,232 @@ describe("Session", () => {
       // should remain after the turn_complete cutoff.
       const historicalDelta = delta.filter((e) => !isStateSnapshotEntry(e));
       expect(historicalDelta).toHaveLength(0);
+    });
+  });
+
+  describe("attention flags", () => {
+    it("setAttentionFlag creates a new flag with raisedAt set", () => {
+      const { session } = makeSession();
+      const before = Date.now();
+      session.setAttentionFlag("test-source", "test-reason", { data: 1 });
+      const after = Date.now();
+      const flags = session.listAttentionFlags();
+      expect(flags).toHaveLength(1);
+      expect(flags[0]!.source).toBe("test-source");
+      expect(flags[0]!.reason).toBe("test-reason");
+      expect(flags[0]!.payload).toEqual({ data: 1 });
+      expect(flags[0]!.raisedAt).toBeGreaterThanOrEqual(before);
+      expect(flags[0]!.raisedAt).toBeLessThanOrEqual(after);
+    });
+
+    it("setAttentionFlag with same payload is idempotent — no-op", () => {
+      const { session } = makeSession();
+      const flag = { data: 1 };
+      session.setAttentionFlag("src", "reason", flag);
+      const firstRaisedAt = session.listAttentionFlags()[0]!.raisedAt;
+      // Wait a tick so Date.now() would differ if raisedAt were updated
+      setImmediate(() => {
+        session.setAttentionFlag("src", "reason", flag);
+      });
+      // Use microtask to assert after the tick
+      return new Promise<void>((resolve) => {
+        setImmediate(() => {
+          const flags = session.listAttentionFlags();
+          expect(flags).toHaveLength(1);
+          expect(flags[0]!.raisedAt).toBe(firstRaisedAt);
+          resolve();
+        });
+      });
+    });
+
+    it("setAttentionFlag with new payload replaces, keeping original raisedAt", () => {
+      const { session } = makeSession();
+      session.setAttentionFlag("src", "reason", { data: 1 });
+      const firstRaisedAt = session.listAttentionFlags()[0]!.raisedAt;
+      return new Promise<void>((resolve) => {
+        setImmediate(() => {
+          session.setAttentionFlag("src", "reason", { data: 2 });
+          const flags = session.listAttentionFlags();
+          expect(flags).toHaveLength(1);
+          expect(flags[0]!.raisedAt).toBe(firstRaisedAt);
+          expect(flags[0]!.payload).toEqual({ data: 2 });
+          resolve();
+        });
+      });
+    });
+
+    it("clearAttentionFlag removes an existing flag", () => {
+      const { session } = makeSession();
+      session.setAttentionFlag("src", "reason", { data: 1 });
+      expect(session.listAttentionFlags()).toHaveLength(1);
+      session.clearAttentionFlag("src", "reason");
+      expect(session.listAttentionFlags()).toHaveLength(0);
+    });
+
+    it("clearAttentionFlag on missing key is no-op", () => {
+      const { session } = makeSession();
+      expect(() => session.clearAttentionFlag("nope", "nope")).not.toThrow();
+      expect(session.listAttentionFlags()).toHaveLength(0);
+    });
+
+    it("listAttentionFlags returns flags sorted by raisedAt ascending", () => {
+      const { session } = makeSession();
+      session.setAttentionFlag("a", "r1", { i: 1 });
+      return new Promise<void>((resolve) => {
+        setImmediate(() => {
+          session.setAttentionFlag("b", "r2", { i: 2 });
+          setImmediate(() => {
+            session.setAttentionFlag("c", "r3", { i: 3 });
+            const flags = session.listAttentionFlags();
+            expect(flags).toHaveLength(3);
+            expect(flags[0]!.source).toBe("a");
+            expect(flags[1]!.source).toBe("b");
+            expect(flags[2]!.source).toBe("c");
+            resolve();
+          });
+        });
+      });
+    });
+
+    it("listAttentionFlagsBySource filters correctly", () => {
+      const { session } = makeSession();
+      session.setAttentionFlag("alpha", "r1", {});
+      session.setAttentionFlag("beta", "r2", {});
+      session.setAttentionFlag("alpha", "r3", {});
+      const byAlpha = session.listAttentionFlagsBySource("alpha");
+      expect(byAlpha).toHaveLength(2);
+      expect(byAlpha.every((f) => f.source === "alpha")).toBe(true);
+      const byBeta = session.listAttentionFlagsBySource("beta");
+      expect(byBeta).toHaveLength(1);
+      expect(byBeta[0]!.reason).toBe("r2");
+    });
+
+    it("awaitingInput is true when only attention flags are present", () => {
+      const { session } = makeSession();
+      expect(session.awaitingInput).toBe(false);
+      session.setAttentionFlag("src", "reason", {});
+      expect(session.awaitingInput).toBe(true);
+      session.clearAttentionFlag("src", "reason");
+      expect(session.awaitingInput).toBe(false);
+    });
+
+    it("awaitingInput is false when there are no attention flags", () => {
+      const { session } = makeSession();
+      expect(session.awaitingInput).toBe(false);
+    });
+
+    it("setAttentionFlag broadcasts attention_updated to attached clients with the new flag", () => {
+      const { session } = makeSession();
+      const { client, stream } = makeClient();
+      session.attach(client, "full");
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      const msg = stream.sent.find(
+        (m) => "method" in m && m.method === "hydra-acp/session/attention_updated",
+      ) as JsonRpcNotification | undefined;
+      expect(msg).toBeDefined();
+      expect(msg!.params).toMatchObject({
+        flags: [expect.objectContaining({ source: "src", reason: "reason", payload: { data: 42 } })],
+      });
+    });
+
+    it("clearAttentionFlag broadcasts attention_updated with empty flags array", () => {
+      const { session } = makeSession();
+      const { client, stream } = makeClient();
+      session.attach(client, "full");
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      stream.sent.length = 0;
+      session.clearAttentionFlag("src", "reason");
+      const msg = stream.sent.find(
+        (m) => "method" in m && m.method === "hydra-acp/session/attention_updated",
+      ) as JsonRpcNotification | undefined;
+      expect(msg).toBeDefined();
+      expect((msg!.params as { flags: unknown[] }).flags).toEqual([]);
+    });
+
+    it("idempotent set (same payload) does NOT trigger a notification", () => {
+      const { session } = makeSession();
+      const { client, stream } = makeClient();
+      session.attach(client, "full");
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      stream.sent.length = 0;
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      const msg = stream.sent.find(
+        (m) => "method" in m && m.method === "hydra-acp/session/attention_updated",
+      );
+      expect(msg).toBeUndefined();
+    });
+
+    it("onAttentionFlagsChange fires with the current flags after set", () => {
+      const { session } = makeSession();
+      const received: AttentionFlag[][] = [];
+      session.onAttentionFlagsChange((flags) => {
+        received.push(flags);
+      });
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      expect(received).toHaveLength(1);
+      expect(received[0]).toHaveLength(1);
+      expect(received[0]![0]!.source).toBe("src");
+      expect(received[0]![0]!.reason).toBe("reason");
+    });
+
+    it("onAttentionFlagsChange fires with empty array after clear", () => {
+      const { session } = makeSession();
+      const received: AttentionFlag[][] = [];
+      session.onAttentionFlagsChange((flags) => {
+        received.push(flags);
+      });
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      session.clearAttentionFlag("src", "reason");
+      expect(received).toHaveLength(2);
+      expect(received[0]).toHaveLength(1);
+      expect(received[1]).toHaveLength(0);
+    });
+
+    it("idempotent set does not fire onAttentionFlagsChange", () => {
+      const { session } = makeSession();
+      const received: AttentionFlag[][] = [];
+      session.onAttentionFlagsChange((flags) => {
+        received.push(flags);
+      });
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      session.setAttentionFlag("src", "reason", { data: 42 });
+      expect(received).toHaveLength(1);
+    });
+
+    it("clear on missing key does not fire onAttentionFlagsChange", () => {
+      const { session } = makeSession();
+      const received: AttentionFlag[][] = [];
+      session.onAttentionFlagsChange((flags) => {
+        received.push(flags);
+      });
+      session.clearAttentionFlag("nope", "nope");
+      expect(received).toHaveLength(0);
+    });
+
+    it("payload replacement fires onAttentionFlagsChange with updated flags", () => {
+      const { session } = makeSession();
+      const received: AttentionFlag[][] = [];
+      session.onAttentionFlagsChange((flags) => {
+        received.push(flags);
+      });
+      session.setAttentionFlag("src", "reason", { data: 1 });
+      session.setAttentionFlag("src", "reason", { data: 2 });
+      expect(received).toHaveLength(2);
+      expect(received[1]![0]!.payload).toEqual({ data: 2 });
+    });
+
+    it("multiple flags with different (source, reason) all fire correctly", () => {
+      const { session } = makeSession();
+      const received: AttentionFlag[][] = [];
+      session.onAttentionFlagsChange((flags) => {
+        received.push(flags);
+      });
+      session.setAttentionFlag("a", "r1", {});
+      expect(received[0]).toHaveLength(1);
+      session.setAttentionFlag("b", "r2", {});
+      expect(received[1]).toHaveLength(2);
+      session.setAttentionFlag("a", "r3", {});
+      expect(received[2]).toHaveLength(3);
     });
   });
 });

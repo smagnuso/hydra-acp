@@ -8,6 +8,8 @@ import {
   decideSetModel,
   handleAuthenticate,
   handleTransformerAttach,
+  handleAttentionSet,
+  handleAttentionClear,
   makeInstallProgressForwarder,
 } from "./acp-ws.js";
 import type { TransformerRef } from "../core/transformer-manager.js";
@@ -864,5 +866,201 @@ describe("handleAuthenticate", () => {
       notify: ReturnType<typeof vi.fn>;
     };
     expect(conn.notify).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleAttentionSet", () => {
+  function makeSession(): Session {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+    return new Session({
+      sessionId: "sess_att",
+      cwd: "/work",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u1",
+    });
+  }
+
+  function makeDeps(sessions: Record<string, Session>) {
+    return {
+      manager: { get: (id: string) => sessions[id] },
+    };
+  }
+
+  it("sets an attention flag with source from callerName", () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    handleAttentionSet(
+      { sessionId: "sess_att", reason: "test-reason", payload: { data: 1 } },
+      "hydra-acp-planner",
+      deps,
+    );
+    const flags = session.listAttentionFlags();
+    expect(flags.length).toBe(1);
+    expect(flags[0]!.source).toBe("hydra-acp-planner");
+    expect(flags[0]!.reason).toBe("test-reason");
+  });
+
+  it("ignores source field in params — uses callerName instead", () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    handleAttentionSet(
+      { sessionId: "sess_att", reason: "r", payload: {}, source: "spoofed" } as any,
+      "real-transformer",
+      deps,
+    );
+    const flags = session.listAttentionFlags();
+    expect(flags.length).toBe(1);
+    expect(flags[0]!.source).toBe("real-transformer");
+  });
+
+  it("rejects with InvalidParams when sessionId is missing", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    await expect(
+      handleAttentionSet({ reason: "r" }, "transformer", deps),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with InvalidParams when sessionId is non-string", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await expect(handleAttentionSet({ sessionId: 42, reason: "r" } as any, "t", deps))
+      .rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with InvalidParams when reason is missing", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    await expect(
+      handleAttentionSet({ sessionId: "sess_att" }, "transformer", deps),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with InvalidParams when reason is non-string", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await expect(handleAttentionSet({ sessionId: "sess_att", reason: 42 } as any, "t", deps))
+      .rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with SessionNotFound when session doesn't exist", async () => {
+    const deps = makeDeps({});
+    await expect(
+      handleAttentionSet(
+        { sessionId: "nope", reason: "r" },
+        "transformer",
+        deps,
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.SessionNotFound });
+  });
+
+  it("returns { ok: true } on success", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    const result = await handleAttentionSet(
+      { sessionId: "sess_att", reason: "r", payload: {} },
+      "transformer",
+      deps,
+    );
+    expect(result).toEqual({ ok: true });
+  });
+});
+
+describe("handleAttentionClear", () => {
+  function makeSession(): Session {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+    return new Session({
+      sessionId: "sess_att",
+      cwd: "/work",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u1",
+    });
+  }
+
+  function makeDeps(sessions: Record<string, Session>) {
+    return {
+      manager: { get: (id: string) => sessions[id] },
+    };
+  }
+
+  it("clears an attention flag raised by the callerName source", () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    // First set a flag with this transformer's name as source.
+    session.setAttentionFlag("hydra-acp-planner", "test-reason", { data: 1 });
+    expect(session.listAttentionFlags().length).toBe(1);
+    // Now clear it via the handler.
+    handleAttentionClear(
+      { sessionId: "sess_att", reason: "test-reason" },
+      "hydra-acp-planner",
+      deps,
+    );
+    expect(session.listAttentionFlags().length).toBe(0);
+  });
+
+  it("rejects with InvalidParams when sessionId is missing", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    await expect(handleAttentionClear({ reason: "r" }, "t", deps))
+      .rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with InvalidParams when sessionId is non-string", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await expect(handleAttentionClear({ sessionId: 42, reason: "r" } as any, "t", deps))
+      .rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with InvalidParams when reason is missing", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    await expect(handleAttentionClear({ sessionId: "sess_att" }, "t", deps))
+      .rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with InvalidParams when reason is non-string", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await expect(handleAttentionClear({ sessionId: "sess_att", reason: 42 } as any, "t", deps))
+      .rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
+  });
+
+  it("rejects with SessionNotFound when session doesn't exist", async () => {
+    const deps = makeDeps({});
+    await expect(
+      handleAttentionClear({ sessionId: "nope", reason: "r" }, "t", deps),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCodes.SessionNotFound });
+  });
+
+  it("clearing a non-existent flag is a no-op (clearAttentionFlag spec)", () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    // No flags exist; clear should not throw — it's a no-op per the Session spec.
+    expect(() =>
+      handleAttentionClear(
+        { sessionId: "sess_att", reason: "nonexistent" },
+        "t",
+        deps,
+      ),
+    ).not.toThrow();
+  });
+
+  it("returns { ok: true } on success", async () => {
+    const session = makeSession();
+    const deps = makeDeps({ sess_att: session });
+    const result = await handleAttentionClear(
+      { sessionId: "sess_att", reason: "r" },
+      "t",
+      deps,
+    );
+    expect(result).toEqual({ ok: true });
   });
 });

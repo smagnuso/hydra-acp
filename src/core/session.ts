@@ -57,6 +57,7 @@ import { renderCompactionSeed } from "./compaction-seed.js";
 import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import type { RollbackBreadcrumb } from "./session-store.js";
 import type { JsonRpcConnection } from "../acp/connection.js";
+import { AttentionFlag, AttentionFlagSchema } from "../acp/types-attention.js";
 import {
   deleteQueue,
   rewriteQueue,
@@ -263,6 +264,9 @@ export interface SessionInit {
   // deliver the current compaction status to freshly-attaching clients
   // before any live broadcast fires.
   compactionState?: CompactionState;
+  // Attention flags restored from meta.json on cold resurrect so the
+  // session starts with the correct attention state.
+  attentionFlags?: AttentionFlag[];
   // MCP server configs to forward to spawnReplacementAgent on swap.
   // Stored verbatim; never re-minted — the per-session MCP tokens are
   // keyed by hydraSessionId (unchanged across swap), so the same config
@@ -503,14 +507,24 @@ export class Session {
   private appendCount = 0;
   private historyMaxEntries: number;
   private compactEvery: number;
-  // Permission requests that have been broadcast to one or more
-  // clients but have not yet resolved. Replayed to clients that
-  // attach mid-flight so a late joiner sees the prompt instead of an
-  // empty session waiting on something they can't see. Settled entries
-  // are removed so this map only ever contains live requests.
-  private inFlightPermissions = new Set<{
-    addClient: (client: AttachedClient) => void;
-  }>();
+  // In-memory callbacks for permission requests raised as attention flags.
+  // Keyed by the requestId suffix of the corresponding flag reason
+  // ("permission:<requestId>"). Does NOT persist — rebuilt as new
+  // permission requests arrive after a restart.
+  private permissionCallbacks = new Map<string, (client: AttachedClient) => void>();
+  // Per-session attention flags keyed by `${source}::${reason}`.
+  // Used by clients to surface "attention" state without scanning history.
+  private attentionFlags = new Map<string, AttentionFlag>();
+  // True when any daemon-raised permission flag is still pending.
+  private get hasPermissionFlag(): boolean {
+    for (const flag of this.attentionFlags.values()) {
+      if (flag.source === "daemon" && flag.reason.startsWith("permission:")) {
+        return true;
+      }
+    }
+    return false;
+  }
+  private attentionFlagsChangeHandlers: Array<(flags: AttentionFlag[]) => void> = [];
   // While set, agent-emitted session/update notifications are
   // captured into `chunks` and NOT broadcast to clients. Used by
   // /hydra slash-command sub-prompts (e.g. title regeneration) so
@@ -736,6 +750,11 @@ export class Session {
             iter: cs.iter,
           };
         }
+      }
+    }
+    if (init.attentionFlags && init.attentionFlags.length > 0) {
+      for (const flag of init.attentionFlags) {
+        this.attentionFlags.set(`${flag.source}::${flag.reason}`, flag);
       }
     }
     this.historyStore = init.historyStore;
@@ -1030,7 +1049,7 @@ export class Session {
   // Lets pickers show a "waiting on you" glyph distinct from the
   // "actively working" one without having to attach.
   get awaitingInput(): boolean {
-    return this.inFlightPermissions.size > 0;
+    return this.attentionFlags.size > 0;
   }
 
   // True when the session is safe to swap upstream out from under.
@@ -1706,8 +1725,15 @@ export class Session {
   // replaying history, so the prompt lands at the bottom of the
   // transcript rather than above the conversation.
   replayPendingPermissions(client: AttachedClient): void {
-    for (const pending of this.inFlightPermissions) {
-      pending.addClient(client);
+    for (const flag of this.attentionFlags.values()) {
+      if (flag.source !== "daemon" || !flag.reason.startsWith("permission:")) {
+        continue;
+      }
+      const requestId = flag.reason.slice("permission:".length);
+      const cb = this.permissionCallbacks.get(requestId);
+      if (cb) {
+        cb(client);
+      }
     }
   }
 
@@ -5054,6 +5080,89 @@ export class Session {
     return this.lastRecordedAt;
   }
 
+  setAttentionFlag(source: string, reason: string, payload: unknown): void {
+    this._setAttentionFlag(source, reason, payload, true);
+  }
+
+  private _setAttentionFlag(
+    source: string,
+    reason: string,
+    payload: unknown,
+    broadcast: boolean,
+  ): void {
+    const key = `${source}::${reason}`;
+    const existing = this.attentionFlags.get(key);
+    if (existing) {
+      if (JSON.stringify(existing.payload) === JSON.stringify(payload)) {
+        return;
+      }
+      this.attentionFlags.set(key, { ...existing, payload, raisedAt: existing.raisedAt });
+    } else {
+      this.attentionFlags.set(key, {
+        source,
+        reason,
+        raisedAt: Date.now(),
+        payload,
+      });
+    }
+    if (broadcast) {
+      this.broadcastAttentionUpdated();
+      this.fireAttentionFlagsChange();
+    }
+  }
+
+  clearAttentionFlag(source: string, reason: string): void {
+    this._clearAttentionFlag(source, reason, true);
+  }
+
+  private _clearAttentionFlag(source: string, reason: string, broadcast: boolean): void {
+    const key = `${source}::${reason}`;
+    if (this.attentionFlags.delete(key)) {
+      if (broadcast) {
+        this.broadcastAttentionUpdated();
+        this.fireAttentionFlagsChange();
+      }
+    }
+  }
+
+  listAttentionFlags(): AttentionFlag[] {
+    return Array.from(this.attentionFlags.values()).sort(
+      (a, b) => a.raisedAt - b.raisedAt,
+    );
+  }
+
+  listAttentionFlagsBySource(source: string): AttentionFlag[] {
+    return this.listAttentionFlags().filter((f) => f.source === source);
+  }
+
+  // Subscribe to attention flag changes. The SessionManager hooks this to
+  // persist the updated flag list to disk so a daemon restart restores it.
+  onAttentionFlagsChange(handler: (flags: AttentionFlag[]) => void): void {
+    this.attentionFlagsChangeHandlers.push(handler);
+  }
+
+  private fireAttentionFlagsChange(): void {
+    const flags = this.listAttentionFlags();
+    for (const handler of this.attentionFlagsChangeHandlers) {
+      try {
+        handler(flags);
+      } catch {
+        void 0;
+      }
+    }
+  }
+
+  private broadcastAttentionUpdated(): void {
+    for (const client of this.clients.values()) {
+      void client.connection
+        .notify("hydra-acp/session/attention_updated", {
+          sessionId: this.sessionId,
+          flags: this.listAttentionFlags(),
+        })
+        .catch(() => undefined);
+    }
+  }
+
   // (Re-)arm the idle timer to fire when the inactivity window
   // elapses past lastActivityAt. Called once at construction and after
   // every recorded broadcast. The previous design gated on
@@ -5092,7 +5201,7 @@ export class Session {
     // stale but work is genuinely in flight or queued behind it.
     if (
       this.turnStartedAt !== undefined ||
-      this.inFlightPermissions.size > 0 ||
+      this.hasPermissionFlag ||
       this.promptQueue.length > 0
     ) {
       this.armIdleTimer(this.idleTimeoutMs);
@@ -5265,6 +5374,8 @@ export class Session {
     }
     const clientParams = this.rewriteForClient(params);
     const toolCallId = extractToolCallId(clientParams);
+    const requestId = generateMessageId();
+    const { toolCall, options } = (clientParams as Record<string, unknown> | null) ?? {};
     return new Promise<unknown>((resolve, reject) => {
       let settled = false;
       const outbound: Array<{ client: AttachedClient }> = [];
@@ -5278,8 +5389,6 @@ export class Session {
       // surfaces something meaningful.
       let outstanding = 0;
       let lastRealErr: unknown;
-      const entry = { addClient: sendTo };
-      this.inFlightPermissions.add(entry);
       const sessionId = this.sessionId;
 
       const settle = (fn: () => void): void => {
@@ -5287,7 +5396,8 @@ export class Session {
           return;
         }
         settled = true;
-        this.inFlightPermissions.delete(entry);
+        this.clearAttentionFlag("daemon", `permission:${requestId}`);
+        this.permissionCallbacks.delete(requestId);
         fn();
       };
 
@@ -5345,6 +5455,13 @@ export class Session {
             }
           });
       }
+
+      this.setAttentionFlag("daemon", `permission:${requestId}`, {
+        kind: "permission",
+        toolCall: toolCall ?? null,
+        options: options ?? null,
+      });
+      this.permissionCallbacks.set(requestId, sendTo);
 
       for (const client of initialClients) {
         sendTo(client);

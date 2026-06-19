@@ -913,6 +913,20 @@ export function registerAcpWsEndpoint(
         return { ok: true };
       });
 
+      // Set an attention flag on a session. Only transformers may call this;
+      // non-transformer connections receive MethodNotFound via the default
+      // handler. Source is resolved from processIdentity.name, not from any
+      // field in the request payload.
+      connection.onRequest("hydra-acp/attention/set", async (raw) =>
+        handleAttentionSet(raw, processIdentity.name, deps),
+      );
+
+      // Clear an attention flag raised by this transformer. Same gate and
+      // source resolution as attention/set.
+      connection.onRequest("hydra-acp/attention/clear", async (raw) =>
+        handleAttentionClear(raw, processIdentity.name, deps),
+      );
+
       // Keep-alive: resets the abandonment timer for an outstanding processing claim.
       connection.onRequest("hydra-acp/connection/keep_alive", async (raw) => {
         const params = (raw ?? {}) as {
@@ -2260,6 +2274,78 @@ export async function handleTransformerAttach(
   }
   const session = requireLiveSession(deps.manager, sessionId);
   session.addTransformer(ref);
+  return { ok: true };
+}
+
+// Shared deps shape for attention handlers. Both set and clear resolve
+// source from the caller's processIdentity.name at the call site — the
+// params must NOT contain a `source` field (it is ignored if present).
+export interface AttentionHandlerDeps {
+  manager: { get(sessionId: string): Session | undefined };
+}
+
+// Handler for `hydra-acp/attention/set`. Only registered for transformer
+// connections; non-transformer callers receive MethodNotFound via the
+// default handler. Source is resolved from callerName (processIdentity.name)
+// and MUST NOT be read from the request payload.
+export async function handleAttentionSet(
+  rawParams: unknown,
+  callerName: string,
+  deps: AttentionHandlerDeps,
+): Promise<{ ok: true }> {
+  const params = (rawParams ?? {}) as {
+    sessionId?: unknown;
+    reason?: unknown;
+    payload?: unknown;
+  };
+  const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+  const reason = typeof params.reason === "string" ? params.reason : undefined;
+  if (!sessionId) {
+    throw rpcError(
+      JsonRpcErrorCodes.InvalidParams,
+      "hydra-acp/attention/set requires string sessionId",
+    );
+  }
+  if (!reason) {
+    throw rpcError(
+      JsonRpcErrorCodes.InvalidParams,
+      "hydra-acp/attention/set requires string reason",
+    );
+  }
+  const session = requireLiveSession(deps.manager, sessionId);
+  // callerName is wired from processIdentity.name at the call site;
+  // ignore any `source` field in params — it is untrusted.
+  session.setAttentionFlag(callerName, reason, params.payload);
+  return { ok: true };
+}
+
+// Handler for `hydra-acp/attention/clear`. Same transformer-only gate
+// and source resolution as handleAttentionSet.
+export async function handleAttentionClear(
+  rawParams: unknown,
+  callerName: string,
+  deps: AttentionHandlerDeps,
+): Promise<{ ok: true }> {
+  const params = (rawParams ?? {}) as {
+    sessionId?: unknown;
+    reason?: unknown;
+  };
+  const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+  const reason = typeof params.reason === "string" ? params.reason : undefined;
+  if (!sessionId) {
+    throw rpcError(
+      JsonRpcErrorCodes.InvalidParams,
+      "hydra-acp/attention/clear requires string sessionId",
+    );
+  }
+  if (!reason) {
+    throw rpcError(
+      JsonRpcErrorCodes.InvalidParams,
+      "hydra-acp/attention/clear requires string reason",
+    );
+  }
+  const session = requireLiveSession(deps.manager, sessionId);
+  session.clearAttentionFlag(callerName, reason);
   return { ok: true };
 }
 

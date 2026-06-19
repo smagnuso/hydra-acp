@@ -1886,3 +1886,422 @@ describe("GET /v1/sessions/events (cross-session k-way merge)", () => {
     }
   });
 });
+
+describe("GET /v1/sessions/:id/attention", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  function setFlag(session: Awaited<ReturnType<typeof harness.manager.create>>, source: string, reason: string, payload: unknown): void {
+    (session as any).setAttentionFlag(source, reason, payload);
+  }
+
+  it("returns flags for a live session that has attention flags", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    await setFlag(session, "daemon", "permission_request", { tool: "Edit" });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { flags: Array<{ source: string; reason: string; raisedAt: number; payload: unknown }> };
+    expect(body.flags).toHaveLength(1);
+    expect(body.flags[0]!.source).toBe("daemon");
+    expect(body.flags[0]!.reason).toBe("permission_request");
+    expect(typeof body.flags[0]!.raisedAt).toBe("number");
+    expect(body.flags[0]!.payload).toEqual({ tool: "Edit" });
+  });
+
+  it("returns 404 for an unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_nope/attention`,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns empty array when a live session has no flags", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { flags: unknown[] };
+    expect(body.flags).toEqual([]);
+  });
+
+  it("returns empty array for a cold session with no flags", async () => {
+    const session = await harness.manager.create({
+      cwd: "/w",
+      agentId: "claude-code",
+    });
+    const id = session.sessionId;
+    await session.close({ deleteRecord: false });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${id}/attention`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { flags: unknown[] };
+    expect(body.flags).toEqual([]);
+  });
+
+  it("returns 404 for a completely unknown session id", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_nonexistent_session/attention`,
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /v1/sessions/attention?source=", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  function setFlag(session: Awaited<ReturnType<typeof harness.manager.create>>, source: string, reason: string, payload: unknown): void {
+    (session as any).setAttentionFlag(source, reason, payload);
+  }
+
+  it("returns flags from multiple sessions filtered by source", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const b = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    await setFlag(a, "daemon", "perm_a", { session: "a" });
+    await setFlag(a, "other", "noise", {});
+    await setFlag(b, "daemon", "perm_b", { session: "b" });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/attention?source=daemon`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      flags: Array<{ source: string; reason: string; sessionId: string }>;
+    };
+    expect(body.flags).toHaveLength(2);
+    const sources = body.flags.map((f) => f.source);
+    expect(sources).toEqual(["daemon", "daemon"]);
+    const sessionIds = body.flags.map((f) => f.sessionId);
+    expect(sessionIds).toContain(a.sessionId);
+    expect(sessionIds).toContain(b.sessionId);
+  });
+
+  it("returns empty array when no sessions have flags matching the source", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(a, "daemon", "perm_a", {});
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/attention?source=ghost`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { flags: unknown[] };
+    expect(body.flags).toEqual([]);
+  });
+
+  it("returns 400 when source query param is missing", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/attention`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("source");
+  });
+
+  it("returns 400 when source query param is empty", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+
+    const res = await fetch(`${harness.baseUrl}/v1/sessions/attention?source=`);
+    expect(res.status).toBe(400);
+  });
+
+  it("includes sessionId on each flag entry", async () => {
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(a, "daemon", "perm", { val: 1 });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/attention?source=daemon`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { flags: Array<{ sessionId: string; source: string }>; };
+    expect(body.flags[0]!.sessionId).toBe(a.sessionId);
+    expect(body.flags[0]!.source).toBe("daemon");
+  });
+
+  it("returns flags from cold sessions by reading the persisted store", async () => {
+    // Session A is live with a flag.
+    const a = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(a, "daemon", "live_flag", { origin: "live" });
+
+    // Session B is cold: create it, write attention flags directly to the store,
+    // then remove it from the live map so cross-session GET reads from disk.
+    const b = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const store = (harness.manager as unknown as { store: import("../../core/session-store.js").SessionStore }).store;
+    const existingB = await store.read(b.sessionId);
+    await store.write({ ...existingB!, attentionFlags: [
+      { source: "daemon", reason: "cold_flag", raisedAt: 9000, payload: { origin: "cold" } },
+      { source: "other", reason: "noise", raisedAt: 9100, payload: {} },
+    ]});
+
+    // Remove session B from the live map so it's treated as cold.
+    const liveMap = (harness.manager as unknown as { sessions: Map<string, any> }).sessions;
+    liveMap.delete(b.sessionId);
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/attention?source=daemon`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      flags: Array<{ source: string; reason: string; sessionId: string; payload: unknown }>;
+    };
+    expect(body.flags).toHaveLength(2);
+    const reasons = body.flags.map((f) => f.reason);
+    expect(reasons).toContain("live_flag");
+    expect(reasons).toContain("cold_flag");
+    const sessionIds = body.flags.map((f) => f.sessionId);
+    expect(sessionIds).toContain(a.sessionId);
+    expect(sessionIds).toContain(b.sessionId);
+  });
+});
+
+describe("POST /v1/sessions/:id/attention/clear", () => {
+  let harness: Harness;
+
+  beforeEach(async () => {
+    harness = await buildHarness();
+  });
+
+  afterEach(async () => {
+    await harness.manager.closeAll().catch(() => undefined);
+    await harness.app.close();
+  });
+
+  function setFlag(session: Awaited<ReturnType<typeof harness.manager.create>>, source: string, reason: string, payload: unknown): void {
+    (session as any).setAttentionFlag(source, reason, payload);
+  }
+
+  it("clears a specific flag when both source and reason are provided", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(session, "daemon", "perm_a", { val: 1 });
+    await setFlag(session, "daemon", "perm_b", { val: 2 });
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "daemon", reason: "perm_a" }),
+      },
+    );
+    expect(res.status).toBe(204);
+
+    // The remaining flag should still be there.
+    const flags = session.listAttentionFlags();
+    expect(flags).toHaveLength(1);
+    expect(flags[0]!.reason).toBe("perm_b");
+  });
+
+  it("clears all flags when body is {}", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(session, "daemon", "perm_a", {});
+    await setFlag(session, "other", "noise", {});
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(204);
+
+    const flags = session.listAttentionFlags();
+    expect(flags).toEqual([]);
+  });
+
+  it("clears a specific flag on a cold session via persisted state", async () => {
+    // Create a session and set up attention flags directly in the store.
+    // We don't close the session — instead we create a separate harness-level
+    // manager to read from disk as a "cold" consumer, simulating what happens
+    // when the main manager no longer has the session live.
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const id = session.sessionId;
+    // Set up attention flags directly in the store so they persist to disk.
+    const store = (harness.manager as unknown as { store: import("../../core/session-store.js").SessionStore }).store;
+    const existing = await store.read(id);
+    await store.write({ ...existing!, attentionFlags: [
+      { source: "daemon", reason: "perm_a", raisedAt: 1000, payload: {} },
+      { source: "other", reason: "noise", raisedAt: 2000, payload: {} },
+    ]});
+
+    // Detach the live session from the manager's in-memory map so GET/POST
+    // treat it as cold (no live session branch). This mirrors a killed session.
+    const liveMap = (harness.manager as unknown as { sessions: Map<string, any> }).sessions;
+    liveMap.delete(id);
+
+    // Clear one flag on the cold session.
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${id}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "daemon", reason: "perm_a" }),
+      },
+    );
+    expect(res.status).toBe(204);
+
+    // Verify via GET that the remaining flag is still there.
+    const getRes = await fetch(`${harness.baseUrl}/v1/sessions/${id}/attention`);
+    expect(getRes.status).toBe(200);
+    const body = (await getRes.json()) as { flags: Array<{ source: string; reason: string }> };
+    expect(body.flags).toHaveLength(1);
+    expect(body.flags[0]!.source).toBe("other");
+    expect(body.flags[0]!.reason).toBe("noise");
+  });
+
+  it("clears all flags on a cold session via persisted state", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    const id = session.sessionId;
+    // Set up attention flags directly in the store so they persist to disk.
+    const store = (harness.manager as unknown as { store: import("../../core/session-store.js").SessionStore }).store;
+    const existing = await store.read(id);
+    await store.write({ ...existing!, attentionFlags: [
+      { source: "daemon", reason: "perm_a", raisedAt: 1000, payload: {} },
+      { source: "other", reason: "noise", raisedAt: 2000, payload: {} },
+    ]});
+
+    // Detach from live map so it's treated as cold.
+    const liveMap = (harness.manager as unknown as { sessions: Map<string, any> }).sessions;
+    liveMap.delete(id);
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${id}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(204);
+
+    const getRes = await fetch(`${harness.baseUrl}/v1/sessions/${id}/attention`);
+    expect(getRes.status).toBe(200);
+    const body = (await getRes.json()) as { flags: unknown[] };
+    expect(body.flags).toEqual([]);
+  });
+
+  it("returns 404 for a completely unknown session", async () => {
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/hydra_session_ghost/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 400 when source is present but reason is a non-string type", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(session, "daemon", "perm_a", {});
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "daemon", reason: 42 }),
+      },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("reason");
+  });
+
+  it("returns 400 when source is a non-string type", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(session, "daemon", "perm_a", {});
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: 42, reason: "perm_a" }),
+      },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("source");
+  });
+
+  it("returns 400 when source is missing entirely", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(session, "daemon", "perm_a", {});
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "perm_a" }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when reason is present but source is missing", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(session, "daemon", "perm_a", {});
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "perm_a" }),
+      },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("clearing a specific flag that does not exist is a no-op returning 204", async () => {
+    const session = await harness.manager.create({ cwd: "/w", agentId: "claude-code" });
+    await setFlag(session, "daemon", "perm_a", {});
+
+    const res = await fetch(
+      `${harness.baseUrl}/v1/sessions/${session.sessionId}/attention/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "daemon", reason: "perm_missing" }),
+      },
+    );
+    expect(res.status).toBe(204);
+
+    // The original flag should still be there.
+    const flags = session.listAttentionFlags();
+    expect(flags).toHaveLength(1);
+  });
+});
