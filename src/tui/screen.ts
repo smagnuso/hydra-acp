@@ -289,6 +289,11 @@ export interface CompletionItem {
 const SESSIONBAR_ROWS = 1;
 const BANNER_ROWS = 1;
 const SEPARATOR_ROWS = 1;
+// Row between banner and sessionbar. Set to 0 (banner sits directly
+// above the sessionbar) — was 1 in the old layout. Keeping it as a
+// named constant so the bottom-chrome math reads consistently with
+// the above-prompt separator.
+const BANNER_SEPARATOR_ROWS = 0;
 export const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
@@ -3658,7 +3663,7 @@ export class Screen {
       this.term.height -
       this.promptRows() -
       SESSIONBAR_ROWS -
-      SEPARATOR_ROWS - // separator between banner and sessionbar
+      BANNER_SEPARATOR_ROWS - // separator between banner and sessionbar
       BANNER_ROWS -
       SEPARATOR_ROWS - // separator above prompt
       this.chipRows() -
@@ -3752,14 +3757,13 @@ export class Screen {
       //   row h-2          banner
       //   rows above       prompt (promptRows tall)
       //   row above prompt separator
-      // Total bottom reservation = promptRows + 2*SEPARATOR_ROWS +
-      // BANNER_ROWS + SESSIONBAR_ROWS.
+      // Total bottom reservation = promptRows + SEPARATOR_ROWS +
+      // BANNER_ROWS + BANNER_SEPARATOR_ROWS + SESSIONBAR_ROWS.
       const separatorAbovePromptRow =
-        h - promptRows - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+        h - promptRows - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
       this.drawSeparator(separatorAbovePromptRow);
       this.drawPrompt();
       this.drawBanner();
-      this.drawSeparator(h - SESSIONBAR_ROWS);
       this.drawSessionbar();
       this.placeCursor();
       if (
@@ -4068,7 +4072,7 @@ export class Screen {
       this.term.height -
       promptRows -
       SESSIONBAR_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       BANNER_ROWS;
     const queuedRows = this.queuedRows();
     const chipRows = this.chipRows();
@@ -4131,7 +4135,7 @@ export class Screen {
       this.term.height -
       promptRows -
       SESSIONBAR_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       BANNER_ROWS;
     const chipBottom = separatorRow - 1;
     const chipTop = chipBottom - rows + 1;
@@ -4200,7 +4204,7 @@ export class Screen {
       this.term.height -
       promptRows -
       SESSIONBAR_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       BANNER_ROWS;
     const chipRows = this.chipRows();
     const queuedBottom = separatorRow - 1 - chipRows;
@@ -4281,7 +4285,7 @@ export class Screen {
       this.term.height -
       layout.rendered -
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
     // The prompt area is always painted bright — typing always routes to
@@ -4343,7 +4347,7 @@ export class Screen {
       this.term.height -
       CONFIRM_PROMPT_ROWS -
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
     this.paintRow(top, `confirm|q|${w}|${spec.question}`, () => {
@@ -4365,7 +4369,7 @@ export class Screen {
       this.term.height -
       rows -
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
     let row = top;
@@ -4428,7 +4432,7 @@ export class Screen {
       this.term.height -
       rows -
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
     let row = top;
@@ -4489,7 +4493,7 @@ export class Screen {
       this.term.height -
       rows -
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
     let row = top;
@@ -4582,7 +4586,7 @@ export class Screen {
   }
 
   private drawBanner(): void {
-    const row = this.term.height - SESSIONBAR_ROWS - SEPARATOR_ROWS;
+    const row = this.term.height - SESSIONBAR_ROWS - BANNER_SEPARATOR_ROWS;
     const w = this.term.width;
     // Use the rendered elapsed string in the sig (not raw ms), so a tick
     // landing within the same displayed-second skips the repaint. Tied to
@@ -4706,12 +4710,12 @@ export class Screen {
         this.term.height -
         rows -
         BANNER_ROWS -
-        SEPARATOR_ROWS -
+        BANNER_SEPARATOR_ROWS -
         SESSIONBAR_ROWS +
         1;
       const optionRow = top + 3 + this.permissionPrompt.selectedIndex;
       const lastUsableRow =
-        this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+        this.term.height - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
       this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
       return;
     }
@@ -4721,13 +4725,13 @@ export class Screen {
         this.term.height -
         rows -
         BANNER_ROWS -
-        SEPARATOR_ROWS -
+        BANNER_SEPARATOR_ROWS -
         SESSIONBAR_ROWS +
         1;
       // title precedes the option rows
       const optionRow = top + 1 + this.optionsPrompt.selectedIndex;
       const lastUsableRow =
-        this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+        this.term.height - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
       this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
       return;
     }
@@ -4738,7 +4742,7 @@ export class Screen {
         this.term.height -
         CONFIRM_PROMPT_ROWS -
         BANNER_ROWS -
-        SEPARATOR_ROWS -
+        BANNER_SEPARATOR_ROWS -
         SESSIONBAR_ROWS +
         1;
       this.term.moveTo(2, top);
@@ -4754,12 +4758,12 @@ export class Screen {
         this.term.height -
         rows -
         BANNER_ROWS -
-        SEPARATOR_ROWS -
+        BANNER_SEPARATOR_ROWS -
         SESSIONBAR_ROWS +
         1;
       const optionRow = top + 2 + this.compactionPrompt.selectedIndex;
       const lastUsableRow =
-        this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+        this.term.height - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
       this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
       return;
     }
@@ -4771,7 +4775,7 @@ export class Screen {
         this.term.height -
         rows -
         BANNER_ROWS -
-        SEPARATOR_ROWS -
+        BANNER_SEPARATOR_ROWS -
         SESSIONBAR_ROWS +
         1;
       this.term.moveTo(2, top);
@@ -4807,13 +4811,13 @@ export class Screen {
       this.term.height -
       layout.rendered -
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
     const row = top + Math.max(0, layout.cursorVisualRow - layout.windowStart);
     const col = layout.cursorVisualCol + 3; // gutter (2) + 1-based column
     const lastPromptRow =
-      this.term.height - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+      this.term.height - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
     this.term.moveTo(
       Math.min(col, this.term.width),
       Math.min(row, lastPromptRow),
@@ -4878,7 +4882,7 @@ export class Screen {
       this.term.height -
       rows -
       BANNER_ROWS -
-      SEPARATOR_ROWS -
+      BANNER_SEPARATOR_ROWS -
       SESSIONBAR_ROWS +
       1;
     let row = top;
@@ -4999,7 +5003,7 @@ export class Screen {
     const w = this.term.width;
     const h = this.term.height;
     const separatorAbovePromptRow =
-      h - this.promptRows() - BANNER_ROWS - SEPARATOR_ROWS - SESSIONBAR_ROWS;
+      h - this.promptRows() - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
     const zoneRows = this.chipRows() + this.queuedRows() + this.completionRows();
     const overlayBottom = separatorAbovePromptRow - 1 - zoneRows;
     const overlayTop = overlayBottom - rows + 1;
