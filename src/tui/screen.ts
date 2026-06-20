@@ -511,6 +511,18 @@ export class Screen {
     hint: "⇧⇥ mode · ⌃P pick · ⌃G guide · ⌃D detach",
     queued: 0,
   };
+  // Click hit-regions for the banner hint chunks ("⇧⇥ mode", "⌃P pick",
+  // "⌃G guide"). Recomputed on every drawBanner so layout shifts (status
+  // changes, queued count, scrollOffset) keep the regions accurate.
+  // Each entry is the inclusive 1-based column range on `row`. `null`
+  // when the banner hasn't been painted yet.
+  private bannerHits: {
+    row: number;
+    mode: [number, number] | null;
+    pick: [number, number] | null;
+    guide: [number, number] | null;
+    detach: [number, number] | null;
+  } | null = null;
   private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
   private lastWindowTitle: string | null = null;
   private resizeHandler: () => void;
@@ -4524,6 +4536,51 @@ export class Screen {
     });
   }
 
+  // Plain-text reproduction of everything drawBanner paints before the
+  // hint chunks. Used to derive the start column of the hint so we can
+  // map left-clicks back to the chunk under the pointer. Must stay in
+  // sync with drawBanner's left-side paints — adding a new prefix
+  // element there means appending it here too.
+  private computeBannerPrefixText(elapsedStr: string): string {
+    const dot = this.banner.status === "busy" ? "●" : "○";
+    let s = "";
+    if (this.banner.status === "busy") {
+      const stalled = this.banner.stalled === true;
+      s += `${dot} ${stalled ? "stalled" : this.banner.status}`;
+      if (elapsedStr) {
+        s += ` ${elapsedStr}`;
+      }
+    } else {
+      s += `${dot} ${this.banner.status}`;
+    }
+    if (this.banner.queued > 0) {
+      s += ` · ${this.banner.queued} queued`;
+    }
+    if (this.scrollOffset > 0) {
+      s += ` · ↑ ${this.scrollOffset}`;
+    }
+    s += " · ";
+    return s;
+  }
+
+  // Public: which clickable banner chunk (if any) contains the given
+  // 1-based terminal cell? Returns null for clicks outside the banner
+  // row or in non-clickable areas (status dot, queued, scroll indicator,
+  // "detach" chunk, the gap before the right-side slot, etc.).
+  bannerHitAt(x: number, y: number): "mode" | "pick" | "guide" | "detach" | null {
+    const hits = this.bannerHits;
+    if (!hits || y !== hits.row) {
+      return null;
+    }
+    const inRange = (r: [number, number] | null): boolean =>
+      r !== null && x >= r[0] && x <= r[1];
+    if (inRange(hits.mode)) return "mode";
+    if (inRange(hits.pick)) return "pick";
+    if (inRange(hits.guide)) return "guide";
+    if (inRange(hits.detach)) return "detach";
+    return null;
+  }
+
   private drawBanner(): void {
     const row = this.term.height - SESSIONBAR_ROWS - SEPARATOR_ROWS;
     const w = this.term.width;
@@ -4575,6 +4632,35 @@ export class Screen {
           )
         : this.banner.hint;
       this.term(" · ").dim(hint);
+      // Compute the absolute column ranges for the "mode", "pick", and
+      // "guide" chunks so left-clicks on the banner can dispatch the same
+      // effect as ⇧⇥ / ⌃P / ⌃G. Done here (alongside the paint) so the
+      // hit regions are always in sync with what's on screen.
+      const prefix = this.computeBannerPrefixText(elapsedStr);
+      let col = stringWidth(prefix) + 1; // 1-based start column of the hint
+      const chunks = hint.split(" · ");
+      const hits: {
+        mode: [number, number] | null;
+        pick: [number, number] | null;
+        guide: [number, number] | null;
+        detach: [number, number] | null;
+      } = { mode: null, pick: null, guide: null, detach: null };
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i] ?? "";
+        const w = stringWidth(chunk);
+        const range: [number, number] = [col, col + w - 1];
+        if (chunk.includes("mode") && hits.mode === null) {
+          hits.mode = range;
+        } else if (chunk.includes("pick") && hits.pick === null) {
+          hits.pick = range;
+        } else if (chunk.includes("guide") && hits.guide === null) {
+          hits.guide = range;
+        } else if (chunk.includes("detach") && hits.detach === null) {
+          hits.detach = range;
+        }
+        col += w + stringWidth(" · ");
+      }
+      this.bannerHits = { row, ...hits };
       // Clear the gap between end-of-hint and start-of-right-slot before
       // moving over. paintRow doesn't pre-clear the row, so a previous
       // frame whose right text started at a column to the LEFT of this

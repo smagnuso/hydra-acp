@@ -622,20 +622,28 @@ export async function pickSession(
   };
 
   // Inner width of the box (cols between the two corner glyphs). At
-  // least 2 so we can always fit "──".
-  const composerBoxInner = (): number => Math.max(2, termWidth - 2);
+  // least 2 so we can always fit "──". We leave the rightmost terminal
+  // column blank — picker doesn't disable DECAWM, so a glyph painted in
+  // the last column triggers a wrap that pushes the right border ╮ onto
+  // the next row.
+  const composerBoxInner = (): number => Math.max(2, termWidth - 3);
 
   // Top border with the title embedded:
   //   ╭─ Create new session in ~/foo ────────────────────╮
   // Title is middle-truncated by formatComposerTitle to fit composerRoom;
   // the dashes flex to fill whatever remains so the border touches the
   // right edge of the terminal.
+  // Set true while the mouse pointer is over the composer box (any row
+  // from the top border through the bottom border). Repaints the box
+  // chrome in brightBlue so the user gets the same hover affordance the
+  // session rows already provide via highlight-follow-pointer.
+  let composerHover = false;
   const paintComposerTopBorder = (): void => {
     const inner = composerBoxInner();
     const titleFragment = `─ ${composerTitle} `;
     const dashCount = Math.max(1, inner - titleFragment.length);
     const dashes = "─".repeat(dashCount);
-    if (selectedIdx === 0) {
+    if (selectedIdx === 0 || composerHover) {
       term.brightBlue.noFormat(`╭${titleFragment}${dashes}╮`);
     } else {
       term.dim.noFormat(`╭${titleFragment}${dashes}╮`);
@@ -646,7 +654,7 @@ export async function pickSession(
   const paintComposerBottomBorder = (): void => {
     const inner = composerBoxInner();
     const dashes = "─".repeat(inner);
-    if (selectedIdx === 0) {
+    if (selectedIdx === 0 || composerHover) {
       term.brightBlue.noFormat(`╰${dashes}╯`);
     } else {
       term.dim.noFormat(`╰${dashes}╯`);
@@ -674,7 +682,7 @@ export async function pickSession(
     const slice = composerSliceAt(visualIdx);
     const padWidth = Math.max(0, inner - 1 - slice.length);
     const pad = " ".repeat(padWidth);
-    if (selectedIdx === 0) {
+    if (selectedIdx === 0 || composerHover) {
       term.brightBlue.noFormat("│");
       term.noFormat(` ${slice}${pad}`);
       term.brightBlue.noFormat("│");
@@ -692,7 +700,7 @@ export async function pickSession(
     const session = visible[sessionIdx];
     const prefix =
       session && session.priority && session.priority > 0 ? "* " : "  ";
-    if (selectedIdx === sessionIdx + 1) {
+    if (selectedIdx === sessionIdx + 1 && !composerHover) {
       term.brightWhite.bgBlue.noFormat(`${prefix}${label}`);
     } else {
       term.noFormat(`${prefix}${label}`);
@@ -830,18 +838,20 @@ export async function pickSession(
   // Sigs for the row-painter cache. Each must include every variable
   // input that affects the row's visible output; identical sig means
   // identical bytes so paintRow can short-circuit.
+  const composerFocusFlag = (): string =>
+    selectedIdx === 0 ? "f" : composerHover ? "h" : "u";
   const composerTopSig = (): string =>
-    `ct|${selectedIdx === 0 ? "f" : "u"}|${composerBoxInner()}|${composerTitle}`;
+    `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}`;
   const composerBotSig = (): string =>
-    `cb|${selectedIdx === 0 ? "f" : "u"}|${composerBoxInner()}`;
+    `cb|${composerFocusFlag()}|${composerBoxInner()}`;
   const composerBodySig = (visualIdx: number): string =>
-    `cbb|${selectedIdx === 0 ? "f" : "u"}|${composerBoxInner()}|${composerSliceAt(visualIdx)}`;
+    `cbb|${composerFocusFlag()}|${composerBoxInner()}|${composerSliceAt(visualIdx)}`;
   const headerSig = (): string => `h|${headerLine}`;
   const sessionRowSig = (sessionIdx: number): string => {
     const session = visible[sessionIdx];
     const prefix = session && session.priority && session.priority > 0 ? "* " : "  ";
     const label = sessionLines[sessionIdx] ?? "";
-    const selected = selectedIdx === sessionIdx + 1 ? "1" : "0";
+    const selected = selectedIdx === sessionIdx + 1 && !composerHover ? "1" : "0";
     return `sr|${selected}|${prefix}${label}`;
   };
 
@@ -1694,6 +1704,7 @@ export async function pickSession(
         autoRefreshInFlight = false;
       }
       term.off("key", dispatch);
+      term.off("mouse", onMouse);
       term.off("resize", dispatchResize);
       // Restore terminal-kit's stdin listener and disable bracketed paste.
       process.stdout.write(BRACKETED_PASTE_OFF);
@@ -2915,8 +2926,107 @@ export async function pickSession(
       onKey: (name, _matches, data) => onKey(name, _matches, data),
       onResize: () => { if (!resolved) renderFromScratch(); },
     });
+    // Translate a mouse click in the session list area into "select that
+    // row + Enter". Only fires on the picker's base layer in normal mode;
+    // ignored while find/help/info/confirm/rename are active. Clicks
+    // outside the viewport (composer, header, indicator, padding) are
+    // dropped silently so a stray click doesn't dismiss the picker.
+    const onMouse = (name: string, data?: { x?: number; y?: number }): void => {
+      if (resolved) return;
+      if (focusStack.length !== 1) return;
+      if (mode !== "normal") return;
+      const isMotion = name === "MOUSE_MOTION";
+      const isClick = name === "MOUSE_LEFT_BUTTON_PRESSED";
+      const isWheelUp = name === "MOUSE_WHEEL_UP";
+      const isWheelDown = name === "MOUSE_WHEEL_DOWN";
+      if (isWheelUp || isWheelDown) {
+        if (visible.length === 0) return;
+        const delta = isWheelUp ? -3 : 3;
+        const max = Math.max(0, visible.length - viewportSize);
+        const nextScroll = Math.min(max, Math.max(0, scrollOffset + delta));
+        if (nextScroll === scrollOffset) return;
+        scrollOffset = nextScroll;
+        // Keep the cursor visible: if the selected row scrolled off the
+        // top/bottom of the viewport, snap selectedIdx to the nearest
+        // edge of the new window. Composer (selectedIdx 0) stays put.
+        if (selectedIdx > 0) {
+          const sessionIdx = selectedIdx - 1;
+          if (sessionIdx < scrollOffset) {
+            selectedIdx = scrollOffset + 1;
+          } else if (sessionIdx >= scrollOffset + viewportSize) {
+            selectedIdx = scrollOffset + viewportSize;
+          }
+        }
+        repaintViewport();
+        return;
+      }
+      if (!isMotion && !isClick) return;
+      const y = data?.y;
+      if (typeof y !== "number") return;
+      // Click anywhere inside the composer box (top border through
+      // bottom border) drops focus into the composer. Hover does not
+      // steal focus, but it does flip the border to brightBlue so the
+      // user gets the same affordance the session rows have.
+      const overComposer = y >= startRow && y <= composerBottomRow();
+      if (overComposer) {
+        if (isClick) {
+          composerHover = false;
+          if (selectedIdx !== 0) {
+            const old = selectedIdx;
+            selectedIdx = 0;
+            withSync(() => {
+              repaintViewport();
+              onFocusChange(old, selectedIdx);
+            });
+          }
+          return;
+        }
+        if (!composerHover && selectedIdx !== 0) {
+          composerHover = true;
+          withSync(() => {
+            repaintComposerChrome();
+            repaintViewport();
+          });
+        }
+        return;
+      }
+      if (composerHover) {
+        composerHover = false;
+        withSync(() => {
+          repaintComposerChrome();
+          repaintViewport();
+        });
+      }
+      const firstRow = headerRow() + 1;
+      const lastRow = firstRow + viewportSize - 1;
+      if (y < firstRow || y > lastRow) return;
+      const sessionIdx = scrollOffset + (y - firstRow);
+      if (sessionIdx < 0 || sessionIdx >= visible.length) return;
+      const session = visible[sessionIdx];
+      if (!session) return;
+      const targetIdx = sessionIdx + 1;
+      if (selectedIdx !== targetIdx) {
+        const old = selectedIdx;
+        selectedIdx = targetIdx;
+        adjustScroll();
+        withSync(() => {
+          repaintViewport();
+          onFocusChange(old, selectedIdx);
+        });
+      }
+      if (!isClick) return;
+      cleanup();
+      const result: PickerResult = {
+        kind: "attach",
+        sessionId: session.sessionId,
+      };
+      if (session.agentId !== undefined) {
+        result.agentId = session.agentId;
+      }
+      resolve(result);
+    };
     const installGrab = (): void => {
-      term.grabInput({});
+      term.grabInput({ mouse: "motion" });
       const tSetup = term as unknown as {
         stdin: NodeJS.ReadableStream;
         onStdin: (chunk: Buffer) => void;
@@ -2928,6 +3038,7 @@ export async function pickSession(
         process.stdout.write(BRACKETED_PASTE_ON);
       }
       term.on("key", dispatch);
+      term.on("mouse", onMouse);
       term.on("resize", dispatchResize);
     };
     // Reverse of installGrab. Used both by cleanup (in resolve path) and
@@ -2943,6 +3054,7 @@ export async function pickSession(
       pasteActive = false;
       pasteBuffer = "";
       term.off("key", dispatch);
+      term.off("mouse", onMouse);
       term.off("resize", dispatchResize);
       term.grabInput(false);
       term.hideCursor(false);

@@ -2200,6 +2200,30 @@ async function runSession(
     // prompt. Fires on press to match the X11 middle-down convention and
     // reuses the same effect + read-only gate as the ^V keybinding.
     onMouse: (ev) => {
+      // Left-click on a clickable banner chunk fires the same effect as
+      // the corresponding hotkey. Done here (not in screen.ts) so the
+      // dispatch routes through the same handleEffect path as keyboard
+      // input, including the readonly-forbidden gate.
+      if (ev.kind === "press" && ev.button === "left") {
+        const hit = screen.bannerHitAt(ev.x, ev.y);
+        if (hit !== null) {
+          if (hit === "mode") {
+            void handleModeToggle(true);
+            return;
+          }
+          const effect: InputEffect =
+            hit === "pick"
+              ? { type: "switch-session" }
+              : hit === "detach"
+                ? { type: "exit" }
+                : { type: "show-help" };
+          if (opts.readonly === true && isReadonlyForbiddenEffect(effect)) {
+            return;
+          }
+          handleEffect(effect);
+          return;
+        }
+      }
       if (ev.kind !== "press" || ev.button !== "middle") {
         return;
       }
