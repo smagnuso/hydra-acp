@@ -986,7 +986,7 @@ export async function pickSession(
 
   const paintFindBoxTopBorder = (focused: boolean): void => {
     termWidth = readTermWidth(term);
-    const inner = Math.max(2, termWidth - 2);
+    const inner = Math.max(2, termWidth - 3);
     const title = "─ Find sessions ";
     const dashes = "─".repeat(Math.max(1, inner - title.length));
     if (focused) {
@@ -1012,7 +1012,7 @@ export async function pickSession(
 
   const paintFindBoxBodyRow = (visualIdx: number, focused: boolean): void => {
     termWidth = readTermWidth(term);
-    const inner = Math.max(2, termWidth - 2);
+    const inner = Math.max(2, termWidth - 3);
     const vr = findVisualRows[visualIdx];
     let slice = "";
     if (vr) {
@@ -1037,7 +1037,7 @@ export async function pickSession(
 
   const paintFindBoxBottomBorder = (focused: boolean): void => {
     termWidth = readTermWidth(term);
-    const inner = Math.max(2, termWidth - 2);
+    const inner = Math.max(2, termWidth - 3);
     const dashes = "─".repeat(inner);
     if (focused) {
       term.brightBlue.noFormat(`╰${dashes}╯`);
