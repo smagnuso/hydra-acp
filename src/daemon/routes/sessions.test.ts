@@ -830,7 +830,7 @@ describe("session routes: POST /v1/sessions/:id/fork", () => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ mode: "verbatim" }),
       },
     );
     expect(res.status).toBe(201);
@@ -877,7 +877,7 @@ describe("session routes: POST /v1/sessions/:id/fork", () => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ forkAt: "m_missing" }),
+        body: JSON.stringify({ forkAt: "m_missing", mode: "verbatim" }),
       },
     );
     expect(res.status).toBe(400);
@@ -903,7 +903,7 @@ describe("session routes: POST /v1/sessions/:id/fork", () => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ mode: "verbatim" }),
       },
     );
     expect(forkRes.status).toBe(201);

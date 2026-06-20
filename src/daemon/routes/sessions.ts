@@ -532,12 +532,14 @@ export function registerSessionRoutes(
       cwd?: unknown;
       agentId?: unknown;
       title?: unknown;
+      mode?: unknown;
     };
     const opts: {
       forkAt?: string;
       cwd?: string;
       agentId?: string;
       title?: string;
+      mode?: "verbatim" | "synthesis";
     } = {};
     if (body.forkAt !== undefined) {
       if (typeof body.forkAt !== "string" || body.forkAt.length === 0) {
@@ -566,6 +568,13 @@ export function registerSessionRoutes(
         return;
       }
       opts.title = body.title;
+    }
+    if (body.mode !== undefined) {
+      if (body.mode !== "verbatim" && body.mode !== "synthesis") {
+        reply.code(400).send({ error: "mode must be \"verbatim\" or \"synthesis\"" });
+        return;
+      }
+      opts.mode = body.mode;
     }
     try {
       const result = await manager.forkSession(id, opts);

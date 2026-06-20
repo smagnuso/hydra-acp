@@ -137,6 +137,7 @@ export function runBtwSidechain(
               cwd: opts.cwd,
               agentId: opts.agentId,
               title: `btw: ${titlePreview}`,
+              mode: "verbatim",
             },
             fetchImpl,
           );

@@ -774,6 +774,7 @@ export function registerAcpWsEndpoint(
           forkAt?: unknown;
           cwd?: unknown;
           agentId?: unknown;
+          mode?: unknown;
         };
         if (typeof params.sessionId !== "string") {
           throw rpcError(
@@ -784,10 +785,14 @@ export function registerAcpWsEndpoint(
         const forkAt = typeof params.forkAt === "string" ? params.forkAt : undefined;
         const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
         const agentId = typeof params.agentId === "string" ? params.agentId : undefined;
+        const mode = (typeof params.mode === "string" && (params.mode === "verbatim" || params.mode === "synthesis"))
+          ? params.mode
+          : undefined;
         return await deps.manager.forkSession(params.sessionId, {
           ...(forkAt !== undefined ? { forkAt } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           ...(agentId !== undefined ? { agentId } : {}),
+          ...(mode !== undefined ? { mode } : {}),
         });
       });
 

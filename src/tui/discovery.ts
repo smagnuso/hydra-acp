@@ -314,7 +314,7 @@ export async function listAgents(
 export async function forkSession(
   target: RemoteTarget,
   id: string,
-  opts: { forkAt?: string; cwd?: string; agentId?: string; title?: string } = {},
+  opts: { forkAt?: string; cwd?: string; agentId?: string; title?: string; mode?: "verbatim" | "synthesis" } = {},
   fetchImpl: typeof fetch = fetch,
 ): Promise<{
   sessionId: string;
@@ -331,8 +331,9 @@ export async function forkSession(
       },
       body: JSON.stringify(opts),
     },
-    // Fork can include a seedFromImport replay; keep the timeout generous.
-    30000,
+    // Fork can include a seedFromImport replay, and synthesis mode spawns
+    // an ephemeral synopsis agent (~120s budget). Keep this comfortably above.
+    180000,
     fetchImpl,
   );
   if (!response.ok) {

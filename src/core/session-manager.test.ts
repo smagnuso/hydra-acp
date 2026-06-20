@@ -3818,7 +3818,7 @@ describe("SessionManager.forkSession", () => {
         history: [turnComplete("m_one", 1), turnComplete("m_two", 2)],
       }),
     );
-    const fork = await manager.forkSession(source.sessionId);
+    const fork = await manager.forkSession(source.sessionId, { mode: "verbatim" });
     expect(fork.forkedAt).toBe("m_two");
     expect(fork.forkedFromSessionId).toBe(source.sessionId);
     const history = await readHistory(fork.sessionId);
@@ -3857,7 +3857,7 @@ describe("SessionManager.forkSession", () => {
         ],
       }),
     );
-    const fork = await manager.forkSession(source.sessionId, { forkAt: "m_one" });
+    const fork = await manager.forkSession(source.sessionId, { forkAt: "m_one", mode: "verbatim" });
     expect(fork.forkedAt).toBe("m_one");
     const history = await readHistory(fork.sessionId);
     expect(history.length).toBe(1);
@@ -3888,7 +3888,7 @@ describe("SessionManager.forkSession", () => {
         history: [turnComplete("m_only")],
       }),
     );
-    const fork = await manager.forkSession(source.sessionId);
+    const fork = await manager.forkSession(source.sessionId, { mode: "verbatim" });
     const forkMeta = await readMeta(fork.sessionId);
     expect(forkMeta.forkedFromSessionId).toBe(source.sessionId);
     expect(forkMeta.forkedFromMessageId).toBe("m_only");
@@ -3915,7 +3915,7 @@ describe("SessionManager.forkSession", () => {
         history: [userMessage("hello, only user input")],
       }),
     );
-    const result = await manager.forkSession(source.sessionId);
+    const result = await manager.forkSession(source.sessionId, { mode: "verbatim" });
     expect(result.forkedFromSessionId).toBe(source.sessionId);
     expect(result.forkedAt).toBe("");
     const history = await readHistory(result.sessionId);
@@ -3931,7 +3931,7 @@ describe("SessionManager.forkSession", () => {
       }),
     );
     await expect(
-      manager.forkSession(source.sessionId, { forkAt: "m_missing" }),
+      manager.forkSession(source.sessionId, { forkAt: "m_missing", mode: "verbatim" }),
     ).rejects.toMatchObject({ code: JsonRpcErrorCodes.InvalidParams });
   });
 
@@ -4043,7 +4043,7 @@ describe("SessionManager.forkSession", () => {
         ],
       }),
     );
-    const fork = await manager.forkSession(source.sessionId, { forkAt: "m_two" });
+    const fork = await manager.forkSession(source.sessionId, { forkAt: "m_two", mode: "verbatim" });
     const forkHist = await readHistory(fork.sessionId);
     const sourceHist = await readHistory(source.sessionId);
     expect(forkHist).toEqual(sourceHist.slice(0, 2));

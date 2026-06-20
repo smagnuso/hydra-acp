@@ -40,6 +40,7 @@ import {
 } from "./tombstone-store.js";
 import type { CompactionState, SessionSynopsis } from "./snapshot.js";
 import { SynopsisCoordinator, type HydraCompactionPayload } from "./synopsis-coordinator.js";
+import { generateSynopsis } from "./synopsis-agent.js";
 import { HistoryStore, type HistoryEntry as HistoryStoreEntry } from "./history-store.js";
 import { getToolBlob, readToolBlobGz, writeToolBlobGz } from "./tool-store.js";
 import { collectToolBlobHashes } from "./tool-content.js";
@@ -978,7 +979,11 @@ export class SessionManager {
     await this.attachManagerHooks(session);
     // Fire and forget — the seed runs through enqueuePrompt inside
     // Session, so any user prompt arriving mid-seed queues behind it.
-    void session.seedFromImport().catch(() => undefined);
+    if (params.forkedFromSessionId && params.synopsis) {
+      void session.seedFromFork(params.synopsis).catch(() => undefined);
+    } else {
+      void session.seedFromImport().catch(() => undefined);
+    }
     return session;
   }
 
@@ -2393,6 +2398,12 @@ export class SessionManager {
       // source's title via the spread below. /btw passes "btw: <prompt>"
       // so the fork is identifiable in `hydra sessions list --all`.
       title?: string;
+      // "synthesis" (default): copy full history and run generateSynopsis
+      // to produce a concise brief for the new agent.  "verbatim": copy
+      // only the sliced history up to forkAt/TurnComplete — identical to
+      // pre-synthesis behavior.  In synthesis mode, `forkAt` is silently
+      // ignored (synthesis always covers full history).
+      mode?: "verbatim" | "synthesis";
     } = {},
   ): Promise<{
     sessionId: string;
@@ -2423,35 +2434,129 @@ export class SessionManager {
 
     const sourceHistory = await this.histories.load(sourceSessionId).catch(() => []);
 
-    let cutoffIndex: number;
+    let slicedHistory = sourceHistory;
     let forkedAt: string;
-    if (opts.forkAt !== undefined) {
-      cutoffIndex = findMessageIdIndex(sourceHistory, opts.forkAt);
-      if (cutoffIndex < 0) {
+    const mode = opts.mode ?? "synthesis";
+    // Holds synopsis data when synthesis succeeds; used to populate
+    // recordForBundle below.  Left undefined on failure (graceful
+    // degrade — seedFromImport handles first attach instead).
+    let forkSynopsis: SessionSynopsis | undefined;
+    let forkSummarizedThroughEntry: number | undefined;
+
+    if (mode === "verbatim") {
+      // Legacy path — slice via forkAt or last completed turn.
+      if (opts.forkAt !== undefined) {
+        const ci = findMessageIdIndex(sourceHistory, opts.forkAt);
+        if (ci < 0) {
+          const err = new Error(
+            `forkAt messageId not found in source history: ${opts.forkAt}`,
+          ) as Error & { code: number };
+          err.code = JsonRpcErrorCodes.InvalidParams;
+          throw err;
+        }
+        forkedAt = opts.forkAt;
+        slicedHistory = sourceHistory.slice(0, ci + 1);
+      } else {
+        const found = findLastTurnComplete(sourceHistory);
+        if (found) {
+          forkedAt = found.messageId;
+          slicedHistory = sourceHistory.slice(0, found.index + 1);
+        } else {
+          // Source has no completed turns yet (e.g. a freshly-spawned
+          // session that hasn't received a real prompt). Fork at the
+          // beginning — empty history, no messageId to point at. This
+          // makes /btw and other fork-based features work from any
+          // session state, not just established conversations.
+          forkedAt = "";
+          slicedHistory = sourceHistory.slice(0, 0);
+        }
+      }
+    } else {
+      // synthesis mode — full history always; forkAt is silently ignored.
+      if (opts.forkAt !== undefined) {
+        this.logger?.warn(
+          `synthesis fork: ignoring forkAt=${opts.forkAt} (synthesis covers full history)`,
+        );
+      }
+      forkedAt = "";
+      slicedHistory = sourceHistory; // full copy
+
+      // Resolve target agent def + spawn plan — only synthesis mode
+      // needs these for generateSynopsis.  Verbatim forks skip this
+      // entirely (avoids registry lookup + npm-prefetch on the /btw
+      // hot path).
+      const targetAgentDef = await this.registry.getAgent(targetAgentId);
+      if (!targetAgentDef) {
         const err = new Error(
-          `forkAt messageId not found in source history: ${opts.forkAt}`,
+          `agent ${targetAgentId} not found in registry`,
         ) as Error & { code: number };
-        err.code = JsonRpcErrorCodes.InvalidParams;
+        err.code = JsonRpcErrorCodes.AgentNotInstalled;
         throw err;
       }
-      forkedAt = opts.forkAt;
-    } else {
-      const found = findLastTurnComplete(sourceHistory);
-      if (found) {
-        cutoffIndex = found.index;
-        forkedAt = found.messageId;
-      } else {
-        // Source has no completed turns yet (e.g. a freshly-spawned
-        // session that hasn't received a real prompt). Fork at the
-        // beginning — empty history, no messageId to point at. This
-        // makes /btw and other fork-based features work from any
-        // session state, not just established conversations.
-        cutoffIndex = -1;
-        forkedAt = "";
-      }
-    }
+      const spawnPlan = await planSpawn(targetAgentDef, [], {
+        npmRegistry: this.npmRegistry,
+      });
 
-    const slicedHistory = sourceHistory.slice(0, cutoffIndex + 1);
+      // Resolve modelId for the synopsis ephemeral agent.  Reuse the
+      // same default timeout as synopsis-agent.ts (120 s).
+      const SYNOPSIS_TIMEOUT_MS = 120_000;
+      const sourceModel = sourceRecord.currentModel;
+
+      // Note: TARGET agent generates the synopsis (not source) — it's
+      // consumed by the fork's agent, so we want it in the target's idiom
+      // + model.  TODO: plumb an AbortSignal so a disconnected HTTP client
+      // can cancel synopsis generation (currently orphans the ephemeral
+      // agent run).
+      try {
+        const synopsisResult = await generateSynopsis({
+          agentId: targetAgentId,
+          cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
+          plan: spawnPlan,
+          history: sourceHistory,
+          modelId: sourceModel,
+          sessionId: sourceSessionId,
+          logger: this.logger,
+          timeoutMs: SYNOPSIS_TIMEOUT_MS,
+        });
+
+        if (synopsisResult && synopsisResult.synopsis) {
+          forkSynopsis = synopsisResult.synopsis;
+          forkSummarizedThroughEntry = sourceHistory.length;
+        } else {
+          this.logger?.warn(
+            `forkSession(${sourceSessionId}): generateSynopsis returned no synopsis — falling back to verbatim seed`,
+          );
+        }
+      } catch (err) {
+        this.logger?.warn(
+          `forkSession(${sourceSessionId}): generateSynopsis threw — falling back to verbatim seed: ${(err as Error).message}`,
+        );
+      }
+
+       // Graceful-degrade fallback: synopsis failed or returned undefined.
+       // Reduce slicedHistory to the last-turn-complete slice (or forkAt
+       // slice if provided) so we don't replay the entire source session.
+       // NEVER throw here — seedFromImport must always receive valid input.
+       if (!forkSynopsis) {
+         if (opts.forkAt !== undefined) {
+           const fi = findMessageIdIndex(sourceHistory, opts.forkAt);
+           if (fi >= 0) {
+             forkedAt = opts.forkAt;
+             slicedHistory = sourceHistory.slice(0, fi + 1);
+           }
+         }
+         if (!forkedAt) {
+           const found = findLastTurnComplete(sourceHistory);
+           if (found) {
+             forkedAt = found.messageId;
+             slicedHistory = sourceHistory.slice(0, found.index + 1);
+           } else {
+             forkedAt = "";
+             slicedHistory = sourceHistory.slice(0, 0);
+           }
+         }
+       }
+     }
     const promptHistory = await loadPromptHistorySafely(sourceSessionId);
 
     // Build a record snapshot for encodeBundle. Fresh lineageId so the
@@ -2480,6 +2585,8 @@ export class SessionManager {
       lineageId: generateLineageId(),
       agentId: targetAgentId,
       interactive: false,
+      ...(forkSynopsis !== undefined ? { synopsis: forkSynopsis } : {}),
+      ...(forkSummarizedThroughEntry !== undefined ? { summarizedThroughEntry: forkSummarizedThroughEntry } : {}),
       ...(opts.title !== undefined ? { title: opts.title } : {}),
       // A fork is a new session: its first turn re-pays for the carried
       // context (cache miss on the new session id, full prompt re-sent),

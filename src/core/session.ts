@@ -15,6 +15,10 @@ const generateChainToken = customAlphabet(HYDRA_ID_ALPHABET, 16);
 // chains before a swap. Bounds I/O cost.
 const QUIESCE_TAIL_SCAN_ENTRIES = 20;
 
+// Default number of recent turns to include in compaction seeds and fork
+// seeds. Kept as a module constant so all callers use the same value.
+const TAIL_K = 20;
+
 export const HYDRA_SESSION_PREFIX = "hydra_session_";
 
 // Stable id stamped onto prompt_received / turn_complete updates per
@@ -4815,6 +4819,66 @@ export class Session {
         return undefined;
       }
       await this.runInternalPrompt(transcript).catch(() => undefined);
+      return undefined;
+    });
+  }
+
+  // Seed a forked session's fresh agent with a compaction-style brief
+  // (synopsis header + recent turns verbatim) drawn from the parent's
+  // generated synopsis. Called on first attach when the session has
+  // forkedFromSessionId set and a non-empty synopsis — the synthesis
+  // path. The seed is sent via internalPromptCapture so neither the
+  // seed prompt nor the agent's acknowledgement lands in history.jsonl.
+  // Safe to call with empty history (renderCompactionSeed degrades to
+  // synopsis-only). Defensive no-op when synopsis is absent (caller
+  // should have routed to seedFromImport instead).
+  async seedFromFork(synopsis: SessionSynopsis): Promise<void> {
+    if (!synopsis) {
+      return;
+    }
+    await this.enqueuePrompt(async () => {
+      const title = this.title ?? "(untitled)";
+
+      let historyEntries: Array<{ method: string; params: unknown }> = [];
+      if (this.historyStore) {
+        try {
+          historyEntries = await this.historyStore.load(this.sessionId);
+        } catch (err) {
+          this.logger?.warn(`seedFromFork: historyStore.load failed: ${(err as Error).message}`);
+        }
+      }
+
+      const tail = historyEntries.slice(-TAIL_K);
+
+      const seedText = renderCompactionSeed({
+        synopsis,
+        title,
+        tail,
+        tailK: TAIL_K,
+      });
+
+      if (this.internalPromptCapture) {
+        throw new Error("seedFromFork: internal prompt already in flight");
+      }
+      this.internalPromptCapture = {
+        chunks: [],
+        toolCalls: 0,
+        thinkingChars: 0,
+        messageChars: 0,
+      };
+      try {
+        await this.agent.connection.request<unknown>("session/prompt", {
+          sessionId: this.upstreamSessionId,
+          prompt: [{ type: "text", text: seedText }],
+        });
+        const cap = this.internalPromptCapture;
+        this.logger?.info(
+          `seedFromFork: seed processed sessionId=${this.sessionId} seedChars=${seedText.length} toolCalls=${cap.toolCalls} thinkingChars=${cap.thinkingChars} messageChars=${cap.messageChars}`,
+        );
+      } finally {
+        this.internalPromptCapture = undefined;
+      }
+
       return undefined;
     });
   }
