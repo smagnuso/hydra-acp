@@ -39,6 +39,10 @@ import {
   BRACKETED_PASTE_ON,
   DECCKM_OFF,
   DECPAM_OFF,
+  FOCUS_IN,
+  FOCUS_OUT,
+  FOCUS_TRACK_OFF,
+  FOCUS_TRACK_ON,
   FORMAT_OTHER_KEYS_OFF,
   FORMAT_OTHER_KEYS_ON,
   KITTY_KBD_POP,
@@ -573,6 +577,23 @@ export class Screen {
   // instead of treating each \n as an Enter that submits the prompt.
   private terminalKitStdinHandler: ((chunk: Buffer) => void) | null = null;
   private pasteActive = false;
+  // True while the terminal window has focus. Tracked via DECSET 1004
+  // focus reporting; mouse button events are dropped when false so a
+  // click that's only meant to focus the window doesn't accidentally
+  // trigger an action. Defaults to true because terminals that don't
+  // support 1004 never emit FOCUS_IN/OUT — we'd lock ourselves out
+  // otherwise. Wheel and motion still pass through (natural scroll
+  // works even on an unfocused window in most desktops).
+  private terminalFocused = true;
+  // Wall-clock ms of the most recent FOCUS_IN. The terminal typically
+  // emits FOCUS_IN BEFORE the click that caused it, so simply checking
+  // terminalFocused at press time is too late: the press already looks
+  // focused. We instead drop every press within FOCUS_GRACE_MS of a
+  // FOCUS_IN, which discards the focusing click without affecting
+  // subsequent intentional clicks. 200ms is comfortably above the wire
+  // latency between the two events (sub-ms in practice) and well below
+  // any deliberate user double-click cadence.
+  private lastFocusInAt = 0;
   private pasteBuffer = "";
   private rawStdinHandler: (chunk: Buffer) => void;
   private mouseEnabled: boolean;
@@ -836,6 +857,7 @@ export class Screen {
     process.stdout.write(MODIFY_OTHER_KEYS_ON);
     process.stdout.write(FORMAT_OTHER_KEYS_ON);
     process.stdout.write(KITTY_KBD_PUSH);
+    process.stdout.write(FOCUS_TRACK_ON);
     const t = this.term as unknown as {
       stdin: NodeJS.ReadableStream;
       onStdin: (chunk: Buffer) => void;
@@ -853,6 +875,7 @@ export class Screen {
     process.stdout.write(MODIFY_OTHER_KEYS_OFF);
     process.stdout.write(FORMAT_OTHER_KEYS_OFF);
     process.stdout.write(KITTY_KBD_POP);
+    process.stdout.write(FOCUS_TRACK_OFF);
     // Force normal cursor key mode (DECCKM off) + numeric keypad mode
     // (DECPAM off). Alt-screen enable enables application cursor mode
     // on iTerm, which makes arrows send \x1bOA. The picker uses
@@ -1014,6 +1037,29 @@ export class Screen {
     // reports before any other parsing — the rest of the pipeline would
     // otherwise treat them as junk key data.
     text = this.consumeSelectiveMouseSequences(text);
+    // Strip every focus-in / focus-out marker before any other parsing.
+    // The terminal can interleave them with normal input (e.g. a click
+    // that focuses the window arrives as FOCUS_IN followed by the mouse
+    // report) so we update state and pass the remaining bytes through.
+    if (text.includes(FOCUS_IN) || text.includes(FOCUS_OUT)) {
+      while (true) {
+        const inIdx = text.indexOf(FOCUS_IN);
+        const outIdx = text.indexOf(FOCUS_OUT);
+        const which =
+          inIdx === -1 ? outIdx :
+          outIdx === -1 ? inIdx :
+          Math.min(inIdx, outIdx);
+        if (which === -1) {
+          break;
+        }
+        const isIn = which === inIdx;
+        this.terminalFocused = isIn;
+        if (isIn) {
+          this.lastFocusInAt = Date.now();
+        }
+        text = text.slice(0, which) + text.slice(which + FOCUS_IN.length);
+      }
+    }
     if (text.length === 0) {
       return;
     }
@@ -2598,6 +2644,26 @@ export class Screen {
     }
     if (name === "MOUSE_WHEEL_DOWN") {
       this.scrollBy(-3);
+      return;
+    }
+    // When the terminal window doesn't have keyboard focus, drop every
+    // button-related mouse event. The click that's about to give us
+    // focus shouldn't also fire a banner action / block click /
+    // selection start. Motion and drag still flow through so the
+    // pointer-shape diff stays accurate. The first FOCUS_IN that
+    // follows the focusing click will flip terminalFocused back to
+    // true for the next event.
+    const FOCUS_GRACE_MS = 200;
+    const recentlyFocused =
+      this.terminalFocused && Date.now() - this.lastFocusInAt < FOCUS_GRACE_MS;
+    const unfocused = this.terminalFocused === false || recentlyFocused;
+    if (
+      unfocused &&
+      (name.endsWith("_PRESSED") ||
+        name.endsWith("_RELEASED") ||
+        name === "MOUSE_MOTION" ||
+        name === "MOUSE_DRAG")
+    ) {
       return;
     }
     const cell = this.mouseCell(data);

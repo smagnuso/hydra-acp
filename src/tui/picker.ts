@@ -60,6 +60,10 @@ import {
   BRACKETED_PASTE_ON,
   DECCKM_OFF,
   DECPAM_OFF,
+  FOCUS_IN,
+  FOCUS_OUT,
+  FOCUS_TRACK_OFF,
+  FOCUS_TRACK_ON,
   FORMAT_OTHER_KEYS_OFF,
   KITTY_KBD_POP,
   MODIFY_OTHER_KEYS_OFF,
@@ -633,17 +637,32 @@ export async function pickSession(
   // Title is middle-truncated by formatComposerTitle to fit composerRoom;
   // the dashes flex to fill whatever remains so the border touches the
   // right edge of the terminal.
-  // Set true while the mouse pointer is over the composer box (any row
-  // from the top border through the bottom border). Repaints the box
-  // chrome in brightBlue so the user gets the same hover affordance the
-  // session rows already provide via highlight-follow-pointer.
+  // Set true while the mouse is over the composer box. Affordance only:
+  // flips the border to brightBlue (matches the focused color) so the
+  // user gets a hint that a click here would focus the composer. Does
+  // NOT change selectedIdx — focus only moves on click.
   let composerHover = false;
+  // Tracks DECSET 1004 focus reports. While false, painted rows lose
+  // their selection highlight and the composer border dims, mirroring
+  // the OS-level "this window isn't active" affordance. selectedIdx
+  // itself is preserved across focus loss, so regaining focus restores
+  // the same highlighted row (unless a hover event lands on a
+  // different row in the meantime — that path is already gated by
+  // selectedIdx and only fires when the list is focused).
+  let terminalFocused = true;
+  // Forward-declared promise-scope state hoisted so the raw stdin
+  // handler (built before the Promise body runs) can observe whether
+  // the picker has resolved and whether a modal layer is currently up.
+  // The Promise body assigns to these; before that, the handler can't
+  // be invoked (grabInput hasn't been wired) so the defaults are safe.
+  let resolved = false;
+  let focusStackRef: FocusLayer[] = [];
   const paintComposerTopBorder = (): void => {
     const inner = composerBoxInner();
     const titleFragment = `─ ${composerTitle} `;
     const dashCount = Math.max(1, inner - titleFragment.length);
     const dashes = "─".repeat(dashCount);
-    if (selectedIdx === 0 || composerHover) {
+    if ((selectedIdx === 0 || composerHover) && terminalFocused) {
       term.brightBlue.noFormat(`╭${titleFragment}${dashes}╮`);
     } else {
       term.dim.noFormat(`╭${titleFragment}${dashes}╮`);
@@ -654,7 +673,7 @@ export async function pickSession(
   const paintComposerBottomBorder = (): void => {
     const inner = composerBoxInner();
     const dashes = "─".repeat(inner);
-    if (selectedIdx === 0 || composerHover) {
+    if ((selectedIdx === 0 || composerHover) && terminalFocused) {
       term.brightBlue.noFormat(`╰${dashes}╯`);
     } else {
       term.dim.noFormat(`╰${dashes}╯`);
@@ -682,7 +701,7 @@ export async function pickSession(
     const slice = composerSliceAt(visualIdx);
     const padWidth = Math.max(0, inner - 1 - slice.length);
     const pad = " ".repeat(padWidth);
-    if (selectedIdx === 0 || composerHover) {
+    if ((selectedIdx === 0 || composerHover) && terminalFocused) {
       term.brightBlue.noFormat("│");
       term.noFormat(` ${slice}${pad}`);
       term.brightBlue.noFormat("│");
@@ -700,7 +719,7 @@ export async function pickSession(
     const session = visible[sessionIdx];
     const prefix =
       session && session.priority && session.priority > 0 ? "* " : "  ";
-    if (selectedIdx === sessionIdx + 1 && !composerHover) {
+    if (selectedIdx === sessionIdx + 1 && !composerHover && terminalFocused) {
       term.brightWhite.bgBlue.noFormat(`${prefix}${label}`);
     } else {
       term.noFormat(`${prefix}${label}`);
@@ -838,8 +857,10 @@ export async function pickSession(
   // Sigs for the row-painter cache. Each must include every variable
   // input that affects the row's visible output; identical sig means
   // identical bytes so paintRow can short-circuit.
-  const composerFocusFlag = (): string =>
-    selectedIdx === 0 ? "f" : composerHover ? "h" : "u";
+  const composerFocusFlag = (): string => {
+    if (!terminalFocused) return "x";
+    return selectedIdx === 0 ? "f" : composerHover ? "h" : "u";
+  };
   const composerTopSig = (): string =>
     `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}`;
   const composerBotSig = (): string =>
@@ -851,7 +872,10 @@ export async function pickSession(
     const session = visible[sessionIdx];
     const prefix = session && session.priority && session.priority > 0 ? "* " : "  ";
     const label = sessionLines[sessionIdx] ?? "";
-    const selected = selectedIdx === sessionIdx + 1 && !composerHover ? "1" : "0";
+    const selected =
+      selectedIdx === sessionIdx + 1 && !composerHover && terminalFocused
+        ? "1"
+        : "0";
     return `sr|${selected}|${prefix}${label}`;
   };
 
@@ -1499,6 +1523,24 @@ export async function pickSession(
   // arriving as bare ENTER keys that submit the prompt.
   let pasteActive = false;
   let pasteBuffer = "";
+    // Tracks DECSET 1004 focus reports. Mouse clicks on the picker are
+    // ignored while the terminal lacks focus so a focusing click can't
+    // also select a session row.
+    // Timestamp (ms) of the most recent FOCUS_IN. Terminals emit
+    // FOCUS_IN before the click that caused it, so we drop every press
+    // within FOCUS_GRACE_MS of a focus gain to swallow the focusing
+    // click.
+    let lastFocusInAt = 0;
+    const FOCUS_GRACE_MS = 200;
+    // Cell where the left button went down. A click only "counts" if
+    // the release lands on the same cell — drag-then-release is not a
+    // click. Cleared on release regardless of outcome.
+    let pickerPressCell: { x: number; y: number } | null = null;
+    // True when the press that armed pickerPressCell happened while
+    // the terminal was unfocused / inside the focus grace window. The
+    // matching release becomes "select-only" — it highlights the
+    // clicked row but doesn't attach.
+    let pickerPressUnfocused = false;
   let tkStdinHandler: ((chunk: Buffer) => void) | null = null;
   // Assigned later (in the Promise body, after dispatch/grabInput state
   // exists) so the suspend closure can refer to the same listeners /
@@ -1511,6 +1553,38 @@ export async function pickSession(
   let dispatchToActiveLayer: ((name: string) => void) | null = null;
   const rawStdinHandler = (chunk: Buffer): void => {
     let text = chunk.toString("binary");
+    if (text.includes(FOCUS_IN) || text.includes(FOCUS_OUT)) {
+      while (true) {
+        const inIdx = text.indexOf(FOCUS_IN);
+        const outIdx = text.indexOf(FOCUS_OUT);
+        const which =
+          inIdx === -1 ? outIdx :
+          outIdx === -1 ? inIdx :
+          Math.min(inIdx, outIdx);
+        if (which === -1) {
+          break;
+        }
+        const wasFocused = terminalFocused;
+        terminalFocused = which === inIdx;
+        if (terminalFocused) {
+          lastFocusInAt = Date.now();
+        }
+        if (
+          wasFocused !== terminalFocused &&
+          !resolved &&
+          focusStackRef.length <= 1
+        ) {
+          withSync(() => {
+            repaintComposerChrome();
+            repaintViewport();
+          });
+        }
+        text = text.slice(0, which) + text.slice(which + FOCUS_IN.length);
+      }
+      if (text.length === 0) {
+        return;
+      }
+    }
     // ^Z (SUB, 0x1a) — raw mode swallowed VSUSP. Only the bare byte
     // counts; embedded 0x1a inside a longer chunk is treated as data.
     if (!pasteActive && text === "\x1a" && suspend) {
@@ -1583,7 +1657,6 @@ export async function pickSession(
   renderFromScratch();
 
   return await new Promise<PickerResult>((resolve) => {
-    let resolved = false;
     let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
     let autoRefreshInFlight = false;
     // AbortController tied to the in-flight refresh. Allows the picker
@@ -1600,7 +1673,7 @@ export async function pickSession(
     // All terminal key/resize events route through the top of the stack.
     // pop() restores the layer below and calls its onResize so the screen
     // reflects whatever was behind the layer that just closed.
-    const focusStack: FocusLayer[] = [];
+    const focusStack: FocusLayer[] = focusStackRef;
     const pushLayer = (layer: FocusLayer): void => {
       focusStack.push(layer);
     };
@@ -1708,6 +1781,7 @@ export async function pickSession(
       term.off("resize", dispatchResize);
       // Restore terminal-kit's stdin listener and disable bracketed paste.
       process.stdout.write(BRACKETED_PASTE_OFF);
+      process.stdout.write(FOCUS_TRACK_OFF);
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
       if (tClean.stdin && tkStdinHandler) {
         tClean.stdin.removeListener("data", rawStdinHandler);
@@ -2493,7 +2567,10 @@ export async function pickSession(
       // into the next action's context. We still fall through and run
       // the key's normal behavior.
       clearTransient();
-      if (name === "CTRL_F") {
+      // ^F opens the find layer only when focus is in the session list.
+      // In the composer it falls through to the InputDispatcher so it
+      // behaves as the readline "forward-character" binding.
+      if (name === "CTRL_F" && selectedIdx !== 0) {
         openFindLayer();
         return;
       }
@@ -2936,9 +3013,47 @@ export async function pickSession(
       if (focusStack.length !== 1) return;
       if (mode !== "normal") return;
       const isMotion = name === "MOUSE_MOTION";
-      const isClick = name === "MOUSE_LEFT_BUTTON_PRESSED";
+      const isPress = name === "MOUSE_LEFT_BUTTON_PRESSED";
+      const isRelease = name === "MOUSE_LEFT_BUTTON_RELEASED";
       const isWheelUp = name === "MOUSE_WHEEL_UP";
       const isWheelDown = name === "MOUSE_WHEEL_DOWN";
+      // Record press cell; clicks fire on release only when the
+      // release lands on the same cell (drag-then-release isn't a
+      // click). Out-of-focus presses are dropped entirely so they
+      // can't arm a release-fire on the next focusing click.
+      const recentlyFocused =
+        terminalFocused && Date.now() - lastFocusInAt < FOCUS_GRACE_MS;
+      const unfocused = !terminalFocused || recentlyFocused;
+      if (isPress) {
+        // Record the press cell even when unfocused — so a focusing
+        // release can still highlight the clicked row. The `unfocused`
+        // flag below downgrades that release from "click" (attach) to
+        // "select-only" (highlight + focus the list).
+        pickerPressCell = { x: data?.x ?? -1, y: data?.y ?? -1 };
+        pickerPressUnfocused = unfocused;
+        return;
+      }
+      if (isMotion && unfocused) {
+        return;
+      }
+      const sameCell =
+        isRelease &&
+        pickerPressCell !== null &&
+        data?.x === pickerPressCell.x &&
+        data?.y === pickerPressCell.y;
+      // A release on the same cell counts as a click ONLY when the
+      // press was focused; an unfocused press downgrades the release
+      // to "select-only" so a focusing click highlights its row but
+      // doesn't attach.
+      const isClick = sameCell && !pickerPressUnfocused;
+      const isSelectOnlyRelease = sameCell && pickerPressUnfocused;
+      if (isRelease) {
+        pickerPressCell = null;
+        pickerPressUnfocused = false;
+        if (!sameCell) {
+          return;
+        }
+      }
       if (isWheelUp || isWheelDown) {
         if (visible.length === 0) return;
         const delta = isWheelUp ? -3 : 3;
@@ -2963,25 +3078,29 @@ export async function pickSession(
       if (!isMotion && !isClick) return;
       const y = data?.y;
       if (typeof y !== "number") return;
-      // Click anywhere inside the composer box (top border through
-      // bottom border) drops focus into the composer. Hover does not
-      // steal focus, but it does flip the border to brightBlue so the
-      // user gets the same affordance the session rows have.
+      // Focus model:
+      //   * Click on the composer box → focus moves to the composer.
+      //   * Click on a session row → focus moves to the list (selecting
+      //     that row); a second click on the already-selected row
+      //     attaches.
+      //   * Hover changes the list selection ONLY while the list is
+      //     already focused. Hovering across panes never steals focus
+      //     and never changes the visible selection, so a mouse trip
+      //     through the picker on the way to copy-paste doesn't
+      //     reshuffle anything.
       const overComposer = y >= startRow && y <= composerBottomRow();
       if (overComposer) {
-        if (isClick) {
+        if ((isClick || isSelectOnlyRelease) && selectedIdx !== 0) {
           composerHover = false;
-          if (selectedIdx !== 0) {
-            const old = selectedIdx;
-            selectedIdx = 0;
-            withSync(() => {
-              repaintViewport();
-              onFocusChange(old, selectedIdx);
-            });
-          }
+          const old = selectedIdx;
+          selectedIdx = 0;
+          withSync(() => {
+            repaintViewport();
+            onFocusChange(old, selectedIdx);
+          });
           return;
         }
-        if (!composerHover && selectedIdx !== 0) {
+        if (isMotion && !composerHover && selectedIdx !== 0) {
           composerHover = true;
           withSync(() => {
             repaintComposerChrome();
@@ -3005,6 +3124,34 @@ export async function pickSession(
       const session = visible[sessionIdx];
       if (!session) return;
       const targetIdx = sessionIdx + 1;
+      // Hover only moves the selection while the list is already
+      // focused; a hover that arrives while the composer is focused
+      // is ignored so a mouse trip through the picker doesn't steal
+      // focus. Clicks: a click while the composer is focused only
+      // focuses the list (and selects the clicked row) — it doesn't
+      // attach. A click on the already-selected row attaches. A click
+      // on a different row while the list is focused selects it
+      // without attaching.
+      if (isMotion && selectedIdx === 0) {
+        return;
+      }
+      const wasComposer = selectedIdx === 0;
+      const alreadySelected = selectedIdx === targetIdx;
+      // Treat a "select-only" release the same as a click that lands
+      // on a different row — it highlights but doesn't attach.
+      if (isSelectOnlyRelease && selectedIdx !== targetIdx) {
+        const old = selectedIdx;
+        selectedIdx = targetIdx;
+        adjustScroll();
+        withSync(() => {
+          repaintViewport();
+          onFocusChange(old, selectedIdx);
+        });
+        return;
+      }
+      if (isSelectOnlyRelease) {
+        return;
+      }
       if (selectedIdx !== targetIdx) {
         const old = selectedIdx;
         selectedIdx = targetIdx;
@@ -3015,6 +3162,9 @@ export async function pickSession(
         });
       }
       if (!isClick) return;
+      if (wasComposer || !alreadySelected) {
+        return;
+      }
       cleanup();
       const result: PickerResult = {
         kind: "attach",
@@ -3036,6 +3186,7 @@ export async function pickSession(
         tSetup.stdin.removeListener("data", tSetup.onStdin);
         tSetup.stdin.on("data", rawStdinHandler);
         process.stdout.write(BRACKETED_PASTE_ON);
+        process.stdout.write(FOCUS_TRACK_ON);
       }
       term.on("key", dispatch);
       term.on("mouse", onMouse);
@@ -3045,6 +3196,7 @@ export async function pickSession(
     // by suspend (which then re-runs installGrab on SIGCONT).
     const uninstallGrab = (): void => {
       process.stdout.write(BRACKETED_PASTE_OFF);
+      process.stdout.write(FOCUS_TRACK_OFF);
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
       if (tClean.stdin && tkStdinHandler) {
         tClean.stdin.removeListener("data", rawStdinHandler);

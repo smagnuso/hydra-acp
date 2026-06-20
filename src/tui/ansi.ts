@@ -78,6 +78,15 @@ export const SELECTIVE_MOUSE_OFF = "\x1b[=0;0w";
 export const POINTER_SHAPE_POINTER = "\x1b]22;pointer\x07";
 export const POINTER_SHAPE_DEFAULT = "\x1b]22;default\x07";
 
+// Focus reporting (DECSET 1004). When on, the terminal emits
+// `\x1b[I` whenever the window/tab gains focus and `\x1b[O` whenever
+// it loses focus. Supported by xterm, kitty, wezterm, iTerm2, foot,
+// ghostty, Windows Terminal; ignored harmlessly elsewhere.
+export const FOCUS_TRACK_ON = "\x1b[?1004h";
+export const FOCUS_TRACK_OFF = "\x1b[?1004l";
+export const FOCUS_IN = "\x1b[I";
+export const FOCUS_OUT = "\x1b[O";
+
 // Synchronized output (DECSET 2026) — coalesces a burst of writes into
 // a single repaint on supporting terminals.
 export const SYNC_BEGIN = "\x1b[?2026h";

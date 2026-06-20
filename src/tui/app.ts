@@ -2161,6 +2161,12 @@ async function runSession(
     process.on("SIGCONT", onSigCont);
   }
 
+  // Banner-click state. A click only counts if press and release land
+  // on the same cell of the same chunk; intermediate motion / drag
+  // cancels it. State lives outside the onMouse closure so the press
+  // event can communicate with the release event.
+  let bannerPressHit: "mode" | "pick" | "guide" | "detach" | null = null;
+  let bannerPressCell: { x: number; y: number } | null = null;
   screen = new Screen({
     term,
     dispatcher,
@@ -2201,12 +2207,30 @@ async function runSession(
     // reuses the same effect + read-only gate as the ^V keybinding.
     onMouse: (ev) => {
       // Left-click on a clickable banner chunk fires the same effect as
-      // the corresponding hotkey. Done here (not in screen.ts) so the
-      // dispatch routes through the same handleEffect path as keyboard
-      // input, including the readonly-forbidden gate.
-      if (ev.kind === "press" && ev.button === "left") {
-        const hit = screen.bannerHitAt(ev.x, ev.y);
-        if (hit !== null) {
+      // the corresponding hotkey. Click = press AND release on the same
+      // cell of the same chunk; a press-drag-release (or release on a
+      // different chunk than the press) is intentionally ignored so
+      // accidental clicks don't fire actions. Done here (not in
+      // screen.ts) so the dispatch routes through the same
+      // handleEffect path as keyboard input, including the
+      // readonly-forbidden gate.
+      if (ev.button === "left" && ev.kind === "press") {
+        bannerPressHit = screen.bannerHitAt(ev.x, ev.y);
+        bannerPressCell = bannerPressHit ? { x: ev.x, y: ev.y } : null;
+        return;
+      }
+      if (ev.button === "left" && ev.kind === "release") {
+        const press = bannerPressCell;
+        const hit = bannerPressHit;
+        bannerPressCell = null;
+        bannerPressHit = null;
+        if (
+          hit !== null &&
+          press !== null &&
+          press.x === ev.x &&
+          press.y === ev.y &&
+          screen.bannerHitAt(ev.x, ev.y) === hit
+        ) {
           if (hit === "mode") {
             void handleModeToggle(true);
             return;
