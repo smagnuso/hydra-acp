@@ -54,7 +54,12 @@ import type {
   AdvertisedModel,
 } from "./hydra-commands.js";
 import { resolveModelId } from "./model-resolve.js";
-import type { AgentCapabilities, AuthMethod, SessionListEntry } from "../acp/types.js";
+import {
+  HYDRA_CLIENT_CAPABILITIES,
+  type AgentCapabilities,
+  type AuthMethod,
+  type SessionListEntry,
+} from "../acp/types.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
@@ -691,7 +696,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: {},
+          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -1088,7 +1093,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: {},
+          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -1345,7 +1350,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: {},
+          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -1475,7 +1480,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: {},
+          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );
@@ -1609,7 +1614,7 @@ export class SessionManager {
         "initialize",
         {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: {},
+          clientCapabilities: HYDRA_CLIENT_CAPABILITIES,
           clientInfo: { name: "hydra", version: HYDRA_VERSION },
         },
       );

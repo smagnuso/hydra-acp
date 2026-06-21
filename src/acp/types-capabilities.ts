@@ -67,15 +67,34 @@ export interface AuthMethod {
   // managed by the agent) or "terminal" (interactive --setup). When
   // omitted, "agent" is assumed for backward compatibility.
   type?: "agent" | "terminal";
+  // Spec-shaped args for terminal-typed methods: appended to the
+  // agent's own spawn command to drive the auth flow (e.g. claude-acp
+  // emits ["--cli","auth","login","--claudeai"]).
+  args?: string[];
   // Optional friendlier label some agents (e.g. qwen-code) include
   // alongside `description`; banner code may prefer it for display.
   name?: string;
   // Verbatim agent-supplied `_meta` envelope. Opaque to hydra: we
   // preserve it (when it is a plain object) so consumers like the
-  // terminal-auth flow can read `_meta.type` / `_meta.args`. Never
-  // promoted to the top-level fields.
+  // terminal-auth flow can read `_meta.type` / `_meta.args`, or the
+  // nested `_meta["terminal-auth"]` extension that claude-acp /
+  // opencode use to ship a full {command,args,label} spawn plan.
   _meta?: Record<string, unknown>;
 }
+
+// clientCapabilities block sent on `initialize` by every hydra-side
+// client (daemon→agent and CLI→daemon). Advertises that we can drive
+// a foreground terminal-auth flow so agents like claude-acp expose
+// their `claude-ai-login` / `console-login` methods, and opencode
+// attaches its `_meta["terminal-auth"]` payload to `opencode-login`.
+//
+// `auth.terminal: true` is the spec-shaped capability per
+// AUTHENTICATION.md; `_meta["terminal-auth"]: true` is the extension
+// both agents key off in addition. We send both for max coverage.
+export const HYDRA_CLIENT_CAPABILITIES: Record<string, unknown> = {
+  auth: { terminal: true },
+  _meta: { "terminal-auth": true },
+};
 
 export interface InitializeResult {
   protocolVersion: number;

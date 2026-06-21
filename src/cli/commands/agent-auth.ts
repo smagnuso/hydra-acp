@@ -39,6 +39,83 @@ export async function runAgentAuthCore({
   method,
   spawn: spawnFn,
 }: RunAgentAuthCoreDeps): Promise<RunAgentAuthCoreResult> {
+  // Discover the agent's advertised authMethods proactively via the
+  // hydra-acp/agents/auth_methods probe. That spawns the agent, runs
+  // initialize with our full clientCapabilities (auth.terminal +
+  // _meta["terminal-auth"]), and returns whatever methods the agent
+  // emits. We then drive the picker on that list — no need to wait for
+  // a session/new to throw AUTH_REQUIRED.
+  //
+  // Falls back to the session/new probe only if the discovery RPC
+  // itself fails (older daemon, network blip, etc.); the probe still
+  // surfaces AUTH_REQUIRED-on-prompt-time agents that don't advertise
+  // methods at initialize.
+  let discovered: AuthMethod[] | undefined;
+  try {
+    const result = (await conn.request("hydra-acp/agents/auth_methods", {
+      agentId,
+    })) as { authMethods?: AuthMethod[] };
+    discovered = Array.isArray(result?.authMethods)
+      ? (result.authMethods as AuthMethod[])
+      : [];
+  } catch {
+    discovered = undefined;
+  }
+
+  const runTerminalAuth: (
+    plan: TerminalAuthPlan,
+  ) => Promise<{ exitCode: number | null }> = (plan) => {
+    return new Promise<{ exitCode: number | null }>((resolve) => {
+      const child = spawnFn(plan.command, plan.args, {
+        stdio: "inherit",
+        env: plan.env,
+        cwd: plan.cwd,
+      });
+      child.on("exit", (code) => {
+        resolve({ exitCode: code });
+      });
+      child.on("error", () => {
+        resolve({ exitCode: -1 });
+      });
+    });
+  };
+
+  const drivePicker = async (
+    methods: AuthMethod[],
+    resolvedAgentId: string,
+  ): Promise<RunAgentAuthCoreResult> => {
+    const chosen = await pickAuthMethod(methods, method);
+    const outcome = await handleAuthMethodSelection(chosen, {
+      authenticate: (methodId) =>
+        conn.request("authenticate", {
+          methodId,
+          _meta: { "hydra-acp": { agentId: resolvedAgentId } },
+        }),
+      runTerminalAuth,
+    });
+    if (outcome.kind === "terminal-completed") {
+      return { exitCode: 0 };
+    }
+    if (outcome.kind === "retry") {
+      process.stderr.write(
+        "auth method completed without terminal step; you may need to retry session/new\n",
+      );
+      return { exitCode: 0 };
+    }
+    if (outcome.kind === "error") {
+      process.stderr.write(`${outcome.message}\n`);
+      return { exitCode: 1 };
+    }
+    process.stderr.write(
+      `auth process exited with code ${outcome.exitCode}\n`,
+    );
+    return { exitCode: 1 };
+  };
+
+  if (discovered !== undefined && discovered.length > 0) {
+    return drivePicker(discovered, agentId);
+  }
+
   try {
     await conn.request("session/new", {
       cwd: os.homedir(),
@@ -62,53 +139,7 @@ export async function runAgentAuthCore({
         errorData?._meta?.["hydra-acp"]?.authMethods ?? authMethods;
       const resolvedAgentId: string =
         errorData?._meta?.["hydra-acp"]?.agentId ?? agentId;
-      const chosen = await pickAuthMethod(methods, method);
-
-      const runTerminalAuth: (
-        plan: TerminalAuthPlan,
-      ) => Promise<{ exitCode: number | null }> = (plan) => {
-        return new Promise<{ exitCode: number | null }>((resolve) => {
-          const child = spawnFn(plan.command, plan.args, {
-            stdio: "inherit",
-            env: plan.env,
-            cwd: plan.cwd,
-          });
-          child.on("exit", (code) => {
-            resolve({ exitCode: code });
-          });
-          child.on("error", () => {
-            resolve({ exitCode: -1 });
-          });
-        });
-      };
-
-      const outcome = await handleAuthMethodSelection(chosen, {
-        authenticate: (methodId) =>
-          conn.request("authenticate", {
-            methodId,
-            _meta: { "hydra-acp": { agentId: resolvedAgentId } },
-          }),
-        runTerminalAuth,
-      });
-
-      if (outcome.kind === "terminal-completed") {
-        return { exitCode: 0 };
-      }
-      if (outcome.kind === "retry") {
-        process.stderr.write(
-          "auth method completed without terminal step; you may need to retry session/new\n",
-        );
-        return { exitCode: 0 };
-      }
-      if (outcome.kind === "error") {
-        process.stderr.write(`${outcome.message}\n`);
-        return { exitCode: 1 };
-      }
-      // exit-nonzero
-      process.stderr.write(
-        `auth process exited with code ${outcome.exitCode}\n`,
-      );
-      return { exitCode: 1 };
+      return drivePicker(methods, resolvedAgentId);
     }
     throw err;
   }

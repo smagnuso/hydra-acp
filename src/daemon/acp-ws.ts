@@ -60,6 +60,7 @@ import type {
 import { HYDRA_CAT_CLIENT_NAME, HYDRA_VERSION } from "../core/hydra-version.js";
 import { randomBytes } from "node:crypto";
 import * as os from "node:os";
+import * as path from "node:path";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
 import { mintExtensionMcpDescriptors, buildMintMcpServersForSwap } from "./extension-mcp-mint.js";
 
@@ -1529,6 +1530,24 @@ export function registerAcpWsEndpoint(
       return listAgents(deps.registry);
     });
 
+    // Probe an agent's advertised authMethods without committing to a
+    // session/new. Spawns the agent (or reuses a pending-auth instance),
+    // runs initialize with hydra's full clientCapabilities so the agent
+    // emits its terminal-auth methods, and returns the list verbatim.
+    // Consumed by `hydra agent auth <id>` to drive the picker before the
+    // user has done anything that would cause an AUTH_REQUIRED error.
+    connection.onRequest("hydra-acp/agents/auth_methods", async (raw) => {
+      const params = (raw ?? {}) as { agentId?: unknown };
+      if (typeof params.agentId !== "string" || params.agentId.length === 0) {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "hydra-acp/agents/auth_methods requires a non-empty agentId string",
+        );
+      }
+      const agent = await deps.manager.bootstrapAgentForAuth(params.agentId);
+      return { authMethods: agent.authMethods ?? [] };
+    });
+
     connection.onRequest("session/prompt", async (raw) => {
       const params = SessionPromptParams.parse(raw);
       denyIfReadonly(params.sessionId, "session/prompt");
@@ -1998,33 +2017,89 @@ export async function handleAuthenticate(
   }
 
   const metaType = method._meta?.type;
+  const terminalAuthMeta = (() => {
+    const ta = method._meta?.["terminal-auth"];
+    if (ta && typeof ta === "object" && !Array.isArray(ta)) {
+      return ta as Record<string, unknown>;
+    }
+    return undefined;
+  })();
   const effectiveType: "agent" | "terminal" =
     method.type ??
     (metaType === "agent" || metaType === "terminal"
       ? (metaType as "agent" | "terminal")
-      : "agent");
+      : terminalAuthMeta !== undefined
+        ? "terminal"
+        : "agent");
 
   if (effectiveType === "terminal") {
-    const rawArgs = method._meta?.args;
-    let extraArgs: string[] = [];
-    if (rawArgs !== undefined) {
-      if (!Array.isArray(rawArgs)) {
+    // Two arg-shapes the agent might send, with different semantics:
+    //
+    //   A. method._meta["terminal-auth"].args — full replacement. The
+    //      agent has handed us the *complete* arg list to drive its
+    //      auth subcommand (e.g. opencode emits ["auth","login"], which
+    //      must NOT be prefixed by the registry's ACP-mode `acp` arg).
+    //   B. method.args (spec) or method._meta.args (legacy hydra) —
+    //      suffix appended to the agent's normal launch args (e.g.
+    //      claude-acp's ["--cli","auth","login","--claudeai"] appended
+    //      to its npx invocation).
+    //
+    // (A) takes priority because it's the most explicit contract.
+    const validateArgs = (raw: unknown, source: string): string[] => {
+      if (!Array.isArray(raw)) {
         throw rpcError(
           JsonRpcErrorCodes.InvalidParams,
-          `authenticate: method ${JSON.stringify(methodId)} _meta.args must be a string[]; got ${rawArgs === null ? "null" : typeof rawArgs}`,
+          `authenticate: method ${JSON.stringify(methodId)} ${source} must be a string[]; got ${raw === null ? "null" : typeof raw}`,
         );
       }
-      for (const a of rawArgs) {
+      for (const a of raw) {
         if (typeof a !== "string") {
           throw rpcError(
             JsonRpcErrorCodes.InvalidParams,
-            `authenticate: method ${JSON.stringify(methodId)} _meta.args must be string[]; got non-string entry ${JSON.stringify(a)}`,
+            `authenticate: method ${JSON.stringify(methodId)} ${source} must be string[]; got non-string entry ${JSON.stringify(a)}`,
           );
         }
       }
-      extraArgs = rawArgs as string[];
-    }
+      return raw as string[];
+    };
+
     const plan = await deps.manager.planSpawnForAgent(agent.agentId);
+    let finalCommand: string;
+    let finalArgs: string[];
+    if (terminalAuthMeta?.args !== undefined) {
+      // The agent has handed us a complete spawn plan in
+      // _meta["terminal-auth"]. Honor its command when it's an absolute
+      // path (claude-acp emits process.execPath, which sidesteps the
+      // npx wrapper that would otherwise eat unknown flags like
+      // --claudeai). For PATH-relative names (opencode emits "opencode"),
+      // fall back to plan.command since the agent's binary may live in
+      // ~/.hydra-acp/agents/ rather than on $PATH.
+      const suppliedCommand =
+        typeof terminalAuthMeta.command === "string"
+          ? terminalAuthMeta.command
+          : undefined;
+      finalCommand =
+        suppliedCommand !== undefined && path.isAbsolute(suppliedCommand)
+          ? suppliedCommand
+          : plan.command;
+      finalArgs = validateArgs(
+        terminalAuthMeta.args,
+        '_meta["terminal-auth"].args',
+      );
+    } else {
+      const suffixSource =
+        method.args !== undefined
+          ? { raw: method.args, label: "args" }
+          : method._meta?.args !== undefined
+            ? { raw: method._meta.args, label: "_meta.args" }
+            : undefined;
+      const extraArgs =
+        suffixSource !== undefined
+          ? validateArgs(suffixSource.raw, suffixSource.label)
+          : [];
+      finalCommand = plan.command;
+      finalArgs = [...plan.args, ...extraArgs];
+    }
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (typeof v === "string") {
@@ -2042,8 +2117,8 @@ export async function handleAuthenticate(
     );
     return {
       kind: "terminal",
-      command: plan.command,
-      args: [...plan.args, ...extraArgs],
+      command: finalCommand,
+      args: finalArgs,
       env,
       cwd,
     };

@@ -759,6 +759,141 @@ describe("handleAuthenticate", () => {
     expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
   });
 
+  it("treats _meta[\"terminal-auth\"] presence as terminal and uses its args verbatim (no plan.args prefix)", async () => {
+    // Mirrors opencode's actual emit: _meta["terminal-auth"]: { command, args, label }.
+    // The agent-supplied args replace plan.args entirely (opencode's plan.args
+    // is the ACP-mode "acp" subcommand which must NOT prefix `auth login`).
+    const sessionAgent = makeMockAgent({ agentId: "opencode" });
+    sessionAgent.agent.authMethods = [
+      {
+        id: "opencode-login",
+        description: "Run `opencode auth login` in the terminal",
+        name: "Login with opencode",
+        _meta: {
+          "terminal-auth": {
+            command: "opencode",
+            args: ["auth", "login"],
+            label: "OpenCode Login",
+          },
+        },
+      },
+    ];
+    const plan = {
+      command: "/Users/me/.hydra-acp/agents/opencode",
+      args: ["acp"],
+      env: {},
+      version: "1.17.8",
+    };
+    const { deps } = makeAuthDeps({ sessionAgent, plan });
+
+    const result = (await handleAuthenticate(
+      {
+        methodId: "opencode-login",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    )) as { kind: string; command: string; args: string[] };
+
+    expect(result.kind).toBe("terminal");
+    expect(result.command).toBe(plan.command);
+    expect(result.args).toEqual(["auth", "login"]);
+    expect(sessionAgent.agentToClient).not.toHaveBeenCalled();
+  });
+
+  it("honors absolute _meta[\"terminal-auth\"].command verbatim (claude-acp's process.execPath, sidestepping npx)", async () => {
+    // claude-acp emits process.execPath (node) + [scriptPath, ...origArgs, "--cli", ...]
+    // so its auth subcommand isn't passed through npx (which would eat
+    // unknown flags like --claudeai). When the supplied command is an
+    // absolute path, trust it verbatim.
+    const sessionAgent = makeMockAgent({ agentId: "claude-acp" });
+    sessionAgent.agent.authMethods = [
+      {
+        id: "claude-ai-login",
+        description: "Use Claude subscription",
+        type: "terminal",
+        args: ["--cli", "auth", "login", "--claudeai"],
+        _meta: {
+          "terminal-auth": {
+            command: "/usr/local/bin/node",
+            args: [
+              "/path/to/claude-acp/index.js",
+              "--cli",
+              "auth",
+              "login",
+              "--claudeai",
+            ],
+            label: "Claude Login",
+          },
+        },
+      },
+    ];
+    const plan = {
+      command: "/usr/bin/npx",
+      args: ["-y", "@agentclientprotocol/claude-agent-acp@0.48.0"],
+      env: {},
+      version: "0.48.0",
+    };
+    const { deps } = makeAuthDeps({ sessionAgent, plan });
+
+    const result = (await handleAuthenticate(
+      {
+        methodId: "claude-ai-login",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    )) as { kind: string; command: string; args: string[] };
+
+    expect(result.kind).toBe("terminal");
+    expect(result.command).toBe("/usr/local/bin/node");
+    expect(result.args).toEqual([
+      "/path/to/claude-acp/index.js",
+      "--cli",
+      "auth",
+      "login",
+      "--claudeai",
+    ]);
+  });
+
+  it("appends top-level method.args (spec shape) to plan.args when method.type is terminal", async () => {
+    // Mirrors claude-acp's actual emit: top-level type:"terminal" + args.
+    // The args are a SUFFIX appended to the agent's normal launch args.
+    const sessionAgent = makeMockAgent({ agentId: "claude-acp" });
+    sessionAgent.agent.authMethods = [
+      {
+        id: "claude-ai-login",
+        description: "Use Claude subscription",
+        name: "Claude Subscription",
+        type: "terminal",
+        args: ["--cli", "auth", "login", "--claudeai"],
+      },
+    ];
+    const plan = {
+      command: "/usr/bin/npx",
+      args: ["-y", "@agentclientprotocol/claude-agent-acp@0.48.0"],
+      env: {},
+      version: "0.48.0",
+    };
+    const { deps } = makeAuthDeps({ sessionAgent, plan });
+
+    const result = (await handleAuthenticate(
+      {
+        methodId: "claude-ai-login",
+        _meta: { "hydra-acp": { sessionId: "sess_live" } },
+      },
+      deps,
+    )) as { kind: string; args: string[] };
+
+    expect(result.kind).toBe("terminal");
+    expect(result.args).toEqual([
+      "-y",
+      "@agentclientprotocol/claude-agent-acp@0.48.0",
+      "--cli",
+      "auth",
+      "login",
+      "--claudeai",
+    ]);
+  });
+
   it("rejects terminal method whose _meta.args is not an array", async () => {
     const sessionAgent = makeMockAgent({ agentId: "qwen-code" });
     sessionAgent.agent.authMethods = [

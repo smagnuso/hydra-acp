@@ -267,6 +267,69 @@ describe("runAgentAuthCore", () => {
     expect(authenticateCalledWith).toBe("token");
   });
 
+  it("discovers authMethods via hydra-acp/agents/auth_methods and drives the picker without session/new", async () => {
+    const methods: AuthMethod[] = [
+      { id: "opencode-login", description: "Run `opencode auth login`" },
+    ];
+
+    let discoveryCalled = false;
+    let sessionNewCalled = false;
+    let authenticatedWith: string | undefined;
+
+    const stream = createRoutingStream({
+      "hydra-acp/agents/auth_methods": (params: unknown) => {
+        discoveryCalled = true;
+        expect((params as { agentId?: string }).agentId).toBe("opencode");
+        return { authMethods: methods };
+      },
+      "session/new": () => {
+        sessionNewCalled = true;
+        return { sessionId: "should-not-reach" };
+      },
+      authenticate: async (params: unknown) => {
+        authenticatedWith = (params as { methodId?: string }).methodId;
+        return { authenticated: true };
+      },
+    });
+
+    const conn = new JsonRpcConnection(stream);
+
+    const result = await runAgentAuthCore({
+      conn,
+      agentId: "opencode",
+      authMethods: [],
+      spawn: makeSpawn(),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(discoveryCalled).toBe(true);
+    expect(sessionNewCalled).toBe(false);
+    expect(authenticatedWith).toBe("opencode-login");
+  });
+
+  it("falls back to session/new probe when discovery RPC is unavailable (older daemon)", async () => {
+    // No handler for hydra-acp/agents/auth_methods — stream returns
+    // MethodNotFound, which the core should swallow and continue.
+    let sessionNewCalled = false;
+    const stream = createRoutingStream({
+      "session/new": () => {
+        sessionNewCalled = true;
+        return { sessionId: "s1" };
+      },
+    });
+    const conn = new JsonRpcConnection(stream);
+
+    const result = await runAgentAuthCore({
+      conn,
+      agentId: "old-agent",
+      authMethods: [],
+      spawn: makeSpawn(),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(sessionNewCalled).toBe(true);
+  });
+
   it("returns exit 2 when --method flag does not match any available method", async () => {
     const methods: AuthMethod[] = [
       { id: "oauth", description: "OAuth" },
