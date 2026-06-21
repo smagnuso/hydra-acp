@@ -1313,6 +1313,23 @@ export function registerAcpWsEndpoint(
             `session ${params.sessionId} not found and no resume hints provided`,
           );
         }
+        // Refuse to resurrect a user-deleted session. The picker's
+        // delete writes a tombstone before unlinking meta.json (see
+        // SessionManager.deleteRecord / attachManagerHooks), so any
+        // racing session/attach — typically a TUI auto-reconnect that
+        // fires off hydra-acp/session/closed — sees the tombstone and
+        // bails instead of bringing the corpse back via hydraHints.
+        if (
+          await deps.manager.isTombstoned(
+            resurrectParams.agentId,
+            resurrectParams.upstreamSessionId,
+          )
+        ) {
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
+            `session ${params.sessionId} was deleted`,
+          );
+        }
         // Backfill originatingClient from the attaching connection's
         // initialize when disk has none. Catches sessions created before
         // the shim started stamping clientInfo: the next attach through

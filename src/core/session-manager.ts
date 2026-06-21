@@ -299,6 +299,12 @@ export class SessionManager {
   // out-of-band so session close is instant; persists synopsis/title
   // via the same enqueueMetaWrite path the in-session handlers used.
   private synopsisCoordinator: SynopsisCoordinator;
+  // In-flight tombstone+unlink chains kicked off by the live-session
+  // close handler. Awaited by deleteLiveSession() so the DELETE route
+  // doesn't return 204 before the record is actually gone — without
+  // this, a racing session/attach can see the meta.json still on disk
+  // and resurrect a corpse.
+  private pendingDeletions = new Map<string, Promise<void>>();
   // Tracked compaction deferral count per sessionId (cap at MAX_SWAP_DEFERRALS).
   private compactionDeferrals = new Map<string, number>();
   // Sessions currently executing a rollback. Guards against concurrent
@@ -1682,7 +1688,12 @@ export class SessionManager {
             // (the only branches that produce a defined boolean).
             true,
           );
-          void this.tombstones
+          // Chain tombstone → unlink so the tombstone file is durable
+          // before the meta.json disappears. Otherwise a racing
+          // session/attach (TUI auto-reconnect off session/closed) can
+          // beat the tombstone to disk, see no record + no tombstone,
+          // and resurrect from hydraHints alone.
+          const chain = this.tombstones
             .add({
               agentId: session.agentId,
               upstreamSessionId: session.upstreamSessionId,
@@ -1695,13 +1706,33 @@ export class SessionManager {
                 ? { interactive: liveInteractive }
                 : {}),
             })
-            .catch(() => undefined);
+            .catch(() => undefined)
+            .then(() =>
+              this.store.delete(session.sessionId).catch(() => undefined),
+            )
+            .then(() =>
+              this.histories.delete(session.sessionId).catch(() => undefined),
+            )
+            .finally(() => {
+              if (this.pendingDeletions.get(session.sessionId) === chain) {
+                this.pendingDeletions.delete(session.sessionId);
+              }
+            });
+          this.pendingDeletions.set(session.sessionId, chain);
+          return;
         }
-        void this.store.delete(session.sessionId).catch(() => undefined);
-        // History follows the same lifecycle as the session record —
-        // an idle-close (deleteRecord: false) keeps both so the next
-        // resurrect can replay; an explicit destroy drops both.
-        void this.histories.delete(session.sessionId).catch(() => undefined);
+        const noTombstoneChain = this.store
+          .delete(session.sessionId)
+          .catch(() => undefined)
+          .then(() =>
+            this.histories.delete(session.sessionId).catch(() => undefined),
+          )
+          .finally(() => {
+            if (this.pendingDeletions.get(session.sessionId) === noTombstoneChain) {
+              this.pendingDeletions.delete(session.sessionId);
+            }
+          });
+        this.pendingDeletions.set(session.sessionId, noTombstoneChain);
         return;
       }
     });
@@ -2011,6 +2042,7 @@ export class SessionManager {
       parentSessionId: session.parentSessionId,
       forkedFromSessionId: session.forkedFromSessionId,
       forkedFromMessageId: session.forkedFromMessageId,
+      forkSynthesisState: session.forkSynthesisState,
       originatingClient: session.originatingClient,
       interactive: session.interactive,
       updatedAt: new Date(session.updatedAt).toISOString(),
@@ -2051,6 +2083,7 @@ export class SessionManager {
         parentSessionId: live.parentSessionId,
         forkedFromSessionId: live.forkedFromSessionId,
         forkedFromMessageId: live.forkedFromMessageId,
+        forkSynthesisState: live.forkSynthesisState,
         originatingClient: live.originatingClient,
         interactive,
         priority: live.priority,
@@ -2088,6 +2121,7 @@ export class SessionManager {
       parentSessionId: r.parentSessionId,
       forkedFromSessionId: r.forkedFromSessionId,
       forkedFromMessageId: r.forkedFromMessageId,
+      forkSynthesisState: r.forkSynthesisState,
       originatingClient: r.originatingClient,
       interactive,
       priority: r.priority,
@@ -2437,11 +2471,18 @@ export class SessionManager {
     let slicedHistory = sourceHistory;
     let forkedAt: string;
     const mode = opts.mode ?? "synthesis";
-    // Holds synopsis data when synthesis succeeds; used to populate
-    // recordForBundle below.  Left undefined on failure (graceful
-    // degrade — seedFromImport handles first attach instead).
-    let forkSynopsis: SessionSynopsis | undefined;
-    let forkSummarizedThroughEntry: number | undefined;
+    // Set in phase 1 for synthesis forks so recordForBundle picks it up.
+    // Undefined for verbatim and cross-machine imports.
+    let forkSynthesisState: "running" | undefined;
+    // Hoisted for synthesis-mode phase 2 (background synopsis generation).
+    // Undefined for verbatim forks.
+    let targetAgentDef: Awaited<ReturnType<typeof this.registry.getAgent>> | undefined;
+    let spawnPlan: Awaited<ReturnType<typeof planSpawn>> | undefined;
+    let sourceModel: string | undefined;
+
+    // Timeout for synopsis generation — reused in phase 1 (validation) and
+    // phase 2 (background).  Same default as synopsis-agent.ts (120 s).
+    const SYNOPSIS_TIMEOUT_MS = 120_000;
 
     if (mode === "verbatim") {
       // Legacy path — slice via forkAt or last completed turn.
@@ -2471,7 +2512,7 @@ export class SessionManager {
           slicedHistory = sourceHistory.slice(0, 0);
         }
       }
-    } else {
+   } else {
       // synthesis mode — full history always; forkAt is silently ignored.
       if (opts.forkAt !== undefined) {
         this.logger?.warn(
@@ -2484,8 +2525,9 @@ export class SessionManager {
       // Resolve target agent def + spawn plan — only synthesis mode
       // needs these for generateSynopsis.  Verbatim forks skip this
       // entirely (avoids registry lookup + npm-prefetch on the /btw
-      // hot path).
-      const targetAgentDef = await this.registry.getAgent(targetAgentId);
+      // hot path).  Must happen in phase 1 (synchronous) so we have the
+      // data before returning to the caller.
+      targetAgentDef = await this.registry.getAgent(targetAgentId);
       if (!targetAgentDef) {
         const err = new Error(
           `agent ${targetAgentId} not found in registry`,
@@ -2493,70 +2535,18 @@ export class SessionManager {
         err.code = JsonRpcErrorCodes.AgentNotInstalled;
         throw err;
       }
-      const spawnPlan = await planSpawn(targetAgentDef, [], {
+      spawnPlan = await planSpawn(targetAgentDef, [], {
         npmRegistry: this.npmRegistry,
       });
 
-      // Resolve modelId for the synopsis ephemeral agent.  Reuse the
-      // same default timeout as synopsis-agent.ts (120 s).
-      const SYNOPSIS_TIMEOUT_MS = 120_000;
-      const sourceModel = sourceRecord.currentModel;
+      // Phase 1 (synchronous): stamp forkSynthesisState="running" so the
+      // recall MCP mint predicate fires immediately on attach.
+      // synopsis is left unset — it will be filled by the background phase
+      // below.
+      sourceModel = sourceRecord.currentModel;
 
-      // Note: TARGET agent generates the synopsis (not source) — it's
-      // consumed by the fork's agent, so we want it in the target's idiom
-      // + model.  TODO: plumb an AbortSignal so a disconnected HTTP client
-      // can cancel synopsis generation (currently orphans the ephemeral
-      // agent run).
-      try {
-        const synopsisResult = await generateSynopsis({
-          agentId: targetAgentId,
-          cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
-          plan: spawnPlan,
-          history: sourceHistory,
-          modelId: sourceModel,
-          sessionId: sourceSessionId,
-          logger: this.logger,
-          timeoutMs: SYNOPSIS_TIMEOUT_MS,
-        });
-
-        if (synopsisResult && synopsisResult.synopsis) {
-          forkSynopsis = synopsisResult.synopsis;
-          forkSummarizedThroughEntry = sourceHistory.length;
-        } else {
-          this.logger?.warn(
-            `forkSession(${sourceSessionId}): generateSynopsis returned no synopsis — falling back to verbatim seed`,
-          );
-        }
-      } catch (err) {
-        this.logger?.warn(
-          `forkSession(${sourceSessionId}): generateSynopsis threw — falling back to verbatim seed: ${(err as Error).message}`,
-        );
-      }
-
-       // Graceful-degrade fallback: synopsis failed or returned undefined.
-       // Reduce slicedHistory to the last-turn-complete slice (or forkAt
-       // slice if provided) so we don't replay the entire source session.
-       // NEVER throw here — seedFromImport must always receive valid input.
-       if (!forkSynopsis) {
-         if (opts.forkAt !== undefined) {
-           const fi = findMessageIdIndex(sourceHistory, opts.forkAt);
-           if (fi >= 0) {
-             forkedAt = opts.forkAt;
-             slicedHistory = sourceHistory.slice(0, fi + 1);
-           }
-         }
-         if (!forkedAt) {
-           const found = findLastTurnComplete(sourceHistory);
-           if (found) {
-             forkedAt = found.messageId;
-             slicedHistory = sourceHistory.slice(0, found.index + 1);
-           } else {
-             forkedAt = "";
-             slicedHistory = sourceHistory.slice(0, 0);
-           }
-         }
-       }
-     }
+      forkSynthesisState = "running";
+    }
     const promptHistory = await loadPromptHistorySafely(sourceSessionId);
 
     // Build a record snapshot for encodeBundle. Fresh lineageId so the
@@ -2580,13 +2570,16 @@ export class SessionManager {
     // true because the fork is seeded with the source's history. That
     // would put every /btw fork in the picker. Setting false here
     // bypasses the inference cleanly.
+    // For synthesis forks, stamp summarizedThroughEntry in phase 1 so the
+    // recall MCP mint predicate fires from the moment of first attach.
+    const synthesized = mode === "synthesis";
     const recordForBundle: SessionRecord & { lineageId: string } = {
       ...sourceRecord,
       lineageId: generateLineageId(),
       agentId: targetAgentId,
       interactive: false,
-      ...(forkSynopsis !== undefined ? { synopsis: forkSynopsis } : {}),
-      ...(forkSummarizedThroughEntry !== undefined ? { summarizedThroughEntry: forkSummarizedThroughEntry } : {}),
+      ...(forkSynthesisState !== undefined ? { forkSynthesisState } : {}),
+      ...(synthesized ? { summarizedThroughEntry: sourceHistory.length } : {}),
       ...(opts.title !== undefined ? { title: opts.title } : {}),
       // A fork is a new session: its first turn re-pays for the carried
       // context (cache miss on the new session id, full prompt re-sent),
@@ -2621,6 +2614,52 @@ export class SessionManager {
       forkedFromSessionId: sourceSessionId,
       forkedFromMessageId: forkedAt,
     });
+
+    // Phase 2 (background, fire-and-forget): generate synopsis for the
+    // new session so it has a concise context brief on attach.  This runs
+    // detached — the HTTP/ACP response already returned above.
+    if (synthesized) {
+      void (async () => {
+        try {
+          // Note: TARGET agent generates the synopsis (not source) — it's
+          // consumed by the fork's agent, so we want it in the target's
+          // idiom + model.  TODO: plumb an AbortSignal so a disconnected
+          // HTTP client can cancel synopsis generation (currently orphans
+          // the ephemeral agent run).
+          const synopsisResult = await generateSynopsis({
+            agentId: targetAgentId,
+            cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
+            plan: spawnPlan!,
+            history: sourceHistory,
+            modelId: sourceModel,
+            sessionId: sourceSessionId,
+            logger: this.logger,
+            timeoutMs: SYNOPSIS_TIMEOUT_MS,
+          });
+
+          if (synopsisResult && synopsisResult.synopsis) {
+            await this.mutateRecord(newId, { synopsis: synopsisResult.synopsis }, ["forkSynthesisState"]);
+          } else {
+            this.logger?.warn(
+              `forkSession(${sourceSessionId}): generateSynopsis returned no synopsis — fork usable via recall`,
+            );
+            await this.mutateRecord(newId, {}, ["forkSynthesisState"]);
+          }
+        } catch (err) {
+          this.logger?.warn(
+            `forkSession(${sourceSessionId}): generateSynopsis failed — fork usable via recall: ${(err as Error).message}`,
+          );
+          try {
+            await this.mutateRecord(newId, {}, ["forkSynthesisState"]);
+          } catch (mutateErr) {
+            this.logger?.warn(
+              `forkSession(${sourceSessionId}): mutateRecord to clear forkSynthesisState failed: ${(mutateErr as Error).message}`,
+            );
+          }
+        }
+      })();
+    }
+
     return {
       sessionId: newId,
       forkedFromSessionId: sourceSessionId,
@@ -2774,6 +2813,34 @@ export class SessionManager {
     await this.histories.delete(sessionId).catch(() => undefined);
     this.invalidateListCache();
     return true;
+  }
+
+  // Await any in-flight deletion chain (tombstone + meta unlink +
+  // history unlink) for a session id. The live-session close path
+  // schedules these as a fire-and-forget chain from the synchronous
+  // onClose handler; callers that need to observe the post-delete
+  // state (DELETE /v1/sessions/:id, tests) await this before checking.
+  async waitForDeletion(sessionId: string): Promise<void> {
+    const p = this.pendingDeletions.get(sessionId);
+    if (p) {
+      await p;
+    }
+  }
+
+  // Tombstone lookup gate for the attach/resurrect path. Returns true
+  // when the user explicitly deleted this (agentId, upstreamSessionId)
+  // pair — so a racing session/attach (e.g. a TUI auto-reconnect that
+  // fires off the hydra-acp/session/closed notify) refuses to bring it
+  // back from the dead. Keyed by (agent, upstream) because that's the
+  // tombstone's natural key; the hydra session id is ephemeral.
+  async isTombstoned(
+    agentId: string,
+    upstreamSessionId: string,
+  ): Promise<boolean> {
+    const t = await this.tombstones
+      .read(agentId, upstreamSessionId)
+      .catch(() => undefined);
+    return t?.reason === "user";
   }
 
   async hasRecord(sessionId: string): Promise<boolean> {

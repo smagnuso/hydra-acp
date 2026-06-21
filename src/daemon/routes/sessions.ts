@@ -371,6 +371,7 @@ export function registerSessionRoutes(
     const session = manager.get(id);
     if (session) {
       await session.close({ deleteRecord: true });
+      await manager.waitForDeletion(id);
       reply.code(204).send();
       return;
     }
