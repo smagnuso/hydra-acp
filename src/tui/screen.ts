@@ -2486,16 +2486,37 @@ export class Screen {
   }
 
   // Close the overlay pane, returning layout to its default state.
+  // Content (lines, meta, status) is intentionally PRESERVED so a
+  // subsequent `/btw` with no args can re-summon the same pane without
+  // losing its scrollback. A fresh `/btw <prompt>` clears it via
+  // openBtwOverlay().
   closeBtwOverlay(): void {
     if (!this.btwOverlayOpen) {
       return;
     }
     this.btwOverlayOpen = false;
-    this.btwOverlayLines = [];
-    this.btwOverlaySessionId = null;
-    this.btwOverlayUsage = undefined;
     this.focusedPane = "main";
     this.scheduleRepaint();
+  }
+
+  // Re-show a previously-closed overlay pane along with its retained
+  // content. Returns true if there was something to reopen, false if no
+  // prior /btw has populated the buffer in this session.
+  reopenBtwOverlay(): boolean {
+    if (this.btwOverlayOpen) {
+      return true;
+    }
+    if (this.btwOverlayLines.length === 0) {
+      return false;
+    }
+    this.btwOverlayOpen = true;
+    this.focusedPane = "btw";
+    this.scheduleRepaint();
+    return true;
+  }
+
+  hasBtwOverlayHistory(): boolean {
+    return this.btwOverlayLines.length > 0;
   }
 
   // Toggle which pane is focused (main ↔ btw). Only has a visual effect

@@ -2370,7 +2370,7 @@ async function runSession(
     },
     { name: "/model", description: "Switch model: /model <model-id>" },
     { name: "/agent", description: "Switch agent via config option: /agent <agent-id>" },
-    { name: "/btw", description: "Run an ancillary forked session: /btw <prompt>" },
+    { name: "/btw", description: "Run an ancillary forked session: /btw <prompt> (no args toggles the last overlay)" },
     {
       name: "/export",
       description: "Export this session as a markdown transcript: /export [path]",
@@ -4374,6 +4374,21 @@ async function runSession(
         // dispatches immediately even when the main turn is in flight.
         const prompt = space === -1 ? "" : trimmed.slice(space + 1).trim();
         if (!prompt) {
+          // No-arg /btw toggles the overlay: visible → hide (same as ESC),
+          // hidden-with-history → reopen, otherwise nothing to toggle and
+          // we ask for a prompt.
+          if (screen.isOverlayOpen()) {
+            if (currentSidechain) {
+              currentSidechain.cancel();
+              currentSidechain = null;
+              btwSessionId = null;
+            }
+            screen.closeBtwOverlay();
+            return true;
+          }
+          if (screen.reopenBtwOverlay()) {
+            return true;
+          }
           screen.appendLines([
             { prefix: "  ", body: "/btw requires a prompt", bodyStyle: "info" },
           ]);
