@@ -3897,34 +3897,41 @@ export class Screen {
     const cwdDisplay = shortenHomePath(this.sessionbar.cwd);
     const sig = `sbar|${w}|${agentCell}|${cwdDisplay}|${title ?? ""}`;
     this.paintRow(row, sig, () => {
-      // Layout: <agent(model) · cwd · title>
-      // Usage / cost moved to the top (prompt-above) separator. cwd and
-      // title share whatever horizontal room is left after the fixed
-      // pieces, with title getting priority over a long cwd so it
-      // always keeps a sliver. The session id lives on the top
-      // separator and isn't painted here.
-      const fixed =
-        agentCell.length +
-        " · ".length +
-        (title ? " · ".length : 0);
-      const variableRoom = Math.max(8, w - fixed);
+      // Layout: <cwd · title> ........ <agent(model)>
+      // agent(model) is right-aligned to the terminal's right edge;
+      // cwd + title share whatever room is left on the left, with
+      // title getting priority over a long cwd so it always keeps a
+      // sliver. Usage / cost lives on the top (prompt-above) separator
+      // and the session id lives there too, so they're not painted here.
+      const agentWidth = stringWidth(agentCell);
+      const minGap = 1;
+      const leftRoom = Math.max(0, w - agentWidth - minGap);
+      const titleSep = title ? " · " : "";
+      const titleSepWidth = stringWidth(titleSep);
       let cwdRoom: number;
       let titleRoom: number;
       if (title) {
         const titleMin = Math.min(title.length, 8);
-        cwdRoom = Math.min(cwdDisplay.length, Math.max(8, variableRoom - titleMin));
-        titleRoom = Math.max(0, variableRoom - cwdRoom);
+        cwdRoom = Math.min(
+          cwdDisplay.length,
+          Math.max(8, leftRoom - titleSepWidth - titleMin),
+        );
+        titleRoom = Math.max(0, leftRoom - cwdRoom - titleSepWidth);
       } else {
         titleRoom = 0;
-        cwdRoom = variableRoom;
+        cwdRoom = leftRoom;
       }
-      this.term
-        .cyan.noFormat(agentCell)(" · ")
-        .dim.noFormat(truncate(cwdDisplay, cwdRoom));
+      const cwdText = truncate(cwdDisplay, cwdRoom);
+      const titleText = title ? truncate(title, titleRoom) : "";
+      const leftWidth =
+        stringWidth(cwdText) + (title ? titleSepWidth + stringWidth(titleText) : 0);
+      const gap = Math.max(minGap, w - leftWidth - agentWidth);
+      this.term.bold.noFormat(cwdText);
       if (title) {
-        this.term(" · ").bold.noFormat(truncate(title, titleRoom));
+        this.term(titleSep).bold.noFormat(titleText);
       }
-      this.term.eraseLineAfter();
+      this.term(" ".repeat(gap));
+      this.term.cyan.noFormat(agentCell);
     });
   }
 
@@ -3990,7 +3997,9 @@ export class Screen {
     const sidSep = sid ? " · " : "";
     const padBeforeMiddle = " ";
     const padAfterMiddle = usageStr ? " " : "";
-    const tail = " ──";
+    // No usage → drop the leading space in the closing tail so the
+    // row ends flush instead of leaving a stray gap on the right edge.
+    const tail = usageStr ? " ──" : "──";
 
     let leftWidth =
       left.length +
@@ -4031,7 +4040,7 @@ export class Screen {
       }
       if (sid) {
         this.term.dim(sidSep);
-        this.term.yellow(sid);
+        this.term.cyan(sid);
       }
       for (const c of auxChunks) {
         this.term.dim(" · ");
@@ -4195,7 +4204,7 @@ export class Screen {
     }
     this.term.dim(segments.sidSep);
     if (segments.sid) {
-      this.term.yellow(segments.sid);
+      this.term.cyan(segments.sid);
       this.term.dim(segments.sidTrail);
     }
     this.term.dim(segments.middle);
