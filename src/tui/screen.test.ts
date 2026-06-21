@@ -1630,8 +1630,10 @@ describe("Screen btw overlay", () => {
     expect(getOverlayState(screen).btwOverlayUsage?.used).toBe(2000);
     expect(getOverlayState(screen).btwOverlayUsage?.size).toBeUndefined();
     screen.closeBtwOverlay();
-    expect(getOverlayState(screen).btwOverlaySessionId).toBeNull();
-    expect(getOverlayState(screen).btwOverlayUsage).toBeUndefined();
+    // Content is intentionally preserved across close so /btw with no
+    // args can re-summon the same overlay.
+    expect(getOverlayState(screen).btwOverlaySessionId).toBe("hydra-session-abc123");
+    expect(getOverlayState(screen).btwOverlayUsage?.used).toBe(2000);
   });
 
   it("openBtwOverlay clears stale sessionId and usage", () => {
@@ -1646,7 +1648,7 @@ describe("Screen btw overlay", () => {
     expect(getOverlayState(screen).btwOverlayUsage).toBeUndefined();
   });
 
-  it("closeBtwOverlay resets state to closed", () => {
+  it("closeBtwOverlay hides the pane while preserving its content", () => {
     const screen = makeOverlayScreen({ width: 40, height: 24 });
     screen.openBtwOverlay({ height: 8 });
     screen.setBtwOverlayContent([plain("x")]);
@@ -1654,7 +1656,18 @@ describe("Screen btw overlay", () => {
     screen.closeBtwOverlay();
     const state = getOverlayState(screen);
     expect(state.btwOverlayOpen).toBe(false);
-    expect(state.btwOverlayLines).toEqual([]);
+    // Content stays so reopenBtwOverlay() can bring the same pane back.
+    expect(state.btwOverlayLines.length).toBe(1);
+    expect(screen.hasBtwOverlayHistory()).toBe(true);
+    expect(screen.reopenBtwOverlay()).toBe(true);
+    expect(getOverlayState(screen).btwOverlayOpen).toBe(true);
+  });
+
+  it("reopenBtwOverlay returns false when there is no history", () => {
+    const screen = makeOverlayScreen({ width: 40, height: 24 });
+    expect(screen.hasBtwOverlayHistory()).toBe(false);
+    expect(screen.reopenBtwOverlay()).toBe(false);
+    expect(getOverlayState(screen).btwOverlayOpen).toBe(false);
   });
 
   it("closeBtwOverlay is a no-op when already closed", () => {

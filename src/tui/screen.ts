@@ -291,13 +291,20 @@ export interface CompletionItem {
 }
 
 const SESSIONBAR_ROWS = 1;
-const BANNER_ROWS = 1;
+// Banner row was its own line above the sessionbar; its contents
+// (status, queued/scroll indicators, hint chunks, transient
+// search/compaction toast) have all folded into the prompt-above
+// separator. Kept as a named 0 so all the bottom-chrome math expressions
+// still read coherently without an arithmetic rewrite.
+const BANNER_ROWS = 0;
 const SEPARATOR_ROWS = 1;
-// Row between banner and sessionbar. Set to 0 (banner sits directly
-// above the sessionbar) — was 1 in the old layout. Keeping it as a
-// named constant so the bottom-chrome math reads consistently with
-// the above-prompt separator.
-const BANNER_SEPARATOR_ROWS = 0;
+// One-row separator below the prompt and above the sessionbar. Holds the
+// hint chunks (⇧⇥ mode · ⌃P pick · ⌃G guide · ⌃D detach) and the transient
+// right-slot (search / compaction / synthesis toast). The top separator
+// (above the prompt) carries status + sid + usage instead. Named
+// BANNER_SEPARATOR_ROWS for backward compatibility with all the bottom-
+// chrome row math expressions that already account for it.
+const BANNER_SEPARATOR_ROWS = 1;
 export const MAX_PROMPT_ROWS = 8;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
@@ -487,8 +494,9 @@ export class Screen {
    private bannerNotificationTimer: NodeJS.Timeout | null = null;
    private bannerSearchIndicator: string | null = null;
    private compactionIndicator: string | null = null;
-  // Bottom-of-screen "btw" overlay pane. Closed by default; when open,
-  // reserves `btwOverlayHeight` rows from the bottom (1 separator + 1
+    private synthesisIndicator: string | null = null;
+    // Bottom-of-screen "btw" overlay pane. Closed by default; when open,
+    // reserves `btwOverlayHeight` rows from the bottom (1 separator + 1
   // header + height-2 content). The main scrollback area shrinks to make
   // room. Rendered purely with termkit helpers — no ACP knowledge.
   private btwOverlayOpen = false;
@@ -1664,6 +1672,18 @@ export class Screen {
     this.syncedPartialRepaint(() => this.drawBanner());
   }
 
+  // Persistent fork-synthesis status indicator shown in the right-side
+  // banner slot (higher priority than compaction, lower than search and
+  // transient notify). Pass null to clear. Does not use a timer — the
+  // caller is responsible for clearing when synthesis completes or fails.
+  setSynthesisIndicator(text: string | null): void {
+    if (this.synthesisIndicator === text) {
+      return;
+    }
+    this.synthesisIndicator = text;
+    this.syncedPartialRepaint(() => this.drawBanner());
+  }
+
   // Runtime toggle for terminal mouse capture. With capture on, the
   // wheel drives scrollback but text selection requires shift+drag
   // (terminals route mouse events to the app). With capture off, plain
@@ -1981,7 +2001,7 @@ export class Screen {
   // since the user can't see which match they're on from the highlight
   // alone; prompt-history's match is visible in the buffer, so no
   // counter needed there.
-  private bannerRightContent(): { text: string; kind: "search" | "notify" | "compaction" } | null {
+  private bannerRightContent(): { text: string; kind: "search" | "notify" | "synthesis" | "compaction" } | null {
     if (this.scrollbackSearch !== null) {
       const sb = this.scrollbackSearch;
       const counter =
@@ -1997,6 +2017,9 @@ export class Screen {
     }
     if (this.bannerNotification !== null) {
       return { text: this.bannerNotification, kind: "notify" };
+    }
+    if (this.synthesisIndicator !== null) {
+      return { text: this.synthesisIndicator, kind: "synthesis" };
     }
     if (this.compactionIndicator !== null) {
       return { text: this.compactionIndicator, kind: "compaction" };
@@ -3850,7 +3873,7 @@ export class Screen {
         h - promptRows - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
       this.drawSeparator(separatorAbovePromptRow);
       this.drawPrompt();
-      this.drawBanner();
+      this.drawBottomSeparator(h - SESSIONBAR_ROWS);
       this.drawSessionbar();
       this.placeCursor();
       if (
@@ -3869,27 +3892,21 @@ export class Screen {
   private drawSessionbar(): void {
     const w = this.term.width;
     const row = this.term.height;
-    const sid = shortId(this.sessionbar.sessionId);
     const title = this.sessionbar.title?.trim();
     const agentCell = formatAgentWithModel(this.sessionbar.agent, this.sessionbar.model);
     const cwdDisplay = shortenHomePath(this.sessionbar.cwd);
-    const usage = formatUsage(this.sessionbar.usage);
-    const sig = `sbar|${w}|${sid}|${agentCell}|${cwdDisplay}|${title ?? ""}|${usage ?? ""}`;
+    const sig = `sbar|${w}|${agentCell}|${cwdDisplay}|${title ?? ""}`;
     this.paintRow(row, sig, () => {
-      // Layout: <sid · agent(model) · cwd · title>           <usage>
-      // Left side is bullet-separated; usage is right-aligned with a
-      // small margin from the right edge. cwd and title share whatever
-      // horizontal room is left after the fixed pieces and the usage
-      // reservation, with title getting priority over a long cwd so it
-      // always keeps a sliver.
-      const usageReserve = usage ? usage.length + 3 : 0;
+      // Layout: <agent(model) · cwd · title>
+      // Usage / cost moved to the top (prompt-above) separator. cwd and
+      // title share whatever horizontal room is left after the fixed
+      // pieces, with title getting priority over a long cwd so it
+      // always keeps a sliver. The session id lives on the top
+      // separator and isn't painted here.
       const fixed =
-        sid.length +
-        " · ".length +
         agentCell.length +
         " · ".length +
-        (title ? " · ".length : 0) +
-        usageReserve;
+        (title ? " · ".length : 0);
       const variableRoom = Math.max(8, w - fixed);
       let cwdRoom: number;
       let titleRoom: number;
@@ -3901,39 +3918,203 @@ export class Screen {
         titleRoom = 0;
         cwdRoom = variableRoom;
       }
-      // noFormat on the user-controlled cells (agent name, cwd, title) so a
-      // literal `^X` in any of them isn't eaten as terminal-kit markup.
       this.term
-        .yellow(sid)(" · ")
         .cyan.noFormat(agentCell)(" · ")
         .dim.noFormat(truncate(cwdDisplay, cwdRoom));
       if (title) {
         this.term(" · ").bold.noFormat(truncate(title, titleRoom));
       }
-      // Clear the gap between end-of-left-content and start-of-usage
-      // before moving over. paintRow doesn't pre-clear the row, so a
-      // previous frame's longer title (or a prior session's title)
-      // would leak its trailing characters into this frame's gap.
-      // Same fix drawBanner() uses for its right slot.
       this.term.eraseLineAfter();
-      if (usage) {
-        // Land the final char at col w-1, not w: paintRow's trailing
-        // eraseLineAfter sits at col w with "pending wrap" set, and on
-        // most terminals EL 0 erases that column — clipping our last
-        // character (e.g. "$5.15" → "$5.1"). Same fix drawBanner() uses
-        // for its right slot.
-        const visibleWidth = stringWidth(usage);
-        const col = Math.max(1, w - visibleWidth);
-        this.term.moveTo(col, row).eraseLineAfter();
-        this.term.dim.noFormat(usage);
-      }
     });
   }
 
+  // Renders the rule above the prompt as a btw-style header carrying
+  // ALL of the legacy banner chrome plus the session id. The legacy
+  // banner row has been folded into this line, so layout is:
+  //
+  //   ── <Status>[ <elapsed>] · <sid>[ · N queued][ · ↑N] ───── <right> ──
+  //
+  // The right slot is either the transient bannerRightContent text
+  // (active scrollback search, compaction toast, etc.) painted in its
+  // kind colour, or — when nothing transient is active — the dim hint
+  // chunks (mode / pick / guide / detach), with click-hit regions
+  // recomputed so the same mouse targets still work. Status label
+  // colour mirrors the btw header's convention: idle (Ready) paints in
+  // the default colour, Busy yellow, Stalled / Disconnected red, Cold
+  // magenta. The sid block is omitted when no session id is known.
   private drawSeparator(row: number): void {
     const w = this.term.width;
-    this.paintRow(row, `sep|${w}`, () => {
-      this.term.dim("─".repeat(w));
+    const sid = shortId(this.sessionbar.sessionId);
+    const status = this.banner.status;
+    const stalled = status === "busy" && this.banner.stalled === true;
+    let label: string;
+    if (stalled) {
+      label = "Stalled";
+    } else if (status === "busy") {
+      label = "Busy";
+    } else {
+      label = status.charAt(0).toUpperCase() + status.slice(1);
+    }
+    const elapsedStr =
+      status === "busy" &&
+      !stalled &&
+      this.banner.elapsedMs !== undefined &&
+      this.banner.elapsedMs >= 1000
+        ? formatElapsed(this.banner.elapsedMs)
+        : "";
+
+    const auxChunks: Array<{ text: string; paint: () => void }> = [];
+    if (this.banner.queued > 0) {
+      const text = `${this.banner.queued} queued`;
+      auxChunks.push({
+        text,
+        paint: () => {
+          this.term.brightYellow(text);
+        },
+      });
+    }
+    if (this.scrollOffset > 0) {
+      const text = `↑ ${this.scrollOffset}`;
+      auxChunks.push({
+        text,
+        paint: () => {
+          this.term.brightCyan(text);
+        },
+      });
+    }
+
+    const usageStr = formatUsage(this.sessionbar.usage) ?? "";
+
+    const left = "── ";
+    const elapsedInline = elapsedStr ? ` ${elapsedStr}` : "";
+    const sidSep = sid ? " · " : "";
+    const padBeforeMiddle = " ";
+    const padAfterMiddle = usageStr ? " " : "";
+    const tail = " ──";
+
+    let leftWidth =
+      left.length +
+      stringWidth(label) +
+      stringWidth(elapsedInline) +
+      sidSep.length +
+      stringWidth(sid);
+    for (const c of auxChunks) {
+      leftWidth += stringWidth(" · ") + stringWidth(c.text);
+    }
+    leftWidth += stringWidth(padBeforeMiddle);
+
+    const rightWidth =
+      stringWidth(padAfterMiddle) +
+      stringWidth(usageStr) +
+      stringWidth(tail);
+
+    const middleCols = Math.max(0, w - leftWidth - rightWidth);
+    const middle = "─".repeat(middleCols);
+
+    const sig =
+      `sep|${w}|${status}|${stalled ? 1 : 0}|${sid}|${elapsedStr}|` +
+      `${this.banner.queued}|${this.scrollOffset}|${usageStr}`;
+
+    this.paintRow(row, sig, () => {
+      this.term.dim(left);
+      if (stalled || status === "disconnected") {
+        this.term.brightRed(label);
+      } else if (status === "busy") {
+        this.term.brightYellow(label);
+      } else if (status === "cold") {
+        this.term.brightMagenta(label);
+      } else {
+        this.term(label);
+      }
+      if (elapsedInline) {
+        this.term.dim.noFormat(elapsedInline);
+      }
+      if (sid) {
+        this.term.dim(sidSep);
+        this.term.yellow(sid);
+      }
+      for (const c of auxChunks) {
+        this.term.dim(" · ");
+        c.paint();
+      }
+      this.term.dim(padBeforeMiddle);
+      this.term.dim(middle);
+      if (usageStr) {
+        this.term.dim(padAfterMiddle);
+        this.term.dim.noFormat(usageStr);
+      }
+      this.term.dim(tail);
+    });
+  }
+
+  // Bottom separator (one row above the sessionbar). Holds the hint
+  // chunks on the right, swapped to the transient right-slot text
+  // (search progress, compaction toast, synthesis toast) when one is
+  // active. Click-hit ranges for mode / pick / guide / detach are
+  // recorded against this row so the same mouse targets still work.
+  private drawBottomSeparator(row: number): void {
+    const w = this.term.width;
+    const transient = this.bannerRightContent();
+    const hintBase = this.banner.currentMode
+      ? this.banner.hint.replace(
+          "⇧⇥ mode",
+          `⇧⇥ mode: ${this.banner.currentMode}`,
+        )
+      : this.banner.hint;
+
+    const padAfterMiddle = " ";
+    const tail = " ──";
+    const rightText = transient ? transient.text : hintBase;
+    const rightWidth =
+      stringWidth(padAfterMiddle) +
+      stringWidth(rightText) +
+      stringWidth(tail);
+    const middleCols = Math.max(0, w - rightWidth);
+    const middle = "─".repeat(middleCols);
+
+    const transientSig = transient ? `${transient.kind}|${transient.text}` : "";
+    const sig =
+      `bsep|${w}|${this.banner.currentMode ?? ""}|${this.banner.hint}|${transientSig}`;
+
+    this.paintRow(row, sig, () => {
+      this.term.dim(middle);
+      this.term.dim(padAfterMiddle);
+      if (transient) {
+        if (transient.kind === "search") {
+          this.term.brightCyan.noFormat(transient.text);
+        } else {
+          this.term.brightYellow.noFormat(transient.text);
+        }
+      } else {
+        this.term.dim(hintBase);
+      }
+      this.term.dim(tail);
+
+      const hits: {
+        mode: [number, number] | null;
+        pick: [number, number] | null;
+        guide: [number, number] | null;
+        detach: [number, number] | null;
+      } = { mode: null, pick: null, guide: null, detach: null };
+      if (!transient) {
+        let col = middleCols + stringWidth(padAfterMiddle) + 1;
+        const chunks = hintBase.split(" · ");
+        for (const chunk of chunks) {
+          const cw = stringWidth(chunk);
+          const range: [number, number] = [col, col + cw - 1];
+          if (chunk.includes("mode") && hits.mode === null) {
+            hits.mode = range;
+          } else if (chunk.includes("pick") && hits.pick === null) {
+            hits.pick = range;
+          } else if (chunk.includes("guide") && hits.guide === null) {
+            hits.guide = range;
+          } else if (chunk.includes("detach") && hits.detach === null) {
+            hits.detach = range;
+          }
+          col += cw + stringWidth(" · ");
+        }
+      }
+      this.bannerHits = { row, ...hits };
     });
   }
 
@@ -3952,6 +4133,7 @@ export class Screen {
     label: string;
     sidSep: string;
     sid: string;
+    sidTrail: string;
     middle: string;
     usage: string;
     right: string;
@@ -3964,6 +4146,7 @@ export class Screen {
       ? shortId(this.btwOverlaySessionId)
       : "";
     const sidSep = sid ? " · " : " ";
+    const sidTrail = sid ? " " : "";
     const usageStr = formatUsage(this.btwOverlayUsage);
     const usage = usageStr ? ` ${usageStr} ` : "";
     const right = usageStr ? "──" : "";
@@ -3972,12 +4155,13 @@ export class Screen {
       stringWidth(label) +
       sidSep.length +
       stringWidth(sid) +
+      sidTrail.length +
       stringWidth(usage) +
       right.length;
     const middle = "─".repeat(Math.max(0, w - consumed));
     const signature =
       `${w}|${sid}|${this.btwOverlayStatus}|${usageStr ?? ""}`;
-    return { left, label, sidSep, sid, middle, usage, right, signature };
+    return { left, label, sidSep, sid, sidTrail, middle, usage, right, signature };
   }
 
   private paintBtwHeader(segments: {
@@ -3985,6 +4169,7 @@ export class Screen {
     label: string;
     sidSep: string;
     sid: string;
+    sidTrail: string;
     middle: string;
     usage: string;
     right: string;
@@ -4011,6 +4196,7 @@ export class Screen {
     this.term.dim(segments.sidSep);
     if (segments.sid) {
       this.term.yellow(segments.sid);
+      this.term.dim(segments.sidTrail);
     }
     this.term.dim(segments.middle);
     if (segments.usage) {
@@ -4631,27 +4817,18 @@ export class Screen {
   // hint chunks. Used to derive the start column of the hint so we can
   // map left-clicks back to the chunk under the pointer. Must stay in
   // sync with drawBanner's left-side paints — adding a new prefix
-  // element there means appending it here too.
-  private computeBannerPrefixText(elapsedStr: string): string {
-    const dot = this.banner.status === "busy" ? "●" : "○";
-    let s = "";
-    if (this.banner.status === "busy") {
-      const stalled = this.banner.stalled === true;
-      s += `${dot} ${stalled ? "stalled" : this.banner.status}`;
-      if (elapsedStr) {
-        s += ` ${elapsedStr}`;
-      }
-    } else {
-      s += `${dot} ${this.banner.status}`;
-    }
+  // element there means appending it here too. Status / elapsed have
+  // moved into the prompt-above separator, so they're no longer part of
+  // the prefix.
+  private computeBannerPrefixText(): string {
+    const parts: string[] = [];
     if (this.banner.queued > 0) {
-      s += ` · ${this.banner.queued} queued`;
+      parts.push(`${this.banner.queued} queued`);
     }
     if (this.scrollOffset > 0) {
-      s += ` · ↑ ${this.scrollOffset}`;
+      parts.push(`↑ ${this.scrollOffset}`);
     }
-    s += " · ";
-    return s;
+    return parts.length > 0 ? parts.join(" · ") + " · " : "";
   }
 
   // Public: which clickable banner chunk (if any) contains the given
@@ -4673,117 +4850,19 @@ export class Screen {
   }
 
   private drawBanner(): void {
-    const row = this.term.height - SESSIONBAR_ROWS - BANNER_SEPARATOR_ROWS;
-    const w = this.term.width;
-    // Use the rendered elapsed string in the sig (not raw ms), so a tick
-    // landing within the same displayed-second skips the repaint. Tied to
-    // formatElapsed exactly: identical sig ⇒ identical bytes.
-    const elapsedStr =
-      this.banner.status === "busy" &&
-      this.banner.elapsedMs !== undefined &&
-      this.banner.elapsedMs >= 1000
-        ? formatElapsed(this.banner.elapsedMs)
-        : "";
-    const right = this.bannerRightContent();
-    const rightSig = right ? `${right.kind}|${right.text}` : "";
-    const stalled = this.banner.status === "busy" && this.banner.stalled === true;
-    const sig =
-      `bnr|${w}|${this.banner.status}|${elapsedStr}|${stalled ? "1" : "0"}|` +
-      `${this.banner.queued}|${this.scrollOffset}|` +
-      `${this.banner.currentMode ?? ""}|${this.banner.hint}|` +
-      rightSig;
-    this.paintRow(row, sig, () => {
-      const dot = this.banner.status === "busy" ? "●" : "○";
-      if (this.banner.status === "busy") {
-        if (stalled) {
-          this.term.brightRed(`${dot} stalled`);
-        } else {
-          this.term.brightYellow(`${dot} ${this.banner.status}`);
-        }
-        if (elapsedStr) {
-          this.term(" ").dim(elapsedStr);
-        }
-      } else if (this.banner.status === "disconnected") {
-        this.term.brightRed(`${dot} ${this.banner.status}`);
-      } else if (this.banner.status === "cold") {
-        this.term.brightMagenta(`${dot} ${this.banner.status}`);
-      } else {
-        this.term.brightGreen(`${dot} ${this.banner.status}`);
-      }
-      if (this.banner.queued > 0) {
-        this.term(" · ").brightYellow(`${this.banner.queued} queued`);
-      }
-      if (this.scrollOffset > 0) {
-        this.term(" · ").brightCyan(`↑ ${this.scrollOffset}`);
-      }
-      const hint = this.banner.currentMode
-        ? this.banner.hint.replace(
-            "⇧⇥ mode",
-            `⇧⇥ mode: ${this.banner.currentMode}`,
-          )
-        : this.banner.hint;
-      this.term(" · ").dim(hint);
-      // Compute the absolute column ranges for the "mode", "pick", and
-      // "guide" chunks so left-clicks on the banner can dispatch the same
-      // effect as ⇧⇥ / ⌃P / ⌃G. Done here (alongside the paint) so the
-      // hit regions are always in sync with what's on screen.
-      const prefix = this.computeBannerPrefixText(elapsedStr);
-      let col = stringWidth(prefix) + 1; // 1-based start column of the hint
-      const chunks = hint.split(" · ");
-      const hits: {
-        mode: [number, number] | null;
-        pick: [number, number] | null;
-        guide: [number, number] | null;
-        detach: [number, number] | null;
-      } = { mode: null, pick: null, guide: null, detach: null };
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i] ?? "";
-        const w = stringWidth(chunk);
-        const range: [number, number] = [col, col + w - 1];
-        if (chunk.includes("mode") && hits.mode === null) {
-          hits.mode = range;
-        } else if (chunk.includes("pick") && hits.pick === null) {
-          hits.pick = range;
-        } else if (chunk.includes("guide") && hits.guide === null) {
-          hits.guide = range;
-        } else if (chunk.includes("detach") && hits.detach === null) {
-          hits.detach = range;
-        }
-        col += w + stringWidth(" · ");
-      }
-      this.bannerHits = { row, ...hits };
-      // Clear the gap between end-of-hint and start-of-right-slot before
-      // moving over. paintRow doesn't pre-clear the row, so a previous
-      // frame whose right text started at a column to the LEFT of this
-      // frame's right text would leak its leading characters into the
-      // gap (e.g. a "thoughts hidden" frame followed by "thoughts shown"
-      // — the shorter label starts one column further right, and without
-      // this erase the stranded "t" remains visible).
-      this.term.eraseLineAfter();
-      if (right) {
-        // Right-aligned, but with a 1-col gap on the very right edge.
-        // The outer paintRow trailing eraseLineAfter sits at col w with
-        // "pending wrap" after the last char is written, and on most
-        // terminals EL 0 erases that column — which would clip our last
-        // character (e.g. "thoughts hidden" → "thoughts hidde"). Landing
-        // the final char at col w-1 keeps the stray erase off our text.
-        // string-width handles wide glyphs (emoji + CJK).
-        const visibleWidth = stringWidth(right.text);
-        const col = Math.max(1, w - visibleWidth);
-        this.term.moveTo(col, row).eraseLineAfter();
-        if (right.kind === "search") {
-          this.term.brightCyan.noFormat(right.text);
-        } else if (right.kind === "compaction") {
-          // Yellow signals active background work — matches the convention
-          // used elsewhere in the TUI for in-flight state (busy banner,
-          // mid-turn indicators).
-          this.term.brightYellow.noFormat(right.text);
-        } else {
-          this.term.brightYellow.noFormat(right.text);
-        }
-      }
-    });
+    // Banner state now spans two rows: status/sid/usage live on the
+    // prompt-above separator, and hint chunks / transient right-slot
+    // live on the bottom separator (one row above the sessionbar).
+    // Partial repaints fan out to both — paintRow's signature short-
+    // circuits no-op rewrites so the cost is negligible.
+    const h = this.term.height;
+    const promptRows = this.promptRows();
+    const separatorAbovePromptRow =
+      h - promptRows - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
+    this.drawSeparator(separatorAbovePromptRow);
+    this.drawBottomSeparator(h - SESSIONBAR_ROWS);
   }
+
 
   private placeCursor(): void {
     if (!this.started) {
