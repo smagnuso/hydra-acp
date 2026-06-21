@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -13,6 +13,7 @@ import { generateSynopsis } from "./synopsis-agent.js";
 import { SessionManager } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
 import { makeMockAgent, type MockAgentControls } from "../__tests__/test-utils.js";
+import { Session } from "./session.js";
 
 const mockGenerate = generateSynopsis as ReturnType<typeof vi.fn>;
 
@@ -155,12 +156,30 @@ describe("forkSession — synthesis mode (default)", () => {
     const fixedSynopsis = { goal: "implement cache layer", outcome: null, open_threads: ["perf review"] };
     mockGenerate.mockResolvedValue({ title: "Cache implementation", synopsis: fixedSynopsis });
 
-    const fork = await manager.forkSession(source.sessionId);
-    const forkMeta = await readMeta(fork.sessionId);
+    // Stub mutateRecord so the background phase completes synchronously.
+    const originalMutateRecord = (manager as unknown as { mutateRecord: (...a: unknown[]) => Promise<void> }).mutateRecord;
+    let mutateResolve: (() => void) | undefined;
+    const mutatePromise = new Promise<void>((resolve) => { mutateResolve = resolve; });
+    (manager as unknown as { mutateRecord: (...a: unknown[]) => Promise<void> }).mutateRecord = async (...args: unknown[]) => {
+      await originalMutateRecord.apply(manager, args);
+      mutateResolve?.();
+    };
 
-    expect(forkMeta.synopsis).toEqual(fixedSynopsis);
-    // summarizedThroughEntry should equal parent history length (full copy)
+    const fork = await manager.forkSession(source.sessionId);
+
+    // Phase 1: forkSynthesisState is stamped immediately.
+    let forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.forkSynthesisState).toBe("running");
     expect(forkMeta.summarizedThroughEntry).toBe(2);
+    expect(forkMeta.synopsis).toBeUndefined();
+
+    // Wait for the fire-and-forget to complete.
+    await mutatePromise;
+
+    forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.synopsis).toEqual(fixedSynopsis);
+    expect(forkMeta.summarizedThroughEntry).toBe(2);
+    expect(forkMeta.forkSynthesisState).toBeUndefined();
   });
 
   it("sets record.forkedFromSessionId on the fork", async () => {
@@ -192,7 +211,7 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
     mockGenerate.mockClear();
   });
 
-  it("fork still succeeds when generateSynopsis returns undefined; history sliced to last-turn-complete", async () => {
+  it("fork still succeeds when generateSynopsis returns undefined; full history copied", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
@@ -201,8 +220,6 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
     );
 
     // 2 turn_complete entries + 1 extra entry past the last turn_complete.
-    // On synopsis failure, slicedHistory must end at the last-turn-complete
-    // slice — NOT include the extra trailing entry.
     const source = await manager.importBundle(
       bundleWith({
         lineageId: "lin_synthesis_fail",
@@ -222,22 +239,19 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
     // Fork must always succeed even if synthesis fails (invariant #3)
     expect(fork.forkedFromSessionId).toBe(source.sessionId);
 
-    // Synopsis should NOT be set on the fork record — seedFromImport will handle first attach
+    // In two-phase mode: full history always copied, summarizedThroughEntry
+    // stamped in phase 1 so recall MCP mint fires immediately.
     const forkMeta = await readMeta(fork.sessionId);
     expect(forkMeta.synopsis).toBeUndefined();
-    // summarizedThroughEntry should also be absent (no synopsis => no recall mint)
-    expect(forkMeta.summarizedThroughEntry).toBeUndefined();
+    expect(forkMeta.summarizedThroughEntry).toBe(3);
+    expect(forkMeta.forkSynthesisState).toBe("running");
 
-    // History is sliced to last-turn-complete (2 entries), NOT the full 3-entry source.
+    // Full history (3 entries), NOT sliced — synthesis mode always copies all.
     const forkHistory = await readHistory(fork.sessionId);
-    expect(forkHistory.length).toBe(2);
-    for (let i = 0; i < 2; i++) {
-      const entry = forkHistory[i] as { params: { update: { messageId: string } } };
-      expect(entry.params.update.messageId).toBe(i === 0 ? "m_one" : "m_two");
-    }
+    expect(forkHistory.length).toBe(3);
   });
 
-  it("synthesis fork with opts.forkAt + synopsis failure — history sliced at forkAt messageId", async () => {
+  it("synthesis fork with opts.forkAt + synopsis failure — full history copied", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
@@ -256,7 +270,8 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
       }),
     );
 
-    // generateSynopsis fails — fallback should honor forkAt (advisory hint)
+    // generateSynopsis fails — in two-phase mode, full history is always
+    // copied regardless of synopsis outcome.
     mockGenerate.mockResolvedValue(undefined);
 
     const fork = await manager.forkSession(source.sessionId, { forkAt: "m_two" });
@@ -265,18 +280,16 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
 
     const forkMeta = await readMeta(fork.sessionId);
     expect(forkMeta.synopsis).toBeUndefined();
-    expect(forkMeta.summarizedThroughEntry).toBeUndefined();
+    // forkAt is silently ignored in synthesis mode — full history always copied.
+    expect(forkMeta.summarizedThroughEntry).toBe(3);
+    expect(forkMeta.forkSynthesisState).toBe("running");
 
-    // History sliced at forkAt=m_two (2 entries), not full 3 and not just last-turn-complete.
+    // Full history (3 entries), NOT sliced to forkAt.
     const forkHistory = await readHistory(fork.sessionId);
-    expect(forkHistory.length).toBe(2);
-    const entry0 = forkHistory[0] as { params: { update: { messageId: string } } };
-    const entry1 = forkHistory[1] as { params: { update: { messageId: string } } };
-    expect(entry0.params.update.messageId).toBe("m_one");
-    expect(entry1.params.update.messageId).toBe("m_two");
+    expect(forkHistory.length).toBe(3);
   });
 
-  it("synthesis fork with opts.forkAt that does not resolve + synopsis failure — falls back to last-turn-complete", async () => {
+  it("synthesis fork with opts.forkAt that does not resolve + synopsis failure — full history copied", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
@@ -304,17 +317,15 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
     // Should NOT throw — synopsis failure is always graceful degrade.
     expect(fork.forkedFromSessionId).toBe(source.sessionId);
 
+    // In two-phase mode: full history always copied regardless of synopsis outcome.
     const forkMeta = await readMeta(fork.sessionId);
     expect(forkMeta.synopsis).toBeUndefined();
-    expect(forkMeta.summarizedThroughEntry).toBeUndefined();
+    expect(forkMeta.summarizedThroughEntry).toBe(3);
+    expect(forkMeta.forkSynthesisState).toBe("running");
 
-    // Falls back to last-turn-complete: 2 entries (m_one + m_two), not full 3.
+    // Full history (3 entries), NOT sliced.
     const forkHistory = await readHistory(fork.sessionId);
-    expect(forkHistory.length).toBe(2);
-    const entry0 = forkHistory[0] as { params: { update: { messageId: string } } };
-    const entry1 = forkHistory[1] as { params: { update: { messageId: string } } };
-    expect(entry0.params.update.messageId).toBe("m_one");
-    expect(entry1.params.update.messageId).toBe("m_two");
+    expect(forkHistory.length).toBe(3);
   });
 
   it("fork still succeeds when generateSynopsis throws", async () => {
@@ -443,14 +454,34 @@ describe("seedFromFork — unit test", () => {
       synopsis: { goal: "research options", outcome: "picked A", open_threads: ["review"] },
     });
 
-    const fork = await manager.forkSession(source.sessionId);
-    const forkMeta = await readMeta(fork.sessionId);
+    // Stub mutateRecord so the background phase completes synchronously.
+    const originalMutateRecord = (manager as unknown as { mutateRecord: (...a: unknown[]) => Promise<void> }).mutateRecord;
+    let mutateResolve: (() => void) | undefined;
+    const mutatePromise = new Promise<void>((resolve) => { mutateResolve = resolve; });
+    (manager as unknown as { mutateRecord: (...a: unknown[]) => Promise<void> }).mutateRecord = async (...args: unknown[]) => {
+      await originalMutateRecord.apply(manager, args);
+      mutateResolve?.();
+    };
 
-    // Verify meta.json has the synthesis artifacts
+    const fork = await manager.forkSession(source.sessionId);
+
+    // Phase 1: forkSynthesisState stamped immediately.
+    let forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.forkSynthesisState).toBe("running");
+    expect(forkMeta.summarizedThroughEntry).toBe(3);
+    expect(forkMeta.synopsis).toBeUndefined();
+
+    // Wait for background phase to complete.
+    await mutatePromise;
+
+    forkMeta = await readMeta(fork.sessionId);
+
+    // Verify meta.json has the synthesis artifacts (after background completes)
     expect(forkMeta.forkedFromSessionId).toBe(source.sessionId);
     expect((forkMeta.synopsis as Record<string, unknown>)?.goal).toBe("research options");
     expect((forkMeta.synopsis as Record<string, unknown>)?.outcome).toBe("picked A");
     expect(forkMeta.summarizedThroughEntry).toBe(3);
+    expect(forkMeta.forkSynthesisState).toBeUndefined();
 
     // Now resurrect the fork — this triggers doResurrectFromImport which dispatches
     // to seedFromFork when forkedFromSessionId + synopsis are present.
@@ -511,5 +542,270 @@ describe("seedFromFork — unit test", () => {
     // (internalPromptCapture prevents recording)
     const forkHistoryAfter = await readHistory(fork.sessionId);
     expect(forkHistoryAfter.length).toBe(3); // Same as before — no extra entries
+  });
+});
+
+// ── Two-phase fork tests ────────────────────────────────────────────────
+
+describe("forkSession — two-phase fork (fast return)", () => {
+  beforeEach(() => { mockGenerate.mockResolvedValue({ title: "x", synopsis: { goal: "g" } }); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("returns immediately with running state before synopsis generation starts", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("spawner should not be called"); },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({ lineageId: "lin_fast_return", history: [turnComplete("m_one"), turnComplete("m_two")] }),
+    );
+
+    // Phase 1 state is present immediately after forkSession returns.
+    const fork = await manager.forkSession(source.sessionId);
+    expect(fork.forkedFromSessionId).toBe(source.sessionId);
+
+    let forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.forkSynthesisState).toBe("running");
+    expect(forkMeta.summarizedThroughEntry).toBe(2);
+    expect(forkMeta.synopsis).toBeUndefined();
+
+    // Poll for background phase completion via vi.waitFor.
+    await vi.waitFor(
+      async () => {
+        forkMeta = await readMeta(fork.sessionId);
+        if (forkMeta.forkSynthesisState !== undefined) {
+          throw new Error(`Still running: forkSynthesisState=${forkMeta.forkSynthesisState}`);
+        }
+      },
+      { timeout: 5000, interval: 50 },
+    );
+
+    expect(forkMeta.synopsis).toEqual({ goal: "g" });
+    expect(forkMeta.forkSynthesisState).toBeUndefined();
+  });
+});
+
+describe("forkSession — two-phase fork (background success)", () => {
+  beforeEach(() => { mockGenerate.mockResolvedValue({ title: "x", synopsis: { goal: "g" } }); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("background phase sets synopsis and clears forkSynthesisState on success", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("spawner should not be called"); },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({ lineageId: "lin_bg_success", history: [turnComplete("m_one"), turnComplete("m_two")] }),
+    );
+
+    const fork = await manager.forkSession(source.sessionId);
+    expect(fork.forkedFromSessionId).toBe(source.sessionId);
+
+    // Phase 1: running state stamped immediately.
+    let meta = await readMeta(fork.sessionId);
+    expect(meta.forkSynthesisState).toBe("running");
+    expect(meta.summarizedThroughEntry).toBe(2);
+    expect(meta.synopsis).toBeUndefined();
+
+    // Use vi.waitFor to poll for background phase completion since the
+    // fire-and-forget async IIFE may take multiple microtask cycles.
+    await vi.waitFor(
+      async () => {
+        meta = await readMeta(fork.sessionId);
+        if (meta.forkSynthesisState !== undefined) {
+          throw new Error(`Still running: forkSynthesisState=${meta.forkSynthesisState}`);
+        }
+      },
+      { timeout: 5000, interval: 50 },
+    );
+
+    expect(meta.synopsis).toEqual({ goal: "g" });
+    expect(meta.forkSynthesisState).toBeUndefined();
+  });
+});
+
+describe("forkSession — two-phase fork (attach without synopsis)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("attaching before background completes skips seeding but does not fail", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("spawner should not be called"); },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({ lineageId: "lin_attach_no_synopsis", history: [turnComplete("m_one"), turnComplete("m_two")] }),
+    );
+
+    // Defer synopsis generation so background stays pending.
+    let deferredResolve: (value: undefined) => void;
+    const deferred = new Promise<undefined>(resolve => { deferredResolve = resolve; });
+    mockGenerate.mockReturnValue(deferred);
+
+    vi.useFakeTimers();
+
+    const fork = await manager.forkSession(source.sessionId);
+
+    // Phase 1 state present, no synopsis yet.
+    let meta = await readMeta(fork.sessionId);
+    expect(meta.forkSynthesisState).toBe("running");
+    expect(meta.synopsis).toBeUndefined();
+
+    // Resurrect the fork and attach — should skip seeding since synopsis isn't set.
+    const resumeParams = await manager.loadFromDisk(fork.sessionId);
+    const mocks: MockAgentControls[] = [];
+    const resurrectMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: process.cwd() });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock.mockResolvedValueOnce({ protocolVersion: 1 }).mockResolvedValueOnce({ sessionId: "u_res" });
+        return m.agent;
+      },
+    );
+
+    const resumedSession = await resurrectMgr.resurrect(resumeParams!);
+
+    // Attach a client — should NOT trigger seedFromFork since synopsis is undefined.
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import("../__tests__/test-utils.js");
+    const stream = makeControlledStream();
+    const conn = new JsonRpcConnection(stream);
+    await resumedSession.attach({ clientId: "c1", connection: conn }, "full");
+
+    // With fake timers, background phase stays pending (deferred not resolved).
+    // No session/prompt calls — seeding was skipped.
+    const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    const promptCalls = requestMock.mock.calls.filter((c: unknown[]) => c[0] === "session/prompt");
+    expect(promptCalls.length).toBe(0);
+
+    // Resolve background so state is clean.
+    deferredResolve!(undefined);
+    vi.advanceTimersByTime(100);
+
+    vi.useRealTimers();
+  });
+});
+
+describe("forkSession — two-phase fork (mutateRecord failure tolerance)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("phase 2 error does not crash the fork — background failure tolerance", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("spawner should not be called"); },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({ lineageId: "lin_mutate_fail", history: [turnComplete("m_one"), turnComplete("m_two")] }),
+    );
+
+    // Make generateSynopsis throw in the background phase.
+    mockGenerate.mockRejectedValue(new Error("synthesis service unavailable"));
+
+    const fork = await manager.forkSession(source.sessionId);
+    expect(fork.forkedFromSessionId).toBe(source.sessionId);
+
+    // Phase 1 should have succeeded.
+    let meta = await readMeta(fork.sessionId);
+    expect(meta.forkSynthesisState).toBe("running");
+    expect(meta.summarizedThroughEntry).toBe(2);
+
+    // Wait for background phase to attempt and fail — error is caught gracefully.
+    await vi.waitFor(
+      async () => {
+        meta = await readMeta(fork.sessionId);
+        if (meta.forkSynthesisState !== undefined) {
+          throw new Error(`Still running: forkSynthesisState=${meta.forkSynthesisState}`);
+        }
+      },
+      { timeout: 5000, interval: 50 },
+    );
+
+    // Synopsis is NOT set because generation failed.
+    expect(meta.synopsis).toBeUndefined();
+  });
+});
+
+describe("forkSession — two-phase fork (background failure)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("phase 2 clears running state and preserves history on synopsis generation failure", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("spawner should not be called"); },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({ lineageId: "lin_bg_fail", history: [turnComplete("m_one"), turnComplete("m_two")] }),
+    );
+
+    // Make generateSynopsis throw.
+    mockGenerate.mockRejectedValue(new Error("synthesis service unavailable"));
+
+    const fork = await manager.forkSession(source.sessionId);
+    expect(fork.forkedFromSessionId).toBe(source.sessionId);
+
+    // Phase 1: running state stamped immediately.
+    let meta = await readMeta(fork.sessionId);
+    expect(meta.forkSynthesisState).toBe("running");
+    expect(meta.summarizedThroughEntry).toBe(2);
+
+    // Wait for background phase to attempt and fail using vi.waitFor.
+    await vi.waitFor(
+      async () => {
+        meta = await readMeta(fork.sessionId);
+        expect(meta.forkSynthesisState).toBeUndefined();
+      },
+      { timeout: 5000, interval: 10 },
+    );
+
+    // Synopsis is NOT set because generation failed.
+    expect(meta.synopsis).toBeUndefined();
+    // History still intact — background failure doesn't corrupt data.
+    const history = await readHistory(fork.sessionId);
+    expect(history.length).toBe(2);
+  });
+});
+
+describe("forkSession — two-phase fork (immediately after return)", () => {
+  beforeEach(() => { mockGenerate.mockResolvedValue({ title: "x", synopsis: { goal: "g" } }); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("phase 1 state is present immediately after forkSession returns", async () => {
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => { throw new Error("spawner should not be called"); },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({ lineageId: "lin_immediate", history: [turnComplete("m_one"), turnComplete("m_two")] }),
+    );
+
+    const fork = await manager.forkSession(source.sessionId);
+    expect(fork.forkedFromSessionId).toBe(source.sessionId);
+
+    // Phase 1 state is present immediately.
+    let meta = await readMeta(fork.sessionId);
+    expect(meta.forkSynthesisState).toBe("running");
+    expect(meta.summarizedThroughEntry).toBe(2);
+    expect(meta.synopsis).toBeUndefined();
+
+    // Poll for background phase completion via vi.waitFor.
+    await vi.waitFor(
+      async () => {
+        meta = await readMeta(fork.sessionId);
+        if (meta.forkSynthesisState !== undefined) {
+          throw new Error(`Still running: forkSynthesisState=${meta.forkSynthesisState}`);
+        }
+      },
+      { timeout: 5000, interval: 50 },
+    );
+
+    expect(meta.synopsis).toEqual({ goal: "g" });
+    expect(meta.forkSynthesisState).toBeUndefined();
   });
 });

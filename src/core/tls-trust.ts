@@ -76,7 +76,7 @@ export async function fetchPeerFingerprint(
       servername: host,
       rejectUnauthorized: false,
       autoSelectFamily: true,
-    });
+    } as tls.ConnectionOptions);
     let settled = false;
     const finish = (err: Error | null, fp?: string): void => {
       if (settled) {

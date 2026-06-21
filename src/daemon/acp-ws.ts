@@ -597,7 +597,7 @@ export function registerAcpWsEndpoint(
         }
 
         if (route === "chain") {
-          const response = await session.emitToChain(processIdentity.name, method, envelope);
+          const response = await session.emitToChain(processIdentity.name, method as string, envelope);
           // Surface the agent's response (for request methods) so the
           // transformer can use it — typically to discharge a parked
           // processing claim with the modified prompt's actual result.
@@ -606,7 +606,7 @@ export function registerAcpWsEndpoint(
         }
 
         if (route === "daemon") {
-          const response = await session.emitToChain(processIdentity.name, method, envelope);
+          const response = await session.emitToChain(processIdentity.name, method as string, envelope);
           return { ok: true, response };
         }
 
@@ -2423,26 +2423,27 @@ export async function handleAttentionClear(
 // Routes through buildHydraSessionMeta so the field set and naming stay
 // identical to session/list and the live attach/new response.
 function buildViewerResponseMeta(
-  fromDisk: ResurrectParams,
-): Record<string, unknown> {
-  const entry: SessionListEntry = {
-    sessionId: fromDisk.hydraSessionId,
-    upstreamSessionId: fromDisk.upstreamSessionId,
-    cwd: fromDisk.cwd,
-    title: fromDisk.title,
-    agentId: fromDisk.agentId,
-    currentModel: fromDisk.currentModel,
-    currentUsage: fromDisk.currentUsage,
-    forkedFromSessionId: fromDisk.forkedFromSessionId,
-    forkedFromMessageId: fromDisk.forkedFromMessageId,
-    originatingClient: fromDisk.originatingClient,
-    interactive: fromDisk.interactive,
-    updatedAt: fromDisk.createdAt ?? new Date().toISOString(),
-    attachedClients: 0,
-    status: "cold",
-    busy: false,
-    awaitingInput: false,
-  };
+   fromDisk: ResurrectParams,
+ ): Record<string, unknown> {
+   const entry: SessionListEntry = {
+     sessionId: fromDisk.hydraSessionId,
+     upstreamSessionId: fromDisk.upstreamSessionId,
+     cwd: fromDisk.cwd,
+     title: fromDisk.title,
+     agentId: fromDisk.agentId,
+     currentModel: fromDisk.currentModel,
+     currentUsage: fromDisk.currentUsage,
+     forkedFromSessionId: fromDisk.forkedFromSessionId,
+     forkedFromMessageId: fromDisk.forkedFromMessageId,
+     forkSynthesisState: fromDisk.forkSynthesisState,
+     originatingClient: fromDisk.originatingClient,
+     interactive: fromDisk.interactive,
+     updatedAt: fromDisk.createdAt ?? new Date().toISOString(),
+     attachedClients: 0,
+     status: "cold",
+     busy: false,
+     awaitingInput: false,
+   };
   const extras: LiveSessionMetaExtras = {
     currentMode: fromDisk.currentMode,
     agentArgs: fromDisk.agentArgs,

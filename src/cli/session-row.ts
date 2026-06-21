@@ -45,6 +45,10 @@ export interface SessionSummary {
   // the STATE cell (`LIVE⟳`) so operators can spot mid-compaction
   // sessions at a glance without a per-session GET /compact/status call.
   compactionState?: unknown;
+  // Present when this session is a fork whose synopsis is being generated
+  // in the background. Drives ✨ (running) or ⚠ (failed) in the STATE
+  // cell so operators can spot mid-synthesis forks at a glance.
+  forkSynthesisState?: "running" | "failed";
 }
 
 export interface Row {
@@ -188,6 +192,7 @@ export function toRow(s: SessionSummary, now: number = Date.now()): Row {
       s.busy,
       s.awaitingInput,
       isCompactionInProgress(s.compactionState),
+      s.forkSynthesisState,
     ),
     agent: formatAgentCell(s.agentId),
     model: shortenModel(s.currentModel) ?? "-",
@@ -236,10 +241,13 @@ export function formatUpstreamCell(
 // Live/cold state cell. Cold sessions render as `COLD`. Live sessions
 // render as `LIVE◦` when the agent is blocked awaiting the user (a
 // permission request / posed question), `LIVE•` when actively mid-turn,
-// `LIVE⟳` when background compaction is running, or plain `LIVE` when
-// idle. Precedence: awaiting-input > busy > compacting > idle. The two
-// user-attention signals (◦, •) outrank the background-work signal (⟳)
-// because they indicate something the operator may need to react to.
+// `LIVE✨` when fork synopsis synthesis is running, `LIVE⟳` when
+// background compaction is running, or plain `LIVE` when idle.
+// Precedence: awaiting-input > busy > synthesizing > compacting > idle.
+// The two user-attention signals (◦, •) outrank the background-work
+// signals because they indicate something the operator may need to react
+// to. Failed synthesis shows ⚠ below any activity signal so it is always
+// visible regardless of what else is happening.
 // The HEADER row reuses formatRow's plumbing but its `state` cell is
 // literal "STATE".
 function formatState(
@@ -247,15 +255,22 @@ function formatState(
   busy: boolean | undefined,
   awaitingInput: boolean | undefined,
   compacting: boolean | undefined,
+  forkSynthesisState?: "running" | "failed",
 ): string {
   if (status === "cold") {
     return "COLD";
   }
   if (awaitingInput) {
-    return "LIVE\u25e6";
+    return forkSynthesisState === "failed" ? "LIVE◦⚠" : "LIVE\u25e6";
   }
   if (busy) {
-    return "LIVE\u2022";
+    return forkSynthesisState === "failed" ? "LIVE•⚠" : "LIVE\u2022";
+  }
+  if (forkSynthesisState === "running") {
+    return "LIVE✨";
+  }
+  if (forkSynthesisState === "failed") {
+    return "LIVE⚠";
   }
   if (compacting) {
     return "LIVE\u27f3";

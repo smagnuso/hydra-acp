@@ -374,7 +374,7 @@ async function probeChainValidation(
       }
       resolve(result);
     };
-    const socket = tls.connect({ host, port, servername: host, autoSelectFamily: true });
+    const socket = tls.connect({ host, port, servername: host, autoSelectFamily: true } as unknown as Parameters<typeof tls.connect>[0]);
     const timer = setTimeout(
       () => finish({ kind: "error", message: `TLS connect timed out after ${timeoutMs}ms` }),
       timeoutMs,

@@ -169,6 +169,9 @@ export interface ResurrectParams {
   // Session; surfaced in list views so future UI can show "branched from <id>".
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  // Synthesis-fork state restored from meta.json on resurrect so the
+  // live Session carries it forward and list views see it immediately.
+  forkSynthesisState?: "running" | "failed";
   // MCP server descriptors to inject at session/load time. Mirrors
   // CreateSessionParams.mcpServers — the WS layer mints fresh per-session
   // bearer tokens and builds descriptors for currently-registered extension
@@ -987,6 +990,12 @@ export class SessionManager {
     // Session, so any user prompt arriving mid-seed queues behind it.
     if (params.forkedFromSessionId && params.synopsis) {
       void session.seedFromFork(params.synopsis).catch(() => undefined);
+    } else if (params.forkedFromSessionId && (params.summarizedThroughEntry ?? 0) > 0) {
+      // Synthesis fork without (yet) a synopsis — background generation
+      // is in flight or failed. Full history is already in the fork's
+      // history.jsonl and recall MCP mints from summarizedThroughEntry.
+      // Skip seeding; the agent can use recall on demand.
+      this.logger?.info(`fork ${session.sessionId}: synthesis pending or failed — skipping seed, recall available`);
     } else {
       void session.seedFromImport().catch(() => undefined);
     }
@@ -1893,6 +1902,7 @@ export class SessionManager {
       priority: record.priority,
       forkedFromSessionId: record.forkedFromSessionId,
       forkedFromMessageId: record.forkedFromMessageId,
+      forkSynthesisState: record.forkSynthesisState,
       forwardedEnv: record.forwardedEnv,
       compactionState: record.compactionState,
       attentionFlags: record.attentionFlags?.filter(
@@ -2223,6 +2233,7 @@ export class SessionManager {
         busy: session.turnStartedAt !== undefined,
         awaitingInput: session.awaitingInput,
         compactionState: session.compactionState,
+        forkSynthesisState: session.forkSynthesisState,
       });
     }
     // Propagate disk errors so list()'s cache entry evicts and the next
@@ -2277,6 +2288,7 @@ export class SessionManager {
         busy: false,
         awaitingInput: false,
         compactionState: r.compactionState,
+        forkSynthesisState: r.forkSynthesisState,
       });
     }
     entries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
@@ -2476,9 +2488,8 @@ export class SessionManager {
     let forkSynthesisState: "running" | undefined;
     // Hoisted for synthesis-mode phase 2 (background synopsis generation).
     // Undefined for verbatim forks.
-    let targetAgentDef: Awaited<ReturnType<typeof this.registry.getAgent>> | undefined;
-    let spawnPlan: Awaited<ReturnType<typeof planSpawn>> | undefined;
     let sourceModel: string | undefined;
+    let pendingSynthAgentDef: Awaited<ReturnType<typeof this.registry.getAgent>> | undefined;
 
     // Timeout for synopsis generation — reused in phase 1 (validation) and
     // phase 2 (background).  Same default as synopsis-agent.ts (120 s).
@@ -2522,12 +2533,11 @@ export class SessionManager {
       forkedAt = "";
       slicedHistory = sourceHistory; // full copy
 
-      // Resolve target agent def + spawn plan — only synthesis mode
-      // needs these for generateSynopsis.  Verbatim forks skip this
-      // entirely (avoids registry lookup + npm-prefetch on the /btw
-      // hot path).  Must happen in phase 1 (synchronous) so we have the
-      // data before returning to the caller.
-      targetAgentDef = await this.registry.getAgent(targetAgentId);
+      // Validate target agent exists (cheap registry lookup). The
+      // expensive part — planSpawn / npm-prefetch — is deferred to phase 2
+      // so the HTTP response returns quickly and the TUI picker can
+      // navigate to the new session without waiting on a network install.
+      const targetAgentDef = await this.registry.getAgent(targetAgentId);
       if (!targetAgentDef) {
         const err = new Error(
           `agent ${targetAgentId} not found in registry`,
@@ -2535,9 +2545,8 @@ export class SessionManager {
         err.code = JsonRpcErrorCodes.AgentNotInstalled;
         throw err;
       }
-      spawnPlan = await planSpawn(targetAgentDef, [], {
-        npmRegistry: this.npmRegistry,
-      });
+      // Stash for phase 2.
+      pendingSynthAgentDef = targetAgentDef;
 
       // Phase 1 (synchronous): stamp forkSynthesisState="running" so the
       // recall MCP mint predicate fires immediately on attach.
@@ -2613,6 +2622,7 @@ export class SessionManager {
       cwd: opts.cwd,
       forkedFromSessionId: sourceSessionId,
       forkedFromMessageId: forkedAt,
+      ...(forkSynthesisState !== undefined ? { forkSynthesisState } : {}),
     });
 
     // Phase 2 (background, fire-and-forget): generate synopsis for the
@@ -2626,10 +2636,17 @@ export class SessionManager {
           // idiom + model.  TODO: plumb an AbortSignal so a disconnected
           // HTTP client can cancel synopsis generation (currently orphans
           // the ephemeral agent run).
+          // planSpawn deferred into phase 2 — it can do an npm install on
+          // first run for a given agent/version, which would otherwise
+          // block the phase-1 HTTP response (and the TUI picker behind it)
+          // for seconds.
+          const spawnPlan = await planSpawn(pendingSynthAgentDef!, [], {
+            npmRegistry: this.npmRegistry,
+          });
           const synopsisResult = await generateSynopsis({
             agentId: targetAgentId,
             cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
-            plan: spawnPlan!,
+            plan: spawnPlan,
             history: sourceHistory,
             modelId: sourceModel,
             sessionId: sourceSessionId,
@@ -2689,6 +2706,10 @@ export class SessionManager {
     // unset so meta.json doesn't lie about the origin.
     forkedFromSessionId?: string;
     forkedFromMessageId?: string;
+    // Transient marker for synthesis-mode forks — stamped in phase 1 so the
+    // recall MCP mint predicate fires immediately. Cleared by the background
+    // phase via mutateRecord once synopsis lands or fails.
+    forkSynthesisState?: "running" | "failed";
   }): Promise<void> {
     // zod's z.unknown() makes params optional in the inferred type, but
     // HistoryStore writes whatever JSON shape it was handed; the on-disk
@@ -2749,6 +2770,9 @@ export class SessionManager {
         title: args.bundle.session.title,
         synopsis: args.bundle.session.synopsis,
         summarizedThroughEntry: args.bundle.session.summarizedThroughEntry,
+        ...(args.forkSynthesisState !== undefined
+          ? { forkSynthesisState: args.forkSynthesisState }
+          : {}),
         currentModel: args.bundle.session.currentModel,
         currentMode: args.bundle.session.currentMode,
         currentUsage: args.bundle.session.currentUsage,

@@ -164,6 +164,12 @@ export const SessionRecord = z.object({
   // ended at. Kept so future UI can show "branched from turn N of session X".
   forkedFromSessionId: z.string().optional(),
   forkedFromMessageId: z.string().optional(),
+  // When set, this fork session's background synopsis generation is in
+  // progress ("running") or terminated abnormally ("failed"). Absent means
+  // either not a synthesis fork, or synopsis already landed (check `synopsis`
+  // field). Cleared (field removed) on successful completion so list
+  // endpoints treat "absent" as the normal/quiet state.
+  forkSynthesisState: z.enum(["running", "failed"]).optional(),
   // clientInfo from the process that issued session/new. Display only
   // since the `interactive` flag below; kept on the record for log
   // attribution and as the legacy hint inside effectiveInteractive
@@ -333,6 +339,7 @@ export function recordFromMemorySession(args: {
   parentSessionId?: string;
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  forkSynthesisState?: "running" | "failed";
   originatingClient?: PersistedOriginatingClient;
   interactive?: boolean;
   priority?: number;
@@ -369,6 +376,7 @@ export function recordFromMemorySession(args: {
     parentSessionId: args.parentSessionId,
     forkedFromSessionId: args.forkedFromSessionId,
     forkedFromMessageId: args.forkedFromMessageId,
+    forkSynthesisState: args.forkSynthesisState,
     originatingClient: args.originatingClient,
     interactive: args.interactive,
     priority: args.priority,

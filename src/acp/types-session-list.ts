@@ -88,6 +88,11 @@ export const SessionListEntry = z.object({
   // those that have never been compacted. Lets list views surface a
   // badge without needing a per-session GET /compact call.
   compactionState: z.any().optional(),
+  // Present when this session is a fork whose synopsis is being
+  // generated in the background. Values: "running" | "failed".
+  // Absent when not a synthesis fork or when synopsis is already
+  // present and clean. Lets list views render a synthesizing indicator.
+  forkSynthesisState: z.enum(["running", "failed"]).optional(),
   _meta: z.record(z.unknown()).optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -204,6 +209,9 @@ export function buildHydraSessionMeta(
   }
   if (entry.compactionState !== undefined) {
     meta.compactionState = entry.compactionState;
+  }
+  if (entry.forkSynthesisState !== undefined) {
+    meta.forkSynthesisState = entry.forkSynthesisState;
   }
   if (extras) {
     if (extras.clientId !== undefined) {

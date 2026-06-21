@@ -225,6 +225,10 @@ export interface SessionInit {
   // meta.json so list views can show "branched from <id>".
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
+  // Synthesis-fork state set by two-phase fork. "running" while synopsis
+  // generation is in progress, "failed" when it errors. Absent when not a
+  // synthesis fork or when synopsis is already present and clean.
+  forkSynthesisState?: "running" | "failed";
   // clientInfo from the process that issued session/new. Carried for
   // log attribution and as the legacy hint inside effectiveInteractive.
   originatingClient?: { name: string; version?: string };
@@ -383,6 +387,7 @@ export class Session {
   readonly parentSessionId: string | undefined;
   readonly forkedFromSessionId: string | undefined;
   readonly forkedFromMessageId: string | undefined;
+  forkSynthesisState: "running" | "failed" | undefined;
   readonly originatingClient: { name: string; version?: string } | undefined;
   // Tristate. Mutates from undefined → true on first prompt (or directly
   // false if init.interactive === false). Persisted via interactiveHandlers.
@@ -697,6 +702,7 @@ export class Session {
     this.parentSessionId = init.parentSessionId;
     this.forkedFromSessionId = init.forkedFromSessionId;
     this.forkedFromMessageId = init.forkedFromMessageId;
+    this.forkSynthesisState = init.forkSynthesisState;
     this.originatingClient = init.originatingClient;
     this.title = init.title;
     this.scheduleSynopsisHook = init.scheduleSynopsis;

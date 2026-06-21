@@ -1334,7 +1334,7 @@ describe("startDaemon", () => {
       });
 
       // Restart the daemon with the pre-existing session in place.
-      await handle.shutdown().catch(() => undefined);
+      await handle!.shutdown().catch(() => undefined);
       handle = null;
       handle = await startDaemon(testConfig(), TEST_TOKEN);
       const p = port(handle);
@@ -1371,7 +1371,7 @@ describe("startDaemon", () => {
         ],
       });
 
-      await handle.shutdown().catch(() => undefined);
+      await handle!.shutdown().catch(() => undefined);
       handle = null;
       handle = await startDaemon(testConfig(), TEST_TOKEN);
       const p = port(handle);

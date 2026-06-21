@@ -114,10 +114,15 @@ export interface DiscoveredSession {
   // User-set sort weight. >0 floats the session to the top of the
   // picker; absent / 0 means normal priority. Toggled from the picker
   // with `*`.
-  priority?: number;
+ priority?: number;
   // Present when compaction is in progress. Lets list views surface a
-  // badge without needing a per-session GET /compact call.
+  // badge without needing a per-session GET /compact/status call.
   compactionState?: unknown;
+  // Present when this session is a fork whose synopsis is being generated
+  // in the background. Values: "running" | "failed". Absent when not a
+  // synthesis fork or when synopsis is already present and clean. Lets
+  // list views render a synthesizing indicator.
+  forkSynthesisState?: "running" | "failed";
 }
 
 export interface DiscoveredUsage {
@@ -195,6 +200,7 @@ export async function listSessions(
     interactive: s.interactive,
     priority: s.priority,
     compactionState: s.compactionState,
+    forkSynthesisState: s.forkSynthesisState,
   }));
 }
 

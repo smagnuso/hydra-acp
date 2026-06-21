@@ -556,6 +556,11 @@ interface SessionContext {
     cwd: string;
     upstreamSessionId: string;
   };
+  // True when this ctx was just minted by runForkFlow (the user picked
+  // "fork from here" in the picker / /btw flow). Drives the launch
+  // status line so the user sees "Forking session…" instead of the
+  // generic "Resuming session…" while the daemon's synopsis pass runs.
+  isFreshFork?: boolean;
 }
 
 // How long the upstream may be silent (no session/update arrivals)
@@ -970,7 +975,9 @@ async function runSession(
   const launchLabelBase =
     ctx.sessionId === "__new__"
       ? "Starting new session…"
-      : "Resuming session…";
+      : ctx.isFreshFork
+        ? "Forking session…"
+        : "Resuming session…";
   const installStatus = createInstallStatusLine(term, launchLabelBase);
   installStatus.write(launchLabelBase);
 
@@ -1114,6 +1121,10 @@ async function runSession(
   // for peer-triggered turns too, not just our own.
   let sessionBusySince: number | null = null;
   let sessionElapsedTimer: NodeJS.Timeout | null = null;
+  // Timer that periodically polls the daemon for the current session's
+  // forkSynthesisState so the banner indicator stays in sync while
+  // attached. Stopped when synthesis completes, fails, or on teardown.
+  let synthesisPollTimer: NodeJS.Timeout | null = null;
   // Wall-clock moment of the most recent session/update we received from
   // the daemon. The 1Hz timer reads this to detect a stalled upstream
   // (silence past STALL_THRESHOLD_MS while busy) and flip the banner red.
@@ -1596,6 +1607,53 @@ async function runSession(
       const raw = typeof u.error === "string" ? u.error : "unknown error";
       const truncated = raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
       screen.notify(`compaction failed: ${truncated}`, 5000);
+    }
+  };
+
+  // Periodically poll the daemon for the current session's forkSynthesisState.
+  // When synthesis completes (field removed) or fails, clears the banner
+  // indicator and stops polling. Uses a 5s interval — enough cadence to
+  // give visible feedback without hammering the daemon.
+  const startSynthesisPoll = (): void => {
+    if (synthesisPollTimer !== null) {
+      return;
+    }
+    synthesisPollTimer = setInterval(async () => {
+      try {
+        const res = await fetch(
+          `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}`,
+          { headers: { Authorization: `Bearer ${target.token}` } },
+        );
+        if (!res.ok) {
+          return;
+        }
+        const data = (await res.json()) as { forkSynthesisState?: "running" | "failed" };
+        if (data.forkSynthesisState === undefined) {
+          // Synthesis completed — field removed.
+          screen.setSynthesisIndicator(null);
+          screen.notify("synthesis complete", 2000);
+          if (synthesisPollTimer !== null) {
+            clearInterval(synthesisPollTimer);
+            synthesisPollTimer = null;
+          }
+        } else if (data.forkSynthesisState === "failed") {
+          screen.setSynthesisIndicator("⚠ synthesis failed");
+          screen.notify("synthesis failed — fork still usable via recall", 8000);
+          if (synthesisPollTimer !== null) {
+            clearInterval(synthesisPollTimer);
+            synthesisPollTimer = null;
+          }
+        }
+        // "running" → keep polling, indicator stays.
+      } catch {
+        // Non-fatal: silently skip on any error.
+      }
+    }, 5_000);
+  };
+  const stopSynthesisPoll = (): void => {
+    if (synthesisPollTimer !== null) {
+      clearInterval(synthesisPollTimer);
+      synthesisPollTimer = null;
     }
   };
 
@@ -3306,6 +3364,11 @@ async function runSession(
       clearInterval(sessionElapsedTimer);
       sessionElapsedTimer = null;
     }
+    // Synthesis poller — same cleanup pattern as the elapsed timer.
+    if (synthesisPollTimer !== null) {
+      clearInterval(synthesisPollTimer);
+      synthesisPollTimer = null;
+    }
     for (const timer of amendPendingPaintTimers.values()) {
       clearTimeout(timer);
     }
@@ -3345,6 +3408,9 @@ async function runSession(
       void killSession(target, dead).catch(() => undefined);
       btwSessionId = null;
     }
+    // Tear down the synthesis poller when switching away from a session.
+    stopSynthesisPoll();
+    screen.setSynthesisIndicator(null);
     // If the user has half-typed text in the prompt, snapshot it into
     // history before opening the picker. Picking a different session
     // tears down the dispatcher and loses the draft; even on abort the
@@ -6240,6 +6306,32 @@ async function runSession(
     }
   })();
 
+  // Attach-time fork-synthesis check — mirrors the compaction block above.
+  // If this session is a synthesis fork that's still in progress, seed the
+  // banner indicator and start a periodic poller so the user sees state
+  // transitions (completion / failure) without having to re-attach.
+  void (async () => {
+    try {
+      const res = await fetch(
+        `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}`,
+        { headers: { Authorization: `Bearer ${target.token}` } },
+      );
+      if (!res.ok) {
+        return;
+      }
+      const data = (await res.json()) as { forkSynthesisState?: "running" | "failed" };
+      if (data.forkSynthesisState === "running") {
+        screen.setSynthesisIndicator("synthesizing context…");
+        startSynthesisPoll();
+      } else if (data.forkSynthesisState === "failed") {
+        screen.setSynthesisIndicator("⚠ synthesis failed");
+        screen.notify("synthesis failed — fork still usable via recall", 8000);
+      }
+    } catch {
+      // Non-fatal: silently skip on any error.
+    }
+  })();
+
   // Mid-turn reattach reconcile. History replay incremented pendingTurns
   // for the unmatched prompt_received, but adjustPendingTurns ran before
   // screenRef was set so the busy banner / elapsed timer transition was
@@ -6826,6 +6918,7 @@ async function runForkFlow(
       sessionId: result.sessionId,
       agentId: choice.sourceAgentId ?? "",
       cwd,
+      isFreshFork: true,
       // For foreign-never-launched forks, the daemon stamped the chosen
       // cwd onto meta.json via the POST body, but the very first attach
       // still goes through the import-reseed path (upstreamSessionId=""),
