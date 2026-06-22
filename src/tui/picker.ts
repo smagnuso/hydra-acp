@@ -781,6 +781,7 @@ export async function pickSession(
       transientStatus ?? "",
       searchActive ? `1|${searchTerm}|${visible.length}` : "0",
       formatIndicator(),
+      escHintHovered ? "h1" : "h0",
     ].join("\u0001");
   };
   const paintIndicator = (): void => {
@@ -844,7 +845,11 @@ export async function pickSession(
           );
           term.dim.noFormat(leftText);
           term.dim(" ".repeat(gap));
-          term.dim.noFormat(escHint);
+          if (escHintHovered) {
+            term.noFormat(escHint);
+          } else {
+            term.dim.noFormat(escHint);
+          }
           escHitCols = {
             start: termWidth - rightMargin - hintWidth + 1,
             end: termWidth - rightMargin,
@@ -1577,6 +1582,7 @@ export async function pickSession(
     // A click landing inside this range on the indicator row triggers the
     // same tryAbort() as pressing ESC.
     let escHitCols: { start: number; end: number } | null = null;
+    let escHintHovered = false;
   let tkStdinHandler: ((chunk: Buffer) => void) | null = null;
   // Assigned later (in the Promise body, after dispatch/grabInput state
   // exists) so the suspend closure can refer to the same listeners /
@@ -3114,6 +3120,25 @@ export async function pickSession(
       if (!isMotion && !isClick) return;
       const y = data?.y;
       if (typeof y !== "number") return;
+      {
+        const x = data?.x;
+        const overEsc =
+          escHitCols !== null &&
+          y === indicatorRow() &&
+          typeof x === "number" &&
+          x >= escHitCols.start &&
+          x <= escHitCols.end;
+        if (overEsc !== escHintHovered) {
+          escHintHovered = overEsc;
+          paintIndicator();
+          if (selectedIdx === 0) {
+            placeComposerCursor();
+            term.hideCursor(false);
+          } else {
+            term.hideCursor(true);
+          }
+        }
+      }
       // "Esc · Go Back" hint on the indicator row: a click inside its
       // recorded column range aborts the picker, matching the ESC key
       // handler in normal mode. escHitCols is only populated by

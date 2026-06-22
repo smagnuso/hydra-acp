@@ -118,6 +118,13 @@ export interface ScreenOptions {
   // When mouse capture is off (selective wheel-only mode or no mouse),
   // this callback is never invoked.
   onMouse?: (ev: MouseEvent) => void;
+  // Invoked when the pointer moves over a keyed block. Returning a non-null
+  // Set of block keys widens the hover-highlight to every row whose
+  // blockKey is in that Set (instead of just the row's own block). Used to
+  // light up a whole thought run together — clicking any member expands
+  // them all, so hover should preview that grouping. Return null/undefined
+  // to use the default per-block scope.
+  onHoverRun?: (key: string) => Set<string> | null | undefined;
   // Invoked once with a keyed-block key the first time any of its rows are
   // painted in the visible window, for blocks registered via
   // notifyWhenVisible(). Used to lazily load deferred content (e.g. fetch a
@@ -370,6 +377,9 @@ export class Screen {
     | ((key: string, rowOffset: number) => boolean)
     | undefined;
   private onMouse: ((ev: MouseEvent) => void) | undefined;
+  private onHoverRun:
+    | ((key: string) => Set<string> | null | undefined)
+    | undefined;
   private onBlockVisible: ((key: string) => void) | undefined;
   private onSuspend: (() => void) | undefined;
   // Keyed blocks awaiting a one-shot "became visible" notification.
@@ -540,6 +550,13 @@ export class Screen {
     guide: [number, number] | null;
     detach: [number, number] | null;
   } | null = null;
+  private hoveredBannerHit: "mode" | "pick" | "guide" | "detach" | null = null;
+  private hoveredBlockKey: string | null = null;
+  private hoveredSubKey: string | null = null;
+  // Expanded set of block keys that should all paint hovered when the
+  // pointer is on any one of them. Populated by onHoverRun (e.g. a
+  // contiguous thought run). null = scope to just hoveredBlockKey.
+  private hoveredRunKeys: Set<string> | null = null;
   private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
   private lastWindowTitle: string | null = null;
   private resizeHandler: () => void;
@@ -663,6 +680,7 @@ export class Screen {
     this.onBlockClick = opts.onBlockClick;
     this.onBlockDoubleClick = opts.onBlockDoubleClick;
     this.onMouse = opts.onMouse;
+    this.onHoverRun = opts.onHoverRun;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
     this.contentRepaintThrottleMs =
@@ -2725,6 +2743,14 @@ export class Screen {
     if (kind !== null && cell !== null && this.onMouse) {
       this.onMouse({ kind, button, x: cell.x, y: cell.y, name });
     }
+    if (kind === "move") {
+      const newHover = cell !== null ? this.bannerHitAt(cell.x, cell.y) : null;
+      if (newHover !== this.hoveredBannerHit) {
+        this.hoveredBannerHit = newHover;
+        this.drawBanner();
+        this.placeCursor();
+      }
+    }
     // Update the OS pointer-shape based on what's under the pointer.
     // Any motion/press event with a valid cell drives the diff —
     // releases are skipped because they imply the user just confirmed
@@ -2732,8 +2758,34 @@ export class Screen {
     // means the row belongs to a clickable scrollback block; that's
     // exactly the affordance we want to surface.
     if (cell !== null && kind !== "release") {
-      const overInteractive = this.keyAtRow(cell.y) !== null;
-      this.setPointerShape(overInteractive ? "pointer" : "default");
+      const info = this.keyAndSubAtRow(cell.y);
+      this.setPointerShape(info !== null ? "pointer" : "default");
+      if (kind === "move") {
+        const newKey = info?.key ?? null;
+        const newSub = info?.sub ?? null;
+        if (newKey !== this.hoveredBlockKey || newSub !== this.hoveredSubKey) {
+          this.hoveredBlockKey = newKey;
+          this.hoveredSubKey = newSub;
+          this.hoveredRunKeys =
+            newKey !== null && this.onHoverRun
+              ? (this.onHoverRun(newKey) ?? null)
+              : null;
+          this.drawScrollback();
+          this.placeCursor();
+        }
+      }
+    } else if (
+      cell === null &&
+      kind === "move" &&
+      (this.hoveredBlockKey !== null ||
+        this.hoveredSubKey !== null ||
+        this.hoveredRunKeys !== null)
+    ) {
+      this.hoveredBlockKey = null;
+      this.hoveredSubKey = null;
+      this.hoveredRunKeys = null;
+      this.drawScrollback();
+      this.placeCursor();
     }
     // Left-click on a keyed scrollback block toggles that single block's
     // expand/collapse via the app. We require a full click — press and
@@ -3401,6 +3453,29 @@ export class Screen {
     }
     const clicked = slice[sliceIdx];
     return clicked?.blockKey ?? null;
+  }
+
+  // Like keyAtRow but also returns the finer-grained hoverSubKey stamped
+  // on the row (when the block opted into per-entry hover scoping). Used
+  // by the mouse motion handler to decide which contiguous run of rows
+  // brightens together.
+  private keyAndSubAtRow(y: number): { key: string; sub: string | null } | null {
+    const w = this.term.width;
+    const top = 1;
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0) return null;
+    const rowIdx = y - top;
+    if (rowIdx < 0 || rowIdx >= visibleRows) return null;
+    const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
+    const end = wrapped.length - this.scrollOffset;
+    const start = Math.max(0, end - visibleRows);
+    const slice = wrapped.slice(start, end);
+    const padTop = Math.max(0, visibleRows - slice.length);
+    const sliceIdx = rowIdx - padTop;
+    if (sliceIdx < 0 || sliceIdx >= slice.length) return null;
+    const clicked = slice[sliceIdx];
+    if (!clicked?.blockKey) return null;
+    return { key: clicked.blockKey, sub: clicked.hoverSubKey ?? null };
   }
 
   // Resolve a 1-based terminal cell (x, y) to a stable position in the
@@ -4087,8 +4162,9 @@ export class Screen {
     const middle = "─".repeat(middleCols);
 
     const transientSig = transient ? `${transient.kind}|${transient.text}` : "";
+    const hoverSig = transient ? "" : (this.hoveredBannerHit ?? "");
     const sig =
-      `bsep|${w}|${this.banner.currentMode ?? ""}|${this.banner.hint}|${transientSig}`;
+      `bsep|${w}|${this.banner.currentMode ?? ""}|${this.banner.hint}|${transientSig}|${hoverSig}`;
 
     this.paintRow(row, sig, () => {
       this.term.bold(middle);
@@ -4100,7 +4176,22 @@ export class Screen {
           this.term.brightYellow.noFormat(transient.text);
         }
       } else {
-        this.term.dim(hintBase);
+        const chunks = hintBase.split(" · ");
+        const hovered = this.hoveredBannerHit;
+        for (let i = 0; i < chunks.length; i++) {
+          if (i > 0) this.term.dim(" · ");
+          const c = chunks[i];
+          let kind: "mode" | "pick" | "guide" | "detach" | null = null;
+          if (c.includes("mode")) kind = "mode";
+          else if (c.includes("pick")) kind = "pick";
+          else if (c.includes("guide")) kind = "guide";
+          else if (c.includes("detach")) kind = "detach";
+          if (kind !== null && kind === hovered) {
+            this.term.noFormat(c);
+          } else {
+            this.term.dim(c);
+          }
+        }
       }
       this.term.bold(tail);
 
@@ -4258,17 +4349,32 @@ export class Screen {
       const line = sliceIdx >= 0 ? slice[sliceIdx] : undefined;
       const activeCol = this.activeMatchCol(line, matchInfo);
       const selRange = line ? this.selectionRangeForChunk(line) : null;
-      const sig = formattedLineSig(
-        "sb",
-        w,
-        line,
-        this.scrollbackHighlight,
-        activeCol,
-        selRange,
-      );
+      const inHoverScope =
+        line !== undefined &&
+        line.blockKey !== undefined &&
+        (line.blockKey === this.hoveredBlockKey ||
+          (this.hoveredRunKeys !== null &&
+            this.hoveredRunKeys.has(line.blockKey)));
+      const hovered =
+        inHoverScope &&
+        // When the hovered row carries a subKey, only rows with the same
+        // subKey light up. Lines that opt out of subKey scoping (header
+        // rows, blocks where the whole thing is one click target) always
+        // brighten together with the block.
+        (this.hoveredSubKey === null ||
+          (line!.hoverSubKey ?? null) === this.hoveredSubKey);
+      const sig =
+        formattedLineSig(
+          "sb",
+          w,
+          line,
+          this.scrollbackHighlight,
+          activeCol,
+          selRange,
+        ) + (hovered ? "|H" : "");
       this.paintRow(row, sig, () => {
         if (line) {
-          this.writeFormattedLine(line, w, activeCol, activeLength, selRange);
+          this.writeFormattedLine(line, w, activeCol, activeLength, selRange, hovered);
         }
       });
     }
@@ -5333,6 +5439,9 @@ export class Screen {
       if (line.blockKey !== undefined) {
         wrappedLine.blockKey = line.blockKey;
       }
+      if (line.hoverSubKey !== undefined) {
+        wrappedLine.hoverSubKey = line.hoverSubKey;
+      }
       if (line.fillRow) {
         wrappedLine.fillRow = true;
       }
@@ -5370,9 +5479,10 @@ export class Screen {
     activeMatchCol: number | null = null,
     activeMatchLength: number = 0,
     selectionRange: { start: number; end: number; toEndOfLine: boolean } | null = null,
+    hovered: boolean = false,
   ): void {
     if (line.prefix) {
-      writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle);
+      writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle, hovered);
     }
     const remaining = Math.max(0, width - cellWidth(line.prefix ?? ""));
     // ANSI lines are already wrapped to the visible-width budget by
@@ -5421,9 +5531,10 @@ export class Screen {
           this.scrollbackHighlight,
           adjustedActive,
           activeMatchLength,
+          hovered,
         );
       } else {
-        writeStyled(this.term, text, line.bodyStyle);
+        writeStyled(this.term, text, line.bodyStyle, hovered);
       }
     };
     if (selectionRange !== null && !line.ansi) {
@@ -5443,7 +5554,7 @@ export class Screen {
           // to a cyan band), making the selection look striped.
           selText = stripTkMarkup(selText);
         }
-        writeStyled(this.term, selText, "selection-highlight");
+        writeStyled(this.term, selText, "selection-highlight", hovered);
       }
       let after = bodyText.slice(selEnd);
       if (usesMarkup && selEnd > selStart) {
@@ -5468,9 +5579,10 @@ export class Screen {
         this.scrollbackHighlight,
         activeMatchCol,
         activeMatchLength,
+        hovered,
       );
     } else {
-      writeStyled(this.term, bodyText, line.bodyStyle);
+      writeStyled(this.term, bodyText, line.bodyStyle, hovered);
     }
     if (line.fillRow) {
       const visible = line.ansi ? stringWidth(bodyText) : cellWidth(bodyText);
@@ -5484,7 +5596,7 @@ export class Screen {
           selectionRange !== null && selectionRange.toEndOfLine
             ? "selection-highlight"
             : line.bodyStyle;
-        writeStyled(this.term, " ".repeat(pad), fillStyle);
+        writeStyled(this.term, " ".repeat(pad), fillStyle, hovered);
       }
     }
     // Defensive reset: if the body contained terminal-kit markup
@@ -5678,12 +5790,13 @@ function writeBodyWithHighlight(
   term: string,
   activeCol: number | null = null,
   _activeLength: number = 0,
+  hovered: boolean = false,
 ): void {
   if (text.length === 0) {
     return;
   }
   if (term.length === 0) {
-    writeStyled(termObj, text, style);
+    writeStyled(termObj, text, style, hovered);
     return;
   }
   const haystack = text.toLowerCase();
@@ -5691,17 +5804,18 @@ function writeBodyWithHighlight(
   while (i < text.length) {
     const next = haystack.indexOf(term, i);
     if (next === -1) {
-      writeStyled(termObj, text.slice(i), style);
+      writeStyled(termObj, text.slice(i), style, hovered);
       return;
     }
     if (next > i) {
-      writeStyled(termObj, text.slice(i, next), style);
+      writeStyled(termObj, text.slice(i, next), style, hovered);
     }
     const isActive = activeCol !== null && next === activeCol;
     writeStyled(
       termObj,
       text.slice(next, next + term.length),
       isActive ? "search-highlight-active" : "search-highlight",
+      hovered,
     );
     i = next + term.length;
   }
@@ -5732,9 +5846,43 @@ function bodyStyleUsesMarkup(style: Style | undefined): boolean {
   );
 }
 
-function writeStyled(term: Terminal, text: string, style: Style | undefined): void {
+function writeStyled(
+  term: Terminal,
+  text: string,
+  style: Style | undefined,
+  hovered: boolean = false,
+): void {
   if (text.length === 0) {
     return;
+  }
+  if (hovered) {
+    switch (style) {
+      case "tool-status-ok":
+      case "tool-status-pending":
+      case "tool-status-cancelled":
+      case "dim":
+        term.noFormat(text);
+        return;
+      case "plan-pending":
+        term(text);
+        return;
+      case "thought":
+        // The thought markdown bakes "^K" (set fg → brightBlack) after every
+        // inline `code` span so the dim gray base holds at rest. On hover
+        // we want the line to stay at default fg after each code span, so
+        // swap "^K" for "^:" (full reset → terminal default fg).
+        term(text.replace(/\^K/g, "^:"));
+        return;
+      case "code":
+        // Lift the grayscale bg from 28 → 60 so the band visibly responds
+        // to hover on top of the cli-highlight ANSI bytes in the body.
+        (term as unknown as {
+          bgColorGrayscale: {
+            white: { noFormat: (g: number, t: string) => void };
+          };
+        }).bgColorGrayscale.white.noFormat(60, text);
+        return;
+    }
   }
   // "agent" and "heading-1/2/3" opt INTO terminal-kit's format processing —
   // parseAgentMarkdown produces `^+bold^:` / `^Cinline^:` markup that
@@ -5781,7 +5929,7 @@ function writeStyled(term: Terminal, text: string, style: Style | undefined): vo
       term.brightBlue.noFormat(text);
       return;
     case "tool-status-ok":
-      term.green.noFormat(text);
+      term.dim.noFormat(text);
       return;
     case "tool-status-fail":
       term.bold.red.noFormat(text);

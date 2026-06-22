@@ -928,6 +928,7 @@ export function _buildToolsLines(args: {
     const state = states.get(id);
     if (state) {
       const toolLines = formatToolLine(state, end);
+      for (const l of toolLines) l.hoverSubKey = id;
       lines.push(...toolLines);
       // Every line emitted for this tool is owned by that tool's id.
       rowOwners.push(...toolLines.map(() => id));
@@ -935,6 +936,7 @@ export function _buildToolsLines(args: {
       // detail body inline below the summary row.
       if (perToolExpanded?.has(id)) {
         const bodyLines = renderToolDetail(state);
+        for (const l of bodyLines) l.hoverSubKey = id;
         lines.push(...bodyLines);
         rowOwners.push(...bodyLines.map(() => id));
       }
@@ -2257,6 +2259,20 @@ async function runSession(
     // scrolls into view.
     onBlockVisible: (key: string) => {
       handleBlockVisible(key);
+    },
+    // Hover scope: thought blocks click as a whole contiguous run (a
+    // click on any member expands them together), so the hover highlight
+    // should preview that grouping. For a collapsed run anchored under
+    // its lead, return the saved member list directly; for expanded
+    // thoughts, recompute the contiguous run on the fly.
+    onHoverRun: (key: string): Set<string> | null => {
+      if (!key.startsWith("thought:")) return null;
+      const saved = collapsedThoughtRuns.get(key);
+      if (saved !== undefined && saved.length > 0) {
+        return new Set(saved);
+      }
+      const run = screen.contiguousRun(key, new Set(renderedThoughts.keys()));
+      return run.length > 0 ? new Set(run) : null;
     },
     // Middle-click pastes the PRIMARY selection, matching native terminal
     // behavior: when mouse capture is on, the terminal can't do its own

@@ -65,6 +65,11 @@ export interface FormattedLine {
   // keyedBlocks entry. Plain appended lines (appendLine/appendLines)
   // carry no key.
   blockKey?: string;
+  // Optional finer-grained hover identifier within a keyed block. When two
+  // rows share blockKey but differ on hoverSubKey, hover highlight scopes
+  // to the matching subKey (e.g. tools: one block per turn but one
+  // hoverSubKey per individual toolCallId).
+  hoverSubKey?: string;
   // When true, the line stays in scrollback but is skipped at draw/measure
   // time (like a hidden thought). Used to fold a contiguous run of thought
   // blocks behind a single "Thoughts" line: the run's secondary lines and
