@@ -48,6 +48,7 @@ export async function promptForAgent(
   term: Terminal,
   agents: DiscoveredAgent[],
   preferred?: string,
+  opts?: { title?: string; intro?: string },
 ): Promise<AgentPromptResult> {
   resetTerminalModes();
   let selected = initialIndex(agents, preferred ?? FALLBACK_PREFERRED_AGENT);
@@ -92,12 +93,12 @@ export async function promptForAgent(
     const layout = drawBox(term, {
       contentHeight,
       contentWidth,
-      title: "Select agent",
+      title: opts?.title ?? "Select agent",
     });
     const innerW = layout.contentW;
     let row = 0;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.noFormat(" Which agent should this session use?");
+    term.noFormat(` ${opts?.intro ?? "Which agent should this session use?"}`);
     row += 2;
     const end = Math.min(agents.length, windowStart + rows);
     for (let i = windowStart; i < end; i++) {

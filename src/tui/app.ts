@@ -3553,7 +3553,7 @@ async function runSession(
       // mutating the live session's opts (which still owns the current
       // session). We translate the shim back into attachOverrides.
       const opsShim: TuiOptions = { ...opts, readonly: false };
-      const decided = await runImportedFirstLaunchFlow(term, chosen, choice, opsShim);
+      const decided = await runImportedFirstLaunchFlow(term, target, chosen, choice, opsShim);
       if (decided.kind === "cancel") {
         screen.start({ skipFullscreen: true });
         screen.resumeRepaint();
@@ -6753,7 +6753,7 @@ async function resolveSession(
       !chosen.upstreamSessionId &&
       !opts.readonly;
     if (isImportedFirstLaunch) {
-      const decided = await runImportedFirstLaunchFlow(term, chosen, choice, opts);
+      const decided = await runImportedFirstLaunchFlow(term, target, chosen, choice, opts);
       if (decided.kind === "cancel") {
         return null;
       }
@@ -6816,6 +6816,7 @@ type ImportedFirstLaunchDecision =
 
 async function runImportedFirstLaunchFlow(
   term: termkit.Terminal,
+  target: RemoteTarget,
   chosen: DiscoveredSession,
   choice: PickerResult & { kind: "attach" },
   opts: TuiOptions,
@@ -6848,6 +6849,17 @@ async function runImportedFirstLaunchFlow(
       };
     }
     // action === "fork-local"
+    const picked = await resolveForkAgent(
+      term,
+      target,
+      choice.agentId ?? chosen.agentId ?? "",
+    );
+    if (picked.kind === "cancel") {
+      return { kind: "cancel" };
+    }
+    if (picked.kind === "back") {
+      continue;
+    }
     const cwdResult = await promptForImportCwd(term, chosen);
     if (cwdResult.kind === "cancel") {
       return { kind: "cancel" };
@@ -6855,7 +6867,7 @@ async function runImportedFirstLaunchFlow(
     if (cwdResult.kind === "back") {
       continue;
     }
-    const agentId = choice.agentId ?? chosen.agentId ?? "";
+    const agentId = picked.agentId;
     return {
       kind: "ctx",
       ctx: {
@@ -6868,6 +6880,46 @@ async function runImportedFirstLaunchFlow(
       },
     };
   }
+}
+
+// Forking inherits the source session's agent. If that agent isn't
+// available on this host (absent from /v1/agents — the same condition the
+// daemon's getAgent rejects at resurrect), prompt for a local replacement
+// using the shared agent picker. Best-effort: a fetch failure, empty list,
+// or unknown source agent leaves the source agent unchanged so the flow
+// proceeds exactly as before.
+async function resolveForkAgent(
+  term: termkit.Terminal,
+  target: RemoteTarget,
+  sourceAgentId: string,
+): Promise<
+  | { kind: "ok"; agentId: string; changed: boolean }
+  | { kind: "back" }
+  | { kind: "cancel" }
+> {
+  if (!sourceAgentId) {
+    return { kind: "ok", agentId: sourceAgentId, changed: false };
+  }
+  let agents;
+  try {
+    agents = await listAgents(target);
+  } catch {
+    return { kind: "ok", agentId: sourceAgentId, changed: false };
+  }
+  if (agents.length === 0 || agents.some((a) => a.id === sourceAgentId)) {
+    return { kind: "ok", agentId: sourceAgentId, changed: false };
+  }
+  const result = await promptForAgent(term, agents, sourceAgentId, {
+    title: "Agent not available here",
+    intro: `Source agent "${sourceAgentId}" isn't installed on this machine — pick a local agent to fork to:`,
+  });
+  if (result.kind === "cancel") {
+    return { kind: "cancel" };
+  }
+  if (result.kind === "back") {
+    return { kind: "back" };
+  }
+  return { kind: "ok", agentId: result.agentId, changed: true };
 }
 
 // Picker's `f` keystroke landed here. If the source was imported from
@@ -6886,6 +6938,20 @@ async function runForkFlow(
   const isForeignNeverLaunched =
     !!choice.sourceImportedFromMachine && !choice.sourceUpstreamSessionId;
   let cwd = choice.sourceCwd;
+
+  const picked = await resolveForkAgent(
+    term,
+    target,
+    choice.sourceAgentId ?? source?.agentId ?? "",
+  );
+  if (picked.kind === "cancel") {
+    return { kind: "cancel" };
+  }
+  if (picked.kind === "back") {
+    return { kind: "back" };
+  }
+  const chosenAgentId = picked.changed ? picked.agentId : undefined;
+
   if (isForeignNeverLaunched) {
     if (!source) {
       // Source row vanished between picker close and lookup — re-show
@@ -6901,13 +6967,13 @@ async function runForkFlow(
     }
     cwd = cwdResult.path;
   }
+  const agentId = chosenAgentId ?? choice.sourceAgentId ?? "";
   let result;
   try {
-    result = await forkSession(
-      target,
-      choice.sourceSessionId,
-      isForeignNeverLaunched ? { cwd } : {},
-    );
+    result = await forkSession(target, choice.sourceSessionId, {
+      ...(isForeignNeverLaunched ? { cwd } : {}),
+      ...(chosenAgentId ? { agentId: chosenAgentId } : {}),
+    });
   } catch (err) {
     term.red(`\nfork failed: ${(err as Error).message}\n`);
     return { kind: "cancel" };
@@ -6916,7 +6982,7 @@ async function runForkFlow(
     kind: "ctx",
     ctx: {
       sessionId: result.sessionId,
-      agentId: choice.sourceAgentId ?? "",
+      agentId,
       cwd,
       isFreshFork: true,
       // For foreign-never-launched forks, the daemon stamped the chosen
@@ -6927,7 +6993,7 @@ async function runForkFlow(
       ...(isForeignNeverLaunched
         ? {
             resumeHint: {
-              agentId: choice.sourceAgentId ?? "",
+              agentId,
               cwd,
               upstreamSessionId: "",
             },

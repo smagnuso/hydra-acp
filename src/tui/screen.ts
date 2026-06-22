@@ -3931,7 +3931,7 @@ export class Screen {
         this.term(titleSep).bold.noFormat(titleText);
       }
       this.term(" ".repeat(gap));
-      this.term.dim.noFormat(agentCell);
+      this.term.noFormat(agentCell);
     });
   }
 
@@ -3964,7 +3964,6 @@ export class Screen {
     }
     const elapsedStr =
       status === "busy" &&
-      !stalled &&
       this.banner.elapsedMs !== undefined &&
       this.banner.elapsedMs >= 1000
         ? formatElapsed(this.banner.elapsedMs)
@@ -4036,7 +4035,13 @@ export class Screen {
         this.term(label);
       }
       if (elapsedInline) {
-        this.term.dim.noFormat(elapsedInline);
+        if (stalled) {
+          this.term.brightRed.noFormat(elapsedInline);
+        } else if (status === "busy") {
+          this.term.brightYellow.noFormat(elapsedInline);
+        } else {
+          this.term.dim.noFormat(elapsedInline);
+        }
       }
       if (sid) {
         this.term.dim(sidSep);
@@ -4050,7 +4055,7 @@ export class Screen {
       this.term.bold(middle);
       if (usageStr) {
         this.term.dim(padAfterMiddle);
-        this.term.dim.noFormat(usageStr);
+        this.term.noFormat(usageStr);
       }
       this.term.bold(tail);
     });
@@ -4209,7 +4214,7 @@ export class Screen {
     }
     this.term.bold(segments.middle);
     if (segments.usage) {
-      this.term.dim.noFormat(segments.usage);
+      this.term.noFormat(segments.usage);
     }
     this.term.bold(segments.right);
   }
