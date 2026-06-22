@@ -3931,7 +3931,7 @@ export class Screen {
         this.term(titleSep).bold.noFormat(titleText);
       }
       this.term(" ".repeat(gap));
-      this.term.cyan.noFormat(agentCell);
+      this.term.dim.noFormat(agentCell);
     });
   }
 
@@ -4025,7 +4025,7 @@ export class Screen {
       `${this.banner.queued}|${this.scrollOffset}|${usageStr}`;
 
     this.paintRow(row, sig, () => {
-      this.term.dim(left);
+      this.term.bold(left);
       if (stalled || status === "disconnected") {
         this.term.brightRed(label);
       } else if (status === "busy") {
@@ -4040,19 +4040,19 @@ export class Screen {
       }
       if (sid) {
         this.term.dim(sidSep);
-        this.term.cyan(sid);
+        this.term.dim(sid);
       }
       for (const c of auxChunks) {
         this.term.dim(" · ");
         c.paint();
       }
       this.term.dim(padBeforeMiddle);
-      this.term.dim(middle);
+      this.term.bold(middle);
       if (usageStr) {
         this.term.dim(padAfterMiddle);
         this.term.dim.noFormat(usageStr);
       }
-      this.term.dim(tail);
+      this.term.bold(tail);
     });
   }
 
@@ -4086,7 +4086,7 @@ export class Screen {
       `bsep|${w}|${this.banner.currentMode ?? ""}|${this.banner.hint}|${transientSig}`;
 
     this.paintRow(row, sig, () => {
-      this.term.dim(middle);
+      this.term.bold(middle);
       this.term.dim(padAfterMiddle);
       if (transient) {
         if (transient.kind === "search") {
@@ -4097,7 +4097,7 @@ export class Screen {
       } else {
         this.term.dim(hintBase);
       }
-      this.term.dim(tail);
+      this.term.bold(tail);
 
       const hits: {
         mode: [number, number] | null;
@@ -4187,7 +4187,7 @@ export class Screen {
     // carries the status colour so an at-a-glance scan of the screen
     // shows colour ONLY where there's actual state: yellow while
     // running, regular (default) when done, red on cancel/error.
-    this.term.dim(segments.left);
+    this.term.bold(segments.left);
     switch (this.btwOverlayStatus) {
       case "busy":
         this.term.brightYellow(segments.label);
@@ -4204,14 +4204,14 @@ export class Screen {
     }
     this.term.dim(segments.sidSep);
     if (segments.sid) {
-      this.term.cyan(segments.sid);
+      this.term.dim(segments.sid);
       this.term.dim(segments.sidTrail);
     }
-    this.term.dim(segments.middle);
+    this.term.bold(segments.middle);
     if (segments.usage) {
       this.term.dim.noFormat(segments.usage);
     }
-    this.term.dim(segments.right);
+    this.term.bold(segments.right);
   }
 
   private drawScrollback(): void {
