@@ -787,8 +787,10 @@ export async function pickSession(
     withSync(() => {
       painter.paintRow(indicatorRow(), indicatorSig(), () => {
         if (mode === "confirm-kill" && pendingAction) {
+          escHitCols = null;
           term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
         } else if (mode === "confirm-delete" && pendingAction) {
+          escHitCols = null;
           if (pendingAction.status === "live") {
             term.brightRed.noFormat(
               `  kill + delete ${shortId(pendingAction.sessionId)}? [y/N]`,
@@ -799,14 +801,18 @@ export async function pickSession(
             );
           }
         } else if (mode === "busy" && pendingAction) {
+          escHitCols = null;
           term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
         } else if (mode === "rename" && pendingAction) {
+          escHitCols = null;
           term.brightYellow.noFormat(`  title: ${renameBuffer}`);
           term.bgBrightYellow(" ");
           term.dim.noFormat("  Enter saves · Esc cancels");
         } else if (transientStatus !== null) {
+          escHitCols = null;
           term.dim.noFormat(`  ${transientStatus}`);
         } else if (searchActive) {
+          escHitCols = null;
           // Search line is anchored to the bottom of the picker so it
           // stays visible regardless of how the session list scrolls
           // above. ^c exits and clears the filter. A trailing block
@@ -819,7 +825,30 @@ export async function pickSession(
               : ` ${visible.length} match${visible.length === 1 ? "" : "es"}`;
           term.dim.noFormat(`${hint} · ^c clears`);
         } else {
-          term.dim.noFormat(formatIndicator());
+          // Normal mode: left side is formatIndicator(); right edge gets
+          // a dim "Esc · Go Back" hint that doubles as a click target
+          // (see escHitCols / onMouse). The padding between left and
+          // hint is rendered with spaces so the previous frame's text
+          // is overwritten even when paintRow's eraseLineAfter only
+          // reaches to the cursor after the hint.
+          const leftText = formatIndicator();
+          const escHint = "Esc · Go Back";
+          const hintWidth = escHint.length;
+          // Right-margin so the hint isn't flush with the terminal edge —
+          // visually matches the inset the rest of the picker chrome uses.
+          const rightMargin = 5;
+          const leftWidth = leftText.length;
+          const gap = Math.max(
+            1,
+            termWidth - leftWidth - hintWidth - rightMargin,
+          );
+          term.dim.noFormat(leftText);
+          term.dim(" ".repeat(gap));
+          term.dim.noFormat(escHint);
+          escHitCols = {
+            start: termWidth - rightMargin - hintWidth + 1,
+            end: termWidth - rightMargin,
+          };
         }
       });
     });
@@ -1541,6 +1570,13 @@ export async function pickSession(
     // matching release becomes "select-only" — it highlights the
     // clicked row but doesn't attach.
     let pickerPressUnfocused = false;
+    // 1-based column range of the right-aligned "Esc · Go Back" hint on
+    // the indicator row. Set by paintIndicator only while mode === "normal"
+    // (the modes where ESC actually aborts the picker, rather than
+    // cancelling a sub-mode like search/rename/confirm); cleared otherwise.
+    // A click landing inside this range on the indicator row triggers the
+    // same tryAbort() as pressing ESC.
+    let escHitCols: { start: number; end: number } | null = null;
   let tkStdinHandler: ((chunk: Buffer) => void) | null = null;
   // Assigned later (in the Promise body, after dispatch/grabInput state
   // exists) so the suspend closure can refer to the same listeners /
@@ -3078,6 +3114,22 @@ export async function pickSession(
       if (!isMotion && !isClick) return;
       const y = data?.y;
       if (typeof y !== "number") return;
+      // "Esc · Go Back" hint on the indicator row: a click inside its
+      // recorded column range aborts the picker, matching the ESC key
+      // handler in normal mode. escHitCols is only populated by
+      // paintIndicator while mode === "normal", so confirm/rename/search
+      // states naturally fall through and ignore the click.
+      if (isClick && escHitCols !== null && y === indicatorRow()) {
+        const x = data?.x;
+        if (
+          typeof x === "number" &&
+          x >= escHitCols.start &&
+          x <= escHitCols.end
+        ) {
+          tryAbort();
+          return;
+        }
+      }
       // Focus model:
       //   * Click on the composer box → focus moves to the composer.
       //   * Click on a session row → focus moves to the list (selecting
