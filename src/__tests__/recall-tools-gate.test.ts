@@ -105,12 +105,12 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
     it("lists the three recall tools (registered unconditionally to keep tools/list wired)", async () => {
       const r = await client!.listTools();
       const names = r.tools.map((t) => t.name).sort();
-      expect(names).toEqual(["recall_range", "recall_search", "recall_tool_calls"]);
+      expect(names).toEqual(["range", "search", "tool_calls"]);
     });
 
-    it("recall_search returns empty matches + a 'no compacted history' note", async () => {
+    it("search returns empty matches + a 'no compacted history' note", async () => {
       const r = await client!.callTool({
-        name: "recall_search",
+        name: "search",
         arguments: { query: "anything" },
       });
       const sc = r.structuredContent as { matches: unknown[]; total_matched: number; note?: string };
@@ -119,9 +119,9 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       expect(sc.note).toContain("no compacted history");
     });
 
-    it("recall_range returns empty text + a 'no compacted history' note", async () => {
+    it("range returns empty text + a 'no compacted history' note", async () => {
       const r = await client!.callTool({
-        name: "recall_range",
+        name: "range",
         arguments: { from_entry: 0, to_entry: 5 },
       });
       const sc = r.structuredContent as { text: string; entry_count: number; note?: string };
@@ -130,9 +130,9 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       expect(sc.note).toContain("no compacted history");
     });
 
-    it("recall_tool_calls returns empty calls + a 'no compacted history' note", async () => {
+    it("tool_calls returns empty calls + a 'no compacted history' note", async () => {
       const r = await client!.callTool({
-        name: "recall_tool_calls",
+        name: "tool_calls",
         arguments: { tool_name: "anything" },
       });
       const sc = r.structuredContent as { calls: unknown[]; note?: string };
@@ -165,9 +165,9 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       }
     });
 
-    it("recall_search returns empty matches + a 'no compacted history' note", async () => {
+    it("search returns empty matches + a 'no compacted history' note", async () => {
       const r = await client!.callTool({
-        name: "recall_search",
+        name: "search",
         arguments: { query: "anything" },
       });
       const sc = r.structuredContent as { matches: unknown[]; note?: string };
@@ -214,35 +214,35 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       }
     });
 
-    it("exposes recall_search", async () => {
+    it("exposes search", async () => {
       const r = await client!.listTools();
       const names = r.tools.map((t) => t.name);
-      expect(names).toContain("recall_search");
+      expect(names).toContain("search");
     });
 
-    it("exposes recall_range", async () => {
+    it("exposes range", async () => {
       const r = await client!.listTools();
       const names = r.tools.map((t) => t.name);
-      expect(names).toContain("recall_range");
+      expect(names).toContain("range");
     });
 
-    it("exposes recall_tool_calls", async () => {
+    it("exposes tool_calls", async () => {
       const r = await client!.listTools();
       const names = r.tools.map((t) => t.name);
-      expect(names).toContain("recall_tool_calls");
+      expect(names).toContain("tool_calls");
     });
 
     it("lists exactly the three recall tools (server is recall-only)", async () => {
       const r = await client!.listTools();
       const names = r.tools.map((t) => t.name).sort();
       expect(names).toEqual(
-        ["recall_range", "recall_search", "recall_tool_calls"],
+        ["range", "search", "tool_calls"],
       );
     });
 
-    it("recall_search finds entries in history", async () => {
+    it("search finds entries in history", async () => {
       const r = await client!.callTool({
-        name: "recall_search",
+        name: "search",
         arguments: { query: "hello" },
       });
       const sc = r.structuredContent as { total_matched: number; matches: Array<{ entryId: number }> };
@@ -250,9 +250,9 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       expect(sc.matches[0]!.entryId).toBe(0);
     });
 
-    it("recall_range returns entries in the requested range", async () => {
+    it("range returns entries in the requested range", async () => {
       const r = await client!.callTool({
-        name: "recall_range",
+        name: "range",
         arguments: { from_entry: 0, to_entry: 0 },
       });
       const sc = r.structuredContent as { entry_count: number; text: string };
@@ -260,7 +260,7 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       expect(sc.text).toContain("hello world");
     });
 
-    it("recall_tool_calls returns entries matching a tool filter", async () => {
+    it("tool_calls returns entries matching a tool filter", async () => {
       populateHistory(session, [
         {
           method: "session/update",
@@ -276,7 +276,7 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
         },
       ]);
       const r = await client!.callTool({
-        name: "recall_tool_calls",
+        name: "tool_calls",
         arguments: { tool_name: "bash" },
       });
       const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -295,7 +295,7 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       }
     });
 
-    it("recall_search returns empty pre-compaction; returns matches post-compaction (same client, same token)", async () => {
+    it("search returns empty pre-compaction; returns matches post-compaction (same client, same token)", async () => {
       h = await makeHarness();
       const historyStore = new HistoryStore();
       const session = makeStreamSession({ historyStore });
@@ -321,10 +321,10 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       // history" note. The list is identical to the post-compaction list
       // — what differs is the answer the tool gives, not its visibility.
       const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-      expect(tools).toEqual(["recall_range", "recall_search", "recall_tool_calls"]);
+      expect(tools).toEqual(["range", "search", "tool_calls"]);
 
       const preCallResult = await client.callTool({
-        name: "recall_search",
+        name: "search",
         arguments: { query: "pre-compaction" },
       });
       const preCall = preCallResult.structuredContent as {
@@ -344,7 +344,7 @@ describe("recall tools — call-time gated on summarizedThroughEntry", () => {
       session.summarizedThroughEntry = 1;
 
       const postCallResult = await client.callTool({
-        name: "recall_search",
+        name: "search",
         arguments: { query: "pre-compaction" },
       });
       const postCall = postCallResult.structuredContent as {

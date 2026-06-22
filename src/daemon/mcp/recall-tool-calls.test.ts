@@ -52,7 +52,7 @@ function populateHistory(
   );
 }
 
-describe("recall_tool_calls — missing both filters rejected", () => {
+describe("tool_calls — missing both filters rejected", () => {
   let h: Harness | null = null;
   let client: Client | null = null;
   const token = "no-filters-token";
@@ -86,7 +86,7 @@ describe("recall_tool_calls — missing both filters rejected", () => {
 
   it("rejects when neither tool_name nor file_path is provided", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: {},
     });
     expect(r.isError).toBe(true);
@@ -97,14 +97,14 @@ describe("recall_tool_calls — missing both filters rejected", () => {
 
   it("rejects when both are empty strings", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "", file_path: "" },
     });
     expect(r.isError).toBe(true);
   });
 });
 
-describe("recall_tool_calls — tool_name filter", () => {
+describe("tool_calls — tool_name filter", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -191,7 +191,7 @@ describe("recall_tool_calls — tool_name filter", () => {
 
   it("returns only Bash tool calls when tool_name is 'Bash'", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Bash" },
     });
     const sc = r.structuredContent as {
@@ -206,7 +206,7 @@ describe("recall_tool_calls — tool_name filter", () => {
 
   it("returns only Read tool calls when tool_name is 'Read'", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read" },
     });
     const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -216,7 +216,7 @@ describe("recall_tool_calls — tool_name filter", () => {
 
   it("uses case-insensitive matching for tool_name", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "bash" },
     });
     const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -225,7 +225,7 @@ describe("recall_tool_calls — tool_name filter", () => {
 
   it("returns empty when tool_name matches nothing", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Write" },
     });
     const sc = r.structuredContent as { calls: unknown[]; truncated: boolean };
@@ -250,7 +250,7 @@ describe("recall_tool_calls — tool_name filter", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Bash" },
     });
     const sc = r.structuredContent as { calls: Array<{ status: string }> };
@@ -273,7 +273,7 @@ describe("recall_tool_calls — tool_name filter", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Bash" },
     });
     const sc = r.structuredContent as { calls: Array<{ status: string }> };
@@ -297,7 +297,7 @@ describe("recall_tool_calls — tool_name filter", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Bash" },
     });
     const sc = r.structuredContent as { calls: Array<{ timestamp?: string }> };
@@ -331,7 +331,7 @@ describe("recall_tool_calls — tool_name filter", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Bash" },
     });
     const sc = r.structuredContent as { calls: Array<{ entryId: number }> };
@@ -356,7 +356,7 @@ describe("recall_tool_calls — tool_name filter", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Edit" },
     });
     const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -365,7 +365,7 @@ describe("recall_tool_calls — tool_name filter", () => {
   });
 });
 
-describe("recall_tool_calls — file_path filter", () => {
+describe("tool_calls — file_path filter", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -440,7 +440,7 @@ describe("recall_tool_calls — file_path filter", () => {
 
   it("returns tool calls that touched src/foo.ts", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { file_path: "src/foo.ts" },
     });
     const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -451,7 +451,7 @@ describe("recall_tool_calls — file_path filter", () => {
 
   it("returns only Edit for src/bar.ts", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { file_path: "src/bar.ts" },
     });
     const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -461,7 +461,7 @@ describe("recall_tool_calls — file_path filter", () => {
 
   it("does not match when file_path is absent from all entries", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { file_path: "src/missing.ts" },
     });
     const sc = r.structuredContent as { calls: unknown[]; truncated: boolean };
@@ -471,7 +471,7 @@ describe("recall_tool_calls — file_path filter", () => {
 
   it("is case-insensitive for file_path matching", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { file_path: "src/FOO.TS" },
     });
     const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -495,7 +495,7 @@ describe("recall_tool_calls — file_path filter", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { file_path: "src/foo.ts" },
     });
     const sc = r.structuredContent as { calls: unknown[] };
@@ -504,7 +504,7 @@ describe("recall_tool_calls — file_path filter", () => {
 
   it("does not match partial paths", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { file_path: "src/ba" },
     });
     const sc = r.structuredContent as { calls: unknown[] };
@@ -526,7 +526,7 @@ describe("recall_tool_calls — file_path filter", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { file_path: "src/foo.ts" },
     });
     const sc = r.structuredContent as { calls: unknown[] };
@@ -534,7 +534,7 @@ describe("recall_tool_calls — file_path filter", () => {
   });
 });
 
-describe("recall_tool_calls — both filters combined", () => {
+describe("tool_calls — both filters combined", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -609,7 +609,7 @@ describe("recall_tool_calls — both filters combined", () => {
 
   it("matches only Edit calls on src/foo.ts when both filters applied", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Edit", file_path: "src/foo.ts" },
     });
     const sc = r.structuredContent as { calls: Array<{ tool: string }> };
@@ -619,7 +619,7 @@ describe("recall_tool_calls — both filters combined", () => {
 
   it("matches nothing when filters are incompatible", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read", file_path: "src/bar.ts" },
     });
     const sc = r.structuredContent as { calls: unknown[]; truncated: boolean };
@@ -629,7 +629,7 @@ describe("recall_tool_calls — both filters combined", () => {
 
   it("matches Edit on src/foo.ts with status included", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Edit", file_path: "src/foo.ts" },
     });
     const sc = r.structuredContent as { calls: Array<{ status: string }> };
@@ -638,7 +638,7 @@ describe("recall_tool_calls — both filters combined", () => {
 
   it("matches Edit on src/bar.ts with failed status", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Edit", file_path: "src/bar.ts" },
     });
     const sc = r.structuredContent as { calls: Array<{ status: string }> };
@@ -646,7 +646,7 @@ describe("recall_tool_calls — both filters combined", () => {
   });
 });
 
-describe("recall_tool_calls — args and truncation", () => {
+describe("tool_calls — args and truncation", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -709,7 +709,7 @@ describe("recall_tool_calls — args and truncation", () => {
 
   it("includes short string args in the response", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read" },
     });
     const sc = r.structuredContent as { calls: Array<{ args: Record<string, unknown> }> };
@@ -733,7 +733,7 @@ describe("recall_tool_calls — args and truncation", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Grep" },
     });
     const sc = r.structuredContent as { calls: Array<{ args: Record<string, unknown> }> };
@@ -760,7 +760,7 @@ describe("recall_tool_calls — args and truncation", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Write" },
     });
     const sc = r.structuredContent as { calls: Array<{ args: Record<string, unknown> }> };
@@ -786,7 +786,7 @@ describe("recall_tool_calls — args and truncation", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Edit" },
     });
     const sc = r.structuredContent as { calls: Array<{ args: Record<string, unknown> }> };
@@ -813,7 +813,7 @@ describe("recall_tool_calls — args and truncation", () => {
     populateHistory(session, entries);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read", limit: 3 },
     });
     const sc = r.structuredContent as { calls: unknown[]; truncated: boolean };
@@ -840,7 +840,7 @@ describe("recall_tool_calls — args and truncation", () => {
     populateHistory(session, entries);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read" },
     });
     const sc = r.structuredContent as { calls: unknown[]; truncated: boolean };
@@ -850,7 +850,7 @@ describe("recall_tool_calls — args and truncation", () => {
 
   it("rejects limit > 100", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read", limit: 101 },
     });
     expect(r.isError).toBe(true);
@@ -858,7 +858,7 @@ describe("recall_tool_calls — args and truncation", () => {
 
   it("rejects limit < 1", async () => {
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read", limit: 0 },
     });
     expect(r.isError).toBe(true);
@@ -883,7 +883,7 @@ describe("recall_tool_calls — args and truncation", () => {
     populateHistory(session, entries);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read", limit: 20 },
     });
     const sc = r.structuredContent as { calls: unknown[]; truncated: boolean };
@@ -913,7 +913,7 @@ describe("recall_tool_calls — args and truncation", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Read" },
     });
     const sc = r.structuredContent as { calls: Array<{ entryId: number }> };
@@ -938,7 +938,7 @@ describe("recall_tool_calls — args and truncation", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_tool_calls",
+      name: "tool_calls",
       arguments: { tool_name: "Bash" },
     });
     const sc = r.structuredContent as { calls: Array<{ args: Record<string, unknown>; status: string }> };

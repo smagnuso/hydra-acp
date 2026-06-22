@@ -8,7 +8,7 @@
 // transport on first request → cache per token → tear down on session
 // close via tokenRegistry.addDisposer.
 //
-// Tool set is gated: recall_search / recall_range / recall_tool_calls
+// Tool set is gated: search / range / tool_calls
 // register only when session.summarizedThroughEntry > 0. Sessions that
 // have never been compacted see an empty tool list from this server —
 // the route still answers initialize / list_tools cleanly so the agent
@@ -44,7 +44,7 @@ interface BuiltPair {
 }
 
 // Mirrors the speaker classification helper inlined in stdin-server.ts
-// for the recall_search snippet metadata. Kept private because callers
+// for the `search` snippet metadata. Kept private because callers
 // outside this file shouldn't need to categorize update kinds.
 function getSpeaker(
   kind: string,
@@ -107,12 +107,12 @@ export function buildRecallMcpServer(
       instructions:
         "Search and retrieve detail from this session's pre-compaction history. " +
         "After a compaction summary replaces earlier conversation in working memory, these tools let you page back specifics on demand. " +
-        "Use `recall_search` to find entries by keyword, `recall_range` to pull a contiguous slice verbatim, and `recall_tool_calls` to enumerate prior tool invocations. " +
+        "Use `search` to find entries by keyword, `range` to pull a contiguous slice verbatim, and `tool_calls` to enumerate prior tool invocations. " +
         "These tools only return results once the session has been compacted at least once.",
     },
   );
 
-  // Always register the three recall_* tools so the MCP server's
+  // Always register the three recall tools so the MCP server's
   // tools/list handler is wired (the SDK only attaches the handler
   // when at least one tool is registered, so an "empty if uncompacted"
   // build-time gate would make the server respond with "Method not
@@ -124,10 +124,10 @@ export function buildRecallMcpServer(
   // gate-by-call now reports real results.
   {
     server.registerTool(
-      "recall_search",
+      "search",
       {
         description:
-          "Search this session's prior conversation history (the part that was compacted out of your working memory) by keyword. Returns matching entry ids with short snippets so you can decide which to pull in full via recall_range. Use this when the compaction summary mentions something but you need the verbatim detail.",
+          "Search this session's prior conversation history (the part that was compacted out of your working memory) by keyword. Returns matching entry ids with short snippets so you can decide which to pull in full via `range`. Use this when the compaction summary mentions something but you need the verbatim detail.",
         inputSchema: {
           query: z.string().min(1).describe("Case-insensitive substring to search for."),
           limit: z
@@ -150,7 +150,7 @@ export function buildRecallMcpServer(
             matches: [],
             total_matched: 0,
             truncated: false,
-            note: "This session has no compacted history. recall_search retrieves detail from entries that were summarized out of the working conversation; nothing has been summarized yet.",
+            note: "This session has no compacted history. `search` retrieves detail from entries that were summarized out of the working conversation; nothing has been summarized yet.",
           });
         }
         const history = await session.getHistorySnapshot();
@@ -193,10 +193,10 @@ export function buildRecallMcpServer(
     );
 
     server.registerTool(
-      "recall_range",
+      "range",
       {
         description:
-          "Pull a contiguous range of prior conversation entries verbatim from this session's pre-compaction history. Use after recall_search narrows in on what you need. Capped at 50 entries per call.",
+          "Pull a contiguous range of prior conversation entries verbatim from this session's pre-compaction history. Use after `search` narrows in on what you need. Capped at 50 entries per call.",
         inputSchema: {
           from_entry: z
             .number()
@@ -217,18 +217,18 @@ export function buildRecallMcpServer(
             text: "",
             entry_count: 0,
             truncated: false,
-            note: "This session has no compacted history. recall_range retrieves verbatim entries from the pre-compaction transcript; nothing has been compacted yet.",
+            note: "This session has no compacted history. `range` retrieves verbatim entries from the pre-compaction transcript; nothing has been compacted yet.",
           });
         }
         if (to_entry < from_entry) {
           throw new Error(
-            `recall_range: to_entry (${to_entry}) must be >= from_entry (${from_entry})`,
+            `range: to_entry (${to_entry}) must be >= from_entry (${from_entry})`,
           );
         }
         const range_size = to_entry - from_entry + 1;
         if (range_size > 50) {
           throw new Error(
-            `recall_range: range size (${range_size}) exceeds maximum of 50 entries`,
+            `range: range size (${range_size}) exceeds maximum of 50 entries`,
           );
         }
         const history = await session.getHistorySnapshot();
@@ -251,7 +251,7 @@ export function buildRecallMcpServer(
     );
 
     server.registerTool(
-      "recall_tool_calls",
+      "tool_calls",
       {
         description:
           "Search this session's prior tool invocations by tool name and/or file path. Returns when each tool was called, the arguments, and the result status. Use this to recall which files were read/edited, what shell commands ran, etc.",
@@ -267,14 +267,14 @@ export function buildRecallMcpServer(
           return mcpJsonResult({
             calls: [],
             truncated: false,
-            note: "This session has no compacted history. recall_tool_calls retrieves tool invocations from the pre-compaction transcript; nothing has been compacted yet.",
+            note: "This session has no compacted history. `tool_calls` retrieves tool invocations from the pre-compaction transcript; nothing has been compacted yet.",
           });
         }
         const hasToolName = typeof tool_name === "string" && tool_name.length > 0;
         const hasFilePath = typeof file_path === "string" && file_path.length > 0;
         if (!hasToolName && !hasFilePath) {
           throw new Error(
-            "recall_tool_calls: at least one of tool_name or file_path must be provided",
+            "tool_calls: at least one of tool_name or file_path must be provided",
           );
         }
         const history = await session.getHistorySnapshot();

@@ -873,9 +873,9 @@ Pre-compaction conversation history, exposed so the agent can page back specific
 
 | Tool | Input | Returns | Semantics |
 |---|---|---|---|
-| `recall_search` | `{ query, limit?, include_tool_calls? }` | Match list with snippets | Case-insensitive substring search across pre-compaction entries. |
-| `recall_range` | `{ from_entry, to_entry }` | Verbatim entries | Pull a contiguous slice of the pre-compaction log. |
-| `recall_tool_calls` | `{ tool_name?, limit? }` | Tool-call entries | Enumerate prior tool invocations, optionally filtered by tool name. |
+| `search` | `{ query, limit?, include_tool_calls? }` | Match list with snippets | Case-insensitive substring search across pre-compaction entries. |
+| `range` | `{ from_entry, to_entry }` | Verbatim entries | Pull a contiguous slice of the pre-compaction log. |
+| `tool_calls` | `{ tool_name?, limit? }` | Tool-call entries | Enumerate prior tool invocations, optionally filtered by tool name. |
 
 All three return a short "no compacted history yet" payload until the session has been compacted at least once.
 

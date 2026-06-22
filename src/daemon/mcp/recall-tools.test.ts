@@ -52,7 +52,7 @@ function populateHistory(
   );
 }
 
-describe("recall_search — empty query rejected", () => {
+describe("search — empty query rejected", () => {
   let h: Harness | null = null;
   let client: Client | null = null;
   const token = "empty-query-token";
@@ -86,7 +86,7 @@ describe("recall_search — empty query rejected", () => {
 
   it("rejects when query is an empty string", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "" },
     });
     expect(r.isError).toBe(true);
@@ -96,14 +96,14 @@ describe("recall_search — empty query rejected", () => {
 
   it("rejects when query is missing entirely", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: {},
     });
     expect(r.isError).toBe(true);
   });
 });
 
-describe("recall_search — matches return", () => {
+describe("search — matches return", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -172,7 +172,7 @@ describe("recall_search — matches return", () => {
 
   it("returns matches for a query that appears in multiple entries", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "world" },
     });
     const sc = r.structuredContent as {
@@ -189,7 +189,7 @@ describe("recall_search — matches return", () => {
 
   it("returns single match for a unique query", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "goodbye" },
     });
     const sc = r.structuredContent as { matches: Array<{ entryId: number }> };
@@ -199,7 +199,7 @@ describe("recall_search — matches return", () => {
 
   it("returns no matches when query is absent from all entries", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "xyzzy" },
     });
     const sc = r.structuredContent as { matches: unknown[]; total_matched: number };
@@ -223,7 +223,7 @@ describe("recall_search — matches return", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "ls" },
     });
     const sc = r.structuredContent as { matches: Array<{ speaker: string }> };
@@ -247,7 +247,7 @@ describe("recall_search — matches return", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "ls", include_tool_calls: false },
     });
     const sc = r.structuredContent as { matches: unknown[] };
@@ -269,7 +269,7 @@ describe("recall_search — matches return", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "world" },
     });
     const sc = r.structuredContent as { matches: Array<{ timestamp?: string }> };
@@ -306,7 +306,7 @@ describe("recall_search — matches return", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "world" },
     });
     const sc = r.structuredContent as { matches: Array<{ entryId: number }> };
@@ -314,7 +314,7 @@ describe("recall_search — matches return", () => {
   });
 });
 
-describe("recall_search — limit honored", () => {
+describe("search — limit honored", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -365,7 +365,7 @@ describe("recall_search — limit honored", () => {
 
   it("caps results at the specified limit", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "hit", limit: 5 },
     });
     const sc = r.structuredContent as { matches: unknown[]; truncated: boolean };
@@ -375,7 +375,7 @@ describe("recall_search — limit honored", () => {
 
   it("uses default limit of 10 when not specified", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "hit" },
     });
     const sc = r.structuredContent as { matches: unknown[]; truncated: boolean };
@@ -385,7 +385,7 @@ describe("recall_search — limit honored", () => {
 
   it("rejects limit > 50", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "hit", limit: 51 },
     });
     expect(r.isError).toBe(true);
@@ -393,7 +393,7 @@ describe("recall_search — limit honored", () => {
 
   it("rejects limit < 1", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "hit", limit: 0 },
     });
     expect(r.isError).toBe(true);
@@ -401,7 +401,7 @@ describe("recall_search — limit honored", () => {
 
   it("returns truncated=false when total matches fit within limit", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "hit", limit: 25 },
     });
     const sc = r.structuredContent as { matches: unknown[]; truncated: boolean };
@@ -409,7 +409,7 @@ describe("recall_search — limit honored", () => {
   });
 });
 
-describe("recall_search — case-insensitive match", () => {
+describe("search — case-insensitive match", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -458,7 +458,7 @@ describe("recall_search — case-insensitive match", () => {
 
   it("matches lowercase query against uppercase text", async () => {
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "hello" },
     });
     const sc = r.structuredContent as { matches: unknown[] };
@@ -480,7 +480,7 @@ describe("recall_search — case-insensitive match", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "QUICK brown" },
     });
     const sc = r.structuredContent as { matches: unknown[] };
@@ -502,7 +502,7 @@ describe("recall_search — case-insensitive match", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "xyz" },
     });
     const sc = r.structuredContent as { matches: unknown[] };
@@ -510,7 +510,7 @@ describe("recall_search — case-insensitive match", () => {
   });
 });
 
-describe("recall_search — snippet formatting", () => {
+describe("search — snippet formatting", () => {
   let h: Harness | null = null;
   let session: Session;
   let client: Client | null = null;
@@ -559,7 +559,7 @@ describe("recall_search — snippet formatting", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "hi" },
     });
     const sc = r.structuredContent as { matches: Array<{ snippet: string }> };
@@ -582,7 +582,7 @@ describe("recall_search — snippet formatting", () => {
     ]);
 
     const r = await client!.callTool({
-      name: "recall_search",
+      name: "search",
       arguments: { query: "MATCH" },
     });
     const sc = r.structuredContent as { matches: Array<{ snippet: string }> };
