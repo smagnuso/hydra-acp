@@ -502,13 +502,21 @@ describe("tool_calls — file_path filter", () => {
     expect(sc.calls).toHaveLength(0);
   });
 
-  it("does not match partial paths", async () => {
+  it("substring-matches partial paths (so callers can pass relative paths against absolute rawInput)", async () => {
     const r = await client!.callTool({
       name: "tool_calls",
       arguments: { file_path: "src/ba" },
     });
-    const sc = r.structuredContent as { calls: unknown[] };
-    expect(sc.calls).toHaveLength(0);
+    const sc = r.structuredContent as { calls: Array<{ args: Record<string, unknown> }> };
+    expect(sc.calls.length).toBeGreaterThan(0);
+    for (const c of sc.calls) {
+      const fp =
+        (c.args.file_path as string | undefined) ??
+        (c.args.filePath as string | undefined) ??
+        (c.args.path as string | undefined) ??
+        "";
+      expect(fp.toLowerCase()).toContain("src/ba");
+    }
   });
 
   it("excludes non-tool_call entries even with a matching path in prompt", async () => {

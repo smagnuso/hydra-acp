@@ -47,7 +47,14 @@ const TRUNCATION_MARKER = "[older history truncated]\n";
 // Argument keys we surface in tool lines, in display order. Anything not
 // in this list is omitted to keep tool lines compact.
 // Shared with compaction-seed.ts.
-export const TOOL_ARG_KEYS = ["file_path", "path", "command", "pattern", "query"];
+export const TOOL_ARG_KEYS = [
+  "file_path",
+  "filePath",
+  "path",
+  "command",
+  "pattern",
+  "query",
+];
 
 export function renderTranscript(
   history: HistoryEntryLike[],

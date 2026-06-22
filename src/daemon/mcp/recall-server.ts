@@ -278,6 +278,80 @@ export function buildRecallMcpServer(
           );
         }
         const history = await session.getHistorySnapshot();
+
+        // Coalesce tool_call + subsequent tool_call_update events for each
+        // toolCallId. The initial tool_call typically ships with empty
+        // rawInput; the real args (and locations[].path) arrive in
+        // follow-up tool_call_update events. Merge them so filters see
+        // the full picture.
+        interface Merged {
+          entryId: number;
+          toolName: string;
+          rawInput: Record<string, unknown>;
+          locations: string[];
+          status: string;
+          timestamp?: string;
+        }
+        const order: string[] = [];
+        const merged = new Map<string, Merged>();
+
+        for (const { entryId, entry, kind, update } of iterSessionUpdates(history)) {
+          if (kind !== "tool_call" && kind !== "tool_call_update") {
+            continue;
+          }
+          const id =
+            typeof update.toolCallId === "string" && update.toolCallId.length > 0
+              ? update.toolCallId
+              : `__noid_${entryId}`;
+
+          let m = merged.get(id);
+          if (!m) {
+            m = {
+              entryId,
+              toolName: "(unnamed)",
+              rawInput: {},
+              locations: [],
+              status: "in_progress",
+            };
+            merged.set(id, m);
+            order.push(id);
+          }
+
+          if (typeof update.name === "string" && update.name.length > 0) {
+            m.toolName = update.name;
+          } else if (
+            (m.toolName === "(unnamed)" || kind === "tool_call") &&
+            typeof update.title === "string" &&
+            update.title.length > 0
+          ) {
+            m.toolName = update.title;
+          }
+
+          const ri = update.rawInput;
+          if (ri && typeof ri === "object" && !Array.isArray(ri) && Object.keys(ri).length > 0) {
+            for (const [k, v] of Object.entries(ri as Record<string, unknown>)) {
+              m.rawInput[k] = v;
+            }
+          }
+
+          if (Array.isArray(update.locations)) {
+            for (const loc of update.locations as Array<Record<string, unknown>>) {
+              const p = loc?.path;
+              if (typeof p === "string" && p.length > 0 && !m.locations.includes(p)) {
+                m.locations.push(p);
+              }
+            }
+          }
+
+          if (typeof update.status === "string") {
+            m.status = update.status;
+          }
+
+          if (entry.recordedAt !== undefined && m.timestamp === undefined) {
+            m.timestamp = String(entry.recordedAt);
+          }
+        }
+
         const calls: Array<{
           entryId: number;
           tool: string;
@@ -286,46 +360,30 @@ export function buildRecallMcpServer(
           timestamp?: string;
         }> = [];
 
-        for (const { entryId, entry, kind, update } of iterSessionUpdates(history)) {
-          if (kind !== "tool_call") {
+        for (const id of order) {
+          const m = merged.get(id)!;
+
+          if (tool_name !== undefined && m.toolName.toLowerCase() !== tool_name.toLowerCase()) {
             continue;
           }
 
-          let toolName: string;
-          if (typeof update.name === "string" && update.name.length > 0) {
-            toolName = update.name;
-          } else if (typeof update.title === "string" && update.title.length > 0) {
-            toolName = update.title;
-          } else {
-            toolName = "(unnamed)";
-          }
-
-          if (tool_name !== undefined && toolName.toLowerCase() !== tool_name.toLowerCase()) {
-            continue;
-          }
-
-          const rawInput = update.rawInput as Record<string, unknown> | undefined;
-          const args: Record<string, unknown> = {};
-
-          if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
-            for (const [key, value] of Object.entries(rawInput)) {
-              if (typeof value === "string") {
-                args[key] = value.length > 500 ? value.slice(0, 497) + "\u2026" : value;
-              } else if (typeof value === "number" || typeof value === "boolean") {
-                args[key] = value;
-              }
-            }
-          }
-
-          if (hasFilePath && rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
+          if (hasFilePath) {
             const fpLower = file_path!.toLowerCase();
-            const pathKeys = ["file_path", "path"];
+            const pathKeys = ["file_path", "filePath", "path"];
             let pathMatch = false;
             for (const key of pathKeys) {
-              const value = rawInput[key];
-              if (typeof value === "string" && value.toLowerCase() === fpLower) {
+              const value = m.rawInput[key];
+              if (typeof value === "string" && value.toLowerCase().includes(fpLower)) {
                 pathMatch = true;
                 break;
+              }
+            }
+            if (!pathMatch) {
+              for (const p of m.locations) {
+                if (p.toLowerCase().includes(fpLower)) {
+                  pathMatch = true;
+                  break;
+                }
               }
             }
             if (!pathMatch) {
@@ -333,15 +391,25 @@ export function buildRecallMcpServer(
             }
           }
 
-          let status = "in_progress";
-          if (typeof update.status === "string") {
-            status = update.status;
+          const args: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(m.rawInput)) {
+            if (typeof value === "string") {
+              args[key] = value.length > 500 ? value.slice(0, 497) + "\u2026" : value;
+            } else if (typeof value === "number" || typeof value === "boolean") {
+              args[key] = value;
+            }
+          }
+          if (m.locations.length > 0 && args.locations === undefined) {
+            args.locations = m.locations;
           }
 
-          const timestamp =
-            typeof entry.recordedAt === "number" ? String(entry.recordedAt) : undefined;
-
-          calls.push({ entryId, tool: toolName, args, status, timestamp });
+          calls.push({
+            entryId: m.entryId,
+            tool: m.toolName,
+            args,
+            status: m.status,
+            timestamp: m.timestamp,
+          });
 
           if (calls.length >= limit) {
             break;
