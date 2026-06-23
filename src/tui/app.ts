@@ -1326,12 +1326,9 @@ async function runSession(
 
   // Daemon-side close (user typed /hydra kill, an idle-close fired, the
   // record was deleted out from under us, etc.). Drain in-flight turn
-  // bookkeeping, flip the banner, and — when the close was NOT user-
-  // initiated — silently reattach to resurrect the session. The daemon
-  // keeps the session record on idle close (deleteRecord=false), so a
-  // fresh session/attach revives it with a new agent process and the
-  // user can keep working without ever leaving the TUI. The WS itself
-  // stays up across this, so onReconnect handles the handshake.
+  // bookkeeping so the elapsed timer stops, then flip the banner to a
+  // terminal "closed" state. The WS itself stays up; a subsequent prompt
+  // will get rejected by the daemon and surface that error in scrollback.
   conn.onNotification("hydra-acp/session/closed", () => {
     if (teardownStarted) {
       return;
@@ -1342,15 +1339,6 @@ async function runSession(
     const screenReady = typeof screenRef !== "undefined" && screenRef !== null;
     if (screenReady) {
       screenRef!.setBanner({ status: "cold", elapsedMs: undefined });
-    }
-    if (onReconnect) {
-      void onReconnect().catch((err) => {
-        writeDebugLine({
-          src: "reconnect",
-          step: "auto-resurrect-fail",
-          message: (err as Error).message,
-        });
-      });
     }
   });
 
