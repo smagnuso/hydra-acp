@@ -747,6 +747,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     mouseEnabled: config.tui.mouse,
     inAppSelectionEnabled: resolveInAppSelection(config),
     defaultEnterAction: config.tui.defaultEnterAction,
+    ...(opts.agentId ? { lastChosenAgent: opts.agentId } : {}),
   };
   // Picker filter toggles (cwd-only, host) are mutated in place by the
   // picker so re-opening via ^p restores the same filtered view the
@@ -3664,11 +3665,17 @@ async function runSession(
     process.off("SIGINT", sigintHandler);
     void stream.close().catch(() => undefined);
     if (choice.kind === "new") {
-      const { sessionId: _drop, ...rest } = opts;
+      const { sessionId: _drop, agentId: _dropAgent, ...rest } = opts;
       void _drop;
+      void _dropAgent;
       // Fresh session is never read-only; explicitly clear so a viewer
       // that pressed ^P → New doesn't inherit readonly into the new
       // session's WS attach.
+      //
+      // agentId is also dropped so ensureAgentForNew re-shows the picker
+      // (highlighted on viewPrefs.lastChosenAgent) rather than silently
+      // reusing the previous session's agent. config.defaultAgent, if
+      // set, still short-circuits the picker as before.
       const nextOpts: TuiOptions = {
         ...rest,
         cwd: choice.cwd ?? resolvedCwd,
