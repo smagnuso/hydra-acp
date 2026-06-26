@@ -899,8 +899,10 @@ describe("Screen scroll anchor on new content", () => {
     return (screen as unknown as { scrollOffset: number }).scrollOffset;
   }
 
-  // Mock term.width = 10. Strings like "0123456789abcdefghijABCDEFGHIJ"
-  // (30 chars, no whitespace → hard breaks every 10 cols) wrap to 3 rows.
+  // Mock term.width = 10. Wrap reserves the rightmost column, so the
+  // per-row budget is 9 cols. Strings like "012345678abcdefghABCDEFGHI"
+  // (27 chars, no whitespace → hard breaks every 9 cols) wrap to 3 rows;
+  // 18-char strings to 2 rows.
 
   it("appendLine shifts scrollOffset by the wrapped-row count, not logical lines", () => {
     const screen = makeScreen();
@@ -910,7 +912,7 @@ describe("Screen scroll anchor on new content", () => {
     screen.scrollBy(5);
     const before = getScrollOffset(screen);
     expect(before).toBeGreaterThan(0);
-    screen.appendLine({ body: "0123456789abcdefghijABCDEFGHIJ" });
+    screen.appendLine({ body: "012345678abcdefghABCDEFGHI" });
     expect(getScrollOffset(screen)).toBe(before + 3);
   });
 
@@ -923,7 +925,7 @@ describe("Screen scroll anchor on new content", () => {
     const before = getScrollOffset(screen);
     screen.appendLines([
       { body: "short" },
-      { body: "abcdefghijABCDEFGHIJ" },
+      { body: "abcdefghiABCDEFGHI" },
     ]);
     expect(getScrollOffset(screen)).toBe(before + 1 + 2);
   });
@@ -948,7 +950,7 @@ describe("Screen scroll anchor on new content", () => {
     screen.upsertLines("k", [{ body: "short" }]);
     screen.scrollBy(5);
     const before = getScrollOffset(screen);
-    screen.upsertLines("k", [{ body: "0123456789abcdefghijABCDEFGHIJ" }]);
+    screen.upsertLines("k", [{ body: "012345678abcdefghABCDEFGHI" }]);
     expect(getScrollOffset(screen)).toBe(before + 2);
   });
 
@@ -957,7 +959,7 @@ describe("Screen scroll anchor on new content", () => {
     for (let i = 0; i < 30; i++) {
       screen.appendLine({ body: `r${i}` });
     }
-    screen.upsertLines("k", [{ body: "0123456789abcdefghijABCDEFGHIJ" }]);
+    screen.upsertLines("k", [{ body: "012345678abcdefghABCDEFGHI" }]);
     screen.scrollBy(8);
     const before = getScrollOffset(screen);
     screen.removeBlock("k");

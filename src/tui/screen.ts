@@ -3963,7 +3963,11 @@ export class Screen {
   }
 
   private drawSessionbar(): void {
-    const w = this.term.width;
+    // Leave the rightmost column unwritten so painting the bottom row
+    // can't trigger an autowrap-induced scroll on terminals that scroll
+    // when the last column of the last row is filled. Same -1 convention
+    // the picker uses (picker.ts ROW_PREFIX_WIDTH/rowMaxWidth math).
+    const w = Math.max(1, this.term.width - 1);
     const row = this.term.height;
     const title = this.sessionbar.title?.trim();
     const agentCell = formatAgentWithModel(this.sessionbar.agent, this.sessionbar.model);
@@ -5406,7 +5410,15 @@ export class Screen {
     // not code-unit length, so an ambiguous-width marker like "· " reserves
     // the columns it actually paints and the continuation indent matches.
     const prefixCols = cellWidth(prefix);
-    const room = Math.max(1, width - prefixCols);
+    // Reserve the rightmost terminal column. Writing into column `w`
+    // (with autowrap on) latches the terminal's deferred-wrap flag; the
+    // next paint step then drops or shifts the trailing glyph, which
+    // shows up as words losing their last character ("gives up" → "gives
+    // u"). Shaving one column from the wrap budget keeps every wrapped
+    // chunk strictly inside w-1 so the terminal never armed the
+    // deferred-wrap state. Same -1 convention picker.ts uses
+    // (rowMaxWidth = termWidth - ROW_PREFIX_WIDTH - 1).
+    const room = Math.max(1, width - prefixCols - 1);
     // The "agent", "thought", and "heading-*" bodyStyles are routed through
     // term-kit's markup-interpreting writer (see writeStyled); every other
     // style emits text via .noFormat, so caret sequences are literal there
