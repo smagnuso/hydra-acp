@@ -728,33 +728,42 @@ export async function pickSession(
     }
   };
 
-  const formatIndicator = (): string => {
+  // Indicator parts as structured tokens. `kind: "host"` is the
+  // click target wired up by hostHitCols; everything else paints as
+  // plain dim text. Order is preserved so the join order matches what
+  // formatIndicator() reports.
+  type IndicatorPart = { kind: "plain" | "host"; text: string };
+  const indicatorParts = (): IndicatorPart[] => {
     const above = scrollOffset;
     const below = Math.max(0, visible.length - scrollOffset - viewportSize);
-    const parts: string[] = [];
+    const parts: IndicatorPart[] = [];
     if (prefs.filters.cwdOnly) {
-      parts.push("cwd-only");
+      parts.push({ kind: "plain", text: "cwd-only" });
     }
     if (prefs.filters.hostFilter !== "__all") {
-      parts.push(
+      const text =
         prefs.filters.hostFilter === "__local"
           ? "host: local"
-          : `host: ${prefs.filters.hostFilter}`,
-      );
+          : `host: ${prefs.filters.hostFilter}`;
+      parts.push({ kind: "host", text });
     }
     if (prefs.filters.includeNonInteractive) {
-      parts.push("+non-interactive");
+      parts.push({ kind: "plain", text: "+non-interactive" });
     }
     if (above > 0) {
-      parts.push(`↑ ${above} above`);
+      parts.push({ kind: "plain", text: `↑ ${above} above` });
     }
     if (below > 0) {
-      parts.push(`↓ ${below} below`);
+      parts.push({ kind: "plain", text: `↓ ${below} below` });
     }
+    return parts;
+  };
+  const formatIndicator = (): string => {
+    const parts = indicatorParts();
     if (parts.length === 0) {
       return "";
     }
-    return `  ${parts.join(" · ")}`;
+    return `  ${parts.map((p) => p.text).join(" · ")}`;
   };
 
   // Short id used in confirm prompts; matches what users see in the table.
@@ -784,16 +793,24 @@ export async function pickSession(
       searchActive ? `1|${searchTerm}|${visible.length}` : "0",
       formatIndicator(),
       escHintHovered ? "h1" : "h0",
+      hostHintHovered ? "ho1" : "ho0",
     ].join("\u0001");
   };
   const paintIndicator = (): void => {
     withSync(() => {
       painter.paintRow(indicatorRow(), indicatorSig(), () => {
-        if (mode === "confirm-kill" && pendingAction) {
+        // Sub-modes never expose host or esc as click targets — clear
+        // both hit ranges so a stale rect from the last normal-mode
+        // frame doesn't keep firing.
+        const clearHits = (): void => {
           escHitCols = null;
+          hostHitCols = null;
+        };
+        if (mode === "confirm-kill" && pendingAction) {
+          clearHits();
           term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
         } else if (mode === "confirm-delete" && pendingAction) {
-          escHitCols = null;
+          clearHits();
           if (pendingAction.status === "live") {
             term.brightRed.noFormat(
               `  kill + delete ${shortId(pendingAction.sessionId)}? [y/N]`,
@@ -804,18 +821,18 @@ export async function pickSession(
             );
           }
         } else if (mode === "busy" && pendingAction) {
-          escHitCols = null;
+          clearHits();
           term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
         } else if (mode === "rename" && pendingAction) {
-          escHitCols = null;
+          clearHits();
           term.brightYellow.noFormat(`  title: ${renameBuffer}`);
           term.bgBrightYellow(" ");
           term.dim.noFormat("  Enter saves · Esc cancels");
         } else if (transientStatus !== null) {
-          escHitCols = null;
+          clearHits();
           term.dim.noFormat(`  ${transientStatus}`);
         } else if (searchActive) {
-          escHitCols = null;
+          clearHits();
           // Search line is anchored to the bottom of the picker so it
           // stays visible regardless of how the session list scrolls
           // above. ^c exits and clears the filter. A trailing block
@@ -834,18 +851,42 @@ export async function pickSession(
           // hint is rendered with spaces so the previous frame's text
           // is overwritten even when paintRow's eraseLineAfter only
           // reaches to the cursor after the hint.
+          const parts = indicatorParts();
           const leftText = formatIndicator();
           const escHint = "Esc · Go Back";
           const hintWidth = escHint.length;
-          // Right-margin so the hint isn't flush with the terminal edge —
-          // visually matches the inset the rest of the picker chrome uses.
           const rightMargin = 5;
           const leftWidth = leftText.length;
           const gap = Math.max(
             1,
             termWidth - leftWidth - hintWidth - rightMargin,
           );
-          term.dim.noFormat(leftText);
+          // Paint the left indicator token by token so we can capture
+          // the host segment's screen column range while we draw it.
+          // The leading "  " (2 cols) matches formatIndicator()'s prefix.
+          hostHitCols = null;
+          if (parts.length > 0) {
+            term.dim.noFormat("  ");
+            let col = 3; // 1-based column of next glyph
+            for (let i = 0; i < parts.length; i++) {
+              const p = parts[i]!;
+              if (i > 0) {
+                term.dim.noFormat(" · ");
+                col += 3;
+              }
+              if (p.kind === "host") {
+                hostHitCols = { start: col, end: col + p.text.length - 1 };
+                if (hostHintHovered) {
+                  term.noFormat(p.text);
+                } else {
+                  term.dim.noFormat(p.text);
+                }
+              } else {
+                term.dim.noFormat(p.text);
+              }
+              col += p.text.length;
+            }
+          }
           term.dim(" ".repeat(gap));
           if (escHintHovered) {
             term.noFormat(escHint);
@@ -1585,6 +1626,12 @@ export async function pickSession(
     // same tryAbort() as pressing ESC.
     let escHitCols: { start: number; end: number } | null = null;
     let escHintHovered = false;
+    // 1-based column range of the "host: …" segment in the left part of
+    // the indicator row. Set by paintIndicator only while mode === "normal";
+    // null when no host segment is rendered (host filter == "__all") or in
+    // any sub-mode. A click cycles `nextHostFilter`; hover dims-up.
+    let hostHitCols: { start: number; end: number } | null = null;
+    let hostHintHovered = false;
   let tkStdinHandler: ((chunk: Buffer) => void) | null = null;
   // Assigned later (in the Promise body, after dispatch/grabInput state
   // exists) so the suspend closure can refer to the same listeners /
@@ -3148,8 +3195,15 @@ export async function pickSession(
           typeof x === "number" &&
           x >= escHitCols.start &&
           x <= escHitCols.end;
-        if (overEsc !== escHintHovered) {
+        const overHost =
+          hostHitCols !== null &&
+          y === indicatorRow() &&
+          typeof x === "number" &&
+          x >= hostHitCols.start &&
+          x <= hostHitCols.end;
+        if (overEsc !== escHintHovered || overHost !== hostHintHovered) {
           escHintHovered = overEsc;
+          hostHintHovered = overHost;
           paintIndicator();
           if (selectedIdx === 0) {
             placeComposerCursor();
@@ -3172,6 +3226,28 @@ export async function pickSession(
           x <= escHitCols.end
         ) {
           tryAbort();
+          return;
+        }
+      }
+      // "host: …" segment on the indicator row: a click cycles the
+      // host filter the same way pressing `h` does. Mirrors the `h`
+      // key handler at the bottom of the onKey switch.
+      if (isClick && hostHitCols !== null && y === indicatorRow()) {
+        const x = data?.x;
+        if (
+          typeof x === "number" &&
+          x >= hostHitCols.start &&
+          x <= hostHitCols.end
+        ) {
+          const keepId =
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
+          prefs.filters.hostFilter = nextHostFilter(
+            prefs.filters.hostFilter,
+            allSessions,
+          );
+          applyFilter();
+          restoreCursorAfterFilter(keepId);
+          renderFromScratch();
           return;
         }
       }
