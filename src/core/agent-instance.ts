@@ -153,6 +153,15 @@ export class AgentInstance {
     return tail ? `${reason}\nstderr: ${tail}` : reason;
   }
 
+  // Trailing stderr captured from the agent process, trimmed (empty when
+  // it printed nothing). The exit handler attaches this to its failure
+  // reason, but a lost stdout pipe rejects an in-flight initialize with a
+  // bare "connection closed" before that fires — so callers expose this
+  // to enrich such errors with what the agent actually said on the way out.
+  stderrTailText(): string {
+    return this.stderrTail.trim();
+  }
+
   static spawn(opts: AgentInstanceOptions): AgentInstance {
     const env = {
       ...process.env,

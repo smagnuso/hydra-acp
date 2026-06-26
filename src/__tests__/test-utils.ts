@@ -160,6 +160,9 @@ export function makeMockAgent(opts: {
     isAlive(): boolean {
       return true;
     },
+    stderrTailText(): string {
+      return "";
+    },
     kill: vi.fn().mockResolvedValue(undefined),
   } as unknown as AgentInstance;
 

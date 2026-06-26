@@ -96,7 +96,9 @@ import {
   promptAuthRequiredBanner,
   runAuthRetryLoop,
   type AuthOnboarding,
+  type AuthRetryOutcome,
 } from "./auth-required-banner.js";
+import { promptStartupFailureBanner } from "./startup-failure-banner.js";
 import {
   emergencyTerminalReset,
   formatElapsed,
@@ -1972,28 +1974,65 @@ async function runSession(
     // banner (with the registry's onboarding hints) instead of an
     // opaque crash. `r` re-issues with identical params; Esc bubbles
     // back to the picker via the runTuiApp outer loop.
-    const authOutcome = await runAuthRetryLoop<SessionNewResult>({
-      request: () =>
-        conn.request("session/new", sessionNewParams) as Promise<SessionNewResult>,
-      showBanner: (agentId, onboarding, authMethods) =>
-        promptAuthRequiredBanner(term, agentId, onboarding, authMethods, {
-          authenticate: (methodId) =>
-            conn.request("authenticate", { methodId }),
-        }),
-      resolveOnboarding: async (agentId) => {
-        if (!agentId) {
-          return undefined;
-        }
-        try {
-          const agents = await listAgents(target);
-          const entry = agents.find((a) => a.id === agentId);
-          return entry?.onboarding;
-        } catch {
-          return undefined;
-        }
-      },
-      fallbackAgentId: opts.agentId,
-    });
+    let authOutcome: AuthRetryOutcome<SessionNewResult>;
+    try {
+      authOutcome = await runAuthRetryLoop<SessionNewResult>({
+        request: () =>
+          conn.request("session/new", sessionNewParams) as Promise<SessionNewResult>,
+        showBanner: (agentId, onboarding, authMethods) =>
+          promptAuthRequiredBanner(term, agentId, onboarding, authMethods, {
+            authenticate: (methodId) =>
+              conn.request("authenticate", { methodId }),
+          }),
+        resolveOnboarding: async (agentId) => {
+          if (!agentId) {
+            return undefined;
+          }
+          try {
+            const agents = await listAgents(target);
+            const entry = agents.find((a) => a.id === agentId);
+            return entry?.onboarding;
+          } catch {
+            return undefined;
+          }
+        },
+        fallbackAgentId: opts.agentId,
+      });
+    } catch (err) {
+      // Non-auth bring-up failure: the agent process died (bad install,
+      // missing module, immediate exit) or the connection dropped during
+      // session/new. runAuthRetryLoop only handles AUTH_REQUIRED, so this
+      // would otherwise bubble to the fatal top-level catch and exit the
+      // whole TUI. Report the reason and stay alive — retry the same
+      // agent, or fall back to the picker to choose another.
+      term.grabInput(false);
+      void stream.close().catch(() => undefined);
+      const message = err instanceof Error ? err.message : String(err);
+      writeDebugLine({
+        src: "session-new-failed",
+        agentId: opts.agentId ?? null,
+        message,
+      });
+      const outcome = await promptStartupFailureBanner(term, opts.agentId, message, {
+        canGoBack: !opts.forceNew,
+      });
+      if (outcome === "cancel") {
+        return null;
+      }
+      const nextOpts: TuiOptions = { ...opts };
+      delete nextOpts.sessionId;
+      delete nextOpts.resume;
+      if (outcome === "retry") {
+        // Re-attempt the same agent directly (skip the picker): forceNew
+        // + the existing agentId re-enters resolveSession's --new path.
+        nextOpts.forceNew = true;
+      } else {
+        // "back" — only offered when a picker exists to return to.
+        delete nextOpts.forceNew;
+        delete nextOpts.agentId;
+      }
+      return nextOpts;
+    }
     if (authOutcome.kind === "cancel") {
       term.grabInput(false);
       void stream.close().catch(() => undefined);

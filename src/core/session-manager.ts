@@ -1441,7 +1441,14 @@ export class SessionManager {
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);
-      throw enrichAuthRequired(err, agent);
+      throw enrichAuthRequired(
+        enrichBringupFailure(err, agent, params.agentId, {
+          command: plan.command,
+          args: plan.args,
+          cwd: params.cwd,
+        }),
+        agent,
+      );
     }
   }
 
@@ -1514,7 +1521,14 @@ export class SessionManager {
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);
-      throw enrichAuthRequired(err, agent);
+      throw enrichAuthRequired(
+        enrichBringupFailure(err, agent, params.agentId, {
+          command: plan.command,
+          args: plan.args,
+          cwd: params.cwd,
+        }),
+        agent,
+      );
     }
   }
 
@@ -3550,6 +3564,80 @@ export function enrichAuthRequired(
       },
     },
   };
+  return next;
+}
+
+// Spawn details for the repro hint appended to a bring-up failure.
+export interface BringupSpawnInfo {
+  command: string;
+  args: string[];
+  cwd: string;
+}
+
+// Single-quote a token for a copy-pasteable shell command, leaving the
+// common safe set bare. Keeps the repro line runnable when args contain
+// spaces or shell metacharacters.
+function shellQuote(token: string): string {
+  if (/^[A-Za-z0-9_\-./=:@]+$/.test(token)) {
+    return token;
+  }
+  return `'${token.replace(/'/g, "'\\''")}'`;
+}
+
+// When a fresh agent dies during initialize/session-new, the daemon↔agent
+// stream can close before the child-exit handler attaches its stderr tail
+// — the in-flight request then rejects with a bare "connection closed".
+// Fold in whatever we actually know so the client can report *why* it
+// failed instead of an opaque connection error: the agent's captured
+// stderr, plus a copy-pasteable command line (and cwd) so the user can run
+// the agent by hand and reproduce. Auth errors pass through untouched so
+// enrichAuthRequired still recognizes them; an error already carrying a
+// stderr tail isn't re-stderr'd, only given the repro hint.
+export function enrichBringupFailure(
+  err: unknown,
+  agent: AgentInstance,
+  agentId: string,
+  spawn?: BringupSpawnInfo,
+): unknown {
+  if (
+    err &&
+    typeof err === "object" &&
+    (err as { code?: unknown }).code === JsonRpcErrorCodes.AuthRequired
+  ) {
+    return err;
+  }
+  const base = err instanceof Error ? err.message : String(err);
+  const alreadyEnriched = base.includes("stderr:");
+  const tail = alreadyEnriched ? "" : agent.stderrTailText();
+  const reproLine = spawn
+    ? `to reproduce: (cd ${shellQuote(spawn.cwd)} && ${[spawn.command, ...spawn.args]
+        .map(shellQuote)
+        .join(" ")})`
+    : "";
+  // Nothing extra to add — leave the error exactly as-is.
+  if (!tail && !reproLine) {
+    return err;
+  }
+  const lines = [alreadyEnriched ? base : `agent ${agentId} failed to start: ${base}`];
+  if (tail) {
+    lines.push(`stderr: ${tail}`);
+  }
+  if (reproLine) {
+    lines.push(reproLine);
+  }
+  const next = new Error(lines.join("\n")) as Error & {
+    code?: number;
+    data?: unknown;
+  };
+  if (err && typeof err === "object") {
+    const e = err as { code?: number; data?: unknown };
+    if (typeof e.code === "number") {
+      next.code = e.code;
+    }
+    if (e.data !== undefined) {
+      next.data = e.data;
+    }
+  }
   return next;
 }
 

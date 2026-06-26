@@ -55,7 +55,7 @@ export async function ensureDaemonReachable(config: HydraConfig): Promise<void> 
   if (probe === "mismatch") {
     const bin = invokedBinName();
     throw new Error(
-      `unable to attach to running daemon — run \`${bin} daemon stop\` and try again.`,
+      `config changed since daemon started — run \`${bin} daemon restart\` to apply.`,
     );
   }
   process.stderr.write("hydra-acp: daemon not running; starting it...\n");
