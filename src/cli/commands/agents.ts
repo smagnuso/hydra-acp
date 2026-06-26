@@ -94,10 +94,17 @@ export async function runAgentsList(): Promise<void> {
 // the process with a clear message + the known ids on a definitive
 // mismatch. If the registry can't be reached we stay silent and let the
 // later session/new path surface whatever error it would have.
+// Preflights an explicit --agent id against the daemon's registry so a
+// typo fails at the shell rather than mid-session after the TUI has
+// taken over the terminal. Exits the process on a definitive miss;
+// stays silent (and lets the caller proceed) when the registry is
+// unreachable. The id is NOT rewritten to canonical form here — the
+// daemon's SessionManager.create canonicalizes on session/new via
+// Registry.getAgent's resolution ladder (exact id → npx basename →
+// unique case-insensitive prefix), so the persisted session record
+// always carries the canonical id regardless of what the user typed.
 export async function assertKnownAgent(agentId: string): Promise<void> {
   const config = await loadConfig();
-  // A locally-defined agent is always valid — it doesn't need to be in
-  // the registry, and the daemon may not have reloaded config yet.
   if (config.agents[agentId] !== undefined) {
     return;
   }
@@ -115,8 +122,60 @@ export async function assertKnownAgent(agentId: string): Promise<void> {
   if (known.includes(agentId)) {
     return;
   }
+  // Mirror Registry.getAgent's unique-prefix fallback so the preflight
+  // doesn't reject an id the daemon would happily resolve. Ambiguous
+  // prefixes fall through to the "unknown agent" error.
+  const lc = agentId.toLowerCase();
+  if (lc.length > 0) {
+    const prefixHits = known.filter((id) => id.toLowerCase().startsWith(lc));
+    if (prefixHits.length === 1) {
+      return;
+    }
+  }
   process.stderr.write(
     `hydra-acp: unknown agent '${agentId}'. Run 'hydra-acp agent list' to see available agents.\n`,
+  );
+  process.exit(2);
+}
+
+// Resolve a user-typed agent id to its canonical registry id using the
+// same ladder as Registry.getAgent / assertKnownAgent: exact id → unique
+// case-insensitive prefix. Returns the input unchanged when the registry
+// is unreachable so the downstream daemon call can produce the real
+// error. Exits on ambiguous / unknown ids.
+export async function resolveAgentIdOrExit(
+  agentId: string,
+  commandLabel: string,
+): Promise<string> {
+  let known: string[];
+  try {
+    const res = await daemonFetch("/v1/agents", { rethrowNetworkError: true });
+    if (!res.ok) {
+      return agentId;
+    }
+    const body = res.body as { agents: AgentSummary[] };
+    known = body.agents.map((a) => a.id);
+  } catch {
+    return agentId;
+  }
+  if (known.includes(agentId)) {
+    return agentId;
+  }
+  const lc = agentId.toLowerCase();
+  if (lc.length > 0) {
+    const prefixHits = known.filter((id) => id.toLowerCase().startsWith(lc));
+    if (prefixHits.length === 1) {
+      return prefixHits[0]!;
+    }
+    if (prefixHits.length > 1) {
+      process.stderr.write(
+        `${commandLabel}: '${agentId}' is ambiguous (matches ${prefixHits.join(", ")}).\n`,
+      );
+      process.exit(2);
+    }
+  }
+  process.stderr.write(
+    `${commandLabel}: unknown agent '${agentId}'. Run 'hydra-acp agent list' to see available agents.\n`,
   );
   process.exit(2);
 }
@@ -138,9 +197,10 @@ export async function runAgentsInstall(
     process.exit(2);
     return;
   }
-  process.stdout.write(`Installing ${agentId}…\n`);
+  const canonical = await resolveAgentIdOrExit(agentId, "hydra agent install");
+  process.stdout.write(`Installing ${canonical}…\n`);
   const res = await daemonFetch(
-    `/v1/agents/${encodeURIComponent(agentId)}/install`,
+    `/v1/agents/${encodeURIComponent(canonical)}/install`,
     {
       method: "POST",
       expectStatus: 200,
@@ -176,8 +236,9 @@ export async function runAgentsSync(agentId: string | undefined): Promise<void> 
     process.exit(2);
     return;
   }
+  const canonical = await resolveAgentIdOrExit(agentId, "hydra agent sync");
   const res = await daemonFetch(
-    `/v1/agents/${encodeURIComponent(agentId)}/sync`,
+    `/v1/agents/${encodeURIComponent(canonical)}/sync`,
     {
       method: "POST",
       expectStatus: 200,
@@ -264,11 +325,27 @@ export async function runAgentsSet(
   // from the registry — and shadows a registry agent of the same id.
   const isLocal = config.agents[agentId] !== undefined;
   if (!isLocal && known !== undefined && !known.includes(agentId)) {
-    process.stderr.write(
-      `hydra agent set: '${agentId}' is not in the registry or config.agents. Known ids: ${known.join(", ")}\n`,
-    );
-    process.exit(1);
-    return;
+    // Mirror the resolution ladder used by --agent and the other
+    // subcommands: unique case-insensitive prefix match against the
+    // registry rewrites to the canonical id.
+    const lc = agentId.toLowerCase();
+    const prefixHits =
+      lc.length > 0 ? known.filter((id) => id.toLowerCase().startsWith(lc)) : [];
+    if (prefixHits.length === 1) {
+      agentId = prefixHits[0]!;
+    } else if (prefixHits.length > 1) {
+      process.stderr.write(
+        `hydra agent set: '${agentId}' is ambiguous (matches ${prefixHits.join(", ")}).\n`,
+      );
+      process.exit(1);
+      return;
+    } else {
+      process.stderr.write(
+        `hydra agent set: '${agentId}' is not in the registry or config.agents. Known ids: ${known.join(", ")}\n`,
+      );
+      process.exit(1);
+      return;
+    }
   }
 
   // Model ids are opaque agent-specific strings (e.g. "claude-opus-4-7",

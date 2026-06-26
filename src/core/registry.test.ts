@@ -166,6 +166,37 @@ describe("Registry.getAgent fallback", () => {
     expect((await registry.getAgent("gemini-cli"))?.id).toBe("gemini");
   });
 
+  it("falls back to unique-prefix match on id when nothing exact hits", async () => {
+    const registry = new Registry(fakeConfig());
+    seedCache(registry, FIXTURE);
+    expect((await registry.getAgent("claude"))?.id).toBe("claude-acp");
+    expect((await registry.getAgent("Claude"))?.id).toBe("claude-acp");
+    expect((await registry.getAgent("CODEX"))?.id).toBe("codex-acp");
+    expect((await registry.getAgent("cod"))?.id).toBe("codex-acp");
+  });
+
+  it("returns undefined when a prefix matches multiple agents", async () => {
+    const registry = new Registry({
+      ...fakeConfig(),
+    });
+    seedCache(registry, {
+      agents: [
+        {
+          id: "codex-acp",
+          name: "Codex",
+          distribution: { npx: { package: "@zed-industries/codex-acp@0.14.0" } },
+        },
+        {
+          id: "codebuddy-code",
+          name: "Codebuddy",
+          distribution: { npx: { package: "@codebuddy/codebuddy@1.0.0" } },
+        },
+      ],
+    });
+    expect(await registry.getAgent("cod")).toBeUndefined();
+    expect(await registry.getAgent("co")).toBeUndefined();
+  });
+
   it("returns undefined when neither id nor package matches", async () => {
     const registry = new Registry(fakeConfig());
     seedCache(registry, FIXTURE);

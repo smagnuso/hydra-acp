@@ -184,7 +184,26 @@ export class Registry {
       return this.applyOverride(exact);
     }
     const byBasename = doc.agents.find((a) => npxPackageBasename(a) === id);
-    return byBasename ? this.applyOverride(byBasename) : undefined;
+    if (byBasename) {
+      return this.applyOverride(byBasename);
+    }
+    // Unique-prefix fuzzy match on agent id (case-insensitive). Lets a
+    // user type `--agent claude` and get `claude-acp` without having to
+    // know the canonical id, but only when the prefix unambiguously
+    // resolves to a single agent. Ambiguous prefixes (e.g. `co` →
+    // codex-acp / codebuddy-code / cortex-code) deliberately fail so
+    // the caller surfaces a "not found" rather than silently picking
+    // the first hit.
+    const lc = id.toLowerCase();
+    if (lc.length > 0) {
+      const prefixHits = doc.agents.filter((a) =>
+        a.id.toLowerCase().startsWith(lc),
+      );
+      if (prefixHits.length === 1) {
+        return this.applyOverride(prefixHits[0]!);
+      }
+    }
+    return undefined;
   }
 
   // Synthesize RegistryAgent entries from config.agents. These carry an

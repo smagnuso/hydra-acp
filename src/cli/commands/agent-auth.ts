@@ -207,6 +207,9 @@ export async function runAgentAuth(
     process.exit(2);
   }
 
+  const { resolveAgentIdOrExit } = await import("./agents.js");
+  const canonicalAgentId = await resolveAgentIdOrExit(agentId, "hydra agent auth");
+
   const config = await loadConfig();
   const target = await resolveLocalTarget(config);
   await ensureDaemonReachable(config);
@@ -233,7 +236,7 @@ export async function runAgentAuth(
   try {
     result = await runAgentAuthCore({
       conn,
-      agentId,
+      agentId: canonicalAgentId,
       authMethods: [],
       method: typeof flags["method"] === "string" ? flags["method"] : undefined,
       spawn,

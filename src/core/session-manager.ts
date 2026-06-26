@@ -530,6 +530,17 @@ export class SessionManager {
   }
 
   async create(params: CreateSessionParams): Promise<Session> {
+    // Canonicalize the caller-supplied agentId to the registry's id
+    // (e.g. "claude-agent-acp" from a shim → "claude-acp", "claude"
+    // from --agent fuzzy match → "claude-acp") so the persisted session
+    // record and every downstream lookup uses the registry-canonical id
+    // regardless of which alias the caller typed. Mirrors Registry.getAgent's
+    // resolution ladder; if getAgent returns nothing we leave the id
+    // alone and let bootstrapAgent surface the AgentNotInstalled error.
+    const canonical = await this.registry.getAgent(params.agentId);
+    if (canonical && canonical.id !== params.agentId) {
+      params = { ...params, agentId: canonical.id };
+    }
     const fresh = await this.bootstrapAgent({
       agentId: params.agentId,
       cwd: params.cwd,
