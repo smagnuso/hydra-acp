@@ -5876,13 +5876,28 @@ function writeStyled(
       case "plan-pending":
         term(text);
         return;
-      case "thought":
-        // The thought markdown bakes "^K" (set fg → brightBlack) after every
-        // inline `code` span so the dim gray base holds at rest. On hover
-        // we want the line to stay at default fg after each code span, so
-        // swap "^K" for "^:" (full reset → terminal default fg).
-        term(text.replace(/\^K/g, "^:"));
+      case "thought": {
+        // Paint a subtle dark-grayscale band so the hovered thought reads
+        // as a distinct block from an adjacent agent_message, and lift
+        // the dim brightBlack baseline to default fg for readability on
+        // top of the band. The markdown bakes "^K" (set fg → brightBlack)
+        // after every inline code span as its codeReset; swap each "^K"
+        // for raw "\x1b[39m" (SGR 39 — default fg only, no bg touch) so
+        // post-code prose returns to default fg without dropping the
+        // band the way "^:" (full reset) would.
+        // Match either an escaped caret pair (which must be preserved
+        // verbatim so terminal-kit emits a single literal "^") or a real
+        // "^K" codeReset token. Alternation order matters: consuming
+        // "^^" first prevents the "K" in "^^K" from being mis-read as
+        // part of a codeReset.
+        const lifted = text.replace(/\^\^|\^K/g, (m) =>
+          m === "^K" ? "\x1b[39m" : m,
+        );
+        (term as unknown as {
+          bgColorGrayscale: (g: number) => (t: string) => void;
+        }).bgColorGrayscale(25)(lifted);
         return;
+      }
       case "code":
         // Lift the grayscale bg from 28 → 60 so the band visibly responds
         // to hover on top of the cli-highlight ANSI bytes in the body.

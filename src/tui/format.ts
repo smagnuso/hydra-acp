@@ -292,7 +292,11 @@ function applyInlineMarkupWithLinks(
       const close = text.indexOf("`", i + 1);
       if (close !== -1 && close > i + 1) {
         const inner = text.slice(i + 1, close);
-        styled += `${codeOpen}${inner}${codeReset}`;
+        // Escape `^` → `^^` so a literal caret inside backticks (e.g.
+        // an agent quoting `^:` while discussing terminal-kit markup)
+        // isn't interpreted as an SGR reset by the writer downstream.
+        const safe = inner.replace(/\^/g, "^^");
+        styled += `${codeOpen}${safe}${codeReset}`;
         cleanLen += inner.length;
         i = close + 1;
         continue;
