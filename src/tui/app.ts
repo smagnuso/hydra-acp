@@ -539,6 +539,11 @@ interface ViewPrefs {
   // What unmodified Enter does in the composer. Mirrors
   // config.tui.defaultEnterAction; the options dialog flips it live.
   defaultEnterAction: "enqueue" | "amend";
+  // In-process memory of the last agent the user picked in the new-session
+  // agent prompt. Used to highlight that row first on the next prompt so
+  // they don't have to scroll back. Not persisted: pressing `s` in the
+  // picker is still the explicit "save as default" path.
+  lastChosenAgent?: string;
 }
 
 interface SessionContext {
@@ -954,7 +959,7 @@ async function runSession(
   viewPrefs: ViewPrefs,
   pickerPrefs: PickerPrefs,
 ): Promise<TuiOptions | null> {
-  const ctx = await resolveSession(term, config, target, opts, pickerPrefs);
+  const ctx = await resolveSession(term, config, target, opts, pickerPrefs, viewPrefs);
   if (!ctx) {
     // Picker was aborted (Ctrl+C / Esc). Belt-and-suspenders grab
     // release — the picker already does this on every exit path, but
@@ -6652,6 +6657,7 @@ async function resolveSession(
   target: RemoteTarget,
   opts: TuiOptions,
   pickerPrefs: PickerPrefs,
+  viewPrefs: ViewPrefs,
 ): Promise<SessionContext | null> {
   let cwd = opts.cwd ?? process.cwd();
   if (opts.sessionId) {
@@ -6668,7 +6674,7 @@ async function resolveSession(
   if (opts.forceNew) {
     // --new bypasses the picker, so there's no list to fall back to:
     // both Esc (back) and ^C (cancel) from the agent prompt exit all.
-    const agentStep = await ensureAgentForNew(term, target, opts);
+    const agentStep = await ensureAgentForNew(term, target, opts, viewPrefs);
     if (agentStep !== "ok") {
       return null;
     }
@@ -6722,7 +6728,7 @@ async function resolveSession(
       // session. Esc (back) re-shows the picker — opts.initialPrompt is
       // preserved above, so the composer re-opens with the typed text.
       // ^C (cancel) tears down the launch.
-      const agentStep = await ensureAgentForNew(term, target, opts);
+      const agentStep = await ensureAgentForNew(term, target, opts, viewPrefs);
       if (agentStep === "cancel") {
         return null;
       }
@@ -7030,6 +7036,7 @@ async function ensureAgentForNew(
   term: termkit.Terminal,
   target: RemoteTarget,
   opts: TuiOptions,
+  viewPrefs: ViewPrefs,
 ): Promise<"ok" | "back" | "cancel"> {
   if (opts.agentId) {
     return "ok";
@@ -7047,7 +7054,12 @@ async function ensureAgentForNew(
     return "ok";
   }
   const config = await loadConfig();
-  const result = await promptForAgent(term, agents, config.defaultAgent);
+  // Prefer the in-process last pick over config.defaultAgent (which is
+  // unset on this path anyway, since hasConfiguredDefaultAgent() gated
+  // above) so the second+ prompt in a launch lands on the user's most
+  // recent choice instead of the hardcoded fallback.
+  const preferred = viewPrefs.lastChosenAgent ?? config.defaultAgent;
+  const result = await promptForAgent(term, agents, preferred);
   if (result.kind === "cancel") {
     return "cancel";
   }
@@ -7055,6 +7067,7 @@ async function ensureAgentForNew(
     return "back";
   }
   opts.agentId = result.agentId;
+  viewPrefs.lastChosenAgent = result.agentId;
   if (result.persist) {
     try {
       await setDefaultAgent(result.agentId);
