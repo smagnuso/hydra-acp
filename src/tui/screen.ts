@@ -1629,6 +1629,7 @@ export class Screen {
       return;
     }
     withSync(() => {
+      this.term.hideCursor();
       paint();
       this.placeCursor();
     });
@@ -2747,8 +2748,7 @@ export class Screen {
       const newHover = cell !== null ? this.bannerHitAt(cell.x, cell.y) : null;
       if (newHover !== this.hoveredBannerHit) {
         this.hoveredBannerHit = newHover;
-        this.drawBanner();
-        this.placeCursor();
+        this.syncedPartialRepaint(() => this.drawBanner());
       }
     }
     // Update the OS pointer-shape based on what's under the pointer.
@@ -2770,8 +2770,7 @@ export class Screen {
             newKey !== null && this.onHoverRun
               ? (this.onHoverRun(newKey) ?? null)
               : null;
-          this.drawScrollback();
-          this.placeCursor();
+          this.syncedPartialRepaint(() => this.drawScrollback());
         }
       }
     } else if (
@@ -2784,8 +2783,7 @@ export class Screen {
       this.hoveredBlockKey = null;
       this.hoveredSubKey = null;
       this.hoveredRunKeys = null;
-      this.drawScrollback();
-      this.placeCursor();
+      this.syncedPartialRepaint(() => this.drawScrollback());
     }
     // Left-click on a keyed scrollback block toggles that single block's
     // expand/collapse via the app. We require a full click — press and
