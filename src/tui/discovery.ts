@@ -97,7 +97,7 @@ export interface DiscoveredSession {
   forkedFromMessageId?: string;
   attachedClients: number;
   updatedAt: string;
-  status: "live" | "cold";
+  status: "warm" | "cold";
   // Mid-turn flag from the daemon. Drives the picker's busy indicator.
   busy?: boolean;
   // True when the agent is blocked on the user (outstanding permission
@@ -184,7 +184,7 @@ export async function listSessions(
     cwd: s.cwd,
     updatedAt: s.updatedAt,
     attachedClients: s.attachedClients ?? 0,
-    status: s.status ?? "live",
+    status: s.status ?? "warm",
     upstreamSessionId: s.upstreamSessionId,
     agentId: s.agentId,
     currentModel: s.currentModel,
@@ -310,7 +310,7 @@ export async function listAgents(
   }));
 }
 
-// Demote a live session to cold (POST .../kill). A 404 is tolerated so
+// Demote a warm session to cold (POST .../kill). A 404 is tolerated so
 // callers don't have to special-case races where the session was already
 // removed by another client.
 // Branch an existing session into a new one. Daemon mints a fresh
@@ -436,7 +436,7 @@ export async function setSessionPriority(
   }
 }
 
-// Ask the daemon to regenerate a live session's title via its agent
+// Ask the daemon to regenerate a warm session's title via its agent
 // (equivalent to typing bare `/hydra title` in the composer). The daemon
 // responds 202 immediately — the regen runs asynchronously on the
 // session's prompt queue, so the new title shows up on the next list
@@ -541,7 +541,7 @@ export function pickMostRecent(
   if (matching.length === 0) {
     return null;
   }
-  const score = (s: DiscoveredSession): number => (s.status === "live" ? 1 : 0);
+  const score = (s: DiscoveredSession): number => (s.status === "warm" ? 1 : 0);
   const sorted = [...matching].sort((a, b) => {
     const ds = score(b) - score(a);
     if (ds !== 0) {

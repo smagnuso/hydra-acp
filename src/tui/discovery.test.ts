@@ -47,7 +47,7 @@ describe("listSessions", () => {
               cwd: "/x",
               updatedAt: "2025-01-01T00:00:00Z",
               attachedClients: 1,
-              status: "live",
+              status: "warm",
               agentId: "claude-acp",
             },
           ],
@@ -66,7 +66,7 @@ describe("listSessions", () => {
         cwd: "/x",
         updatedAt: "2025-01-01T00:00:00Z",
         attachedClients: 1,
-        status: "live",
+        status: "warm",
         agentId: "claude-acp",
         upstreamSessionId: undefined,
         title: undefined,
@@ -138,7 +138,7 @@ describe("pickMostRecent", () => {
     sessionId: string,
     cwd: string,
     updatedAt: string,
-    status: "live" | "cold" = "live",
+    status: "warm" | "cold" = "warm",
   ) => ({ sessionId, cwd, updatedAt, status, attachedClients: 0 });
 
   it("returns null when no cwd match", () => {
@@ -146,14 +146,14 @@ describe("pickMostRecent", () => {
   });
 
   it("prefers live over cold", () => {
-    const live = mk("a", "/x", "2025-01-01", "live");
+    const live = mk("a", "/x", "2025-01-01", "warm");
     const coldNewer = mk("b", "/x", "2025-02-01", "cold");
     expect(pickMostRecent([coldNewer, live], "/x")).toBe(live);
   });
 
   it("picks most recent within same status", () => {
-    const older = mk("a", "/x", "2025-01-01", "live");
-    const newer = mk("b", "/x", "2025-02-01", "live");
+    const older = mk("a", "/x", "2025-01-01", "warm");
+    const newer = mk("b", "/x", "2025-02-01", "warm");
     expect(pickMostRecent([older, newer], "/x")).toBe(newer);
   });
 });

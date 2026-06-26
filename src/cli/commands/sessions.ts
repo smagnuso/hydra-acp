@@ -64,7 +64,7 @@ export async function runSessionsList(
       title?: string;
       attachedClients: number;
       updatedAt: string;
-      status?: "live" | "cold";
+      status?: "warm" | "cold";
       importedFromMachine?: string;
       originatingClient?: { name: string; version?: string };
       compactionState?: unknown;
@@ -119,13 +119,13 @@ export async function runSessionsList(
     return;
   }
   const sorted = hostFiltered.slice().sort((a, b) => {
-    const liveDiff = (b.status === "live" ? 1 : 0) - (a.status === "live" ? 1 : 0);
-    if (liveDiff !== 0) {
-      return liveDiff;
+    const warmDiff = (b.status === "warm" ? 1 : 0) - (a.status === "warm" ? 1 : 0);
+    if (warmDiff !== 0) {
+      return warmDiff;
     }
     return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
   });
-  // Always keep every live session; cap cold at sessionListColdLimit (most
+  // Always keep every warm session; cap cold at sessionListColdLimit (most
   // recent first) unless --all is passed. Sort is live-first then
   // recency, so cold entries are already contiguous at the tail.
   let visible = sorted;

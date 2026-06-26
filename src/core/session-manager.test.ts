@@ -2103,7 +2103,7 @@ describe("SessionManager: importBundle", () => {
     expect(record.cwd).toBe("/bundle-orig");
   });
 
-  it("closes a live session backed by the replaced record and notifies attached clients", async () => {
+  it("closes a warm session backed by the replaced record and notifies attached clients", async () => {
     // Replace-over-live is the only importBundle path that can yank the
     // session out from under an attached client; assert it broadcasts
     // hydra-acp/session/closed so the TUI's cold-banner handler trips.
@@ -3326,7 +3326,7 @@ describe("SessionManager.resurrect: pendingHistorySync", () => {
 
 
 describe("SessionManager: parentSessionId", () => {
-  it("surfaces parentSessionId for a live session in list()", async () => {
+  it("surfaces parentSessionId for a warm session in list()", async () => {
     const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock
@@ -3376,7 +3376,7 @@ describe("SessionManager: parentSessionId", () => {
 });
 
 describe("SessionManager: originatingClient", () => {
-  it("surfaces originatingClient for a live session in list() and persists it", async () => {
+  it("surfaces originatingClient for a warm session in list() and persists it", async () => {
     const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
     const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
     requestMock

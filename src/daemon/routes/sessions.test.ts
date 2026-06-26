@@ -289,7 +289,7 @@ describe("session routes: termination broadcasts session_closed", () => {
   it("PATCH /v1/sessions/:id with { regen: true } accepts cold sessions (schedules background synopsis)", async () => {
     // Phase 2.5: cold sessions are no longer rejected. The synopsis
     // coordinator reads history.jsonl + meta.json from disk and spawns
-    // an ephemeral agent to generate the synopsis — no live session
+    // an ephemeral agent to generate the synopsis — no warm session
     // required.
     const session = await harness.manager.create({
       cwd: "/w",
@@ -333,7 +333,7 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(await harness.manager.hasRecord(session.sessionId)).toBe(false);
   });
 
-  it("GET /v1/sessions reports busy: false for an idle live session", async () => {
+  it("GET /v1/sessions reports busy: false for an idle warm session", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -353,7 +353,7 @@ describe("session routes: termination broadcasts session_closed", () => {
     };
     const entry = body.sessions.find((s) => s.sessionId === session.sessionId);
     expect(entry).toBeDefined();
-    expect(entry?.status).toBe("live");
+    expect(entry?.status).toBe("warm");
     expect(entry?.busy).toBe(false);
     expect(entry?.awaitingInput).toBe(false);
   });
@@ -363,7 +363,7 @@ describe("session routes: termination broadcasts session_closed", () => {
       cwd: "/w",
       agentId: "claude-code",
     });
-    // Inject compactionState — for live sessions it must be set on the
+    // Inject compactionState — for warm sessions it must be set on the
     // in-memory object (listUncached reads session.compactionState);
     // the store write covers cold-session exposure.
     session.compactionState = {
@@ -396,12 +396,12 @@ describe("session routes: termination broadcasts session_closed", () => {
     expect(entry?.compactionState?.iter).toBe(1);
   });
 
-  it("GET /v1/sessions includes forkSynthesisState when present on a live session", async () => {
+  it("GET /v1/sessions includes forkSynthesisState when present on a warm session", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
     });
-    // Inject forkSynthesisState — for live sessions it must be set on the
+    // Inject forkSynthesisState — for warm sessions it must be set on the
     // in-memory object (listUncached reads session.forkSynthesisState);
     // the store write covers cold-session exposure.
     session.forkSynthesisState = "running";
@@ -461,7 +461,7 @@ describe("session routes: termination broadcasts session_closed", () => {
     };
     expect(body.sessionId).toBe(session.sessionId);
     expect(body.agentId).toBe("claude-code");
-    expect(body.status).toBe("live");
+    expect(body.status).toBe("warm");
   });
 
   it("GET /v1/sessions/:id 404s for an unknown id", async () => {
@@ -1166,7 +1166,7 @@ describe("session routes: compaction endpoints", () => {
     await harness.app.close();
   });
 
-  it("POST /v1/sessions/:id/compact returns 202 with { scheduled: true } for a live session", async () => {
+  it("POST /v1/sessions/:id/compact returns 202 with { scheduled: true } for a warm session", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -1227,7 +1227,7 @@ describe("session routes: compaction endpoints", () => {
     expect(typeof body.inFlight).toBe("boolean");
   });
 
-  it("GET /v1/sessions/:id/compact returns summarizedThroughEntry from a live session", async () => {
+  it("GET /v1/sessions/:id/compact returns summarizedThroughEntry from a warm session", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -1934,7 +1934,7 @@ describe("GET /v1/sessions/:id/attention", () => {
     (session as any).setAttentionFlag(source, reason, payload);
   }
 
-  it("returns flags for a live session that has attention flags", async () => {
+  it("returns flags for a warm session that has attention flags", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -1960,7 +1960,7 @@ describe("GET /v1/sessions/:id/attention", () => {
     expect(res.status).toBe(404);
   });
 
-  it("returns empty array when a live session has no flags", async () => {
+  it("returns empty array when a warm session has no flags", async () => {
     const session = await harness.manager.create({
       cwd: "/w",
       agentId: "claude-code",
@@ -2185,8 +2185,8 @@ describe("POST /v1/sessions/:id/attention/clear", () => {
       { source: "other", reason: "noise", raisedAt: 2000, payload: {} },
     ]});
 
-    // Detach the live session from the manager's in-memory map so GET/POST
-    // treat it as cold (no live session branch). This mirrors a killed session.
+    // Detach the warm session from the manager's in-memory map so GET/POST
+    // treat it as cold (no warm session branch). This mirrors a killed session.
     const liveMap = (harness.manager as unknown as { sessions: Map<string, any> }).sessions;
     liveMap.delete(id);
 

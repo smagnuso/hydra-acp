@@ -214,7 +214,7 @@ export function registerSessionRoutes(
     }
   });
 
-  // Demote a live session to cold: close the in-memory session but keep
+  // Demote a warm session to cold: close the in-memory session but keep
   // the on-disk record so it can be resurrected later. Idempotent — a
   // session that's already cold returns 204 without touching disk. Use
   // DELETE /v1/sessions/:id when you want the record gone too.
@@ -301,7 +301,7 @@ export function registerSessionRoutes(
   // directly; { regen: true } triggers the LLM-regen path (same as bare
   // /hydra title in the composer). Plain retitle works on live AND cold
   // sessions — cold just persists straight to meta.json. Regen still
-  // requires a live session (no agent to talk to when cold) and 409s
+  // requires a warm session (no agent to talk to when cold) and 409s
   // otherwise. Empty/whitespace title without regen is rejected as 400.
   //
   // Regen is fire-and-forget: we accept the request, queue it on the
@@ -341,7 +341,7 @@ export function registerSessionRoutes(
     }
     if (body.regen === true) {
       // Picker T and /hydra title (no arg) both land here. The synopsis
-      // coordinator handles live and cold sessions uniformly: live agents
+      // coordinator handles warm and cold sessions uniformly: warm agents
       // are kept alive; the ephemeral synopsis agent runs in parallel
       // from the cold record + history.jsonl. Return 202 immediately.
       const exists = manager.get(id) !== undefined || (await manager.hasRecord(id));
@@ -685,7 +685,7 @@ export function registerSessionRoutes(
       approxTokens = estimateTokens(unsummarizedChars);
       const currentModel = session?.currentModel;
       const lastActivityMs = history.at(-1)!.recordedAt;
-      // Pull authoritative usage from the live session if attached.
+      // Pull authoritative usage from the warm session if attached.
       // The heuristic prefers these over the char-estimate so utilization
       // matches what the status bar shows the user.
       const usage = session?.currentUsage;
@@ -770,7 +770,7 @@ export function registerSessionRoutes(
     const id = (await manager.resolveCanonicalId(raw)) ?? raw;
 
     const live = manager.get(id);
-    // For follow mode against a live session, subscribe BEFORE reading
+    // For follow mode against a warm session, subscribe BEFORE reading
     // the snapshot so we don't lose entries that land during the
     // disk-read window. Buffer those into `pending` and flush after
     // the snapshot to preserve order; switch to direct emission once
@@ -854,7 +854,7 @@ export function registerSessionRoutes(
       return reply;
     }
 
-    // Follow mode against a live session — keep the connection open
+    // Follow mode against a warm session — keep the connection open
     // until the client disconnects. The on('close') handler that
     // unsubscribes was registered earlier (before the snapshot await)
     // so an abort during the snapshot phase also cleans up.
@@ -1260,7 +1260,7 @@ export function registerSessionRoutes(
   });
 
   // GET /v1/sessions/attention?source=<name> — return attention flags
-  // from ALL sessions (live + cold) whose source matches the query
+  // from ALL sessions (warm + cold) whose source matches the query
   // parameter. Each entry includes sessionId alongside the standard
   // AttentionFlag shape.
   app.get<{ Querystring: { source?: string } }>("/v1/sessions/attention", async (request, reply) => {
@@ -1293,7 +1293,7 @@ export function registerSessionRoutes(
 
   // POST /v1/sessions/:id/attention/clear — clear attention flags on a
   // session. Body `{source, reason}` clears exactly that flag; body `{}`
-  // clears all flags. For live sessions this uses the in-memory mutation
+  // clears all flags. For warm sessions this uses the in-memory mutation
   // path (which broadcasts to attached clients). For cold sessions it
   // reads the persisted record, mutates the flags array, and writes back
   // through mutateRecord so the change survives a daemon restart.

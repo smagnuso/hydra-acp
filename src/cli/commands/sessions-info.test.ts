@@ -102,11 +102,11 @@ describe("aggregate — bare bundle", () => {
         },
         summarizedThroughEntry: 42,
       }),
-      "live",
+      "warm",
     );
     expect(d.title).toBe("Wire reminder MCP");
     expect(d.currentModel).toBe("claude-opus-4-7");
-    expect(d.status).toBe("live");
+    expect(d.status).toBe("warm");
     expect(d.synopsis).not.toBeNull();
     expect(d.synopsis!.goal).toBe("ship reminder v0.1");
     expect(d.summarizedThroughEntry).toBe(42);

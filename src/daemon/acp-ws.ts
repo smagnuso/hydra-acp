@@ -26,7 +26,7 @@ import {
   mergeMeta,
   sessionListEntryToWire,
   buildHydraSessionMeta,
-  type LiveSessionMetaExtras,
+  type WarmSessionMetaExtras,
   type SessionListEntry,
   type InitializeResult,
   type SessionListResult,
@@ -2519,7 +2519,7 @@ function buildViewerResponseMeta(
      busy: false,
      awaitingInput: false,
    };
-  const extras: LiveSessionMetaExtras = {
+  const extras: WarmSessionMetaExtras = {
     currentMode: fromDisk.currentMode,
     agentArgs: fromDisk.agentArgs,
     availableCommands: fromDisk.agentCommands,
@@ -2551,7 +2551,7 @@ function buildResponseMeta(
   // otherwise come from history-replayed snapshot events
   // (current_model_update / current_mode_update / available_commands_update)
   // so a fresh attach has the right view from the get-go.
-  const extras: LiveSessionMetaExtras = {
+  const extras: WarmSessionMetaExtras = {
     clientId: opts.clientId,
     currentMode: session.currentMode,
     agentArgs: session.agentArgs,

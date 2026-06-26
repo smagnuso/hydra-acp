@@ -608,7 +608,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["^Y", "yank last kill"],
   null,
   ["^P", "switch session (picker)"],
-  ["Alt+N / Alt+Tab", "next live session"],
+  ["Alt+N / Alt+Tab", "next warm session"],
   ["^T", "show / hide thoughts"],
   ["^V", "paste image from clipboard"],
   ["^O", "session options (tools · plan · thoughts · diffs · mouse · enter)"],
@@ -1900,7 +1900,7 @@ async function runSession(
   // banner to busy and start the elapsed timer at the right offset.
   let initialTurnStartedAt: number | undefined;
   // True when the session/attach call that started this TUI is what
-  // brought the session from cold → live. Drives one-shot attach-time
+  // brought the session from cold → warm. Drives one-shot attach-time
   // UX (currently the compaction prompt) so re-attaches to an already
   // hot session don't keep nagging.
   let attachJustResurrected = false;
@@ -3430,17 +3430,17 @@ async function runSession(
     // in-memory state; repaints are deferred until we resume.
     // keepFullscreen=true: stay in the alt-screen buffer across the
     // picker round-trip so the user doesn't see a frame of the host
-    // shell's main buffer flash between the live session tearing down
+    // shell's main buffer flash between the warm session tearing down
     // and the picker painting from row 1. The picker's moveTo(1,1) +
     // eraseDisplayBelow simply overwrites the alt-screen buffer the
-    // live session was using; on return, screen.start() clears its
+    // warm session was using; on return, screen.start() clears its
     // row-sig cache and repaints over the picker content.
     screen.pauseRepaint();
     screen.stop({ keepFullscreen: true });
     saveHistory(historyFile, history).catch(() => undefined);
     // Loop: the imported-first-launch action dialog's Esc returns
     // "back" to re-show the picker, same as the initial-picker flow.
-    // Picker abort exits the loop and resumes the live session.
+    // Picker abort exits the loop and resumes the warm session.
     let resolvedChoice: { choice: PickerResult; sessions: DiscoveredSession[] } | null = null;
     let attachOverrides: { readonly?: boolean; cwd?: string; resumeHint?: { agentId: string; cwd: string; upstreamSessionId: string } } | null = null;
     while (resolvedChoice === null) {
@@ -3502,7 +3502,7 @@ async function runSession(
         break;
       }
       // attach: route imported-first-launch picks through the action /
-      // cwd wizard. cancel aborts the switch (resume live session);
+      // cwd wizard. cancel aborts the switch (resume warm session);
       // back loops to re-show the picker.
       const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
       const isImportedFirstLaunch =
@@ -3554,7 +3554,7 @@ async function runSession(
         break;
       }
       // Use a local opts shim so the helper can flip readonly without
-      // mutating the live session's opts (which still owns the current
+      // mutating the warm session's opts (which still owns the current
       // session). We translate the shim back into attachOverrides.
       const opsShim: TuiOptions = { ...opts, readonly: false };
       const decided = await runImportedFirstLaunchFlow(term, target, chosen, choice, opsShim);
@@ -3632,7 +3632,7 @@ async function runSession(
     if (!finishSession)
       return;
     const sessions = await listSessions(target);
-    const live = sessions.filter((s) => s.status === "live");
+    const live = sessions.filter((s) => s.status === "warm");
     if (live.length <= 1)
       return;
     const idx = live.findIndex((s) => s.sessionId === resolvedSessionId);
@@ -3701,7 +3701,7 @@ async function runSession(
       ...opts,
       sessionId: match.sessionId,
       cwd: match.cwd ?? resolvedCwd,
-      readonly: match.status !== "live",
+      readonly: match.status !== "warm",
     };
     if (match.agentId !== undefined)
       nextOpts.agentId = match.agentId;
@@ -6261,7 +6261,7 @@ async function runSession(
   //      shows "compacting..." right away rather than waiting for the
   //      next phase broadcast. This runs on every attach.
   //   B. If shouldCompact is true AND this attach woke the session up
-  //      (cold → live), surface the "compact?" prompt. Re-attaches to
+  //      (cold → warm), surface the "compact?" prompt. Re-attaches to
   //      an already-hot session don't re-prompt.
   void (async () => {
     try {
@@ -6687,7 +6687,7 @@ async function resolveSession(
       cwd,
     };
   }
-  // Smart default: show every live session plus up to PICKER_COLD_LIMIT
+  // Smart default: show every warm session plus up to PICKER_COLD_LIMIT
   // most-recently-touched cold ones so the list stays scannable even with
   // a deep on-disk history. The picker defaults its cursor to
   // "New session" so just pressing Enter creates a fresh one.

@@ -21,7 +21,7 @@ export type SessionListParams = z.infer<typeof SessionListParams>;
 // Last-known usage snapshot (tokens + cost) for a session. Fields are
 // individually optional — agents emit varying subsets and the persisted
 // record merges them across events. Listed sessions surface whatever
-// was last seen on disk; live sessions surface the in-memory state.
+// was last seen on disk; warm sessions surface the in-memory state.
 export const SessionListUsage = z.object({
   used: z.number().optional(),
   size: z.number().optional(),
@@ -73,7 +73,7 @@ export const SessionListEntry = z.object({
   priority: z.number().int().nonnegative().optional(),
   updatedAt: z.string(),
   attachedClients: z.number().int().nonnegative(),
-  status: z.enum(["live", "cold"]).default("live"),
+  status: z.enum(["warm", "cold"]).default("warm"),
   // True while the session is mid-turn (an agent prompt is in flight).
   // Always false for cold sessions. Lets pickers render a busy dot
   // without having to attach.
@@ -125,7 +125,7 @@ export type SessionListResult = z.infer<typeof SessionListResult>;
 // the session/new and session/attach paths fill them in. Keeping them
 // separate from SessionListEntry lets one builder emit a consistent
 // superset across every response that carries session meta.
-export interface LiveSessionMetaExtras {
+export interface WarmSessionMetaExtras {
   // Per-attachment client id. Set on session/new and session/load (where
   // it can't ride top-level — those are core spec methods).
   clientId?: string;
@@ -138,8 +138,8 @@ export interface LiveSessionMetaExtras {
   agentCapabilities?: unknown;
   queue?: unknown[];
   // True when this session/attach call is what brought the session
-  // from cold → live (the daemon's resurrect path ran inside the
-  // handler). False/absent when attaching to an already-live session.
+  // from cold → warm (the daemon's resurrect path ran inside the
+  // handler). False/absent when attaching to an already-warm session.
   // Clients use this to decide whether to surface attach-time UX like
   // the compaction prompt: ask once per wake, not on every re-attach.
   resurrected?: boolean;
@@ -148,7 +148,7 @@ export interface LiveSessionMetaExtras {
 // Single source of truth for the `_meta["hydra-acp"]` object emitted on
 // every response that describes a session — session/list, session/new,
 // session/attach (live + viewer). Producers derive a SessionListEntry
-// for the session and (for the live paths) pass the LiveSessionMetaExtras
+// for the session and (for the live paths) pass the WarmSessionMetaExtras
 // the list path can't know. This keeps the three response shapes in sync:
 // add a field here and every surface gets it.
 //
@@ -157,7 +157,7 @@ export interface LiveSessionMetaExtras {
 // moved to `title`.)
 export function buildHydraSessionMeta(
   entry: SessionListEntry,
-  extras?: LiveSessionMetaExtras,
+  extras?: WarmSessionMetaExtras,
 ): Record<string, unknown> {
   const meta: Record<string, unknown> = {
     attachedClients: entry.attachedClients,

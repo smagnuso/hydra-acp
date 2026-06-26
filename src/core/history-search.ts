@@ -39,7 +39,7 @@ export interface SessionHits {
   sessionId: string;
   title?: string;
   cwd: string;
-  status: "live" | "cold";
+  status: "warm" | "cold";
   updatedAt: string;
   // Total match occurrences in this session across all scanned
   // fragments, including matches beyond maxSnippetsPerSession. Lets the

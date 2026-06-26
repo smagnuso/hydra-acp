@@ -211,7 +211,7 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["r", "refresh from daemon"],
   ["s", "sync sessions from installed agents"],
   null,
-  ["k", "kill the selected live session"],
+  ["k", "kill the selected warm session"],
   ["d", "delete the selected session (kills first if live)"],
   ["t", "retitle the selected session"],
   ["T", "regenerate title + synopsis via agent"],
@@ -381,7 +381,7 @@ export async function pickSession(
     | "rename"
     | "busy";
   let mode: Mode = "normal";
-  let pendingAction: { sessionId: string; cwd: string; status: "live" | "cold" } | null = null;
+  let pendingAction: { sessionId: string; cwd: string; status: "warm" | "cold" } | null = null;
   // Find-session state. All transient — cleared when exitFind() fires.
   // findLayerActive gates the bracketed-paste interceptor so pasted text
   // reaches findComposer while the find dialog is open.
@@ -441,7 +441,7 @@ export async function pickSession(
   // Set when the user kills or deletes the session they opened the picker
   // from. Aborting (Esc) would otherwise resume that now-dead session,
   // which then errors on the first prompt — so we block the abort and
-  // make the user pick a live session or start a new one instead.
+  // make the user pick a warm session or start a new one instead.
   let currentSessionGone = false;
 
   // Composer pane at the top of the picker. Reuses the live composer's
@@ -811,7 +811,7 @@ export async function pickSession(
           term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
         } else if (mode === "confirm-delete" && pendingAction) {
           clearHits();
-          if (pendingAction.status === "live") {
+          if (pendingAction.status === "warm") {
             term.brightRed.noFormat(
               `  kill + delete ${shortId(pendingAction.sessionId)}? [y/N]`,
             );
@@ -1227,7 +1227,7 @@ export async function pickSession(
         : focused && hit.totalMatches > hit.snippets.length
           ? `  [${hit.snippets.length} of ${hit.totalMatches}]`
           : "";
-    const head = `${shortId}  ${hit.status === "live" ? "live" : "cold"}`;
+    const head = `${shortId}  ${hit.status === "warm" ? "warm" : "cold"}`;
     const titleBudget = Math.max(5, rowBudget - head.length - counterText.length - 2);
     const titleSlice = truncateMiddle(title, titleBudget);
     const line1 = `${head}  ${titleSlice}${counterText}`.padEnd(rowBudget);
@@ -3470,12 +3470,12 @@ export function sortSessions(
   const priorityOf = (s: DiscoveredSession): number =>
     s.priority && s.priority > 0 ? s.priority : 0;
   const tier = (s: DiscoveredSession): number => {
-    const isLive = s.status === "live";
+    const isWarm = s.status === "warm";
     const isPriority = priorityOf(s) > 0;
-    if (isLive && s.awaitingInput) return 5;
-    if (isLive && s.busy) return 4;
-    if (isLive && isPriority) return 3;
-    if (isLive) return 2;
+    if (isWarm && s.awaitingInput) return 5;
+    if (isWarm && s.busy) return 4;
+    if (isWarm && isPriority) return 3;
+    if (isWarm) return 2;
     if (isPriority) return 1;
     return 0;
   };

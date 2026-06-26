@@ -293,13 +293,13 @@ describe("sortSessions", () => {
   it("floats busy sessions above non-busy live sessions", () => {
     const live = session({
       sessionId: "hydra-live",
-      status: "live",
+      status: "warm",
       cwd,
       updatedAt: "2026-05-20T12:00:00Z",
     });
     const busy = session({
       sessionId: "hydra-busy",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd,
       updatedAt: "2026-05-20T11:00:00Z",
@@ -321,14 +321,14 @@ describe("sortSessions", () => {
   it("floats awaiting-input sessions above merely-busy ones", () => {
     const busy = session({
       sessionId: "hydra-busy",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd,
       updatedAt: "2026-05-20T13:00:00Z",
     });
     const awaiting = session({
       sessionId: "hydra-awaiting",
-      status: "live",
+      status: "warm",
       busy: true,
       awaitingInput: true,
       cwd,
@@ -344,14 +344,14 @@ describe("sortSessions", () => {
   it("ranks awaiting-input elsewhere above busy in the current cwd", () => {
     const busyHere = session({
       sessionId: "hydra-here",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd,
       updatedAt: "2026-05-20T12:00:00Z",
     });
     const awaitingElsewhere = session({
       sessionId: "hydra-elsewhere",
-      status: "live",
+      status: "warm",
       awaitingInput: true,
       cwd: "/other/place",
       updatedAt: "2026-05-20T11:00:00Z",
@@ -366,14 +366,14 @@ describe("sortSessions", () => {
   it("does not prefer current cwd within the same tier — newer wins", () => {
     const busyHere = session({
       sessionId: "hydra-here",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd,
       updatedAt: "2026-05-20T11:00:00Z",
     });
     const busyElsewhere = session({
       sessionId: "hydra-elsewhere",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd: "/other/place",
       updatedAt: "2026-05-20T12:00:00Z",
@@ -388,13 +388,13 @@ describe("sortSessions", () => {
   it("ranks busy elsewhere above non-busy in current cwd", () => {
     const liveHere = session({
       sessionId: "hydra-here",
-      status: "live",
+      status: "warm",
       cwd,
       updatedAt: "2026-05-20T12:00:00Z",
     });
     const busyElsewhere = session({
       sessionId: "hydra-elsewhere",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd: "/other/place",
       updatedAt: "2026-05-20T11:00:00Z",
@@ -409,14 +409,14 @@ describe("sortSessions", () => {
   it("sorts by updatedAt within the same tier", () => {
     const older = session({
       sessionId: "hydra-older",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd,
       updatedAt: "2026-05-20T10:00:00Z",
     });
     const newer = session({
       sessionId: "hydra-newer",
-      status: "live",
+      status: "warm",
       busy: true,
       cwd,
       updatedAt: "2026-05-20T12:00:00Z",
@@ -431,14 +431,14 @@ describe("sortSessions", () => {
   it("preserves compactionState on sessions through sorting", () => {
     const compacting = session({
       sessionId: "hydra-compacting",
-      status: "live",
+      status: "warm",
       cwd,
       updatedAt: "2026-05-20T13:00:00Z",
       compactionState: { status: "running", requestedAt: Date.now() },
     });
     const idle = session({
       sessionId: "hydra-idle",
-      status: "live",
+      status: "warm",
       cwd,
       updatedAt: "2026-05-20T14:00:00Z",
     });
@@ -683,7 +683,7 @@ describe("pickSession: killing the current session blocks abort", () => {
   it("exits hydra on abort when the current session was just killed", async () => {
     const live = session({
       sessionId: "hydra-current",
-      status: "live",
+      status: "warm",
       agentId: "claude-code",
     });
     // After kill the daemon reports the session as cold (still on disk).
@@ -718,8 +718,8 @@ describe("pickSession: killing the current session blocks abort", () => {
   });
 
   it("still aborts normally when a non-current session is killed", async () => {
-    const current = session({ sessionId: "hydra-current", status: "live" });
-    const other = session({ sessionId: "hydra-other", status: "live" });
+    const current = session({ sessionId: "hydra-current", status: "warm" });
+    const other = session({ sessionId: "hydra-other", status: "warm" });
     globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
       const url = String(input);
       if (url.includes("/kill")) {

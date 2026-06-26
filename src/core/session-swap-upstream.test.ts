@@ -422,7 +422,7 @@ describe("Session.swapUpstream", () => {
     expect(history).toHaveLength(0);
 
     // The synthetic "Compaction completed." goes out to attached
-    // clients via the live session/update channel (broadcast-only).
+    // clients via the warm session/update channel (broadcast-only).
     const chunkUpdate = notifications.find((n) => {
       if (n.method !== "session/update") {
         return false;

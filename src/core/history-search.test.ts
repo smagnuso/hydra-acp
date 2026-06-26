@@ -24,7 +24,7 @@ import type { SessionManager } from "./session-manager.js";
 interface FakeSession {
   sessionId: string;
   cwd: string;
-  status: "live" | "cold";
+  status: "warm" | "cold";
   title?: string;
   updatedAt: string;
   history: HistoryEntry[];
@@ -456,7 +456,7 @@ describe("searchHistories", () => {
       {
         sessionId: "hydra_session_a",
         cwd: "/a",
-        status: "live",
+        status: "warm",
         title: "Session A",
         updatedAt: "2026-05-20T00:00:00Z",
         history: [userEntry("alpha banana"), agentEntry("more banana")],
@@ -484,7 +484,7 @@ describe("searchHistories", () => {
       {
         sessionId: "hydra_session_a",
         cwd: "/a",
-        status: "live",
+        status: "warm",
         updatedAt: "2026-05-20T00:00:00Z",
         history: [agentEntry("banana")],
       },

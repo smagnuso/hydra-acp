@@ -199,7 +199,7 @@ describe("compaction swap — onCompactionArtifact hook", () => {
     await manager.flushHistoryWrites();
   });
 
-  it("persists artifact for cold session (no live session to swap)", async () => {
+  it("persists artifact for cold session (no warm session to swap)", async () => {
     mockCompaction.mockResolvedValue({
       synopsis: makeArtifact(),
     });

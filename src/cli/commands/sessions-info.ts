@@ -50,7 +50,7 @@ interface SessionInfoData {
   cwd: string;
   agentId: string;
   currentModel?: string;
-  status: "live" | "cold";
+  status: "warm" | "cold";
   createdAt: string;
   updatedAt: string;
   synopsis: SessionSynopsisShape | null;
@@ -111,7 +111,7 @@ export async function runSessionsInfo(
   );
   const liveStatus =
     infoRes.status === 200
-      ? (infoRes.body as { status?: "live" | "cold" }).status
+      ? (infoRes.body as { status?: "warm" | "cold" }).status
       : undefined;
 
   const exportRes = await daemonFetch(
@@ -168,7 +168,7 @@ export async function runSessionsInfo(
 
 export function aggregate(
   bundle: Bundle,
-  status: "live" | "cold",
+  status: "warm" | "cold",
 ): SessionInfoData {
   const r = bundle.session;
   const history = bundle.history;

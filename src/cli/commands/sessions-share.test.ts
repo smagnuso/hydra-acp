@@ -216,7 +216,7 @@ describe("runSessionsShare", () => {
               cwd: "/tmp/work",
               updatedAt: "2025-02-01T00:00:00Z",
               attachedClients: 0,
-              status: "live",
+              status: "warm",
             },
           ],
         }),

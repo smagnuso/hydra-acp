@@ -19,7 +19,7 @@ describe("toRow agent column", () => {
       agentId: "opencode",
       attachedClients: 1,
       updatedAt: new Date().toISOString(),
-      status: "live",
+      status: "warm",
     });
     expect(r.agent).toBe("opencode");
   });
@@ -44,7 +44,7 @@ describe("toRow agent column", () => {
       currentUsage: { costAmount: 1.42, costCurrency: "USD" },
       attachedClients: 1,
       updatedAt: new Date().toISOString(),
-      status: "live",
+      status: "warm",
     });
     expect(r.agent).toBe("opencode");
   });
@@ -57,7 +57,7 @@ describe("toRow cost column", () => {
     agentId: "opencode",
     attachedClients: 1,
     updatedAt: new Date().toISOString(),
-    status: "live" as const,
+    status: "warm" as const,
   };
 
   it("renders whole-dollar USD cost (cents dropped)", () => {
@@ -95,7 +95,7 @@ describe("default columns include trailing cost", () => {
       currentUsage: { costAmount: 3.5 },
       attachedClients: 0,
       updatedAt: new Date().toISOString(),
-      status: "live",
+      status: "warm",
     });
     const widths = computeWidths([row]);
     const line = formatRow(row, widths, 80);
@@ -152,36 +152,36 @@ describe("toRow state column", () => {
     updatedAt: new Date().toISOString(),
   };
 
-  it("renders LIVE for an idle live session", () => {
-    const r = toRow({ ...base, attachedClients: 0, status: "live" });
-    expect(r.state).toBe("LIVE");
+  it("renders WARM for an idle warm session", () => {
+    const r = toRow({ ...base, attachedClients: 0, status: "warm" });
+    expect(r.state).toBe("WARM");
   });
 
-  it("renders LIVE• for a live session that is mid-turn", () => {
-    const r = toRow({ ...base, attachedClients: 1, status: "live", busy: true });
-    expect(r.state).toBe("LIVE•");
+  it("renders WARM• for a warm session that is mid-turn", () => {
+    const r = toRow({ ...base, attachedClients: 1, status: "warm", busy: true });
+    expect(r.state).toBe("WARM•");
   });
 
-  it("renders LIVE◦ for a live session awaiting user input", () => {
+  it("renders WARM◦ for a warm session awaiting user input", () => {
     const r = toRow({
       ...base,
       attachedClients: 1,
-      status: "live",
+      status: "warm",
       busy: true,
       awaitingInput: true,
     });
-    expect(r.state).toBe("LIVE◦");
+    expect(r.state).toBe("WARM◦");
   });
 
   it("awaiting input wins over busy on the state glyph", () => {
     const r = toRow({
       ...base,
       attachedClients: 1,
-      status: "live",
+      status: "warm",
       busy: false,
       awaitingInput: true,
     });
-    expect(r.state).toBe("LIVE◦");
+    expect(r.state).toBe("WARM◦");
   });
 
   it("renders COLD for cold sessions regardless of busy flag", () => {
@@ -225,7 +225,7 @@ describe("formatRow column selection", () => {
     title: "My session",
     attachedClients: 0,
     updatedAt: new Date().toISOString(),
-    status: "live",
+    status: "warm",
   };
 
   it("omits UPSTREAM by default and includes it in the full set", () => {
@@ -310,22 +310,22 @@ describe("toRow compaction badge in STATE column", () => {
     agentId: "opencode",
     attachedClients: 1,
     updatedAt: new Date().toISOString(),
-    status: "live" as const,
+    status: "warm" as const,
   };
 
-  it("renders LIVE\u27f3 when compactionState is populated", () => {
+  it("renders WARM\u27f3 when compactionState is populated", () => {
     const r = toRow({
       ...base,
       title: "Auth refactor",
       compactionState: { status: "running", requestedAt: Date.now() },
     });
-    expect(r.state).toBe("LIVE\u27f3");
+    expect(r.state).toBe("WARM\u27f3");
     expect(r.title).toBe("Auth refactor");
   });
 
-  it("leaves state as LIVE when compactionState is absent", () => {
+  it("leaves state as WARM when compactionState is absent", () => {
     const r = toRow({ ...base, title: "Auth refactor" });
-    expect(r.state).toBe("LIVE");
+    expect(r.state).toBe("WARM");
     expect(r.title).toBe("Auth refactor");
   });
 
@@ -335,7 +335,7 @@ describe("toRow compaction badge in STATE column", () => {
       busy: true,
       compactionState: { status: "running", requestedAt: Date.now() },
     });
-    expect(r.state).toBe("LIVE\u2022");
+    expect(r.state).toBe("WARM\u2022");
   });
 
   it("awaitingInput takes precedence over compacting", () => {
@@ -344,7 +344,7 @@ describe("toRow compaction badge in STATE column", () => {
       awaitingInput: true,
       compactionState: { status: "running", requestedAt: Date.now() },
     });
-    expect(r.state).toBe("LIVE\u25e6");
+    expect(r.state).toBe("WARM\u25e6");
   });
 
   it("cold sessions render plain COLD regardless of compactionState", () => {

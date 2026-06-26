@@ -31,9 +31,9 @@ export interface SessionSummary {
   importedFromMachine?: string;
   attachedClients: number;
   updatedAt: string;
-  status?: "live" | "cold";
+  status?: "warm" | "cold";
   // Mid-turn flag from the daemon. Renders as a filled trailing dot
-  // (`•`) in the STATE cell so the picker can show which live sessions
+  // (`•`) in the STATE cell so the picker can show which warm sessions
   // are working without the user having to attach.
   busy?: boolean;
   // Set when the agent is blocked on the user (outstanding permission
@@ -42,7 +42,7 @@ export interface SessionSummary {
   // session awaiting input is mid-turn but stalled on the human.
   awaitingInput?: boolean;
   // Present when compaction is in progress. Drives the trailing ⟳ in
-  // the STATE cell (`LIVE⟳`) so operators can spot mid-compaction
+  // the STATE cell (`WARM⟳`) so operators can spot mid-compaction
   // sessions at a glance without a per-session GET /compact/status call.
   compactionState?: unknown;
   // Present when this session is a fork whose synopsis is being generated
@@ -56,7 +56,7 @@ export interface Row {
   upstream: string;
   // Live/cold status plus a trailing dot for in-flight work: filled
   // `•` when mid-turn, hollow `◦` when blocked awaiting the user.
-  // `LIVE` / `LIVE•` / `LIVE◦` / `COLD`.
+  // `WARM` / `WARM•` / `WARM◦` / `COLD`.
   state: string;
   agent: string;
   // Last-known model id, provider prefix stripped (e.g. "claude-opus-4").
@@ -239,10 +239,10 @@ export function formatUpstreamCell(
 }
 
 // Live/cold state cell. Cold sessions render as `COLD`. Live sessions
-// render as `LIVE◦` when the agent is blocked awaiting the user (a
-// permission request / posed question), `LIVE•` when actively mid-turn,
-// `LIVE✨` when fork synopsis synthesis is running, `LIVE⟳` when
-// background compaction is running, or plain `LIVE` when idle.
+// render as `WARM◦` when the agent is blocked awaiting the user (a
+// permission request / posed question), `WARM•` when actively mid-turn,
+// `WARM✨` when fork synopsis synthesis is running, `WARM⟳` when
+// background compaction is running, or plain `WARM` when idle.
 // Precedence: awaiting-input > busy > synthesizing > compacting > idle.
 // The two user-attention signals (◦, •) outrank the background-work
 // signals because they indicate something the operator may need to react
@@ -251,7 +251,7 @@ export function formatUpstreamCell(
 // The HEADER row reuses formatRow's plumbing but its `state` cell is
 // literal "STATE".
 function formatState(
-  status: "live" | "cold" | undefined,
+  status: "warm" | "cold" | undefined,
   busy: boolean | undefined,
   awaitingInput: boolean | undefined,
   compacting: boolean | undefined,
@@ -261,21 +261,21 @@ function formatState(
     return "COLD";
   }
   if (awaitingInput) {
-    return forkSynthesisState === "failed" ? "LIVE◦⚠" : "LIVE\u25e6";
+    return forkSynthesisState === "failed" ? "WARM◦⚠" : "WARM\u25e6";
   }
   if (busy) {
-    return forkSynthesisState === "failed" ? "LIVE•⚠" : "LIVE\u2022";
+    return forkSynthesisState === "failed" ? "WARM•⚠" : "WARM\u2022";
   }
   if (forkSynthesisState === "running") {
-    return "LIVE✨";
+    return "WARM✨";
   }
   if (forkSynthesisState === "failed") {
-    return "LIVE⚠";
+    return "WARM⚠";
   }
   if (compacting) {
-    return "LIVE\u27f3";
+    return "WARM\u27f3";
   }
-  return "LIVE";
+  return "WARM";
 }
 
 // Header-aware natural width per column. Only the selected columns are

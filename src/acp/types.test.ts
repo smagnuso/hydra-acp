@@ -150,7 +150,7 @@ describe("sessionListEntryToWire", () => {
       title: "fix flaky test",
       updatedAt: "2026-05-29T18:01:23.000Z",
       attachedClients: 2,
-      status: "live",
+      status: "warm",
       busy: false,
       awaitingInput: false,
     });
@@ -160,7 +160,7 @@ describe("sessionListEntryToWire", () => {
     expect(wire.updatedAt).toBe("2026-05-29T18:01:23.000Z");
     expect(wire._meta?.[HYDRA_META_KEY]).toEqual({
       attachedClients: 2,
-      status: "live",
+      status: "warm",
       busy: false,
       awaitingInput: false,
       cwd: "/work",
@@ -236,7 +236,7 @@ describe("buildHydraSessionMeta", () => {
     title: "my session",
     updatedAt: "t",
     attachedClients: 1,
-    status: "live" as const,
+    status: "warm" as const,
     busy: true,
     awaitingInput: false,
     agentId: "claude-acp",

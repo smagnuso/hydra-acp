@@ -243,7 +243,7 @@ export interface SessionManagerOptions {
   npmRegistry?: string;
   // Process-name → registered command list. Daemon shares a single
   // registry across all sessions so an extension only has to register
-  // once at connect time and every live session can dispatch to it.
+  // once at connect time and every warm session can dispatch to it.
   extensionCommands?: ExtensionCommandRegistry;
   // Fallback cwd used when a resurrected session's recorded cwd no longer
   // exists on disk (e.g. a `cat` session whose /tmp sandbox was cleaned
@@ -365,7 +365,7 @@ export class SessionManager {
       compactionModel: this.compactionModel,
       compactionMaxIterations: compactionConfig.maxIterations,
       persistTitle: async (id, title) => {
-        // Route through the live session when one exists (e.g. bare
+        // Route through the warm session when one exists (e.g. bare
         // `/hydra title` on an attached session). retitle() broadcasts
         // session_info_update to attached clients AND updates the
         // in-memory title so list() (and thus the picker poll) reflects
@@ -2062,7 +2062,7 @@ export class SessionManager {
       interactive: session.interactive,
       updatedAt: new Date(session.updatedAt).toISOString(),
       attachedClients: session.attachedCount,
-      status: "live",
+      status: "warm",
       busy: session.turnStartedAt !== undefined,
       awaitingInput: session.awaitingInput,
     };
@@ -2104,7 +2104,7 @@ export class SessionManager {
         priority: live.priority,
         updatedAt: used,
         attachedClients: live.attachedCount,
-        status: "live",
+        status: "warm",
         busy: live.turnStartedAt !== undefined,
         awaitingInput: live.awaitingInput,
       };
@@ -2192,7 +2192,7 @@ export class SessionManager {
       if (filter.includeNonInteractive) return true;
       return interactive === true;
     };
-    // Stat all sessions (live + cold) in parallel. The sequential
+    // Stat all sessions (warm + cold) in parallel. The sequential
     // historyStatus loop was the dominant cost when the picker opened
     // against a directory with hundreds of cold sessions.
     const liveSessions = [...this.sessions.values()].filter(
@@ -2234,7 +2234,7 @@ export class SessionManager {
         priority: session.priority,
         updatedAt: used,
         attachedClients: session.attachedCount,
-        status: "live",
+        status: "warm",
         busy: session.turnStartedAt !== undefined,
         awaitingInput: session.awaitingInput,
         compactionState: session.compactionState,
@@ -2385,7 +2385,7 @@ export class SessionManager {
         err.existingSessionId = existing.sessionId;
         throw err;
       }
-      // Close any live session backed by this record so the import
+      // Close any warm session backed by this record so the import
       // overwrite isn't racing in-memory state. close() runs the
       // onClose handlers which delete the in-memory entry from
       // this.sessions; deleteRecord:false keeps the disk record so

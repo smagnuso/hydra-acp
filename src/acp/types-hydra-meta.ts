@@ -161,7 +161,7 @@ export interface HydraMeta {
   // an attaching client gets the same view session/list offers. status,
   // busy, awaitingInput, and attachedClients are always present on the wire;
   // the rest are present only when applicable.
-  status?: "live" | "cold";
+  status?: "warm" | "cold";
   busy?: boolean;
   awaitingInput?: boolean;
   priority?: number;
@@ -183,8 +183,8 @@ export interface HydraMeta {
   // on respawn / cold-resurrect.
   env?: Record<string, string>;
   // True when the session/attach call that produced this meta is what
-  // brought the session from cold → live. Absent / false on re-attach
-  // to an already-live session. Drives one-shot attach-time UX such
+  // brought the session from cold → warm. Absent / false on re-attach
+  // to an already-warm session. Drives one-shot attach-time UX such
   // as the compaction prompt.
   resurrected?: boolean;
 }
@@ -410,7 +410,7 @@ export function extractHydraMeta(
       out.availableModels = models;
     }
   }
-  if (obj.status === "live" || obj.status === "cold") {
+  if (obj.status === "warm" || obj.status === "cold") {
     out.status = obj.status;
   }
   if (typeof obj.busy === "boolean") {

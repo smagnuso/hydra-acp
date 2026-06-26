@@ -4,7 +4,7 @@
 // (see ./synopsis-agent.ts), and persists the result via caller-supplied
 // `persistSynopsis` / `persistTitle` hooks.
 //
-// Concurrency is bounded so that a daemon shutdown with N live sessions
+// Concurrency is bounded so that a daemon shutdown with N warm sessions
 // doesn't fork N agent processes at once. Dedup is by sessionId: the
 // same session can't have two synopsis jobs in flight.
 //
@@ -59,14 +59,14 @@ export interface SynopsisCoordinatorOptions {
     summarizedThroughEntry: number,
   ) => Promise<void>;
   logger?: AgentLogger;
-  // Bounded so a shutdown with many live sessions doesn't fork the box.
+  // Bounded so a shutdown with many warm sessions doesn't fork the box.
   // Each job spawns a full agent process + LLM call; 2 is plenty.
   maxConcurrent?: number;
   npmRegistry?: string;
   // Override the default 120s ephemeral timeout for tests.
   generateTimeoutMs?: number;
   // Called after persisting a compaction result. Used by T10 to swap
-  // the compaction artifact into the live session record.
+  // the compaction artifact into the warm session record.
   onCompactionArtifact?: (
     sessionId: string,
     artifact: SessionSynopsis,
