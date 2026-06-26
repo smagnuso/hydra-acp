@@ -192,6 +192,8 @@ const HELP_KEYS_WIDTH = 20;
 const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["Composer", "type prompt for new session; Enter creates + submits"],
   ["↓ from composer", "drop focus into session list"],
+  ["typing in list", "jumps focus back to composer with that key"],
+  ["mouse-hover composer", "Enter from anywhere creates a new session"],
   null,
   ["↑ / ↓, n / p, ^p / ^n", "navigate sessions"],
   ["PgUp / PgDn", "page up / page down"],
@@ -2975,6 +2977,14 @@ export async function pickSession(
           paintIndicator();
           return;
         }
+        // Unbound printable char while focus is in the session list:
+        // pull focus up into the composer and feed the character so the
+        // user can just start typing a new-session prompt without first
+        // pressing ↑ to land on the composer box.
+        composerHover = false;
+        selectedIdx = 0;
+        composer.feed({ type: "char", ch: name });
+        renderFromScratch();
         return;
       }
       switch (name) {
@@ -3014,6 +3024,16 @@ export async function pickSession(
           return;
         case "ENTER":
         case "KP_ENTER": {
+          if (composerHover) {
+            cleanup();
+            const text = composer.expandedText();
+            const out = makeNewResult();
+            if (text.trim().length > 0) {
+              out.prompt = text;
+            }
+            resolve(out);
+            return;
+          }
           cleanup();
           if (selectedIdx === 0) {
             resolve(makeNewResult());
