@@ -12,6 +12,7 @@ import {
   resolveSessionFlag,
   type ResolvedSession,
 } from "./cli/resolve-session.js";
+import { writeDebugLine } from "./tui/debug-log.js";
 import { runInit } from "./cli/commands/init.js";
 import {
   runDaemonLogs,
@@ -871,6 +872,10 @@ async function resolveSessionFlagOrExit(
   try {
     return await resolveSessionFlag(input, opts);
   } catch (err) {
+    writeDebugLine({
+      src: "cli-fatal",
+      stack: err instanceof Error ? (err.stack ?? err.message) : String(err),
+    });
     process.stderr.write(`${(err as Error).message}\n`);
     process.exit(1);
   }
@@ -1026,6 +1031,14 @@ async function maybePrintUpdateNotice(): Promise<void> {
 main()
   .then(maybePrintUpdateNotice)
   .catch(async (err) => {
+    // Caught here, this never reaches the uncaughtException handler, and
+    // the stderr line below is wiped by the TUI's alt-screen reset — so
+    // log the full stack to tui.log too, or a fatal in the pre-screen
+    // flow (picker, new-session agent prompt) leaves only an exit code.
+    writeDebugLine({
+      src: "cli-fatal",
+      stack: err instanceof Error ? (err.stack ?? err.message) : String(err),
+    });
     process.stderr.write(`hydra-acp: ${(err as Error).message}\n`);
     await maybePrintUpdateNotice();
     process.exit(1);

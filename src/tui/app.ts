@@ -1,7 +1,7 @@
 // Orchestrator: ties config, daemon discovery, WS connection, the screen, and
 // the input dispatcher together.
 
-import { appendFileSync, readFileSync, statSync, renameSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { nanoid } from "nanoid";
 import termkit from "terminal-kit";
 import { JsonRpcConnection } from "../acp/connection.js";
@@ -54,6 +54,7 @@ export {
 };
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { paths } from "../core/paths.js";
+import { setLogMaxBytes, writeDebugLine } from "./debug-log.js";
 import { HYDRA_VERSION } from "../core/hydra-version.js";
 import {
   buildApproveResponse,
@@ -97,6 +98,7 @@ import {
   type AuthOnboarding,
 } from "./auth-required-banner.js";
 import {
+  emergencyTerminalReset,
   formatElapsed,
   guardTerminalDimensions,
   Screen,
@@ -670,14 +672,49 @@ export function resolveToolsClick(
   return { toolCallId };
 }
 
+let crashLoggingInstalled = false;
+// Installed before any TUI work so a crash in the pre-screen window —
+// the picker, the new-session agent prompt, the daemon handshake — lands
+// in tui.log. Screen's emergency handlers only cover the in-session
+// phase, and the bare stderr stack we'd otherwise print there gets wiped
+// by the alt-screen reset on the way out, so without this a pre-screen
+// crash leaves no trace anywhere. Registered first, so it wins over
+// Screen's later uncaughtException listener.
+function installCrashLogging(): void {
+  if (crashLoggingInstalled) {
+    return;
+  }
+  crashLoggingInstalled = true;
+  const stackOf = (reason: unknown): string =>
+    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  process.on("uncaughtException", (err) => {
+    writeDebugLine({ src: "uncaughtException", stack: stackOf(err) });
+    emergencyTerminalReset();
+    process.stderr.write(`\nuncaught: ${stackOf(err)}\n`);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    writeDebugLine({ src: "unhandledRejection", stack: stackOf(reason) });
+    emergencyTerminalReset();
+    process.stderr.write(`\nunhandled rejection: ${stackOf(reason)}\n`);
+    process.exit(1);
+  });
+  process.on("exit", (code) => {
+    if (code !== 0) {
+      writeDebugLine({ src: "process-exit", code });
+    }
+  });
+}
+
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
+  installCrashLogging();
   const config = await loadConfig();
   // Local daemon target unless the caller pre-resolved a remote one.
   // `hydra session attach hydra://...` does the resolution up front so
   // the password prompt happens before we touch the terminal; the
   // local TUI invocation falls through to resolveLocalTarget here.
   const target = opts.target ?? (await resolveLocalTarget(config));
-  logMaxBytes = config.tui.logMaxBytes;
+  setLogMaxBytes(config.tui.logMaxBytes);
   // Only autostart the daemon when it's on this machine. Remote
   // targets get a connection error from the WS layer if the daemon
   // isn't up, which is the right behavior (we can't reach across the
@@ -7079,37 +7116,16 @@ async function ensureAgentForNew(
   return "ok";
 }
 
-// Always-on append-only log of every session/update the TUI receives,
-// paired with the RenderEvent kind we mapped it to (or null when the
-// mapper rejected the shape). Default path is ~/.hydra-acp/tui.log so a
-// user reporting "thoughts/tools aren't rendering" has a ready artifact
-// to share. HYDRA_TUI_DEBUG_LOG overrides the path; setting it to an
-// empty string disables logging.
-let logMaxBytes = 5 * 1024 * 1024;
+// Records every session/update the TUI receives, paired with the
+// RenderEvent kind we mapped it to (or null when the mapper rejected the
+// shape), so a user reporting "thoughts/tools aren't rendering" has a
+// ready artifact to share. Backed by the shared tui.log writer.
 function debugLogUpdate(update: unknown, event: RenderEvent | null): void {
   writeDebugLine({
     src: "session/update",
     update,
     event: event === null ? null : { kind: event.kind },
   });
-}
-
-function writeDebugLine(payload: Record<string, unknown>): void {
-  const override = process.env.HYDRA_TUI_DEBUG_LOG;
-  const target = override === undefined ? paths.tuiLogFile() : override;
-  if (target.length === 0) {
-    return;
-  }
-  try {
-    rotateIfBig(target);
-    const line = JSON.stringify({
-      t: new Date().toISOString(),
-      ...payload,
-    });
-    appendFileSync(target, `${line}\n`);
-  } catch {
-    void 0;
-  }
 }
 
 // Single-line, redraw-in-place status indicator used in the pre-screen
@@ -7246,18 +7262,4 @@ function createInstallStatusLine(
   };
 }
 
-// Single-step rotation: when the log crosses the size cap, rename it to
-// `<path>.0` (overwriting any prior rotation) and start fresh. Bounds
-// disk use at ~2x cap without depending on logrotate.
-function rotateIfBig(target: string): void {
-  try {
-    const stat = statSync(target);
-    if (stat.size < logMaxBytes) {
-      return;
-    }
-    renameSync(target, `${target}.0`);
-  } catch {
-    void 0;
-  }
-}
 
