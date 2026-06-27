@@ -1433,7 +1433,18 @@ Declare which message kinds this transformer wants to intercept.
 { "ack": true }
 ```
 
-Intercepts are matched against `request:<method>`, `response:<method>`, and `lifecycle:<event>` strings. Lifecycle events currently fired are `session.opened`, `session.idle`, `session.closed`, and `permission.replied`.
+Intercepts are matched against `request:<method>`, `response:<method>`, and `lifecycle:<event>` strings. Lifecycle events currently fired:
+
+| Event | When | Payload |
+|---|---|---|
+| `session.opened` | A transformer with this intercept joins a live session (`addTransformer`) or the chain runs on session creation. | `{}` |
+| `session.idle` | After `idleEventTimeoutMs` of continuous quiet following the last recordable broadcast. Re-fires after each activity → quiet cycle. | `{}` |
+| `session.closed` | Synchronously inside `markClosed`, before per-session state is torn down. | `{}` |
+| `permission.replied` | After a `session/request_permission` resolves — whether by transformer short-circuit or by a real client reply. | `{ toolCallId, outcome, sourceWasTransformer }` |
+| `tool.completed` | Edge-triggered: the first `tool_call_update` for a given `toolCallId` whose `status` is `"completed"` or `"failed"`. Deduplicated per session — repeat terminal updates do not re-fire. | `{ toolCallId, status, kind?, content?, locations? }` |
+| `file.edited` | A `tool_call` or `tool_call_update` of `kind: "edit"` carries one or more `locations[].path`. Deduplicated per `(session, path)` — only the first sighting of each path emits. | `{ path, toolCallId, line? }` |
+| `agent.swap` | Around `swapUpstream`. Fires twice per swap: `phase: "pre"` before the new agent is spawned, `phase: "post"` after the old agent is killed. | `{ phase, previousUpstreamSessionId, upstreamSessionId?, agentId }` |
+| `compaction` | Mirrors every `broadcastCompactionPhase` call. Same envelope as the `hydra_compaction` `session/update`, exposed as a typed lifecycle so hooks don't have to filter notifications. Notification-only — cancellable `compact:pre` is deferred to a future stage. | `{ phase, ... }` (phase ∈ `"started"`, `"iteration"`, `"deferred"`, `"swapped"`, `"failed"`, `"rolled_back"`) |
 
 **Recognized request-side intercepts.**
 
@@ -1505,13 +1516,13 @@ Fires for lifecycle events the transformer declared an interest in.
 
 ```jsonc
 {
-  "event":     "session.opened" | "session.idle" | "session.closed" | "permission.replied",
+  "event":     "<lifecycle event name>",
   "sessionId": "<id>",
-  "payload":   { /* event-specific; absent on opened/idle/closed */ }
+  "payload":   { /* event-specific; see the lifecycle events table above */ }
 }
 ```
 
-`permission.replied` fires after a `session/request_permission` resolves (whether by short-circuit or by a real client reply). Its payload is `{ toolCallId: string | null, outcome: <agent reply>, sourceWasTransformer: boolean }` — observers can use this to audit policy decisions or trigger downstream side effects.
+The full set of currently-fired events and their payloads is enumerated in the table above (`session.opened`, `session.idle`, `session.closed`, `permission.replied`, `tool.completed`, `file.edited`, `agent.swap`, `compaction`).
 
 #### Request (transformer → daemon): `hydra-acp/message/emit`
 

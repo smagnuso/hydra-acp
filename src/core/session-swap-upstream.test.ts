@@ -193,6 +193,51 @@ describe("Session.swapUpstream", () => {
     ).rejects.toThrow("agent spawning not configured");
   });
 
+  it("emits lifecycle:agent.swap pre and post around the swap", async () => {
+    const { spawnReplacementAgent, oldMock } = makeSpawnMock({ agentId: "a1" });
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const transformerConn = {
+      request: vi.fn().mockResolvedValue({ action: "continue" }),
+      notify: vi.fn().mockImplementation(async (m: string, p: unknown) => {
+        notifications.push({ method: m, params: p });
+      }),
+      onRequest: vi.fn(),
+      onNotification: vi.fn(),
+      onClose: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as JsonRpcConnection;
+
+    const store = new HistoryStore();
+    const session = new Session({
+      sessionId: "hydra_swap_emit",
+      cwd: "/w",
+      agentId: "a1",
+      agent: oldMock.agent,
+      upstreamSessionId: "u_before",
+      historyStore: store,
+      spawnReplacementAgent,
+      transformChain: [
+        { name: "obs", intercepts: new Set(["lifecycle:agent.swap"]), connection: transformerConn },
+      ],
+    });
+
+    await session.swapUpstream({ artifact: makeSynopsis(), tailK: 2 });
+    await new Promise((r) => setImmediate(r));
+
+    const swapEvents = notifications.filter(
+      (n) => (n.params as { event: string }).event === "agent.swap",
+    );
+    expect(swapEvents).toHaveLength(2);
+    const pre = (swapEvents[0]!.params as { payload: Record<string, unknown> }).payload;
+    const post = (swapEvents[1]!.params as { payload: Record<string, unknown> }).payload;
+    expect(pre.phase).toBe("pre");
+    expect(pre.previousUpstreamSessionId).toBe("u_before");
+    expect(post.phase).toBe("post");
+    expect(post.previousUpstreamSessionId).toBe("u_before");
+    expect(typeof post.upstreamSessionId).toBe("string");
+    expect(post.upstreamSessionId).not.toBe("u_before");
+  });
+
   it("spawns a fresh agent and swaps upstream on success", async () => {
     const { spawnReplacementAgent, oldMock, newMock, spawnCalls } = makeSpawnMock({
       agentId: "a1",

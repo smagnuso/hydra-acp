@@ -594,6 +594,24 @@ export class Session {
   private extensionCommandsUnsub: (() => void) | undefined;
   // Outstanding "processing" claims: token → claim waiting for respondsTo discharge.
   private pendingClaims = new Map<string, TransformerClaim>();
+  // Edge-trigger state for synthesized lifecycle events. Both maps live
+  // for the lifetime of the session and are cleared in markClosed.
+  //   toolCompletionSeen: toolCallId → terminal status that was already
+  //     emitted as lifecycle:tool.completed. Prevents duplicate emits
+  //     when the agent re-sends a tool_call_update with the same
+  //     completed/failed status, or transitions failed→completed across
+  //     a retry. We key on toolCallId, so the first terminal status
+  //     wins per call.
+  //   toolCallKind: toolCallId → tool kind ("edit", "execute", …) from
+  //     the originating tool_call. Used to gate file.edited emission to
+  //     edit-kind tools only (avoiding over-fire on grep/read).
+  //   filesEditedSeen: paths already emitted as lifecycle:file.edited.
+  //     Dedups across multiple tool_call_update events that re-emit the
+  //     same path, and across multiple edit-kind tool calls touching
+  //     the same file.
+  private toolCompletionSeen = new Map<string, string>();
+  private toolCallKind = new Map<string, string>();
+  private filesEditedSeen = new Set<string>();
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
   > = [];
@@ -868,6 +886,10 @@ export class Session {
         captureInternalChunk(this.internalPromptCapture, params);
         return;
       }
+      // Synthesize edge events (tool.completed, file.edited) before the
+      // chain. Edges fire based on what the agent emitted, independent
+      // of whether response transformers later drop the update.
+      this.maybeEmitToolEdges(params);
       // Chain runs first — no state mutation before this resolves.
       void this.runResponseChain(params);
     });
@@ -1204,6 +1226,14 @@ export class Session {
         "session is not quiesced for swap — wait for in-flight work to complete",
       );
     }
+    // Pre-swap observation hook. Fires before the agent is replaced so
+    // subscribers (notifier, archiver, audit) can stamp the old upstream
+    // identity. Notification-only; not cancellable in this stage.
+    this.notifyChain("agent.swap", {
+      phase: "pre",
+      previousUpstreamSessionId: this.upstreamSessionId,
+      agentId: this.agentId,
+    });
 
     // Capture current context so we can spawn with matching config.
     const agentId = this.agentId;
@@ -1369,6 +1399,15 @@ export class Session {
     }
 
     await oldAgent.kill().catch(() => undefined);
+
+    // Post-swap observation hook. Fires after the new agent is fully
+    // installed and the old one is dead.
+    this.notifyChain("agent.swap", {
+      phase: "post",
+      previousUpstreamSessionId,
+      upstreamSessionId: this.upstreamSessionId,
+      agentId: this.agentId,
+    });
 
     // Signal to attached clients that the compaction swap completed.
     this.broadcastCompactionPhase({
@@ -1617,6 +1656,12 @@ export class Session {
     for (const client of this.clients.values()) {
       void client.connection.notify("session/update", params).catch(() => undefined);
     }
+    // Mirror to transformers as a typed lifecycle event so hooks don't
+    // have to filter session/update for the hydra_compaction subtype.
+    // Notification-only — observation hook. Cancellable compact:pre is
+    // deferred to a future stage (requires a request-shaped dispatch
+    // wired into SessionManager.dispatchCompactionSwap).
+    this.notifyChain("compaction", { ...update });
   }
 
   // Register a client and (asynchronously) load the replay slice it
@@ -5385,6 +5430,10 @@ export class Session {
     }
     // Notify transformers the session is closing before we tear down.
     this.notifyChain("session.closed", {});
+    // Edge-trigger state is per-session; release it.
+    this.toolCompletionSeen.clear();
+    this.toolCallKind.clear();
+    this.filesEditedSeen.clear();
     // markClosed is the explicit-shutdown path (close() was called,
     // user typed /hydra kill, agent exited, idle timer fired, etc.).
     // The session is going cold; clear the persisted queue so it
@@ -5709,6 +5758,101 @@ export class Session {
       }
     }
     this.idleHandlers.length = 0;
+  }
+
+  // Inspect a session/update envelope and synthesize lifecycle edge events
+  // for transformers that subscribe to them. Called from the agent's
+  // session/update handler before the chain runs, so edges reflect what
+  // the agent actually emitted (regardless of whether transformers later
+  // drop the update via response chain `stop`).
+  //
+  // Currently synthesized:
+  //   lifecycle:tool.completed — fires once per toolCallId when its
+  //     tool_call_update first reports status="completed" or "failed".
+  //     Payload: { toolCallId, status, kind?, content?, locations? }.
+  //   lifecycle:file.edited — fires once per (session, path) for paths
+  //     mentioned in an edit-kind tool_call/tool_call_update's
+  //     locations[]. Payload: { path, toolCallId, line? }.
+  private maybeEmitToolEdges(params: unknown): void {
+    if (!params || typeof params !== "object") {
+      return;
+    }
+    const update = (params as { update?: unknown }).update;
+    if (!update || typeof update !== "object") {
+      return;
+    }
+    const u = update as {
+      sessionUpdate?: unknown;
+      toolCallId?: unknown;
+      status?: unknown;
+      kind?: unknown;
+      content?: unknown;
+      locations?: unknown;
+    };
+    const kind = typeof u.sessionUpdate === "string" ? u.sessionUpdate : "";
+    if (kind !== "tool_call" && kind !== "tool_call_update") {
+      return;
+    }
+    const toolCallId =
+      typeof u.toolCallId === "string" && u.toolCallId.length > 0
+        ? u.toolCallId
+        : undefined;
+    if (!toolCallId) {
+      return;
+    }
+    // Track tool kind from the first tool_call we see for this id, so
+    // file.edited can gate on edit-kind even if a later tool_call_update
+    // omits the kind field.
+    const toolKind = typeof u.kind === "string" ? u.kind : undefined;
+    if (toolKind && !this.toolCallKind.has(toolCallId)) {
+      this.toolCallKind.set(toolCallId, toolKind);
+    }
+    // file.edited: emit once per (session, path) for edit-kind tools.
+    const effectiveKind = toolKind ?? this.toolCallKind.get(toolCallId);
+    if (effectiveKind === "edit" && Array.isArray(u.locations)) {
+      for (const loc of u.locations) {
+        if (!loc || typeof loc !== "object") {
+          continue;
+        }
+        const path = (loc as { path?: unknown }).path;
+        if (typeof path !== "string" || path.length === 0) {
+          continue;
+        }
+        if (this.filesEditedSeen.has(path)) {
+          continue;
+        }
+        this.filesEditedSeen.add(path);
+        const line = (loc as { line?: unknown }).line;
+        const filePayload: Record<string, unknown> = { path, toolCallId };
+        if (typeof line === "number") {
+          filePayload.line = line;
+        }
+        this.notifyChain("file.edited", filePayload);
+      }
+    }
+    // tool.completed: only fires on tool_call_update with terminal status.
+    if (kind !== "tool_call_update") {
+      return;
+    }
+    const status = typeof u.status === "string" ? u.status : undefined;
+    if (status !== "completed" && status !== "failed") {
+      return;
+    }
+    if (this.toolCompletionSeen.has(toolCallId)) {
+      return;
+    }
+    this.toolCompletionSeen.set(toolCallId, status);
+    const toolPayload: Record<string, unknown> = { toolCallId, status };
+    if (effectiveKind) {
+      toolPayload.kind = effectiveKind;
+    }
+    if (u.content !== undefined) {
+      toolPayload.content = u.content;
+    }
+    if (Array.isArray(u.locations)) {
+      toolPayload.locations = u.locations;
+    }
+    this.notifyChain("tool.completed", toolPayload);
   }
 
   // Send a lifecycle notification to every transformer in the chain that

@@ -3,6 +3,7 @@ import { Session } from "./session.js";
 import { HistoryStore } from "./history-store.js";
 import { makeMockAgent, makeControlledStream } from "../__tests__/test-utils.js";
 import { JsonRpcConnection } from "../acp/connection.js";
+import type { JsonRpcRequest } from "../acp/types.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import type { AttachedClient } from "./session.js";
 
@@ -1084,7 +1085,7 @@ describe("Session transformer chain — agent→client request (permission)", ()
     await flushMicrotasks();
 
     const permMsg = stream.sent.find(
-      (m): m is { method: string; id: number | string; params: unknown } =>
+      (m): m is JsonRpcRequest =>
         "method" in (m as object) &&
         (m as { method: string }).method === "session/request_permission",
     );
@@ -1113,7 +1114,7 @@ describe("Session transformer chain — agent→client request (permission)", ()
     await flushMicrotasks();
 
     const permMsg = stream.sent.find(
-      (m): m is { method: string; id: number | string; params: unknown } =>
+      (m): m is JsonRpcRequest =>
         "method" in (m as object) &&
         (m as { method: string }).method === "session/request_permission",
     );
@@ -1141,7 +1142,7 @@ describe("Session transformer chain — agent→client request (permission)", ()
     expect(t.requests).toHaveLength(0);
     // Client was asked normally.
     const permMsg = stream.sent.find(
-      (m): m is { method: string; id: number | string } =>
+      (m): m is JsonRpcRequest =>
         "method" in (m as object) &&
         (m as { method: string }).method === "session/request_permission",
     );
@@ -1191,7 +1192,7 @@ describe("Session transformer chain — agent→client request (permission)", ()
     await flushMicrotasks();
 
     const permMsg = stream.sent.find(
-      (m): m is { method: string; id: number | string } =>
+      (m): m is JsonRpcRequest =>
         "method" in (m as object) &&
         (m as { method: string }).method === "session/request_permission",
     );
@@ -1237,5 +1238,300 @@ describe("Session transformer chain — agent→client request (permission)", ()
       (replied!.params as { payload: { sourceWasTransformer: boolean } }).payload
         .sourceWasTransformer,
     ).toBe(true);
+  });
+});
+
+// ── Edge-trigger synthesis — lifecycle:tool.completed / lifecycle:file.edited ─
+
+describe("Session edge events — tool.completed", () => {
+  function eventsOf(notifications: Array<{ method: string; params: unknown }>, name: string) {
+    return notifications.filter(
+      (n) => (n.params as { event: string }).event === name,
+    );
+  }
+
+  it("fires once when tool_call_update transitions to completed", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:tool.completed"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "tool_call", toolCallId: "tc_1", kind: "execute" },
+    });
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc_1", status: "completed" },
+    });
+    await flushMicrotasks();
+
+    const events = eventsOf(t.notifications, "tool.completed");
+    expect(events).toHaveLength(1);
+    const payload = (events[0]!.params as { payload: Record<string, unknown> }).payload;
+    expect(payload.toolCallId).toBe("tc_1");
+    expect(payload.status).toBe("completed");
+    expect(payload.kind).toBe("execute");
+  });
+
+  it("fires on failed status as well", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:tool.completed"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc_2", status: "failed" },
+    });
+    await flushMicrotasks();
+
+    const events = eventsOf(t.notifications, "tool.completed");
+    expect(events).toHaveLength(1);
+    expect((events[0]!.params as { payload: { status: string } }).payload.status).toBe("failed");
+  });
+
+  it("does not fire on in_progress or pending updates", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:tool.completed"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "tool_call", toolCallId: "tc_3", kind: "execute" },
+    });
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc_3", status: "in_progress" },
+    });
+    await flushMicrotasks();
+
+    expect(eventsOf(t.notifications, "tool.completed")).toHaveLength(0);
+  });
+
+  it("deduplicates repeat terminal updates for the same toolCallId", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:tool.completed"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    for (let i = 0; i < 3; i++) {
+      mock.triggerNotification("session/update", {
+        sessionId: "u1",
+        update: { sessionUpdate: "tool_call_update", toolCallId: "tc_4", status: "completed" },
+      });
+    }
+    await flushMicrotasks();
+
+    expect(eventsOf(t.notifications, "tool.completed")).toHaveLength(1);
+  });
+
+  it("does not fire when no transformer declares lifecycle:tool.completed", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["response:session/update"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tc_5", status: "completed" },
+    });
+    await flushMicrotasks();
+
+    expect(eventsOf(t.notifications, "tool.completed")).toHaveLength(0);
+  });
+});
+
+describe("Session lifecycle — compaction", () => {
+  function eventsOf(notifications: Array<{ method: string; params: unknown }>, name: string) {
+    return notifications.filter(
+      (n) => (n.params as { event: string }).event === name,
+    );
+  }
+
+  it("fires lifecycle:compaction for each broadcastCompactionPhase call", async () => {
+    const t = fakeTransformerConn();
+    const { session } = makeSession([
+      makeRef("t1", ["lifecycle:compaction"], t.conn),
+    ]);
+    session.broadcastCompactionPhase({ phase: "started", requestedAt: 1 });
+    session.broadcastCompactionPhase({ phase: "deferred", attempts: 1 });
+    session.broadcastCompactionPhase({ phase: "swapped", summarizedThroughEntry: 7 });
+    await flushMicrotasks();
+
+    const events = eventsOf(t.notifications, "compaction");
+    expect(events).toHaveLength(3);
+    expect((events[0]!.params as { payload: { phase: string } }).payload.phase).toBe("started");
+    expect((events[1]!.params as { payload: { phase: string } }).payload.phase).toBe("deferred");
+    expect((events[2]!.params as { payload: { phase: string } }).payload.phase).toBe("swapped");
+  });
+
+  it("does not fire when no transformer declares lifecycle:compaction", async () => {
+    const t = fakeTransformerConn();
+    const { session } = makeSession([
+      makeRef("t1", ["response:session/update"], t.conn),
+    ]);
+    session.broadcastCompactionPhase({ phase: "started", requestedAt: 1 });
+    await flushMicrotasks();
+    expect(eventsOf(t.notifications, "compaction")).toHaveLength(0);
+  });
+});
+
+describe("Session edge events — file.edited", () => {
+  function eventsOf(notifications: Array<{ method: string; params: unknown }>, name: string) {
+    return notifications.filter(
+      (n) => (n.params as { event: string }).event === name,
+    );
+  }
+
+  it("fires once per unique path on an edit-kind tool", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:file.edited"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc_e1",
+        kind: "edit",
+        locations: [{ path: "/a/b/file.ts", line: 12 }],
+      },
+    });
+    await flushMicrotasks();
+
+    const events = eventsOf(t.notifications, "file.edited");
+    expect(events).toHaveLength(1);
+    const payload = (events[0]!.params as { payload: Record<string, unknown> }).payload;
+    expect(payload.path).toBe("/a/b/file.ts");
+    expect(payload.toolCallId).toBe("tc_e1");
+    expect(payload.line).toBe(12);
+  });
+
+  it("dedupes the same path across multiple updates", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:file.edited"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc_e2",
+        kind: "edit",
+        locations: [{ path: "/x.ts" }],
+      },
+    });
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc_e2",
+        locations: [{ path: "/x.ts" }],
+      },
+    });
+    await flushMicrotasks();
+
+    expect(eventsOf(t.notifications, "file.edited")).toHaveLength(1);
+  });
+
+  it("does not fire for non-edit tool kinds (e.g. execute, read)", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:file.edited"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc_r1",
+        kind: "read",
+        locations: [{ path: "/x.ts" }],
+      },
+    });
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc_x1",
+        kind: "execute",
+        locations: [{ path: "/y.sh" }],
+      },
+    });
+    await flushMicrotasks();
+
+    expect(eventsOf(t.notifications, "file.edited")).toHaveLength(0);
+  });
+
+  it("uses the kind from the original tool_call when tool_call_update omits it", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:file.edited"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "tool_call", toolCallId: "tc_e3", kind: "edit" },
+    });
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc_e3",
+        locations: [{ path: "/late.ts" }],
+      },
+    });
+    await flushMicrotasks();
+
+    expect(eventsOf(t.notifications, "file.edited")).toHaveLength(1);
+  });
+
+  it("fires for multiple distinct paths within the same tool call", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:file.edited"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc_e4",
+        kind: "edit",
+        locations: [{ path: "/a.ts" }, { path: "/b.ts" }, { path: "/a.ts" }],
+      },
+    });
+    await flushMicrotasks();
+
+    const events = eventsOf(t.notifications, "file.edited");
+    expect(events).toHaveLength(2);
+    const paths = events
+      .map((e) => (e.params as { payload: { path: string } }).payload.path)
+      .sort();
+    expect(paths).toEqual(["/a.ts", "/b.ts"]);
   });
 });
