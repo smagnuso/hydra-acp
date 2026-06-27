@@ -73,8 +73,11 @@ import { loadQueue, rewriteQueue } from "./queue-store.js";
 // is a defensible default — a crash-restart cycle should be under
 // that, and longer downtime means the user has likely moved on.
 const QUEUE_REPLAY_TTL_MS = 15 * 60 * 1000;
-const DEFERRAL_RETRY_MS = 5000;
-const MAX_SWAP_DEFERRALS = 3;
+// Compaction swap is now event-driven (Session.onceIdle); the legacy
+// poll-and-cap constants are gone. A swap that lands on a busy session
+// parks an idle handler that fires whenever the session next quiesces,
+// re-verifies via isQuiescedForSwap, and either swaps or — if history
+// grew during the wait — reschedules the synopsis run.
 
 const HYDRA_ID_ALPHABET =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -313,8 +316,10 @@ export class SessionManager {
   // this, a racing session/attach can see the meta.json still on disk
   // and resurrect a corpse.
   private pendingDeletions = new Map<string, Promise<void>>();
-  // Tracked compaction deferral count per sessionId (cap at MAX_SWAP_DEFERRALS).
-  private compactionDeferrals = new Map<string, number>();
+  // onceIdle disposers for sessions waiting on a quiesce edge to swap.
+  // Keyed by sessionId so a re-arm replaces the prior handler instead of
+  // stacking.
+  private pendingSwapDisposers = new Map<string, () => void>();
   // Sessions currently executing a rollback. Guards against concurrent
   // uncompact + compact triggers.
   private rollbackLocks = new Set<string>();
@@ -398,117 +403,140 @@ export class SessionManager {
         this.broadcastHydraCompaction(sessionId, payload);
       },
       onCompactionArtifact: async (sessionId, artifact, summarizedThroughEntry) => {
-        const live = this.get(sessionId);
-        if (!live) {
-          // Cold session — persist the compaction artifact so it is
-          // available when the session resumes. No swap can happen now
-          // because there is no live upstream agent to replace.
-          this.logger?.info(
-            `compaction: persisted artifact for cold session sessionId=${sessionId}`,
-          );
-          await this.mutateRecord(sessionId, {
-            synopsis: artifact,
-            summarizedThroughEntry,
-          });
-          return;
-        }
-        try {
-          const quiesced = await live.isQuiescedForSwap();
-          if (!quiesced) {
-            // Defer: re-schedule after a short delay. Track deferrals
-            // with a Map keyed by sessionId so we can cap at 3 before
-            // giving up until the next trigger.
-            let count = this.compactionDeferrals.get(sessionId) ?? 0;
-            count++;
-            if (count > MAX_SWAP_DEFERRALS) {
-              this.logger?.warn(
-                `compaction: deferral cap reached for sessionId=${sessionId}, skipping swap until next trigger`,
-              );
-              this.compactionDeferrals.delete(sessionId);
-              live.compactionState = undefined;
-              await this.mutateRecord(sessionId, {}, ["compactionState"]);
-              live.broadcastCompactionPhase({ phase: "failed", error: "deferral cap reached" });
-              return;
-            }
-            this.compactionDeferrals.set(sessionId, count);
-            this.logger?.info(
-              `compaction: session not quiesced, deferring swap sessionId=${sessionId} attempt=${count}`,
-            );
-            live.broadcastCompactionPhase({ phase: "deferred", attempts: count });
-            setTimeout(() => {
-              void this.retrySwap(sessionId);
-            }, DEFERRAL_RETRY_MS).unref();
-            return;
-          }
-          this.compactionDeferrals.delete(sessionId);
-          await live.swapUpstream({ artifact, tailK, summarizedThroughEntry });
-          // Clear compactionState now that the swap completed (in-memory
-          // and on disk in lockstep — see onCompactionStateChange above).
-          live.compactionState = undefined;
-          await this.mutateRecord(sessionId, {}, ["compactionState"]);
-        } catch (err) {
-          this.logger?.warn(
-            `compaction: swap failed for sessionId=${sessionId}: ${err instanceof Error ? err.message : String(err)}, leaving session as-is`,
-          );
-        }
+        await this.dispatchCompactionSwap(sessionId, artifact, summarizedThroughEntry);
       },
     });
     void this.refreshAgentCatalog();
   }
 
-  // Retry the compaction swap using the already-persisted artifact — no new
-  // summarization is triggered. Called by the deferral timeout in
-  // onCompactionArtifact when the session was non-quiesced at artifact time.
-  private async retrySwap(sessionId: string): Promise<void> {
+  // Drive the compaction swap. When the session is already quiesced this
+  // calls swapUpstream immediately. When it's not, we park an onceIdle
+  // handler on the Session that re-attempts the swap at the next quiesce
+  // edge — no polling, no retry cap, no false "giving up" failures. If
+  // history grew past the artifact's watermark while we waited, we
+  // reschedule the synopsis coordinator instead of swapping with a stale
+  // artifact (the coordinator's catch-up loop converges; eventually a
+  // fresh artifact triggers a new dispatchCompactionSwap call).
+  private async dispatchCompactionSwap(
+    sessionId: string,
+    artifact: SessionSynopsis,
+    summarizedThroughEntry: number,
+  ): Promise<void> {
     const live = this.get(sessionId);
     if (!live) {
-      this.compactionDeferrals.delete(sessionId);
+      // Cold — persist the artifact for the next resume. No swap target.
+      this.logger?.info(
+        `compaction: persisted artifact for cold session sessionId=${sessionId}`,
+      );
+      await this.mutateRecord(sessionId, {
+        synopsis: artifact,
+        summarizedThroughEntry,
+      });
+      return;
+    }
+    const tailK = this.compactionTailK;
+    try {
+      const quiesced = await live.isQuiescedForSwap();
+      if (quiesced) {
+        // Drop any prior waiter — we're acting now.
+        this.pendingSwapDisposers.get(sessionId)?.();
+        this.pendingSwapDisposers.delete(sessionId);
+        await this.performCompactionSwap(live, artifact, tailK, summarizedThroughEntry);
+        return;
+      }
+      // Not quiesced — park an onceIdle handler that retries the swap
+      // when the session next quiesces. Replace any prior waiter so we
+      // don't double-fire when this is called repeatedly.
+      this.pendingSwapDisposers.get(sessionId)?.();
+      this.logger?.info(
+        `compaction: session not quiesced, parking onceIdle swap sessionId=${sessionId}`,
+      );
+      live.broadcastCompactionPhase({ phase: "deferred" });
+      const disposer = live.onceIdle(() => {
+        this.pendingSwapDisposers.delete(sessionId);
+        void this.onIdleAttemptSwap(sessionId);
+      });
+      this.pendingSwapDisposers.set(sessionId, disposer);
+    } catch (err) {
+      this.logger?.warn(
+        `compaction: dispatch failed for sessionId=${sessionId}: ${err instanceof Error ? err.message : String(err)}, leaving session as-is`,
+      );
+    }
+  }
+
+  // Idle-edge handler. Re-verifies the strong quiesce check (the onIdle
+  // primitive uses isQuiescedSync, which doesn't scan for open tool
+  // calls), reads the freshest persisted artifact from disk (synopsis
+  // may have advanced via a catch-up run), and either swaps or
+  // reschedules a synopsis if history overran the artifact watermark.
+  private async onIdleAttemptSwap(sessionId: string): Promise<void> {
+    const live = this.get(sessionId);
+    if (!live) {
       return;
     }
     const tailK = this.compactionTailK;
     try {
       const quiesced = await live.isQuiescedForSwap();
       if (!quiesced) {
-        let count = this.compactionDeferrals.get(sessionId) ?? 0;
-        count++;
-        if (count > MAX_SWAP_DEFERRALS) {
-          this.logger?.warn(
-            `compaction: deferral cap reached on retry for sessionId=${sessionId}, giving up`,
-          );
-          this.compactionDeferrals.delete(sessionId);
-          live.compactionState = undefined;
-          await this.mutateRecord(sessionId, {}, ["compactionState"]);
-          live.broadcastCompactionPhase({ phase: "failed", error: "deferral cap reached on retry" });
-          return;
+        // Activity arrived between the onceIdle fire and the strong
+        // check (an open tool call from the prior turn is still pending,
+        // or a new prompt slipped in). Re-park the waiter — we'll get
+        // another shot at the next idle edge.
+        const record = await this.store.read(sessionId).catch(() => undefined);
+        if (record?.synopsis && record.summarizedThroughEntry !== undefined) {
+          void this.dispatchCompactionSwap(sessionId, record.synopsis, record.summarizedThroughEntry);
         }
-        this.compactionDeferrals.set(sessionId, count);
-        this.logger?.info(
-          `compaction: still not quiesced on retry, re-deferring sessionId=${sessionId} attempt=${count}`,
-        );
-        setTimeout(() => {
-          void this.retrySwap(sessionId);
-        }, DEFERRAL_RETRY_MS).unref();
         return;
       }
       const record = await this.store.read(sessionId).catch(() => undefined);
       if (!record?.synopsis || record.summarizedThroughEntry === undefined) {
         this.logger?.warn(
-          `compaction: persisted artifact missing on retry for sessionId=${sessionId}, skipping swap`,
+          `compaction: persisted artifact missing for sessionId=${sessionId}, abandoning swap`,
         );
-        this.compactionDeferrals.delete(sessionId);
         live.compactionState = undefined;
         await this.mutateRecord(sessionId, {}, ["compactionState"]);
         return;
       }
-      this.compactionDeferrals.delete(sessionId);
-      await live.swapUpstream({ artifact: record.synopsis, tailK, summarizedThroughEntry: record.summarizedThroughEntry });
-      // Clear compactionState now that the retry-swap completed (in-memory
-      // and on disk in lockstep — see onCompactionStateChange above).
-      live.compactionState = undefined;
-      await this.mutateRecord(sessionId, {}, ["compactionState"]);
+      // History-growth check: if entries past the watermark accumulated
+      // while we waited, the artifact is stale. Re-run the synopsis
+      // coordinator; once it converges, onCompactionArtifact will be
+      // called again with a fresh artifact.
+      const history = await this.histories.load(sessionId).catch(() => []);
+      if (history.length > record.summarizedThroughEntry) {
+        this.logger?.info(
+          `compaction: history grew during deferral (have=${history.length} artifact=${record.summarizedThroughEntry}), rescheduling synopsis sessionId=${sessionId}`,
+        );
+        this.synopsisCoordinator.scheduleCompaction(sessionId);
+        return;
+      }
+      await this.performCompactionSwap(
+        live,
+        record.synopsis,
+        tailK,
+        record.summarizedThroughEntry,
+      );
     } catch (err) {
       this.logger?.warn(
-        `compaction: retrySwap failed for sessionId=${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        `compaction: onIdleAttemptSwap failed for sessionId=${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async performCompactionSwap(
+    live: Session,
+    artifact: SessionSynopsis,
+    tailK: number,
+    summarizedThroughEntry: number,
+  ): Promise<void> {
+    try {
+      await live.swapUpstream({ artifact, tailK, summarizedThroughEntry });
+      // Clear compactionState now that the swap completed (in-memory
+      // and on disk in lockstep — see onCompactionStateChange above).
+      live.compactionState = undefined;
+      await this.mutateRecord(live.sessionId, {}, ["compactionState"]);
+    } catch (err) {
+      this.logger?.warn(
+        `compaction: swap failed for sessionId=${live.sessionId}: ${err instanceof Error ? err.message : String(err)}, leaving session as-is`,
       );
     }
   }

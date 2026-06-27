@@ -497,6 +497,8 @@ describe("compaction swap — onCompactionArtifact hook", () => {
 
     expect(deferredEvents.length).toBeGreaterThan(0);
     expect(deferredEvents[0]!.phase).toBe("deferred");
-    expect(typeof deferredEvents[0]!.attempts).toBe("number");
+    // Under the onceIdle dispatch design there are no retry attempts —
+    // the parked handler fires once on the next quiesce edge. The
+    // payload no longer carries an `attempts` counter.
   });
 });

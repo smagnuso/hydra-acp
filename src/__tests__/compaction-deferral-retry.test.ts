@@ -1,11 +1,16 @@
 /**
- * Verifies that when onCompactionArtifact finds the session non-quiesced, the
- * deferral retry path calls retrySwap (which reuses the persisted artifact)
- * rather than re-invoking scheduleCompaction (which would spawn a new
- * ephemeral agent and LLM call).
+ * Verifies onceIdle-based compaction swap dispatch:
+ *   - When a session is non-quiesced at artifact time, an idle handler
+ *     is parked instead of polling with a deferral cap.
+ *   - When the session next quiesces, the parked handler reads the
+ *     persisted artifact from disk (no re-summarization) and calls
+ *     swapUpstream.
+ *   - If history grew past the artifact's watermark during the wait,
+ *     scheduleCompaction is invoked to refresh the synopsis rather than
+ *     swapping with a stale artifact.
  *
- * The SynopsisCoordinator is mocked so we can capture the onCompactionArtifact
- * callback and drive it synchronously without waiting for a real worker loop.
+ * The SynopsisCoordinator is mocked so we can capture the
+ * onCompactionArtifact callback and drive it synchronously.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync } from "node:fs";
@@ -14,7 +19,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { SessionSynopsis } from "../core/snapshot.js";
 
-// Must be declared before the module mock so the factory closure can write to it.
 let capturedOnArtifact:
   | ((
       sessionId: string,
@@ -84,7 +88,7 @@ function makeArtifact(overrides?: Partial<SessionSynopsis>): SessionSynopsis {
   };
 }
 
-const WORK_CWD = mkdtempSync(path.join(os.tmpdir(), "hydra-test-deferral-retry-"));
+const WORK_CWD = mkdtempSync(path.join(os.tmpdir(), "hydra-test-onceidle-swap-"));
 
 type StoreShape = {
   read: (id: string) => Promise<unknown>;
@@ -93,7 +97,6 @@ type StoreShape = {
 
 type ManagerInternal = {
   store: StoreShape;
-  retrySwap: (id: string) => Promise<void>;
 };
 
 async function buildManager(): Promise<{
@@ -123,11 +126,11 @@ async function buildManager(): Promise<{
   return { manager, session, sessionId: session.sessionId };
 }
 
-describe("compaction deferral retry — retrySwap reuses persisted artifact", () => {
+describe("compaction swap — onceIdle dispatch", () => {
   let tmpHome: string;
 
   beforeEach(() => {
-    tmpHome = mkdtempSync(path.join(os.tmpdir(), "hydra-test-home-deferral-"));
+    tmpHome = mkdtempSync(path.join(os.tmpdir(), "hydra-test-home-onceidle-"));
     process.env.HOME = tmpHome;
     capturedOnArtifact = undefined;
   });
@@ -136,88 +139,95 @@ describe("compaction deferral retry — retrySwap reuses persisted artifact", ()
     try {
       await fs.rm(tmpHome, { recursive: true, force: true });
     } catch {
-      // Ignore cleanup errors.
+      // intentional
     }
   });
 
-  it("retrySwap reuses persisted artifact; scheduleCompaction called exactly once", async () => {
+  it("parks an onceIdle handler when non-quiesced; swap fires at the next idle edge", async () => {
     const { manager, session, sessionId } = await buildManager();
-    const originalUpstream = session.upstreamSessionId;
 
-    // isQuiescedForSwap: first call → not ready, subsequent calls → ready.
+    // First isQuiescedForSwap call (in dispatchCompactionSwap) → false:
+    // forces the parking path. Subsequent calls (from inside the idle
+    // handler) → true so the swap proceeds.
     const quiesceSpy = vi
       .spyOn(session, "isQuiescedForSwap")
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
 
-    // swapUpstream: intercept so we don't need a real agent round-trip.
     const swapSpy = vi.spyOn(session, "swapUpstream").mockResolvedValue(undefined);
 
     const artifact = makeArtifact();
 
-    // The real coordinator calls persistSynopsis before onCompactionArtifact, so the
-    // artifact is in the store when retrySwap reads it. Simulate that here since
-    // the coordinator is mocked.
+    // Mirror what the real coordinator would have done before firing
+    // onCompactionArtifact: persist the artifact to the store.
     const store = (manager as unknown as ManagerInternal).store;
     const existingRecord = await store.read(sessionId);
-    await store.write({ ...(existingRecord as object), synopsis: artifact, summarizedThroughEntry: 3 });
+    await store.write({
+      ...(existingRecord as object),
+      synopsis: artifact,
+      summarizedThroughEntry: 3,
+    });
 
-    // Deliver artifact — session is non-quiesced, so a deferral setTimeout is set.
     expect(capturedOnArtifact).toBeDefined();
     await capturedOnArtifact!(sessionId, artifact, 3);
 
-    // scheduleCompaction must NOT have been called (no re-summarization).
-    expect(capturedScheduleCompaction).not.toHaveBeenCalled();
+    // No swap yet — parked on idle. scheduleCompaction not called either
+    // (we did NOT grow history past the watermark).
     expect(swapSpy).not.toHaveBeenCalled();
-    expect(quiesceSpy).toHaveBeenCalledTimes(1);
-
-    // Directly invoke retrySwap to simulate the 5-second deferral firing. This
-    // avoids fake-timer complexity with real async I/O inside the method body.
-    await (manager as unknown as ManagerInternal).retrySwap(sessionId);
-
-    // Session is now quiesced → swapUpstream called exactly once.
-    expect(swapSpy).toHaveBeenCalledTimes(1);
-    // isQuiescedForSwap was checked a second time inside retrySwap.
-    expect(quiesceSpy).toHaveBeenCalledTimes(2);
-    // scheduleCompaction was never invoked on the retry path.
     expect(capturedScheduleCompaction).not.toHaveBeenCalled();
-    // Session identity is preserved.
-    expect(session.sessionId).toBe(sessionId);
-    expect(session.upstreamSessionId).toBe(originalUpstream);
+
+    // Simulate the quiesce edge by directly calling the dispatch path
+    // that the parked handler would have called. The Session.onceIdle
+    // hook fires synchronously on its registered callback; the manager's
+    // callback calls onIdleAttemptSwap.
+    const internal = manager as unknown as {
+      onIdleAttemptSwap: (id: string) => Promise<void>;
+    };
+    await internal.onIdleAttemptSwap(sessionId);
+
+    expect(swapSpy).toHaveBeenCalledTimes(1);
+    expect(capturedScheduleCompaction).not.toHaveBeenCalled();
+    expect(quiesceSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("deferral cap is respected — gives up after MAX_SWAP_DEFERRALS retries", async () => {
+  it("reschedules synopsis (no swap) when history grew past the artifact during the wait", async () => {
     const { manager, session, sessionId } = await buildManager();
-    const originalUpstream = session.upstreamSessionId;
 
-    // Always return non-quiesced so all deferrals are exhausted.
-    const quiesceSpy = vi.spyOn(session, "isQuiescedForSwap").mockResolvedValue(false);
+    // Park first, then become quiesced.
+    vi.spyOn(session, "isQuiescedForSwap")
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
     const swapSpy = vi.spyOn(session, "swapUpstream").mockResolvedValue(undefined);
 
     const artifact = makeArtifact();
     const store = (manager as unknown as ManagerInternal).store;
     const existingRecord = await store.read(sessionId);
-    await store.write({ ...(existingRecord as object), synopsis: artifact, summarizedThroughEntry: 3 });
+    await store.write({
+      ...(existingRecord as object),
+      synopsis: artifact,
+      summarizedThroughEntry: 3,
+    });
 
-    // First delivery sets deferral count to 1.
     await capturedOnArtifact!(sessionId, artifact, 3);
 
-    // Invoke retrySwap directly for each possible retry (up to cap).
-    const internal = manager as unknown as ManagerInternal;
-    await internal.retrySwap(sessionId);
-    await internal.retrySwap(sessionId);
-    await internal.retrySwap(sessionId);
-    // One more invocation after cap should be a no-op (count was cleared).
-    await internal.retrySwap(sessionId);
+    // Inject growth past the watermark into the history store BEFORE
+    // the idle handler runs.
+    const internal = manager as unknown as {
+      onIdleAttemptSwap: (id: string) => Promise<void>;
+      histories: {
+        load: (id: string) => Promise<unknown[]>;
+      };
+    };
+    vi.spyOn(internal.histories, "load").mockResolvedValue(
+      new Array(10).fill({ method: "session/update" }),
+    );
 
-    // swapUpstream should never have been called — session was never quiesced.
+    await internal.onIdleAttemptSwap(sessionId);
+
+    // Swap is NOT called — instead a fresh synopsis run is scheduled.
     expect(swapSpy).not.toHaveBeenCalled();
-    // scheduleCompaction should never have been called.
-    expect(capturedScheduleCompaction).not.toHaveBeenCalled();
-    // Session identity still intact.
-    expect(session.sessionId).toBe(sessionId);
-    expect(session.upstreamSessionId).toBe(originalUpstream);
-    // quiesceSpy was called at most once per attempt.
-    expect(quiesceSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(capturedScheduleCompaction).toHaveBeenCalledTimes(1);
+    expect(capturedScheduleCompaction).toHaveBeenCalledWith(sessionId);
   });
 });
