@@ -6611,6 +6611,42 @@ async function runSession(
   // an incremental replay.
   onReconnect = async (): Promise<void> => {
     writeDebugLine({ src: "reconnect", step: "begin", sessionId: resolvedSessionId });
+    // Refresh target.baseUrl / target.wsUrl from the pidfile on every
+    // reconnect for local daemons. The WS layer's ResilientWsUrl resolver
+    // already re-reads the pidfile per attempt (wsUrl above), but
+    // target.baseUrl was captured once at runSession entry and is used by
+    // every HTTP path (listSessions for ^P picker, /v1/sessions/.../compact,
+    // /v1/sessions/.../export, fork/kill/info endpoints). If `hydra daemon
+    // restart` lands on a different ephemeral loopback port, those HTTP
+    // calls all reject with 'fetch failed' against the stale URL — making
+    // ^P silently do nothing while WS-driven UI keeps working. Mutate in
+    // place so every downstream reference (closures, helper calls) picks
+    // up the fresh URLs without rewiring.
+    if (target.isLocal) {
+      try {
+        const fresh = await resolveLocalTarget(await loadConfig());
+        if (fresh.baseUrl !== target.baseUrl || fresh.wsUrl !== target.wsUrl) {
+          writeDebugLine({
+            src: "reconnect",
+            step: "target-refresh",
+            oldBase: target.baseUrl,
+            newBase: fresh.baseUrl,
+          });
+          target.baseUrl = fresh.baseUrl;
+          target.wsUrl = fresh.wsUrl;
+          target.display = fresh.display;
+        }
+      } catch (err) {
+        // Best-effort: if the pidfile read fails the stale URL stays in
+        // place and downstream HTTP calls will surface the error in their
+        // own catch paths. The WS reconnect itself still succeeds.
+        writeDebugLine({
+          src: "reconnect",
+          step: "target-refresh-failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     resetInFlightUiState();
     const initReq: JsonRpcRequest = {
       jsonrpc: "2.0",
