@@ -3520,200 +3520,219 @@ async function runSession(
     screen.pauseRepaint();
     screen.stop({ keepFullscreen: true });
     saveHistory(historyFile, history).catch(() => undefined);
-    // Loop: the imported-first-launch action dialog's Esc returns
-    // "back" to re-show the picker, same as the initial-picker flow.
-    // Picker abort exits the loop and resumes the warm session.
-    let resolvedChoice: { choice: PickerResult; sessions: DiscoveredSession[] } | null = null;
-    let attachOverrides: { readonly?: boolean; cwd?: string; resumeHint?: { agentId: string; cwd: string; upstreamSessionId: string } } | null = null;
-    while (resolvedChoice === null) {
-      // Picker manages its own interactive-only filter; ask the daemon
-      // for everything and let prefs.filters.includeNonInteractive decide
-      // what to render.
-      const sessions = await listSessions(target, { includeNonInteractive: true });
-      const choice: PickerResult = await pickSession(term, {
-        cwd: resolvedCwd,
-        sessions,
-        config,
-        target,
-        currentSessionId: resolvedSessionId,
-        prefs: pickerPrefs,
-      });
-      if (choice.kind === "abort") {
-        // Pair with stop({ keepFullscreen: true }) above — we never left
-        // the alt screen buffer, so don't re-emit fullscreen(true).
-        screen.start({ skipFullscreen: true });
-        screen.resumeRepaint();
-        return;
-      }
-      if (choice.kind === "exit") {
-        // Current session was killed/deleted from inside the picker, so
-        // there's nothing to resume to. Exit hydra entirely.
-        stop(0);
-        return;
-      }
-      if (choice.kind === "new") {
-        resolvedChoice = { choice, sessions };
-        break;
-      }
-      if (choice.kind === "fork") {
-        const decided = await runForkFlow(term, target, choice, sessions);
+    // Past this point the terminal is in cooked mode (screen.stop ran
+    // grabInput(false)). Any throw / silent rejection before we either
+    // (a) restart the screen, or (b) hand off to a new runSession via
+    // `resume(nextOpts)`, would leave the user with a hung TUI: WS still
+    // alive, but keyboard input not delivered. `handedOff` tracks the
+    // hand-off branch so the finally below only restarts the screen on
+    // the resume-warm-session branches (abort / cancel / back-out / any
+    // exception bubbling from listSessions / pickSession / sub-prompts).
+    let handedOff = false;
+    try {
+      // Loop: the imported-first-launch action dialog's Esc returns
+      // "back" to re-show the picker, same as the initial-picker flow.
+      // Picker abort exits the loop and resumes the warm session.
+      let resolvedChoice: { choice: PickerResult; sessions: DiscoveredSession[] } | null = null;
+      let attachOverrides: { readonly?: boolean; cwd?: string; resumeHint?: { agentId: string; cwd: string; upstreamSessionId: string } } | null = null;
+      while (resolvedChoice === null) {
+        // Picker manages its own interactive-only filter; ask the daemon
+        // for everything and let prefs.filters.includeNonInteractive decide
+        // what to render.
+        const sessions = await listSessions(target, { includeNonInteractive: true });
+        const choice: PickerResult = await pickSession(term, {
+          cwd: resolvedCwd,
+          sessions,
+          config,
+          target,
+          currentSessionId: resolvedSessionId,
+          prefs: pickerPrefs,
+        });
+        if (choice.kind === "abort") {
+          // finally restarts the screen.
+          return;
+        }
+        if (choice.kind === "exit") {
+          // Current session was killed/deleted from inside the picker, so
+          // there's nothing to resume to. Exit hydra entirely. stop(0)
+          // tears the screen down itself, so suppress the finally's
+          // restart by marking the hand-off taken.
+          handedOff = true;
+          stop(0);
+          return;
+        }
+        if (choice.kind === "new") {
+          resolvedChoice = { choice, sessions };
+          break;
+        }
+        if (choice.kind === "fork") {
+          const decided = await runForkFlow(term, target, choice, sessions);
+          if (decided.kind === "cancel") {
+            return;
+          }
+          if (decided.kind === "back") {
+            continue;
+          }
+          // Synthesize an attach pick targeting the fresh fork id so the
+          // existing attach plumbing below switches us into the new
+          // session.
+          const synthetic: PickerResult = {
+            kind: "attach",
+            sessionId: decided.ctx.sessionId,
+            ...(decided.ctx.agentId ? { agentId: decided.ctx.agentId } : {}),
+          };
+          resolvedChoice = { choice: synthetic, sessions };
+          attachOverrides = {
+            readonly: false,
+            cwd: decided.ctx.cwd,
+          };
+          if (decided.ctx.resumeHint !== undefined) {
+            attachOverrides.resumeHint = decided.ctx.resumeHint;
+          }
+          break;
+        }
+        // attach: route imported-first-launch picks through the action /
+        // cwd wizard. cancel aborts the switch (resume warm session);
+        // back loops to re-show the picker.
+        const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
+        const isImportedFirstLaunch =
+          chosen !== undefined &&
+          !!chosen.importedFromMachine &&
+          !chosen.upstreamSessionId &&
+          choice.readonly !== true;
+        if (!isImportedFirstLaunch) {
+          // Same dead-cwd repair as the initial-picker path: a local
+          // session whose recorded cwd is gone can't be resumed (the agent
+          // is pinned to it), so prompt for a new cwd and forward a resume
+          // hint with an empty upstreamSessionId to reseed there.
+          if (
+            target.isLocal &&
+            chosen &&
+            !chosen.importedFromMachine &&
+            choice.readonly !== true
+          ) {
+            const v = await validateLocalCwd(chosen.cwd);
+            if (!v.ok) {
+              const r = await promptForImportCwd(term, chosen, {
+                defaultCwd: expandHome(config.defaultCwd),
+                title: "Working directory missing — choose cwd",
+                intro:
+                  "This session's working directory no longer exists. Pick a new one:",
+              });
+              if (r.kind === "cancel") {
+                return;
+              }
+              if (r.kind === "back") {
+                continue;
+              }
+              resolvedChoice = { choice, sessions };
+              attachOverrides = {
+                readonly: false,
+                cwd: r.path,
+                resumeHint: {
+                  agentId: choice.agentId ?? chosen.agentId ?? "",
+                  cwd: r.path,
+                  upstreamSessionId: "",
+                },
+              };
+              break;
+            }
+          }
+          resolvedChoice = { choice, sessions };
+          break;
+        }
+        // Use a local opts shim so the helper can flip readonly without
+        // mutating the warm session's opts (which still owns the current
+        // session). We translate the shim back into attachOverrides.
+        const opsShim: TuiOptions = { ...opts, readonly: false };
+        const decided = await runImportedFirstLaunchFlow(term, target, chosen, choice, opsShim);
         if (decided.kind === "cancel") {
-          screen.start({ skipFullscreen: true });
-          screen.resumeRepaint();
           return;
         }
         if (decided.kind === "back") {
           continue;
         }
-        // Synthesize an attach pick targeting the fresh fork id so the
-        // existing attach plumbing below switches us into the new
-        // session.
-        const synthetic: PickerResult = {
-          kind: "attach",
-          sessionId: decided.ctx.sessionId,
-          ...(decided.ctx.agentId ? { agentId: decided.ctx.agentId } : {}),
-        };
-        resolvedChoice = { choice: synthetic, sessions };
+        resolvedChoice = { choice, sessions };
         attachOverrides = {
-          readonly: false,
+          readonly: opsShim.readonly === true,
           cwd: decided.ctx.cwd,
         };
         if (decided.ctx.resumeHint !== undefined) {
           attachOverrides.resumeHint = decided.ctx.resumeHint;
         }
-        break;
       }
-      // attach: route imported-first-launch picks through the action /
-      // cwd wizard. cancel aborts the switch (resume warm session);
-      // back loops to re-show the picker.
-      const chosen = sessions.find((s) => s.sessionId === choice.sessionId);
-      const isImportedFirstLaunch =
-        chosen !== undefined &&
-        !!chosen.importedFromMachine &&
-        !chosen.upstreamSessionId &&
-        choice.readonly !== true;
-      if (!isImportedFirstLaunch) {
-        // Same dead-cwd repair as the initial-picker path: a local
-        // session whose recorded cwd is gone can't be resumed (the agent
-        // is pinned to it), so prompt for a new cwd and forward a resume
-        // hint with an empty upstreamSessionId to reseed there.
-        if (
-          target.isLocal &&
-          chosen &&
-          !chosen.importedFromMachine &&
-          choice.readonly !== true
-        ) {
-          const v = await validateLocalCwd(chosen.cwd);
-          if (!v.ok) {
-            const r = await promptForImportCwd(term, chosen, {
-              defaultCwd: expandHome(config.defaultCwd),
-              title: "Working directory missing — choose cwd",
-              intro:
-                "This session's working directory no longer exists. Pick a new one:",
-            });
-            if (r.kind === "cancel") {
-              screen.start({ skipFullscreen: true });
-              screen.resumeRepaint();
-              return;
-            }
-            if (r.kind === "back") {
-              continue;
-            }
-            resolvedChoice = { choice, sessions };
-            attachOverrides = {
-              readonly: false,
-              cwd: r.path,
-              resumeHint: {
-                agentId: choice.agentId ?? chosen.agentId ?? "",
-                cwd: r.path,
-                upstreamSessionId: "",
-              },
-            };
-            break;
-          }
+      const { choice } = resolvedChoice;
+      // The user is actually switching: finish the teardown and let the
+      // outer loop attach the chosen session. From here on, every code
+      // path hands off to a new runSession via resume() — set handedOff
+      // before resume() because resume() reenters the outer loop and a
+      // subsequent throw must not retry to restart this dead screen.
+      const resume = finishSession;
+      finishSession = null;
+      process.off("SIGINT", sigintHandler);
+      void stream.close().catch(() => undefined);
+      handedOff = true;
+      if (choice.kind === "new") {
+        const { sessionId: _drop, agentId: _dropAgent, ...rest } = opts;
+        void _drop;
+        void _dropAgent;
+        // Fresh session is never read-only; explicitly clear so a viewer
+        // that pressed ^P → New doesn't inherit readonly into the new
+        // session's WS attach.
+        //
+        // agentId is also dropped so ensureAgentForNew re-shows the picker
+        // (highlighted on viewPrefs.lastChosenAgent) rather than silently
+        // reusing the previous session's agent. config.defaultAgent, if
+        // set, still short-circuits the picker as before.
+        const nextOpts: TuiOptions = {
+          ...rest,
+          cwd: choice.cwd ?? resolvedCwd,
+          forceNew: true,
+          readonly: false,
+        };
+        if (choice.prompt !== undefined) {
+          nextOpts.initialPrompt = choice.prompt;
         }
-        resolvedChoice = { choice, sessions };
-        break;
-      }
-      // Use a local opts shim so the helper can flip readonly without
-      // mutating the warm session's opts (which still owns the current
-      // session). We translate the shim back into attachOverrides.
-      const opsShim: TuiOptions = { ...opts, readonly: false };
-      const decided = await runImportedFirstLaunchFlow(term, target, chosen, choice, opsShim);
-      if (decided.kind === "cancel") {
-        screen.start({ skipFullscreen: true });
-        screen.resumeRepaint();
+        resume(nextOpts);
         return;
       }
-      if (decided.kind === "back") {
-        continue;
+      // Read-only is per-session; default off on a picker-driven switch.
+      // The picker's `v` keystroke and the action dialog's view option
+      // are the only ways to re-enter read-only.
+      if (choice.kind !== "attach") {
+        // Unreachable — the loop only escapes on "attach" or "new", and
+        // "new" returned above. Belt-and-suspenders for the type
+        // narrowing.
+        return;
       }
-      resolvedChoice = { choice, sessions };
-      attachOverrides = {
-        readonly: opsShim.readonly === true,
-        cwd: decided.ctx.cwd,
-      };
-      if (decided.ctx.resumeHint !== undefined) {
-        attachOverrides.resumeHint = decided.ctx.resumeHint;
-      }
-    }
-    const { choice } = resolvedChoice;
-    // The user is actually switching: finish the teardown and let the
-    // outer loop attach the chosen session.
-    const resume = finishSession;
-    finishSession = null;
-    process.off("SIGINT", sigintHandler);
-    void stream.close().catch(() => undefined);
-    if (choice.kind === "new") {
-      const { sessionId: _drop, agentId: _dropAgent, ...rest } = opts;
-      void _drop;
-      void _dropAgent;
-      // Fresh session is never read-only; explicitly clear so a viewer
-      // that pressed ^P → New doesn't inherit readonly into the new
-      // session's WS attach.
-      //
-      // agentId is also dropped so ensureAgentForNew re-shows the picker
-      // (highlighted on viewPrefs.lastChosenAgent) rather than silently
-      // reusing the previous session's agent. config.defaultAgent, if
-      // set, still short-circuits the picker as before.
       const nextOpts: TuiOptions = {
-        ...rest,
-        cwd: choice.cwd ?? resolvedCwd,
-        forceNew: true,
-        readonly: false,
+        ...opts,
+        sessionId: choice.sessionId,
+        cwd: attachOverrides?.cwd ?? resolvedCwd,
+        readonly: attachOverrides?.readonly ?? (choice.readonly === true),
       };
-      if (choice.prompt !== undefined) {
-        nextOpts.initialPrompt = choice.prompt;
+      if (choice.agentId !== undefined) {
+        nextOpts.agentId = choice.agentId;
+      }
+      if (attachOverrides?.resumeHint !== undefined) {
+        nextOpts.resumeHint = attachOverrides.resumeHint;
+      } else {
+        // Clear any stale hint inherited from the current session's opts —
+        // it was for the previous attach, not the new one.
+        delete nextOpts.resumeHint;
       }
       resume(nextOpts);
-      return;
+    } finally {
+      // If we exit without handing off (abort, cancel, back-out, or any
+      // thrown rejection from listSessions / pickSession / sub-prompts),
+      // resume the warm session — restoring raw mode along with it.
+      // finishSession check guards against the choice.kind === "exit"
+      // path where stop(0) cleared it (and screen too).
+      if (!handedOff && finishSession) {
+        screen.start({ skipFullscreen: true });
+        screen.resumeRepaint();
+      }
     }
-    // Read-only is per-session; default off on a picker-driven switch.
-    // The picker's `v` keystroke and the action dialog's view option
-    // are the only ways to re-enter read-only.
-    if (choice.kind !== "attach") {
-      // Unreachable — the loop only escapes on "attach" or "new", and
-      // "new" returned above. Belt-and-suspenders for the type
-      // narrowing.
-      return;
-    }
-    const nextOpts: TuiOptions = {
-      ...opts,
-      sessionId: choice.sessionId,
-      cwd: attachOverrides?.cwd ?? resolvedCwd,
-      readonly: attachOverrides?.readonly ?? (choice.readonly === true),
-    };
-    if (choice.agentId !== undefined) {
-      nextOpts.agentId = choice.agentId;
-    }
-    if (attachOverrides?.resumeHint !== undefined) {
-      nextOpts.resumeHint = attachOverrides.resumeHint;
-    } else {
-      // Clear any stale hint inherited from the current session's opts —
-      // it was for the previous attach, not the new one.
-      delete nextOpts.resumeHint;
-    }
-    resume(nextOpts);
   };
 
   const cycleLiveSession = async (direction: "next" | "prev" = "next"): Promise<void> => {
@@ -3934,7 +3953,12 @@ async function runSession(
         screen.scrollToBottom();
         return;
       case "switch-session":
-        void switchSession().catch(() => undefined);
+        void switchSession().catch((err: unknown) => {
+          writeDebugLine({
+            src: "switch-session-failed",
+            stack: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          });
+        });
         return;
       case "next-live-session":
         void cycleLiveSession().catch(() => undefined);
@@ -4494,12 +4518,22 @@ async function runSession(
       case "/resume":
         // Same destination as the switch-session hotkey: suspend the live
         // session and open the picker.
-        void switchSession().catch(() => undefined);
+        void switchSession().catch((err: unknown) => {
+          writeDebugLine({
+            src: "switch-session-failed",
+            stack: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          });
+        });
         return true;
       case "/session": {
         const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
         if (!arg) {
-          void switchSession().catch(() => undefined);
+          void switchSession().catch((err: unknown) => {
+          writeDebugLine({
+            src: "switch-session-failed",
+            stack: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          });
+        });
           return true;
         }
         if (arg === "next" || arg === "prev") {
