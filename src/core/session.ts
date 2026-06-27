@@ -5873,10 +5873,31 @@ export class Session {
     }
   }
 
+  // The agent's stdio connection is uniquely owned by this hydra session,
+  // so any sessionId appearing on a message inbound from the agent
+  // corresponds to this hydra session from an attached client's POV —
+  // regardless of which internal session the agent considers it.
+  //
+  // Concretely: agents that multiplex multiple internal sessions over a
+  // single stdio connection (opencode's @explore-style subagents, claude's
+  // sub-thread tool calls) emit some messages with the *parent* upstream
+  // sessionId (session/update notifications) and others with a *child /
+  // foreign* sessionId (session/request_permission, see opencode
+  // acp/permission.ts:63). The old gate `obj.sessionId === upstreamSessionId`
+  // only rewrote the first case. The second was forwarded to attached
+  // clients with the foreign id; the planner client couldn't resolve it to
+  // a known hydra worker session and abstained (-32601), the daemon then
+  // settled the permission as denied, and the subagent's tool call wedged
+  // / aborted with no UI prompt ever shown to the user.
+  //
+  // Rewriting any non-self sessionId to this.sessionId fixes both cases.
+  // It's safe because this method only runs on payloads flowing FROM the
+  // agent OUT to attached clients — never the other direction — and the
+  // agent's connection is 1:1 with this Session.
   private rewriteForClient(params: unknown): unknown {
     if (params && typeof params === "object" && !Array.isArray(params)) {
       const obj = params as Record<string, unknown>;
-      if (obj.sessionId === this.upstreamSessionId) {
+      if (typeof obj.sessionId === "string" && obj.sessionId !== this.sessionId) {
         return { ...obj, sessionId: this.sessionId };
       }
     }

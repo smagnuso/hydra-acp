@@ -4187,6 +4187,7 @@ export class Screen {
         for (let i = 0; i < chunks.length; i++) {
           if (i > 0) this.term.dim(" · ");
           const c = chunks[i];
+          if (c === undefined) continue;
           let kind: "mode" | "pick" | "guide" | "detach" | null = null;
           if (c.includes("mode")) kind = "mode";
           else if (c.includes("pick")) kind = "pick";

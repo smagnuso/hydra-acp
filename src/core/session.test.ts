@@ -179,6 +179,44 @@ describe("Session", () => {
       });
     });
 
+    it("rewrites permission requests bearing a subagent (foreign) sessionId to the hydra session id", async () => {
+      // Regression: opencode subagent permission requests (acp/permission.ts)
+      // carry the subagent's internal opencode session id in params.sessionId,
+      // NOT the parent's upstream id. The old gate
+      // `obj.sessionId === upstreamSessionId` left those untouched, so the
+      // planner (or any attached client) saw a foreign id, couldn't resolve
+      // it to a known worker, and abstained — wedging the subagent's tool.
+      const { session, mock } = makeSession("sess_hyd", "u_parent");
+      const { client, stream } = makeClient();
+      session.attach(client, "full");
+
+      const requestPromise = mock.triggerRequest("session/request_permission", {
+        sessionId: "u_subagent_foreign",
+        toolCall: { name: "external_directory" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const permMsg = stream.sent.find(
+        (m): m is JsonRpcRequest =>
+          "method" in m && m.method === "session/request_permission",
+      );
+      expect(permMsg).toBeDefined();
+      expect(permMsg!.params).toMatchObject({
+        sessionId: "sess_hyd",
+        toolCall: { name: "external_directory" },
+      });
+
+      stream.emitMessage({
+        jsonrpc: "2.0",
+        id: (permMsg! as { id: string | number }).id,
+        result: { outcome: { kind: "allow", optionId: "allow" } },
+      });
+      await expect(requestPromise).resolves.toMatchObject({
+        outcome: { kind: "allow" },
+      });
+    });
+
     it("replays in-flight permission requests to clients that attach late", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");
       const a = makeClient();
