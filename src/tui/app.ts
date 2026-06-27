@@ -2409,29 +2409,57 @@ async function runSession(
       handleEffect(effect);
     },
     onKey: (events: KeyEvent[]) => {
+      // Diagnostic: log every interceptor that swallows a key (returns
+      // true). Only fires for "key" events (ignores plain char input to
+      // keep the noise floor low). A ^P that produces a swallow entry
+      // here identifies which modal flag was stuck active.
       for (const ev of events) {
         if (compactionPromptActive && tryHandleCompactionPromptKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "compactionPrompt", name: ev.name });
+          }
           continue;
         }
         if (pendingPermission && tryHandlePermissionKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "permission", name: ev.name });
+          }
           continue;
         }
         if (tryHandleHelpKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "help", name: ev.name });
+          }
           continue;
         }
         if (tryHandleQuestionsKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "questions", name: ev.name });
+          }
           continue;
         }
         if (tryHandleOptionsKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "options", name: ev.name });
+          }
           continue;
         }
         if (tryHandleScrollbackSearchKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "scrollbackSearch", name: ev.name });
+          }
           continue;
         }
         if (tryHandleCompletionKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "completion", name: ev.name });
+          }
           continue;
         }
         if (tryHandleBtwCloseKey(ev)) {
+          if (ev.type === "key") {
+            writeDebugLine({ src: "key-swallowed", site: "btwClose", name: ev.name });
+          }
           continue;
         }
         // Escape while scrolled back snaps the viewport to the bottom
@@ -3483,7 +3511,18 @@ async function runSession(
   };
 
   const switchSession = async (): Promise<void> => {
+    writeDebugLine({
+      src: "switch-session",
+      step: "entered",
+      finishSessionNull: finishSession === null,
+    });
     if (!finishSession) {
+      // No active resume slot — the previous runSession's resolve has
+      // already been called (we're in the brief window before the outer
+      // loop spawns a new runSession), OR teardown ran. Either way, ^P
+      // is a no-op in this state. Flag it so we can detect "stuck null"
+      // (finishSession remains null indefinitely while the screen is
+      // still up).
       return;
     }
     // Cancel any in-flight btw sidechain AND kill any retained reusable
