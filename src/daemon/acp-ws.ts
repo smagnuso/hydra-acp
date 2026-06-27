@@ -606,6 +606,27 @@ export function registerAcpWsEndpoint(
           return { ok: true, response };
         }
 
+        // route: "queue" — used by transformers that want to ORIGINATE
+        // a fresh user-equivalent turn on the session (planner spawning
+        // a worker, planner re-prompting an orchestrator). Goes through
+        // Session.emitToQueue → enqueueing as a real
+        // UserPromptQueueEntry, so the full lifecycle fires:
+        // broadcastPromptReceived, turnStartedAt, prompt_queue_*,
+        // broadcastTurnComplete. The emitting transformer is skipped
+        // on the chain to avoid loop-on-self when it also intercepts
+        // request:session/prompt. Only session/prompt is supported —
+        // there's no notion of "queue a session/cancel."
+        if (route === "queue") {
+          if (method !== "session/prompt") {
+            throw rpcError(
+              -32602,
+              'route "queue" only supports method "session/prompt"',
+            );
+          }
+          const response = await session.emitToQueue(processIdentity.name, envelope);
+          return { ok: true, response };
+        }
+
         if (route === "daemon") {
           const response = await session.emitToChain(processIdentity.name, method as string, envelope);
           return { ok: true, response };

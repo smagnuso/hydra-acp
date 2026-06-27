@@ -360,6 +360,16 @@ interface UserPromptQueueEntry {
   // includes the originator in the wire turn_complete (no exclusion) so
   // their TUI can clear currentHeadMessageId and adjust pendingTurns.
   wasAmend?: boolean;
+  // Set when this entry was synthesized via `route: "queue"` on
+  // hydra-acp/message/emit by an in-chain transformer (e.g. the
+  // planner originating a worker's turn). forwardRequest must start
+  // at chainStartIdx (== emitterIdx + 1) so the emitting transformer's
+  // own request:session/prompt intercept is skipped — same skip
+  // semantics as emitToChain, but routed through the queue so the
+  // full turn lifecycle (broadcastPromptReceived, prompt_queue_*,
+  // turnStartedAt, broadcastTurnComplete) fires normally.
+  emitterName?: string;
+  chainStartIdx?: number;
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
 }
@@ -3097,6 +3107,60 @@ export class Session {
     // Everything else is treated as a request — forward to the agent if the
     // chain doesn't stop it.
     return this.forwardRequest(method, envelope, originatedBy, startIdx);
+  }
+
+  // Companion to emitToChain for session/prompt envelopes that
+  // ORIGINATE a fresh user-equivalent turn on this session (e.g. the
+  // planner dispatching a worker, or planner re-prompting an
+  // orchestrator). Enqueues a real UserPromptQueueEntry instead of
+  // calling forwardRequest directly — so broadcastPromptReceived
+  // fires, turnStartedAt is set, queue chips render, and
+  // broadcastTurnComplete pairs the turn correctly on the wire.
+  //
+  // The emitter's own request:session/prompt intercept is skipped
+  // (via chainStartIdx threaded through to forwardRequest) so a
+  // transformer that both injects prompts AND intercepts them
+  // doesn't loop on itself — same skip semantics as emitToChain,
+  // just with the queue lifecycle layered on top.
+  //
+  // Returns the agent's session/prompt response once the queued
+  // entry drains and the agent completes the turn. If the entry is
+  // dropped via cancelQueuedPrompt before reaching the head, resolves
+  // with { stopReason: "cancelled" } like any other cancelled queue
+  // entry.
+  async emitToQueue(
+    emitterName: string,
+    envelope: unknown,
+  ): Promise<unknown> {
+    const emitterIdx = this.transformChain.findIndex((t) => t.name === emitterName);
+    const chainStartIdx = emitterIdx >= 0 ? emitterIdx + 1 : 0;
+    const promptArray = (((envelope ?? {}) as { prompt?: unknown[] }).prompt ??
+      []) as unknown[];
+    const messageId = generateMessageId();
+    const synthClientId = `transformer:${emitterName}`;
+    const originator: PromptOriginator = {
+      clientId: synthClientId,
+      name: emitterName,
+    };
+    return new Promise<unknown>((resolve, reject) => {
+      const entry: UserPromptQueueEntry = {
+        kind: "user",
+        messageId,
+        originator,
+        clientId: synthClientId,
+        prompt: promptArray,
+        enqueuedAt: Date.now(),
+        cancelled: false,
+        emitterName,
+        chainStartIdx,
+        resolve,
+        reject,
+      };
+      const insertedAt = this.insertEntryAt(entry, "tail");
+      this.persistRewrite();
+      this.broadcastQueueAdded(entry, { position: insertedAt });
+      void this.drainQueue();
+    });
   }
 
   private rewriteForAgent(params: unknown): unknown {
@@ -6409,10 +6473,12 @@ export class Session {
       // injection) get to see and potentially rewrite the prompt before it
       // reaches the agent. forwardRequest handles rewriteForAgent
       // (sessionId → upstreamSessionId) and tail-forwards to the agent.
-      response = await this.forwardRequest("session/prompt", {
-        sessionId: this.sessionId,
-        prompt: entry.prompt,
-      });
+      response = await this.forwardRequest(
+        "session/prompt",
+        { sessionId: this.sessionId, prompt: entry.prompt },
+        entry.emitterName ? new Set([entry.emitterName]) : new Set(),
+        entry.chainStartIdx ?? 0,
+      );
     } catch (err) {
       // Deliberate force-cancel: the agent was killed on purpose. Resolve
       // the originator's prompt as cancelled (markClosed already broadcast

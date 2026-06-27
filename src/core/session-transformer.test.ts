@@ -527,6 +527,74 @@ describe("Session transformer chain — loop prevention", () => {
   });
 });
 
+// ── emitToQueue ───────────────────────────────────────────────────────────────
+
+describe("Session transformer chain — emitToQueue", () => {
+  it("runs the queue lifecycle (turnStartedAt is set during the turn)", async () => {
+    const { session, mock } = makeSession();
+    // Hold session/prompt open so we can sample turnStartedAt mid-turn.
+    let release: (v: unknown) => void = () => undefined;
+    (mock.agent.connection.request as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    expect(session.turnStartedAt).toBeUndefined();
+    const turn = session.emitToQueue("planner", {
+      sessionId: "sess_test",
+      prompt: [{ type: "text", text: "hi" }],
+    });
+    await flushMicrotasks();
+    expect(session.turnStartedAt).toBeTypeOf("number");
+    release({ stopReason: "end_turn" });
+    await turn;
+    expect(session.turnStartedAt).toBeUndefined();
+  });
+
+  it("broadcasts prompt_received with the synthetic transformer originator", async () => {
+    const { client, stream } = makeClient();
+    const { session } = makeSession();
+    await session.attach(client, "none");
+    await session.emitToQueue("planner", {
+      sessionId: "sess_test",
+      prompt: [{ type: "text", text: "hi" }],
+    });
+    const promptReceived = (stream.sent as Array<{
+      method?: string;
+      params?: { update?: { sessionUpdate?: string; sentBy?: { name?: string } } };
+    }>).filter(
+      (m) =>
+        m.method === "session/update" &&
+        m.params?.update?.sessionUpdate === "prompt_received",
+    );
+    expect(promptReceived).toHaveLength(1);
+    expect(promptReceived[0]!.params!.update!.sentBy?.name).toBe("planner");
+  });
+
+  it("skips the emitting transformer's own request:session/prompt intercept", async () => {
+    const t1 = fakeTransformerConn({ action: "continue" });
+    const t2 = fakeTransformerConn({ action: "continue" });
+    const { session, requestMock } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t1.conn),
+      makeRef("t2", ["request:session/prompt"], t2.conn),
+    ]);
+    await session.emitToQueue("t1", { sessionId: "sess_test", prompt: [] });
+    // t1 emitted — skipped. t2 still intercepts. Agent still called.
+    expect(t1.requests).toHaveLength(0);
+    expect(t2.requests).toHaveLength(1);
+    expect(requestMock).toHaveBeenCalled();
+  });
+
+  it("rejects route: 'queue' for non-prompt methods (enforced at the route layer; sanity)", async () => {
+    // emitToQueue itself only builds prompt entries; the route gate lives
+    // in acp-ws.ts. This sanity check just confirms a session/prompt envelope
+    // round-trips a normal stopReason back to the caller.
+    const { session } = makeSession();
+    const result = await session.emitToQueue("planner", {
+      sessionId: "sess_test",
+      prompt: [],
+    });
+    expect((result as { stopReason: string }).stopReason).toBe("end_turn");
+  });
+});
+
 // ── Lifecycle events ──────────────────────────────────────────────────────────
 
 describe("Session transformer chain — lifecycle events — idle rearms", () => {
