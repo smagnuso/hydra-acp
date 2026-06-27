@@ -1433,9 +1433,25 @@ Declare which message kinds this transformer wants to intercept.
 { "ack": true }
 ```
 
-Intercepts are matched against `request:<method>`, `response:<method>`, and `lifecycle:<event>` strings. Lifecycle events currently fired are `session.opened`, `session.idle`, and `session.closed`.
+Intercepts are matched against `request:<method>`, `response:<method>`, and `lifecycle:<event>` strings. Lifecycle events currently fired are `session.opened`, `session.idle`, `session.closed`, and `permission.replied`.
 
-**Response-side scope.** Declaring `response:<method>` is only effective for `response:session/update` today — the daemon's response chain (`Session.runResponseChain`) only iterates transformers for `session/update` notifications, since those are the only thing the agent emits that flows agent → clients. There is no `response:session/prompt` event: the session/prompt RPC result is consumed by the daemon's `runQueueEntry` and translated into a synthesized `turn_complete` `session/update` via `broadcastTurnComplete`, which is published with `recordAndBroadcast` and therefore bypasses the transformer chain entirely. **A transformer cannot observe `turn_complete` through the intercept stream.** If you need an end-of-turn signal for a sub-prompt you originated via `hydra-acp/message/emit`, await the emit promise instead — see the note on `message/emit` below.
+**Recognized request-side intercepts.**
+
+| Intercept | Direction | Source |
+|---|---|---|
+| `request:session/prompt` | client → agent | client `session/prompt` |
+| `request:session/new` | client → agent | client `session/new` |
+| `request:session/load` | client → agent | client `session/load` |
+| `request:session/set_mode` | client → agent | client `session/set_mode` |
+| `request:session/cancel` | client → agent (notification) | client `session/cancel` |
+| `request:authenticate` | client → agent | client `authenticate` |
+| `request:session/request_permission` | agent → client | agent's permission gate |
+
+The first six are dispatched by `forwardRequest`; the last by `runAgentRequestChain`. Both honor `continue` / `stop` / `processing` identically — see the action contract under `hydra-acp/transformer/message`. The `direction` field on the message payload disambiguates which side originated.
+
+**Response-side scope.** Declaring `response:<method>` is generic — the dispatch predicate is `response:${method}` — but `session/update` is the only agent → client notification wired into a response chain today. There is no `response:session/prompt` event: the session/prompt RPC result is consumed by the daemon's `runQueueEntry` and translated into a synthesized `turn_complete` `session/update` via `broadcastTurnComplete`, which is published with `recordAndBroadcast` and therefore bypasses the transformer chain entirely. **A transformer cannot observe `turn_complete` through the intercept stream.** If you need an end-of-turn signal for a sub-prompt you originated via `hydra-acp/message/emit`, await the emit promise instead — see the note on `message/emit` below.
+
+The response chain adopts a returned `payload` on `continue` as a rewrite of the outbound envelope (symmetric with the request side), so a transformer can mutate `session/update` notifications before clients see them.
 
 #### Request (daemon → transformer): `hydra-acp/transformer/message`
 
@@ -1458,9 +1474,9 @@ Called for every intercepted JSON-RPC request or response.
 }
 ```
 
-- `continue` (default) — daemon proceeds with the envelope (rewritten if `payload` is present).
-- `stop` — daemon never sees this message. The optional `payload` is returned to the original caller (synthetic response).
-- `processing` — the transformer is taking ownership; the daemon parks the call until the transformer discharges the claim via `hydra-acp/message/emit` with `respondsTo: <token>`. If the transformer doesn't discharge within the claim timeout, the daemon broadcasts a `hydra-acp/transformer/abandoned_request` notification and resumes the chain from the next transformer (fail-open).
+- `continue` (default) — daemon proceeds with the envelope (rewritten if `payload` is present, on both request and response chains).
+- `stop` — short-circuit. For `request:` intercepts with `direction: "client→agent"` the agent is not called and `payload` becomes the synthesized response to the original client caller. For `request:` intercepts with `direction: "agent→client"` (currently only `session/request_permission`), the original daemon-side handler is not called and `payload` becomes the synthesized reply returned to the agent — defaults to `{ outcome: { outcome: "cancelled" } }` (auto-deny) for `session/request_permission` when no payload is supplied. For `response:` intercepts the envelope is dropped (clients never see it). For notification-tailed intercepts (`request:session/cancel`) the message is silently discarded — `payload` is irrelevant.
+- `processing` — the transformer is taking ownership; the daemon parks the call until the transformer discharges the claim via `hydra-acp/message/emit` with `respondsTo: <token>`. The discharge value becomes the short-circuit payload. If the transformer doesn't discharge within the claim timeout, the daemon broadcasts a `hydra-acp/transformer/abandoned_request` notification and resumes the chain from the next transformer (fail-open).
 
 **Notification-tailed intercepts.** Most intercepted methods are JSON-RPC requests whose chain tail dispatches as a request to the agent. The exception is `request:session/cancel` — ACP cancel is a notification, so the chain tail dispatches via `agent.notify(...)` and the `payload` field on `stop`/`processing` discharge is irrelevant (no value is returned to the originator). Concretely:
 
@@ -1488,8 +1504,14 @@ This is the primitive that lets a transformer holding a `session/prompt` `proces
 Fires for lifecycle events the transformer declared an interest in.
 
 ```jsonc
-{ "event": "session.opened" | "session.idle" | "session.closed", "sessionId": "<id>" }
+{
+  "event":     "session.opened" | "session.idle" | "session.closed" | "permission.replied",
+  "sessionId": "<id>",
+  "payload":   { /* event-specific; absent on opened/idle/closed */ }
+}
 ```
+
+`permission.replied` fires after a `session/request_permission` resolves (whether by short-circuit or by a real client reply). Its payload is `{ toolCallId: string | null, outcome: <agent reply>, sourceWasTransformer: boolean }` — observers can use this to audit policy decisions or trigger downstream side effects.
 
 #### Request (transformer → daemon): `hydra-acp/message/emit`
 

@@ -317,7 +317,12 @@ interface TransformerClaim {
   envelope: unknown;
   chainIdx: number;           // index of the transformer that claimed processing
   originatedBy: Set<string>;  // snapshot so resume routing is correct
-  side: "request" | "response";
+  // Three chain kinds park claims here:
+  //   request       — client→agent request chain (forwardRequest).
+  //   response      — agent→client notification chain (runResponseChain).
+  //   agent-request — agent→client request chain (runAgentRequestChain),
+  //                   currently only session/request_permission.
+  side: "request" | "response" | "agent-request";
   // For request-side claims, whether the chain's tail dispatches as an
   // agent request or as an agent notification. Used by the keep-alive
   // fail-open path to resume the chain with the correct tail. Unused
@@ -867,7 +872,34 @@ export class Session {
       void this.runResponseChain(params);
     });
     agent.connection.onRequest("session/request_permission", async (params) => {
-      return this.handlePermissionRequest(params);
+      // Run the agent→client request chain first. A transformer can rewrite
+      // the envelope (e.g. narrow options, redact tool args) and pass it
+      // through, or short-circuit with a synthesized outcome (auto-approve,
+      // auto-deny). After the handler resolves (whether by short-circuit
+      // or by user/policy reply), emit lifecycle:permission.replied for
+      // audit / observation hooks.
+      const chained = await this.runAgentRequestChain(
+        "session/request_permission",
+        params,
+      );
+      const toolCallId = extractToolCallId(
+        chained.shortCircuit ? params : chained.envelope,
+      );
+      if (chained.shortCircuit) {
+        this.notifyChain("permission.replied", {
+          toolCallId: toolCallId ?? null,
+          outcome: chained.payload,
+          sourceWasTransformer: true,
+        });
+        return chained.payload;
+      }
+      const outcome = await this.handlePermissionRequest(chained.envelope);
+      this.notifyChain("permission.replied", {
+        toolCallId: toolCallId ?? null,
+        outcome,
+        sourceWasTransformer: false,
+      });
+      return outcome;
     });
     // Guard: some test doubles / alternate transports don't implement
     // the orphan-error hook. Real JsonRpcConnection always does.
@@ -917,23 +949,34 @@ export class Session {
   // Runs the response-side transformer chain, then the snapshot interceptors,
   // then recordAndBroadcast. All state mutation happens after the chain exits.
   // See forwardRequest for originatedBy / startIdx semantics.
+  //
+  // `method` defaults to "session/update" — the only response-side method
+  // wired today. The parameter exists so the chain-walk predicate dispatches
+  // generically on `response:${method}`, leaving room for future agent→client
+  // notifications/requests (fs/*, terminal/*) to share the same plumbing.
+  // The post-chain snapshot-extraction and broadcast logic remains
+  // session/update-specific and is gated below.
   private async runResponseChain(
     params: unknown,
     originatedBy = new Set<string>(),
     startIdx = 0,
+    method = "session/update",
   ): Promise<void> {
     // Transformers and clients see the injected total; maybeApplyAgentUsage
     // must see the raw params so it stores the agent's raw costAmount in
     // _currentUsage, not the already-totalled value (which would double-count
     // on the next injection pass).
     const rawParams = params;
-    let envelope = this.injectCumulativeCost(params);
+    let envelope = method === "session/update"
+      ? this.injectCumulativeCost(params)
+      : params;
+    const interceptName = `response:${method}`;
     for (let i = startIdx; i < this.transformChain.length; i++) {
       const t = this.transformChain[i]!;
       if (originatedBy.has(t.name)) {
         continue;
       }
-      if (!t.intercepts.has("response:session/update")) {
+      if (!t.intercepts.has(interceptName)) {
         continue;
       }
       const token = `t_${generateChainToken()}`;
@@ -942,14 +985,14 @@ export class Session {
         result = await t.connection.request("hydra-acp/transformer/message", {
           token,
           phase: "response",
-          method: "session/update",
+          method,
           direction: "agent→client",
           sessionId: this.sessionId,
           envelope,
         }) as { action: string; payload?: unknown } | undefined;
       } catch (err) {
         this.logger?.warn(
-          `transformer ${t.name} error on response:session/update: ${(err as Error).message}`,
+          `transformer ${t.name} error on ${interceptName}: ${(err as Error).message}`,
         );
         continue;
       }
@@ -961,6 +1004,7 @@ export class Session {
         const claimIdx = i;
         const claimEnvelope = envelope;
         const claimOriginatedBy = new Set(originatedBy);
+        const claimMethod = method;
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
             if (this.pendingClaims.delete(token)) {
@@ -973,6 +1017,7 @@ export class Session {
                 claimEnvelope,
                 new Set([...claimOriginatedBy, t.name]),
                 claimIdx + 1,
+                claimMethod,
               )
                 .then(() => resolve())
                 .catch(() => resolve());
@@ -985,7 +1030,7 @@ export class Session {
             resolve: () => resolve(),
             timer,
             transformerName: t.name,
-            method: "session/update",
+            method: claimMethod,
             envelope: claimEnvelope,
             chainIdx: claimIdx,
             originatedBy: claimOriginatedBy,
@@ -994,7 +1039,16 @@ export class Session {
         });
         return;
       }
+      if (result?.payload && typeof result.payload === "object") {
+        envelope = result.payload;
+      }
       originatedBy.add(t.name);
+    }
+    // Post-chain processing below is session/update-specific (snapshot
+    // extraction, cumulative-cost capture, broadcast). Skip for other
+    // methods — those should be added explicitly when wired.
+    if (method !== "session/update") {
+      return;
     }
     // Snapshot interceptors and broadcast run on the post-chain envelope.
     const agentCmds = extractAdvertisedCommands(envelope);
@@ -2774,6 +2828,126 @@ export class Session {
     return this.agent.connection.request(method, envelope);
   }
 
+  // Walk the agent→client request chain. Currently dispatched for
+  // session/request_permission, but the helper is generic — any future
+  // agent→client request (fs/*, terminal/*) can route through this same
+  // path by declaring `request:<method>` with direction "agent→client".
+  //
+  // Returns:
+  //   { shortCircuit: false, envelope } — pass the (possibly rewritten)
+  //     envelope to the original handler. Default when no transformer stops.
+  //   { shortCircuit: true, payload } — return this payload to the agent
+  //     in place of the handler's reply. The handler is NOT called.
+  //
+  // Actions:
+  //   continue   — pass to next transformer; payload (if returned) replaces envelope.
+  //   stop       — short-circuit. Payload becomes the synthesized response.
+  //                Default for stop without payload is defaultAgentRequestDeny.
+  //   processing — park a claim. The transformer answers later via
+  //                emit_message with respondsTo, and that value becomes
+  //                the short-circuit payload.
+  async runAgentRequestChain(
+    method: string,
+    params: unknown,
+    originatedBy = new Set<string>(),
+    startIdx = 0,
+  ): Promise<
+    | { shortCircuit: false; envelope: unknown }
+    | { shortCircuit: true; payload: unknown }
+  > {
+    let envelope = params;
+    const interceptName = `request:${method}`;
+    for (let i = startIdx; i < this.transformChain.length; i++) {
+      const t = this.transformChain[i]!;
+      if (originatedBy.has(t.name)) {
+        continue;
+      }
+      if (!t.intercepts.has(interceptName)) {
+        continue;
+      }
+      const token = `t_${generateChainToken()}`;
+      let result: { action: string; payload?: unknown } | undefined;
+      try {
+        result = await t.connection.request("hydra-acp/transformer/message", {
+          token,
+          phase: "request",
+          method,
+          direction: "agent→client",
+          sessionId: this.sessionId,
+          envelope,
+        }) as { action: string; payload?: unknown } | undefined;
+      } catch (err) {
+        this.logger?.warn(
+          `transformer ${t.name} error on ${interceptName}: ${(err as Error).message}`,
+        );
+        continue;
+      }
+      const action = result?.action ?? "continue";
+      if (action === "stop") {
+        return {
+          shortCircuit: true,
+          payload: result?.payload ?? defaultAgentRequestDeny(method),
+        };
+      }
+      if (action === "continue") {
+        if (result?.payload && typeof result.payload === "object") {
+          envelope = result.payload;
+        }
+        originatedBy.add(t.name);
+        continue;
+      }
+      if (action === "processing") {
+        const claimIdx = i;
+        const claimEnvelope = envelope;
+        const claimOriginatedBy = new Set(originatedBy);
+        const claimMethod = method;
+        return new Promise<
+          | { shortCircuit: false; envelope: unknown }
+          | { shortCircuit: true; payload: unknown }
+        >((resolve) => {
+          const timer = setTimeout(() => {
+            if (this.pendingClaims.delete(token)) {
+              this.broadcastQueueNotification(
+                "hydra-acp/transformer/abandoned_request",
+                { sessionId: this.sessionId, token, transformerName: t.name },
+              );
+              // Fail-open: resume from the next transformer rather than
+              // forcing a denial. If no further transformer claims, the
+              // handler runs with the envelope as-of the abandonment.
+              void this.runAgentRequestChain(
+                claimMethod,
+                claimEnvelope,
+                new Set([...claimOriginatedBy, t.name]),
+                claimIdx + 1,
+              )
+                .then(resolve)
+                .catch(() =>
+                  resolve({ shortCircuit: false, envelope: claimEnvelope }),
+                );
+            }
+          }, TRANSFORMER_CLAIM_TIMEOUT_MS);
+          if (typeof timer.unref === "function") {
+            timer.unref();
+          }
+          this.pendingClaims.set(token, {
+            // Discharge value is the transformer's synthesized response.
+            resolve: (v) => resolve({ shortCircuit: true, payload: v }),
+            timer,
+            transformerName: t.name,
+            method: claimMethod,
+            envelope: claimEnvelope,
+            chainIdx: claimIdx,
+            originatedBy: claimOriginatedBy,
+            side: "agent-request",
+          });
+        });
+      }
+      // Unknown action — continue without payload-adoption.
+      originatedBy.add(t.name);
+    }
+    return { shortCircuit: false, envelope };
+  }
+
   // Called by the WS handler when emit_message carries respondsTo.
   // Discharges the outstanding claim so the original requester unblocks.
   dischargeClaim(token: string, result: unknown): boolean {
@@ -2815,6 +2989,20 @@ export class Session {
           )
             .then(() => claim.resolve(undefined))
             .catch(() => claim.resolve(undefined));
+        } else if (claim.side === "agent-request") {
+          void this.runAgentRequestChain(
+            claim.method,
+            claim.envelope,
+            new Set([...claim.originatedBy, claim.transformerName]),
+            claim.chainIdx + 1,
+          )
+            .then(claim.resolve)
+            .catch(() =>
+              claim.resolve({
+                shortCircuit: false,
+                envelope: claim.envelope,
+              }),
+            );
         } else {
           const tailKind = claim.tailKind ?? "request";
           void this.forwardRequest(
@@ -6545,6 +6733,18 @@ export function extractPromptText(prompt: unknown): string {
 function defaultStopPayload(method: string): Record<string, unknown> {
   if (method === "session/prompt") {
     return { stopReason: "stopped" };
+  }
+  return {};
+}
+
+// Default response when a transformer returns { action: "stop" } on an
+// agent→client request without providing a payload. For
+// session/request_permission the ACP-canonical "user declined" shape is
+// { outcome: { outcome: "cancelled" } }; the agent treats this as a
+// normal denial. Other agent→client methods get an empty object.
+function defaultAgentRequestDeny(method: string): Record<string, unknown> {
+  if (method === "session/request_permission") {
+    return { outcome: { outcome: "cancelled" } };
   }
   return {};
 }

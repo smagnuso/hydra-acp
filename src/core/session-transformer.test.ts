@@ -292,6 +292,69 @@ describe("Session transformer chain — response side", () => {
     expect(updates).toHaveLength(0);
   });
 
+  it("continue with payload rewrites the envelope broadcast to clients", async () => {
+    const rewritten = {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "REDACTED" },
+      },
+    };
+    const t = fakeTransformerConn({ action: "continue", payload: rewritten });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["response:session/update"], t.conn),
+    ]);
+    const { client, stream } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "secret" } },
+    });
+    await flushMicrotasks();
+
+    const sent = stream.sent.find(
+      (m) =>
+        "method" in m && m.method === "session/update" &&
+        ((m.params as { update?: { sessionUpdate?: string } })?.update?.sessionUpdate ===
+          "agent_message_chunk"),
+    );
+    expect(sent).toBeDefined();
+    expect(
+      (sent as { params: { update: { content: { text: string } } } }).params.update.content.text,
+    ).toBe("REDACTED");
+  });
+
+  it("chained response continue+payload composes — second transformer sees first's rewrite", async () => {
+    const firstRewrite = {
+      sessionId: "u1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "STEP1" },
+      },
+    };
+    const t1 = fakeTransformerConn({ action: "continue", payload: firstRewrite });
+    const t2 = fakeTransformerConn({ action: "continue" });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["response:session/update"], t1.conn),
+      makeRef("t2", ["response:session/update"], t2.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "none");
+
+    mock.triggerNotification("session/update", {
+      sessionId: "u1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "raw" } },
+    });
+    await flushMicrotasks();
+
+    expect(t2.requests).toHaveLength(1);
+    const seenByT2 = (
+      t2.requests[0] as { params: { envelope: { update: { content: { text: string } } } } }
+    ).params.envelope.update.content.text;
+    expect(seenByT2).toBe("STEP1");
+  });
+
   it("response chain skips transformers that don't declare response intercept", async () => {
     const t = fakeTransformerConn({ action: "continue" });
     const { session, mock } = makeSession([
@@ -956,5 +1019,223 @@ describe("Session.addTransformer — retroactive wiring", () => {
       expect(t.notifications).toHaveLength(0);
       resolve();
     }));
+  });
+});
+
+// ── runAgentRequestChain — session/request_permission ─────────────────────────
+
+describe("Session transformer chain — agent→client request (permission)", () => {
+  const permParams = {
+    sessionId: "u1",
+    toolCall: { name: "bash", toolCallId: "tc_1" },
+    options: [
+      { optionId: "allow", name: "Allow", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" },
+    ],
+  };
+
+  it("stop auto-approves without prompting any attached client", async () => {
+    const approval = { outcome: { outcome: "selected", optionId: "allow" } };
+    const t = fakeTransformerConn({ action: "stop", payload: approval });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/request_permission"], t.conn),
+    ]);
+    const { client, stream } = makeClient();
+    await session.attach(client, "full");
+
+    const result = await mock.triggerRequest("session/request_permission", permParams);
+
+    expect(t.requests).toHaveLength(1);
+    expect((t.requests[0]!.params as { direction: string }).direction).toBe("agent→client");
+    expect(result).toEqual(approval);
+    // Client was never asked.
+    expect(
+      stream.sent.some(
+        (m) => "method" in m && m.method === "session/request_permission",
+      ),
+    ).toBe(false);
+  });
+
+  it("stop with no payload defaults to a cancelled outcome (auto-deny)", async () => {
+    const t = fakeTransformerConn({ action: "stop" });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/request_permission"], t.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "full");
+
+    const result = await mock.triggerRequest("session/request_permission", permParams);
+    expect(result).toEqual({ outcome: { outcome: "cancelled" } });
+  });
+
+  it("continue with payload rewrites envelope before the client sees it", async () => {
+    const rewritten = {
+      ...permParams,
+      toolCall: { name: "bash", toolCallId: "tc_1", rawInput: { command: "ls" } },
+    };
+    const t = fakeTransformerConn({ action: "continue", payload: rewritten });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/request_permission"], t.conn),
+    ]);
+    const { client, stream } = makeClient();
+    await session.attach(client, "full");
+
+    const reqPromise = mock.triggerRequest("session/request_permission", permParams);
+    await flushMicrotasks();
+
+    const permMsg = stream.sent.find(
+      (m): m is { method: string; id: number | string; params: unknown } =>
+        "method" in (m as object) &&
+        (m as { method: string }).method === "session/request_permission",
+    );
+    expect(permMsg).toBeDefined();
+    expect(
+      (permMsg!.params as { toolCall: { rawInput?: { command: string } } }).toolCall.rawInput?.command,
+    ).toBe("ls");
+
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      id: permMsg!.id,
+      result: { outcome: { outcome: "selected", optionId: "allow" } },
+    });
+    await reqPromise;
+  });
+
+  it("continue without payload passes through to client unchanged", async () => {
+    const t = fakeTransformerConn({ action: "continue" });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/request_permission"], t.conn),
+    ]);
+    const { client, stream } = makeClient();
+    await session.attach(client, "full");
+
+    const reqPromise = mock.triggerRequest("session/request_permission", permParams);
+    await flushMicrotasks();
+
+    const permMsg = stream.sent.find(
+      (m): m is { method: string; id: number | string; params: unknown } =>
+        "method" in (m as object) &&
+        (m as { method: string }).method === "session/request_permission",
+    );
+    expect(permMsg).toBeDefined();
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      id: permMsg!.id,
+      result: { outcome: { outcome: "selected", optionId: "deny" } },
+    });
+    const result = (await reqPromise) as { outcome: { optionId: string } };
+    expect(result.outcome.optionId).toBe("deny");
+  });
+
+  it("skips transformers that don't declare request:session/request_permission", async () => {
+    const t = fakeTransformerConn({ action: "stop" });
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/prompt"], t.conn), // wrong intercept
+    ]);
+    const { client, stream } = makeClient();
+    await session.attach(client, "full");
+
+    const reqPromise = mock.triggerRequest("session/request_permission", permParams);
+    await flushMicrotasks();
+
+    expect(t.requests).toHaveLength(0);
+    // Client was asked normally.
+    const permMsg = stream.sent.find(
+      (m): m is { method: string; id: number | string } =>
+        "method" in (m as object) &&
+        (m as { method: string }).method === "session/request_permission",
+    );
+    expect(permMsg).toBeDefined();
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      id: permMsg!.id,
+      result: { outcome: { outcome: "cancelled" } },
+    });
+    await reqPromise;
+  });
+
+  it("chained continue+stop: first rewrites, second short-circuits with the rewrite visible", async () => {
+    const rewritten = {
+      ...permParams,
+      toolCall: { name: "bash", toolCallId: "tc_1", redacted: true },
+    };
+    const t1 = fakeTransformerConn({ action: "continue", payload: rewritten });
+    let seenByT2: unknown;
+    const t2 = fakeTransformerConn();
+    (t2.conn.request as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_m: string, params: unknown) => {
+        seenByT2 = (params as { envelope: unknown }).envelope;
+        return { action: "stop", payload: { outcome: { outcome: "cancelled" } } };
+      },
+    );
+    const { session, mock } = makeSession([
+      makeRef("t1", ["request:session/request_permission"], t1.conn),
+      makeRef("t2", ["request:session/request_permission"], t2.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "full");
+
+    await mock.triggerRequest("session/request_permission", permParams);
+    expect((seenByT2 as { toolCall: { redacted?: boolean } }).toolCall.redacted).toBe(true);
+  });
+
+  it("emits lifecycle:permission.replied after user/client reply", async () => {
+    const t = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("t1", ["lifecycle:permission.replied"], t.conn),
+    ]);
+    const { client, stream } = makeClient();
+    await session.attach(client, "full");
+
+    const reqPromise = mock.triggerRequest("session/request_permission", permParams);
+    await flushMicrotasks();
+
+    const permMsg = stream.sent.find(
+      (m): m is { method: string; id: number | string } =>
+        "method" in (m as object) &&
+        (m as { method: string }).method === "session/request_permission",
+    );
+    stream.emitMessage({
+      jsonrpc: "2.0",
+      id: permMsg!.id,
+      result: { outcome: { outcome: "selected", optionId: "allow" } },
+    });
+    await reqPromise;
+    await flushMicrotasks();
+
+    const replied = t.notifications.find(
+      (n) => (n.params as { event: string }).event === "permission.replied",
+    );
+    expect(replied).toBeDefined();
+    expect(
+      (replied!.params as { payload: { sourceWasTransformer: boolean } }).payload
+        .sourceWasTransformer,
+    ).toBe(false);
+  });
+
+  it("emits lifecycle:permission.replied on short-circuit with sourceWasTransformer=true", async () => {
+    const policy = fakeTransformerConn({
+      action: "stop",
+      payload: { outcome: { outcome: "selected", optionId: "allow" } },
+    });
+    const observer = fakeTransformerConn();
+    const { session, mock } = makeSession([
+      makeRef("policy", ["request:session/request_permission"], policy.conn),
+      makeRef("observer", ["lifecycle:permission.replied"], observer.conn),
+    ]);
+    const { client } = makeClient();
+    await session.attach(client, "full");
+
+    await mock.triggerRequest("session/request_permission", permParams);
+    await flushMicrotasks();
+
+    const replied = observer.notifications.find(
+      (n) => (n.params as { event: string }).event === "permission.replied",
+    );
+    expect(replied).toBeDefined();
+    expect(
+      (replied!.params as { payload: { sourceWasTransformer: boolean } }).payload
+        .sourceWasTransformer,
+    ).toBe(true);
   });
 });
