@@ -15,6 +15,7 @@
 
 import type { Terminal } from "terminal-kit";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { writeDebugLine } from "./debug-log.js";
 import { JsonRpcErrorCodes } from "../acp/types-jsonrpc.js";
 import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
 import type { AuthMethod } from "../acp/types-capabilities.js";
@@ -297,6 +298,7 @@ export async function runTerminalAuthSpawn(
   deps?: { spawn?: SpawnFn },
 ): Promise<TerminalAuthOutcome> {
   term.grabInput(false);
+  writeDebugLine({ src: "grab", site: "runTerminalAuthSpawn.release", on: false });
   resetTerminalModes();
   term.moveTo(1, 1).eraseDisplayBelow();
   const headline = `─ Running ${plan.command} ${plan.args.join(" ")} — finish setup, then return to hydra ─`;
@@ -309,6 +311,7 @@ export async function runTerminalAuthSpawn(
     const reGrab = (): void => {
       try {
         term.grabInput({});
+        writeDebugLine({ src: "grab", site: "runTerminalAuthSpawn.reGrab", on: true });
       } catch {
         // best-effort; the caller will repaint anyway
       }

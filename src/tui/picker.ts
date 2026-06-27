@@ -79,6 +79,7 @@ import {
   aggregate as aggregateSessionInfo,
   formatSummary as formatSessionInfoSummary,
 } from "../cli/commands/sessions-info.js";
+import { writeDebugLine } from "./debug-log.js";
 
 export type PickerResult =
   | {
@@ -1882,6 +1883,7 @@ export async function pickSession(
       pasteActive = false;
       pasteBuffer = "";
       term.grabInput(false);
+      writeDebugLine({ src: "grab", site: "picker.cleanup", on: false });
       term.hideCursor(false);
       term.moveTo(1, indicatorRow() + 1);
       term("\n");
@@ -3350,6 +3352,7 @@ export async function pickSession(
     };
     const installGrab = (): void => {
       term.grabInput({ mouse: "motion" });
+      writeDebugLine({ src: "grab", site: "picker.installGrab", on: true });
       const tSetup = term as unknown as {
         stdin: NodeJS.ReadableStream;
         onStdin: (chunk: Buffer) => void;
@@ -3382,6 +3385,7 @@ export async function pickSession(
       term.off("mouse", onMouse);
       term.off("resize", dispatchResize);
       term.grabInput(false);
+      writeDebugLine({ src: "grab", site: "picker.uninstallGrab", on: false });
       term.hideCursor(false);
     };
     installGrab();

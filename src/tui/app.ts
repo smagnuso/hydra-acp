@@ -1005,6 +1005,7 @@ async function runSession(
     // release — the picker already does this on every exit path, but
     // a leaked grab here would keep the event loop alive past return.
     term.grabInput(false);
+    writeDebugLine({ src: "grab", site: "runSession.picker-aborted", on: false });
     return null;
   }
 
@@ -2007,6 +2008,7 @@ async function runSession(
       // whole TUI. Report the reason and stay alive — retry the same
       // agent, or fall back to the picker to choose another.
       term.grabInput(false);
+      writeDebugLine({ src: "grab", site: "runSession.session-new-failed", on: false });
       void stream.close().catch(() => undefined);
       const message = err instanceof Error ? err.message : String(err);
       writeDebugLine({
@@ -2036,11 +2038,13 @@ async function runSession(
     }
     if (authOutcome.kind === "cancel") {
       term.grabInput(false);
+      writeDebugLine({ src: "grab", site: "runSession.auth-cancel", on: false });
       void stream.close().catch(() => undefined);
       return null;
     }
     if (authOutcome.kind === "back") {
       term.grabInput(false);
+      writeDebugLine({ src: "grab", site: "runSession.auth-back", on: false });
       void stream.close().catch(() => undefined);
       // Re-enter the outer loop with sessionId/forceNew/resume cleared
       // so resolveSession re-shows the picker. agentId is cleared so

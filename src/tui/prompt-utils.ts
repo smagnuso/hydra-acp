@@ -23,6 +23,7 @@
 // picker.ts does too (see renderFromScratch in picker.ts:385).
 
 import type { Terminal } from "terminal-kit";
+import { writeDebugLine } from "./debug-log.js";
 import {
   BRACKETED_PASTE_OFF,
   DECCKM_OFF,
@@ -257,6 +258,7 @@ export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
       term.off("key", handleKey);
       term.off("resize", handleResize);
       term.grabInput(false);
+      writeDebugLine({ src: "grab", site: "runModalPrompt.cleanup", on: false });
       term.hideCursor(false);
       term.moveTo(1, 1).eraseDisplayBelow();
     };
@@ -265,6 +267,7 @@ export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
       resolve(value);
     };
     term.grabInput({});
+    writeDebugLine({ src: "grab", site: "runModalPrompt.install", on: true });
     term.on("key", handleKey);
     term.on("resize", handleResize);
   });

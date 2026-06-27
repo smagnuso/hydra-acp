@@ -31,6 +31,7 @@ import {
 } from "./column-mapping.js";
 import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
 import { withSync } from "./sync.js";
+import { writeDebugLine } from "./debug-log.js";
 import {
   ALT_SCREEN_LEAVE,
   AUTOWRAP_OFF,
@@ -765,6 +766,7 @@ export class Screen {
     } else {
       this.term.grabInput(true);
     }
+    writeDebugLine({ src: "grab", site: "screen.start", on: true });
     this.term.hideCursor(false);
     this.term.on("key", this.keyHandler);
     if (this.mouseEnabled) {
@@ -816,6 +818,7 @@ export class Screen {
     }
     this.term.off("resize", this.resizeHandler);
     this.term.grabInput(false);
+    writeDebugLine({ src: "grab", site: "screen.stop", on: false });
     this.term.hideCursor(false);
     // Reset OS pointer-shape so the host shell doesn't inherit our
     // hand-pointer override. Harmless on terminals that don't support
@@ -1730,6 +1733,7 @@ export class Screen {
       this.term.off("mouse", this.mouseHandler);
       this.term.grabInput(true);
     }
+    writeDebugLine({ src: "grab", site: "setMouseEnabled", on: true, mouse: enabled });
     this.reclaimStdinAfterGrabInput();
   }
 
