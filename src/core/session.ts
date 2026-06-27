@@ -553,8 +553,17 @@ export class Session {
   private idleTimer: NodeJS.Timeout | undefined;
   // Separate timer that fires session.idle to the transformer chain after
   // a quiet period. Distinct from idleTimer, which drives session close.
-  private idleEventTimer: NodeJS.Timeout | undefined;
   private idleEventTimeoutMs: number;
+  // Handlers registered via onIdle/onceIdle. Fire on quiesce edges
+  // (isQuiescedForSwap flipping false→true). debounceMs=0 fires
+  // immediately; >0 schedules a delayed fire that is cancelled if the
+  // session becomes non-quiesced before the timer expires.
+  private idleHandlers: Array<{
+    fn: (s: Session) => void;
+    once: boolean;
+    debounceMs: number;
+    timer?: NodeJS.Timeout;
+  }> = [];
   // Time of the last recordable broadcast (or session creation, if
   // none yet). Drives the inactivity-based idle close; deliberately
   // does NOT include snapshot state pings (model/mode/title/commands)
@@ -723,6 +732,16 @@ export class Session {
     }
     this.idleTimeoutMs = init.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = init.idleEventTimeoutMs ?? 30_000;
+    // Wire the transformer-chain `session.idle` lifecycle event onto the
+    // unified idle primitive: fire after `idleEventTimeoutMs` of
+    // continuous quiet. notifyChain is a no-op when no transformer in
+    // the chain has subscribed to `lifecycle:session.idle`, so this is
+    // cheap to leave registered for life.
+    if (this.idleEventTimeoutMs > 0) {
+      this.onIdle((s) => s.notifyChain("session.idle", {}), {
+        debounceMs: this.idleEventTimeoutMs,
+      });
+    }
     this.spawnReplacementAgent = init.spawnReplacementAgent;
     this.mintMcpServersForSwap = init.mintMcpServersForSwap;
     this.loadExistingAgentSession = init.loadExistingAgentSession;
@@ -1087,6 +1106,23 @@ export class Session {
     }
     const hasOpen = await this._hasOpenToolCall();
     if (hasOpen) {
+      return false;
+    }
+    return true;
+  }
+
+  // Synchronous sibling of isQuiescedForSwap. Checks only in-memory
+  // state — no history-store scan for open tool calls — so the answer is
+  // available without an async hop. Used by the onIdle dispatch path so
+  // debounced timers (transformer session.idle) can be scheduled
+  // immediately at activity edges; consumers that need the stronger
+  // open-tool-call guarantee (e.g. compaction swap) re-verify via
+  // isQuiescedForSwap before acting.
+  isQuiescedSync(): boolean {
+    if (this.promptInFlight) {
+      return false;
+    }
+    if (this.modeChangeInFlight || this.modelChangeInFlight) {
       return false;
     }
     return true;
@@ -5355,32 +5391,136 @@ export class Session {
       clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
     }
-    this.cancelIdleEventTimer();
+    this.disposeIdleHandlers();
   }
 
-  // ── Lifecycle event timer ────────────────────────────────────────────────
+  // ── Idle dispatch ────────────────────────────────────────────────────────
+  //
+  // Two consumers off the same "session went quiet" edge:
+  //   - Compaction swap wants it RAW: fire immediately when no prompt is
+  //     in flight (debounceMs=0, once=true).
+  //   - The transformer-chain `session.idle` lifecycle event wants it
+  //     DEBOUNCED: fire after a continuous quiet period of
+  //     idleEventTimeoutMs (debounceMs>0, persistent — re-fires after
+  //     the next activity→quiet cycle).
+  //
+  // Both ride on the same primitive: handlers are evaluated at every
+  // quiesce dispatch (scheduled below). On a non-quiesced dispatch, any
+  // pending debounce timers are cancelled — so a partial idle window
+  // doesn't "leak" into the next quiesce.
+  //
+  // Returns a disposer the caller can use to deregister.
+  onIdle(
+    fn: (s: Session) => void,
+    opts?: { once?: boolean; debounceMs?: number },
+  ): () => void {
+    const entry = {
+      fn,
+      once: !!opts?.once,
+      debounceMs: opts?.debounceMs ?? 0,
+    } as { fn: (s: Session) => void; once: boolean; debounceMs: number; timer?: NodeJS.Timeout };
+    this.idleHandlers.push(entry);
+    return () => {
+      const i = this.idleHandlers.indexOf(entry);
+      if (i >= 0) {
+        this.idleHandlers.splice(i, 1);
+      }
+      if (entry.timer) {
+        clearTimeout(entry.timer);
+        entry.timer = undefined;
+      }
+    };
+  }
 
-  private scheduleIdleEvent(): void {
-    if (this.closed || this.idleEventTimeoutMs <= 0 || this.transformChain.length === 0) {
+  // Sugar for onIdle(fn, { once: true }). Common case for "wait until
+  // the session is quiet, then do this one thing."
+  onceIdle(fn: (s: Session) => void): () => void {
+    return this.onIdle(fn, { once: true });
+  }
+
+  // Evaluate registered idle handlers against the current quiesce state.
+  // Uses the synchronous quiesce check (in-memory only) so debounce
+  // timers can be scheduled at activity edges without an async hop —
+  // critical for fake-timer-based tests, and cheap in production.
+  // Consumers that need the stronger open-tool-call guarantee re-verify
+  // via isQuiescedForSwap inside their handler.
+  private dispatchIdle(): void {
+    if (this.closed) {
       return;
     }
-    if (this.idleEventTimer) {
-      clearTimeout(this.idleEventTimer);
+    const quiesced = this.isQuiescedSync();
+    if (!quiesced) {
+      // Cancel any pending debounce timers — a partial idle window
+      // shouldn't carry over once activity resumes.
+      for (const h of this.idleHandlers) {
+        if (h.timer) {
+          clearTimeout(h.timer);
+          h.timer = undefined;
+        }
+      }
+      return;
     }
-    this.idleEventTimer = setTimeout(() => {
-      this.idleEventTimer = undefined;
-      this.notifyChain("session.idle", {});
-    }, this.idleEventTimeoutMs);
-    if (typeof this.idleEventTimer.unref === "function") {
-      this.idleEventTimer.unref();
+    // Snapshot since once-handlers will splice themselves out.
+    const snapshot = [...this.idleHandlers];
+    for (const h of snapshot) {
+      if (h.debounceMs === 0) {
+        if (h.once) {
+          const i = this.idleHandlers.indexOf(h);
+          if (i >= 0) {
+            this.idleHandlers.splice(i, 1);
+          }
+        }
+        try {
+          h.fn(this);
+        } catch {
+          // intentional: handlers own their own error handling
+        }
+        continue;
+      }
+      // Reset on every dispatch so a burst of recordable broadcasts
+      // (each one calls dispatchIdle) restarts the debounce window —
+      // matches the prior scheduleIdleEvent semantics for transformer
+      // lifecycle events.
+      if (h.timer) {
+        clearTimeout(h.timer);
+        h.timer = undefined;
+      }
+      h.timer = setTimeout(() => {
+        h.timer = undefined;
+        if (this.closed) {
+          return;
+        }
+        if (!this.isQuiescedSync()) {
+          return;
+        }
+        if (h.once) {
+          const i = this.idleHandlers.indexOf(h);
+          if (i >= 0) {
+            this.idleHandlers.splice(i, 1);
+          }
+        }
+        try {
+          h.fn(this);
+        } catch {
+          // intentional
+        }
+      }, h.debounceMs);
+      if (typeof h.timer.unref === "function") {
+        h.timer.unref();
+      }
     }
   }
 
-  private cancelIdleEventTimer(): void {
-    if (this.idleEventTimer) {
-      clearTimeout(this.idleEventTimer);
-      this.idleEventTimer = undefined;
+  // Tear down every registered idle handler and its pending timer. Called
+  // at close so timers don't fire on a dead session.
+  private disposeIdleHandlers(): void {
+    for (const h of this.idleHandlers) {
+      if (h.timer) {
+        clearTimeout(h.timer);
+        h.timer = undefined;
+      }
     }
+    this.idleHandlers.length = 0;
   }
 
   // Send a lifecycle notification to every transformer in the chain that
@@ -5467,7 +5607,7 @@ export class Session {
         }
       }
       this.scheduleIdleCheck();
-      this.scheduleIdleEvent();
+      this.dispatchIdle();
     }
     this.updatedAt = Date.now();
     for (const client of this.clients.values()) {
@@ -5835,6 +5975,7 @@ export class Session {
       }
     } finally {
       this.promptInFlight = false;
+      this.dispatchIdle();
     }
   }
 
