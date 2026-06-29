@@ -3071,6 +3071,11 @@ export async function pickSession(
         case "END":
           move(total);
           return;
+        case "RIGHT":
+          if (composerHover || selectedIdx === 0) {
+            break;
+          }
+        // fallthrough: RIGHT on a session row activates it like ENTER.
         case "ENTER":
         case "KP_ENTER": {
           if (composerHover) {

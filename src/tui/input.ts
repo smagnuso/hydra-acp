@@ -164,7 +164,11 @@ export const PASTE_LINE_THRESHOLD = 10;
 // Window for the double-Escape -> open-picker shortcut. Long enough to
 // be ergonomic, short enough that a held Esc on a slow terminal won't
 // trip it unintentionally.
-const DOUBLE_ESCAPE_MS = 500;
+// Max gap between two consecutive presses of the same key for a
+// "double-tap" gesture (e.g. Esc-Esc or Left-Left on an empty buffer
+// opening the session picker). Any other input in between resets the
+// pending key.
+const DOUBLE_TAP_MS = 500;
 
 // Matches the placeholder anywhere in a line. The same shape is used
 // (anchored) for atomic deletion / cursor jumps over the token.
@@ -243,11 +247,14 @@ export class InputDispatcher {
   private nextPasteId = 1;
   private collapsePastes: boolean;
 
-  // Timestamp of the most recent Escape that hit the composer no-op
-  // branch (no turn running, no modal, no history-search). A second
-  // Escape within DOUBLE_ESCAPE_MS — with no other input in between —
-  // opens the session picker, mirroring ^P. Reset on any other input.
-  private lastEscapeAt: number | null = null;
+  // Most recent "armed" key for a double-tap gesture: the key handler
+  // sets this when its first press is a no-op worth offering a
+  // double-tap meaning to (Escape with no modal/turn, Left on an empty
+  // buffer, …). A second press of the same key within DOUBLE_TAP_MS —
+  // with no other input in between — fires the gesture. Any other input
+  // clears it.
+  private lastTapKey: KeyName | null = null;
+  private lastTapAt: number | null = null;
 
   // Undo/redo. Snapshots capture the user-visible draft state (buffer +
   // cursor + plan mode + attachments). Recorded BEFORE each mutating
@@ -478,13 +485,13 @@ export class InputDispatcher {
       }
     }
     if (event.type === "char") {
-      this.lastEscapeAt = null;
+      this.clearDoubleTap();
       this.recordEdit();
       this.insertChar(event.ch);
       return [];
     }
     if (event.type === "paste") {
-      this.lastEscapeAt = null;
+      this.clearDoubleTap();
       this.recordEdit();
       const lineCount = event.text.split("\n").length;
       if (this.collapsePastes && lineCount > PASTE_LINE_THRESHOLD) {
@@ -506,8 +513,8 @@ export class InputDispatcher {
   }
 
   private handleKey(name: KeyName): InputEffect[] {
-    if (name !== "escape") {
-      this.lastEscapeAt = null;
+    if (this.lastTapKey !== null && this.lastTapKey !== name) {
+      this.clearDoubleTap();
     }
     switch (name) {
       case "enter":
@@ -540,6 +547,13 @@ export class InputDispatcher {
       case "down":
         return this.handleDown();
       case "left":
+        if (this.bufferIsEmpty()) {
+          if (this.consumeDoubleTap("left")) {
+            return [{ type: "switch-session" }];
+          }
+          this.armDoubleTap("left");
+          return [];
+        }
         this.moveLeft();
         return [];
       case "right":
@@ -653,22 +667,16 @@ export class InputDispatcher {
         // cancels with prefill — the app drops the cancelled turn's
         // text back into the buffer if nothing else is queued.
         if (this.turnRunning) {
-          this.lastEscapeAt = null;
+          this.clearDoubleTap();
           return [{ type: "cancel", prefill: true }];
         }
-        // No-op Escape: if a second one arrives within DOUBLE_ESCAPE_MS
-        // (with no other input in between — handleKey resets the timer
-        // for any other chord, and feed() resets it for char/paste),
-        // jump to the session picker like ^P.
-        const now = Date.now();
-        if (
-          this.lastEscapeAt !== null &&
-          now - this.lastEscapeAt <= DOUBLE_ESCAPE_MS
-        ) {
-          this.lastEscapeAt = null;
+        // No-op Escape: a second one within DOUBLE_TAP_MS opens the
+        // session picker like ^P. armDoubleTap / consumeDoubleTap give
+        // the same gesture to any key that wants it.
+        if (this.consumeDoubleTap("escape")) {
           return [{ type: "switch-session" }];
         }
-        this.lastEscapeAt = now;
+        this.armDoubleTap("escape");
         return [];
       }
     }
@@ -695,6 +703,33 @@ export class InputDispatcher {
       const stored = this.pastes.get(id);
       return stored !== undefined ? stored : match;
     });
+  }
+
+  // Double-tap gesture helpers. armDoubleTap records `name` as the
+  // pending tap; consumeDoubleTap returns true (and clears the pending
+  // tap) if the same key was armed within DOUBLE_TAP_MS. handleKey
+  // clears the arming when any other key intervenes; feed() clears it
+  // for char/paste.
+  private armDoubleTap(name: KeyName): void {
+    this.lastTapKey = name;
+    this.lastTapAt = Date.now();
+  }
+
+  private consumeDoubleTap(name: KeyName): boolean {
+    if (
+      this.lastTapKey === name &&
+      this.lastTapAt !== null &&
+      Date.now() - this.lastTapAt <= DOUBLE_TAP_MS
+    ) {
+      this.clearDoubleTap();
+      return true;
+    }
+    return false;
+  }
+
+  private clearDoubleTap(): void {
+    this.lastTapKey = null;
+    this.lastTapAt = null;
   }
 
   private bufferIsEmpty(): boolean {

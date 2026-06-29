@@ -478,6 +478,12 @@ export class Session {
   // markClosed runs. Subsequent close() calls return this same promise
   // so kill paths can race without double-firing the regen and agent.kill.
   private closeInFlight: Promise<void> | undefined;
+  // Sticky intent for deleteRecord: set when close({deleteRecord:true}) is
+  // called, consumed by markClosed. Without this, a race where agent.onExit
+  // fires markClosed({deleteRecord:false}) during doClose's `await agent.kill()`
+  // would drop the delete intent on the floor, leaving the on-disk record
+  // after a DELETE /v1/sessions/:id on a warm session.
+  private deleteRecordIntent = false;
   private closeHandlers: Array<(opts: { deleteRecord: boolean }) => void> = [];
   private titleHandlers: Array<(title: string) => void> = [];
   // Fire-and-forget hook installed by SessionInit so the slash-command
@@ -3174,6 +3180,9 @@ export class Session {
   }
 
   async close(opts: CloseOptions = {}): Promise<void> {
+    if (opts.deleteRecord) {
+      this.deleteRecordIntent = true;
+    }
     if (this.closed) {
       return;
     }
@@ -4026,6 +4035,7 @@ export class Session {
     // dispatcher — users just type the rest themselves.
     const out: AdvertisedCommand[] = [
       { name: "hydra", description: "Hydra session command (kill, restart, title, agent <agent>)" },
+      { name: "compact", description: "Alias for '/hydra compact'" },
       { name: "model", description: "Switch model; omit arg to list available models" },
       { name: "mode", description: "Switch mode; omit arg to list available modes" },
       { name: "sessions", description: "List all sessions" },
@@ -5439,6 +5449,8 @@ export class Session {
     if (this.closed) {
       return;
     }
+    const deleteRecord = opts.deleteRecord || this.deleteRecordIntent;
+    opts = { deleteRecord };
     this.closing = true;
     this.closed = true;
     this.cancelIdleTimer();
@@ -6432,7 +6444,8 @@ export class Session {
       slashFirstWord === "/mode" ||
       slashFirstWord === "/sessions" ||
       slashFirstWord === "/help" ||
-      slashFirstWord === "/hydra"
+      slashFirstWord === "/hydra" ||
+      slashFirstWord === "/compact"
     ) {
       let result: unknown;
       if (slashFirstWord === "/sessions") {
@@ -6443,6 +6456,10 @@ export class Session {
         result = await this.handleModeCommand(promptText);
       } else if (slashFirstWord === "/model") {
         result = await this.handleModelCommand(promptText);
+      } else if (slashFirstWord === "/compact") {
+        const rest = promptText.slice("/compact".length).trim();
+        const rewritten = rest ? `/hydra compact ${rest}` : "/hydra compact";
+        result = await this.handleSlashCommand(rewritten, entry.messageId);
       } else {
         // /hydra ... — dispatch via the shared handler, passing the
         // queue entry's messageId so extension commands can correlate
