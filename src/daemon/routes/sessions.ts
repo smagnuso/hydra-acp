@@ -372,6 +372,14 @@ export function registerSessionRoutes(
     if (session) {
       await session.close({ deleteRecord: true });
       await manager.waitForDeletion(id);
+      // Safety net: if the live close raced an earlier markClosed (e.g.
+      // agent.onExit fired before our DELETE landed), the deleteRecord
+      // intent may not have produced a pendingDeletion chain. Fall
+      // through to the cold-record delete so the on-disk record is
+      // guaranteed gone before we 204.
+      if (await manager.hasRecord(id)) {
+        await manager.deleteRecord(id);
+      }
       reply.code(204).send();
       return;
     }

@@ -838,6 +838,11 @@ export function registerAcpWsEndpoint(
         const live = deps.manager.get(id);
         if (live) {
           await live.close({ deleteRecord: true });
+          await deps.manager.waitForDeletion(id);
+          // Safety net for the agent.onExit race — see DELETE /v1/sessions/:id.
+          if (await deps.manager.hasRecord(id)) {
+            await deps.manager.deleteRecord(id);
+          }
           return { deleted: true, sessionId: id };
         }
         const removed = await deps.manager.deleteRecord(id);
