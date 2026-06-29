@@ -256,7 +256,7 @@ export interface SessionManagerOptions {
   // Override for tests; production code constructs its own.
   tombstones?: TombstoneStore;
   // Compaction configuration forwarded to the synopsis coordinator and
-  // used by the onCompactionArtifact hook (swap logic).
+  // used by the onSynthesisArtifact hook (swap logic).
   compaction?: {
     // Number of recent turns kept verbatim in the seed after compaction.
     tailK?: number;
@@ -388,7 +388,14 @@ export class SessionManager {
         this.persistSynopsis(id, synopsis, through),
       logger: this.logger,
       npmRegistry: this.npmRegistry,
-      onCompactionStateChange: async (sessionId, state) => {
+      onCompactionStateChange: async (sessionId, state, ctx) => {
+        // /hydra agent jobs don't use compactionState — the agent-swap
+        // breadcrumb lives on record.pendingAgentSwap (set at schedule
+        // time, cleared on successful swap). compactionState describes
+        // compaction work only.
+        if (ctx.targetAgentId) {
+          return;
+        }
         // Mirror to the live Session's in-memory field so manager.list()
         // (which reads session.compactionState directly, not from disk)
         // surfaces the current compactionState to pickers and other
@@ -399,11 +406,11 @@ export class SessionManager {
         }
         await this.mutateRecord(sessionId, { compactionState: state });
       },
-      broadcastHydraCompaction: (sessionId, payload) => {
-        this.broadcastHydraCompaction(sessionId, payload);
+      broadcastHydraCompaction: (sessionId, payload, ctx) => {
+        this.emitSwapPhase(sessionId, ctx.targetAgentId, payload);
       },
-      onCompactionArtifact: async (sessionId, artifact, summarizedThroughEntry) => {
-        await this.dispatchCompactionSwap(sessionId, artifact, summarizedThroughEntry);
+      onSynthesisArtifact: async (sessionId, artifact, summarizedThroughEntry, targetAgentId) => {
+        await this.dispatchSynthesisSwap(sessionId, artifact, summarizedThroughEntry, targetAgentId);
       },
     });
     void this.refreshAgentCatalog();
@@ -416,15 +423,19 @@ export class SessionManager {
   // history grew past the artifact's watermark while we waited, we
   // reschedule the synopsis coordinator instead of swapping with a stale
   // artifact (the coordinator's catch-up loop converges; eventually a
-  // fresh artifact triggers a new dispatchCompactionSwap call).
-  private async dispatchCompactionSwap(
+  // fresh artifact triggers a new dispatchSynthesisSwap call).
+  private async dispatchSynthesisSwap(
     sessionId: string,
     artifact: SessionSynopsis,
     summarizedThroughEntry: number,
+    targetAgentId?: string,
   ): Promise<void> {
     const live = this.get(sessionId);
     if (!live) {
       // Cold — persist the artifact for the next resume. No swap target.
+      // targetAgentId is preserved on compactionState (written by the
+      // coordinator) so a resurrected session resumes against the right
+      // agent.
       this.logger?.info(
         `compaction: persisted artifact for cold session sessionId=${sessionId}`,
       );
@@ -441,7 +452,7 @@ export class SessionManager {
         // Drop any prior waiter — we're acting now.
         this.pendingSwapDisposers.get(sessionId)?.();
         this.pendingSwapDisposers.delete(sessionId);
-        await this.performCompactionSwap(live, artifact, tailK, summarizedThroughEntry);
+        await this.performSynthesisSwap(live, artifact, tailK, summarizedThroughEntry, targetAgentId);
         return;
       }
       // Not quiesced — park an onceIdle handler that retries the swap
@@ -451,7 +462,7 @@ export class SessionManager {
       this.logger?.info(
         `compaction: session not quiesced, parking onceIdle swap sessionId=${sessionId}`,
       );
-      live.broadcastCompactionPhase({ phase: "deferred" });
+      this.emitSwapPhase(sessionId, targetAgentId, { phase: "deferred" });
       const disposer = live.onceIdle(() => {
         this.pendingSwapDisposers.delete(sessionId);
         void this.onIdleAttemptSwap(sessionId);
@@ -481,10 +492,16 @@ export class SessionManager {
         // Activity arrived between the onceIdle fire and the strong
         // check (an open tool call from the prior turn is still pending,
         // or a new prompt slipped in). Re-park the waiter — we'll get
-        // another shot at the next idle edge.
+        // another shot at the next idle edge. Carry pendingAgentSwap
+        // through if this is a cross-agent job.
         const record = await this.store.read(sessionId).catch(() => undefined);
         if (record?.synopsis && record.summarizedThroughEntry !== undefined) {
-          void this.dispatchCompactionSwap(sessionId, record.synopsis, record.summarizedThroughEntry);
+          void this.dispatchSynthesisSwap(
+            sessionId,
+            record.synopsis,
+            record.summarizedThroughEntry,
+            record.pendingAgentSwap,
+          );
         }
         return;
       }
@@ -497,23 +514,31 @@ export class SessionManager {
         await this.mutateRecord(sessionId, {}, ["compactionState"]);
         return;
       }
+      // pendingAgentSwap is the agent-switch breadcrumb; survives daemon
+      // restart and any onceIdle deferral.
+      const targetAgentId = record.pendingAgentSwap;
       // History-growth check: if entries past the watermark accumulated
       // while we waited, the artifact is stale. Re-run the synopsis
-      // coordinator; once it converges, onCompactionArtifact will be
+      // coordinator; once it converges, onSynthesisArtifact will be
       // called again with a fresh artifact.
       const history = await this.histories.load(sessionId).catch(() => []);
       if (history.length > record.summarizedThroughEntry) {
         this.logger?.info(
           `compaction: history grew during deferral (have=${history.length} artifact=${record.summarizedThroughEntry}), rescheduling synopsis sessionId=${sessionId}`,
         );
-        this.synopsisCoordinator.scheduleCompaction(sessionId);
+        if (targetAgentId) {
+          this.synopsisCoordinator.scheduleCompaction(sessionId, { targetAgentId });
+        } else {
+          this.synopsisCoordinator.scheduleCompaction(sessionId);
+        }
         return;
       }
-      await this.performCompactionSwap(
+      await this.performSynthesisSwap(
         live,
         record.synopsis,
         tailK,
         record.summarizedThroughEntry,
+        targetAgentId,
       );
     } catch (err) {
       this.logger?.warn(
@@ -522,18 +547,31 @@ export class SessionManager {
     }
   }
 
-  private async performCompactionSwap(
+  private async performSynthesisSwap(
     live: Session,
     artifact: SessionSynopsis,
     tailK: number,
     summarizedThroughEntry: number,
+    targetAgentId?: string,
   ): Promise<void> {
     try {
-      await live.swapUpstream({ artifact, tailK, summarizedThroughEntry });
-      // Clear compactionState now that the swap completed (in-memory
-      // and on disk in lockstep — see onCompactionStateChange above).
-      live.compactionState = undefined;
-      await this.mutateRecord(live.sessionId, {}, ["compactionState"]);
+      await live.swapUpstream({
+        artifact,
+        tailK,
+        summarizedThroughEntry,
+        ...(targetAgentId ? { newAgentId: targetAgentId } : {}),
+      });
+      if (targetAgentId) {
+        // Cross-agent swap completed — drop the breadcrumb so resume
+        // doesn't re-fire the same swap. Compaction-only state is
+        // already absent on this path (the coordinator never wrote it).
+        await this.mutateRecord(live.sessionId, {}, ["pendingAgentSwap"]);
+      } else {
+        // Clear compactionState now that the swap completed (in-memory
+        // and on disk in lockstep — see onCompactionStateChange above).
+        live.compactionState = undefined;
+        await this.mutateRecord(live.sessionId, {}, ["compactionState"]);
+      }
     } catch (err) {
       this.logger?.warn(
         `compaction: swap failed for sessionId=${live.sessionId}: ${err instanceof Error ? err.message : String(err)}, leaving session as-is`,
@@ -642,8 +680,9 @@ export class SessionManager {
       mcpServers: params.mcpServers ?? [],
       extensionCommands: this.extensionCommands,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
-      scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
+      scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       getCompactionState: () => this.getCompactionState(session.sessionId),
+      getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
@@ -919,8 +958,9 @@ export class SessionManager {
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
-      scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
+      scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       getCompactionState: () => this.getCompactionState(session.sessionId),
+      getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
@@ -1021,8 +1061,9 @@ export class SessionManager {
       extensionCommands: this.extensionCommands,
       attentionFlags: params.attentionFlags,
       scheduleSynopsis: () => this.synopsisCoordinator.schedule(session.sessionId),
-      scheduleCompaction: () => this.synopsisCoordinator.scheduleCompaction(session.sessionId),
+      scheduleCompaction: (opts) => this.scheduleCompaction(session.sessionId, opts),
       getCompactionState: () => this.getCompactionState(session.sessionId),
+      getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
@@ -3128,17 +3169,37 @@ export class SessionManager {
     this.synopsisCoordinator.schedule(sessionId);
   }
 
-  // Public entry point for /hydra compact — schedule a compaction job
-  // on the named session (live or cold). The coordinator runs the
-  // synopsis-based compaction asynchronously.
-  scheduleCompaction(sessionId: string): void {
-    this.synopsisCoordinator.scheduleCompaction(sessionId);
+  // Public entry point for /hydra compact and /hydra agent — schedule
+  // a synthesis-based job on the named session (live or cold). The
+  // coordinator runs synthesis asynchronously and dispatches the swap
+  // on the next idle edge. When opts.targetAgentId is set, this is a
+  // /hydra agent switch: the swap rotates to that agent and we stamp
+  // pendingAgentSwap on the record so resume-after-restart knows the
+  // target. Fire-and-forget: the meta-write is best-effort (resume
+  // gracefully degrades to scheduling a fresh synthesis if missing).
+  scheduleCompaction(sessionId: string, opts?: { targetAgentId?: string }): void {
+    if (opts?.targetAgentId) {
+      void this.mutateRecord(sessionId, { pendingAgentSwap: opts.targetAgentId }).catch((err) => {
+        this.logger?.warn(
+          `scheduleCompaction: failed to stamp pendingAgentSwap for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }
+    this.synopsisCoordinator.scheduleCompaction(sessionId, opts);
   }
 
   // Expose compaction in-flight status for the GET /compact endpoint.
   getCompactionInFlight(): boolean {
     const s = this.synopsisCoordinator.size();
     return s.inflight > 0 || s.queued > 0;
+  }
+
+  // Read pendingAgentSwap from a session's record. Returns the target
+  // agentId of an in-flight /hydra agent swap, or undefined if none
+  // pending. Used by /hydra agent status.
+  async getPendingAgentSwap(sessionId: string): Promise<string | undefined> {
+    const record = await this.store.read(sessionId).catch(() => undefined);
+    return record?.pendingAgentSwap;
   }
 
   // Read compactionState from a session's record (cold or live).
@@ -3156,10 +3217,28 @@ export class SessionManager {
     return record?.rollbackBreadcrumb;
   }
 
-  private broadcastHydraCompaction(sessionId: string, payload: HydraCompactionPayload): void {
+  // Route synthesis phase events to the right wire channel. /hydra compact
+  // jobs emit hydra_compaction; /hydra agent jobs emit session_info_update
+  // carrying _meta["hydra-acp"].pendingAgentSwap so the TUI's session bar
+  // can render "switching to X" without conflating with compaction events.
+  // Cleared by swapUpstream's broadcastAgentSwitch once the swap lands; on
+  // terminal "failed" phases we broadcast a null pendingAgentSwap so the
+  // bar resets.
+  private emitSwapPhase(
+    sessionId: string,
+    targetAgentId: string | undefined,
+    payload: Record<string, unknown> & { phase: string },
+  ): void {
     const live = this.get(sessionId);
-    if (live)
-      live.broadcastCompactionPhase(payload);
+    if (!live) {
+      return;
+    }
+    if (targetAgentId) {
+      const cleared = payload.phase === "failed";
+      live.broadcastPendingAgentSwap(cleared ? null : targetAgentId);
+      return;
+    }
+    live.broadcastCompactionPhase(payload);
   }
 
   // Read summarizedThroughEntry from a session's record (cold or live).
@@ -3261,10 +3340,58 @@ export class SessionManager {
         `compaction: resuming sessionId=${rec.sessionId} status=${state.status} from prior daemon`,
       );
       try {
+        // compactionState is compaction-only; /hydra agent resume rides
+        // on record.pendingAgentSwap, handled by resumePendingAgentSwaps.
         this.scheduleCompaction(rec.sessionId);
       } catch (err) {
         this.logger?.warn(
           `compaction: resume failed for sessionId=${rec.sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  // Startup hook for /hydra agent swaps that were in flight when the
+  // daemon went down. Two sub-cases:
+  //   (1) record.synopsis is fresh (summarizedThroughEntry === current
+  //       history length) — the artifact is already in the target's
+  //       idiom and there's nothing to summarize. Dispatch the swap
+  //       directly; first attach will execute it on idle.
+  //   (2) otherwise — reschedule synthesis (target-agent run produces
+  //       a fresh artifact incorporating any new turns), then dispatch.
+  // Per-session failures are logged and do not block boot.
+  async resumePendingAgentSwaps(): Promise<void> {
+    const records = await this.store.list().catch(() => []);
+    for (const rec of records) {
+      const targetAgentId = rec.pendingAgentSwap;
+      if (!targetAgentId) {
+        continue;
+      }
+      try {
+        const history = await this.histories.load(rec.sessionId).catch(() => []);
+        const fresh =
+          rec.synopsis !== undefined &&
+          rec.summarizedThroughEntry !== undefined &&
+          rec.summarizedThroughEntry >= history.length;
+        if (fresh && rec.synopsis) {
+          this.logger?.info(
+            `agent-swap: resuming sessionId=${rec.sessionId} target=${targetAgentId} with persisted synopsis (history=${history.length})`,
+          );
+          await this.dispatchSynthesisSwap(
+            rec.sessionId,
+            rec.synopsis,
+            rec.summarizedThroughEntry ?? history.length,
+            targetAgentId,
+          );
+        } else {
+          this.logger?.info(
+            `agent-swap: resuming sessionId=${rec.sessionId} target=${targetAgentId} via fresh synthesis (history=${history.length} watermark=${rec.summarizedThroughEntry ?? "(none)"})`,
+          );
+          this.scheduleCompaction(rec.sessionId, { targetAgentId });
+        }
+      } catch (err) {
+        this.logger?.warn(
+          `agent-swap: resume failed for sessionId=${rec.sessionId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

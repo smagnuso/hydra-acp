@@ -73,7 +73,7 @@ function makeArtifact(overrides?: Partial<SessionSynopsis>): SessionSynopsis {
 
 const WORK_CWD = mkdtempSync(path.join(os.tmpdir(), "hydra-test-compaction-"));
 
-describe("compaction swap — onCompactionArtifact hook", () => {
+describe("compaction swap — onSynthesisArtifact hook", () => {
   let tmpHome: string;
 
   beforeEach(() => {

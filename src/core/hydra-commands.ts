@@ -25,8 +25,9 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
   {
     verb: "agent",
     name: "hydra agent",
-    argsHint: "<agent>",
-    description: "Swap the agent backing this session, preserving context",
+    argsHint: "<agent | status>",
+    description:
+      "Schedule a swap to a different agent (synthesizes a brief in the target's idiom, rotates on idle); `status` reports any pending swap",
   },
   {
     verb: "kill",

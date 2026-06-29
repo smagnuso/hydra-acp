@@ -209,11 +209,16 @@ export interface SessionInit {
   // SessionManager to schedule an out-of-band synopsis for this session.
   // Returns immediately; the synopsis lands later via persistSynopsis.
   scheduleSynopsis?: () => void;
-  // Fire-and-forget callback used by `/hydra compact` to schedule a
-  // compaction job on the SessionManager. Returns immediately; the
-  // compaction artifact lands later via persistSynopsis + onCompactionArtifact.
-  scheduleCompaction?: () => void;
+  // Fire-and-forget callback used by `/hydra compact` and `/hydra agent`
+  // to schedule a compaction-style job on the SessionManager. Returns
+  // immediately; the artifact lands later via persistSynopsis +
+  // onSynthesisArtifact. When targetAgentId is set, the swap rotates
+  // to that agent (the /hydra agent path).
+  scheduleCompaction?: (opts?: { targetAgentId?: string }) => void;
   getCompactionState?: () => Promise<CompactionState | undefined>;
+  // Reads the persisted pendingAgentSwap field (the target agentId of an
+  // in-flight /hydra agent swap, or undefined if none pending).
+  getPendingAgentSwap?: () => Promise<string | undefined>;
   createdAt?: number;
   transformChain?: TransformerRef[];
   // How long after the last recordable broadcast before session.idle fires to
@@ -491,11 +496,13 @@ export class Session {
   // out-of-band synopsis without taking a direct dependency on
   // SessionManager.
   private scheduleSynopsisHook?: () => void;
-  // Fire-and-forget hook for `/hydra compact` — calls back to the
-  // manager's compaction scheduler so the slash command doesn't need
-  // a direct dependency on SynopsisCoordinator.
-  private scheduleCompactionHook?: () => void;
+  // Fire-and-forget hook for `/hydra compact` and `/hydra agent` —
+  // calls back to the manager's compaction scheduler so the slash
+  // commands don't need a direct dependency on SynopsisCoordinator.
+  // For /hydra agent, opts.targetAgentId names the agent to swap to.
+  private scheduleCompactionHook?: (opts?: { targetAgentId?: string }) => void;
   private getCompactionStateHook?: () => Promise<CompactionState | undefined>;
+  private getPendingAgentSwapHook?: () => Promise<string | undefined>;
   // In-memory mirror of the last hydra_compaction phase broadcast.
   // Kept so buildStateSnapshotReplay can deliver the current phase to
   // freshly-attaching clients without an async disk read.
@@ -756,6 +763,7 @@ export class Session {
     this.scheduleSynopsisHook = init.scheduleSynopsis;
     this.scheduleCompactionHook = init.scheduleCompaction;
     this.getCompactionStateHook = init.getCompactionState;
+    this.getPendingAgentSwapHook = init.getPendingAgentSwap;
     this.currentModel = init.currentModel;
     this.currentMode = init.currentMode;
     this._currentUsage = init.currentUsage;
@@ -1235,6 +1243,13 @@ export class Session {
     title?: string;
     tailK: number;
     summarizedThroughEntry?: number;
+    // When set, swap to a different agent (the /hydra agent path). When
+    // unset (or equal to this.agentId), this is a same-agent compaction
+    // rotation. Cross-agent swaps skip model/mode restore (the persisted
+    // values belong to the old agent's idiom) and use the new agent's
+    // defaults as reported by session/new; agentAdvertisedCommands /
+    // models / modes are reset from the fresh response.
+    newAgentId?: string;
   }): Promise<void> {
     const quiesced = await this.isQuiescedForSwap();
     if (!quiesced) {
@@ -1252,7 +1267,9 @@ export class Session {
     });
 
     // Capture current context so we can spawn with matching config.
-    const agentId = this.agentId;
+    const oldAgentId = this.agentId;
+    const targetAgentId = opts.newAgentId ?? this.agentId;
+    const crossAgent = targetAgentId !== this.agentId;
     const cwd = this.cwd;
     const agentArgs = this.agentArgs;
     const forwardedEnv = this.forwardedEnv;
@@ -1279,9 +1296,10 @@ export class Session {
       : (this.mcpServersConfig ?? []);
 
     // Spawn a fresh agent — bootstrapAgent calls initialize + session/new
-    // internally, giving us a new upstreamSessionId.
+    // internally, giving us a new upstreamSessionId. For cross-agent
+    // swaps this spawns the TARGET agent's process.
     const fresh = await spawnAgent({
-      agentId,
+      agentId: targetAgentId,
       cwd,
       agentArgs,
       ...(forwardedEnv ? { forwardedEnv } : {}),
@@ -1291,23 +1309,26 @@ export class Session {
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent);
 
-    // Restore model and mode on the new agent if the old session had
-    // non-default values. Uses the shared helpers from restore-agent-settings.ts
-    // so both the resurrect path and the swap path get identical semantics.
-    await restoreCurrentModel({
-      agent: fresh.agent,
-      upstreamSessionId: fresh.upstreamSessionId,
-      persistedModel,
-      agentReportedModel: fresh.initialModel,
-      logger: this.logger,
-    });
-    await restoreCurrentMode({
-      agent: fresh.agent,
-      upstreamSessionId: fresh.upstreamSessionId,
-      persistedMode,
-      agentReportedMode: fresh.initialMode,
-      logger: this.logger,
-    });
+    // Restore model and mode only for same-agent swaps. Cross-agent
+    // swaps inherit the target agent's defaults from session/new — the
+    // persisted model/mode were the OLD agent's identifiers and are
+    // unlikely to be valid on the new agent.
+    if (!crossAgent) {
+      await restoreCurrentModel({
+        agent: fresh.agent,
+        upstreamSessionId: fresh.upstreamSessionId,
+        persistedModel,
+        agentReportedModel: fresh.initialModel,
+        logger: this.logger,
+      });
+      await restoreCurrentMode({
+        agent: fresh.agent,
+        upstreamSessionId: fresh.upstreamSessionId,
+        persistedMode,
+        agentReportedMode: fresh.initialMode,
+        logger: this.logger,
+      });
+    }
 
     // Drop any buffered session/update notifications that arrived during
     // the restore calls — same race as doResurrect in session-manager.ts.
@@ -1384,6 +1405,20 @@ export class Session {
     this.agentMeta = fresh.agentMeta;
     this.agentCapabilities = fresh.agentCapabilities;
 
+    if (crossAgent) {
+      this.agentId = targetAgentId;
+      // Old agent's advertised commands/models/modes don't apply on the
+      // new agent. Clear and refresh from its session/new response —
+      // mirrors the inline-swap behavior in the (now-replaced)
+      // runAgentCommandInline path so the TUI's dropdowns repopulate
+      // even when the agent doesn't emit a follow-up current_model_update.
+      this.agentAdvertisedCommands = [];
+      this.currentModel = fresh.initialModel;
+      this.currentMode = fresh.initialMode;
+      this.setAgentAdvertisedModels(fresh.initialModels ?? []);
+      this.setAgentAdvertisedModes(fresh.initialModes ?? []);
+    }
+
     // Re-broadcast config options and commands under the new upstream.
     this.broadcastMergedCommands();
     this.broadcastConfigOptions();
@@ -1401,7 +1436,11 @@ export class Session {
         this.logger?.warn(`swapUpstream: agentChange handler failed: ${(err as Error).message}`);
       }
     }
-    if (this.onCompactionSwapHook) {
+    // Cross-agent swaps skip the rollback breadcrumb: rollbackToUpstream
+    // resumes the prior upstream on this.agentId, which after a cross-
+    // agent swap is the NEW agent — incompatible with a session created
+    // by the old one. Compaction rollback only supports same-agent.
+    if (!crossAgent && this.onCompactionSwapHook) {
       try {
         this.onCompactionSwapHook({
           previousUpstreamSessionId,
@@ -1426,11 +1465,23 @@ export class Session {
     });
 
     // Signal to attached clients that the compaction swap completed.
-    this.broadcastCompactionPhase({
-      phase: "swapped",
-      ...(this.title !== undefined ? { title: this.title } : {}),
-      summarizedThroughEntry: opts.summarizedThroughEntry ?? this._summarizedThroughEntry ?? 0,
-    });
+    // Skipped on cross-agent swaps: /hydra agent surfaces completion via
+    // broadcastAgentSwitch (session_info_update with the new agentId)
+    // rather than the compaction wire channel.
+    if (!crossAgent) {
+      this.broadcastCompactionPhase({
+        phase: "swapped",
+        ...(this.title !== undefined ? { title: this.title } : {}),
+        summarizedThroughEntry: opts.summarizedThroughEntry ?? this._summarizedThroughEntry ?? 0,
+      });
+    }
+
+    // For cross-agent swaps, surface the agent-identity change to clients
+    // so the TUI relabels and any agent-id-aware UI updates immediately
+    // (mirrors the pre-existing inline /hydra agent path).
+    if (crossAgent) {
+      this.broadcastAgentSwitch(oldAgentId, targetAgentId);
+    }
 
     // Surface a synthetic agent_message_chunk so the user sees a clean
     // "Compaction completed." in the conversation stream instead of the
@@ -1446,11 +1497,14 @@ export class Session {
     // completion via the hydra_compaction phase:"swapped" event
     // already broadcast above plus the cleared compactionState in
     // meta.json.
+    const completedText = crossAgent
+      ? `\nSwitched to ${targetAgentId}.\n`
+      : "\nCompaction completed.\n";
     const completedParams = this.rewriteForClient({
       sessionId: this.upstreamSessionId,
       update: {
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "\nCompaction completed.\n" },
+        content: { type: "text", text: completedText },
         _meta: { "hydra-acp": { synthetic: true } },
       },
     });
@@ -1676,7 +1730,7 @@ export class Session {
     // have to filter session/update for the hydra_compaction subtype.
     // Notification-only — observation hook. Cancellable compact:pre is
     // deferred to a future stage (requires a request-shaped dispatch
-    // wired into SessionManager.dispatchCompactionSwap).
+    // wired into SessionManager.dispatchSynthesisSwap).
     this.notifyChain("compaction", { ...update });
   }
 
@@ -4783,15 +4837,17 @@ export class Session {
     }
   }
 
-  // Swap the underlying agent process while keeping the same Session
-  // record. Spawns the new agent first so a failure leaves the old one
-  // intact; then injects a synthesized transcript so the new agent has
-  // context for the next turn.
+  // Schedule an agent switch via the compaction coordinator. The
+  // coordinator generates a synthesis artifact in the target agent's
+  // idiom, then swaps on the next idle edge (mirroring /hydra compact).
+  // Returns end_turn immediately with a synthetic banner — the actual
+  // process swap lands asynchronously when the synthesis completes and
+  // the session quiesces.
+  //
   // Public entry for swapping the underlying agent from a client request
   // (session/set_config_option with configId "agent"), the protocol twin
-  // of the `/hydra agent` text command. Delegates to the same swap
-  // machinery so both paths share validation, transcript replay, and the
-  // config_option_update broadcast.
+  // of the `/hydra agent` text command. Both routes funnel through the
+  // same scheduler so behavior is identical regardless of trigger.
   setAgent(newAgentId: string): Promise<unknown> {
     return this.runAgentCommand(newAgentId);
   }
@@ -4800,7 +4856,11 @@ export class Session {
     return this.enqueuePrompt(() => this.runAgentCommandInline(newAgentId));
   }
 
-  private async runAgentCommandInline(newAgentId: string): Promise<unknown> {
+  private async runAgentCommandInline(arg: string): Promise<unknown> {
+    if (arg === "status") {
+      return this.runAgentStatusCommandInline();
+    }
+    const newAgentId = arg;
     if (!newAgentId) {
       throw withCode(
         new Error("/hydra agent requires an agent id"),
@@ -4813,66 +4873,28 @@ export class Session {
         JsonRpcErrorCodes.InvalidParams,
       );
     }
-    if (!this.spawnReplacementAgent) {
-      throw withCode(
-        new Error("agent switching not configured for this session"),
-        JsonRpcErrorCodes.InternalError,
+    if (!this.scheduleCompactionHook) {
+      this.emitExtensionReply(
+        "agent switching not configured for this session",
       );
+      return { stopReason: "end_turn" };
     }
-    const spawnAgent = this.spawnReplacementAgent;
-    const oldAgentId = this.agentId;
-    const transcript = await this.buildSwitchTranscript(oldAgentId);
+    this.scheduleCompactionHook({ targetAgentId: newAgentId });
+    this.emitExtensionReply(
+      `Agent switch to ${newAgentId} scheduled. The session will rotate to ${newAgentId} once synthesis completes.`,
+    );
+    return { stopReason: "end_turn" };
+  }
 
-    const fresh = await spawnAgent({
-      agentId: newAgentId,
-      cwd: this.cwd,
-      agentArgs: this.agentArgs,
-      ...(this.forwardedEnv ? { forwardedEnv: this.forwardedEnv } : {}),
-    });
-    this.accumulateAndResetCost();
-    this.wireAgent(fresh.agent);
-
-    const oldAgent = this.agent;
-    this.agent = fresh.agent;
-    this.agentId = newAgentId;
-    this.upstreamSessionId = fresh.upstreamSessionId;
-    this.agentMeta = fresh.agentMeta;
-    this.agentCapabilities = fresh.agentCapabilities;
-    // Old agent's commands no longer apply; clear and re-broadcast
-    // a merged update with just /hydra verbs until the new agent
-    // advertises its own.
-    this.agentAdvertisedCommands = [];
-    this.broadcastMergedCommands();
-    // Re-advertise the new agent's model list and modes from its
-    // session/new response. Some agents (e.g. opencode) report these
-    // only in that response and never emit a follow-up
-    // current_model_update, so clearing-and-waiting would leave the
-    // clients' model/mode dropdowns permanently empty. Setting the new
-    // selections first means the broadcast carries the right current
-    // value; the persistence hooks fire so meta.json reflects the swap.
-    this.currentModel = fresh.initialModel;
-    this.currentMode = fresh.initialMode;
-    this.setAgentAdvertisedModels(fresh.initialModels ?? []);
-    this.setAgentAdvertisedModes(fresh.initialModes ?? []);
-    await oldAgent.kill().catch(() => undefined);
-
-    if (transcript) {
-      await this.runInternalPrompt(transcript).catch(() => undefined);
+  private async runAgentStatusCommandInline(): Promise<unknown> {
+    const target = await this.getPendingAgentSwapHook?.();
+    if (!target) {
+      this.emitExtensionReply("No agent switch pending.");
+      return { stopReason: "end_turn" };
     }
-
-    this.broadcastAgentSwitch(oldAgentId, newAgentId);
-
-    const info = {
-      agentId: this.agentId,
-      upstreamSessionId: this.upstreamSessionId,
-    };
-    for (const handler of this.agentChangeHandlers) {
-      try {
-        handler(info);
-      } catch {
-        void 0;
-      }
-    }
+    this.emitExtensionReply(
+      `Agent switch to ${target} pending — will rotate on the next idle edge.`,
+    );
     return { stopReason: "end_turn" };
   }
 
@@ -5243,10 +5265,23 @@ export class Session {
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "session_info_update",
-        _meta: { "hydra-acp": { synthetic: true, agentId: newAgentId } },
+        _meta: { "hydra-acp": { synthetic: true, agentId: newAgentId, pendingAgentSwap: null } },
       },
     });
     this.broadcastConfigOptions();
+  }
+
+  // Push a session_info_update carrying pendingAgentSwap so the TUI
+  // can show "switching to X" in the session bar during a /hydra agent
+  // synthesis run. Pass null to clear (e.g. on synthesis failure).
+  broadcastPendingAgentSwap(targetAgentId: string | null): void {
+    this.recordAndBroadcast("session/update", {
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "session_info_update",
+        _meta: { "hydra-acp": { synthetic: true, pendingAgentSwap: targetAgentId } },
+      },
+    });
   }
 
   // stdin-stream lifecycle. Cat --stream calls openStream() once after

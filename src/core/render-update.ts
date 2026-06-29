@@ -134,7 +134,12 @@ export type RenderEvent =
     }
   | { kind: "available-commands"; commands: AvailableCommand[] }
   | { kind: "available-modes"; modes: AvailableMode[] }
-  | { kind: "session-info"; title?: string; agentId?: string }
+  | {
+      kind: "session-info";
+      title?: string;
+      agentId?: string;
+      pendingAgentSwap?: string | null;
+    }
   | { kind: "config-options"; options: ConfigOption[] }
   | { kind: "unknown"; sessionUpdate: string; raw: unknown };
 
@@ -289,6 +294,10 @@ function mapSessionInfo(u: UpdateLike): RenderEvent | null {
   // updatedAt + _meta — agent identity is not a protocol-level concept).
   const meta = u._meta;
   let agentId: string | undefined;
+  // pendingAgentSwap: a string names the agent a deferred /hydra agent
+  // switch is rotating to; explicit null clears the indicator (the swap
+  // landed or failed). Absent means this update carries no swap news.
+  let pendingAgentSwap: string | null | undefined;
   if (meta && typeof meta === "object" && !Array.isArray(meta)) {
     const ns = (meta as Record<string, unknown>)["hydra-acp"];
     if (ns && typeof ns === "object" && !Array.isArray(ns)) {
@@ -296,9 +305,21 @@ function mapSessionInfo(u: UpdateLike): RenderEvent | null {
       if (typeof candidate === "string") {
         agentId = candidate;
       }
+      if ("pendingAgentSwap" in (ns as Record<string, unknown>)) {
+        const swap = (ns as Record<string, unknown>).pendingAgentSwap;
+        if (typeof swap === "string") {
+          pendingAgentSwap = swap;
+        } else if (swap === null) {
+          pendingAgentSwap = null;
+        }
+      }
     }
   }
-  if (title === undefined && agentId === undefined) {
+  if (
+    title === undefined &&
+    agentId === undefined &&
+    pendingAgentSwap === undefined
+  ) {
     return null;
   }
   const event: RenderEvent = { kind: "session-info" };
@@ -307,6 +328,9 @@ function mapSessionInfo(u: UpdateLike): RenderEvent | null {
   }
   if (agentId !== undefined) {
     event.agentId = agentId;
+  }
+  if (pendingAgentSwap !== undefined) {
+    event.pendingAgentSwap = pendingAgentSwap;
   }
   return event;
 }

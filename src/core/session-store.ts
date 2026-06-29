@@ -155,6 +155,12 @@ export const SessionRecord = z.object({
   // it) so the local history.jsonl gets populated from the agent's
   // memory. Cleared after that first resurrect completes.
   pendingHistorySync: z.boolean().optional(),
+  // Breadcrumb set by `/hydra agent <id>` while the swap is in flight.
+  // Names the target agent. The synthesis artifact lives on `synopsis`
+  // and is generated in the target's idiom so resume-after-restart can
+  // dispatch the swap immediately when history hasn't grown. Cleared
+  // when the cross-agent swap completes (or the user re-targets).
+  pendingAgentSwap: z.string().optional(),
   // Set when this session was spawned as a child by a transformer via
   // hydra-acp/child_session/spawn. Points to the spawning session's id.
   parentSessionId: z.string().optional(),
@@ -336,6 +342,7 @@ export function recordFromMemorySession(args: {
   agentModes?: PersistedAgentMode[];
   agentModels?: PersistedAgentModel[];
   pendingHistorySync?: boolean;
+  pendingAgentSwap?: string;
   parentSessionId?: string;
   forkedFromSessionId?: string;
   forkedFromMessageId?: string;
@@ -373,6 +380,7 @@ export function recordFromMemorySession(args: {
     agentModes: args.agentModes,
     agentModels: args.agentModels,
     pendingHistorySync: args.pendingHistorySync,
+    pendingAgentSwap: args.pendingAgentSwap,
     parentSessionId: args.parentSessionId,
     forkedFromSessionId: args.forkedFromSessionId,
     forkedFromMessageId: args.forkedFromMessageId,

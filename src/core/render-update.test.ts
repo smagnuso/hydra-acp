@@ -740,6 +740,35 @@ describe("mapUpdate", () => {
     ).toEqual({ kind: "session-info", title: "fix the bug", agentId: "codex-acp" });
   });
 
+  it("maps a pending agent swap (string) from _meta", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "session_info_update",
+        _meta: { "hydra-acp": { synthetic: true, pendingAgentSwap: "claude" } },
+      }),
+    ).toEqual({ kind: "session-info", pendingAgentSwap: "claude" });
+  });
+
+  it("maps a cleared agent swap (null) alongside the new agentId", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "session_info_update",
+        _meta: {
+          "hydra-acp": { agentId: "claude", pendingAgentSwap: null },
+        },
+      }),
+    ).toEqual({ kind: "session-info", agentId: "claude", pendingAgentSwap: null });
+  });
+
+  it("ignores a non-string, non-null pendingAgentSwap", () => {
+    expect(
+      mapUpdate({
+        sessionUpdate: "session_info_update",
+        _meta: { "hydra-acp": { pendingAgentSwap: 42 } },
+      }),
+    ).toBeNull();
+  });
+
   it("returns unknown for unrecognized sessionUpdate", () => {
     expect(
       mapUpdate({ sessionUpdate: "some_future_kind", foo: "bar" }),

@@ -65,21 +65,29 @@ export interface SynopsisCoordinatorOptions {
   npmRegistry?: string;
   // Override the default 120s ephemeral timeout for tests.
   generateTimeoutMs?: number;
-  // Called after persisting a compaction result. Used by T10 to swap
-  // the compaction artifact into the warm session record.
-  onCompactionArtifact?: (
+  // Called after persisting a compaction result. Used by the manager to
+  // dispatch a swap of the compaction artifact into the warm session.
+  // `targetAgentId`, when set, signals this was a /hydra agent job —
+  // the dispatcher swaps to that agent instead of rotating in place.
+  onSynthesisArtifact?: (
     sessionId: string,
     artifact: SessionSynopsis,
     summarizedThroughEntry: number,
+    targetAgentId?: string,
   ) => Promise<void>;
   // Max iterations for the compaction catch-up loop. Default 3.
   compactionMaxIterations?: number;
   // Called on each compaction state transition so the caller can persist
   // the state machine. null means "clear the state" (not used by the
   // coordinator; the coordinator only writes requested/running/iter).
+  // ctx.targetAgentId is set when the job came from /hydra agent — the
+  // SessionManager branches on it to route the event to the agent-swap
+  // observer (session_info_update with pendingAgentSwap) instead of the
+  // compaction observer (compactionState + hydra_compaction).
   onCompactionStateChange?: (
     sessionId: string,
     state: CompactionState,
+    ctx: { targetAgentId?: string },
   ) => Promise<void>;
   // Called to push a hydra_compaction session/update notification to
   // any attached clients. The coordinator only fires started/iteration
@@ -87,6 +95,7 @@ export interface SynopsisCoordinatorOptions {
   broadcastHydraCompaction?: (
     sessionId: string,
     payload: HydraCompactionPayload,
+    ctx: { targetAgentId?: string },
   ) => void;
 }
 
@@ -99,9 +108,17 @@ export type HydraCompactionPayload =
 
 const DEFAULT_MAX_CONCURRENT = 2;
 type JobKind = "title" | "compaction";
+interface QueuedJob {
+  kind: JobKind;
+  // Set when scheduleCompaction was called for a /hydra agent switch.
+  // Forces the ephemeral synthesizer to run on this agent (so the
+  // artifact is in the target's idiom) and is plumbed through to
+  // onSynthesisArtifact so the dispatcher knows to swap to it.
+  targetAgentId?: string;
+}
 
 export class SynopsisCoordinator {
-  private queued: Record<string, JobKind> = {};
+  private queued: Record<string, QueuedJob> = {};
   private inflight = new Map<string, Promise<void>>();
   private stopped = false;
   private readonly maxConcurrent: number;
@@ -122,25 +139,29 @@ export class SynopsisCoordinator {
       // Compaction is queued → no-op.
       return;
     }
-    this.queued[sessionId] = "title";
+    this.queued[sessionId] = { kind: "title" };
     void this.drain();
   }
 
-  scheduleCompaction(sessionId: string): void {
+  scheduleCompaction(sessionId: string, opts?: { targetAgentId?: string }): void {
     if (this.stopped) {
       return;
     }
+    const targetAgentId = opts?.targetAgentId;
     if (this.inflight.has(sessionId)) {
       return;
     }
     const existing = this.queued[sessionId];
-    if (existing === "title") {
-      // Promote title to compaction.
-      this.queued[sessionId] = "compaction";
+    if (existing && existing.kind === "title") {
+      // Promote title to compaction, carrying any targetAgentId.
+      this.queued[sessionId] = { kind: "compaction", ...(targetAgentId ? { targetAgentId } : {}) };
       return;
     }
-    // Already compaction or not queued → add and drain.
-    this.queued[sessionId] = "compaction";
+    // Already compaction or not queued → set and drain. Note: a second
+    // scheduleCompaction call overrides a prior targetAgentId — last
+    // writer wins, mirroring how /hydra agent X then /hydra agent Y
+    // should resolve to Y.
+    this.queued[sessionId] = { kind: "compaction", ...(targetAgentId ? { targetAgentId } : {}) };
     void this.drain();
   }
 
@@ -190,9 +211,9 @@ export class SynopsisCoordinator {
       if (!sessionId) {
         return;
       }
-      const jobKind = this.queued[sessionId] as JobKind;
+      const job = this.queued[sessionId] as QueuedJob;
       delete this.queued[sessionId];
-      const p = this.runOne(sessionId, jobKind).finally(() => {
+      const p = this.runOne(sessionId, job).finally(() => {
         this.inflight.delete(sessionId);
         this.drain();
       });
@@ -202,8 +223,10 @@ export class SynopsisCoordinator {
 
   private async runOne(
     sessionId: string,
-    jobKind: JobKind,
+    job: QueuedJob,
   ): Promise<void> {
+    const jobKind = job.kind;
+    const targetAgentId = job.targetAgentId;
     try {
       const record = await this.opts.store.read(sessionId);
       if (!record) {
@@ -232,8 +255,11 @@ export class SynopsisCoordinator {
       // Fallthrough for each job kind is to the session's own agentId,
       // letting the user opt either knob in/out without affecting the
       // other. If neither resolves to a registered agent we skip the job.
+      // targetAgentId (from /hydra agent) takes precedence over the
+      // compactionAgent config — the artifact must be in the new
+      // agent's idiom because it's what that agent will consume.
       const synopsisAgentId = jobKind === "compaction"
-        ? (this.opts.compactionAgent ?? record.agentId)
+        ? (targetAgentId ?? this.opts.compactionAgent ?? record.agentId)
         : (this.opts.synopsisAgent ?? record.agentId);
       const agentDef = await this.opts.registry.getAgent(synopsisAgentId);
       if (!agentDef) {
@@ -264,7 +290,10 @@ export class SynopsisCoordinator {
       //   Compaction does NOT inherit synopsisModel — those knobs are
       //   independent (title is high-frequency / cheap; compaction is
       //   rare / quality-sensitive).
-      const usingSessionAgent = this.opts.compactionAgent === undefined;
+      // Cross-agent jobs (targetAgentId set) must NOT inherit the
+      // source session's currentModel — that model id likely doesn't
+      // exist on the target agent. Let the target pick its own default.
+      const usingSessionAgent = this.opts.compactionAgent === undefined && targetAgentId === undefined;
       const modelId = jobKind === "compaction"
         ? (this.opts.compactionModel ??
            (usingSessionAgent ? record.currentModel : undefined))
@@ -295,11 +324,17 @@ export class SynopsisCoordinator {
         // `/hydra compact status` and the TUI's failed broadcast.
         let lastFailureReason: string | undefined;
         const requestedAt = Date.now();
-        await this.opts.onCompactionStateChange?.(sessionId, {
+        const ctx = { targetAgentId };
+        const writeState = (state: CompactionState): Promise<void> =>
+          this.opts.onCompactionStateChange?.(sessionId, state, ctx) ?? Promise.resolve();
+        const wireBroadcast = (payload: HydraCompactionPayload): void => {
+          this.opts.broadcastHydraCompaction?.(sessionId, payload, ctx);
+        };
+        await writeState({
           status: "requested",
           requestedAt,
         });
-        this.opts.broadcastHydraCompaction?.(sessionId, {
+        wireBroadcast({
           sessionUpdate: "hydra_compaction",
           phase: "started",
           requestedAt,
@@ -327,7 +362,7 @@ export class SynopsisCoordinator {
               logger: this.opts.logger,
               timeoutMs: this.opts.generateTimeoutMs,
               onWorkerSpawned: (upstreamSessionId, pid) => {
-                void this.opts.onCompactionStateChange?.(sessionId, {
+                void writeState({
                   status: "running",
                   requestedAt,
                   iter,
@@ -351,18 +386,18 @@ export class SynopsisCoordinator {
                 // Clear any stale failure reason now that an iteration
                 // succeeded — partial progress beats no information.
                 lastFailureReason = undefined;
-                await this.opts.onCompactionStateChange?.(sessionId, {
+                await writeState({
                   status: "running",
                   requestedAt,
                   iter,
                 });
-                this.opts.broadcastHydraCompaction?.(sessionId, {
+                wireBroadcast({
                   sessionUpdate: "hydra_compaction",
                   phase: "iteration",
                   iter,
                   historyLen: historyAtStart.length,
                 });
-                await this.opts.onCompactionArtifact?.(sessionId, merged, latestThrough);
+                await this.opts.onSynthesisArtifact?.(sessionId, merged, latestThrough, targetAgentId);
                 this.opts.logger?.info(
                   `synopsis: persisted compaction sessionId=${sessionId} iteration=${iter} fields=${describeFields(merged)}`,
                 );
@@ -397,13 +432,13 @@ export class SynopsisCoordinator {
               (iter === 0
                 ? "no new history to compact since last summary"
                 : `compaction did not produce an artifact after ${iter} iteration(s)`);
-            await this.opts.onCompactionStateChange?.(sessionId, {
+            await writeState({
               status: "failed",
               requestedAt,
               iter,
               lastError: errorMsg,
             });
-            this.opts.broadcastHydraCompaction?.(sessionId, {
+            wireBroadcast({
               sessionUpdate: "hydra_compaction",
               phase: "failed",
               error: errorMsg,
@@ -415,13 +450,13 @@ export class SynopsisCoordinator {
           }
         } catch (err) {
           // Thrown errors land here — record so the state isn't stranded.
-          // The onCompactionArtifact / swap path has its own try/catch and
+          // The onSynthesisArtifact / swap path has its own try/catch and
           // won't reach here; this catches unexpected throws inside the loop.
           const message = err instanceof Error ? err.message : String(err);
           this.opts.logger?.warn(
             `synopsis: compaction threw for sessionId=${sessionId}: ${message}`,
           );
-          await this.opts.onCompactionStateChange?.(sessionId, {
+          await writeState({
             status: "failed",
             requestedAt,
             iter,
@@ -431,7 +466,7 @@ export class SynopsisCoordinator {
             sessionUpdate: "hydra_compaction",
             phase: "failed",
             error: message,
-          });
+          }, { targetAgentId });
         }
       } else {
         const result = await generateSynopsis({

@@ -10,7 +10,7 @@
  *     swapping with a stale artifact.
  *
  * The SynopsisCoordinator is mocked so we can capture the
- * onCompactionArtifact callback and drive it synchronously.
+ * onSynthesisArtifact callback and drive it synchronously.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync } from "node:fs";
@@ -34,13 +34,13 @@ vi.mock("../core/synopsis-coordinator.js", async (importOriginal) => {
     ...real,
     SynopsisCoordinator: vi.fn().mockImplementation(
       (opts: {
-        onCompactionArtifact: (
+        onSynthesisArtifact: (
           sessionId: string,
           artifact: SessionSynopsis,
           summarizedThroughEntry: number,
         ) => Promise<void>;
       }) => {
-        capturedOnArtifact = opts.onCompactionArtifact;
+        capturedOnArtifact = opts.onSynthesisArtifact;
         capturedScheduleCompaction = vi.fn();
         return {
           scheduleCompaction: capturedScheduleCompaction,
@@ -146,7 +146,7 @@ describe("compaction swap — onceIdle dispatch", () => {
   it("parks an onceIdle handler when non-quiesced; swap fires at the next idle edge", async () => {
     const { manager, session, sessionId } = await buildManager();
 
-    // First isQuiescedForSwap call (in dispatchCompactionSwap) → false:
+    // First isQuiescedForSwap call (in dispatchSynthesisSwap) → false:
     // forces the parking path. Subsequent calls (from inside the idle
     // handler) → true so the swap proceeds.
     const quiesceSpy = vi
@@ -159,7 +159,7 @@ describe("compaction swap — onceIdle dispatch", () => {
     const artifact = makeArtifact();
 
     // Mirror what the real coordinator would have done before firing
-    // onCompactionArtifact: persist the artifact to the store.
+    // onSynthesisArtifact: persist the artifact to the store.
     const store = (manager as unknown as ManagerInternal).store;
     const existingRecord = await store.read(sessionId);
     await store.write({

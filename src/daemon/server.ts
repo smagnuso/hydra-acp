@@ -382,6 +382,15 @@ export async function startDaemon(
     );
   });
 
+  // Same for in-flight /hydra agent swaps. Separate scan because the
+  // breadcrumb lives on a different record field (pendingAgentSwap) and
+  // can short-circuit synthesis when the persisted artifact is fresh.
+  void manager.resumePendingAgentSwaps().catch((err: unknown) => {
+    app.log.warn(
+      `agent-swap resume scan failed: ${(err as Error).message}`,
+    );
+  });
+
   // Background poll: walk every installed agent on a staggered
   // schedule and run syncFromAgent so sessions created outside hydra
   // (or by other tools) show up in `sessions list` without the user

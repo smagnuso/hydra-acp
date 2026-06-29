@@ -6011,6 +6011,22 @@ async function runSession(
         resolvedAgentId = event.agentId;
         screen.setSessionbar({ agent: event.agentId });
       }
+      // A pending /hydra agent switch reuses the compaction banner slot:
+      // a string names the target while synthesis runs, null clears it
+      // once the swap lands (the agentId update above reflects the new
+      // agent, so a "switched to" toast mirrors compaction's "compacted").
+      if (event.pendingAgentSwap !== undefined) {
+        if (typeof event.pendingAgentSwap === "string") {
+          screen.setCompactionIndicator(
+            `switching to ${event.pendingAgentSwap}...`,
+          );
+        } else {
+          screen.setCompactionIndicator(null);
+          if (event.agentId !== undefined) {
+            screen.notify(`switched to ${event.agentId}`, 2000);
+          }
+        }
+      }
       return;
     }
     if (event.kind === "usage-update") {

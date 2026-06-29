@@ -2262,176 +2262,45 @@ describe("Session", () => {
       await expect(session.forceCancel()).rejects.toThrow(/closing/);
     });
 
-    it("/hydra agent swaps the agent, broadcasts info+banner, and feeds transcript to new agent", async () => {
-      const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
-      const newMock = makeMockAgent({ agentId: "new", cwd: "/w" });
-      let spawnCalls = 0;
+    it("/hydra agent schedules a cross-agent synthesis via scheduleCompaction hook with targetAgentId and emits a synthetic banner", async () => {
+      const scheduleCompaction = vi.fn();
+      const mock = makeMockAgent({ agentId: "old", cwd: "/w" });
       const session = new Session({
         sessionId: "hydra_session_SW",
         cwd: "/w",
         agentId: "old",
-        agent: oldMock.agent,
+        agent: mock.agent,
         upstreamSessionId: "u_old",
         historyStore: new HistoryStore(),
-        spawnReplacementAgent: async (p) => {
-          spawnCalls++;
-          expect(p.agentId).toBe("new");
-          expect(p.cwd).toBe("/w");
-          return {
-            agent: newMock.agent,
-            upstreamSessionId: "u_new",
-          };
-        },
+        scheduleCompaction,
       });
-      const { client: alice, stream: aliceStream } = makeClient();
+      const { client: alice, stream } = makeClient();
       await session.attach(alice, "full");
-
-      // Build a tiny history first: one user prompt + one agent reply.
-      const oldRequest = oldMock.agent.connection.request as ReturnType<
-        typeof vi.fn
-      >;
-      oldRequest.mockImplementationOnce(async () => {
-        oldMock.triggerNotification("session/update", {
-          sessionId: "u_old",
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "Hello." },
-          },
-        });
-        return { stopReason: "end_turn" };
-      });
-      await session.prompt(alice.clientId, {
-        prompt: [{ type: "text", text: "say hi" }],
-      });
-      await flushHistoryWrites();
-
-      // The new agent's session/prompt resolves immediately; we just want to
-      // assert it was *invoked* with the synthesized transcript.
-      const newRequest = newMock.agent.connection.request as ReturnType<
-        typeof vi.fn
-      >;
-      newRequest.mockResolvedValue({ stopReason: "end_turn" });
-
-      let agentChangePayload: { agentId: string; upstreamSessionId: string } | undefined;
-      session.onAgentChange((info) => {
-        agentChangePayload = info;
-      });
-
-      const oldKill = oldMock.agent.kill as ReturnType<typeof vi.fn>;
 
       const result = await session.prompt(alice.clientId, {
         prompt: [{ type: "text", text: "/hydra agent new" }],
       });
       expect(result).toMatchObject({ stopReason: "end_turn" });
-      expect(spawnCalls).toBe(1);
-      expect(session.agentId).toBe("new");
-      expect(session.upstreamSessionId).toBe("u_new");
-      expect(session.agent).toBe(newMock.agent);
-      expect(oldKill).toHaveBeenCalled();
+      expect(scheduleCompaction).toHaveBeenCalledTimes(1);
+      expect(scheduleCompaction).toHaveBeenCalledWith({ targetAgentId: "new" });
 
-      // Transcript was sent to the new agent.
-      const promptCalls = newRequest.mock.calls.filter(
-        ([method]) => method === "session/prompt",
-      );
-      expect(promptCalls.length).toBe(1);
-      const [, params] = promptCalls[0] as [string, { prompt: Array<{ text: string }> }];
-      const sentText = params.prompt[0]!.text;
-      expect(sentText).toContain("taking over this conversation from old");
-      expect(sentText).toContain("<user>: say hi");
-      expect(sentText).toContain("<agent: old>: Hello.");
+      // The actual upstream swap is asynchronous (driven by the coordinator
+      // → onSynthesisArtifact → swapUpstream chain). Inline path no longer
+      // mutates Session state; agentId stays "old" until the swap fires.
+      expect(session.agentId).toBe("old");
 
-      // Broadcast: session_info_update carrying the new agentId inside
-      // _meta["hydra-acp"] (the standard ACP schema has no agentId field
-      // at the top level — agent identity is a hydra extension).
-      const infoUpdate = aliceStream.sent.find((m) => {
-        if (!("method" in m) || m.method !== "session/update") {
-          return false;
-        }
-        const update = (
-          m.params as
-            | {
-                update?: {
-                  sessionUpdate?: string;
-                  _meta?: { "hydra-acp"?: { agentId?: string } };
-                };
-              }
-            | undefined
-        )?.update;
-        return (
-          update?.sessionUpdate === "session_info_update" &&
-          update._meta?.["hydra-acp"]?.agentId === "new"
-        );
-      });
-      expect(infoUpdate).toBeDefined();
-      const banner = aliceStream.sent.find(
+      // Banner names the target so attached clients see immediate
+      // confirmation that the switch was scheduled.
+      const banner = stream.sent.find(
         (m) =>
           "method" in m &&
           m.method === "session/update" &&
           (
             (m.params as { update?: { content?: { text?: string } } } | undefined)?.update
               ?.content?.text ?? ""
-          ).includes("(switched from `old` to `new`)"),
+          ).includes("Agent switch to new scheduled"),
       );
-      expect(banner).toBeUndefined();
-
-      expect(agentChangePayload).toEqual({
-        agentId: "new",
-        upstreamSessionId: "u_new",
-      });
-    });
-
-    it("/hydra agent re-advertises the new agent's models/modes from its session/new response", async () => {
-      // Regression: opencode reports its model/mode list only in the
-      // session/new response (never via a follow-up current_model_update),
-      // so a switch that merely cleared the lists left the client dropdowns
-      // permanently empty. The switch must repopulate from the spawn result.
-      const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
-      const newMock = makeMockAgent({ agentId: "new", cwd: "/w" });
-      (newMock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        stopReason: "end_turn",
-      });
-      const session = new Session({
-        sessionId: "hydra_session_SM",
-        cwd: "/w",
-        agentId: "old",
-        agent: oldMock.agent,
-        upstreamSessionId: "u_old",
-        historyStore: new HistoryStore(),
-        // Old agent starts with its own (different) list.
-        agentModels: [{ modelId: "old/model-1" }],
-        currentModel: "old/model-1",
-        spawnReplacementAgent: async () => ({
-          agent: newMock.agent,
-          upstreamSessionId: "u_new",
-          initialModel: "openai/gpt-5-codex",
-          initialModels: [
-            { modelId: "openai/gpt-5-codex", name: "GPT-5 Codex" },
-            { modelId: "anthropic/claude-opus", name: "Opus" },
-          ],
-          initialMode: "build",
-          initialModes: [
-            { id: "build", name: "Build" },
-            { id: "plan", name: "Plan" },
-          ],
-        }),
-      });
-      const { client } = makeClient();
-      await session.attach(client, "full");
-
-      await session.prompt(client.clientId, {
-        prompt: [{ type: "text", text: "/hydra agent new" }],
-      });
-
-      // The new agent's lists replaced the old agent's, rather than being
-      // cleared to empty.
-      expect(session.availableModels()).toEqual([
-        { modelId: "openai/gpt-5-codex", name: "GPT-5 Codex" },
-        { modelId: "anthropic/claude-opus", name: "Opus" },
-      ]);
-      expect(session.availableModes()).toEqual([
-        { id: "build", name: "Build" },
-        { id: "plan", name: "Plan" },
-      ]);
+      expect(banner).toBeDefined();
     });
 
     it("/hydra agent with no agent id rejects", async () => {
@@ -2458,30 +2327,28 @@ describe("Session", () => {
       ).rejects.toThrow(/already on agent mock/);
     });
 
-    it("/hydra agent leaves the old agent in place when the new spawn fails", async () => {
-      const oldMock = makeMockAgent({ agentId: "old", cwd: "/w" });
-      const session = new Session({
-        sessionId: "hydra_session_SF",
-        cwd: "/w",
-        agentId: "old",
-        agent: oldMock.agent,
-        upstreamSessionId: "u_old",
-        spawnReplacementAgent: async () => {
-          throw new Error("registry: agent missing");
-        },
-      });
-      const { client: alice } = makeClient();
+    it("/hydra agent without scheduleCompaction hook emits a configuration error", async () => {
+      // No scheduleCompaction hook wired — the slash command degrades to
+      // a synthetic error reply rather than throwing through the prompt.
+      const { session } = makeSession("hydra_session_SF", "u_SF");
+      const { client: alice, stream } = makeClient();
       session.attach(alice, "full");
-      const oldKill = oldMock.agent.kill as ReturnType<typeof vi.fn>;
 
-      await expect(
-        session.prompt(alice.clientId, {
-          prompt: [{ type: "text", text: "/hydra agent nope" }],
-        }),
-      ).rejects.toThrow(/registry: agent missing/);
-      expect(session.agentId).toBe("old");
-      expect(session.agent).toBe(oldMock.agent);
-      expect(oldKill).not.toHaveBeenCalled();
+      const result = await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "/hydra agent nope" }],
+      });
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+      expect(session.agentId).toBe("mock");
+      const errorMsg = stream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (
+            (m.params as { update?: { content?: { text?: string } } } | undefined)?.update
+              ?.content?.text ?? ""
+          ).includes("agent switching not configured"),
+      );
+      expect(errorMsg).toBeDefined();
     });
 
     it("/hydra kill closes the session, notifies clients, and keeps the cold record", async () => {

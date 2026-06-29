@@ -421,7 +421,7 @@ describe("SynopsisCoordinator", () => {
     expect(persistedTitles).toHaveLength(0);
   });
 
-  it("onCompactionArtifact fires with the right args", async () => {
+  it("onSynthesisArtifact fires with the right args", async () => {
     const record = makeRecord();
     const records = new Map([[record.sessionId, record]]);
     const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
@@ -438,7 +438,7 @@ describe("SynopsisCoordinator", () => {
       
       persistTitle: async () => undefined,
       persistSynopsis: async () => undefined,
-      onCompactionArtifact: async (sid, artifact, through) => {
+      onSynthesisArtifact: async (sid, artifact, through) => {
         compactionArtifacts.push({ sessionId: sid, artifact, through });
       },
     });
@@ -452,7 +452,7 @@ describe("SynopsisCoordinator", () => {
     expect(compactionArtifacts[0]!.through).toBe(3);
   });
 
-  it("onCompactionArtifact is not called for title jobs", async () => {
+  it("onSynthesisArtifact is not called for title jobs", async () => {
     const record = makeRecord();
     const records = new Map([[record.sessionId, record]]);
     const histories = new Map([[record.sessionId, [{}, {}, {}]]]);
@@ -465,7 +465,7 @@ describe("SynopsisCoordinator", () => {
       
       persistTitle: async () => undefined,
       persistSynopsis: async () => undefined,
-      onCompactionArtifact: async () => {
+      onSynthesisArtifact: async () => {
         compactionCalled = true;
       },
     });
@@ -498,7 +498,7 @@ describe("SynopsisCoordinator", () => {
       
       persistTitle: async () => undefined,
       persistSynopsis: async () => undefined,
-      onCompactionArtifact: async (sid, artifact, through) => {
+      onSynthesisArtifact: async (sid, artifact, through) => {
         compactionArtifacts.push(artifact);
       },
     });
@@ -631,7 +631,7 @@ describe("SynopsisCoordinator", () => {
       
       persistTitle: async () => undefined,
       persistSynopsis: async () => undefined,
-      onCompactionArtifact: async (sid, artifact, through) => {
+      onSynthesisArtifact: async (sid, artifact, through) => {
         compactionArtifacts.push(artifact);
       },
     });
