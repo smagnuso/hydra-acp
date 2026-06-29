@@ -202,7 +202,7 @@ async function main(): Promise<void> {
     return;
   }
   if (flags.help === true) {
-    printHelp();
+    printHelp(positional[0]);
     return;
   }
 
@@ -893,125 +893,174 @@ function readVersion(): string {
   }
 }
 
-function printHelp(): void {
-  process.stdout.write(
-    [
-      "hydra-acp — multi-client ACP session daemon",
-      "",
-      "Usage:",
-      "  hydra-acp [--session <id-or-url>] [--reattach] [opts]",
-      "                                     Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case).",
-      "                                     With -p / --prompt and no subcommand, auto-dispatch to cat.",
-      "  hydra-acp tui   [same flags]       Force TUI explicitly.",
-      "  hydra-acp shim  [same flags]       Force shim explicitly (non-interactive; password prompts not allowed).",
-      "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--agent <id>] [--model <id>] [--name <label>]",
-      "                                     Pipe-friendly headless mode. Reads stdin and sends it",
-      "                                     as a prompt to a fresh session, streams the agent's",
-      "                                     response to stdout, exits when stdin closes. A bounded",
-      "                                     input (e.g. `cat file.log | hydra cat -p \"...\"`) goes in",
-      "                                     as one turn; a streaming input (e.g. `tail -f`) is",
-      "                                     chunked by the natural pauses in the writer. -p is an",
-      "                                     optional standing instruction prepended to every chunk;",
-      "                                     if stdin already contains the question, -p is not needed.",
-      "                                     By default, agent markdown is post-processed: ANSI-styled",
-      "                                     on a TTY, stripped to plain text on a pipe, tables laid",
-      "                                     out in both modes. Tool calls / thoughts split paragraphs",
-      "                                     but otherwise stay hidden. --raw bypasses the renderer",
-      "                                     and emits chunks immediately, the way cat used to behave.",
-      "                                     With --session, attach to an existing session instead",
-      "                                     of creating a new one. With --detach, the session",
-      "                                     survives in the daemon for slack/browser/notifier",
-      "                                     extensions.",
-      "  hydra-acp launch <agent> [agent-args...]",
-      "                                     Shim mode, force daemon to spawn <agent>",
-      "                                     from the registry. Args after <agent>",
-      "                                     are forwarded to the agent's command.",
-      "",
-      "Session selection (any entry point):",
-      "  --session <id>                     Attach to a local session by id.",
-      "  --session hydra://host[:port]/id   Attach to a session on another daemon (loopback uses the local service",
-      "                                     token; remote hosts use the cached credential from ~/.hydra-acp/remotes.json,",
-      "                                     falling back to a password prompt — but only on the TUI path).",
-      "  --session hydra://host/            URL with no id: picker (TUI) or fresh session (shim/cat).",
-      "  --reattach                         Pick the most-recent session for the current cwd.",
-      "  --new                              Force a fresh session.",
-      "  --readonly                         Open a session as a transcript viewer (requires --session).",
-      "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat).",
-      "  HYDRA_ACP_SESSION                  Env var equivalent of --session (flag wins).",
-      "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json",
-      "  hydra-acp daemon [status]          Show daemon pid/version (default when no subcommand)",
-      "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)",
-      "  hydra-acp daemon stop|restart",
-      "  hydra-acp daemon log [-f] [-n N]   Tail or follow the daemon log",
-      "  hydra-acp version [--json]         Print CLI, daemon, and extension/transformer versions",
-      "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive] [--columns=<list>]",
-      "                                     List sessions (live + 20 most-recent cold; --all lifts the cold cap AND surfaces non-interactive sessions; --json emits JSON for scripts).",
-      "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer.",
-      "                                     --include-non-interactive surfaces ancillary (e.g. `hydra cat`) or never-prompted sessions while keeping the cold cap (a narrower --all).",
-      "                                     --columns picks which columns show and their order, e.g. --columns=session,state,title,cost (valid: session,upstream,host,state,agent,model,age,cwd,title,cost). UPSTREAM/HOST/MODEL hidden by default; COST is the trailing column; overrides config.tui.sessionColumns.",
-      "  hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]",
-      "                                     Aggregate one session: turn count, tool histogram, files touched, cost/duration, synopsis. --diff appends the session diff under the summary and pages the whole thing on a TTY (inherits --fold).",
-      "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]",
-      "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses. --fold collapses sequential hunks that rewrite the same region into one net-effect hunk.",
-      "  hydra-acp session kill <id>        Demote a warm session to cold (keeps the on-disk record)",
-      "  hydra-acp session remove <id>      Remove a session entirely (live or cold)",
-      "  hydra-acp session collect [--max-age-days <n>] [--limit <n>] [--keep-undecided] [--json]",
-      "                                     Delete cold sessions that were never promoted to a real conversation — `hydra cat` one-shots (interactive=false) AND editor-spawned panels that never had a turn (interactive=undefined). With no --max-age-days, collects every matching cold row regardless of age (you typed `collect`, so collect it all). Pass --max-age-days N to scope to anything older than N days; 0 is the same as omitting it. --keep-undecided narrows to only explicit interactive=false rows (matches what the background timer does). --limit caps deletions per call (default 1000); re-run to drain a larger backlog. The daemon also runs this on a timer using config.daemon.sessionGcMaxAgeDays (with the conservative explicit-only policy) — this is the manual trigger.",
-      "  hydra-acp session export <id> [--out <file>|.]",
-      "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout",
-      "  hydra-acp session transcript <id>|<file> [--out <file>|.]",
-      "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout",
-      "  hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]",
-      "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing",
-      "  hydra-acp session share [<id>] [--host <name>] [--cwd <path>]",
-      "                                     Print a hydra:// URL the recipient can paste into `--session`. With no id, picks the most-recent session for cwd. Host precedence: --host > config.daemon.publicHost > config.daemon.host > 127.0.0.1 (with a stderr warning that the URL is loopback-only).",
-      "  hydra-acp extension list                    List configured extensions and live state",
-      "  hydra-acp extension add <name> [opts]       Add an extension to config",
-      "  hydra-acp extension remove <name>           Remove an extension from config",
-      "  hydra-acp extension start|stop|restart <n>|all   Lifecycle on one or all",
-      "  hydra-acp extension log <name> [-f] [-n N]       Tail or follow an extension's log",
-      "  hydra-acp transformer list                  List configured transformers and live state",
-      "  hydra-acp transformer add <name> [opts]     Add a transformer to config (--command, --args, --env, --disabled)",
-      "  hydra-acp transformer remove <name>         Remove a transformer from config",
-      "  hydra-acp transformer start|stop|restart <n>|all  Lifecycle on one or all",
-      "  hydra-acp transformer log <name> [-f] [-n N]      Tail or follow a transformer's log",
-      "  hydra-acp agent [list]                      List agents in the cached registry",
-      "  hydra-acp agent refresh                     Force a registry re-fetch",
-      "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)",
-      "  hydra-acp agent set [<id>] [model]          With no args, report the daemon's current default agent and its default model. With <id>, set <id> as the default agent (config.defaultAgent). With <id> and [model], set the per-agent default model (config.defaultModels[<id>]).",
-      "  hydra-acp agent pin <id> [packageSpec]      Pin a registry agent to a specific npm version (e.g. opencode-ai@0.5.12). Omit packageSpec to clear. Sidesteps a broken upstream publish.",
-      "  hydra-acp agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...  Define a local agent that bypasses the registry (e.g. your system `opencode`). --command defaults to <id> (resolved off PATH).",
-      "  hydra-acp agent remove <id>                 Remove a local agent.",
-      "  hydra-acp registry pin | unpin              Freeze the daemon on its cached registry (pin) so a bad push isn't picked up, or resume normal TTL fetching (unpin). `agent refresh` still forces a fetch.",
-      "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`",
-      "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log",
-      "  hydra-acp agent auth <id>                      Run the auth flow for <id>",
-      "  hydra-acp config [list] [<dotted.key>]      Print effective config (or one subtree) as JSON",
-      "  hydra-acp config get <dotted.key>           Print a single effective value (e.g. `tui.openFileCommand`)",
-      "  hydra-acp config set <dotted.key> <value>   Persist a value; <value> is parsed as JSON when possible, else stored as a string. Validated against the schema before write.",
-      "  hydra-acp config unset <dotted.key>         Remove a key from config.json (reverts to schema default)",
-      "  hydra-acp config path                       Print the config file path",
-      "  hydra-acp auth password [--force]           Set the daemon's master password",
-      "  hydra-acp auth [list]                       List active session tokens",
-      "  hydra-acp auth revoke <id>                  Revoke a session token",
-      "  hydra-acp tui flags: [--session <id-or-url>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]",
-      "                                     Smart default (no flags): shows a picker when sessions exist, else new.",
-      "  hydra-acp --version                Print version",
-      "  hydra-acp --help                   Show this help",
-      "",
-      "External subcommands:",
-      "  Any `hydra-acp <name>` whose <name> is not built-in is exec'd as",
-      "  `hydra-acp-<name>` from PATH (git-style). Ecosystem packages like",
-      "  @hydra-acp/planner expose themselves through this mechanism.",
-      "",
-      "Config knob flags accept env-var equivalents (flag wins):",
-      "  --agent                 HYDRA_ACP_AGENT",
-      "  --model                 HYDRA_ACP_MODEL    (one-shot at session/new; ignored on --session resume)",
-      "  --session               HYDRA_ACP_SESSION  (session id or hydra:// URL)",
-      "  --name                  HYDRA_ACP_NAME",
-      "",
-    ].join("\n"),
-  );
+// A help line is one of:
+//   - a plain string: always shown.
+//   - [subs, text]: shown only when no filter is set or `subcommand` is in subs.
+//   - { globalOnly: text }: shown only when no filter is set (e.g. cross-cutting
+//     footers like the env-var legend that don't belong in a subcommand-scoped
+//     view).
+// Continuation lines for a multi-line entry share the same tag so they
+// appear/disappear as a unit.
+type HelpLine =
+  | string
+  | readonly [readonly string[], string]
+  | { readonly globalOnly: string };
+
+const TUI = ["tui"] as const;
+const SHIM = ["shim"] as const;
+const CAT = ["cat"] as const;
+const LAUNCH = ["launch"] as const;
+const INIT = ["init"] as const;
+const DAEMON = ["daemon"] as const;
+const VERSION = ["version"] as const;
+const SESSION = ["session", "sessions"] as const;
+const EXT = ["extension", "extensions"] as const;
+const TR = ["transformer", "transformers"] as const;
+const AGENT = ["agent", "agents"] as const;
+const REGISTRY = ["registry"] as const;
+const CONFIG = ["config"] as const;
+const AUTH = ["auth"] as const;
+
+function printHelp(subcommand?: string): void {
+  const lines: readonly HelpLine[] = [
+    "hydra-acp — multi-client ACP session daemon",
+    "",
+    "Usage:",
+    { globalOnly: "  hydra-acp [--session <id-or-url>] [--reattach] [opts]" },
+    { globalOnly: "                                     Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case)." },
+    { globalOnly: "                                     With -p / --prompt and no subcommand, auto-dispatch to cat." },
+    [TUI, "  hydra-acp tui   [same flags]       Force TUI explicitly."],
+    [SHIM, "  hydra-acp shim  [same flags]       Force shim explicitly (non-interactive; password prompts not allowed)."],
+    [CAT, "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--agent <id>] [--model <id>] [--name <label>]"],
+    [CAT, "                                     Pipe-friendly headless mode. Reads stdin and sends it"],
+    [CAT, "                                     as a prompt to a fresh session, streams the agent's"],
+    [CAT, "                                     response to stdout, exits when stdin closes. A bounded"],
+    [CAT, "                                     input (e.g. `cat file.log | hydra cat -p \"...\"`) goes in"],
+    [CAT, "                                     as one turn; a streaming input (e.g. `tail -f`) is"],
+    [CAT, "                                     chunked by the natural pauses in the writer. -p is an"],
+    [CAT, "                                     optional standing instruction prepended to every chunk;"],
+    [CAT, "                                     if stdin already contains the question, -p is not needed."],
+    [CAT, "                                     By default, agent markdown is post-processed: ANSI-styled"],
+    [CAT, "                                     on a TTY, stripped to plain text on a pipe, tables laid"],
+    [CAT, "                                     out in both modes. Tool calls / thoughts split paragraphs"],
+    [CAT, "                                     but otherwise stay hidden. --raw bypasses the renderer"],
+    [CAT, "                                     and emits chunks immediately, the way cat used to behave."],
+    [CAT, "                                     With --session, attach to an existing session instead"],
+    [CAT, "                                     of creating a new one. With --detach, the session"],
+    [CAT, "                                     survives in the daemon for slack/browser/notifier"],
+    [CAT, "                                     extensions."],
+    [LAUNCH, "  hydra-acp launch <agent> [agent-args...]"],
+    [LAUNCH, "                                     Shim mode, force daemon to spawn <agent>"],
+    [LAUNCH, "                                     from the registry. Args after <agent>"],
+    [LAUNCH, "                                     are forwarded to the agent's command."],
+    "",
+    ...(((): readonly HelpLine[] => {
+      const ENTRY = ["tui", "shim", "cat", "launch"] as const;
+      return [
+        [ENTRY, "Session selection (any entry point):"],
+        [ENTRY, "  --session <id>                     Attach to a local session by id."],
+        [ENTRY, "  --session hydra://host[:port]/id   Attach to a session on another daemon (loopback uses the local service"],
+        [ENTRY, "                                     token; remote hosts use the cached credential from ~/.hydra-acp/remotes.json,"],
+        [ENTRY, "                                     falling back to a password prompt — but only on the TUI path)."],
+        [ENTRY, "  --session hydra://host/            URL with no id: picker (TUI) or fresh session (shim/cat)."],
+        [ENTRY, "  --reattach                         Pick the most-recent session for the current cwd."],
+        [ENTRY, "  --new                              Force a fresh session."],
+        [ENTRY, "  --readonly                         Open a session as a transcript viewer (requires --session)."],
+        [ENTRY, "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat)."],
+        [ENTRY, "  HYDRA_ACP_SESSION                  Env var equivalent of --session (flag wins)."],
+      ];
+    })()),
+    [INIT, "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json"],
+    [DAEMON, "  hydra-acp daemon [status]          Show daemon pid/version (default when no subcommand)"],
+    [DAEMON, "  hydra-acp daemon start [--foreground]   Start daemon (detached by default; --foreground to attach)"],
+    [DAEMON, "  hydra-acp daemon stop|restart"],
+    [DAEMON, "  hydra-acp daemon log [-f] [-n N]   Tail or follow the daemon log"],
+    [VERSION, "  hydra-acp version [--json]         Print CLI, daemon, and extension/transformer versions"],
+    [SESSION, "  hydra-acp session [list] [--all] [--json] [--host=<host>] [--include-non-interactive] [--columns=<list>]"],
+    [SESSION, "                                     List sessions (live + 20 most-recent cold; --all lifts the cold cap AND surfaces non-interactive sessions; --json emits JSON for scripts)."],
+    [SESSION, "                                     --host filters by origin machine: 'local' (default) shows only sessions created here, 'all' shows everything, or pass a hostname (e.g. machine-b) to show only imports from that peer."],
+    [SESSION, "                                     --include-non-interactive surfaces ancillary (e.g. `hydra cat`) or never-prompted sessions while keeping the cold cap (a narrower --all)."],
+    [SESSION, "                                     --columns picks which columns show and their order, e.g. --columns=session,state,title,cost (valid: session,upstream,host,state,agent,model,age,cwd,title,cost). UPSTREAM/HOST/MODEL hidden by default; COST is the trailing column; overrides config.tui.sessionColumns."],
+    [SESSION, "  hydra-acp session info <id> [--verbose] [--json] [--diff] [--fold] [--no-color] [--no-pager]"],
+    [SESSION, "                                     Aggregate one session: turn count, tool histogram, files touched, cost/duration, synopsis. --diff appends the session diff under the summary and pages the whole thing on a TTY (inherits --fold)."],
+    [SESSION, "  hydra-acp session diff <id> [--json] [--no-color] [--no-pager] [--fold]"],
+    [SESSION, "                                     Print a git-diff-shaped view of every file the session edited, reconstructed from history (no git). Pages through $HYDRA_ACP_PAGER / $PAGER / less on a TTY (LESS=FRX default); --no-pager bypasses. --fold collapses sequential hunks that rewrite the same region into one net-effect hunk."],
+    [SESSION, "  hydra-acp session kill <id>        Demote a warm session to cold (keeps the on-disk record)"],
+    [SESSION, "  hydra-acp session remove <id>      Remove a session entirely (live or cold)"],
+    [SESSION, "  hydra-acp session collect [--max-age-days <n>] [--limit <n>] [--keep-undecided] [--json]"],
+    [SESSION, "                                     Delete cold sessions that were never promoted to a real conversation — `hydra cat` one-shots (interactive=false) AND editor-spawned panels that never had a turn (interactive=undefined). With no --max-age-days, collects every matching cold row regardless of age (you typed `collect`, so collect it all). Pass --max-age-days N to scope to anything older than N days; 0 is the same as omitting it. --keep-undecided narrows to only explicit interactive=false rows (matches what the background timer does). --limit caps deletions per call (default 1000); re-run to drain a larger backlog. The daemon also runs this on a timer using config.daemon.sessionGcMaxAgeDays (with the conservative explicit-only policy) — this is the manual trigger."],
+    [SESSION, "  hydra-acp session export <id> [--out <file>|.]"],
+    [SESSION, "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout"],
+    [SESSION, "  hydra-acp session transcript <id>|<file> [--out <file>|.]"],
+    [SESSION, "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout"],
+    [SESSION, "  hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]"],
+    [SESSION, "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing"],
+    [SESSION, "  hydra-acp session share [<id>] [--host <name>] [--cwd <path>]"],
+    [SESSION, "                                     Print a hydra:// URL the recipient can paste into `--session`. With no id, picks the most-recent session for cwd. Host precedence: --host > config.daemon.publicHost > config.daemon.host > 127.0.0.1 (with a stderr warning that the URL is loopback-only)."],
+    [EXT, "  hydra-acp extension list                    List configured extensions and live state"],
+    [EXT, "  hydra-acp extension add <name> [opts]       Add an extension to config"],
+    [EXT, "  hydra-acp extension remove <name>           Remove an extension from config"],
+    [EXT, "  hydra-acp extension start|stop|restart <n>|all   Lifecycle on one or all"],
+    [EXT, "  hydra-acp extension log <name> [-f] [-n N]       Tail or follow an extension's log"],
+    [TR, "  hydra-acp transformer list                  List configured transformers and live state"],
+    [TR, "  hydra-acp transformer add <name> [opts]     Add a transformer to config (--command, --args, --env, --disabled)"],
+    [TR, "  hydra-acp transformer remove <name>         Remove a transformer from config"],
+    [TR, "  hydra-acp transformer start|stop|restart <n>|all  Lifecycle on one or all"],
+    [TR, "  hydra-acp transformer log <name> [-f] [-n N]      Tail or follow a transformer's log"],
+    [AGENT, "  hydra-acp agent [list]                      List agents in the cached registry"],
+    [AGENT, "  hydra-acp agent refresh                     Force a registry re-fetch"],
+    [AGENT, "  hydra-acp agent install <id>                Pre-install <id> from the registry (else lazy on first session)"],
+    [AGENT, "  hydra-acp agent set [<id>] [model]          With no args, report the daemon's current default agent and its default model. With <id>, set <id> as the default agent (config.defaultAgent). With <id> and [model], set the per-agent default model (config.defaultModels[<id>])."],
+    [AGENT, "  hydra-acp agent pin <id> [packageSpec]      Pin a registry agent to a specific npm version (e.g. opencode-ai@0.5.12). Omit packageSpec to clear. Sidesteps a broken upstream publish."],
+    [AGENT, "  hydra-acp agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...  Define a local agent that bypasses the registry (e.g. your system `opencode`). --command defaults to <id> (resolved off PATH)."],
+    [AGENT, "  hydra-acp agent remove <id>                 Remove a local agent."],
+    [REGISTRY, "  hydra-acp registry pin | unpin              Freeze the daemon on its cached registry (pin) so a bad push isn't picked up, or resume normal TTL fetching (unpin). `agent refresh` still forces a fetch."],
+    [AGENT, "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`"],
+    [AGENT, "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log"],
+    [AGENT, "  hydra-acp agent auth <id>                      Run the auth flow for <id>"],
+    [CONFIG, "  hydra-acp config [list] [<dotted.key>]      Print effective config (or one subtree) as JSON"],
+    [CONFIG, "  hydra-acp config get <dotted.key>           Print a single effective value (e.g. `tui.openFileCommand`)"],
+    [CONFIG, "  hydra-acp config set <dotted.key> <value>   Persist a value; <value> is parsed as JSON when possible, else stored as a string. Validated against the schema before write."],
+    [CONFIG, "  hydra-acp config unset <dotted.key>         Remove a key from config.json (reverts to schema default)"],
+    [CONFIG, "  hydra-acp config path                       Print the config file path"],
+    [AUTH, "  hydra-acp auth password [--force]           Set the daemon's master password"],
+    [AUTH, "  hydra-acp auth [list]                       List active session tokens"],
+    [AUTH, "  hydra-acp auth revoke <id>                  Revoke a session token"],
+    [TUI, "  hydra-acp tui [--session <id-or-url>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]"],
+    [TUI, "                                     Interactive terminal UI. Smart default (no flags): shows a picker when sessions exist, else new."],
+    { globalOnly: "  hydra-acp --version                Print version" },
+    { globalOnly: "  hydra-acp --help                   Show this help" },
+    { globalOnly: "" },
+    { globalOnly: "External subcommands:" },
+    { globalOnly: "  Any `hydra-acp <name>` whose <name> is not built-in is exec'd as" },
+    { globalOnly: "  `hydra-acp-<name>` from PATH (git-style). Ecosystem packages like" },
+    { globalOnly: "  @hydra-acp/planner expose themselves through this mechanism." },
+    { globalOnly: "" },
+    { globalOnly: "Config knob flags accept env-var equivalents (flag wins):" },
+    { globalOnly: "  --agent                 HYDRA_ACP_AGENT" },
+    { globalOnly: "  --model                 HYDRA_ACP_MODEL    (one-shot at session/new; ignored on --session resume)" },
+    { globalOnly: "  --session               HYDRA_ACP_SESSION  (session id or hydra:// URL)" },
+    { globalOnly: "  --name                  HYDRA_ACP_NAME" },
+    "",
+  ];
+  const out: string[] = [];
+  for (const line of lines) {
+    if (typeof line === "string") {
+      out.push(line);
+      continue;
+    }
+    if ("globalOnly" in line) {
+      if (subcommand === undefined) {
+        out.push(line.globalOnly);
+      }
+      continue;
+    }
+    const [subs, text] = line;
+    if (subcommand === undefined || subs.includes(subcommand)) {
+      out.push(text);
+    }
+  }
+  process.stdout.write(out.join("\n") + "\n");
 }
 
 async function maybePrintUpdateNotice(): Promise<void> {
