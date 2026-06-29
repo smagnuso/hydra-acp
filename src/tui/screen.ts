@@ -2762,7 +2762,14 @@ export class Screen {
     // means the row belongs to a clickable scrollback block; that's
     // exactly the affordance we want to surface.
     if (cell !== null && kind !== "release") {
-      const info = this.keyAndSubAtRow(cell.y);
+      const rawInfo = this.keyAndSubAtRow(cell.y);
+      // agent_message blocks carry a blockKey only so streaming chunks
+      // can re-render in place via upsertLines — they have no click or
+      // hover affordance. Treat them as unkeyed for pointer-shape and
+      // hover-highlight purposes so child thought/code spans don't
+      // flash a hover background when the pointer drifts across them.
+      const info =
+        rawInfo !== null && rawInfo.key.startsWith("agent:") ? null : rawInfo;
       this.setPointerShape(info !== null ? "pointer" : "default");
       if (kind === "move") {
         const newKey = info?.key ?? null;
