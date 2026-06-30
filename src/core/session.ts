@@ -5219,12 +5219,15 @@ export class Session {
         }
       }
 
-      const tail = historyEntries.slice(-TAIL_K);
-
+      // Pass the FULL history — renderCompactionSeed turn-extracts and keeps
+      // the last TAIL_K *turns*. Pre-slicing to the last TAIL_K *entries*
+      // here starved the extractor of a prompt_received boundary whenever the
+      // tail landed mid-agent-turn, yielding an empty tail (synopsis-only
+      // seed). Mirrors swapUpstream's compaction path.
       const seedText = renderCompactionSeed({
         synopsis,
         title,
-        tail,
+        tail: historyEntries,
         tailK: TAIL_K,
       });
 

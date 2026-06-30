@@ -74,6 +74,22 @@ function turnComplete(messageId: string): {
   };
 }
 
+function userPrompt(text: string): { method: string; params: unknown; recordedAt: number } {
+  return {
+    method: "session/update",
+    params: { update: { sessionUpdate: "prompt_received", prompt: [{ type: "text", text }] } },
+    recordedAt: 1,
+  };
+}
+
+function agentChunk(text: string): { method: string; params: unknown; recordedAt: number } {
+  return {
+    method: "session/update",
+    params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } },
+    recordedAt: 1,
+  };
+}
+
 function bundleWith(opts: {
   lineageId: string;
   history: Array<{ method: string; params: unknown; recordedAt: number }>;
@@ -542,6 +558,86 @@ describe("seedFromFork — unit test", () => {
     // (internalPromptCapture prevents recording)
     const forkHistoryAfter = await readHistory(fork.sessionId);
     expect(forkHistoryAfter.length).toBe(3); // Same as before — no extra entries
+  });
+
+  it("includes recent turns even when the final turn spans more than TAIL_K entries", async () => {
+    // Regression: seedFromFork used to pre-slice the last TAIL_K *entries*
+    // before turn-extraction. A long final agent turn (one prompt followed by
+    // >TAIL_K message chunks) pushed the only prompt_received out of that
+    // window, so the extractor found no turn boundary and rendered an empty
+    // tail — a synopsis-only seed. The fix passes the full history so the
+    // renderer keeps the last TAIL_K *turns*.
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        throw new Error("spawner should not be called from forkSession");
+      },
+    );
+
+    // 1 short turn, then a final turn whose 30 chunks bury the prompt far
+    // past the last-20-entries window.
+    const longTurn = [
+      userPrompt("RECENT_QUESTION_MARKER"),
+      ...Array.from({ length: 30 }, (_, i) => agentChunk(`chunk ${i} `)),
+      turnComplete("m_last"),
+    ];
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_long_final_turn",
+        history: [userPrompt("warmup"), agentChunk("ok"), turnComplete("m_first"), ...longTurn],
+        title: "Long turn thread",
+      }),
+    );
+
+    mockGenerate.mockResolvedValue({
+      title: "Synthesized",
+      synopsis: { goal: "g", outcome: "o" },
+    });
+
+    const originalMutateRecord = (manager as unknown as { mutateRecord: (...a: unknown[]) => Promise<void> }).mutateRecord;
+    let mutateResolve: (() => void) | undefined;
+    const mutatePromise = new Promise<void>((resolve) => { mutateResolve = resolve; });
+    (manager as unknown as { mutateRecord: (...a: unknown[]) => Promise<void> }).mutateRecord = async (...args: unknown[]) => {
+      await originalMutateRecord.apply(manager, args);
+      mutateResolve?.();
+    };
+
+    const fork = await manager.forkSession(source.sessionId);
+    await mutatePromise;
+
+    const resumeParams = await manager.loadFromDisk(fork.sessionId);
+    const mocks: MockAgentControls[] = [];
+    const resurrectMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: process.cwd() });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u_resurrected" });
+        return m.agent;
+      },
+    );
+
+    const resumedSession = await resurrectMgr.resurrect(resumeParams!);
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import("../__tests__/test-utils.js");
+    const conn = new JsonRpcConnection(makeControlledStream());
+    await resumedSession.attach({ clientId: "c1", connection: conn }, "full");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    const promptCalls = requestMock.mock.calls.filter((c: unknown[]) => c[0] === "session/prompt");
+    expect(promptCalls.length).toBeGreaterThan(0);
+    const promptText = (promptCalls[0] as [string, { prompt?: Array<{ text: string }> }])[1]?.prompt?.[0]?.text ?? "";
+
+    // The recent-turns block must be non-empty and carry the final turn's
+    // prompt — the exact content the old entry-slice path dropped.
+    const tailStart = promptText.indexOf("--- begin recent turns");
+    const tailEnd = promptText.indexOf("--- end recent turns ---");
+    expect(tailStart).toBeGreaterThanOrEqual(0);
+    expect(promptText.slice(tailStart, tailEnd)).toContain("User: RECENT_QUESTION_MARKER");
   });
 });
 
