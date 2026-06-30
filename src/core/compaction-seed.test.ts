@@ -213,6 +213,134 @@ describe("renderCompactionSeed", () => {
     expect(seed).toContain("Assistant: hi back");
   });
 
+  it("omits the compaction header and uses the recall-oriented note when synopsis is absent", () => {
+    const seed = renderCompactionSeed({
+      title: "btw: quick aside",
+      tail: buildHistory(2),
+      tailK: 10,
+    });
+
+    // No synopsis → no compaction header block at all.
+    expect(seed).not.toContain("--- begin prior session compaction ---");
+    expect(seed).not.toContain("--- end prior session compaction ---");
+    expect(seed).not.toContain("[Goal]");
+    // Title still renders, above the recent turns.
+    expect(seed).toContain("[Title] btw: quick aside");
+    expect(seed).toContain("--- begin recent turns (verbatim, last 2) ---");
+    expect(seed).toContain("User: prompt 1");
+    expect(seed).toContain("Assistant: response 2");
+    // Honest closing note — does NOT claim a compaction happened, points at recall.
+    expect(seed).not.toContain("Hydra has compacted earlier conversation");
+    expect(seed).toContain("forked from another session");
+    expect(seed).toContain("hydra-recall");
+  });
+
+  it("watermark-anchored clamp: no turns past watermark + floor=0 → empty tail (compaction-lean)", () => {
+    // Synopsis covers everything (watermark = entry count). With
+    // floor=0, the post-watermark gap is zero turns so the tail is
+    // empty — this is the /compact handoff: pure synopsis.
+    const history = buildHistory(5);
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      tail: history,
+      tailK: 20,
+      watermark: history.length,
+      tailFloor: 0,
+    });
+    expect(seed).toContain("--- begin recent turns (verbatim, last 0) ---");
+    expect(seed).not.toContain("User: prompt");
+    expect(seed).not.toContain("Assistant: response");
+  });
+
+  it("watermark-anchored clamp: floor reaches back into pre-watermark turns for continuity", () => {
+    // No turns past watermark, but floor=3 → render last 3 closed
+    // turns even though the synopsis already covers them. This is the
+    // /hydra agent / fork / btw continuity handoff.
+    const history = buildHistory(5);
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      tail: history,
+      tailK: 20,
+      watermark: history.length,
+      tailFloor: 3,
+    });
+    expect(seed).toContain("--- begin recent turns (verbatim, last 3) ---");
+    expect(seed).not.toContain("User: prompt 1");
+    expect(seed).not.toContain("User: prompt 2");
+    expect(seed).toContain("User: prompt 3");
+    expect(seed).toContain("User: prompt 4");
+    expect(seed).toContain("User: prompt 5");
+  });
+
+  it("watermark-anchored clamp: gap larger than floor uses the gap", () => {
+    // Stale synopsis: 5 turns since watermark, floor=2 → tail = 5
+    // (the full gap), not floor. The cap (tailK) only kicks in if the
+    // gap exceeds it.
+    const allTurns = buildHistory(10);
+    // First 5 turns sit before the watermark (covered by synopsis);
+    // remaining 5 are post-watermark and must replay verbatim.
+    const fiveTurnEntries = buildHistory(5).length; // 15 entries (prompt+chunk+complete per turn)
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      tail: allTurns,
+      tailK: 20,
+      watermark: fiveTurnEntries,
+      tailFloor: 2,
+    });
+    expect(seed).toContain("--- begin recent turns (verbatim, last 5) ---");
+    expect(seed).not.toContain("User: prompt 5");
+    expect(seed).toContain("User: prompt 6");
+    expect(seed).toContain("User: prompt 10");
+  });
+
+  it("watermark-anchored clamp: gap larger than tailK is capped (recall covers the rest)", () => {
+    const allTurns = buildHistory(10);
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      tail: allTurns,
+      tailK: 3,
+      watermark: 0, // entire history is post-watermark
+      tailFloor: 0,
+    });
+    expect(seed).toContain("--- begin recent turns (verbatim, last 3) ---");
+    expect(seed).not.toContain("User: prompt 7");
+    expect(seed).toContain("User: prompt 8");
+    expect(seed).toContain("User: prompt 10");
+  });
+
+  it("renders an in-flight open turn in its own section", () => {
+    // History ends mid-turn — user prompt + chunks + tool call, no
+    // turn_complete. Should render the open turn separately.
+    const history = [
+      ...buildHistory(2),
+      userPrompt("ongoing question"),
+      agentChunk("partial answer in "),
+      agentChunk("progress"),
+      toolCall("Bash", { command: "ls" }),
+    ];
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      tail: history,
+      tailK: 10,
+    });
+    expect(seed).toContain("--- end recent turns ---");
+    expect(seed).toContain("--- begin current in-flight turn (no completion yet) ---");
+    expect(seed).toContain("User: ongoing question");
+    expect(seed).toContain("Assistant: partial answer in progress");
+    expect(seed).toContain("Tool: Bash(command=ls)");
+    expect(seed).toContain("--- end current in-flight turn ---");
+  });
+
+  it("does not emit the in-flight section when every turn is closed", () => {
+    const seed = renderCompactionSeed({
+      synopsis: synopsis(),
+      tail: buildHistory(2),
+      tailK: 10,
+    });
+    expect(seed).not.toContain("--- begin current in-flight turn");
+    expect(seed).not.toContain("--- end current in-flight turn");
+  });
+
   it("returns closing note on every invocation", () => {
     const seed = renderCompactionSeed({
       synopsis: synopsis(),

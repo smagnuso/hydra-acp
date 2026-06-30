@@ -555,9 +555,14 @@ export class SessionManager {
     targetAgentId?: string,
   ): Promise<void> {
     try {
+      // Per-intent floor: /hydra agent (cross-agent) wants a few
+      // verbatim turns for continuity; /compact wants pure synopsis
+      // (lean handoff, the explicit point of compaction).
+      const tailFloor = targetAgentId ? Math.min(5, tailK) : 0;
       await live.swapUpstream({
         artifact,
         tailK,
+        tailFloor,
         summarizedThroughEntry,
         ...(targetAgentId ? { newAgentId: targetAgentId } : {}),
       });
@@ -1073,14 +1078,23 @@ export class SessionManager {
     await this.attachManagerHooks(session);
     // Fire and forget — the seed runs through enqueuePrompt inside
     // Session, so any user prompt arriving mid-seed queues behind it.
-    if (params.forkedFromSessionId && params.synopsis) {
+    if (params.forkedFromSessionId && params.forkSynthesisState === "running") {
+      // Synthesis still generating — its synopsis will land in the
+      // background. Skip seeding now; the full history is in the fork's
+      // history.jsonl and recall MCP mints from summarizedThroughEntry, so
+      // the agent has context on demand. (Re-seeding when the synopsis
+      // arrives is intentionally not done — first attach is the only seed.)
+      this.logger?.info(`fork ${session.sessionId}: synthesis in flight — skipping seed, recall available`);
+    } else if (
+      params.forkedFromSessionId &&
+      (params.synopsis || (params.summarizedThroughEntry ?? 0) > 0)
+    ) {
+      // Fork with a synopsis (compaction / synthesis-done) OR a verbatim/btw
+      // fork with history to replay. seedFromFork renders [synopsis if
+      // present] + the last TAIL_K turns; recall covers the rest of the
+      // prefix. synopsis may be undefined here (no-synopsis btw / failed
+      // synthesis) — seedFromFork degrades to title + recent turns.
       void session.seedFromFork(params.synopsis).catch(() => undefined);
-    } else if (params.forkedFromSessionId && (params.summarizedThroughEntry ?? 0) > 0) {
-      // Synthesis fork without (yet) a synopsis — background generation
-      // is in flight or failed. Full history is already in the fork's
-      // history.jsonl and recall MCP mints from summarizedThroughEntry.
-      // Skip seeding; the agent can use recall on demand.
-      this.logger?.info(`fork ${session.sessionId}: synthesis pending or failed — skipping seed, recall available`);
     } else {
       void session.seedFromImport().catch(() => undefined);
     }
@@ -2678,8 +2692,13 @@ export class SessionManager {
     // true because the fork is seeded with the source's history. That
     // would put every /btw fork in the picker. Setting false here
     // bypasses the inference cleanly.
-    // For synthesis forks, stamp summarizedThroughEntry in phase 1 so the
-    // recall MCP mint predicate fires from the moment of first attach.
+    // Stamp summarizedThroughEntry = the fork's own (sliced) history length
+    // for BOTH modes, so the recall MCP mint predicate fires from first
+    // attach and recall indexes exactly the history this fork carries.
+    // Synthesis copies the full history (sliced === source), so this equals
+    // sourceHistory.length there; verbatim/btw gets its prefix length —
+    // replacing the incoherent inherited source watermark (which could
+    // exceed the prefix and point recall past the end of the fork).
     const synthesized = mode === "synthesis";
     const recordForBundle: SessionRecord & { lineageId: string } = {
       ...sourceRecord,
@@ -2687,7 +2706,7 @@ export class SessionManager {
       agentId: targetAgentId,
       interactive: false,
       ...(forkSynthesisState !== undefined ? { forkSynthesisState } : {}),
-      ...(synthesized ? { summarizedThroughEntry: sourceHistory.length } : {}),
+      summarizedThroughEntry: slicedHistory.length,
       ...(opts.title !== undefined ? { title: opts.title } : {}),
       // A fork is a new session: its first turn re-pays for the carried
       // context (cache miss on the new session id, full prompt re-sent),

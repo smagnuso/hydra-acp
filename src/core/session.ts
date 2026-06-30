@@ -18,6 +18,7 @@ const QUIESCE_TAIL_SCAN_ENTRIES = 20;
 // Default number of recent turns to include in compaction seeds and fork
 // seeds. Kept as a module constant so all callers use the same value.
 const TAIL_K = 20;
+const FORK_TAIL_FLOOR = 5;
 
 export const HYDRA_SESSION_PREFIX = "hydra_session_";
 
@@ -1242,6 +1243,10 @@ export class Session {
     artifact: SessionSynopsis;
     title?: string;
     tailK: number;
+    // Minimum closed turns to include verbatim even when the synopsis
+    // covers everything. Compaction passes 0 (lean); /hydra agent
+    // passes a small floor for continuity. Defaults to 0.
+    tailFloor?: number;
     summarizedThroughEntry?: number;
     // When set, swap to a different agent (the /hydra agent path). When
     // unset (or equal to this.agentId), this is a same-agent compaction
@@ -1350,6 +1355,14 @@ export class Session {
       title: opts.title,
       tail: historyEntries,
       tailK: opts.tailK,
+      tailFloor: opts.tailFloor,
+      // Anchor the tail against the synopsis watermark — only turns
+      // past summarizedThroughEntry are "new"; older turns are already
+      // represented in the synopsis. Floor lets callers force a small
+      // continuity overlap on top.
+      ...(opts.summarizedThroughEntry !== undefined
+        ? { watermark: opts.summarizedThroughEntry }
+        : {}),
     });
 
     // Send the seed as a single session/prompt on the fresh agent. The
@@ -5194,19 +5207,16 @@ export class Session {
     });
   }
 
-  // Seed a forked session's fresh agent with a compaction-style brief
-  // (synopsis header + recent turns verbatim) drawn from the parent's
-  // generated synopsis. Called on first attach when the session has
-  // forkedFromSessionId set and a non-empty synopsis — the synthesis
-  // path. The seed is sent via internalPromptCapture so neither the
-  // seed prompt nor the agent's acknowledgement lands in history.jsonl.
-  // Safe to call with empty history (renderCompactionSeed degrades to
-  // synopsis-only). Defensive no-op when synopsis is absent (caller
-  // should have routed to seedFromImport instead).
-  async seedFromFork(synopsis: SessionSynopsis): Promise<void> {
-    if (!synopsis) {
-      return;
-    }
+  // Seed a forked session's fresh agent with a compaction-style brief:
+  // [synopsis header if present] + recent turns verbatim. Called on first
+  // attach when the session has forkedFromSessionId set. `synopsis` is
+  // optional — fork/btw paths pass the parent's synopsis when one exists
+  // (orientation), and omit it otherwise; renderCompactionSeed then emits
+  // title + recent turns only, with a closing note pointing at recall. The
+  // seed is sent via internalPromptCapture so neither the seed prompt nor
+  // the agent's acknowledgement lands in history.jsonl. Safe with empty
+  // history (tail degrades to nothing).
+  async seedFromFork(synopsis?: SessionSynopsis): Promise<void> {
     await this.enqueuePrompt(async () => {
       const title = this.title ?? "(untitled)";
 
@@ -5229,6 +5239,17 @@ export class Session {
         title,
         tail: historyEntries,
         tailK: TAIL_K,
+        // Continuity floor — fork/btw always want a few recent turns
+        // verbatim even when the synopsis (if present) covers
+        // everything up to fork time. Capped by TAIL_K.
+        tailFloor: FORK_TAIL_FLOOR,
+        // Anchor against this fork's own watermark. For verbatim/btw
+        // forks this is the sliced-history length (stamped at fork
+        // time); for synthesis forks it's the source length. Either
+        // way, post-watermark = 0, so the floor drives the tail and
+        // any in-flight open turn from a mid-turn /btw renders in its
+        // own section.
+        watermark: this._summarizedThroughEntry,
       });
 
       if (this.internalPromptCapture) {

@@ -374,7 +374,7 @@ describe("forkSession — verbatim mode preserves today's behavior", () => {
     mockGenerate.mockClear();
   });
 
-  it("sliced history per forkAt with no synopsis call and no summarizedThroughEntry stamp", async () => {
+  it("slices history per forkAt, calls no synopsis, and stamps summarizedThroughEntry = sliced length", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
@@ -402,10 +402,12 @@ describe("forkSession — verbatim mode preserves today's behavior", () => {
     const forkHistory = await readHistory(fork.sessionId);
     expect(forkHistory.length).toBe(2);
 
-    // No synopsis stamp in verbatim mode
+    // No synopsis in verbatim mode (never-compacted source), but
+    // summarizedThroughEntry is stamped to the sliced prefix length so the
+    // recall MCP gets wired and indexes exactly this fork's history.
     const forkMeta = await readMeta(fork.sessionId);
     expect(forkMeta.synopsis).toBeUndefined();
-    expect(forkMeta.summarizedThroughEntry).toBeUndefined();
+    expect(forkMeta.summarizedThroughEntry).toBe(2);
   });
 
   it("forkAt is ignored (silently) in synthesis mode — full history always copied", async () => {
@@ -638,6 +640,77 @@ describe("seedFromFork — unit test", () => {
     const tailEnd = promptText.indexOf("--- end recent turns ---");
     expect(tailStart).toBeGreaterThanOrEqual(0);
     expect(promptText.slice(tailStart, tailEnd)).toContain("User: RECENT_QUESTION_MARKER");
+  });
+
+  it("verbatim/btw fork from a never-compacted source seeds tail-only + wires recall", async () => {
+    // btw forks verbatim. With no synopsis to inherit, the seed must still
+    // carry recent turns (not the skip-seed branch) AND stamp
+    // summarizedThroughEntry so the recall MCP is wired over the prefix.
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        throw new Error("spawner should not be called from forkSession");
+      },
+    );
+
+    const source = await manager.importBundle(
+      bundleWith({
+        lineageId: "lin_btw_no_synopsis",
+        history: [
+          userPrompt("first q"),
+          agentChunk("first a"),
+          turnComplete("m_one"),
+          userPrompt("BTW_RECENT_MARKER"),
+          agentChunk("recent answer"),
+          turnComplete("m_two"),
+        ],
+        title: "btw: aside",
+      }),
+    );
+
+    const fork = await manager.forkSession(source.sessionId, { mode: "verbatim" });
+
+    // No synopsis call, no synopsis, but watermark stamped to prefix length
+    // so recall gets wired (the resurrect path keys recall on > 0).
+    expect(mockGenerate).not.toHaveBeenCalled();
+    const forkMeta = await readMeta(fork.sessionId);
+    expect(forkMeta.synopsis).toBeUndefined();
+    expect(forkMeta.summarizedThroughEntry).toBe(6);
+    expect(forkMeta.forkSynthesisState).toBeUndefined();
+
+    const resumeParams = await manager.loadFromDisk(fork.sessionId);
+    const mocks: MockAgentControls[] = [];
+    const resurrectMgr = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => {
+        const m = makeMockAgent({ agentId: "claude-code", cwd: process.cwd() });
+        mocks.push(m);
+        const requestMock = m.agent.connection.request as ReturnType<typeof vi.fn>;
+        requestMock
+          .mockResolvedValueOnce({ protocolVersion: 1 })
+          .mockResolvedValueOnce({ sessionId: "u_resurrected" });
+        return m.agent;
+      },
+    );
+
+    const resumedSession = await resurrectMgr.resurrect(resumeParams!);
+    const { JsonRpcConnection } = await import("../acp/connection.js");
+    const { makeControlledStream } = await import("../__tests__/test-utils.js");
+    const conn = new JsonRpcConnection(makeControlledStream());
+    await resumedSession.attach({ clientId: "c1", connection: conn }, "full");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const requestMock = mocks[0]!.agent.connection.request as ReturnType<typeof vi.fn>;
+    const promptCalls = requestMock.mock.calls.filter((c: unknown[]) => c[0] === "session/prompt");
+    // seedFromFork fired (tail-only) — NOT the skip branch.
+    expect(promptCalls.length).toBeGreaterThan(0);
+    const promptText = (promptCalls[0] as [string, { prompt?: Array<{ text: string }> }])[1]?.prompt?.[0]?.text ?? "";
+
+    // No synopsis → no compaction header; recent turns + recall note present.
+    expect(promptText).not.toContain("--- begin prior session compaction ---");
+    expect(promptText).toContain("User: BTW_RECENT_MARKER");
+    expect(promptText).not.toContain("Hydra has compacted earlier conversation");
+    expect(promptText).toContain("hydra-recall");
   });
 });
 
