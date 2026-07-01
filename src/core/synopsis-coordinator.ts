@@ -243,11 +243,24 @@ export class SynopsisCoordinator {
       const last = record.summarizedThroughEntry;
       // First-ever run: regardless of history length. Subsequent: only
       // when history grew past the last offset.
-      if (last !== undefined && history.length <= last) {
+      //
+      // `last` is a count of entries summarized so far. history.length
+      // is the CURRENT count on disk — which can shrink if the history
+      // store's cap trimmed old entries, or if a swap seeded a fresh
+      // upstream (subsequent turns then appended atop a smaller base).
+      // When `last > history.length` the watermark is stale relative to
+      // on-disk state; treat that as "watermark corrupt, re-baseline" and
+      // fall through rather than silently skipping every future compact.
+      if (last !== undefined && history.length === last) {
         this.opts.logger?.info(
           `synopsis: skip ${sessionId} (history unchanged at ${history.length})`,
         );
         return;
+      }
+      if (last !== undefined && history.length < last) {
+        this.opts.logger?.warn(
+          `synopsis: watermark ahead of history (last=${last} history=${history.length}) for ${sessionId} — re-baselining`,
+        );
       }
       // Pick agent. Compaction and title are independent concerns with
       // different cost/quality tradeoffs, so the two knobs do NOT cascade:
@@ -348,7 +361,12 @@ export class SynopsisCoordinator {
             );
 
             const historyAtStart = await this.opts.histories.load(sessionId, { maxEntries: Infinity });
-            if (historyAtStart.length <= through) {
+            // Only break on exact equality — if history has shrunk below
+            // the watermark (cap trimmed old entries; post-swap tail
+            // is smaller than the pre-swap length recorded in `through`)
+            // we still want this iteration to run and re-baseline the
+            // watermark to the current history length.
+            if (historyAtStart.length === through) {
               break;
             }
 

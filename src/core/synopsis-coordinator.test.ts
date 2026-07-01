@@ -154,7 +154,7 @@ describe("SynopsisCoordinator", () => {
     expect(mockGenerate).toHaveBeenCalledTimes(1);
   });
 
-  it("skips when summarizedThroughEntry >= history.length", async () => {
+  it("skips when summarizedThroughEntry === history.length", async () => {
     const record = makeRecord({ summarizedThroughEntry: 5 });
     const records = new Map([[record.sessionId, record]]);
     const histories = new Map([[record.sessionId, [{}, {}, {}, {}, {}]]]);
@@ -171,6 +171,31 @@ describe("SynopsisCoordinator", () => {
     await coord.flush(5_000);
 
     expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
+  it("re-baselines rather than skipping when summarizedThroughEntry > history.length (stale watermark after history cap trim / post-swap shrink)", async () => {
+    // Simulates the post-swap state where the swap stamped a watermark
+    // matching pre-swap history length, and the on-disk cap subsequently
+    // trimmed entries below that watermark. A naive `history.length <=
+    // last` skip would then wedge the session — no `/compact` could ever
+    // fire again until raw history exceeded the stale watermark.
+    const record = makeRecord({ summarizedThroughEntry: 12594 });
+    const records = new Map([[record.sessionId, record]]);
+    const histories = new Map([[record.sessionId, new Array(12204).fill({})]]);
+    mockCompaction.mockResolvedValue({ synopsis: { goal: "g" } });
+
+    const coord = new SynopsisCoordinator({
+      registry: makeRegistry({ id: "test-agent" }),
+      store: makeStore(records),
+      histories: makeHistories(histories),
+
+      persistTitle: async () => undefined,
+      persistSynopsis: async () => undefined,
+    });
+    coord.scheduleCompaction(record.sessionId);
+    await coord.flush(5_000);
+
+    expect(mockCompaction).toHaveBeenCalledTimes(1);
   });
 
   it("runs first-time job (no offset) regardless of history length", async () => {
