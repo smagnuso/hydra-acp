@@ -353,6 +353,21 @@ function matchBareUrl(text: string): string | null {
 // report drag with the original button encoded in the SGR byte but
 // terminal-kit collapses unknown buttons; refining this would require
 // parsing the raw sequence ourselves.
+// Terminal-kit decodes the SGR modifier byte and exposes shift / alt /
+// ctrl as booleans on the mouse event's data payload. Safely read one
+// of them without narrowing the whole `data: unknown` handleMouse
+// receives — returns false when the flag or the payload is missing.
+function mouseModifier(
+  data: unknown,
+  key: "shift" | "alt" | "ctrl",
+): boolean {
+  if (!data || typeof data !== "object") {
+    return false;
+  }
+  const v = (data as Record<string, unknown>)[key];
+  return v === true;
+}
+
 function mouseButtonFromEventName(name: string): MouseEvent["button"] {
   if (name.includes("LEFT")) {
     return "left";
@@ -584,6 +599,18 @@ export class Screen {
   // Timestamp + cell of the most recent left-button release, used to
   // decide whether the next press qualifies as a double-click.
   private lastLeftClick: { x: number; y: number; t: number } | null = null;
+  // Last drag cell + ticker used to autoscroll while selecting past the
+  // top/bottom edge of the visible scrollback area. Set when a drag
+  // motion lands on row 1 or the last scrollback row; cleared on
+  // release or when the drag moves away from the edge. The ticker
+  // repeatedly scrolls by one row and re-runs the drag extension so
+  // the selection grows even while the pointer is stationary.
+  private autoscrollTimer: ReturnType<typeof setInterval> | null = null;
+  private autoscrollCell: { x: number; y: number } | null = null;
+  // Direction sign for the autoscroll ticker: +1 pans upward (older
+  // content) when the drag is at the top edge, -1 pans downward
+  // (newer content) at the bottom.
+  private autoscrollDir: 1 | -1 = 1;
   // Single-click block toggles are deferred by DOUBLE_CLICK_MAX_MS so a
   // follow-up click on the same cell can override the gesture (e.g. open
   // a file path under the cursor) without first toggling the block and
@@ -809,6 +836,7 @@ export class Screen {
     // escapes into the host shell, scrambling it.
     this.scheduler.cancel();
     this.cancelPendingBlockClick();
+    this.stopAutoscroll();
     this.uninstallSelectiveMouseReporting();
     this.uninstallBracketedPaste();
     this.uninstallEmergencyCleanup();
@@ -1873,6 +1901,53 @@ export class Screen {
     };
   }
 
+  // Return the endpoint of the current selection farthest (in display
+  // order) from `pos`, so shift+click can extend a selection toward
+  // the click position by pinning the opposite end as the new anchor.
+  // Returns null when there is no active selection or either endpoint
+  // no longer resolves to a live source line.
+  private farEndpointFrom(
+    pos: { sourceLineId: number; offset: number },
+  ): { sourceLineId: number; offset: number } | null {
+    if (this.selection === null) {
+      return null;
+    }
+    const sel = this.selection;
+    const iPos = this.lineIndexById(pos.sourceLineId);
+    const iStart = this.lineIndexById(sel.startLineId);
+    const iEnd = this.lineIndexById(sel.endLineId);
+    if (iPos < 0 || iStart < 0 || iEnd < 0) {
+      return null;
+    }
+    // Compare (lineIndex, offset) tuples so same-line selections tie-
+    // break by offset — otherwise same-line endpoints tie on line
+    // distance and shift+click below the selection would collapse it.
+    const cmp = (aIdx: number, aOff: number, bIdx: number, bOff: number): number => {
+      if (aIdx !== bIdx) return aIdx - bIdx;
+      return aOff - bOff;
+    };
+    const posVsStart = cmp(iPos, pos.offset, iStart, sel.startOffset);
+    const posVsEnd = cmp(iPos, pos.offset, iEnd, sel.endOffset);
+    // Click before both endpoints → anchor at end. Click after both →
+    // anchor at start. Click inside [start, end] → pick the endpoint
+    // that is FARTHER (shrink toward click) so the gesture always
+    // grows the selection toward the click position when possible.
+    if (posVsStart <= 0) {
+      return { sourceLineId: sel.endLineId, offset: sel.endOffset };
+    }
+    if (posVsEnd >= 0) {
+      return { sourceLineId: sel.startLineId, offset: sel.startOffset };
+    }
+    const distStart = Math.abs(iPos - iStart) * 1e6 +
+      Math.abs(pos.offset - sel.startOffset);
+    const distEnd = Math.abs(iPos - iEnd) * 1e6 +
+      Math.abs(pos.offset - sel.endOffset);
+    if (distEnd >= distStart) {
+      return { sourceLineId: sel.endLineId, offset: sel.endOffset };
+    }
+    return { sourceLineId: sel.startLineId, offset: sel.startOffset };
+  }
+
   // Extract the active selection as plain text suitable for the
   // clipboard: slice each covered source line at the selection's
   // start/end offsets (partial first/last, full middle lines), join
@@ -1904,13 +1979,16 @@ export class Screen {
       const rawBody = line.body ?? "";
       let piece: string;
       if (line.ansi) {
-        // ANSI bodies aren't selectable per-char; only their FULL body
-        // appears here as an interior line. Partial-ansi endpoints are
-        // skipped rather than emit a garbled half-stripped slice.
-        piece =
-          i === ext.loIdx || i === ext.hiIdx
-            ? ""
-            : rawBody.replace(ANSI_STRIP_RE, "");
+        // ANSI bodies aren't selectable per-char: their offsets refer
+        // to raw code units that include escape bytes, so a naive slice
+        // can land inside an SGR sequence and paste garbage. Emit the
+        // FULL stripped body regardless of endpoint vs interior status
+        // — overshoots the visual selection at the endpoints slightly,
+        // but keeps every visible character intact so pasting a code
+        // block doesn't drop its first or last line (or, when a
+        // selection sits wholly inside a code block, produce an empty
+        // string).
+        piece = rawBody.replace(ANSI_STRIP_RE, "");
       } else {
         piece = rawBody.slice(bounds.start, bounds.end);
         // Styled bodies route through the markup-interpreting writer, so
@@ -1990,7 +2068,7 @@ export class Screen {
   private selectionRangeForChunk(
     line: FormattedLine,
   ): { start: number; end: number; toEndOfLine: boolean } | null {
-    if (this.selection === null || line.ansi) {
+    if (this.selection === null) {
       return null;
     }
     // Membership + per-line offset window come from the display-ordered
@@ -2018,6 +2096,19 @@ export class Screen {
     const interEnd = Math.min(lineSel.end, chunkEnd);
     if (interEnd <= interStart) {
       return null;
+    }
+    // ANSI chunks (syntax-highlighted code) can't be sliced per-char —
+    // escape bytes inflate code-unit math and a partial slice would land
+    // mid-SGR. When any part of an ANSI chunk overlaps the selection,
+    // highlight the WHOLE chunk (including fillRow padding). Matches the
+    // extractor's endpoint policy in getSelectionText, so the visual
+    // band and the copied text agree on which lines are "in".
+    if (line.ansi) {
+      return {
+        start: 0,
+        end: line.body.length,
+        toEndOfLine: true,
+      };
     }
     return {
       start: interStart - chunkStart,
@@ -2845,7 +2936,7 @@ export class Screen {
         this.flushPendingBlockClick();
       }
       this.pressCell = cell;
-      this.handleSelectionPress(cell);
+      this.handleSelectionPress(cell, mouseModifier(data, "shift"));
       return;
     }
     // Any non-left press (right/middle) is unambiguously "user moved
@@ -2854,12 +2945,26 @@ export class Screen {
     if (name.endsWith("_PRESSED") && name !== "MOUSE_LEFT_BUTTON_PRESSED") {
       this.flushPendingBlockClick();
     }
+    // Right-click extends an existing selection to the click point —
+    // canonical xterm gesture, and one that terminals pass through
+    // reliably (unlike shift+click, which most terminals intercept for
+    // their own native text selection when app-level mouse tracking is
+    // active). Falls through when no selection is active so the event
+    // stays available for future right-click affordances.
+    if (name === "MOUSE_RIGHT_BUTTON_PRESSED" && cell !== null) {
+      if (this.extendSelectionByClick(cell)) {
+        return;
+      }
+    }
     if (name === "MOUSE_DRAG" && cell !== null) {
       this.handleSelectionDrag(cell);
       return;
     }
     if (
       name === "MOUSE_LEFT_BUTTON_RELEASED" ||
+      name === "MOUSE_RIGHT_BUTTON_RELEASED" ||
+      name === "MOUSE_MIDDLE_BUTTON_RELEASED" ||
+      name === "MOUSE_OTHER_BUTTON_RELEASED" ||
       name === "MOUSE_BUTTON_RELEASED"
     ) {
       const press = this.pressCell;
@@ -2899,21 +3004,42 @@ export class Screen {
   // falls through to plain-click semantics. Bypassed entirely when the
   // feature is disabled so the existing wheel/block-click behaviour
   // stays unchanged.
-  private handleSelectionPress(cell: { x: number; y: number } | null): void {
+  private handleSelectionPress(
+    cell: { x: number; y: number } | null,
+    shift = false,
+  ): void {
     this.selectionAnchor = null;
     this.selectionDragStarted = false;
     this.doubleClickPending = false;
     if (!this.inAppSelectionEnabled || cell === null) {
       return;
     }
-    const anchor = this.resolveCellToSource(cell.x, cell.y);
+    // Fall back to the nearest resolvable row when the click lands on
+    // a blank / padding row inside the scrollback area. Same policy as
+    // right-click extend: snap to end-of-line for content above the
+    // click, start-of-line for content below, so a drag begun on a
+    // blank still anchors somewhere useful. resolveCellToSource
+    // returning null AND resolveNearestSource also returning null
+    // means the press was outside the scrollback area entirely (banner
+    // / prompt) — a drag from there can't produce a coherent selection.
+    const anchor =
+      this.resolveCellToSource(cell.x, cell.y) ??
+      this.resolveNearestSource(cell.x, cell.y);
     if (anchor === null) {
-      // Press outside the scrollback area (banner, prompt, etc.) —
-      // don't anchor; a drag from here can't produce a coherent
-      // selection. Still dismiss any prior selection on the upcoming
-      // release via the dragStarted=false path.
       this.lastLeftClick = null;
       return;
+    }
+    // Shift+click extends an existing selection to the click point,
+    // pinning the FAR endpoint as the new anchor. Note: most terminals
+    // intercept shift+click when app-level mouse tracking is on and
+    // route it to their own text-selection instead — the click never
+    // reaches us there. Right-click hits the same extend-selection
+    // path in handleMouse and passes through terminals reliably.
+    if (shift && this.selection !== null) {
+      if (this.extendSelectionByClickResolved(anchor)) {
+        this.lastLeftClick = null;
+        return;
+      }
     }
     this.selectionAnchor = anchor;
     const now = Date.now();
@@ -2995,6 +3121,186 @@ export class Screen {
       // word-grab gesture is intentionally release-only here.
       return;
     }
+    this.extendSelectionToCell(cell);
+    // Autoscroll while the pointer sits on the top or bottom row of the
+    // scrollback area. Row 1 pulls older content into view (delta > 0);
+    // the last row reveals newer content. If the drag is between the
+    // edges, cancel any in-flight ticker.
+    const visibleRows = this.scrollbackVisibleRows();
+    if (cell.y <= 1 && this.scrollOffset < this.maxScrollOffset()) {
+      this.startAutoscroll(cell, 1);
+    } else if (
+      cell.y >= visibleRows &&
+      this.scrollOffset > 0
+    ) {
+      this.startAutoscroll(cell, -1);
+    } else {
+      this.stopAutoscroll();
+    }
+  }
+
+  // Extend an existing selection to the given cell by pinning the far
+  // endpoint as the anchor and setting the click as the focus. Backing
+  // for right-click / shift+click extend gestures. Returns true when
+  // the gesture was applied so callers can early-return; false when
+  // there is no active selection or the click resolves outside the
+  // scrollback area, so the caller can decide whether to fall through
+  // to normal click semantics.
+  private extendSelectionByClick(cell: { x: number; y: number }): boolean {
+    if (!this.inAppSelectionEnabled || this.selection === null) {
+      return false;
+    }
+    // A click on the top row (or in top padding above visible content)
+    // extends all the way to the OLDEST line in scrollback; a click on
+    // the bottom row extends to the NEWEST. Otherwise resolve the
+    // exact cell, then fall back to the nearest resolvable row so a
+    // click on a blank/padding row still extends to whichever side of
+    // the gap the click landed toward. Without the edge shortcut,
+    // reaching scrolled-off content would require scrolling first and
+    // then clicking precisely — the corner click is the "select-to-end"
+    // affordance.
+    const edge = this.resolveEdgeSource(cell.y);
+    const focus =
+      edge ??
+      this.resolveCellToSource(cell.x, cell.y) ??
+      this.resolveNearestSource(cell.x, cell.y);
+    if (focus === null) {
+      return false;
+    }
+    return this.extendSelectionByClickResolved(focus);
+  }
+
+  // Returns a scrollback-boundary anchor when the click lands on an
+  // edge with scrolled-off content in that direction (or on top
+  // padding above visible content); otherwise null. Lets a single
+  // right-click extend selection past the viewport into scrolled-off
+  // content without requiring the user to scroll first. Precise-cell
+  // resolution still wins when content is fully in view, so a click
+  // on the bottom row where content is painted keeps its exact column.
+  private resolveEdgeSource(
+    y: number,
+  ): { sourceLineId: number; offset: number } | null {
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0 || this.lines.length === 0) {
+      return null;
+    }
+    const w = this.term.width;
+    const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
+    const end = wrapped.length - this.scrollOffset;
+    const start = Math.max(0, end - visibleRows);
+    const slice = wrapped.slice(start, end);
+    const padTop = Math.max(0, visibleRows - slice.length);
+    const rowIdx = y - 1;
+    // "Scrolled above" = there is scrollback content ABOVE the current
+    // viewport. wrapTail here only wraps the tail we asked for, so
+    // scrolledAbove is computed against the true maxScrollOffset.
+    const scrolledAbove = this.scrollOffset < this.maxScrollOffset();
+    const scrolledBelow = this.scrollOffset > 0;
+    // Top edge: row 1 with content above the viewport, OR any row in
+    // the top-padding gap (nothing painted). Extend to the very first
+    // source line's start.
+    const inTopPadding = rowIdx < padTop;
+    if ((rowIdx === 0 && scrolledAbove) || inTopPadding) {
+      const firstLine = this.lines[0];
+      if (firstLine) {
+        const id = this.lineIds.get(firstLine);
+        if (id !== undefined) {
+          return { sourceLineId: id, offset: 0 };
+        }
+      }
+    }
+    // Bottom edge: last row of the scrollback area WITH scrolled-off
+    // content below. Extend to the newest source line's end. When not
+    // scrolled, the click resolves normally to the visible content at
+    // that row (preserves precise-cell selection at the bottom).
+    if (rowIdx >= visibleRows - 1 && scrolledBelow) {
+      const lastLine = this.lines[this.lines.length - 1];
+      if (lastLine) {
+        const id = this.lineIds.get(lastLine);
+        if (id !== undefined) {
+          return {
+            sourceLineId: id,
+            offset: (lastLine.body ?? "").length,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  // Walk outward from (x, y) row-by-row until resolveCellToSource
+  // returns a hit, preferring the row closer to `y`. When the click
+  // landed on a blank/padding row, the returned position snaps to the
+  // NEAREST edge of the adjacent content — end-of-line for content
+  // above the click, start-of-line for content below — so the
+  // extended selection stops at the blank rather than reaching into
+  // the content past it. Returns null when no row in the visible
+  // scrollback resolves.
+  private resolveNearestSource(
+    x: number,
+    y: number,
+  ): { sourceLineId: number; offset: number } | null {
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0) {
+      return null;
+    }
+    const w = this.term.width;
+    const snapX = Math.max(1, Math.min(w, x));
+    for (let d = 1; d < visibleRows; d++) {
+      const up = y - d;
+      if (up >= 1) {
+        const hit = this.resolveCellToSource(snapX, up);
+        if (hit !== null) {
+          // Content sits ABOVE a blank click — snap the fallback to
+          // the END of that content line so the selection includes
+          // that line and stops at the blank gap.
+          const line = this.lineById(hit.sourceLineId);
+          if (line) {
+            return {
+              sourceLineId: hit.sourceLineId,
+              offset: (line.body ?? "").length,
+            };
+          }
+          return hit;
+        }
+      }
+      const down = y + d;
+      if (down <= visibleRows) {
+        const hit = this.resolveCellToSource(snapX, down);
+        if (hit !== null) {
+          // Content sits BELOW a blank click — snap to the START of
+          // that line so the selection stops just before the content.
+          return { sourceLineId: hit.sourceLineId, offset: 0 };
+        }
+      }
+    }
+    return null;
+  }
+
+  private extendSelectionByClickResolved(
+    focus: { sourceLineId: number; offset: number },
+  ): boolean {
+    const far = this.farEndpointFrom(focus);
+    if (far === null) {
+      return false;
+    }
+    this.selectionAnchor = far;
+    // Mark as an in-progress drag so release finalizes (copies) and a
+    // follow-up drag motion continues extending from `far`.
+    this.selectionDragStarted = true;
+    this.setSelection(far, focus);
+    return true;
+  }
+
+  // Resolve the drag cell to a source position and extend the selection
+  // from the pinned anchor. Called both from the terminal drag event
+  // and from the autoscroll ticker (which uses the last recorded drag
+  // cell so a stationary pointer at the edge keeps growing the
+  // selection as content scrolls past it).
+  private extendSelectionToCell(cell: { x: number; y: number }): void {
+    if (this.selectionAnchor === null) {
+      return;
+    }
     const focus = this.resolveCellToSource(cell.x, cell.y);
     if (focus === null) {
       return;
@@ -3003,12 +3309,53 @@ export class Screen {
     this.setSelection(this.selectionAnchor, focus);
   }
 
+  // Autoscroll ticker interval. Kept modest so scrolling feels smooth
+  // without racing past content the user is trying to select.
+  private static readonly AUTOSCROLL_TICK_MS = 60;
+
+  private startAutoscroll(
+    cell: { x: number; y: number },
+    dir: 1 | -1,
+  ): void {
+    if (this.autoscrollTimer !== null && this.autoscrollDir === dir) {
+      // Refresh the recorded cell so subsequent ticks resolve to the
+      // latest drag column, but leave the running ticker untouched.
+      this.autoscrollCell = { x: cell.x, y: cell.y };
+      return;
+    }
+    this.stopAutoscroll();
+    this.autoscrollCell = { x: cell.x, y: cell.y };
+    this.autoscrollDir = dir;
+    this.autoscrollTimer = setInterval(() => {
+      if (this.selectionAnchor === null || this.autoscrollCell === null) {
+        this.stopAutoscroll();
+        return;
+      }
+      const before = this.scrollOffset;
+      this.scrollBy(this.autoscrollDir);
+      if (this.scrollOffset === before) {
+        this.stopAutoscroll();
+        return;
+      }
+      this.extendSelectionToCell(this.autoscrollCell);
+    }, Screen.AUTOSCROLL_TICK_MS);
+  }
+
+  private stopAutoscroll(): void {
+    if (this.autoscrollTimer !== null) {
+      clearInterval(this.autoscrollTimer);
+      this.autoscrollTimer = null;
+    }
+    this.autoscrollCell = null;
+  }
+
   // Release half of the gesture. Finalizes (extract + clipboard +
   // notify) when a real drag occurred or a word-grab double-click is
   // pending; otherwise treats the gesture as a plain click and
   // dismisses any prior selection. Always records the release for the
   // next press's double-click timing check.
   private handleSelectionRelease(cell: { x: number; y: number } | null): void {
+    this.stopAutoscroll();
     const dragStarted = this.selectionDragStarted;
     const doubleClick = this.doubleClickPending;
     this.selectionAnchor = null;
@@ -5583,7 +5930,15 @@ export class Screen {
         writeStyled(this.term, text, line.bodyStyle, hovered);
       }
     };
-    if (selectionRange !== null && !line.ansi) {
+    if (selectionRange !== null && line.ansi) {
+      // ANSI-highlighted code row inside the selection. Per-char
+      // slicing isn't safe (see selectionRangeForChunk), so drop the
+      // syntax coloring for the highlighted row and paint the plain
+      // text under the inverse-video selection style. Matches how most
+      // editors behave — selection color wins over syntax color.
+      const plain = bodyText.replace(ANSI_STRIP_RE, "");
+      writeStyled(this.term, plain, "selection-highlight", hovered);
+    } else if (selectionRange !== null && !line.ansi) {
       const selStart = Math.max(0, Math.min(bodyText.length, selectionRange.start));
       const selEnd = Math.max(selStart, Math.min(bodyText.length, selectionRange.end));
       const usesMarkup = bodyStyleUsesMarkup(line.bodyStyle);

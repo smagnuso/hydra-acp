@@ -2603,6 +2603,351 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe(selected);
   });
 
+  it("shift+click extends an existing selection toward the click", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Three lines, all in the visible viewport.
+    screen.appendLine({ body: "alpha bravo" });
+    screen.appendLine({ body: "charlie delta" });
+    screen.appendLine({ body: "echo foxtrot" });
+    const rows = visibleRows(screen);
+    // Drag-select "alpha" on the first of the three lines.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: rows - 2 });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 6, y: rows - 2 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y: rows - 2 });
+    expect(screen.hasSelection()).toBe(true);
+    // Shift+click on the third line — selection should extend downward
+    // through the intermediate line without requiring a fresh drag.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", {
+      x: 6,
+      y: rows,
+      shift: true,
+    });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", {
+      x: 6,
+      y: rows,
+      shift: true,
+    });
+    expect(screen.hasSelection()).toBe(true);
+    const text = screen.getSelectionText();
+    expect(text.startsWith("alpha")).toBe(true);
+    expect(text.includes("charlie delta")).toBe(true);
+    expect(text.endsWith("echo ")).toBe(true);
+  });
+
+  it("left-click drag starting on a blank/padding row still anchors a selection", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Two lines near the bottom leave most of the viewport as
+    // top-padding (no chunk painted).
+    screen.appendLine({ body: "alpha bravo" });
+    screen.appendLine({ body: "charlie delta" });
+    const rows = visibleRows(screen);
+    // Press on a top-padding row, drag down onto real content, release.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y: 2 });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 8, y: rows });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y: rows });
+    expect(screen.hasSelection()).toBe(true);
+    expect(screen.getSelectionText().length).toBeGreaterThan(0);
+  });
+
+  it("right-click extend triggers finalizeSelection (auto-copy path)", () => {
+    // Verifies right-click extend actually reaches the finalize path by
+    // spying on it directly (skips the async clipboard subprocess so
+    // the test doesn't need to wait on real xclip / pbcopy).
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "alpha bravo" });
+    screen.appendLine({ body: "charlie delta" });
+    const rows = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: rows - 1 });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 5, y: rows - 1 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 5, y: rows - 1 });
+    let finalizeCalls = 0;
+    const original = (
+      screen as unknown as { finalizeSelection: () => void }
+    ).finalizeSelection.bind(screen);
+    (screen as unknown as { finalizeSelection: () => void }).finalizeSelection =
+      () => {
+        finalizeCalls += 1;
+        original();
+      };
+    // Use the SGR-mode release name (MOUSE_RIGHT_BUTTON_RELEASED) —
+    // this is what terminal-kit actually emits under modern mouse
+    // reporting. Under the legacy X11 protocol releases arrive as the
+    // generic MOUSE_BUTTON_RELEASED; both must reach finalizeSelection.
+    dispatchMouse(screen, "MOUSE_RIGHT_BUTTON_PRESSED", { x: 6, y: rows });
+    dispatchMouse(screen, "MOUSE_RIGHT_BUTTON_RELEASED", { x: 6, y: rows });
+    expect(finalizeCalls).toBeGreaterThan(0);
+    // And the selection covers the extended range.
+    expect(screen.getSelectionText().startsWith("alpha")).toBe(true);
+  });
+
+  it("right-click extends an existing selection (canonical xterm gesture)", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "alpha bravo" });
+    screen.appendLine({ body: "charlie delta" });
+    screen.appendLine({ body: "echo foxtrot" });
+    const rows = visibleRows(screen);
+    // Establish a small selection on the first line.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: rows - 2 });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 6, y: rows - 2 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y: rows - 2 });
+    expect(screen.getSelectionText()).toBe("alpha");
+    // Right-click on the third line — selection should extend through
+    // the intermediate line without needing a drag or shift.
+    dispatchMouse(screen, "MOUSE_RIGHT_BUTTON_PRESSED", { x: 6, y: rows });
+    dispatchMouse(screen, "MOUSE_BUTTON_RELEASED", { x: 6, y: rows });
+    const text = screen.getSelectionText();
+    expect(text.startsWith("alpha")).toBe(true);
+    expect(text.includes("charlie delta")).toBe(true);
+    expect(text.endsWith("echo ")).toBe(true);
+  });
+
+  it("right-click at top row extends into content scrolled above the viewport", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    for (let i = 0; i < 200; i++) {
+      screen.appendLine({ body: `line-${String(i).padStart(3, "0")}` });
+    }
+    const rows = visibleRows(screen);
+    // Anchor a small selection near the bottom.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: rows });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 5, y: rows });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 5, y: rows });
+    expect(screen.hasSelection()).toBe(true);
+    // Right-click on row 1 with the viewport scrolled anywhere (there
+    // are 200 lines but only ~20 visible → content scrolled above).
+    dispatchMouse(screen, "MOUSE_RIGHT_BUTTON_PRESSED", { x: 5, y: 1 });
+    dispatchMouse(screen, "MOUSE_BUTTON_RELEASED", { x: 5, y: 1 });
+    // Selection should now cover from the very first line (line-000)
+    // through the original anchor.
+    const text = screen.getSelectionText();
+    expect(text.startsWith("line-000")).toBe(true);
+  });
+
+  it("right-click at bottom row extends into content scrolled below the viewport", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    for (let i = 0; i < 200; i++) {
+      screen.appendLine({ body: `line-${String(i).padStart(3, "0")}` });
+    }
+    const rows = visibleRows(screen);
+    // Scroll up so there's content below the viewport.
+    (screen as unknown as { scrollBy: (n: number) => void }).scrollBy(50);
+    // Anchor a small selection near the top of the current view.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: 2 });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 5, y: 2 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 5, y: 2 });
+    expect(screen.hasSelection()).toBe(true);
+    // Right-click on the bottom row → should extend to the newest line.
+    dispatchMouse(screen, "MOUSE_RIGHT_BUTTON_PRESSED", { x: 5, y: rows });
+    dispatchMouse(screen, "MOUSE_BUTTON_RELEASED", { x: 5, y: rows });
+    expect(screen.getSelectionText().endsWith("line-199")).toBe(true);
+  });
+
+  it("right-click on a blank row snaps to the nearest resolvable line", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Two lines near the bottom of a tall viewport — most rows above
+    // are pure top-padding (no chunk, resolveCellToSource returns null).
+    screen.appendLine({ body: "alpha bravo" });
+    screen.appendLine({ body: "charlie delta" });
+    const rows = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: rows - 1 });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 6, y: rows - 1 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y: rows - 1 });
+    expect(screen.getSelectionText()).toBe("alpha");
+    // Right-click on a top-padding row — no chunk, but the extend
+    // should snap DOWN to the first content line and grow the
+    // selection accordingly (rather than silently no-op).
+    dispatchMouse(screen, "MOUSE_RIGHT_BUTTON_PRESSED", { x: 3, y: 2 });
+    dispatchMouse(screen, "MOUSE_BUTTON_RELEASED", { x: 3, y: 2 });
+    expect(screen.hasSelection()).toBe(true);
+    // Selection now covers from click-column on "alpha bravo" up to
+    // the anchor's far endpoint — must not be empty.
+    expect(screen.getSelectionText().length).toBeGreaterThan(0);
+  });
+
+  it("right-click without a prior selection is a no-op (no accidental anchor)", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "hello world" });
+    const rows = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_RIGHT_BUTTON_PRESSED", { x: 3, y: rows });
+    dispatchMouse(screen, "MOUSE_BUTTON_RELEASED", { x: 3, y: rows });
+    expect(screen.hasSelection()).toBe(false);
+  });
+
+  it("shift+click without prior selection anchors a fresh drag", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "hello world" });
+    const rows = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", {
+      x: 1,
+      y: rows,
+      shift: true,
+    });
+    dispatchMouse(screen, "MOUSE_DRAG", { x: 6, y: rows });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 6, y: rows });
+    expect(screen.hasSelection()).toBe(true);
+    expect(screen.getSelectionText()).toBe("hello");
+  });
+
+  it("dragging to the top row while scrolled autoscrolls and grows the selection upward", () => {
+    vi.useFakeTimers();
+    // Escape the FOCUS_GRACE_MS window in handleMouse — with fake
+    // timers frozen at t=0 the initial lastFocusInAt=0 window would
+    // reject every press as "recently focused".
+    vi.advanceTimersByTime(1000);
+    try {
+      const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+      for (let i = 0; i < 200; i++) {
+        screen.appendLine({ body: `line-${String(i).padStart(3, "0")}` });
+      }
+      // Anchor a small selection near the bottom.
+      const rows = visibleRows(screen);
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: rows });
+      dispatchMouse(screen, "MOUSE_DRAG", { x: 4, y: rows });
+      const startText = screen.getSelectionText();
+      expect(startText.length).toBeGreaterThan(0);
+      // Drag to row 1 — the top edge of scrollback. The autoscroll ticker
+      // should scroll the viewport up and re-extend the selection each tick.
+      const scrollBefore = (screen as unknown as { scrollOffset: number })
+        .scrollOffset;
+      dispatchMouse(screen, "MOUSE_DRAG", { x: 4, y: 1 });
+      // Advance a few ticker cycles; ticker interval is 60ms.
+      vi.advanceTimersByTime(500);
+      const scrollAfter = (screen as unknown as { scrollOffset: number })
+        .scrollOffset;
+      expect(scrollAfter).toBeGreaterThan(scrollBefore);
+      expect(screen.getSelectionText().length).toBeGreaterThan(startText.length);
+      // Release stops the ticker.
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 4, y: 1 });
+      const scrollAfterRelease = (screen as unknown as { scrollOffset: number })
+        .scrollOffset;
+      vi.advanceTimersByTime(500);
+      expect(
+        (screen as unknown as { scrollOffset: number }).scrollOffset,
+      ).toBe(scrollAfterRelease);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("autoscroll stops when the drag moves back inside the viewport", () => {
+    vi.useFakeTimers();
+    vi.advanceTimersByTime(1000);
+    try {
+      const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+      for (let i = 0; i < 200; i++) {
+        screen.appendLine({ body: `line-${i}` });
+      }
+      const rows = visibleRows(screen);
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 1, y: rows });
+      dispatchMouse(screen, "MOUSE_DRAG", { x: 4, y: rows });
+      dispatchMouse(screen, "MOUSE_DRAG", { x: 4, y: 1 });
+      vi.advanceTimersByTime(200);
+      const scrollMid = (screen as unknown as { scrollOffset: number })
+        .scrollOffset;
+      expect(scrollMid).toBeGreaterThan(0);
+      // Drag back inside the viewport — ticker must halt.
+      dispatchMouse(screen, "MOUSE_DRAG", { x: 4, y: Math.floor(rows / 2) });
+      vi.advanceTimersByTime(500);
+      expect(
+        (screen as unknown as { scrollOffset: number }).scrollOffset,
+      ).toBe(scrollMid);
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 4, y: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("selection through a highlighted code block yields the full stripped code lines", () => {
+    const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
+    // Simulate a fenced code block: three ANSI lines sandwiched between
+    // plain prose. The regression: prior behavior emitted "" for
+    // ANSI endpoints, so a selection anchored inside the code block
+    // silently dropped its first / last / only line.
+    screen.appendLine({ body: "before" });
+    screen.appendLine({
+      body: "\x1b[31mconst\x1b[0m x = 1;",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    screen.appendLine({
+      body: "\x1b[31mconst\x1b[0m y = 2;",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    screen.appendLine({
+      body: "\x1b[31mconst\x1b[0m z = 3;",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    screen.appendLine({ body: "after" });
+    const rows = visibleRows(screen);
+    // Anchor a selection wholly inside the code block (rows 2 and 3 of
+    // the code fence). Neither endpoint sits on a non-ANSI line.
+    const start = resolve(screen, 3, rows - 3)!;
+    const end = resolve(screen, 5, rows - 2)!;
+    screen.setSelection(start, end);
+    const text = screen.getSelectionText();
+    // Both ANSI lines contribute their FULL stripped bodies — no empty
+    // pieces, no leaked SGR escape bytes.
+    expect(text).toBe("const x = 1;\nconst y = 2;");
+  });
+
+  it("selection through a code block highlights every ANSI row (not every other one)", () => {
+    // Regression: selectionRangeForChunk used to return null for any
+    // ANSI-bodied chunk, so selecting through a syntax-highlighted code
+    // block skipped the code rows and produced a striped "every other
+    // line" highlight. It now returns a full-body range for ANSI chunks
+    // that overlap the selection so every covered row paints.
+    const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
+    screen.appendLine({ body: "before" });
+    screen.appendLine({
+      body: "\x1b[31mconst\x1b[0m x = 1;",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    screen.appendLine({
+      body: "\x1b[31mconst\x1b[0m y = 2;",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    screen.appendLine({ body: "after" });
+    const rows = visibleRows(screen);
+    const start = resolve(screen, 6, rows - 3)!;
+    const end = resolve(screen, 6, rows - 1)!;
+    screen.setSelection(start, end);
+    // Query the wrap output directly (selectionRangeForChunk needs the
+    // WRAPPED chunk with wrapOrigin metadata attached, not the raw
+    // source line).
+    const wrapped = wrapAll(screen, 80);
+    const codeChunkA = wrapped[wrapped.length - 3]!;
+    const codeChunkB = wrapped[wrapped.length - 2]!;
+    const rangeA = selectionRangeFor(screen, codeChunkA);
+    const rangeB = selectionRangeFor(screen, codeChunkB);
+    expect(rangeA).not.toBeNull();
+    expect(rangeB).not.toBeNull();
+    // ANSI chunks always report a full-body range with toEndOfLine so
+    // the whole row (plus fillRow padding) paints as one band.
+    expect(rangeA!.start).toBe(0);
+    expect(rangeA!.end).toBe(codeChunkA.body.length);
+    expect(rangeA!.toEndOfLine).toBe(true);
+    expect(rangeB!.start).toBe(0);
+    expect(rangeB!.end).toBe(codeChunkB.body.length);
+    expect(rangeB!.toEndOfLine).toBe(true);
+  });
+
+  it("selection wholly inside a single highlighted code line still yields text", () => {
+    const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
+    screen.appendLine({
+      body: "\x1b[31mconst\x1b[0m only = 42;",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    const rows = visibleRows(screen);
+    const start = resolve(screen, 1, rows)!;
+    const end = resolve(screen, 5, rows)!;
+    screen.setSelection(start, end);
+    expect(screen.getSelectionText()).toBe("const only = 42;");
+  });
+
   it("opt-out: in-app selection disabled means no drag selection", () => {
     const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
     screen.setInAppSelectionEnabled(false);

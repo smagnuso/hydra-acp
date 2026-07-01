@@ -626,6 +626,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["PgUp / PgDn", "scroll scrollback"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
+  ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
   ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
   null,
   ["^C", "cancel turn (twice to exit)"],
