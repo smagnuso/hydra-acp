@@ -2503,15 +2503,19 @@ describe("Screen block-click routing", () => {
   });
 
   it("selection orders by display position when line ids are non-monotonic", () => {
-    // Re-rendering a block via upsertLines reassigns it a FRESH (higher)
-    // line id while it keeps its original, higher-up slot — so the line
-    // ABOVE can carry a higher id than the line BELOW. Selection extent
-    // and extraction must follow display order, not id order, or a small
-    // visual selection copies the wrong (or empty) range.
+    // Re-rendering a block via upsertLines with any differing field
+    // reassigns it a FRESH (higher) line id while it keeps its original,
+    // higher-up slot — so the line ABOVE can carry a higher id than the
+    // line BELOW. Selection extent and extraction must follow display
+    // order, not id order, or a small visual selection copies the wrong
+    // (or empty) range. (A re-upsert with fully identical content
+    // preserves identity — the identity-reuse optimization in
+    // upsertLines that keeps selection alive across streaming block
+    // ticks — so we vary bodyStyle here to force a fresh id.)
     const screen = makeTallScreen({ width: 80, height: 24 });
     screen.upsertLines("top", [{ body: "alpha" }]); // id 1, row 0
     screen.appendLine({ body: "bravo" }); // id 2, row 1
-    screen.upsertLines("top", [{ body: "alpha" }]); // re-render: id 3, still row 0
+    screen.upsertLines("top", [{ body: "alpha", bodyStyle: "agent" }]); // re-render: id 3, still row 0
     const rows = visibleRows(screen);
     const top = resolve(screen, 1, rows - 1)!; // 'alpha' offset 0 (higher id)
     const bottom = resolve(screen, 6, rows)!; // 'bravo' end (lower id)
@@ -2554,6 +2558,49 @@ describe("Screen block-click routing", () => {
     expect(screen.hasSelection()).toBe(true);
     (screen as unknown as { scrollBy: (n: number) => void }).scrollBy(20);
     expect(screen.hasSelection()).toBe(true);
+  });
+
+  it("upsertLines preserves selection when the block re-renders with identical content", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Establish a block with two lines, then anchor a selection into it.
+    screen.upsertLines("blk", [
+      { body: "hello world" },
+      { body: "second line" },
+    ]);
+    const rows = visibleRows(screen);
+    const start = resolve(screen, 1, rows - 1)!;
+    const end = resolve(screen, 6, rows - 1)!;
+    screen.setSelection(start, end);
+    expect(screen.hasSelection()).toBe(true);
+    const selected = screen.getSelectionText();
+    // Re-upsert the same block verbatim (streaming tick with no changes).
+    screen.upsertLines("blk", [
+      { body: "hello world" },
+      { body: "second line" },
+    ]);
+    expect(screen.hasSelection()).toBe(true);
+    expect(screen.getSelectionText()).toBe(selected);
+  });
+
+  it("upsertLines preserves selection on unchanged lines when only trailing lines differ", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.upsertLines("blk", [
+      { body: "stable line" },
+      { body: "elapsed 5s" },
+    ]);
+    const rows = visibleRows(screen);
+    const start = resolve(screen, 1, rows - 1)!;
+    const end = resolve(screen, 6, rows - 1)!;
+    screen.setSelection(start, end);
+    expect(screen.hasSelection()).toBe(true);
+    const selected = screen.getSelectionText();
+    // Only the elapsed line changes — anchor line is untouched.
+    screen.upsertLines("blk", [
+      { body: "stable line" },
+      { body: "elapsed 10s" },
+    ]);
+    expect(screen.hasSelection()).toBe(true);
+    expect(screen.getSelectionText()).toBe(selected);
   });
 
   it("opt-out: in-app selection disabled means no drag selection", () => {

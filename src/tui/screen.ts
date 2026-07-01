@@ -1456,15 +1456,39 @@ export class Screen {
         this.lines.slice(existing.start, oldEnd),
       );
       const delta = newLines.length - existing.count;
-      const removed = this.lines.splice(
-        existing.start,
-        existing.count,
-        ...newLines,
-      );
+      // Rewrite the block in place, reusing FormattedLine object
+      // identities when a new line's content matches the old line at
+      // the same index. Preserving identity keeps the line's id (and
+      // any selection anchored on it) intact through streaming block
+      // re-renders — otherwise every re-upsert would invalidate the
+      // user's active selection via invalidateSelectionIfTouches.
+      const oldSlice = this.lines.slice(existing.start, oldEnd);
+      const merged: FormattedLine[] = new Array(newLines.length);
+      const removed: FormattedLine[] = [];
+      for (let i = 0; i < newLines.length; i++) {
+        const oldLine = oldSlice[i];
+        const newLine = newLines[i]!;
+        if (oldLine !== undefined && sameRenderedLine(oldLine, newLine)) {
+          merged[i] = oldLine;
+        } else {
+          if (oldLine !== undefined) {
+            removed.push(oldLine);
+          }
+          merged[i] = newLine;
+        }
+      }
+      for (let i = newLines.length; i < oldSlice.length; i++) {
+        removed.push(oldSlice[i]!);
+      }
+      this.lines.splice(existing.start, existing.count, ...merged);
       for (const line of removed) {
         this.forgetLine(line);
       }
-      this.trackLines(newLines);
+      for (const line of merged) {
+        if (!this.lineIds.has(line)) {
+          this.trackLine(line);
+        }
+      }
       this.invalidateSelectionIfTouches(removed);
       existing.count = newLines.length;
       if (delta !== 0) {
@@ -5651,6 +5675,56 @@ export class Screen {
 // guarantee identical output, so paintRow can skip the re-emit. `zone`
 // distinguishes which draw block painted the row so a scrollback row's
 // sig can't accidentally match a completion row's.
+// True when two FormattedLines are fully equal on every field that
+// affects rendering. upsertLines uses this to decide whether it can
+// keep the OLD line object (preserving its identity, and therefore any
+// selection anchored on it) instead of swapping in the fresh one. We
+// deliberately do NOT mutate the retained object: wrapCache and other
+// per-id caches embed style / decoration data captured at wrap time,
+// so any diff — even a style-only diff — has to force a fresh object
+// so downstream caches get keyed off a fresh line id.
+function sameRenderedLine(a: FormattedLine, b: FormattedLine): boolean {
+  if (
+    a.body !== b.body ||
+    (a.prefix ?? "") !== (b.prefix ?? "") ||
+    (a.bodyStyle ?? "") !== (b.bodyStyle ?? "") ||
+    (a.prefixStyle ?? "") !== (b.prefixStyle ?? "") ||
+    Boolean(a.ansi) !== Boolean(b.ansi) ||
+    Boolean(a.fillRow) !== Boolean(b.fillRow) ||
+    Boolean(a.collapsed) !== Boolean(b.collapsed) ||
+    (a.blockKey ?? "") !== (b.blockKey ?? "") ||
+    (a.hoverSubKey ?? "") !== (b.hoverSubKey ?? "")
+  ) {
+    return false;
+  }
+  const ai = a.iterm2Image;
+  const bi = b.iterm2Image;
+  if ((ai === undefined) !== (bi === undefined)) {
+    return false;
+  }
+  if (ai && bi && (ai.data !== bi.data || ai.heightCells !== bi.heightCells)) {
+    return false;
+  }
+  const al = a.links;
+  const bl = b.links;
+  if ((al === undefined) !== (bl === undefined)) {
+    return false;
+  }
+  if (al && bl) {
+    if (al.length !== bl.length) {
+      return false;
+    }
+    for (let i = 0; i < al.length; i++) {
+      const x = al[i]!;
+      const y = bl[i]!;
+      if (x.start !== y.start || x.end !== y.end || x.url !== y.url) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 function formattedLineSig(
   zone: string,
   width: number,
