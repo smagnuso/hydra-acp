@@ -2330,6 +2330,12 @@ async function runSession(
     onBlockDoubleClick: (key: string, rowOffset: number): boolean => {
       return handleBlockDoubleClick(key, rowOffset);
     },
+    // Click a hydra://sessions/<id> link in scrollback to jump to that
+    // session. Returns true to claim the gesture (skip word-snap copy).
+    onHydraLinkClick: (sessionId: string): boolean => {
+      void switchToSessionById(sessionId);
+      return true;
+    },
     // Lazy-load deferred (references-mode) diff bodies only when the block
     // scrolls into view.
     onBlockVisible: (key: string) => {

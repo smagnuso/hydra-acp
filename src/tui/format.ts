@@ -14,6 +14,12 @@ import {
   type RenderEvent,
 } from "../core/render-update.js";
 
+// Regex for hydra://sessions/<id> URLs that the TUI click handler
+// interprets as "switch to this session". Accepts optional host:port
+// prefix and #turn-<n> fragment; v1 captures the id but ignores those.
+const HYDRA_SESSION_URL_RE =
+  /^hydra:\/\/(?:[^/\s]+\/)?sessions\/([A-Za-z0-9_-]+)(?:#turn-(\d+))?$/;
+
 export type Style =
   | "user"
   | "agent"
@@ -357,7 +363,11 @@ function applyInlineMarkupWithLinks(
           // modern terminals expose ctrl/cmd-click and hover tooltips
           // — none of which our internal handler can do for a URL
           // that isn't a filesystem path anyway.
+          //
+          // hydra://sessions/<id> URLs are also added to the sidecar
+          // so the TUI click handler can switch sessions when clicked.
           const isFileUrl = url.startsWith("file://");
+          const isHydraSessionUrl = HYDRA_SESSION_URL_RE.test(url);
           if (isFileUrl) {
             styled += `${linkOpen}${inner.styled}${linkReset}`;
           } else {
@@ -376,9 +386,10 @@ function applyInlineMarkupWithLinks(
             });
           }
           cleanLen += inner.cleanLength;
-          // Only the file:// links are in the sidecar so the click
-          // handler doesn't try to spawn `code http://example.com`.
-          if (isFileUrl) {
+          // file:// and hydra://sessions/<id> links go in the sidecar
+          // so the TUI click handler can act on them instead of trying
+          // to spawn an editor or browser.
+          if (isFileUrl || isHydraSessionUrl) {
             links.push({ start, end: cleanLen, url });
           }
           i = closeParen + 1;

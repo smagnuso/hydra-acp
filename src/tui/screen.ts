@@ -84,6 +84,10 @@ const PATH_TOKEN_RE = /[A-Za-z0-9_./\-~+@]/;
 // ANSI SGR pattern used when stripping styling escapes from extracted
 // selection text so the clipboard payload is clean plaintext.
 const ANSI_STRIP_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+// Matches hydra://sessions/<id> URLs (with optional host:port prefix and
+// #turn-<n> fragment). Used by the click handler to switch sessions.
+const HYDRA_SESSION_URL_RE =
+  /^hydra:\/\/(?:[^/\s]+\/)?sessions\/([A-Za-z0-9_-]+)(?:#turn-(\d+))?$/;
 
 export interface ScreenOptions {
   term: Terminal;
@@ -105,6 +109,11 @@ export interface ScreenOptions {
   // copy fallback. Return false to fall through to the default
   // double-click handling. Coordinates match onBlockClick.
   onBlockDoubleClick?: (key: string, rowOffset: number) => boolean;
+   // Invoked when the double-click gesture lands inside a hydra://sessions/<id>
+   // link span. The session id is extracted from the URL and passed here so
+   // the app can switch to that session. Return true to claim the gesture
+   // (skip word-snap copy); return false/undefined to fall through.
+   onHydraLinkClick?: (sessionId: string) => boolean;
   // Invoked for every mouse button-press, drag-motion, and button-release
   // event while mouse capture is on. Wheel events are NOT routed here —
   // they continue to drive scrollback internally. Coordinates are 1-based
@@ -391,6 +400,9 @@ export class Screen {
   private onBlockClick: ((key: string, rowOffset: number) => void) | undefined;
   private onBlockDoubleClick:
     | ((key: string, rowOffset: number) => boolean)
+    | undefined;
+  private onHydraLinkClick:
+    | ((sessionId: string) => boolean)
     | undefined;
   private onMouse: ((ev: MouseEvent) => void) | undefined;
   private onHoverRun:
@@ -707,6 +719,7 @@ export class Screen {
     };
     this.onBlockClick = opts.onBlockClick;
     this.onBlockDoubleClick = opts.onBlockDoubleClick;
+    this.onHydraLinkClick = opts.onHydraLinkClick;
     this.onMouse = opts.onMouse;
     this.onHoverRun = opts.onHoverRun;
     this.onBlockVisible = opts.onBlockVisible;
@@ -3080,8 +3093,24 @@ export class Screen {
           }
         }
       }
-      // Try the open-file gesture first: when the click landed on a
-      // filesystem-path token, hand it to the configured editor command
+       // Hydra session link: if the click landed inside a hydra://sessions/<id>
+       // link span, extract the session id and hand it to the app's handler.
+       // This runs after onBlockDoubleClick so keyed-block overrides (editdiff,
+       // tools) get first refusal; falls through to open-file for path tokens.
+       if (this.onHydraLinkClick && cell !== null) {
+         const linkUrl = this.findLinkUrlAt(anchor);
+         if (linkUrl !== null && HYDRA_SESSION_URL_RE.test(linkUrl)) {
+           const m = linkUrl.match(HYDRA_SESSION_URL_RE);
+           const sessionId = m?.[1] ?? null;
+           if (sessionId && this.onHydraLinkClick(sessionId)) {
+             this.doubleClickPending = true;
+             this.lastLeftClick = null;
+             return;
+           }
+         }
+       }
+       // Try the open-file gesture first: when the click landed on a
+       // filesystem-path token, hand it to the configured editor command
       // and skip the word-snap/clipboard path entirely. When the token
       // isn't a file (or no command is configured) fall through to the
       // existing word-snap copy behaviour so the gesture remains useful.
@@ -3520,6 +3549,38 @@ export class Screen {
       lineNum = Number.parseInt(suffix[1]!, 10);
     }
     return { raw, line: lineNum };
+  }
+
+  // Check whether the click position falls inside an inline-markdown link
+  // span ([text](url)) and return its URL, or null when the click landed
+  // outside any link region. This is used by the app's block double-click
+  // handler to detect hydra://session-join links before falling back to
+  // the generic file-open path.
+  findLinkUrlAt(
+    pos: { sourceLineId: number; offset: number },
+  ): string | null {
+    const line = this.lineById(pos.sourceLineId);
+    if (line === null || line.ansi || !line.links) {
+      return null;
+    }
+    // Strip terminal-kit markup to get the clean view, then project the
+    // click offset through the same raw→clean map used by pathTokenAt.
+    const rawBody = line.body ?? "";
+    if (rawBody.length === 0) {
+      return null;
+    }
+    const { clean, rawToClean } = stripTkMarkupWithMap(rawBody);
+    if (clean.length === 0) {
+      return null;
+    }
+    const cleanOffset =
+      rawToClean[Math.min(pos.offset, rawToClean.length - 1)] ?? clean.length;
+    for (const link of line.links) {
+      if (cleanOffset >= link.start && cleanOffset < link.end) {
+        return link.url;
+      }
+    }
+    return null;
   }
 
   // Resolve a token to an existing absolute filesystem path, or null if

@@ -1329,5 +1329,48 @@ describe("renderToolDetail", () => {
     expect(lines[1]?.body).toBe("total 0");
     expect(lines[2]?.body).toBe("drwxrwxrwt");
   });
+
+  it("recognizes hydra://sessions/<id> links and includes them in the sidecar", () => {
+    const lines = parseAgentMarkdown("[join session](hydra://sessions/abc123)");
+    expect(lines).toHaveLength(1);
+    const body = lines[0]?.body ?? "";
+    // OSC 8 hyperlink wrapping (non-file URL)
+    expect(body).toContain("\x1b]8;;hydra://sessions/abc123\x1b\\");
+    // Sidecar link entry
+    const links = lines[0]?.links;
+    expect(links).toHaveLength(1);
+    expect(links![0].url).toBe("hydra://sessions/abc123");
+  });
+
+  it("recognizes hydra:// with host:port in the sidecar", () => {
+    const lines = parseAgentMarkdown("[join](hydra://demo.ngrok.app:443/sessions/xyz789)");
+    expect(lines).toHaveLength(1);
+    const links = lines[0]?.links;
+    expect(links).toHaveLength(1);
+    expect(links![0].url).toBe("hydra://demo.ngrok.app:443/sessions/xyz789");
+  });
+
+  it("recognizes hydra://sessions/<id>#turn-<n> fragment in the sidecar", () => {
+    const lines = parseAgentMarkdown("[jump](hydra://sessions/abc123#turn-5)");
+    expect(lines).toHaveLength(1);
+    const links = lines[0]?.links;
+    expect(links).toHaveLength(1);
+    expect(links![0].url).toBe("hydra://sessions/abc123#turn-5");
+  });
+
+  it("recognizes hydra:// with both host:port and fragment", () => {
+    const lines = parseAgentMarkdown("[go](hydra://tunnel.example.com:7000/sessions/def456#turn-2)");
+    expect(lines).toHaveLength(1);
+    const links = lines[0]?.links;
+    expect(links).toHaveLength(1);
+    expect(links![0].url).toBe("hydra://tunnel.example.com:7000/sessions/def456#turn-2");
+  });
+
+  it("non-hydra-session URLs are not in the sidecar", () => {
+    const lines = parseAgentMarkdown("[open](https://example.com/page)");
+    expect(lines).toHaveLength(1);
+    const links = lines[0]?.links;
+    expect(links).toBeUndefined();
+  });
 });
 
