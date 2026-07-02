@@ -6339,15 +6339,19 @@ function writeStyled(
         }).bgColorGrayscale(25)(lifted);
         return;
       }
-      case "code":
-        // Lift the grayscale bg from 28 → 60 so the band visibly responds
-        // to hover on top of the cli-highlight ANSI bytes in the body.
-        (term as unknown as {
-          bgColorGrayscale: {
-            white: { noFormat: (g: number, t: string) => void };
-          };
-        }).bgColorGrayscale.white.noFormat(60, text);
+      case "code": {
+        // Grayscale hover snapped hard against the terminal's palette
+        // ramp — any lift small enough to feel "subtle" rounded back to
+        // baseline, any lift the ramp could resolve read as a full
+        // highlight. Emit a raw 24-bit bg SGR so we can pick a colour the
+        // ramp can't approximate away: same luminance ballpark as the
+        // baseline (grayscale 28 ≈ #1c1c1c) but a touch cooler so hover
+        // reads via hue rather than brightness.
+        (term as unknown as { noFormat: (t: string) => void }).noFormat(
+          `\x1b[48;2;22;25;36m${text}\x1b[49m`,
+        );
         return;
+      }
     }
   }
   // "agent" and "heading-1/2/3" opt INTO terminal-kit's format processing —
