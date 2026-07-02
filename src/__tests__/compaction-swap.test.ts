@@ -305,10 +305,14 @@ describe("compaction swap — onSynthesisArtifact hook", () => {
       prompt: [{ type: "text", text: "hello" }],
     });
 
-    // Give it a tick to start processing.
+    // Give it a tick to start processing, then flush any queued history
+    // writes from the prompt so compaction sees a stable history length —
+    // otherwise the coordinator's catch-up loop can legitimately fire a
+    // second iteration when the user-turn entry lands between iter 1's
+    // load and its post-iteration growth check.
     await new Promise((r) => setImmediate(r));
+    await manager.flushHistoryWrites();
 
-    // Configure compaction and trigger it.
     mockCompaction.mockResolvedValue({
       synopsis: makeArtifact(),
     });
