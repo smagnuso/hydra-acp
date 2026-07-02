@@ -4100,14 +4100,19 @@ export class Session {
     // slash commands, so advertise bare verbs only. Sub-commands
     // (`/hydra kill`, `/model <id>`) are still accepted by the session
     // dispatcher — users just type the rest themselves.
-    const out: AdvertisedCommand[] = [
-      { name: "hydra", description: "Hydra session command (kill, restart, title, agent <agent>)" },
-      { name: "compact", description: "Alias for '/hydra compact'" },
-      { name: "model", description: "Switch model; omit arg to list available models" },
-      { name: "mode", description: "Switch mode; omit arg to list available modes" },
-      { name: "sessions", description: "List all sessions" },
-      { name: "help", description: "Show available commands" },
-    ];
+    const out: AdvertisedCommand[] = this.daemonTopLevelCommands();
+    const bareAliases = this.aliasableBareVerbs();
+    // Auto-expose each /hydra <verb> as bare /verb where safe.
+    for (const c of HYDRA_COMMANDS) {
+      if (bareAliases.get(c.verb) !== "__hydra__") {
+        continue;
+      }
+      const head = c.argsHint ? `${c.verb} ${c.argsHint}` : c.verb;
+      out.push({
+        name: head,
+        description: `Alias for '/hydra ${c.verb}': ${c.description}`,
+      });
+    }
     if (this.extensionCommands) {
       for (const { name, command } of this.extensionCommands.list()) {
         // An empty verb means "advertise the bare `/hydra <name>`
@@ -4124,24 +4129,108 @@ export class Session {
         // handleSlashCommand. Both forms work; the short form is the
         // recommended UX, the long form is preserved for explicit usage
         // and backward compatibility.
-        if (name.startsWith("hydra-acp-")) {
-          const short = name.slice("hydra-acp-".length);
-          if (short.length > 0) {
-            const shortHead = command.verb ? `hydra ${short} ${command.verb}` : `hydra ${short}`;
-            const shortDisplay = command.argsHint
-              ? `${shortHead} ${command.argsHint}`
-              : shortHead;
-            const shortEntry: AdvertisedCommand = { name: shortDisplay };
-            if (command.description) {
-              shortEntry.description = command.description;
-            }
-            out.push(shortEntry);
+        const short = name.startsWith("hydra-acp-") ? name.slice("hydra-acp-".length) : name;
+        if (name.startsWith("hydra-acp-") && short.length > 0) {
+          const shortHead = command.verb ? `hydra ${short} ${command.verb}` : `hydra ${short}`;
+          const shortDisplay = command.argsHint
+            ? `${shortHead} ${command.argsHint}`
+            : shortHead;
+          const shortEntry: AdvertisedCommand = { name: shortDisplay };
+          if (command.description) {
+            shortEntry.description = command.description;
           }
+          out.push(shortEntry);
+        }
+        // Fully-bare `/short <verb>` form when the short name is safely
+        // aliasable (no conflict with a reserved top-level slash command,
+        // a /hydra built-in verb, or another extension).
+        if (short.length > 0 && bareAliases.get(short) === name) {
+          const bareHead = command.verb ? `${short} ${command.verb}` : short;
+          const bareDisplay = command.argsHint ? `${bareHead} ${command.argsHint}` : bareHead;
+          const bareEntry: AdvertisedCommand = { name: bareDisplay };
+          if (command.description) {
+            bareEntry.description = command.description;
+          }
+          out.push(bareEntry);
         }
       }
     }
     out.push(...this.agentAdvertisedCommands);
     return out;
+  }
+
+  // The daemon's own top-level slash commands — single source of truth
+  // for both advertising (mergedAvailableCommands) and reserved-name
+  // derivation (aliasableBareVerbs).
+  private daemonTopLevelCommands(): AdvertisedCommand[] {
+    return [
+      { name: "hydra", description: "Hydra session command (kill, restart, title, agent <agent>)" },
+      { name: "model", description: "Switch model; omit arg to list available models" },
+      { name: "mode", description: "Switch mode; omit arg to list available modes" },
+      { name: "sessions", description: "List all sessions" },
+      { name: "help", description: "Show available commands" },
+    ];
+  }
+
+  // Compute which bare `/verb` words can be safely auto-aliased to
+  // `/hydra <verb>`. Value is "__hydra__" for a built-in hydra verb,
+  // otherwise the extension process name that owns the alias. Reserved
+  // bare verbs are derived (not hardcoded) from the daemon's own
+  // top-level commands and whatever the underlying agent advertised —
+  // aliasing never shadows something the client already recognizes.
+  // Additional exclusions: hydra-vs-extension collisions (hydra wins)
+  // and extension-vs-extension collisions (nobody wins — user must
+  // type the long `/hydra <name>` form).
+  private aliasableBareVerbs(): Map<string, string> {
+    const reserved = new Set<string>();
+    const firstWord = (name: string): string => name.split(/\s+/)[0] ?? "";
+    for (const c of this.daemonTopLevelCommands()) {
+      const w = firstWord(c.name);
+      if (w) {
+        reserved.add(w);
+      }
+    }
+    for (const c of this.agentAdvertisedCommands) {
+      const w = firstWord(c.name);
+      if (w) {
+        reserved.add(w);
+      }
+    }
+    const result = new Map<string, string>();
+    for (const c of HYDRA_COMMANDS) {
+      if (!reserved.has(c.verb)) {
+        result.set(c.verb, "__hydra__");
+      }
+    }
+    if (!this.extensionCommands) {
+      return result;
+    }
+    const shortOwners = new Map<string, string | "__conflict__">();
+    const seenExtNames = new Set<string>();
+    for (const { name } of this.extensionCommands.list()) {
+      if (seenExtNames.has(name)) {
+        continue;
+      }
+      seenExtNames.add(name);
+      const short = name.startsWith("hydra-acp-")
+        ? name.slice("hydra-acp-".length)
+        : name;
+      if (!short || reserved.has(short) || result.has(short)) {
+        continue;
+      }
+      const prev = shortOwners.get(short);
+      if (prev === undefined) {
+        shortOwners.set(short, name);
+      } else if (prev !== name) {
+        shortOwners.set(short, "__conflict__");
+      }
+    }
+    for (const [short, owner] of shortOwners) {
+      if (owner !== "__conflict__") {
+        result.set(short, owner);
+      }
+    }
+    return result;
   }
 
   // The agent's own advertised commands (not merged with hydra verbs).
@@ -6496,15 +6585,25 @@ export class Session {
     const promptText = extractPromptText(entry.prompt).replace(/\s+$/, "");
     const slashFirstWord =
       !promptText.includes("\n") && promptText.startsWith("/")
-        ? promptText.split(/\s+/)[0]
+        ? (promptText.split(/\s+/)[0] ?? "")
         : "";
+    // Bare aliases: `/verb ...` transparently rewritten to
+    // `/hydra verb ...` when `verb` is a safe non-colliding alias.
+    // Reserved top-level names below are checked first so they always
+    // win over any accidental alias.
+    const bareWord = slashFirstWord.startsWith("/") ? slashFirstWord.slice(1) : "";
+    // Bare-alias resolution excludes anything already handled by the
+    // dedicated top-level switch below (hydra/model/mode/sessions/help)
+    // and anything the underlying agent advertises — same reserved-set
+    // logic that gates advertising in aliasableBareVerbs().
+    const isBareAlias = bareWord.length > 0 && this.aliasableBareVerbs().has(bareWord);
     if (
       slashFirstWord === "/model" ||
       slashFirstWord === "/mode" ||
       slashFirstWord === "/sessions" ||
       slashFirstWord === "/help" ||
       slashFirstWord === "/hydra" ||
-      slashFirstWord === "/compact"
+      isBareAlias
     ) {
       let result: unknown;
       if (slashFirstWord === "/sessions") {
@@ -6515,9 +6614,9 @@ export class Session {
         result = await this.handleModeCommand(promptText);
       } else if (slashFirstWord === "/model") {
         result = await this.handleModelCommand(promptText);
-      } else if (slashFirstWord === "/compact") {
-        const rest = promptText.slice("/compact".length).trim();
-        const rewritten = rest ? `/hydra compact ${rest}` : "/hydra compact";
+      } else if (isBareAlias) {
+        const rest = promptText.slice(slashFirstWord.length).trim();
+        const rewritten = rest ? `/hydra ${bareWord} ${rest}` : `/hydra ${bareWord}`;
         result = await this.handleSlashCommand(rewritten, entry.messageId);
       } else {
         // /hydra ... — dispatch via the shared handler, passing the
