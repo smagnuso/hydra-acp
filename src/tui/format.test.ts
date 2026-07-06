@@ -1339,7 +1339,7 @@ describe("renderToolDetail", () => {
     // Sidecar link entry
     const links = lines[0]?.links;
     expect(links).toHaveLength(1);
-    expect(links![0].url).toBe("hydra://sessions/abc123");
+    expect(links?.[0]?.url).toBe("hydra://sessions/abc123");
   });
 
   it("recognizes hydra:// with host:port in the sidecar", () => {
@@ -1347,7 +1347,7 @@ describe("renderToolDetail", () => {
     expect(lines).toHaveLength(1);
     const links = lines[0]?.links;
     expect(links).toHaveLength(1);
-    expect(links![0].url).toBe("hydra://demo.ngrok.app:443/sessions/xyz789");
+    expect(links?.[0]?.url).toBe("hydra://demo.ngrok.app:443/sessions/xyz789");
   });
 
   it("recognizes hydra://sessions/<id>#turn-<n> fragment in the sidecar", () => {
@@ -1355,7 +1355,7 @@ describe("renderToolDetail", () => {
     expect(lines).toHaveLength(1);
     const links = lines[0]?.links;
     expect(links).toHaveLength(1);
-    expect(links![0].url).toBe("hydra://sessions/abc123#turn-5");
+    expect(links?.[0]?.url).toBe("hydra://sessions/abc123#turn-5");
   });
 
   it("recognizes hydra:// with both host:port and fragment", () => {
@@ -1363,7 +1363,7 @@ describe("renderToolDetail", () => {
     expect(lines).toHaveLength(1);
     const links = lines[0]?.links;
     expect(links).toHaveLength(1);
-    expect(links![0].url).toBe("hydra://tunnel.example.com:7000/sessions/def456#turn-2");
+    expect(links?.[0]?.url).toBe("hydra://tunnel.example.com:7000/sessions/def456#turn-2");
   });
 
   it("non-hydra-session URLs are not in the sidecar", () => {

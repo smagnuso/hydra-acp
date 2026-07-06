@@ -4534,20 +4534,33 @@ async function runSession(
           screen.appendLines(lines);
           return true;
         }
-        if (!opt.options.some((v) => v.value === arg)) {
+        // Match /hydra agent's fuzzy resolution: exact id, else unique
+        // case-insensitive prefix. Ambiguous prefixes fall through to
+        // "unknown agent" rather than silently picking the first hit.
+        let resolvedArg = opt.options.find((v) => v.value === arg)?.value;
+        if (!resolvedArg) {
+          const lc = arg.toLowerCase();
+          const hits = opt.options.filter((v) =>
+            v.value.toLowerCase().startsWith(lc),
+          );
+          if (hits.length === 1) {
+            resolvedArg = hits[0]!.value;
+          }
+        }
+        if (!resolvedArg) {
           screen.notify(`unknown agent: ${arg}`);
           return true;
         }
-        if (arg === opt.currentValue) {
-          screen.notify(`already on agent ${arg}`);
+        if (resolvedArg === opt.currentValue) {
+          screen.notify(`already on agent ${resolvedArg}`);
           return true;
         }
-        screen.notify(`switching to ${arg}…`);
+        screen.notify(`switching to ${resolvedArg}…`);
         void conn
           .request("session/set_config_option", {
             sessionId: resolvedSessionId,
             configId: "agent",
-            value: arg,
+            value: resolvedArg,
           })
           .catch((err: Error) => {
             screen.notify(`set_config_option failed: ${err.message}`);

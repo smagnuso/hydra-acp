@@ -216,6 +216,12 @@ export interface SessionInit {
   // onSynthesisArtifact. When targetAgentId is set, the swap rotates
   // to that agent (the /hydra agent path).
   scheduleCompaction?: (opts?: { targetAgentId?: string }) => void;
+  // Canonicalize an agent id typed by the user (e.g. "claude" ->
+  // "claude-acp") via the same resolution ladder Registry.getAgent uses.
+  // Returns undefined for unknown ids. Used by `/hydra agent` so the
+  // slash command accepts the same fuzzy shorthands the `--agent` flag
+  // does. When absent, `/hydra agent` uses the raw string as-is.
+  resolveAgentId?: (id: string) => Promise<string | undefined>;
   getCompactionState?: () => Promise<CompactionState | undefined>;
   // Reads the persisted pendingAgentSwap field (the target agentId of an
   // in-flight /hydra agent swap, or undefined if none pending).
@@ -502,6 +508,7 @@ export class Session {
   // commands don't need a direct dependency on SynopsisCoordinator.
   // For /hydra agent, opts.targetAgentId names the agent to swap to.
   private scheduleCompactionHook?: (opts?: { targetAgentId?: string }) => void;
+  private resolveAgentIdHook?: (id: string) => Promise<string | undefined>;
   private getCompactionStateHook?: () => Promise<CompactionState | undefined>;
   private getPendingAgentSwapHook?: () => Promise<string | undefined>;
   // In-memory mirror of the last hydra_compaction phase broadcast.
@@ -763,6 +770,7 @@ export class Session {
     this.title = init.title;
     this.scheduleSynopsisHook = init.scheduleSynopsis;
     this.scheduleCompactionHook = init.scheduleCompaction;
+    this.resolveAgentIdHook = init.resolveAgentId;
     this.getCompactionStateHook = init.getCompactionState;
     this.getPendingAgentSwapHook = init.getPendingAgentSwap;
     this.currentModel = init.currentModel;
@@ -4962,13 +4970,21 @@ export class Session {
     if (arg === "status") {
       return this.runAgentStatusCommandInline();
     }
-    const newAgentId = arg;
-    if (!newAgentId) {
+    const rawAgentId = arg;
+    if (!rawAgentId) {
       throw withCode(
         new Error("/hydra agent requires an agent id"),
         JsonRpcErrorCodes.InvalidParams,
       );
     }
+    // Canonicalize (e.g. "claude" -> "claude-acp") so `/hydra agent`
+    // accepts the same fuzzy shorthands `--agent` does. Unknown ids
+    // fall through unchanged so bootstrapAgent surfaces the usual
+    // AgentNotInstalled error downstream.
+    const resolved = this.resolveAgentIdHook
+      ? await this.resolveAgentIdHook(rawAgentId)
+      : undefined;
+    const newAgentId = resolved ?? rawAgentId;
     if (newAgentId === this.agentId) {
       throw withCode(
         new Error(`already on agent ${newAgentId}`),
