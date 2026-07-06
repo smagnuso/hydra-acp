@@ -1708,6 +1708,55 @@ export function registerAcpWsEndpoint(
       return session.amendPrompt(att.clientId, params);
     });
 
+    // session/resume: attach without replaying prior turns. Same
+    // request/response shape as session/load; the only difference is
+    // that we don't stream the buffered `replay` notifications. Used
+    // by clients (e.g. agent-shell with `restore-verbosity 'minimal`)
+    // that want to reconnect without re-rendering history.
+    connection.onRequest("session/resume", async (raw) => {
+      const rawObj = (raw ?? {}) as Record<string, unknown>;
+      const rawSessionId =
+        typeof rawObj.sessionId === "string" ? rawObj.sessionId : undefined;
+      if (!rawSessionId) {
+        throw rpcError(
+          JsonRpcErrorCodes.InvalidParams,
+          "session/resume requires sessionId",
+        );
+      }
+      const sessionId =
+        (await deps.manager.resolveCanonicalId(rawSessionId)) ?? rawSessionId;
+      let session = deps.manager.get(sessionId);
+      if (!session) {
+        const fromDisk = await deps.manager.loadFromDisk(sessionId);
+        if (!fromDisk) {
+          throw rpcError(
+            JsonRpcErrorCodes.SessionNotFound,
+            `session ${rawSessionId} not found in memory or on disk`,
+          );
+        }
+        session = await resurrectFromDisk(deps, fromDisk);
+      }
+      const client = bindClientToSession(connection, session, state);
+      await session.attach(client, "pending_only");
+      state.attached.set(session.sessionId, {
+        sessionId: session.sessionId,
+        clientId: client.clientId,
+        readonly: false,
+      });
+      session.replayPendingPermissions(client);
+      const modesPayload = buildModesPayload(session);
+      const modelsPayload = buildModelsPayload(session);
+      return {
+        sessionId: session.sessionId,
+        ...(modesPayload ? { modes: modesPayload } : {}),
+        ...(modelsPayload ? { models: modelsPayload } : {}),
+        configOptions: session.buildConfigOptions(),
+        _meta: buildResponseMeta(deps.manager, session, {
+          clientId: client.clientId,
+        }),
+      };
+    });
+
     connection.onRequest("session/load", async (raw) => {
       const rawObj = (raw ?? {}) as Record<string, unknown>;
       const rawSessionId =
@@ -2628,6 +2677,7 @@ function buildInitializeResult(): InitializeResult {
       sessionCapabilities: {
         attach: {},
         list: {},
+        resume: {},
       },
     },
     // Hydra is a proxy and has no provider auth of its own. The

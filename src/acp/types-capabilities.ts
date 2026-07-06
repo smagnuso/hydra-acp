@@ -40,6 +40,10 @@ export interface SessionCapabilities {
   // is advertised as an empty object `{}`, matching the `attach` shape.
   // See https://agentclientprotocol.com/protocol/session-list
   list?: Record<string, never>;
+  // session/resume: attach to an existing session without replaying
+  // its history. Same empty-object capability shape as attach/list.
+  // See https://agentclientprotocol.com/rfds/session-resume.
+  resume?: Record<string, never>;
 }
 
 export interface PromptCapabilities {
