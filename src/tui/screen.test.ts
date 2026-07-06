@@ -2502,6 +2502,48 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("st line\nmiddle line\nlast");
   });
 
+  it("pathTokenAt parses a #L<start> fragment off a sidecar link into a line number", () => {
+    const screen = makeTallScreen({ width: 120, height: 24 });
+    const url = "gaming/d2d/d2d-controller.ts#L886-L923";
+    screen.appendLine({
+      body: url,
+      bodyStyle: "agent",
+      links: [{ start: 0, end: url.length, url }],
+    });
+    const rows = visibleRows(screen);
+    const pos = resolve(screen, 3, rows)!;
+    const token = (
+      screen as unknown as {
+        pathTokenAt: (p: { sourceLineId: number; offset: number }) => {
+          raw: string;
+          line: number | null;
+        } | null;
+      }
+    ).pathTokenAt(pos);
+    expect(token).not.toBeNull();
+    expect(token!.raw).toBe("gaming/d2d/d2d-controller.ts");
+    expect(token!.line).toBe(886);
+  });
+
+  it("getSelectionText strips OSC 8 hyperlinks and caret markup from an ansi line", () => {
+    // Real http/https links still render via OSC 8 (ansi:true) with the
+    // link text carried as terminal-kit caret markup. Selection-copy must
+    // yield plain visible text — no OSC 8 escape bytes, no `^C…^:` markup.
+    const screen = makeTallScreen({ width: 120, height: 24 });
+    const body =
+      "see \x1b]8;;https://example.com\x1b\\^C^_https://example.com^:\x1b]8;;\x1b\\ end";
+    screen.appendLine({ body, bodyStyle: "agent", ansi: true });
+    const rows = visibleRows(screen);
+    const a = resolve(screen, 1, rows)!;
+    const b = resolve(screen, 4, rows)!;
+    screen.setSelection(a, b);
+    const text = screen.getSelectionText();
+    expect(text).not.toContain("\x1b");
+    expect(text).not.toContain("^C");
+    expect(text).not.toContain("^_");
+    expect(text).toBe("see https://example.com end");
+  });
+
   it("selection orders by display position when line ids are non-monotonic", () => {
     // Re-rendering a block via upsertLines with any differing field
     // reassigns it a FRESH (higher) line id while it keeps its original,

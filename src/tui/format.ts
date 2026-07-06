@@ -366,9 +366,19 @@ function applyInlineMarkupWithLinks(
           //
           // hydra://sessions/<id> URLs are also added to the sidecar
           // so the TUI click handler can switch sessions when clicked.
+          //
+          // Scheme-less URLs are treated as project-relative filesystem
+          // paths (the file-links skill emits `[foo.ts:42](foo.ts#L42)`
+          // with no scheme). Like file:// they go in the sidecar and are
+          // NOT OSC 8-wrapped: the terminal's URL handler can't open a
+          // bare relative path, and wrapping would (a) break our double-
+          // click open gesture and (b) leak OSC 8 bytes + caret markup
+          // into the clipboard on selection-copy.
           const isFileUrl = url.startsWith("file://");
           const isHydraSessionUrl = HYDRA_SESSION_URL_RE.test(url);
-          if (isFileUrl) {
+          const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url);
+          const isLocalPath = !isFileUrl && !isHydraSessionUrl && !hasScheme;
+          if (isFileUrl || isLocalPath) {
             styled += `${linkOpen}${inner.styled}${linkReset}`;
           } else {
             // OSC 8 framing: ESC ] 8 ; ; URL ST … ESC ] 8 ; ; ST.
@@ -386,10 +396,10 @@ function applyInlineMarkupWithLinks(
             });
           }
           cleanLen += inner.cleanLength;
-          // file:// and hydra://sessions/<id> links go in the sidecar
-          // so the TUI click handler can act on them instead of trying
-          // to spawn an editor or browser.
-          if (isFileUrl || isHydraSessionUrl) {
+          // file://, hydra://sessions/<id>, and scheme-less local paths
+          // go in the sidecar so the TUI click handler can act on them
+          // instead of trying to spawn an editor or browser.
+          if (isFileUrl || isHydraSessionUrl || isLocalPath) {
             links.push({ start, end: cleanLen, url });
           }
           i = closeParen + 1;

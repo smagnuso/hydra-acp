@@ -84,6 +84,13 @@ const PATH_TOKEN_RE = /[A-Za-z0-9_./\-~+@]/;
 // ANSI SGR pattern used when stripping styling escapes from extracted
 // selection text so the clipboard payload is clean plaintext.
 const ANSI_STRIP_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+// OSC 8 hyperlink framing: ESC ] 8 ; params ; URI ST, where ST is either
+// ESC '\' or BEL. Matches both the opening (URI-bearing) and closing
+// (empty) halves so stripping leaves just the visible link text. Applied
+// to selection text alongside ANSI_STRIP_RE so a line carrying an OSC 8
+// link (real http/https URLs still use OSC 8) doesn't leak escape bytes
+// into the clipboard.
+const OSC8_STRIP_RE = /\x1b\]8;[^;]*;[^\x1b\x07]*(?:\x1b\\|\x07)/g;
 // Matches hydra://sessions/<id> URLs (with optional host:port prefix and
 // #turn-<n> fragment). Used by the click handler to switch sessions.
 const HYDRA_SESSION_URL_RE =
@@ -2001,7 +2008,16 @@ export class Screen {
         // block doesn't drop its first or last line (or, when a
         // selection sits wholly inside a code block, produce an empty
         // string).
-        piece = rawBody.replace(ANSI_STRIP_RE, "");
+        piece = rawBody.replace(ANSI_STRIP_RE, "").replace(OSC8_STRIP_RE, "");
+        // Agent / thought / heading / plan bodies that carry an OSC 8
+        // link are flagged ansi but ALSO hold terminal-kit caret markup
+        // (^C…^:) for any inline code / link styling on the same line;
+        // strip that too so the clipboard is plain text. Code-block
+        // bodies (bodyStyle "code") are pure SGR with no caret markup,
+        // so stripTkMarkup is a no-op for them.
+        if (bodyStyleUsesMarkup(line.bodyStyle)) {
+          piece = stripTkMarkup(piece);
+        }
       } else {
         piece = rawBody.slice(bounds.start, bounds.end);
         // Styled bodies route through the markup-interpreting writer, so
@@ -3529,8 +3545,18 @@ export class Screen {
       for (const link of line.links) {
         if (cleanOffset >= link.start && cleanOffset < link.end) {
           const url = link.url;
-          const raw = url.startsWith("file://") ? url.slice("file://".length) : url;
-          return { raw, line: null };
+          let raw = url.startsWith("file://") ? url.slice("file://".length) : url;
+          // GitHub-style "#L<start>[-L<end>]" fragment (from the file-links
+          // skill) → open at <start>. Strip it off the path so the token
+          // stats cleanly; the range end is ignored (editors jump to one
+          // line). A plain "#…" anchor with no line digits is left intact.
+          let lineNum: number | null = null;
+          const frag = raw.match(/^(.*?)#L(\d+)(?:-L?\d+)?$/);
+          if (frag) {
+            raw = frag[1]!;
+            lineNum = Number.parseInt(frag[2]!, 10);
+          }
+          return { raw, line: lineNum };
         }
       }
     }

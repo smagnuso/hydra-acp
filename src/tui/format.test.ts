@@ -1372,5 +1372,31 @@ describe("renderToolDetail", () => {
     const links = lines[0]?.links;
     expect(links).toBeUndefined();
   });
+
+  it("scheme-less path links (file-links skill #L) go in the sidecar, not OSC 8", () => {
+    const lines = parseAgentMarkdown(
+      "[d2d-controller.ts:886](gaming/d2d/d2d-controller.ts#L886-L923)",
+    );
+    expect(lines).toHaveLength(1);
+    const body = lines[0]?.body ?? "";
+    // Local path: NOT OSC 8-wrapped and NOT flagged ansi (so selection-
+    // copy stays clean and the terminal doesn't try to open it as a URL).
+    expect(body).not.toContain("\x1b]8;;");
+    expect(lines[0]?.ansi).toBeFalsy();
+    // In the sidecar so the double-click gesture can open it.
+    const links = lines[0]?.links;
+    expect(links).toHaveLength(1);
+    expect(links?.[0]?.url).toBe("gaming/d2d/d2d-controller.ts#L886-L923");
+  });
+
+  it("scheme-less path link without a line fragment goes in the sidecar", () => {
+    const lines = parseAgentMarkdown(
+      "[game-loader-resource.ts](gaming/d2d/game-loader-resource.ts)",
+    );
+    const links = lines[0]?.links;
+    expect(links).toHaveLength(1);
+    expect(links?.[0]?.url).toBe("gaming/d2d/game-loader-resource.ts");
+    expect(lines[0]?.ansi).toBeFalsy();
+  });
 });
 
