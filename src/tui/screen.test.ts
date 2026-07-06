@@ -2525,23 +2525,55 @@ describe("Screen block-click routing", () => {
     expect(token!.line).toBe(886);
   });
 
-  it("getSelectionText strips OSC 8 hyperlinks and caret markup from an ansi line", () => {
-    // Real http/https links still render via OSC 8 (ansi:true) with the
-    // link text carried as terminal-kit caret markup. Selection-copy must
-    // yield plain visible text — no OSC 8 escape bytes, no `^C…^:` markup.
+  it("getSelectionText copies the full clean text of an OSC 8 agent line", () => {
+    // Real http/https links render via OSC 8 (ansi:true) with the link
+    // text carried as terminal-kit caret markup. A whole-line selection
+    // must yield plain visible text — no OSC 8 escape bytes, no `^C…^:`.
     const screen = makeTallScreen({ width: 120, height: 24 });
     const body =
       "see \x1b]8;;https://example.com\x1b\\^C^_https://example.com^:\x1b]8;;\x1b\\ end";
     screen.appendLine({ body, bodyStyle: "agent", ansi: true });
-    const rows = visibleRows(screen);
-    const a = resolve(screen, 1, rows)!;
-    const b = resolve(screen, 4, rows)!;
-    screen.setSelection(a, b);
+    const line = getLines(screen).find((l) => l.body === body)!;
+    const id = (
+      screen as unknown as { lineIds: Map<FormattedLine, number> }
+    ).lineIds.get(line)!;
+    const setSel = (startOffset: number, endOffset: number): void => {
+      (screen as unknown as {
+        selection: {
+          startLineId: number;
+          startOffset: number;
+          endLineId: number;
+          endOffset: number;
+        } | null;
+      }).selection = {
+        startLineId: id,
+        startOffset,
+        endLineId: id,
+        endOffset,
+      };
+    };
+    setSel(0, body.length);
     const text = screen.getSelectionText();
     expect(text).not.toContain("\x1b");
     expect(text).not.toContain("^C");
     expect(text).not.toContain("^_");
     expect(text).toBe("see https://example.com end");
+  });
+
+  it("getSelectionText slices an OSC 8 agent line per-character (not whole-line)", () => {
+    // The line is ansi only because of the OSC 8 link; its offsets are
+    // still per-char selectable via the markup-aware machinery. Selecting
+    // just the leading word must copy only that word.
+    const screen = makeTallScreen({ width: 120, height: 24 });
+    const body =
+      "see \x1b]8;;https://example.com\x1b\\^C^_https://example.com^:\x1b]8;;\x1b\\ end";
+    screen.appendLine({ body, bodyStyle: "agent", ansi: true });
+    const rows = visibleRows(screen);
+    // Columns 1..4 cover the visible "see" (before the link).
+    const a = resolve(screen, 1, rows)!;
+    const b = resolve(screen, 4, rows)!;
+    screen.setSelection(a, b);
+    expect(screen.getSelectionText()).toBe("see");
   });
 
   it("selection orders by display position when line ids are non-monotonic", () => {
@@ -3061,5 +3093,96 @@ describe("screen compaction prompt", () => {
   it("compactionPromptSpec returns null when inactive", () => {
     const screen = makeScreen();
     expect(screen.compactionPromptSpec()).toBeNull();
+  });
+});
+
+describe("Screen selection-highlight rendering of ansi lines", () => {
+  // Recording term: captures every string payload written via term(...)
+  // (text writes pass a string as the first arg; moveTo/eraseLine pass
+  // numbers or nothing), so we can inspect what the selection-highlight
+  // branch actually emits to the screen.
+  function makeRecordingScreen(): { screen: Screen; writes: string[] } {
+    const writes: string[] = [];
+    const width = 120;
+    const height = 24;
+    const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
+      apply: (_t, _this, args) => {
+        if (typeof args[0] === "string") {
+          writes.push(args[0]);
+        }
+        return term;
+      },
+      get(_target, prop) {
+        if (prop === "width") return width;
+        if (prop === "height") return height;
+        if (prop === "on" || prop === "off") return () => undefined;
+        return new Proxy(() => term, handler);
+      },
+    };
+    const term = new Proxy(
+      function noop() {} as (...args: unknown[]) => unknown,
+      handler,
+    ) as unknown as Terminal;
+    const dispatcher = {
+      state: () => ({
+        buffer: [""],
+        row: 0,
+        col: 0,
+        planMode: false,
+        historyIndex: -1,
+        queueIndex: -1,
+        attachments: [],
+        historySearchQuery: null,
+      }),
+    } as unknown as InputDispatcher;
+    const screen = new Screen({
+      term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    return { screen, writes };
+  }
+
+  it("strips OSC 8 + caret markup from the highlight band (no funky control codes)", () => {
+    const { screen, writes } = makeRecordingScreen();
+    // A real http link renders via OSC 8 (ansi:true) with the link text
+    // carried as terminal-kit caret markup — the "Agent Extensions via
+    // ACP Proxies RFD" shape the user hit.
+    screen.start();
+    const body =
+      "see \x1b]8;;https://example.com/rfd\x1b\\^C^_Agent Extensions via ACP Proxies RFD^:\x1b]8;;\x1b\\ end";
+    screen.appendLine({ body, bodyStyle: "agent", ansi: true });
+    const line = getLines(screen).find((l) => l.body === body)!;
+    const id = (
+      screen as unknown as { lineIds: Map<FormattedLine, number> }
+    ).lineIds.get(line)!;
+    (screen as unknown as {
+      selection: {
+        startLineId: number;
+        startOffset: number;
+        endLineId: number;
+        endOffset: number;
+      } | null;
+    }).selection = {
+      startLineId: id,
+      startOffset: 0,
+      endLineId: id,
+      endOffset: body.length,
+    };
+    writes.length = 0;
+    (screen as unknown as { drawScrollback: () => void }).drawScrollback();
+    const joined = writes.join("");
+    // The selection band carries the visible link text as one clean,
+    // contiguous plain-text run (rendered via the inverse .noFormat
+    // writer)…
+    expect(joined).toContain("see Agent Extensions via ACP Proxies RFD end");
+    // …and no OSC 8 / escape control codes leak into the row at all.
+    // (Caret markup on the non-selected agent pieces is consumed by
+    // term(text); the escape-free assertion is the meaningful one — it's
+    // exactly what the user saw as "funky control codes".)
+    expect(joined).not.toContain("\x1b");
   });
 });

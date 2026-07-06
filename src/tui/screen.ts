@@ -1998,34 +1998,25 @@ export class Screen {
       }
       const rawBody = line.body ?? "";
       let piece: string;
-      if (line.ansi) {
-        // ANSI bodies aren't selectable per-char: their offsets refer
-        // to raw code units that include escape bytes, so a naive slice
-        // can land inside an SGR sequence and paste garbage. Emit the
-        // FULL stripped body regardless of endpoint vs interior status
-        // — overshoots the visual selection at the endpoints slightly,
-        // but keeps every visible character intact so pasting a code
-        // block doesn't drop its first or last line (or, when a
+      if (ansiLineWholeSelectOnly(line)) {
+        // Code-block bodies aren't selectable per-char: their offsets
+        // refer to raw code units that include SGR escape bytes, so a
+        // naive slice can land inside a sequence and paste garbage. Emit
+        // the FULL stripped body regardless of endpoint vs interior
+        // status — overshoots the visual selection at the endpoints
+        // slightly, but keeps every visible character intact so pasting
+        // a code block doesn't drop its first or last line (or, when a
         // selection sits wholly inside a code block, produce an empty
         // string).
         piece = rawBody.replace(ANSI_STRIP_RE, "").replace(OSC8_STRIP_RE, "");
-        // Agent / thought / heading / plan bodies that carry an OSC 8
-        // link are flagged ansi but ALSO hold terminal-kit caret markup
-        // (^C…^:) for any inline code / link styling on the same line;
-        // strip that too so the clipboard is plain text. Code-block
-        // bodies (bodyStyle "code") are pure SGR with no caret markup,
-        // so stripTkMarkup is a no-op for them.
-        if (bodyStyleUsesMarkup(line.bodyStyle)) {
-          piece = stripTkMarkup(piece);
-        }
       } else {
         piece = rawBody.slice(bounds.start, bounds.end);
         // Styled bodies route through the markup-interpreting writer, so
-        // `^X` / `^[...]` style spans are visually zero-width but sit in
-        // the source as code units. Offsets already land on markup
-        // boundaries (segment-aware), so the slice contains whole markup
-        // sequences only; strip them so the clipboard carries the visible
-        // characters alone.
+        // `^X` / `^[...]` spans and OSC 8 hyperlink framing are visually
+        // zero-width but sit in the source as code units. Offsets land on
+        // markup boundaries (segment-aware, OSC-8-aware), so the slice
+        // contains whole markup / OSC 8 sequences only; strip them so the
+        // clipboard carries the visible characters alone.
         if (bodyStyleUsesMarkup(line.bodyStyle)) {
           piece = stripTkMarkup(piece);
         }
@@ -2126,13 +2117,16 @@ export class Screen {
     if (interEnd <= interStart) {
       return null;
     }
-    // ANSI chunks (syntax-highlighted code) can't be sliced per-char —
+    // Syntax-highlighted code chunks can't be sliced per-char — SGR
     // escape bytes inflate code-unit math and a partial slice would land
-    // mid-SGR. When any part of an ANSI chunk overlaps the selection,
+    // mid-sequence. When any part of such a chunk overlaps the selection,
     // highlight the WHOLE chunk (including fillRow padding). Matches the
     // extractor's endpoint policy in getSelectionText, so the visual
-    // band and the copied text agree on which lines are "in".
-    if (line.ansi) {
+    // band and the copied text agree on which lines are "in". Agent /
+    // heading / plan chunks flagged ansi (OSC 8 links only) fall through
+    // to the per-char intersection below — matchTkMarkupAt treats their
+    // OSC 8 spans as zero-width so the offsets line up.
+    if (ansiLineWholeSelectOnly(line)) {
       return {
         start: 0,
         end: line.body.length,
@@ -6070,15 +6064,15 @@ export class Screen {
         writeStyled(this.term, text, line.bodyStyle, hovered);
       }
     };
-    if (selectionRange !== null && line.ansi) {
-      // ANSI-highlighted code row inside the selection. Per-char
+    if (selectionRange !== null && ansiLineWholeSelectOnly(line)) {
+      // Syntax-highlighted code row inside the selection. Per-char
       // slicing isn't safe (see selectionRangeForChunk), so drop the
       // syntax coloring for the highlighted row and paint the plain
       // text under the inverse-video selection style. Matches how most
       // editors behave — selection color wins over syntax color.
-      const plain = bodyText.replace(ANSI_STRIP_RE, "");
+      const plain = bodyText.replace(ANSI_STRIP_RE, "").replace(OSC8_STRIP_RE, "");
       writeStyled(this.term, plain, "selection-highlight", hovered);
-    } else if (selectionRange !== null && !line.ansi) {
+    } else if (selectionRange !== null) {
       const selStart = Math.max(0, Math.min(bodyText.length, selectionRange.start));
       const selEnd = Math.max(selStart, Math.min(bodyText.length, selectionRange.end));
       const usesMarkup = bodyStyleUsesMarkup(line.bodyStyle);
@@ -6437,6 +6431,18 @@ function bodyStyleUsesMarkup(style: Style | undefined): boolean {
   );
 }
 
+// True when an ansi-flagged line must be selected/copied as a whole unit
+// rather than sliced per character. Syntax-highlighted code blocks
+// (bodyStyle "code", real SGR spans throughout) qualify — code-unit
+// offsets can't be mapped to visible columns safely. Agent / thought /
+// heading / plan bodies flagged ansi carry only OSC 8 hyperlink framing
+// (zero-width, recognized by matchTkMarkupAt) plus zero-width caret
+// markup, so the markup-aware offset machinery CAN slice them per-char;
+// those return false and fall through to the normal selection path.
+function ansiLineWholeSelectOnly(line: FormattedLine): boolean {
+  return line.ansi === true && !bodyStyleUsesMarkup(line.bodyStyle);
+}
+
 function writeStyled(
   term: Terminal,
   text: string,
@@ -6708,7 +6714,32 @@ interface MarkupMatch {
   width: number;
 }
 
+// Match an OSC 8 hyperlink sequence starting at `i`: ESC ] 8 ; params ;
+// URI (ST | BEL), where ST is ESC '\'. Returns the matched substring, or
+// null when `i` isn't the start of a (terminated) OSC 8 sequence. These
+// are zero visible columns — the link text lives between the opening and
+// closing halves — so matchTkMarkupAt reports them like caret markup so
+// the width / wrap / offset / strip machinery treats them uniformly.
+function matchOsc8At(text: string, i: number): string | null {
+  if (!text.startsWith("\x1b]8;", i)) {
+    return null;
+  }
+  for (let j = i + 4; j < text.length; j++) {
+    if (text[j] === "\x07") {
+      return text.slice(i, j + 1);
+    }
+    if (text[j] === "\x1b" && text[j + 1] === "\\") {
+      return text.slice(i, j + 2);
+    }
+  }
+  return null;
+}
+
 export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
+  if (text.charCodeAt(i) === 0x1b /* ESC */) {
+    const osc8 = matchOsc8At(text, i);
+    return osc8 === null ? null : { text: osc8, width: 0 };
+  }
   if (text.charCodeAt(i) !== 0x5e /* ^ */) {
     return null;
   }
@@ -6773,7 +6804,7 @@ export function stripTkMarkupWithMap(text: string): {
 }
 
 export function stripTkMarkup(text: string): string {
-  if (!text.includes("^"))
+  if (!text.includes("^") && !text.includes("\x1b"))
     return text;
   let out = "";
   let i = 0;
@@ -6797,6 +6828,11 @@ export function stripTkMarkup(text: string): string {
 // the markup writer re-applies the toggle/color spans that were active at
 // the splice point so the trailing piece keeps its original styling.
 // Literal `^^` (a visible caret) is dropped since it has no styling effect.
+//
+// OSC 8 hyperlink spans (also zero-width per matchTkMarkupAt) are
+// deliberately NOT replayed: they're a link WRAPPER, not a persistent SGR
+// style. Re-emitting a bare OSC 8 opener would start an unwanted hyperlink
+// on the trailing text and leak its escape bytes into the row.
 function tkMarkupTokensOnly(text: string): string {
   if (!text.includes("^")) {
     return "";
@@ -6806,7 +6842,7 @@ function tkMarkupTokensOnly(text: string): string {
   while (i < text.length) {
     const m = matchTkMarkupAt(text, i);
     if (m) {
-      if (m.width === 0) {
+      if (m.width === 0 && m.text.charCodeAt(0) === 0x5e /* ^ */) {
         out += m.text;
       }
       i += m.text.length;
@@ -6818,7 +6854,7 @@ function tkMarkupTokensOnly(text: string): string {
 }
 
 function hasTkMarkup(text: string): boolean {
-  if (!text.includes("^")) {
+  if (!text.includes("^") && !text.includes("\x1b")) {
     return false;
   }
   for (let i = 0; i < text.length; i++) {
@@ -6832,6 +6868,22 @@ function hasTkMarkup(text: string): boolean {
 interface WidthSegment {
   text: string;
   width: number;
+}
+
+// Index of the next byte that could START a markup span (caret `^` or an
+// ESC that may open an OSC 8 sequence), at or after `from`. -1 when none
+// remain. Lets the grapheme walk in segmentForWidth stop at either kind of
+// boundary without a separate scan per marker.
+function nextMarkupBoundary(text: string, from: number): number {
+  const caret = text.indexOf("^", from);
+  const esc = text.indexOf("\x1b", from);
+  if (caret === -1) {
+    return esc;
+  }
+  if (esc === -1) {
+    return caret;
+  }
+  return Math.min(caret, esc);
 }
 
 // Walk `text` yielding either a markup span (emitted as one indivisible
@@ -6849,15 +6901,16 @@ export function* segmentForWidth(text: string): IterableIterator<WidthSegment> {
       continue;
     }
     // Walk graphemes only up to the next markup boundary so the
-    // segmenter doesn't fuse a stray '^' with adjacent text.
+    // segmenter doesn't fuse a stray '^' (or an OSC 8 escape) with
+    // adjacent text. Probe for the nearest of '^' or ESC.
     let runEnd = text.length;
-    let probe = text.indexOf("^", i);
+    let probe = nextMarkupBoundary(text, i);
     while (probe !== -1 && probe < text.length) {
       if (matchTkMarkupAt(text, probe)) {
         runEnd = probe;
         break;
       }
-      probe = text.indexOf("^", probe + 1);
+      probe = nextMarkupBoundary(text, probe + 1);
     }
     if (runEnd === i) {
       // Bare '^' that isn't valid markup; render as 1 visible col.

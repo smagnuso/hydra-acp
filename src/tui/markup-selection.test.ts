@@ -97,6 +97,29 @@ describe("stripTkMarkup — clipboard text is markup-free", () => {
     expect(stripTkMarkup("hello, world!")).toBe("hello, world!");
   });
 
+  it("OSC 8 hyperlink framing is removed, leaving the visible link text", () => {
+    // ESC ] 8 ; ; URI ESC \ … ESC ] 8 ; ; ESC \ wraps the caret-styled
+    // link text. Both halves plus the caret markup collapse to the text.
+    const body =
+      "see \x1b]8;;https://example.com\x1b\\^C^_link text^:\x1b]8;;\x1b\\ end";
+    expect(stripTkMarkup(body)).toBe("see link text end");
+  });
+
+  it("BEL-terminated OSC 8 is also removed", () => {
+    const body = "\x1b]8;;https://x\x07^C^_x^:\x1b]8;;\x07";
+    expect(stripTkMarkup(body)).toBe("x");
+  });
+});
+
+describe("segmentForWidth — OSC 8 is zero-width", () => {
+  it("treats an OSC 8 span as a single zero-width segment", () => {
+    const body = "a\x1b]8;;https://x\x1b\\b\x1b]8;;\x1b\\c";
+    const segs = [...segmentForWidth(body)];
+    const totalWidth = segs.reduce((n, s) => n + s.width, 0);
+    // Visible cells: a, b, c → width 3, regardless of the OSC 8 bytes.
+    expect(totalWidth).toBe(3);
+  });
+
   it("slice-then-strip produces exactly the visible chars under the selection", () => {
     // Simulate the screen.ts pipeline: pick visible columns, ask the
     // segment-aware mapper for the corresponding code-unit slice,
