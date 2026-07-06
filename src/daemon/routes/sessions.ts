@@ -542,6 +542,7 @@ export function registerSessionRoutes(
       agentId?: unknown;
       title?: unknown;
       mode?: unknown;
+      model?: unknown;
     };
     const opts: {
       forkAt?: string;
@@ -549,6 +550,7 @@ export function registerSessionRoutes(
       agentId?: string;
       title?: string;
       mode?: "verbatim" | "synthesis";
+      model?: string;
     } = {};
     if (body.forkAt !== undefined) {
       if (typeof body.forkAt !== "string" || body.forkAt.length === 0) {
@@ -584,6 +586,13 @@ export function registerSessionRoutes(
         return;
       }
       opts.mode = body.mode;
+    }
+    if (body.model !== undefined) {
+      if (typeof body.model !== "string" || body.model.length === 0) {
+        reply.code(400).send({ error: "model must be a non-empty string" });
+        return;
+      }
+      opts.model = body.model;
     }
     try {
       const result = await manager.forkSession(id, opts);

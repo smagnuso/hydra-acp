@@ -424,9 +424,10 @@ Branch a local session. `forkAt` defaults to the source's most-recent `turn_comp
 
 ```jsonc
 {
-  "forkAt":  "<messageId>",   // optional
-  "cwd":     "/work-fork",    // optional
-  "agentId": "claude-acp"     // optional
+  "forkAt":  "<messageId>",     // optional
+  "cwd":     "/work-fork",      // optional
+  "agentId": "claude-acp",      // optional
+  "model":   "claude-opus-4-7"  // optional; applied via session/set_model at attach
 }
 ```
 
@@ -1250,7 +1251,14 @@ Branch a local session into a new one that shares context up to a chosen turn bo
   "sessionId": "<source>",
   "forkAt":    "<messageId>",   // optional; defaults to source's latest turn_complete
   "cwd":       "<path>",        // optional; defaults to source's cwd
-  "agentId":   "<id>"           // optional; defaults to source's agent
+  "agentId":   "<id>",          // optional; defaults to source's agent
+  "model":     "<modelId>"      // optional; stamped on the fork's record.currentModel
+                                //   so the resurrect path applies it via
+                                //   session/set_model at agent bootstrap. Overrides
+                                //   both the source's currentModel (same-agent fork)
+                                //   and the cross-agent clear. Invalid ids log a
+                                //   warning at attach and leave the fork on the
+                                //   agent's default.
 }
 // result
 {

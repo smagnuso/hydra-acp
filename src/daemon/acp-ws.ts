@@ -797,6 +797,7 @@ export function registerAcpWsEndpoint(
           cwd?: unknown;
           agentId?: unknown;
           mode?: unknown;
+          model?: unknown;
         };
         if (typeof params.sessionId !== "string") {
           throw rpcError(
@@ -810,11 +811,15 @@ export function registerAcpWsEndpoint(
         const mode = (typeof params.mode === "string" && (params.mode === "verbatim" || params.mode === "synthesis"))
           ? params.mode
           : undefined;
+        const model = typeof params.model === "string" && params.model.length > 0
+          ? params.model
+          : undefined;
         return await deps.manager.forkSession(params.sessionId, {
           ...(forkAt !== undefined ? { forkAt } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           ...(agentId !== undefined ? { agentId } : {}),
           ...(mode !== undefined ? { mode } : {}),
+          ...(model !== undefined ? { model } : {}),
         });
       });
 

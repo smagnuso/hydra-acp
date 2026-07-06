@@ -2547,7 +2547,7 @@ export class SessionManager {
   // usage, agent-emitted commands/modes/models) so the new agent boots
   // clean — title and conversation transcript are agent-agnostic and
   // are kept.
-  async forkSession(
+   async forkSession(
     sourceSessionId: string,
     opts: {
       forkAt?: string;
@@ -2563,6 +2563,14 @@ export class SessionManager {
       // pre-synthesis behavior.  In synthesis mode, `forkAt` is silently
       // ignored (synthesis always covers full history).
       mode?: "verbatim" | "synthesis";
+      // Optional model override for the fork. When set, the fork's
+      // record.currentModel is stamped with this id so the resurrect path
+      // applies it via session/set_model at agent bootstrap. Validation
+      // against the target agent's advertised models happens at attach
+      // time; an unknown id logs a warning and leaves the fork on the
+      // agent's default. Also used as the synopsis model in synthesis mode
+      // so the brief is generated in the same idiom the fork will consume.
+      model?: string;
     } = {},
   ): Promise<{
     sessionId: string;
@@ -2723,6 +2731,9 @@ export class SessionManager {
             agentModels: undefined,
           }
         : {}),
+      // Explicit model override wins over both source's currentModel
+      // (same-agent fork) and the crossAgent clear above.
+      ...(opts.model !== undefined ? { currentModel: opts.model } : {}),
     };
 
     const bundle = encodeBundle({
@@ -2766,6 +2777,12 @@ export class SessionManager {
             cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
             plan: spawnPlan,
             history: sourceHistory,
+            // sourceModel deliberately — synopsis is a one-shot prep step,
+            // not the review work. Using opts.model here would burn premium
+            // tokens (and possibly rate-limit) on history summarization the
+            // user didn't ask for. The target agent still consumes the
+            // synopsis in its own idiom (agentId is targetAgentId above);
+            // the model-tier choice is what stays with the source.
             modelId: sourceModel,
             sessionId: sourceSessionId,
             logger: this.logger,
