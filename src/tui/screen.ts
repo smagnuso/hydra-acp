@@ -2985,23 +2985,37 @@ export class Screen {
       const selectionFinalize = this.inAppSelectionEnabled &&
         (this.selectionDragStarted || this.doubleClickPending);
       if (
-        this.onBlockClick &&
         press !== null &&
         cell !== null &&
         cell.x === press.x &&
         cell.y === press.y &&
         !selectionFinalize
       ) {
-        const key = this.keyAtRow(cell.y);
-        if (key !== null) {
-          // Scan upward to find the block's top row so we can report a
-          // 0-based offset within the block. Relies on the invariant
-          // that a given key occupies a contiguous run of rows.
-          let firstRowY = cell.y;
-          while (firstRowY > 1 && this.keyAtRow(firstRowY - 1) === key) {
-            firstRowY -= 1;
+        // BTW header sid: single-click jumps to the fork session, matching
+        // the ^p picker convention. Checked before onBlockClick because
+        // the overlay header sits above the transcript block map and would
+        // never be a valid block target anyway.
+        const region = this.btwHeaderSidRegion();
+        if (
+          region !== null &&
+          this.onHydraLinkClick &&
+          cell.y === region.row &&
+          cell.x >= region.colStart &&
+          cell.x <= region.colEnd
+        ) {
+          this.onHydraLinkClick(region.sessionId);
+        } else if (this.onBlockClick) {
+          const key = this.keyAtRow(cell.y);
+          if (key !== null) {
+            // Scan upward to find the block's top row so we can report a
+            // 0-based offset within the block. Relies on the invariant
+            // that a given key occupies a contiguous run of rows.
+            let firstRowY = cell.y;
+            while (firstRowY > 1 && this.keyAtRow(firstRowY - 1) === key) {
+              firstRowY -= 1;
+            }
+            this.schedulePendingBlockClick(key, cell.y - firstRowY);
           }
-          this.schedulePendingBlockClick(key, cell.y - firstRowY);
         }
       }
       this.handleSelectionRelease(cell);
@@ -4713,6 +4727,45 @@ export class Screen {
     const signature =
       `${w}|${sid}|${this.btwOverlayStatus}|${usageStr ?? ""}`;
     return { left, label, sidSep, sid, sidTrail, middle, usage, right, signature };
+  }
+
+  // Compute the header row's sid click region for single-click jump-to-fork.
+  // Returns null when there's no overlay open, no sid populated, or the
+  // overlay hasn't been laid out yet. Column math mirrors buildBtwHeaderSegments's
+  // left→right layout so the region stays in sync with what's actually painted.
+  private btwHeaderSidRegion(): {
+    row: number;
+    colStart: number;
+    colEnd: number;
+    sessionId: string;
+  } | null {
+    if (!this.btwOverlayOpen || !this.btwOverlaySessionId) {
+      return null;
+    }
+    const rows = this.btwOverlayRows();
+    if (rows === 0) {
+      return null;
+    }
+    const h = this.term.height;
+    const separatorAbovePromptRow =
+      h - this.promptRows() - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
+    const zoneRows = this.chipRows() + this.queuedRows() + this.completionRows();
+    const overlayBottom = separatorAbovePromptRow - 1 - zoneRows;
+    const headerRow = overlayBottom - rows + 1;
+    const label = "By the way";
+    const left = "── ";
+    const sid = shortId(this.btwOverlaySessionId);
+    const sidSep = " \u00b7 ";
+    // Terminal columns are 1-indexed to match cell.x/cell.y coordinates
+    // used by handleMouse.
+    const colStart = 1 + left.length + stringWidth(label) + sidSep.length;
+    const colEnd = colStart + stringWidth(sid) - 1;
+    return {
+      row: headerRow,
+      colStart,
+      colEnd,
+      sessionId: this.btwOverlaySessionId,
+    };
   }
 
   private paintBtwHeader(segments: {
