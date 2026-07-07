@@ -3223,6 +3223,45 @@ export class SessionManager {
           `scheduleCompaction: failed to stamp pendingAgentSwap for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
+      // Fast path for /hydra agent when we already have a fresh synopsis
+      // artifact covering the entire current history: skip re-synthesis
+      // (which would spawn an ephemeral agent and re-summarize the whole
+      // transcript in the target agent's idiom) and go straight to the
+      // swap. The artifact is in whatever agent's idiom last generated
+      // it, but modern agents consume each other's markdown fine — and
+      // for the frequent-switching case the multi-second synthesis wait
+      // dominates the perceived latency. If history has grown past the
+      // watermark, fall through to the normal coordinator path.
+      const targetAgentId = opts.targetAgentId;
+      void (async () => {
+        try {
+          const record = await this.store.read(sessionId);
+          if (!record?.synopsis || record.summarizedThroughEntry === undefined) {
+            this.synopsisCoordinator.scheduleCompaction(sessionId, opts);
+            return;
+          }
+          const history = await this.histories.load(sessionId, { maxEntries: Infinity });
+          if (history.length !== record.summarizedThroughEntry) {
+            this.synopsisCoordinator.scheduleCompaction(sessionId, opts);
+            return;
+          }
+          this.logger?.info(
+            `compaction: fast-path swap sessionId=${sessionId} target=${targetAgentId} (reusing artifact @${record.summarizedThroughEntry})`,
+          );
+          await this.dispatchSynthesisSwap(
+            sessionId,
+            record.synopsis,
+            record.summarizedThroughEntry,
+            targetAgentId,
+          );
+        } catch (err) {
+          this.logger?.warn(
+            `scheduleCompaction: fast-path check failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)} — falling back to synthesis`,
+          );
+          this.synopsisCoordinator.scheduleCompaction(sessionId, opts);
+        }
+      })();
+      return;
     }
     this.synopsisCoordinator.scheduleCompaction(sessionId, opts);
   }
