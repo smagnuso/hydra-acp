@@ -39,7 +39,12 @@ import {
   type SessionHits,
 } from "./discovery.js";
 import { loadHistory } from "./history.js";
-import { InputDispatcher, type KeyEvent } from "./input.js";
+import { readClipboard } from "./clipboard.js";
+import {
+  InputDispatcher,
+  type Attachment,
+  type KeyEvent,
+} from "./input.js";
 import {
   computePromptLayout,
   computePromptVisualRows,
@@ -105,7 +110,15 @@ export type PickerResult =
       sourceImportedFromMachine?: string;
       sourceUpstreamSessionId?: string;
     }
-  | { kind: "new"; prompt?: string; cwd?: string }
+  | {
+      kind: "new";
+      prompt?: string;
+      cwd?: string;
+      // Image attachments the user pasted / read into the picker composer
+      // before the session existed. Fired alongside `prompt` on the first
+      // enqueuePrompt in the freshly-attached session.
+      attachments?: Attachment[];
+    }
   | { kind: "abort" }
   | { kind: "exit" };
 
@@ -124,6 +137,10 @@ export interface PickOptions {
   // picker's Esc re-shows the session picker — the prompt the user
   // already typed for the new session is restored into the composer box.
   initialPrompt?: string;
+  // Seed the composer's attachment list on open. Mirrors initialPrompt for
+  // the case where the agent picker is re-entered and we want to preserve
+  // any images the user pasted into the composer before diverting.
+  initialAttachments?: Attachment[];
   // Persistent filter state. Seeded on first picker open from
   // createPickerPrefs(); pickSession mutates it in place so the next
   // invocation re-opens with the same `o`/`h` toggles the user left in
@@ -456,6 +473,11 @@ export async function pickSession(
   if (opts.initialPrompt) {
     composer.setBuffer(opts.initialPrompt);
   }
+  if (opts.initialAttachments) {
+    for (const a of opts.initialAttachments) {
+      composer.addAttachment(a);
+    }
+  }
   // Seed Up-arrow recall with the global cross-session prompt history,
   // same as the live composer. Loaded asynchronously so we don't suspend
   // before installing input handlers; in practice the file load resolves
@@ -524,7 +546,10 @@ export async function pickSession(
     // title length is capped at termWidth - 8 to guarantee at least two
     // trailing dashes before the corner glyph.
     const titleBudget = Math.max(10, termWidth - 8);
-    composerTitle = formatComposerTitle(currentCwd, titleBudget);
+    const attachmentCount = composer.state().attachments.length;
+    const suffix = attachmentCount > 0 ? ` · 📎×${attachmentCount}` : "";
+    const titleBudgetForCwd = Math.max(10, titleBudget - suffix.length);
+    composerTitle = formatComposerTitle(currentCwd, titleBudgetForCwd) + suffix;
     const state = composer.state();
     composerVisualRows = computePromptVisualRows(state.buffer, composerRoom);
     const layout = computePromptLayout(
@@ -1532,6 +1557,52 @@ export async function pickSession(
       }
     });
   };
+
+  // Fetch an image from the system clipboard (best-effort, image-first)
+  // and add it to the composer's attachment list. Fired when the
+  // dispatcher emits an attachment-request effect from ^V or from an
+  // empty bracketed paste (wezterm's native ctrl+shift+v with an
+  // image-only clipboard). Reflects success/failure in the transient
+  // indicator slot so the user knows the paste took effect.
+  const ingestClipboardAttachment = async (): Promise<void> => {
+    const result = await readClipboard();
+    if (!result.ok) {
+      transientStatus = result.reason;
+      paintIndicator();
+      return;
+    }
+    if (result.kind !== "image") {
+      // Text-only clipboard: route through the same paste path as
+      // bracketed paste so multi-line content splits at \n.
+      const before = composer.state();
+      composer.feed({ type: "paste", text: result.text });
+      const after = composer.state();
+      const changed =
+        before.buffer.length !== after.buffer.length ||
+        before.row !== after.row ||
+        before.col !== after.col ||
+        !before.buffer.every((line, i) => line === after.buffer[i]);
+      if (changed) {
+        const rows = computePromptVisualRows(after.buffer, composerRoom);
+        const layout = computePromptLayout(
+          rows,
+          after,
+          PICKER_COMPOSER_MAX_ROWS,
+        );
+        if (layout.rendered !== composerRows) {
+          renderFromScratch();
+        } else {
+          repaintComposerBody();
+        }
+      }
+      return;
+    }
+    composer.addAttachment(result.attachment);
+    transientStatus = `attached ${result.attachment.name ?? "image"}`;
+    // Attachment count is baked into composerTitle, so a full redraw
+    // keeps the box border label in sync with the new count.
+    renderFromScratch();
+  };
   const repaintSessionRow = (sessionIdx: number): void => {
     if (
       sessionIdx < scrollOffset ||
@@ -1712,7 +1783,15 @@ export async function pickSession(
           feedFindPaste(pasted);
         }
       } else if (selectedIdx === 0 && !searchActive) {
-        composer.feed({ type: "paste", text: pasted });
+        const effects = composer.feed({ type: "paste", text: pasted });
+        // Empty bracketed paste (wezterm's ctrl+shift+v on an image-only
+        // clipboard) surfaces as an attachment-request — read the
+        // clipboard and attach any image found.
+        for (const effect of effects) {
+          if (effect.type === "attachment-request") {
+            void ingestClipboardAttachment();
+          }
+        }
         const after = composer.state();
         const newVr = computePromptVisualRows(after.buffer, composerRoom);
         const newLayout = computePromptLayout(
@@ -1780,8 +1859,24 @@ export async function pickSession(
     // Build a "new" PickerResult, always reporting the picker's
     // current cwd so the caller's launch path uses the same path the
     // composer title is showing — no opts.cwd vs currentCwd skew.
-    const makeNewResult = (): { kind: "new"; prompt?: string; cwd?: string } =>
-      ({ kind: "new", cwd: currentCwd });
+    const makeNewResult = (): {
+      kind: "new";
+      prompt?: string;
+      cwd?: string;
+      attachments?: Attachment[];
+    } => {
+      const out: {
+        kind: "new";
+        prompt?: string;
+        cwd?: string;
+        attachments?: Attachment[];
+      } = { kind: "new", cwd: currentCwd };
+      const attached = composer.state().attachments;
+      if (attached.length > 0) {
+        out.attachments = [...attached];
+      }
+      return out;
+    };
 
     // ^p opens a directory prompt. On accept, currentCwd updates and the
     // composer title + cwd-only filter follow. On Esc, cwd is unchanged.
@@ -2784,6 +2879,16 @@ export async function pickSession(
         if (effects.some((e) => e.type === "exit")) {
           tryAbort();
           return;
+        }
+        // ^V (or an empty bracketed paste from wezterm's native ctrl+shift+v
+        // when the clipboard holds only an image) surfaces as an
+        // attachment-request. Read the system clipboard and attach any
+        // image found so the new-session flow can send it with the first
+        // prompt.
+        for (const effect of effects) {
+          if (effect.type === "attachment-request") {
+            void ingestClipboardAttachment();
+          }
         }
         if (unchanged) {
           placeComposerCursor();

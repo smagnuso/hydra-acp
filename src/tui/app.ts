@@ -476,6 +476,12 @@ export interface TuiOptions {
   // freshly-spawned session. Only honored when ctx.sessionId === "__new__"
   // so a stray forward into a resume/restart path can't re-fire it.
   initialPrompt?: string;
+  // First-attachment seed for a freshly-created session. Populated when
+  // the picker's composer collected image attachments (e.g. via ^V or an
+  // empty bracketed paste from wezterm's native ctrl+shift+v) before the
+  // session existed. Fired alongside initialPrompt on the first
+  // enqueuePrompt. Only honored when ctx.sessionId === "__new__".
+  initialAttachments?: Attachment[];
   // View-only mode. When true the TUI attaches with readonly:true so
   // the daemon won't resurrect or spawn an agent (cold session viewer
   // path) and refuses any state-changing JSON-RPC method from this
@@ -3743,6 +3749,9 @@ async function runSession(
         if (choice.prompt !== undefined) {
           nextOpts.initialPrompt = choice.prompt;
         }
+        if (choice.attachments && choice.attachments.length > 0) {
+          nextOpts.initialAttachments = choice.attachments;
+        }
         resume(nextOpts);
         return;
       }
@@ -6876,8 +6885,12 @@ async function runSession(
   // Fire it once, now that screen.start() and the dispatcher are wired
   // up. Guarded by sessionId === "__new__" so a resume/restart that
   // accidentally inherits opts.initialPrompt is a no-op.
-  if (opts.initialPrompt && ctx.sessionId === "__new__") {
-    enqueuePrompt(opts.initialPrompt, []);
+  if (
+    ctx.sessionId === "__new__" &&
+    (opts.initialPrompt ||
+      (opts.initialAttachments && opts.initialAttachments.length > 0))
+  ) {
+    enqueuePrompt(opts.initialPrompt ?? "", opts.initialAttachments ?? []);
   }
 
   return await sessionDone;
@@ -6944,6 +6957,9 @@ async function resolveSession(
       ...(opts.initialPrompt !== undefined
         ? { initialPrompt: opts.initialPrompt }
         : {}),
+      ...(opts.initialAttachments && opts.initialAttachments.length > 0
+        ? { initialAttachments: opts.initialAttachments }
+        : {}),
     });
     if (choice.kind === "abort" || choice.kind === "exit") {
       return null;
@@ -6951,6 +6967,9 @@ async function resolveSession(
     if (choice.kind === "new") {
       if (choice.prompt !== undefined) {
         opts.initialPrompt = choice.prompt;
+      }
+      if (choice.attachments && choice.attachments.length > 0) {
+        opts.initialAttachments = choice.attachments;
       }
       if (choice.cwd !== undefined) {
         cwd = choice.cwd;
