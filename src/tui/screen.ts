@@ -2906,8 +2906,32 @@ export class Screen {
       // hover affordance. Treat them as unkeyed for pointer-shape and
       // hover-highlight purposes so child thought/code spans don't
       // flash a hover background when the pointer drifts across them.
-      const info =
+      let info =
         rawInfo !== null && rawInfo.key.startsWith("agent:") ? null : rawInfo;
+      // Sticky-run resolution: if the pointer landed on an unkeyed row
+      // but is sandwiched between two rows whose keys both belong to
+      // the current hoveredRunKeys, treat it as still hovering the
+      // run. This keeps the highlight continuous across the blank
+      // separator between two contiguous thoughts (or any other run
+      // grouping onHoverRun defines) rather than blinking off every
+      // time the pointer crosses the gap.
+      if (
+        info === null &&
+        kind === "move" &&
+        this.hoveredRunKeys !== null &&
+        this.hoveredBlockKey !== null
+      ) {
+        const above = this.nearestKeyAboveRow(cell.y);
+        const below = this.nearestKeyBelowRow(cell.y);
+        if (
+          above !== null &&
+          below !== null &&
+          this.hoveredRunKeys.has(above) &&
+          this.hoveredRunKeys.has(below)
+        ) {
+          info = { key: this.hoveredBlockKey, sub: null };
+        }
+      }
       this.setPointerShape(info !== null ? "pointer" : "default");
       if (kind === "move") {
         const newKey = info?.key ?? null;
@@ -3930,6 +3954,33 @@ export class Screen {
     return clicked?.blockKey ?? null;
   }
 
+  // Scan upward from `y` (exclusive) for the first row that carries a
+  // blockKey and return it. Used by sticky-run hover resolution to
+  // detect whether an unkeyed row sits inside a run's interior gap.
+  private nearestKeyAboveRow(y: number): string | null {
+    for (let probe = y - 1; probe >= 1; probe--) {
+      const k = this.keyAtRow(probe);
+      if (k !== null) {
+        return k;
+      }
+    }
+    return null;
+  }
+
+  // Mirror of nearestKeyAboveRow that scans downward, bounded by the
+  // scrollback viewport.
+  private nearestKeyBelowRow(y: number): string | null {
+    const visibleRows = this.scrollbackVisibleRows();
+    const maxY = visibleRows;
+    for (let probe = y + 1; probe <= maxY; probe++) {
+      const k = this.keyAtRow(probe);
+      if (k !== null) {
+        return k;
+      }
+    }
+    return null;
+  }
+
   // Like keyAtRow but also returns the finer-grained hoverSubKey stamped
   // on the row (when the block opted into per-entry hover scoping). Used
   // by the mouse motion handler to decide which contiguous run of rows
@@ -4862,18 +4913,50 @@ export class Screen {
     // Rebuild the display-ordered selection bounds once per paint so each
     // selectionRangeForChunk lookup below is O(1) and order-correct.
     this.selectionRenderBounds = this.selectionLineBounds()?.byId ?? null;
+    // Precompute the slice-index span covered by the hovered run so
+    // unkeyed rows sitting inside the run (typically the blank
+    // separator between two contiguous thoughts) can still paint as
+    // hovered. Without this the highlight leaves a bright/dark/bright
+    // stripe pattern across a run that reads as broken.
+    let runFirstIdx = -1;
+    let runLastIdx = -1;
+    if (this.hoveredBlockKey !== null || this.hoveredRunKeys !== null) {
+      for (let j = 0; j < slice.length; j++) {
+        const k = slice[j]?.blockKey;
+        if (k === undefined) {
+          continue;
+        }
+        const inRun =
+          k === this.hoveredBlockKey ||
+          (this.hoveredRunKeys !== null && this.hoveredRunKeys.has(k));
+        if (!inRun) {
+          continue;
+        }
+        if (runFirstIdx === -1) {
+          runFirstIdx = j;
+        }
+        runLastIdx = j;
+      }
+    }
     for (let i = 0; i < visibleRows; i++) {
       const row = top + i;
       const sliceIdx = i - padTop;
       const line = sliceIdx >= 0 ? slice[sliceIdx] : undefined;
       const activeCol = this.activeMatchCol(line, matchInfo);
       const selRange = line ? this.selectionRangeForChunk(line) : null;
-      const inHoverScope =
+      const keyedInScope =
         line !== undefined &&
         line.blockKey !== undefined &&
         (line.blockKey === this.hoveredBlockKey ||
           (this.hoveredRunKeys !== null &&
             this.hoveredRunKeys.has(line.blockKey)));
+      const inRunGap =
+        line !== undefined &&
+        line.blockKey === undefined &&
+        runFirstIdx !== -1 &&
+        sliceIdx >= runFirstIdx &&
+        sliceIdx <= runLastIdx;
+      const inHoverScope = keyedInScope || inRunGap;
       const hovered =
         inHoverScope &&
         // When the hovered row carries a subKey, only rows with the same
@@ -6119,7 +6202,7 @@ export class Screen {
     } else {
       writeStyled(this.term, bodyText, line.bodyStyle, hovered);
     }
-    if (line.fillRow) {
+    if (line.fillRow || hovered) {
       const visible = line.ansi ? stringWidth(bodyText) : cellWidth(bodyText);
       const pad = remaining - visible;
       if (pad > 0) {
@@ -6127,6 +6210,11 @@ export class Screen {
         // row selection), paint the padding with the same highlight
         // so the band reads as a continuous rectangle across wraps
         // and lines instead of stopping at the end of each text run.
+        // Hovered rows (even without fillRow) also pad here so the
+        // hover band extends across the trailing empty columns and
+        // blank-body rows — otherwise moving the pointer into a blank
+        // line inside a thought (or past end-of-text) reads as "hover
+        // was lost" even though the block is still hovered.
         const fillStyle: Style | undefined =
           selectionRange !== null && selectionRange.toEndOfLine
             ? "selection-highlight"
@@ -6453,15 +6541,45 @@ function writeStyled(
     return;
   }
   if (hovered) {
+    // Wrap the styled fg text in a subtle grayscale bg band so the whole
+    // row visibly changes on hover. Terminal-kit's fg calls close only the
+    // fg SGR (e.g. \x1b[39m) rather than a full reset, so the bg SGR we
+    // emit up front survives through the styled text and is closed by the
+    // trailing \x1b[49m. Same tint as "thought"'s hover band (grayscale
+    // 236) for a consistent hover language across styles.
+    const hoverBandOpen = "\x1b[48;5;236m";
+    const hoverBandClose = "\x1b[49m";
+    const rawWrite = (t: string): void => {
+      (term as unknown as { noFormat: (s: string) => void }).noFormat(t);
+    };
     switch (style) {
+      case "dim":
       case "tool-status-ok":
       case "tool-status-pending":
       case "tool-status-cancelled":
-      case "dim":
-        term.noFormat(text);
+        rawWrite(hoverBandOpen);
+        term.dim.noFormat(text);
+        rawWrite(hoverBandClose);
+        return;
+      case "tool-status-fail":
+        rawWrite(hoverBandOpen);
+        term.bold.red.noFormat(text);
+        rawWrite(hoverBandClose);
+        return;
+      case "tool-status-running":
+        rawWrite(hoverBandOpen);
+        term.brightYellow.noFormat(text);
+        rawWrite(hoverBandClose);
+        return;
+      case "tool":
+        rawWrite(hoverBandOpen);
+        term.brightBlue.noFormat(text);
+        rawWrite(hoverBandClose);
         return;
       case "plan-pending":
-        term(text);
+        rawWrite(hoverBandOpen);
+        term.dim(text);
+        rawWrite(hoverBandClose);
         return;
       case "thought": {
         // Paint a subtle dark-grayscale band so the hovered thought reads
