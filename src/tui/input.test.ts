@@ -1069,6 +1069,15 @@ describe("InputDispatcher", () => {
       expect(d.state().buffer).toEqual(["hi"]);
     });
 
+    it("empty bracketed paste routes to attachment-request (image-only clipboard)", () => {
+      const d = new InputDispatcher();
+      feed(d, [ch("h"), ch("i")]);
+      expect(feed(d, [{ type: "paste", text: "" }])).toEqual([
+        { type: "attachment-request", source: "clipboard" },
+      ]);
+      expect(d.state().buffer).toEqual(["hi"]);
+    });
+
     it("addAttachment appends and state exposes the list", () => {
       const d = new InputDispatcher();
       d.addAttachment(att("a.png"));

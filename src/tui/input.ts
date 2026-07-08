@@ -492,6 +492,14 @@ export class InputDispatcher {
     }
     if (event.type === "paste") {
       this.clearDoubleTap();
+      if (event.text.length === 0) {
+        // WezTerm (and some other terminals) emit an empty bracketed paste
+        // when the clipboard holds an image with no text representation —
+        // native Ctrl+Shift+V "pastes" nothing on the wire. Route to the
+        // same clipboard-image path Ctrl+V uses so the image lands as an
+        // attachment.
+        return [{ type: "attachment-request", source: "clipboard" }];
+      }
       this.recordEdit();
       const lineCount = event.text.split("\n").length;
       if (this.collapsePastes && lineCount > PASTE_LINE_THRESHOLD) {
