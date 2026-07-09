@@ -28,6 +28,7 @@ import {
   truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
+import { LineEditor } from "./line-editor.js";
 
 export interface PromptOptions {
   defaultCwd?: string;
@@ -70,31 +71,10 @@ export async function promptForImportCwd(
       ]
     : [];
 
-  let buffer = defaultCwd;
+  const editor = new LineEditor(defaultCwd);
   let errorLine: string | null = null;
   let busy = false;
   let layout: BoxLayout | null = null;
-  // Undo/redo for the buffer. ^_ undoes, Alt-_ redoes. One snapshot per
-  // keystroke — matches bash readline.
-  let undoStack: string[] = [];
-  let redoStack: string[] = [];
-  const recordEdit = (): void => {
-    undoStack.push(buffer);
-    if (undoStack.length > 500) undoStack.shift();
-    redoStack = [];
-  };
-  const undoEdit = (): void => {
-    const prev = undoStack.pop();
-    if (prev === undefined) return;
-    redoStack.push(buffer);
-    buffer = prev;
-  };
-  const redoEdit = (): void => {
-    const next = redoStack.pop();
-    if (next === undefined) return;
-    undoStack.push(buffer);
-    buffer = next;
-  };
 
   const render = (): void => {
     const contentHeight = headerRows.length + 6;
@@ -130,21 +110,50 @@ export async function promptForImportCwd(
   // Header rows, one blank, the intro line, one blank — then the input.
   const inputRow = (): number => headerRows.length + 3;
 
+  // Horizontal scroll offset for the input window. Adjusted on every
+  // paint so the cursor stays visible; leading "…" surfaces when the
+  // window has scrolled off the left.
+  let scrollOffset = 0;
+
   const paintInputRow = (rowOffset?: number): void => {
     if (!layout) {
       return;
     }
     const r = rowOffset ?? inputRow();
     term.moveTo(layout.contentX, layout.contentY + r).eraseLineAfter();
-    // Re-draw the right border the eraseLineAfter just wiped.
     term.moveTo(layout.x + layout.w - 1, layout.contentY + r);
     term.dim.noFormat("│");
     term.moveTo(layout.contentX, layout.contentY + r);
     term.bold.noFormat(" cwd: ");
-    const available = layout.contentW - " cwd: ".length - 2;
-    term.noFormat(truncateLeft(buffer, available));
-    if (!busy) {
+    const label = " cwd: ".length;
+    const available = Math.max(1, layout.contentW - label - 2);
+    const text = editor.text;
+    const cur = editor.cursor;
+    if (cur < scrollOffset) {
+      scrollOffset = cur;
+    }
+    if (cur - scrollOffset >= available) {
+      scrollOffset = cur - available + 1;
+    }
+    if (scrollOffset < 0) {
+      scrollOffset = 0;
+    }
+    let visible = text.slice(scrollOffset, scrollOffset + available);
+    if (scrollOffset > 0 && visible.length > 0) {
+      visible = "…" + visible.slice(1);
+    }
+    const rel = cur - scrollOffset;
+    if (busy) {
+      term.noFormat(visible);
+      return;
+    }
+    if (rel >= visible.length) {
+      term.noFormat(visible);
       term.bgWhite(" ");
+    } else {
+      term.noFormat(visible.slice(0, rel));
+      term.bgWhite.noFormat(visible[rel] ?? " ");
+      term.noFormat(visible.slice(rel + 1));
     }
   };
 
@@ -172,13 +181,12 @@ export async function promptForImportCwd(
   return runModalPrompt<CwdPromptResult>({
     term,
     render,
-    hideCursor: false,
     onKey: (name, _matches, data, finish) => {
       if (busy) {
         return;
       }
       if (name === "ENTER" || name === "KP_ENTER") {
-        const candidate = buffer;
+        const candidate = editor.text;
         busy = true;
         errorLine = null;
         repaintInput();
@@ -203,7 +211,7 @@ export async function promptForImportCwd(
       }
       if (name === "TAB") {
         busy = true;
-        void completeLocalPath(buffer).then((result) => {
+        void completeLocalPath(editor.text).then((result) => {
           busy = false;
           if (result.matches.length === 0) {
             return;
@@ -218,83 +226,20 @@ export async function promptForImportCwd(
             }
             next = result.prefix + lcp;
           }
-          if (next === buffer) {
+          if (next === editor.text) {
             return;
           }
-          recordEdit();
-          buffer = next;
+          editor.setText(next, { recordUndo: true });
           errorLine = null;
           repaintInput();
         });
         return;
       }
-      if (name === "BACKSPACE") {
-        if (buffer.length > 0) {
-          recordEdit();
-          buffer = buffer.slice(0, -1);
-          errorLine = null;
-          repaintInput();
-        }
-        return;
-      }
-      if (name === "CTRL_U") {
-        if (buffer.length > 0) {
-          recordEdit();
-          buffer = "";
-          errorLine = null;
-          repaintInput();
-        }
-        return;
-      }
-      if (name === "CTRL_W") {
-        const trimmedRight = buffer.replace(/[/\s]+$/, "");
-        const lastSep = Math.max(
-          trimmedRight.lastIndexOf("/"),
-          trimmedRight.lastIndexOf(" "),
-        );
-        const next =
-          lastSep >= 0 ? trimmedRight.slice(0, lastSep + 1) : "";
-        if (next !== buffer) {
-          recordEdit();
-          buffer = next;
-          errorLine = null;
-          repaintInput();
-        }
-        return;
-      }
-      // ^_ undo / Alt-_ redo. Raw bytes — terminal-kit doesn't name them.
-      if (name === "\x1f") {
-        undoEdit();
-        errorLine = null;
-        repaintInput();
-        return;
-      }
-      if (name === "\x1b_" || name === "\x1b\x1f") {
-        redoEdit();
-        errorLine = null;
-        repaintInput();
-        return;
-      }
-      if (data?.isCharacter) {
-        recordEdit();
-        buffer += name;
+      if (editor.handleKey(name, data?.isCharacter === true)) {
         errorLine = null;
         repaintInput();
         return;
       }
     },
   });
-}
-
-// Used for the cwd input: when the buffer is longer than the visible
-// width, keep the right edge (where the cursor sits) visible by
-// trimming the left side with a leading ellipsis.
-function truncateLeft(s: string, max: number): string {
-  if (max <= 1) {
-    return "";
-  }
-  if (s.length <= max) {
-    return s;
-  }
-  return "…" + s.slice(s.length - (max - 1));
 }

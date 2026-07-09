@@ -56,6 +56,7 @@ import {
   type LaunchOrViewResult,
 } from "./import-action-prompt.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
+import { LineEditor } from "./line-editor.js";
 import { readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
@@ -419,40 +420,10 @@ export async function pickSession(
   // user sees "searching…" instead of "working on <id>…".
   let findInFlight = false;
   // Rename input buffer. Pre-filled with the current title when `t` is
-  // pressed on a live row; the user edits in-place (^U clears the line,
-  // ^W deletes a word, Backspace pops a char). Enter saves, Esc cancels.
-  let renameBuffer = "";
-  // Undo/redo for the rename buffer. ^_ undoes the last edit; Alt-_
-  // redoes. One snapshot per keystroke — matches bash readline.
-  let renameUndo: string[] = [];
-  let renameRedo: string[] = [];
-  const renameRecord = (): void => {
-    renameUndo.push(renameBuffer);
-    if (renameUndo.length > 500) {
-      renameUndo.shift();
-    }
-    renameRedo = [];
-  };
-  const renameUndoStep = (): void => {
-    const prev = renameUndo.pop();
-    if (prev === undefined) {
-      return;
-    }
-    renameRedo.push(renameBuffer);
-    renameBuffer = prev;
-  };
-  const renameRedoStep = (): void => {
-    const next = renameRedo.pop();
-    if (next === undefined) {
-      return;
-    }
-    renameUndo.push(renameBuffer);
-    renameBuffer = next;
-  };
-  const renameResetUndo = (): void => {
-    renameUndo = [];
-    renameRedo = [];
-  };
+  // pressed on a live row; the user edits in-place with full readline
+  // motion (arrows, ^A/^E, word motion, ^U/^K/^W, ^Y, ^_ undo, Alt-_
+  // redo). Enter saves, Esc cancels. Null when not in rename mode.
+  let renameEditor: LineEditor | null = null;
   // Transient one-line hint shown in the indicator slot. Cleared on the
   // next key press so it never lingers.
   let transientStatus: string | null = null;
@@ -814,7 +785,7 @@ export async function pickSession(
       "ind",
       mode,
       pending,
-      renameBuffer,
+      renameEditor ? `${renameEditor.text}\u0002${renameEditor.cursor}` : "",
       transientStatus ?? "",
       searchActive ? `1|${searchTerm}|${visible.length}` : "0",
       formatIndicator(),
@@ -849,10 +820,18 @@ export async function pickSession(
         } else if (mode === "busy" && pendingAction) {
           clearHits();
           term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
-        } else if (mode === "rename" && pendingAction) {
+        } else if (mode === "rename" && pendingAction && renameEditor) {
           clearHits();
-          term.brightYellow.noFormat(`  title: ${renameBuffer}`);
-          term.bgBrightYellow(" ");
+          const text = renameEditor.text;
+          const cur = renameEditor.cursor;
+          term.brightYellow.noFormat("  title: ");
+          term.brightYellow.noFormat(text.slice(0, cur));
+          if (cur < text.length) {
+            term.bgBrightYellow.noFormat(text[cur] ?? " ");
+            term.brightYellow.noFormat(text.slice(cur + 1));
+          } else {
+            term.bgBrightYellow(" ");
+          }
           term.dim.noFormat("  Enter saves · Esc cancels");
         } else if (transientStatus !== null) {
           clearHits();
@@ -2133,12 +2112,12 @@ export async function pickSession(
         await renameSession(opts.target, session.sessionId, title);
         mode = "normal";
         pendingAction = null;
-        renameBuffer = "";
+        renameEditor = null;
         await refresh(session.sessionId);
       } catch (err) {
         mode = "normal";
         pendingAction = null;
-        renameBuffer = "";
+        renameEditor = null;
         transientStatus = `rename failed: ${(err as Error).message}`;
         paintIndicator();
       }
@@ -2660,13 +2639,13 @@ export async function pickSession(
         forceFullRepaint();
         return;
       }
-      if (mode === "rename") {
+      if (mode === "rename" && renameEditor) {
         if (name === "ENTER" || name === "KP_ENTER") {
-          const trimmed = renameBuffer.trim();
+          const trimmed = renameEditor.text.trim();
           if (trimmed.length === 0) {
             mode = "normal";
             pendingAction = null;
-            renameBuffer = "";
+            renameEditor = null;
             paintIndicator();
             return;
           }
@@ -2676,56 +2655,11 @@ export async function pickSession(
         if (name === "ESCAPE" || name === "CTRL_C") {
           mode = "normal";
           pendingAction = null;
-          renameBuffer = "";
-          renameResetUndo();
+          renameEditor = null;
           paintIndicator();
           return;
         }
-        if (name === "BACKSPACE") {
-          if (renameBuffer.length > 0) {
-            renameRecord();
-            renameBuffer = renameBuffer.slice(0, -1);
-            paintIndicator();
-          }
-          return;
-        }
-        if (name === "CTRL_U") {
-          if (renameBuffer.length > 0) {
-            renameRecord();
-            renameBuffer = "";
-            paintIndicator();
-          }
-          return;
-        }
-        if (name === "CTRL_W") {
-          // Trim trailing whitespace then drop the last whitespace-delimited
-          // word, matching what most readline-style editors do.
-          const trimmedRight = renameBuffer.replace(/\s+$/, "");
-          const lastSpace = trimmedRight.lastIndexOf(" ");
-          const next =
-            lastSpace >= 0 ? trimmedRight.slice(0, lastSpace) : "";
-          if (next !== renameBuffer) {
-            renameRecord();
-            renameBuffer = next;
-            paintIndicator();
-          }
-          return;
-        }
-        // ^_ undo, Alt-_ redo. Raw bytes — terminal-kit doesn't name
-        // them, so we match on the .keymap/data char directly.
-        if (name === "\x1f") {
-          renameUndoStep();
-          paintIndicator();
-          return;
-        }
-        if (name === "\x1b_" || name === "\x1b\x1f") {
-          renameRedoStep();
-          paintIndicator();
-          return;
-        }
-        if (data?.isCharacter) {
-          renameRecord();
-          renameBuffer += name;
+        if (renameEditor.handleKey(name, data?.isCharacter === true)) {
           paintIndicator();
           return;
         }
@@ -3096,7 +3030,7 @@ export async function pickSession(
             cwd: session.cwd,
             status: session.status,
           };
-          renameBuffer = session.title ?? "";
+          renameEditor = new LineEditor(session.title ?? "");
           mode = "rename";
           paintIndicator();
           return;
