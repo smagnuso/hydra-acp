@@ -1119,6 +1119,7 @@ export class Screen {
     // that focuses the window arrives as FOCUS_IN followed by the mouse
     // report) so we update state and pass the remaining bytes through.
     if (text.includes(FOCUS_IN) || text.includes(FOCUS_OUT)) {
+      const prevFocused = this.terminalFocused;
       while (true) {
         const inIdx = text.indexOf(FOCUS_IN);
         const outIdx = text.indexOf(FOCUS_OUT);
@@ -1135,6 +1136,12 @@ export class Screen {
           this.lastFocusInAt = Date.now();
         }
         text = text.slice(0, which) + text.slice(which + FOCUS_IN.length);
+      }
+      if (this.terminalFocused !== prevFocused) {
+        // Repaint so hovered blocks/banner-hits drop their bright
+        // highlight while the terminal isn't focused (matches the
+        // picker's focus-loss behavior).
+        this.scheduleRepaint();
       }
     }
     if (text.length === 0) {
@@ -4692,7 +4699,8 @@ export class Screen {
     const middle = "─".repeat(middleCols);
 
     const transientSig = transient ? `${transient.kind}|${transient.text}` : "";
-    const hoverSig = transient ? "" : (this.hoveredBannerHit ?? "");
+    const hoverSig =
+      transient || !this.terminalFocused ? "" : (this.hoveredBannerHit ?? "");
     const sig =
       `bsep|${w}|${this.banner.currentMode ?? ""}|${this.banner.hint}|${transientSig}|${hoverSig}`;
 
@@ -4707,7 +4715,7 @@ export class Screen {
         }
       } else {
         const chunks = hintBase.split(" · ");
-        const hovered = this.hoveredBannerHit;
+        const hovered = this.terminalFocused ? this.hoveredBannerHit : null;
         for (let i = 0; i < chunks.length; i++) {
           if (i > 0) this.term.dim(" · ");
           const c = chunks[i];
@@ -4958,6 +4966,7 @@ export class Screen {
         sliceIdx <= runLastIdx;
       const inHoverScope = keyedInScope || inRunGap;
       const hovered =
+        this.terminalFocused &&
         inHoverScope &&
         // When the hovered row carries a subKey, only rows with the same
         // subKey light up. Lines that opt out of subKey scoping (header
