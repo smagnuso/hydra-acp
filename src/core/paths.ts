@@ -152,15 +152,22 @@ export const paths = {
       encodeURIComponent(upstreamSessionId),
     ),
   extensionsDir: () => path.join(hydraHome(), "extensions"),
+  // Per-extension subdirectory holds pino-roll's numbered `<name>.<N>.log`
+  // files and a `current.log` symlink pointing at the active one. The
+  // symlink is the user-facing path (tail follows it transparently).
+  extensionLogDir: (name: string) =>
+    path.join(hydraHome(), "extensions", name),
   extensionLogFile: (name: string) =>
-    path.join(hydraHome(), "extensions", `${name}.log`),
+    path.join(hydraHome(), "extensions", name, "current.log"),
   extensionPidFile: (name: string) =>
-    path.join(hydraHome(), "extensions", `${name}.pid`),
+    path.join(hydraHome(), "extensions", name, "extension.pid"),
   transformersDir: () => path.join(hydraHome(), "transformers"),
+  transformerLogDir: (name: string) =>
+    path.join(hydraHome(), "transformers", name),
   transformerLogFile: (name: string) =>
-    path.join(hydraHome(), "transformers", `${name}.log`),
+    path.join(hydraHome(), "transformers", name, "current.log"),
   transformerPidFile: (name: string) =>
-    path.join(hydraHome(), "transformers", `${name}.pid`),
+    path.join(hydraHome(), "transformers", name, "transformer.pid"),
   // Per-session scratch directory for transformer state. Each transformer
   // gets an isolated directory keyed by session + transformer name so
   // multiple transformers on the same session don't collide.

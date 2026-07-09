@@ -140,7 +140,7 @@ describe("ExtensionManager", () => {
     await manager.start();
     await waitForProbe();
 
-    const pidPath = path.join(tmpHome, "extensions", "pidf.pid");
+    const pidPath = path.join(tmpHome, "extensions", "pidf", "extension.pid");
     const raw = await fs.readFile(pidPath, "utf8");
     const pid = Number.parseInt(raw.trim(), 10);
     expect(pid).toBeGreaterThan(0);
@@ -155,7 +155,7 @@ describe("ExtensionManager", () => {
   it("reaps orphan extensions from a prior daemon run on start", async () => {
     const { spawn } = await import("node:child_process");
     const orphanOut = path.join(tmpHome, "orphan-out.json");
-    await fs.mkdir(path.join(tmpHome, "extensions"), { recursive: true });
+    await fs.mkdir(path.join(tmpHome, "extensions", "ghost"), { recursive: true });
     const orphan = spawn("node", ["-e", PROBE_SCRIPT], {
       env: { ...process.env, PROBE_OUT: orphanOut },
       stdio: "ignore",
@@ -165,7 +165,7 @@ describe("ExtensionManager", () => {
     if (typeof orphan.pid !== "number") {
       throw new Error("could not spawn orphan");
     }
-    const pidPath = path.join(tmpHome, "extensions", "ghost.pid");
+    const pidPath = path.join(tmpHome, "extensions", "ghost", "extension.pid");
     await fs.writeFile(pidPath, `${orphan.pid}\n`);
 
     let alive = false;
@@ -206,7 +206,7 @@ describe("ExtensionManager", () => {
     expect(probe.name).toBe("node");
   });
 
-  it("writes a log file at ~/.hydra-acp/extensions/<name>.log", async () => {
+  it("writes a log file at ~/.hydra-acp/extensions/<name>/current.log", async () => {
     const cfg: ExtensionConfig = {
       name: "loggy",
       command: ["node", "-e", PROBE_SCRIPT],
@@ -225,7 +225,7 @@ describe("ExtensionManager", () => {
     // load. The "starting extension loggy" line comes from the manager
     // itself and is in place by the time start() resolves, but we still
     // poll both checks together for symmetry.
-    const logPath = path.join(tmpHome, "extensions", "loggy.log");
+    const logPath = path.join(tmpHome, "extensions", "loggy", "current.log");
     await expect
       .poll(async () => await fs.readFile(logPath, "utf8"), { timeout: 3_000 })
       .toContain("starting extension loggy");
@@ -255,7 +255,7 @@ describe("ExtensionManager", () => {
       expect(info[0]?.enabled).toBe(true);
       expect(info[0]?.restartCount).toBe(0);
       expect(info[0]?.startedAt).toBeGreaterThan(0);
-      expect(info[0]?.logPath).toContain("extensions/lst.log");
+      expect(info[0]?.logPath).toContain("extensions/lst/current.log");
     });
 
     it("stopByName() suppresses auto-restart (manuallyStopped flag)", async () => {

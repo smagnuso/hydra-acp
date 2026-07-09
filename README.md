@@ -307,7 +307,7 @@ Each extension is launched with these env vars set:
 | `HYDRA_ACP_HOME` | `~/.hydra-acp` |
 | `HYDRA_ACP_EXTENSION_NAME` | the `name` from config |
 
-Extension stdout/stderr are appended to `~/.hydra-acp/extensions/<name>.log`.
+Extension stdout/stderr are appended to `~/.hydra-acp/extensions/<name>/current.log` (a symlink to the active rotated file). Logs rotate at 5 MB with the 5 most recent files retained as `<name>.<N>.log` alongside the symlink (~25 MB per extension).
 
 While the daemon is running you can manage extensions without bouncing it:
 

@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import createPinoRoll from "pino-roll";
+import type { SonicBoom } from "sonic-boom";
 import type { ProcessTokenRegistry } from "../daemon/auth.js";
 import { RestartBreaker, type BreakerOptions } from "./restart-breaker.js";
 import { expandHome } from "./config.js";
@@ -66,7 +68,7 @@ const STOP_GRACE_MS = 3_000;
 interface ChildEntry<TConfig extends BaseChildConfig> {
   config: TConfig;
   child: ChildProcess | undefined;
-  logStream: fs.WriteStream | undefined;
+  logStream: SonicBoom | undefined;
   restartTimer: NodeJS.Timeout | undefined;
   pid: number | undefined;
   startedAt: number | undefined;
@@ -139,12 +141,14 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     }
     await fsp.mkdir(this.adapter.paths.dir(), { recursive: true });
     await this.reapOrphans();
+    const spawns: Array<Promise<void>> = [];
     for (const entry of this.entries.values()) {
       if (!entry.config.enabled) {
         continue;
       }
-      this.spawn(entry, 0);
+      spawns.push(this.spawn(entry, 0));
     }
+    await Promise.all(spawns);
   }
 
   async stop(): Promise<void> {
@@ -233,7 +237,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     entry.restartCount = 0;
     entry.breaker.reset();
     entry.failureReason = undefined;
-    this.spawn(entry, 0);
+    await this.spawn(entry, 0);
     return this.infoFor(entry);
   }
 
@@ -281,7 +285,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     const entry = this.makeEntry(config);
     this.entries.set(config.name, entry);
     if (config.enabled) {
-      this.spawn(entry, 0);
+      void this.spawn(entry, 0);
     }
     return this.infoFor(entry);
   }
@@ -390,9 +394,11 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
   }
 
   private async reapOrphans(): Promise<void> {
-    let entries: string[];
+    let entries: import("node:fs").Dirent[];
     try {
-      entries = await fsp.readdir(this.adapter.paths.dir());
+      entries = await fsp.readdir(this.adapter.paths.dir(), {
+        withFileTypes: true,
+      });
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === "ENOENT") {
@@ -401,10 +407,10 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       throw err;
     }
     for (const entry of entries) {
-      if (!entry.endsWith(".pid")) {
+      if (!entry.isDirectory()) {
         continue;
       }
-      const pidPath = path.join(this.adapter.paths.dir(), entry);
+      const pidPath = this.adapter.paths.pidFile(entry.name);
       let pid: number | undefined;
       try {
         const raw = await fsp.readFile(pidPath, "utf8");
@@ -437,7 +443,10 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     }
   }
 
-  private spawn(entry: ChildEntry<TConfig>, attempt: number): void {
+  private async spawn(
+    entry: ChildEntry<TConfig>,
+    attempt: number,
+  ): Promise<void> {
     if (this.stopping || entry.manuallyStopped) {
       return;
     }
@@ -448,10 +457,27 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     const cfg = entry.config;
     const command = cfg.command.length > 0 ? cfg.command : [cfg.name];
 
-    const logStream = fs.createWriteStream(
-      this.adapter.paths.logFile(cfg.name),
-      { flags: "a" },
-    );
+    // Rotate at 5 MB, keep 5 files (~25 MB per child). Numbered
+    // `<name>.<N>.log` files live in a per-extension subdirectory;
+    // pino-roll's symlink option maintains a `current.log` inside that dir
+    // which paths.logFile() returns as the user-facing tail target.
+    const logDir = path.dirname(this.adapter.paths.logFile(cfg.name));
+    await fsp.mkdir(logDir, { recursive: true });
+    const logStream = await createPinoRoll({
+      file: path.join(logDir, `${cfg.name}.log`),
+      size: "5m",
+      mkdir: true,
+      symlink: true,
+      limit: { count: 5 },
+    });
+    if (this.stopping || entry.manuallyStopped) {
+      try {
+        logStream.end();
+      } catch {
+        void 0;
+      }
+      return;
+    }
     logStream.write(
       `[hydra-acp] ${new Date().toISOString()} starting ${this.adapter.kind} ${cfg.name} (attempt ${attempt + 1})\n`,
     );
@@ -508,12 +534,15 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
       return;
     }
 
-    if (child.stdout) {
-      child.stdout.pipe(logStream, { end: false });
-    }
-    if (child.stderr) {
-      child.stderr.pipe(logStream, { end: false });
-    }
+    const forward = (chunk: Buffer | string): void => {
+      try {
+        logStream.write(typeof chunk === "string" ? chunk : chunk.toString());
+      } catch {
+        void 0;
+      }
+    };
+    child.stdout?.on("data", forward);
+    child.stderr?.on("data", forward);
 
     if (typeof child.pid === "number") {
       try {
@@ -604,7 +633,7 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     );
     entry.restartTimer = setTimeout(() => {
       entry.restartTimer = undefined;
-      this.spawn(entry, attempt);
+      void this.spawn(entry, attempt);
     }, delay);
     if (typeof entry.restartTimer.unref === "function") {
       entry.restartTimer.unref();
