@@ -57,6 +57,7 @@ import {
 } from "./import-action-prompt.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { LineEditor } from "./line-editor.js";
+import { completePathToken, extractPathToken } from "./file-completion.js";
 import { readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
@@ -2782,6 +2783,41 @@ export async function pickSession(
         // Any other key in the composer cancels the held-UP guard so a
         // later, deliberate UP isn't wrongly swallowed.
         upGuardArmed = false;
+        // Tab expands a path-like token under the cursor against the
+        // picker's current cwd, matching what the live session composer
+        // does. Bare-word tokens fall through to InputDispatcher, which
+        // treats Tab as insert-two-spaces (indent). No multi-candidate
+        // overlay here — the picker has nowhere to render it — so a
+        // token with multiple matches commits the longest common prefix
+        // silently and the user hits Tab again once they've disambiguated.
+        if (name === "TAB") {
+          const st = composer.state();
+          const line = st.buffer[st.row] ?? "";
+          const tok = extractPathToken(line, st.col);
+          if (tok !== null) {
+            const result = completePathToken(tok.token, currentCwd);
+            if (result !== null) {
+              if (result.replacement !== tok.token) {
+                composer.replaceRangeOnCurrentLine(
+                  tok.start,
+                  st.col,
+                  result.replacement,
+                );
+                const after = composer.state();
+                const newVr = computePromptVisualRows(after.buffer, composerRoom);
+                if (newVr.length !== composerVisualRows.length) {
+                  renderFromScratch();
+                } else {
+                  repaintComposerBody();
+                }
+                placeComposerCursor();
+              } else {
+                placeComposerCursor();
+              }
+              return;
+            }
+          }
+        }
         const before = composer.state();
         let event: KeyEvent | null = null;
         if (name === "\x1f") {
