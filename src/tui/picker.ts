@@ -1623,14 +1623,20 @@ export async function pickSession(
     if (result.kind !== "image") {
       // Text-only clipboard: route through the same paste path as
       // bracketed paste so multi-line content splits at \n.
-      const before = composer.state();
+      // state() aliases the live buffer array (documented perf choice
+      // in input.ts). Snapshot lines here so the after-comparison
+      // actually sees the pre-feed state.
+      const beforeState = composer.state();
+      const beforeBuffer = [...beforeState.buffer];
+      const beforeRow = beforeState.row;
+      const beforeCol = beforeState.col;
       composer.feed({ type: "paste", text: result.text });
       const after = composer.state();
       const changed =
-        before.buffer.length !== after.buffer.length ||
-        before.row !== after.row ||
-        before.col !== after.col ||
-        !before.buffer.every((line, i) => line === after.buffer[i]);
+        beforeBuffer.length !== after.buffer.length ||
+        beforeRow !== after.row ||
+        beforeCol !== after.col ||
+        !beforeBuffer.every((line, i) => line === after.buffer[i]);
       if (changed) {
         const rows = computePromptVisualRows(after.buffer, composerRoom);
         const layout = computePromptLayout(
@@ -2507,7 +2513,11 @@ export async function pickSession(
             });
             return;
           }
-          const before = findComposer.state();
+          // state() aliases the live buffer — snapshot before feeding.
+          const beforeState = findComposer.state();
+          const beforeBuffer = [...beforeState.buffer];
+          const beforeRow = beforeState.row;
+          const beforeCol = beforeState.col;
           let event: KeyEvent | null = null;
           if (name === "\x1f") {
             event = { type: "key", name: "ctrl-underscore" };
@@ -2527,10 +2537,10 @@ export async function pickSession(
           findComposer.feed(event);
           const after = findComposer.state();
           const unchanged =
-            before.buffer.length === after.buffer.length &&
-            before.buffer.every((l, i) => l === after.buffer[i]) &&
-            before.row === after.row &&
-            before.col === after.col;
+            beforeBuffer.length === after.buffer.length &&
+            beforeBuffer.every((l, i) => l === after.buffer[i]) &&
+            beforeRow === after.row &&
+            beforeCol === after.col;
           if (unchanged) {
             term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
             return;
@@ -2893,7 +2903,13 @@ export async function pickSession(
         // Any composer keystroke other than Tab dismisses a lingering
         // completion hint so it doesn't shadow the next action.
         clearComposerStatus();
-        const before = composer.state();
+        // state() aliases the live buffer — snapshot before feeding so
+        // in-place mutations (e.g. ^K at col=0 rewriting the current
+        // line) are visible in the after-comparison.
+        const beforeState = composer.state();
+        const beforeBuffer = [...beforeState.buffer];
+        const beforeRow = beforeState.row;
+        const beforeCol = beforeState.col;
         let event: KeyEvent | null = null;
         if (name === "\x1f") {
           event = { type: "key", name: "ctrl-underscore" };
@@ -2914,10 +2930,10 @@ export async function pickSession(
         const effects = composer.feed(event);
         const after = composer.state();
         const unchanged =
-          before.buffer.length === after.buffer.length &&
-          before.buffer.every((line, i) => line === after.buffer[i]) &&
-          before.row === after.row &&
-          before.col === after.col;
+          beforeBuffer.length === after.buffer.length &&
+          beforeBuffer.every((line, i) => line === after.buffer[i]) &&
+          beforeRow === after.row &&
+          beforeCol === after.col;
         // Dispatcher told us to exit — ^c with no text left to clear,
         // ^d on an empty buffer, or ^d at end-of-buffer with nothing
         // forward to delete (all handled inside the dispatcher).

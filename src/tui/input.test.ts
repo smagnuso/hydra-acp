@@ -23,6 +23,27 @@ function k(name: KeyName): KeyEvent {
 }
 
 describe("InputDispatcher", () => {
+  it("state() aliases the live buffer — callers must snapshot to detect in-place mutation", () => {
+    // ^K at col=0 with content rewrites the current line without moving
+    // row/col. Callers that compare before/after via state() will miss
+    // the mutation unless they snapshot buffer contents. This test
+    // documents the aliasing behavior so nobody removes it thinking
+    // state() should be a copy.
+    const d = new InputDispatcher();
+    feed(d, [ch("h"), ch("i")]);
+    const before = d.state();
+    const snapshot = [...before.buffer];
+    d.feed(k("ctrl-a"));
+    d.feed(k("ctrl-k"));
+    const after = d.state();
+    // The array reference is shared — same object.
+    expect(before.buffer).toBe(after.buffer);
+    // And both now show the mutated content.
+    expect(before.buffer[0]).toBe("");
+    // Snapshot preserves the pre-mutation view.
+    expect(snapshot[0]).toBe("hi");
+  });
+
   it("inserts characters and tracks cursor", () => {
     const d = new InputDispatcher();
     feed(d, [ch("h"), ch("i")]);
