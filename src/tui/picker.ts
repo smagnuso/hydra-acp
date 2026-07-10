@@ -428,6 +428,41 @@ export async function pickSession(
   // Transient one-line hint shown in the indicator slot. Cleared on the
   // next key press so it never lingers.
   let transientStatus: string | null = null;
+  // Transient hint shown in the composer-adjacent status row (blank
+  // gap between the composer's bottom border and the session-list
+  // header). Currently used for tab-completion candidate lists.
+  // Cleared on the next composer keystroke that isn't another Tab.
+  // The `/` search filter also renders in this row when searchActive,
+  // but it comes from searchTerm/visible directly — formatComposerStatus
+  // combines both.
+  let composerHint: string | null = null;
+
+  const formatComposerStatus = (): { plain: string; render: () => void } | null => {
+    if (searchActive) {
+      const matches =
+        visible.length === 0
+          ? "no matches"
+          : `${visible.length} match${visible.length === 1 ? "" : "es"}`;
+      const plain = `/${searchTerm}▉ ${matches} · ^c clears`;
+      return {
+        plain,
+        render: () => {
+          term.brightYellow.noFormat(`  /${searchTerm}`);
+          term.bgBrightYellow(" ");
+          term.dim.noFormat(` ${matches} · ^c clears`);
+        },
+      };
+    }
+    if (composerHint !== null) {
+      return {
+        plain: composerHint,
+        render: () => {
+          term.dim.noFormat(`  ${composerHint}`);
+        },
+      };
+    }
+    return null;
+  };
   // Set when the user kills or deletes the session they opened the picker
   // from. Aborting (Esc) would otherwise resume that now-dead session,
   // which then errors on the first prompt — so we block the abort and
@@ -680,6 +715,23 @@ export async function pickSession(
     }
   };
 
+  // Composer-adjacent status row, one line below the composer's bottom
+  // border. Blank unless there's a hint to show (tab-completion
+  // candidates, or the active `/` filter).
+  const paintComposerStatus = (): void => {
+    const status = formatComposerStatus();
+    if (status === null) {
+      return;
+    }
+    const w = Math.max(0, readTermWidth(term) - 2);
+    if (status.plain.length > w) {
+      const truncated = status.plain.slice(0, Math.max(0, w - 1)) + "…";
+      term.dim.noFormat(`  ${truncated}`);
+      return;
+    }
+    status.render();
+  };
+
   // The visible slice of the composer buffer for one visual row, used
   // by paintComposerBodyRow to draw the row and by composerBodySig to
   // detect when that row's content has changed across frames.
@@ -837,19 +889,6 @@ export async function pickSession(
         } else if (transientStatus !== null) {
           clearHits();
           term.dim.noFormat(`  ${transientStatus}`);
-        } else if (searchActive) {
-          clearHits();
-          // Search line is anchored to the bottom of the picker so it
-          // stays visible regardless of how the session list scrolls
-          // above. ^c exits and clears the filter. A trailing block
-          // cursor reinforces that the line accepts input.
-          term.brightYellow.noFormat(`  /${searchTerm}`);
-          term.bgBrightYellow(" ");
-          const hint =
-            visible.length === 0
-              ? " no matches"
-              : ` ${visible.length} match${visible.length === 1 ? "" : "es"}`;
-          term.dim.noFormat(`${hint} · ^c clears`);
         } else {
           // Normal mode: left side is formatIndicator(); right edge gets
           // a dim "Esc · Go Back" hint that doubles as a click target
@@ -948,6 +987,15 @@ export async function pickSession(
     `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}`;
   const composerBotSig = (): string =>
     `cb|${composerFocusFlag()}|${composerBoxInner()}`;
+  const composerStatusSig = (): string => {
+    if (searchActive) {
+      return `cs|s|${searchTerm}|${visible.length}`;
+    }
+    if (composerHint !== null) {
+      return `cs|h|${composerHint}`;
+    }
+    return "blank";
+  };
   const composerBodySig = (visualIdx: number): string =>
     `cbb|${composerFocusFlag()}|${composerBoxInner()}|${composerSliceAt(visualIdx)}`;
   const headerSig = (): string => `h|${headerLine}`;
@@ -988,8 +1036,11 @@ export async function pickSession(
       painter.paintRow(composerBottomRow(), composerBotSig(), () => {
         paintComposerBottomBorder();
       });
-      // Blank gap row between composer and header.
-      painter.paintRow(composerBottomRow() + 1, "blank", () => {});
+      painter.paintRow(
+        composerBottomRow() + 1,
+        composerStatusSig(),
+        () => paintComposerStatus(),
+      );
       painter.paintRow(headerRow(), headerSig(), () => {
         term.dim.noFormat(`  ${headerLine}`);
       });
@@ -1509,6 +1560,24 @@ export async function pickSession(
   // should renderFromScratch (handled by the row-count check in onKey).
   // Hides the cursor while painting so each keystroke doesn't visibly
   // walk it across the row before snapping back to the typing position.
+  const repaintComposerStatus = (): void => {
+    withSync(() => {
+      painter.paintRow(
+        composerBottomRow() + 1,
+        composerStatusSig(),
+        () => paintComposerStatus(),
+      );
+    });
+  };
+
+  const clearComposerStatus = (): void => {
+    if (composerHint === null) {
+      return;
+    }
+    composerHint = null;
+    repaintComposerStatus();
+  };
+
   const repaintComposerBody = (): void => {
     withSync(() => {
       const state = composer.state();
@@ -2803,21 +2872,27 @@ export async function pickSession(
                   st.col,
                   result.replacement,
                 );
-                const after = composer.state();
-                const newVr = computePromptVisualRows(after.buffer, composerRoom);
-                if (newVr.length !== composerVisualRows.length) {
-                  renderFromScratch();
-                } else {
-                  repaintComposerBody();
-                }
-                placeComposerCursor();
-              } else {
-                placeComposerCursor();
+                repaintComposerBody();
               }
+              // Ambiguous match — no path-completion overlay in the
+              // picker, so surface candidate basenames in the composer-
+              // adjacent status row so the user can see what
+              // disambiguates. The row width truncates for us.
+              if (result.candidates.length > 1) {
+                const shown = result.candidates.join("  ");
+                composerHint = `${result.candidates.length} matches: ${shown}`;
+                repaintComposerStatus();
+              } else {
+                clearComposerStatus();
+              }
+              placeComposerCursor();
               return;
             }
           }
         }
+        // Any composer keystroke other than Tab dismisses a lingering
+        // completion hint so it doesn't shadow the next action.
+        clearComposerStatus();
         const before = composer.state();
         let event: KeyEvent | null = null;
         if (name === "\x1f") {
