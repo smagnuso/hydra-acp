@@ -12,8 +12,8 @@ import type { Terminal } from "terminal-kit";
 import { RepaintScheduler, RowPainter } from "./screen/painter.js";
 import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
-import { shortenHomePath } from "../core/paths.js";
-import { stripHydraSessionPrefix } from "../core/session.js";
+import { paths, shortenHomePath } from "../core/paths.js";
+import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
 import { formatElapsed } from "./format.js";
 import type { FormattedLine, Style } from "./format.js";
@@ -95,6 +95,12 @@ const OSC8_STRIP_RE = /\x1b\]8;[^;]*;[^\x1b\x07]*(?:\x1b\\|\x07)/g;
 // #turn-<n> fragment). Used by the click handler to switch sessions.
 const HYDRA_SESSION_URL_RE =
   /^hydra:\/\/(?:[^/\s]+\/)?sessions\/([A-Za-z0-9_-]+)(?:#turn-(\d+))?$/;
+// Shape gate for the bare-token session double-click gesture. Session
+// ids on disk match /^[A-Za-z0-9_-]+$/ (see core/session-store), but
+// short/leading-punctuation tokens are common non-session words in
+// scrollback ("foo", "-v"); the leading-alnum + length-8 gate keeps the
+// statSync probe from firing on every double-clicked word.
+const SESSION_ID_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,}$/;
 
 export interface ScreenOptions {
   term: Terminal;
@@ -116,9 +122,11 @@ export interface ScreenOptions {
   // copy fallback. Return false to fall through to the default
   // double-click handling. Coordinates match onBlockClick.
   onBlockDoubleClick?: (key: string, rowOffset: number) => boolean;
-   // Invoked when the double-click gesture lands inside a hydra://sessions/<id>
-   // link span. The session id is extracted from the URL and passed here so
-   // the app can switch to that session. Return true to claim the gesture
+   // Invoked when the double-click gesture resolves to a hydra session id
+   // — either because the click landed inside a hydra://sessions/<id>
+   // link span, or because the bare token under the cursor matched the
+   // session id shape AND a session record for it exists on disk. The
+   // app switches to that session. Return true to claim the gesture
    // (skip word-snap copy); return false/undefined to fall through.
    onHydraLinkClick?: (sessionId: string) => boolean;
   // Invoked for every mouse button-press, drag-motion, and button-release
@@ -3177,6 +3185,11 @@ export class Screen {
         this.lastLeftClick = null;
         return;
       }
+      if (this.tryOpenSessionAt(anchor)) {
+        this.doubleClickPending = true;
+        this.lastLeftClick = null;
+        return;
+      }
       const word = this.wordBoundsAt(anchor);
       if (word !== null) {
         this.setSelection(
@@ -3712,6 +3725,53 @@ export class Screen {
     }
     const suffix = token.line === null ? "" : `:${token.line}`;
     return this.tryOpenPathString(token.raw + suffix);
+  }
+
+  // Bare-token session gesture: mirrors tryOpenFileAt but treats the
+  // token under the cursor as a possible hydra session id. Shape-gates
+  // with SESSION_ID_TOKEN_RE (min 8 alnum-ish chars) and then does a
+  // sync statSync on the session's meta.json — same disambiguation
+  // pattern the file gesture uses. Only claims the gesture when the
+  // session actually exists on disk, so ordinary words fall through to
+  // the word-snap copy path unchanged.
+  private tryOpenSessionAt(
+    pos: { sourceLineId: number; offset: number },
+  ): boolean {
+    if (!this.onHydraLinkClick) {
+      return false;
+    }
+    const token = this.pathTokenAt(pos);
+    if (token === null) {
+      return false;
+    }
+    const raw = token.raw;
+    if (!SESSION_ID_TOKEN_RE.test(raw)) {
+      return false;
+    }
+    // On disk, session ids carry the hydra_session_ prefix; the TUI
+    // renders the stripped form for legibility, so a bare token from
+    // scrollback usually needs the prefix re-attached before statSync
+    // will find meta.json. Probe the prefixed form first, then the raw
+    // token verbatim (covers ids that already include the prefix).
+    const candidates = raw.startsWith(HYDRA_SESSION_PREFIX)
+      ? [raw]
+      : [HYDRA_SESSION_PREFIX + raw, raw];
+    let resolved: string | null = null;
+    for (const id of candidates) {
+      try {
+        const st = statSync(paths.sessionFile(id));
+        if (st.isFile()) {
+          resolved = id;
+          break;
+        }
+      } catch {
+        // try the next candidate
+      }
+    }
+    if (resolved === null) {
+      return false;
+    }
+    return this.onHydraLinkClick(resolved);
   }
 
   // Public entrypoint shared by the in-line word-click path and the
