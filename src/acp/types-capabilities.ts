@@ -44,6 +44,12 @@ export interface SessionCapabilities {
   // its history. Same empty-object capability shape as attach/list.
   // See https://agentclientprotocol.com/rfds/session-resume.
   resume?: Record<string, never>;
+  // session/fork: branch a new session from an existing one. Still-Draft
+  // RFD (2025-11-20, not yet moved to Preview) — hydra exposes the verb
+  // speculatively as a compat alias over hydra-acp/session/fork. RFD
+  // reserves the object for future capability keys.
+  // See https://agentclientprotocol.com/rfds/session-fork.
+  fork?: Record<string, never>;
 }
 
 export interface PromptCapabilities {

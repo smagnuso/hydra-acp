@@ -1271,6 +1271,25 @@ Branch a local session into a new one that shares context up to a chosen turn bo
 
 The new session is minted with `upstreamSessionId=""` so its first attach triggers the same takeover-replay path used for imported bundles. Fork breadcrumbs (`forkedFromSessionId`, `forkedFromMessageId`) ride in `session/list` `_meta` for ancestry views.
 
+#### Compat alias: `session/fork`
+
+Hydra also accepts the still-Draft standard [ACP `session/fork` RFD](https://agentclientprotocol.com/rfds/session-fork) verb as a thin alias. Generic ACP clients that don't speak the `hydra-acp/*` namespace can fork with:
+
+```jsonc
+// params
+{
+  "sessionId":  "<source>",
+  "cwd":        "<path>",       // optional; defaults to source's cwd
+  "mcpServers": [...]           // accepted but currently ignored (inherited from source)
+}
+// result
+{ "sessionId": "<new id>" }
+```
+
+The alias always forks at the source's latest turn boundary and uses `mode: "verbatim"` — no ephemeral synopsis synthesis, no agent swap, no `forkAt`. Clients that want those knobs must use `hydra-acp/session/fork`. Hydra advertises the alias via `sessionCapabilities.fork = {}` on `initialize`, and the extras via `_meta["hydra-acp"].session.fork`.
+
+Status caveat: the RFD is Draft (not Preview/Completed) and has been since 2025-11-20. If it reshapes when it moves to Preview, this alias will need to adjust.
+
 ### Agent install progress
 
 When `session/new` or `session/attach` requires downloading or installing an agent (npx pre-install or binary fetch), the daemon emits progress on the originating WS connection so clients can paint a download bar.

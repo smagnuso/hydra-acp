@@ -114,12 +114,12 @@ export interface AcpWsDeps {
   // /mcp/<extension-name> resolves to the right connection.
   extensionMcp?: ExtensionMcpRegistry;
   // Control surface for the extension-MCP HTTP routes. Currently
-  // exposes evictSessionExtension, called by the
+  // exposes notifyToolListChanged, called by the
   // hydra-acp/mcp_tools/refresh_session handler so an extension can
   // force one session's agent to re-list tools without disturbing
-  // any other session.
+  // any other session and without dropping the transport.
   extensionMcpControls?: {
-    evictSessionExtension(sessionId: string, extName: string): void;
+    notifyToolListChanged(sessionId: string, extName: string): Promise<void>;
   };
   // Lazy getter for the daemon's externally-reachable origin (scheme +
   // host + port). Lazy because the bound port isn't known until after
@@ -529,14 +529,17 @@ export function registerAcpWsEndpoint(
         return { ok: true, registered: tools.length };
       });
 
-      // Per-session transport eviction. Extensions that expose
+      // Per-session tool-list refresh. Extensions that expose
       // different tools to different sessions (e.g. the planner's
-      // gateway-then-activate pattern) call this after mutating their
-      // per-session state so the affected agent reconnects and re-
-      // fetches tools/list — which the extension will answer
-      // dynamically via its hydra-acp/mcp_tools/list_tools handler.
-      // Silently no-ops when no matching transport exists (session
-      // never talked to this extension, already evicted, etc.).
+      // conservative-then-activate pattern) call this after mutating
+      // their per-session state. The daemon sends
+      // `notifications/tools/list_changed` on the affected session's
+      // MCP transport, which prompts the agent's MCP client to
+      // re-fetch tools/list over the same connection — that re-fetch
+      // is answered dynamically by the extension via its
+      // hydra-acp/mcp_tools/list_tools handler. No transport close,
+      // no in-flight request interruption. Silently no-ops when no
+      // matching transport exists.
       if (deps.extensionMcpControls) {
         const controls = deps.extensionMcpControls;
         connection.onRequest(
@@ -549,7 +552,7 @@ export function registerAcpWsEndpoint(
                 "refresh_session requires sessionId",
               );
             }
-            controls.evictSessionExtension(
+            await controls.notifyToolListChanged(
               params.sessionId,
               processIdentity.name,
             );
@@ -858,6 +861,40 @@ export function registerAcpWsEndpoint(
           ...(mode !== undefined ? { mode } : {}),
           ...(model !== undefined ? { model } : {}),
         });
+      });
+
+      // Speculative-compat alias for the still-Draft ACP RFD
+      // https://agentclientprotocol.com/rfds/session-fork — accept the
+      // standard verb and delegate to the hydra fork machinery so generic
+      // ACP clients can fork without speaking hydra-acp/*. The RFD shape
+      // is `{sessionId, cwd?, mcpServers?}`; extras (forkAt, agentId,
+      // mode, model) remain hydra-only on the namespaced verb.
+      //
+      // Defaults intentionally conservative for standard callers: mode
+      // defaults to "verbatim" (no surprise ephemeral-agent spend), and
+      // fork happens at the source's latest turn boundary (RFD only
+      // envisions tip-fork today). mcpServers is accepted but currently
+      // ignored — forkSession inherits the source's servers; when the
+      // RFD stabilizes and forkSession grows an mcpServers override, wire
+      // it through here.
+      connection.onRequest("session/fork", async (raw) => {
+        const params = (raw ?? {}) as {
+          sessionId?: unknown;
+          cwd?: unknown;
+          mcpServers?: unknown;
+        };
+        if (typeof params.sessionId !== "string") {
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidParams,
+            "session/fork requires sessionId",
+          );
+        }
+        const cwd = typeof params.cwd === "string" ? params.cwd : undefined;
+        const result = await deps.manager.forkSession(params.sessionId, {
+          ...(cwd !== undefined ? { cwd } : {}),
+          mode: "verbatim",
+        });
+        return { sessionId: result.sessionId };
       });
 
       // Delete a session record (and, if live, close the agent first).
@@ -2715,6 +2752,12 @@ function buildInitializeResult(): InitializeResult {
         attach: {},
         list: {},
         resume: {},
+        // Speculative-compat with the still-Draft session/fork RFD
+        // (https://agentclientprotocol.com/rfds/session-fork). The RFD
+        // reserves this object for future capability keys; hydra's fork
+        // extras (forkAt, agentId swap, synthesis mode, model override)
+        // are advertised separately under _meta["hydra-acp"].session.fork.
+        fork: {},
       },
     },
     // Hydra is a proxy and has no provider auth of its own. The
@@ -2755,6 +2798,18 @@ function buildInitializeResult(): InitializeResult {
       agents: {
         list: true,
         installProgress: true,
+      },
+      session: {
+        // Extras beyond the standard session/fork RFD, all available on
+        // hydra-acp/session/fork. Capability-aware clients probe here to
+        // decide whether to expose UI for arbitrary-turn forks, agent
+        // swap on fork, and synthesis vs verbatim history transfer.
+        fork: {
+          forkAt: true,
+          agentSwap: true,
+          synthesis: true,
+          model: true,
+        },
       },
     }),
   };
