@@ -3867,7 +3867,7 @@ async function runSession(
       ...opts,
       sessionId: match.sessionId,
       cwd: match.cwd ?? resolvedCwd,
-      readonly: match.status !== "warm",
+      readonly: false,
     };
     if (match.agentId !== undefined)
       nextOpts.agentId = match.agentId;
