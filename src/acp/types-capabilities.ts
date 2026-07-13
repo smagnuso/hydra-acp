@@ -44,6 +44,10 @@ export interface SessionCapabilities {
   // its history. Same empty-object capability shape as attach/list.
   // See https://agentclientprotocol.com/rfds/session-resume.
   resume?: Record<string, never>;
+  // session/delete: remove a session from session/list history.
+  // Stabilized 2026-06-05. Same empty-object capability shape.
+  // See https://agentclientprotocol.com/protocol/v1/session-delete.
+  delete?: Record<string, never>;
   // session/fork: branch a new session from an existing one. Still-Draft
   // RFD (2025-11-20, not yet moved to Preview) — hydra exposes the verb
   // speculatively as a compat alias over hydra-acp/session/fork. RFD

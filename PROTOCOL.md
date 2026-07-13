@@ -27,6 +27,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [The `hydra-acp` meta namespace](#the-hydra-acp-meta-namespace)
   - [Prompt-queue surface](#prompt-queue-surface)
   - [Stdin streaming](#stdin-streaming)
+  - [Session delete](#session-delete)
   - [Local fork](#local-fork)
   - [Agent install progress](#agent-install-progress)
   - [Extension and transformer plumbing](#extension-and-transformer-plumbing)
@@ -1239,6 +1240,30 @@ Attached clients receive `session/update` notifications as compaction progresses
 
 **Cold sessions:** broadcasts are dropped for sessions with no attached clients. The persistent `compactionState` field in the session record provides visibility for cold sessions.
 
+### Session delete
+
+#### Request: `session/delete`
+
+The canonical way to remove a session from `session/list` history. Follows the stabilized [ACP `session/delete` spec](https://agentclientprotocol.com/protocol/v1/session-delete) (v1, 2026-06-05).
+
+```jsonc
+// params
+{ "sessionId": "<id>" }
+// result
+{}
+```
+
+Hydra is the authoritative session registry to attached clients — `session/list` is answered from `~/.hydra-acp/sessions/`, not from the upstream agent — so `session/delete` is served the same way and is **not** forwarded downstream. If the session is live, hydra closes it (same teardown as `session/close` / `DELETE /v1/sessions/:id`) before deleting the on-disk record. Deleting an already-gone session succeeds silently, per spec. Support is advertised unconditionally via `sessionCapabilities.delete = {}` on `initialize`.
+
+#### Legacy alias: `hydra-acp/session/delete`
+
+Predates the standard method. Kept for one release cycle so external clients pinned to the hydra-prefixed name keep working. Identical params (`{ sessionId }`), but differs from the standard in two ways preserved for back-compat:
+
+- **Return shape** is `{ "deleted": true, "sessionId": "<id>" }` instead of `{}`.
+- **Missing session** returns `SessionNotFound` (`-32001`) instead of silent success.
+
+New callers should use `session/delete`.
+
 ### Local fork
 
 #### Request: `hydra-acp/session/fork`
@@ -1827,7 +1852,7 @@ After the broadcast, the daemon resumes the chain from the next transformer (fai
 
 The `initialize` response carries Hydra's extension capabilities in two places:
 
-- **Standard `agentCapabilities.sessionCapabilities`** advertises the RFD #533 (`attach: {}`) and Session List (`list: {}`) extensions.
+- **Standard `agentCapabilities.sessionCapabilities`** advertises the RFD #533 (`attach: {}`), Session List (`list: {}`), Session Resume (`resume: {}`), Session Delete (`delete: {}`), and (speculatively, still-Draft) Session Fork (`fork: {}`) extensions.
 - **`_meta["hydra-acp"]`** on the same response carries hydra's own capability groups, keyed by resource to mirror the `hydra-acp/<resource>/<action>` method namespaces (and deliberately **not** named `promptCapabilities`/`agentCapabilities`, which are ACP spec names with different meanings):
 
 ```jsonc

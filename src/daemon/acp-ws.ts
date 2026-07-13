@@ -1011,12 +1011,24 @@ export function registerAcpWsEndpoint(
       // dropping to the REST API. Persists a tombstone via
       // SessionManager so the periodic agent sync doesn't reimport the
       // upstream session under a fresh hydra id.
-      connection.onRequest("hydra-acp/session/delete", async (raw) => {
+      // Shared handler for standard `session/delete` and the legacy
+      // `hydra-acp/session/delete` alias. The standard method (ACP v1,
+      // stabilized 2026-06-05) is the preferred entry point; the alias
+      // stays for one release cycle so external clients pinned to the
+      // hydra-prefixed name keep working. The standard-shaped variant
+      // returns `{}` per spec and treats a missing session as silent
+      // success ("SHOULD succeed silently"); the legacy alias preserves
+      // hydra's older `{ deleted, sessionId }` return and hard-error on
+      // missing to avoid changing behavior for existing callers.
+      const deleteSession = async (
+        raw: unknown,
+        methodLabel: string,
+      ): Promise<{ id: string; existed: boolean }> => {
         const params = (raw ?? {}) as { sessionId?: unknown };
         if (typeof params.sessionId !== "string") {
           throw rpcError(
             JsonRpcErrorCodes.InvalidParams,
-            "hydra-acp/session/delete requires sessionId",
+            `${methodLabel} requires sessionId`,
           );
         }
         const id =
@@ -1030,10 +1042,21 @@ export function registerAcpWsEndpoint(
           if (await deps.manager.hasRecord(id)) {
             await deps.manager.deleteRecord(id);
           }
-          return { deleted: true, sessionId: id };
+          return { id, existed: true };
         }
         const removed = await deps.manager.deleteRecord(id);
-        if (!removed) {
+        return { id, existed: removed };
+      };
+      connection.onRequest("session/delete", async (raw) => {
+        await deleteSession(raw, "session/delete");
+        return {};
+      });
+      connection.onRequest("hydra-acp/session/delete", async (raw) => {
+        const { id, existed } = await deleteSession(
+          raw,
+          "hydra-acp/session/delete",
+        );
+        if (!existed) {
           throw rpcError(
             JsonRpcErrorCodes.SessionNotFound,
             `session ${id} not found`,
@@ -2867,6 +2890,12 @@ function buildInitializeResult(): InitializeResult {
         attach: {},
         list: {},
         resume: {},
+        // Hydra is the authoritative session registry to attached
+        // clients — session/list is answered from ~/.hydra-acp/sessions,
+        // not from the upstream agent. session/delete is served the
+        // same way (close-if-live plus tombstone), so we advertise
+        // support unconditionally regardless of what the upstream can do.
+        delete: {},
         // Speculative-compat with the still-Draft session/fork RFD
         // (https://agentclientprotocol.com/rfds/session-fork). The RFD
         // reserves this object for future capability keys; hydra's fork
