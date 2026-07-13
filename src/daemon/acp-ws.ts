@@ -1277,6 +1277,8 @@ export function registerAcpWsEndpoint(
       handleAuthenticate(raw, deps),
     );
 
+    connection.onRequest("logout", async (raw) => handleLogout(raw, deps));
+
     connection.onRequest("session/new", async (raw) => {
       const params = SessionNewParams.parse(raw);
       const hydraMeta = extractHydraMeta(
@@ -2464,6 +2466,49 @@ export async function handleAuthenticate(
   }
 }
 
+// Standard ACP `logout`: end the current authenticated state on the
+// upstream agent so a subsequent session/new requires re-auth.
+// Stabilized 2026-05-22. Spec params are literally `{}`; hydra
+// extends with an optional `_meta["hydra-acp"].{agentId,sessionId}`
+// disambiguator because hydra proxies to N different upstream agents
+// with independent auth, and bare `{}` doesn't say which one.
+// Mirrors handleAuthenticate's routing: session hint > agent hint >
+// defaultAgent, bootstrap if none is live so the user can log out
+// without first spawning a real session. The spec explicitly does
+// not guarantee what happens to already-running sessions after
+// logout — hydra leaves them alone and lets attached clients
+// discover auth failures naturally on the next authenticated call.
+// Hydra's own bearer token (~/.hydra-acp/auth-token) is transport
+// auth and is deliberately untouched here.
+export async function handleLogout(
+  raw: unknown,
+  deps: Pick<AcpWsDeps, "manager" | "defaultAgent">,
+): Promise<unknown> {
+  const params = (raw ?? {}) as {
+    _meta?: { "hydra-acp"?: { agentId?: unknown; sessionId?: unknown } };
+  };
+  const hydraMeta = params._meta?.["hydra-acp"];
+  const targetSessionId =
+    typeof hydraMeta?.sessionId === "string" ? hydraMeta.sessionId : undefined;
+  const targetAgentId =
+    typeof hydraMeta?.agentId === "string" ? hydraMeta.agentId : undefined;
+
+  let agent =
+    targetSessionId !== undefined
+      ? deps.manager.getAgentForSession(targetSessionId)
+      : undefined;
+  if (!agent || !agent.isAlive()) {
+    const spawnId = targetAgentId ?? deps.defaultAgent;
+    agent = await deps.manager.bootstrapAgentForAuth(spawnId);
+  }
+
+  // Pass through to the upstream. If the selected agent kind doesn't
+  // implement logout (older ACP version), the error surfaces to the
+  // client verbatim — hydra advertises auth.logout at the daemon
+  // level but can't guarantee every upstream implements it.
+  return await agent.connection.request("logout", {});
+}
+
 // Exported for unit testing — the WS layer is the only production
 // consumer.
 export function makeInstallProgressForwarder(
@@ -2927,6 +2972,15 @@ function buildInitializeResult(): InitializeResult {
         sse: true,
       },
       loadSession: true,
+      // Hydra advertises logout support at the daemon level. The
+      // handler routes to the appropriate upstream agent (via
+      // _meta["hydra-acp"].{agentId,sessionId}) and forwards. If the
+      // selected upstream doesn't itself support logout, that error
+      // surfaces to the client — consistent with how hydra advertises
+      // the union of upstream capabilities for prompt/mcp too.
+      auth: {
+        logout: {},
+      },
       sessionCapabilities: {
         attach: {},
         list: {},

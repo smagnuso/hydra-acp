@@ -72,11 +72,19 @@ export interface McpCapabilities {
   sse?: boolean;
 }
 
+export interface AgentAuthCapabilities {
+  // logout method availability. Stabilized 2026-05-22. Same
+  // empty-object shape as other v1 capability markers.
+  // See https://agentclientprotocol.com/protocol/v1/authentication#logging-out.
+  logout?: Record<string, never>;
+}
+
 export interface AgentCapabilities {
   promptCapabilities?: PromptCapabilities;
   mcpCapabilities?: McpCapabilities;
   loadSession?: boolean;
   sessionCapabilities?: SessionCapabilities;
+  auth?: AgentAuthCapabilities;
 }
 
 export interface AuthMethod {

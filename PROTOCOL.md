@@ -27,6 +27,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [The `hydra-acp` meta namespace](#the-hydra-acp-meta-namespace)
   - [Prompt-queue surface](#prompt-queue-surface)
   - [Stdin streaming](#stdin-streaming)
+  - [Authentication](#authentication)
   - [Session close](#session-close)
   - [Session delete](#session-delete)
   - [Local fork](#local-fork)
@@ -1241,6 +1242,39 @@ Attached clients receive `session/update` notifications as compaction progresses
 
 **Cold sessions:** broadcasts are dropped for sessions with no attached clients. The persistent `compactionState` field in the session record provides visibility for cold sessions.
 
+### Authentication
+
+Hydra proxies to N different upstream agent kinds (claude, codex, gemini, …), each with its own independent provider auth. That breaks the vanilla ACP assumption of a single "the agent," so hydra extends both `authenticate` and `logout` with an optional `_meta["hydra-acp"].{agentId,sessionId}` disambiguator that tells the daemon which upstream to route to. When no hint is given, hydra falls back to `defaultAgent`; when no upstream is live for the selected kind, hydra bootstraps one just for the auth flow (mirrors `bootstrapAgentForAuth`).
+
+#### Request: `authenticate`
+
+Standard ACP `authenticate` — client selects one of the advertised `authMethods` and passes its `methodId`. Hydra advertises a placeholder `authMethods` list at `initialize` (before any upstream is selected) and resolves the real method against the routed agent at call time. Terminal-type methods trigger the two arg-shape resolution described in `handleAuthenticate`.
+
+```jsonc
+// params
+{
+  "methodId": "<id>",
+  "_meta": { "hydra-acp": { "agentId": "<id>", "sessionId": "<id>" } }  // optional
+}
+```
+
+#### Request: `logout`
+
+Standard [ACP `logout`](https://agentclientprotocol.com/protocol/v1/authentication#logging-out) (stabilized 2026-05-22). Ends the current authenticated state on the routed upstream agent so a subsequent `session/new` requires re-auth.
+
+```jsonc
+// params
+{
+  "_meta": { "hydra-acp": { "agentId": "<id>", "sessionId": "<id>" } }  // optional
+}
+// result
+{}
+```
+
+Same routing rules as `authenticate`. The upstream `logout` call is a straight pass-through — if the selected upstream doesn't implement it (older ACP version), the error surfaces to the client verbatim. Hydra advertises `agentCapabilities.auth.logout = {}` at the daemon level; whether the specific upstream selected by routing supports it is a runtime discovery, consistent with how hydra advertises the union of upstream capabilities for prompt/mcp too.
+
+Spec explicitly does not guarantee what happens to already-running sessions after logout — hydra leaves them alone and lets attached clients discover auth failures naturally on the next authenticated call. Hydra's own bearer token (`~/.hydra-acp/auth-token`, transport auth) is deliberately untouched; use [`POST /v1/auth/logout`](#post-v1-auth-logout) for that.
+
 ### Session close
 
 #### Request: `session/close`
@@ -1877,6 +1911,7 @@ After the broadcast, the daemon resumes the chain from the next transformer (fai
 The `initialize` response carries Hydra's extension capabilities in two places:
 
 - **Standard `agentCapabilities.sessionCapabilities`** advertises the RFD #533 (`attach: {}`), Session List (`list: {}`), Session Resume (`resume: {}`), Session Close (`close: {}`), Session Delete (`delete: {}`), and (speculatively, still-Draft) Session Fork (`fork: {}`) extensions.
+- **Standard `agentCapabilities.auth`** advertises Logout (`logout: {}`). Hydra advertises this unconditionally; the actual upstream capability is resolved at call time when routing to a specific agent kind.
 - **`_meta["hydra-acp"]`** on the same response carries hydra's own capability groups, keyed by resource to mirror the `hydra-acp/<resource>/<action>` method namespaces (and deliberately **not** named `promptCapabilities`/`agentCapabilities`, which are ACP spec names with different meanings):
 
 ```jsonc
