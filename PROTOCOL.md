@@ -27,6 +27,7 @@ The daemon exposes three surfaces on a single TCP port (default `127.0.0.1:55514
   - [The `hydra-acp` meta namespace](#the-hydra-acp-meta-namespace)
   - [Prompt-queue surface](#prompt-queue-surface)
   - [Stdin streaming](#stdin-streaming)
+  - [Session close](#session-close)
   - [Session delete](#session-delete)
   - [Local fork](#local-fork)
   - [Agent install progress](#agent-install-progress)
@@ -294,7 +295,7 @@ Create a new session. Equivalent to ACP `session/new` over REST. Omitted `cwd`/`
 
 #### `POST /v1/sessions/:id/kill`
 
-Demote a live session to cold. The on-disk record is preserved so the session can be resurrected later. Use `DELETE` to drop the record too. Idempotent.
+Demote a live session to cold. The on-disk record is preserved so the session can be resurrected later. Use `DELETE` to drop the record too. Idempotent. REST equivalent of the ACP [`session/close`](#session-close) method — both channels converge on the same daemon-side teardown (`Session.close({deleteRecord:false})`), differing only in that REST returns `202` immediately without awaiting the ~1s teardown, while ACP awaits and returns `{}`.
 
 **Response**
 
@@ -1240,6 +1241,29 @@ Attached clients receive `session/update` notifications as compaction progresses
 
 **Cold sessions:** broadcasts are dropped for sessions with no attached clients. The persistent `compactionState` field in the session record provides visibility for cold sessions.
 
+### Session close
+
+#### Request: `session/close`
+
+Cancel any ongoing work for a session and free daemon-side resources, but keep the on-disk record so `session/list` still shows it and `session/resume` can reactivate it later. Follows the stabilized [ACP `session/close` spec](https://agentclientprotocol.com/protocol/v1/session-setup#closing-active-sessions) (v1, 2026-04-23).
+
+```jsonc
+// params
+{ "sessionId": "<id>" }
+// result
+{}
+```
+
+Semantics slot between the neighbouring lifecycle verbs:
+
+- `session/cancel` — abort the current turn, keep the session hot.
+- `session/close` — kill the upstream agent and free session state, keep the record so a later `session/resume` can rehydrate it.
+- `session/delete` — do everything close does plus remove the record from `session/list`.
+
+Not the same as `hydra-acp/session/force_cancel`, which is an escape hatch for a wedged agent (aborts the turn but keeps the session live). This is the *routine* "I'm done for now, free the resources" verb, and it converges on the same `Session.close({deleteRecord:false})` path the daemon's own idle timer uses — so attached clients see the standard `hydra-acp/session/closed` notification regardless of who initiated the close.
+
+Idempotent: if the session exists in history but isn't live, returns `{}` (nothing to free). Only truly-unknown session ids surface `SessionNotFound` (`-32001`). Support is advertised unconditionally via `sessionCapabilities.close = {}` on `initialize`.
+
 ### Session delete
 
 #### Request: `session/delete`
@@ -1852,7 +1876,7 @@ After the broadcast, the daemon resumes the chain from the next transformer (fai
 
 The `initialize` response carries Hydra's extension capabilities in two places:
 
-- **Standard `agentCapabilities.sessionCapabilities`** advertises the RFD #533 (`attach: {}`), Session List (`list: {}`), Session Resume (`resume: {}`), Session Delete (`delete: {}`), and (speculatively, still-Draft) Session Fork (`fork: {}`) extensions.
+- **Standard `agentCapabilities.sessionCapabilities`** advertises the RFD #533 (`attach: {}`), Session List (`list: {}`), Session Resume (`resume: {}`), Session Close (`close: {}`), Session Delete (`delete: {}`), and (speculatively, still-Draft) Session Fork (`fork: {}`) extensions.
 - **`_meta["hydra-acp"]`** on the same response carries hydra's own capability groups, keyed by resource to mirror the `hydra-acp/<resource>/<action>` method namespaces (and deliberately **not** named `promptCapabilities`/`agentCapabilities`, which are ACP spec names with different meanings):
 
 ```jsonc

@@ -1051,6 +1051,47 @@ export function registerAcpWsEndpoint(
         await deleteSession(raw, "session/delete");
         return {};
       });
+
+      // Standard session/close: cancel any ongoing work and free the
+      // resources associated with the session, but keep the on-disk
+      // record so session/list still shows it and session/resume can
+      // reactivate it later. Distinct from session/delete (which
+      // removes the record) and from hydra-acp/session/force_cancel
+      // (which cancels the current turn but keeps the agent live).
+      // See https://agentclientprotocol.com/protocol/v1/session-setup#closing-active-sessions.
+      // Client intent: "I'm done with this session for now" — the
+      // routine counterpart to the idle-timer auto-close hydra already
+      // performs, converging on the same Session.close({deleteRecord:false})
+      // path so the hydra-acp/session/closed notification fires
+      // uniformly regardless of who initiated the close.
+      connection.onRequest("session/close", async (raw) => {
+        const params = (raw ?? {}) as { sessionId?: unknown };
+        if (typeof params.sessionId !== "string") {
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidParams,
+            "session/close requires sessionId",
+          );
+        }
+        denyIfReadonly(params.sessionId, "session/close");
+        const id =
+          (await deps.manager.resolveCanonicalId(params.sessionId)) ??
+          params.sessionId;
+        const live = deps.manager.get(id);
+        if (live) {
+          await live.close({ deleteRecord: false });
+          return {};
+        }
+        // Idempotent when the session exists in history but isn't live:
+        // client asked us to free resources and there are none to free.
+        // Only truly-unknown sessions surface as SessionNotFound.
+        if (await deps.manager.hasRecord(id)) {
+          return {};
+        }
+        throw rpcError(
+          JsonRpcErrorCodes.SessionNotFound,
+          `session ${id} not found`,
+        );
+      });
       connection.onRequest("hydra-acp/session/delete", async (raw) => {
         const { id, existed } = await deleteSession(
           raw,
@@ -2896,6 +2937,11 @@ function buildInitializeResult(): InitializeResult {
         // same way (close-if-live plus tombstone), so we advertise
         // support unconditionally regardless of what the upstream can do.
         delete: {},
+        // session/close: kill the live upstream and free daemon-side
+        // session resources, keep the on-disk record. Same rationale
+        // as delete — hydra owns the session lifecycle, so we always
+        // support it regardless of upstream capabilities.
+        close: {},
         // Speculative-compat with the still-Draft session/fork RFD
         // (https://agentclientprotocol.com/rfds/session-fork). The RFD
         // reserves this object for future capability keys; hydra's fork
