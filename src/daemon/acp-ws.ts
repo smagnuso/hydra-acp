@@ -326,6 +326,7 @@ async function resurrectFromDisk(
     });
   }
   wireDefaultTransformers(session, deps);
+  broadcastSessionStarting(session.sessionId, deps);
   return session;
 }
 
@@ -1354,6 +1355,13 @@ export function registerAcpWsEndpoint(
       if (extMcpMint !== undefined) {
         extMcpMint.bindToSession(session);
       }
+      // Broadcast the "session is coming to life" hook to any
+      // transformer that subscribed to lifecycle:session.starting.
+      // Out-of-chain — transformers that aren't yet in this session's
+      // chain get a chance to inspect the session and opt in (via
+      // hydra-acp/transformer/attach) BEFORE the agent starts
+      // producing events.
+      broadcastSessionStarting(session.sessionId, deps);
       // From here on, the session is live and has bindings (stdin token,
       // extension MCP) wired to its onClose. If any of the remaining
       // attach/replay work throws, close the session so those disposers
@@ -2938,6 +2946,49 @@ function wireDefaultTransformers(
     if (ref) {
       session.addTransformer(ref);
     }
+  }
+}
+
+// Broadcast a "session is about to become live" signal to every
+// connected transformer that subscribed to `lifecycle:session.starting`
+// in its initial intercepts. Unlike `session.opened` (which flows
+// through the session's transform chain — meaning only transformers
+// already in the chain hear it), this signal fires OUT OF CHAIN so
+// transformers can opt into a session AFTER inspecting it. The typical
+// pattern:
+//
+//   1. Transformer receives session.starting for a session it doesn't
+//      have in its chain.
+//   2. Transformer inspects persistent state (extension_state, its own
+//      files, whatever) and decides whether it wants in.
+//   3. If yes, it calls hydra-acp/transformer/attach for this session,
+//      which puts it into the session's chain going forward. Future
+//      lifecycle events and message intercepts flow through the chain
+//      as normal.
+//
+// Fire-and-forget: the daemon doesn't await the transformer's
+// response. Transformers race their own state-loading against the
+// agent's first message to the session. In practice the agent's first
+// message is bounded by an LLM turn (seconds), so a transformer's
+// millisecond-scale state check + transformer/attach round-trip is
+// well ahead of the first observable event.
+function broadcastSessionStarting(
+  sessionId: string,
+  deps: { transformers?: TransformerManager },
+): void {
+  if (!deps.transformers) {
+    return;
+  }
+  const subscribers = deps.transformers.interestedIn(
+    "lifecycle:session.starting",
+  );
+  for (const ref of subscribers) {
+    void ref.connection
+      .notify("hydra-acp/transformer/session_event", {
+        event: "session.starting",
+        sessionId,
+      })
+      .catch(() => undefined);
   }
 }
 

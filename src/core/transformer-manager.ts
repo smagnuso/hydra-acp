@@ -79,4 +79,19 @@ export class TransformerManager extends ChildSupervisor<TransformerConfig> {
     }
     return out;
   }
+
+  // Return every connected transformer whose declared intercepts include
+  // `intercept`. Used by broadcast lifecycle signals (session.starting)
+  // that fire out-of-chain — the daemon dispatches to any subscribing
+  // transformer regardless of whether it's currently in the session's
+  // transform chain. Order is registration order (arbitrary but stable).
+  interestedIn(intercept: string): TransformerRef[] {
+    const out: TransformerRef[] = [];
+    for (const ref of this.connected.values()) {
+      if (ref.intercepts.has(intercept)) {
+        out.push(ref);
+      }
+    }
+    return out;
+  }
 }

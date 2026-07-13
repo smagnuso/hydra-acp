@@ -1578,7 +1578,8 @@ Intercepts are matched against `request:<method>`, `response:<method>`, and `lif
 
 | Event | When | Payload |
 |---|---|---|
-| `session.opened` | A transformer with this intercept joins a live session (`addTransformer`) or the chain runs on session creation. | `{}` |
+| `session.starting` | Broadcast to every connected transformer subscribed to this intercept, out-of-chain, once per session bring-up (`session/new` AND resurrect from cold), just after MCP/stdin bindings are wired and before the agent produces events. Lets transformers inspect a session's persisted state (e.g. its `extension_state` bucket) and decide whether to join the chain by calling `hydra-acp/transformer/attach`. Fire-and-forget from the daemon's side. | `{}` |
+| `session.opened` | A transformer with this intercept joins a live session (`addTransformer`) or the chain runs on session creation. Note: this fires only to transformers ALREADY in the session's chain — use `session.starting` if you need to opt in based on persisted state. | `{}` |
 | `session.idle` | After `idleEventTimeoutMs` of continuous quiet following the last recordable broadcast. Re-fires after each activity → quiet cycle. | `{}` |
 | `session.closed` | Synchronously inside `markClosed`, before per-session state is torn down. | `{}` |
 | `permission.replied` | After a `session/request_permission` resolves — whether by transformer short-circuit or by a real client reply. | `{ toolCallId, outcome, sourceWasTransformer }` |

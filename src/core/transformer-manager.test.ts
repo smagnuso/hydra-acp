@@ -87,6 +87,38 @@ describe("TransformerManager — connection registry", () => {
     m.reportVersion("t1", "1.2.3");
     expect(m.list()[0]!.version).toBe("1.2.3");
   });
+
+  it("interestedIn returns transformers whose declared intercepts include the query", () => {
+    const m = makeManager([{ name: "t1" }, { name: "t2" }, { name: "t3" }]);
+    m.registerConnection("t1", fakeConnection(), ["lifecycle:session.starting"]);
+    m.registerConnection("t2", fakeConnection(), ["request:session/prompt"]);
+    m.registerConnection("t3", fakeConnection(), [
+      "lifecycle:session.starting",
+      "lifecycle:session.idle",
+    ]);
+    const starters = m.interestedIn("lifecycle:session.starting");
+    expect(starters.map((r) => r.name).sort()).toEqual(["t1", "t3"]);
+    const prompts = m.interestedIn("request:session/prompt");
+    expect(prompts.map((r) => r.name)).toEqual(["t2"]);
+    const unknown = m.interestedIn("lifecycle:no.such.event");
+    expect(unknown).toHaveLength(0);
+  });
+
+  it("interestedIn skips transformers that are configured but not connected", () => {
+    const m = makeManager([{ name: "t1" }, { name: "unconnected" }]);
+    m.registerConnection("t1", fakeConnection(), ["lifecycle:session.starting"]);
+    // unconnected never registered — should not appear.
+    const starters = m.interestedIn("lifecycle:session.starting");
+    expect(starters.map((r) => r.name)).toEqual(["t1"]);
+  });
+
+  it("interestedIn no longer returns a deregistered transformer", () => {
+    const m = makeManager([{ name: "t1" }]);
+    m.registerConnection("t1", fakeConnection(), ["lifecycle:session.starting"]);
+    expect(m.interestedIn("lifecycle:session.starting")).toHaveLength(1);
+    m.deregisterConnection("t1");
+    expect(m.interestedIn("lifecycle:session.starting")).toHaveLength(0);
+  });
 });
 
 describe("TransformerManager — circuit breaker", () => {
