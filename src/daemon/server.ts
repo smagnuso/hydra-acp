@@ -273,7 +273,11 @@ export async function startDaemon(
   });
   registerStdinMcpRoutes(app, mcpTokenRegistry);
   registerRecallMcpRoutes(app, mcpTokenRegistry);
-  registerExtensionMcpRoutes(app, mcpTokenRegistry, extensionMcp);
+  const extensionMcpControls = registerExtensionMcpRoutes(
+    app,
+    mcpTokenRegistry,
+    extensionMcp,
+  );
   registerAcpWsEndpoint(app, {
     validator,
     manager,
@@ -285,6 +289,7 @@ export async function startDaemon(
     extensionCommands,
     mcpTokenRegistry,
     extensionMcp,
+    extensionMcpControls,
     getDaemonOrigin,
     registry,
   });

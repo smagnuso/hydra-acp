@@ -163,6 +163,108 @@ describe("buildExtensionServer — tools/list", () => {
   });
 });
 
+describe("buildExtensionServer — dynamic tools hooks", () => {
+  // The dynamic hooks let an extension expose different tools to
+  // different sessions. When peekSessionId returns a sessionId AND
+  // fetchSessionTools returns a spec, the dynamic response replaces
+  // the static entry.tools. When either hook is absent, or the
+  // dynamic fetch fails, the static list is served — same as before
+  // hooks existed. These are the invariants activate_planner relies
+  // on: gateway when not yet bound / not activated, full spec once
+  // the extension flags the session.
+
+  let mock: MockConnection;
+  let server: Server;
+  let client: Client | null = null;
+
+  const gateway = [
+    { name: "activate", description: "unlock", inputSchema: { type: "object" } },
+  ];
+  const full = [
+    { name: "activate", description: "unlock", inputSchema: { type: "object" } },
+    { name: "do_thing", description: "the thing", inputSchema: { type: "object" } },
+    { name: "do_other", description: "other", inputSchema: { type: "object" } },
+  ];
+
+  beforeEach(() => {
+    mock = makeMockConnection();
+  });
+
+  afterEach(async () => {
+    if (client) {
+      await client.close().catch(() => undefined);
+      client = null;
+    }
+    if (server) {
+      await server.close().catch(() => undefined);
+    }
+  });
+
+  it("serves entry.tools when peekSessionId returns undefined (handshake path)", async () => {
+    // Both hooks provided but the sessionId isn't yet knowable. The
+    // ListTools handler must not attempt the dynamic path — that
+    // would attempt to forward to the extension with sessid="", and
+    // during real session/new would deadlock (see resolveSessionId
+    // comment). Serves the static entry.tools instead.
+    const fetched: string[] = [];
+    server = buildExtensionServer("planner", entryFor(mock.conn, gateway), "sess", {
+      peekSessionId: () => undefined,
+      fetchSessionTools: async (sid) => {
+        fetched.push(sid);
+        return full;
+      },
+    });
+    client = await connect(server);
+    const r = await client.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["activate"]);
+    expect(fetched).toEqual([]);
+  });
+
+  it("returns dynamic spec verbatim when both hooks are present and session is bound", async () => {
+    const fetched: string[] = [];
+    server = buildExtensionServer("planner", entryFor(mock.conn, gateway), "sess", {
+      peekSessionId: () => "sess-42",
+      fetchSessionTools: async (sid) => {
+        fetched.push(sid);
+        return full;
+      },
+    });
+    client = await connect(server);
+    const r = await client.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["activate", "do_thing", "do_other"]);
+    expect(fetched).toEqual(["sess-42"]);
+  });
+
+  it("falls back to entry.tools when fetchSessionTools throws", async () => {
+    server = buildExtensionServer("planner", entryFor(mock.conn, gateway), "sess", {
+      peekSessionId: () => "sess-42",
+      fetchSessionTools: async () => {
+        throw new Error("method not found");
+      },
+    });
+    client = await connect(server);
+    const r = await client.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["activate"]);
+  });
+
+  it("falls back to entry.tools when fetchSessionTools returns undefined", async () => {
+    server = buildExtensionServer("planner", entryFor(mock.conn, gateway), "sess", {
+      peekSessionId: () => "sess-42",
+      fetchSessionTools: async () => undefined,
+    });
+    client = await connect(server);
+    const r = await client.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["activate"]);
+  });
+
+  it("serves entry.tools when no dynamic hooks are supplied at all (back-compat)", async () => {
+    server = buildExtensionServer("planner", entryFor(mock.conn, full), "sess");
+    client = await connect(server);
+    const r = await client.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["activate", "do_thing", "do_other"]);
+  });
+});
+
 describe("buildExtensionServer — tools/call success", () => {
   let mock: MockConnection;
   let server: Server;
@@ -297,9 +399,16 @@ describe("startProgressHeartbeat", () => {
       },
       10,
     );
-    await new Promise((r) => setTimeout(r, 45));
+    // Poll until at least 2 ticks have fired, up to 2s. A fixed
+    // "sleep 45ms, expect ≥2" is unreliable under full-suite CPU
+    // pressure where setTimeout callbacks can be delayed by 30+ ms.
+    // Polling collapses the flake without hiding the invariant:
+    // the interval is 10ms so 2 ticks should land well under 2s.
+    const start = Date.now();
+    while (sent.length < 2 && Date.now() - start < 2_000) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
     stop();
-    // 45ms / 10ms interval ≈ 3–4 ticks (jitter-tolerant).
     expect(sent.length).toBeGreaterThanOrEqual(2);
     expect(sent[0]!.progressToken).toBe("tok-1");
     expect(sent[0]!.progress).toBe(1);
@@ -360,7 +469,17 @@ describe("buildExtensionServer — tools/call error paths", () => {
     }
   });
 
-  it("unknown tool returns isError without invoking the extension", async () => {
+  it("forwards unknown tool calls to the extension so it can validate against its current per-session set", async () => {
+    // The daemon no longer pre-flights the tool name against a
+    // static register-time set. Dynamic ListTools + per-session
+    // notifyToolListChanged mean the extension's per-session tool
+    // set can diverge from `entry.tools`, so daemon-side validation
+    // would produce false negatives. The extension is authoritative
+    // and returns its own isError for anything it doesn't recognize.
+    mock.setResponder(async () => ({
+      content: [{ type: "text", text: "unknown planner tool: absent" }],
+      isError: true,
+    }));
     const entry = entryFor(mock.conn, [
       { name: "ping", description: "", inputSchema: { type: "object" } },
     ]);
@@ -368,9 +487,14 @@ describe("buildExtensionServer — tools/call error paths", () => {
     client = await connect(server);
     const r = await client.callTool({ name: "absent", arguments: {} });
     expect(r.isError).toBe(true);
-    expect(mock.calls).toHaveLength(0);
+    // Extension WAS invoked — this is the new contract.
+    expect(mock.calls).toHaveLength(1);
+    expect(mock.calls[0]!.params).toMatchObject({
+      server: "memory",
+      tool: "absent",
+    });
     const content = r.content as Array<{ type: string; text: string }>;
-    expect(content[0]!.text).toMatch(/unknown tool: absent/);
+    expect(content[0]!.text).toMatch(/unknown planner tool: absent/);
   });
 
   it("extension throwing yields isError with the thrown message", async () => {

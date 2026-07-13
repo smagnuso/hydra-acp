@@ -50,6 +50,33 @@ import type {
   ExtensionMcpToolSpec,
 } from "../../core/extension-mcp.js";
 
+// Optional hooks that enable per-session dynamic tool lists. When
+// present, the ListTools handler prefers a live response from the
+// extension over the static spec captured in `entry.tools`.
+//
+//   peekSessionId  — synchronous, non-blocking. Returns the hydra
+//                    sessionId bound to this transport if one is
+//                    known right now, else undefined. Used to skip
+//                    the dynamic path during the agent's initial
+//                    session/new MCP handshake (when the sessionId
+//                    is not yet bound and awaiting it would
+//                    deadlock — see the resolveSessionId comment).
+//
+//   fetchSessionTools — given a resolved sessionId, ask the extension
+//                       what tools this specific session should see.
+//                       Returning undefined (or throwing) falls back
+//                       to entry.tools. Extensions that don't
+//                       implement per-session lists (i.e. don't
+//                       respond to hydra-acp/mcp_tools/list_tools)
+//                       will error here; the fallback swallows those.
+//
+// When either hook is omitted, ListTools serves entry.tools verbatim
+// — the pre-existing behavior.
+export interface DynamicToolsHooks {
+  peekSessionId?: () => string | undefined;
+  fetchSessionTools?: (sessionId: string) => Promise<ExtensionMcpToolSpec[] | undefined>;
+}
+
 export function buildExtensionServer(
   extensionName: string,
   entry: ExtensionMcpEntry,
@@ -71,6 +98,7 @@ export function buildExtensionServer(
   // only place that actually needs the sessionId, and by the time
   // tools/call fires the session has long since been bound.
   sessionId: string | (() => string | Promise<string>),
+  dynamicHooks?: DynamicToolsHooks,
 ): Server {
   const resolveSessionId: () => Promise<string> =
     typeof sessionId === "function"
@@ -81,11 +109,16 @@ export function buildExtensionServer(
     { name: extensionName, version: "1.0.0" },
     {
       capabilities: {
-        // listChanged: false matches the v1 strategy — the daemon closes
-        // transports on re-register; agents reconnect and re-list against
-        // the new spec naturally. Flipping to true is the upgrade path
-        // if any supported agent caches tools/list across reconnects.
-        tools: { listChanged: false },
+        // listChanged: true tells clients we may push
+        // `notifications/tools/list_changed` at any time; the client
+        // then re-fetches tools/list on the same transport without
+        // reconnecting. This is the ONLY safe way to change a
+        // per-session tool list mid-conversation for streamable HTTP
+        // MCP — closing the transport as a "force re-list" trick
+        // (v1 strategy, briefly tried) leaves the client's next POST
+        // hitting an uninitialized server since the client can't
+        // detect the server-side close in time to re-initialize.
+        tools: { listChanged: true },
       },
       ...(entry.instructions !== undefined
         ? { instructions: entry.instructions }
@@ -93,28 +126,50 @@ export function buildExtensionServer(
     },
   );
 
-  const toolsByName = new Map<string, ExtensionMcpToolSpec>(
-    entry.tools.map((t) => [t.name, t]),
-  );
+  // NOTE: we intentionally do NOT maintain a `toolsByName` set for
+  // pre-flighting CallTool. The dynamic ListTools path lets an
+  // extension expose different tools to different sessions
+  // (fetchSessionTools) and mutate the per-session set at runtime
+  // (via notifyToolListChanged). A static-at-construction set would
+  // reject calls to tools that are legitimately advertised via the
+  // dynamic path, since entry.tools reflects only the boot-time
+  // registration. The extension itself validates tool names via its
+  // hydra-acp/mcp_tools/invoke handler; anything unknown comes back
+  // as an isError result, which is the same shape the daemon would
+  // have emitted. Cheaper AND correct.
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: entry.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-      ...(t.outputSchema !== undefined
-        ? { outputSchema: t.outputSchema }
-        : {}),
-    })),
-  }));
+  const toWire = (t: ExtensionMcpToolSpec) => ({
+    name: t.name,
+    description: t.description,
+    inputSchema: t.inputSchema,
+    ...(t.outputSchema !== undefined ? { outputSchema: t.outputSchema } : {}),
+  });
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // Try the per-session dynamic path first. Only attempted when the
+    // sessionId is knowable synchronously — the initial session/new
+    // handshake has no bound session yet and must serve static (see
+    // resolveSessionId comment for why awaiting there deadlocks).
+    const sid = dynamicHooks?.peekSessionId?.();
+    if (sid !== undefined && dynamicHooks?.fetchSessionTools !== undefined) {
+      try {
+        const dyn = await dynamicHooks.fetchSessionTools(sid);
+        if (dyn !== undefined) {
+          return { tools: dyn.map(toWire) };
+        }
+      } catch {
+        // Extension doesn't implement per-session lists, or errored.
+        // Fall through to the static spec — extensions that opt out
+        // of dynamic lists still get their register-time tools served.
+      }
+    }
+    return { tools: entry.tools.map(toWire) };
+  });
 
   server.setRequestHandler(
     CallToolRequestSchema,
     async (req, extra): Promise<CallToolResult> => {
       const toolName = req.params.name;
-      if (!toolsByName.has(toolName)) {
-        return errorResult(`unknown tool: ${toolName}`);
-      }
       // Prefer a client-supplied progressToken when present; otherwise
       // fall back to the JSON-RPC requestId so the heartbeat addresses
       // notifications to a token the client SDK will still resolve

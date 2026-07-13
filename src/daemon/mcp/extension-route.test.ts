@@ -55,6 +55,7 @@ interface Harness {
   tokenRegistry: McpTokenRegistry;
   extensionMcp: ExtensionMcpRegistry;
   baseUrl: string;
+  notifyToolListChanged: (sessionId: string, extName: string) => Promise<void>;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -64,7 +65,7 @@ async function makeHarness(): Promise<Harness> {
   // Register stdin too — verifies that /mcp/hydra-acp-stdin still wins the route
   // race against /mcp/:name.
   registerStdinMcpRoutes(app, tokenRegistry);
-  registerExtensionMcpRoutes(app, tokenRegistry, extensionMcp);
+  const controls = registerExtensionMcpRoutes(app, tokenRegistry, extensionMcp);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address() as AddressInfo;
   return {
@@ -72,6 +73,7 @@ async function makeHarness(): Promise<Harness> {
     tokenRegistry,
     extensionMcp,
     baseUrl: `http://127.0.0.1:${addr.port}`,
+    notifyToolListChanged: controls.notifyToolListChanged,
   };
 }
 
@@ -420,6 +422,149 @@ describe("extension MCP route — reservation pending (deadlock regression)", ()
       sessionId: session.sessionId,
     });
     await client.close().catch(() => undefined);
+  });
+});
+
+describe("extension MCP route — per-session dynamic tools + eviction", () => {
+  // Covers the activate-then-refresh pattern: extension registers a
+  // small "gateway" spec at boot; per-session state controls whether
+  // ListTools returns the gateway or a larger spec; a targeted
+  // eviction forces one session's agent to reconnect and re-list
+  // without disturbing other sessions.
+  let h: Harness | null = null;
+  let mock: MockConnection;
+
+  const gateway = [
+    { name: "activate", description: "unlock", inputSchema: { type: "object" } },
+  ];
+  const full = [
+    { name: "activate", description: "unlock", inputSchema: { type: "object" } },
+    { name: "do_thing", description: "thing", inputSchema: { type: "object" } },
+  ];
+
+  // Extension serves `full` for sessions in `activated`, else `gateway`.
+  // Modeled after the planner's list_tools handler.
+  let activated: Set<string>;
+
+  beforeEach(async () => {
+    h = await makeHarness();
+    mock = makeMockConnection();
+    activated = new Set<string>();
+    mock.setResponder(async (method, params) => {
+      if (method === "hydra-acp/mcp_tools/list_tools") {
+        const sid = (params as { sessionId?: string }).sessionId ?? "";
+        return { tools: activated.has(sid) ? full : gateway };
+      }
+      if (method === "hydra-acp/mcp_tools/invoke") {
+        return { content: [{ type: "text", text: "ok" }] };
+      }
+      throw new Error(`unexpected method: ${method}`);
+    });
+    h.extensionMcp.register("planner", mock.conn, undefined, gateway);
+  });
+
+  afterEach(async () => {
+    if (h) {
+      await h.app.close().catch(() => undefined);
+      h = null;
+    }
+  });
+
+  async function openMcp(token: string): Promise<Client> {
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${h!.baseUrl}/mcp/planner`),
+      { requestInit: { headers: { Authorization: `Bearer ${token}` } } },
+    );
+    const client = new Client({ name: "test", version: "0.0.1" });
+    await client.connect(transport);
+    return client;
+  }
+
+  it("returns the gateway spec by default (session not activated)", async () => {
+    const token = "tok-A";
+    h!.tokenRegistry.bind(token, makeSession());
+    const client = await openMcp(token);
+    const r = await client.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["activate"]);
+    await client.close().catch(() => undefined);
+  });
+
+  it("returns the full spec once the session is marked activated", async () => {
+    const token = "tok-B";
+    const session = makeSession();
+    h!.tokenRegistry.bind(token, session);
+    activated.add(session.sessionId);
+    const client = await openMcp(token);
+    const r = await client.listTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["activate", "do_thing"]);
+    await client.close().catch(() => undefined);
+  });
+
+  it("notifyToolListChanged causes the SAME client to see the fresh per-session spec on next list", async () => {
+    // Session opens on gateway. We mark it activated in the
+    // extension, then notify. The SAME client — on the SAME
+    // transport, no reconnect — must see the full spec on its next
+    // listTools() call. This is the whole point of using
+    // notifications instead of transport reset: the client's
+    // in-flight state (including any pending tool call) stays intact.
+    const token = "tok-C";
+    const session = makeSession();
+    h!.tokenRegistry.bind(token, session);
+
+    const client = await openMcp(token);
+    const r1 = await client.listTools();
+    expect(r1.tools.map((t) => t.name)).toEqual(["activate"]);
+
+    // Extension marks session activated + asks daemon to notify.
+    activated.add(session.sessionId);
+    await h!.notifyToolListChanged(session.sessionId, "planner");
+
+    // Same client, same transport — the dynamic ListTools handler
+    // now sees the session in `activated` and returns the full spec.
+    const r2 = await client.listTools();
+    expect(r2.tools.map((t) => t.name)).toEqual(["activate", "do_thing"]);
+    await client.close().catch(() => undefined);
+  });
+
+  it("notifyToolListChanged isolates to the target session — others don't see the change", async () => {
+    // Notifying session A must NOT affect session B: B's ListTools
+    // response continues to reflect B's own per-session state.
+    const tokenA = "tok-iso-A";
+    const tokenB = "tok-iso-B";
+    const sessA = makeSession();
+    const sessB = makeSession();
+    h!.tokenRegistry.bind(tokenA, sessA);
+    h!.tokenRegistry.bind(tokenB, sessB);
+
+    const clientA = await openMcp(tokenA);
+    const clientB = await openMcp(tokenB);
+    expect((await clientA.listTools()).tools.map((t) => t.name)).toEqual(["activate"]);
+    expect((await clientB.listTools()).tools.map((t) => t.name)).toEqual(["activate"]);
+
+    // Activate only A; notify only A.
+    activated.add(sessA.sessionId);
+    await h!.notifyToolListChanged(sessA.sessionId, "planner");
+
+    // A now sees the full spec — its ListTools handler returns the
+    // updated per-session view.
+    expect((await clientA.listTools()).tools.map((t) => t.name)).toEqual([
+      "activate",
+      "do_thing",
+    ]);
+    // B is unchanged — still on gateway. Same transport, same
+    // client, no disruption from A's notification.
+    expect((await clientB.listTools()).tools.map((t) => t.name)).toEqual(["activate"]);
+
+    await clientA.close().catch(() => undefined);
+    await clientB.close().catch(() => undefined);
+  });
+
+  it("notifyToolListChanged is a no-op when no matching transport exists", async () => {
+    // Never opens a client for the sessionId. Notification should
+    // silently do nothing (resolve to undefined) rather than throw.
+    await expect(
+      h!.notifyToolListChanged("hydra_session_nonexistent", "planner"),
+    ).resolves.toBeUndefined();
   });
 });
 

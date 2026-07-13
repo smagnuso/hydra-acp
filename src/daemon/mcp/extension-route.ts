@@ -26,10 +26,35 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
-import type { ExtensionMcpRegistry } from "../../core/extension-mcp.js";
+import type {
+  ExtensionMcpRegistry,
+  ExtensionMcpToolSpec,
+} from "../../core/extension-mcp.js";
 import { extractBearer } from "./bearer.js";
 import { buildExtensionServer } from "./build-extension-server.js";
 import type { McpTokenRegistry } from "./token-registry.js";
+
+// Control surface returned by registerExtensionMcpRoutes. Wired into
+// registerAcpWsEndpoint so the hydra-acp/mcp_tools/refresh_session
+// handler on the WS layer can trigger a per-(session, extName)
+// tool-list refresh — the mechanism that lets an extension change
+// what tools a specific session sees without disturbing other
+// sessions and without dropping the transport.
+export interface ExtensionMcpRouteControls {
+  // Push a `notifications/tools/list_changed` to the agent's MCP
+  // client on this (sessionId, extName) transport. The client then
+  // re-fetches tools/list over the SAME connection — no reconnect,
+  // no re-initialize, no in-flight tool call interruption. The
+  // dynamic ListTools handler in buildExtensionServer forwards that
+  // re-fetch to the extension via hydra-acp/mcp_tools/list_tools, so
+  // the extension gets to serve fresh per-session tools.
+  //
+  // Returns a Promise so callers can await if they want, though the
+  // typical use is fire-and-forget. No-op (resolves immediately)
+  // when no such transport exists (session never opened the
+  // extension MCP, or the token has since been unbound). Idempotent.
+  notifyToolListChanged(sessionId: string, extName: string): Promise<void>;
+}
 
 interface BuiltPair {
   server: Server;
@@ -48,7 +73,7 @@ export function registerExtensionMcpRoutes(
   app: FastifyInstance,
   tokenRegistry: McpTokenRegistry,
   extensionMcp: ExtensionMcpRegistry,
-): void {
+): ExtensionMcpRouteControls {
   // Per-registration lazy build cache, keyed (token, extName). Two-level
   // map so we can evict efficiently in either direction: by token (session
   // end → close everything that session built) or by extName (extension
@@ -77,6 +102,38 @@ export function registerExtensionMcpRoutes(
       if (pair !== undefined) {
         tokenScope.delete(extName);
         void disposeBuiltPair(pair);
+      }
+    }
+  }
+
+  // Send a `notifications/tools/list_changed` over the built server
+  // for one (sessionId, extName) pair. This is the mechanism the
+  // hydra-acp/mcp_tools/refresh_session daemon method uses so an
+  // extension can force ONE session's agent to re-list tools without
+  // disturbing other sessions AND without tearing down its transport
+  // (which would leave the client's next request hitting an
+  // uninitialized server).
+  //
+  // The two-level `built` map (token → extName → pair) supports
+  // per-session lookup; we get the token↔session reverse mapping via
+  // the shared McpTokenRegistry. No-op when no matching pair exists
+  // (session never opened the MCP, or transport already gone).
+  async function notifyToolListChanged(
+    sessionId: string,
+    extName: string,
+  ): Promise<void> {
+    for (const [token, tokenScope] of built) {
+      const entry = tokenRegistry.lookup(token);
+      if (entry?.session?.sessionId !== sessionId) continue;
+      const pair = tokenScope.get(extName);
+      if (pair === undefined) continue;
+      try {
+        await pair.server.sendToolListChanged();
+      } catch {
+        // Transport may have closed underneath us (client disconnect,
+        // token unbind). Silently drop — the next request from a
+        // reconnecting client will re-list against the current spec
+        // via the dynamic ListTools handler.
       }
     }
   }
@@ -151,7 +208,55 @@ export function registerExtensionMcpRoutes(
       return resolved.sessionId;
     };
 
-    const server = buildExtensionServer(extName, entry, resolveSessionId);
+    // Sync peek at the token's bound sessionId. Returns undefined
+    // during the agent's session/new handshake (session not yet
+    // bound). buildExtensionServer uses this to decide whether the
+    // ListTools request can safely take the dynamic per-session path
+    // (a JSON-RPC round-trip to the extension carrying sessionId) or
+    // must fall back to the static registered spec.
+    const peekSessionId = (): string | undefined => {
+      return tokenRegistry.lookup(token)?.session?.sessionId;
+    };
+
+    // Ask the extension what tools this specific session should see.
+    // Extensions that don't implement per-session lists let the RPC
+    // fail with method-not-found; buildExtensionServer catches and
+    // falls back to entry.tools, preserving the pre-existing behavior
+    // for every extension that hasn't opted in.
+    const fetchSessionTools = async (
+      sid: string,
+    ): Promise<ExtensionMcpToolSpec[] | undefined> => {
+      const result = await entry.connection.request<{ tools?: unknown }>(
+        "hydra-acp/mcp_tools/list_tools",
+        { sessionId: sid },
+      );
+      if (!result || typeof result !== "object") return undefined;
+      const raw = (result as { tools?: unknown }).tools;
+      if (!Array.isArray(raw)) return undefined;
+      const out: ExtensionMcpToolSpec[] = [];
+      for (const item of raw) {
+        if (!item || typeof item !== "object") continue;
+        const t = item as Record<string, unknown>;
+        if (typeof t.name !== "string" || t.name.length === 0) continue;
+        if (typeof t.description !== "string") continue;
+        if (t.inputSchema === null || typeof t.inputSchema !== "object") continue;
+        const spec: ExtensionMcpToolSpec = {
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema as object,
+        };
+        if (t.outputSchema !== null && typeof t.outputSchema === "object") {
+          spec.outputSchema = t.outputSchema as object;
+        }
+        out.push(spec);
+      }
+      return out;
+    };
+
+    const server = buildExtensionServer(extName, entry, resolveSessionId, {
+      peekSessionId,
+      fetchSessionTools,
+    });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
     });
@@ -202,4 +307,6 @@ export function registerExtensionMcpRoutes(
   app.delete("/mcp/:name", opts, async (req, reply) => {
     await handle(req, reply);
   });
+
+  return { notifyToolListChanged };
 }

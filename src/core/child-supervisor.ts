@@ -285,7 +285,14 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     const entry = this.makeEntry(config);
     this.entries.set(config.name, entry);
     if (config.enabled) {
-      void this.spawn(entry, 0);
+      // Fire-and-forget: register() is sync from the caller's view but
+      // spawn is async. Any late failure (e.g. mkdir/logfile ENOENT
+      // during a race with test teardown) is defensively surfaced onto
+      // entry.failureReason rather than becoming an uncaught promise
+      // rejection that crashes the process.
+      this.spawn(entry, 0).catch((err) => {
+        entry.failureReason = `spawn: ${(err as Error).message}`;
+      });
     }
     return this.infoFor(entry);
   }
@@ -461,15 +468,39 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     // `<name>.<N>.log` files live in a per-extension subdirectory;
     // pino-roll's symlink option maintains a `current.log` inside that dir
     // which paths.logFile() returns as the user-facing tail target.
+    //
+    // mkdir + createPinoRoll can both fail (permissions, disk pressure,
+    // or — in tests — the tmpdir being wiped underneath a scheduled
+    // restart). This function is called via `void this.spawn(...)` from
+    // scheduleRestart's timer callback, so a rejection here becomes an
+    // uncaught promise rejection. Catch it: if we're stopping anyway,
+    // swallow silently; otherwise schedule another restart and let the
+    // breaker decide when to give up on persistent failures.
     const logDir = path.dirname(this.adapter.paths.logFile(cfg.name));
-    await fsp.mkdir(logDir, { recursive: true });
-    const logStream = await createPinoRoll({
-      file: path.join(logDir, `${cfg.name}.log`),
-      size: "5m",
-      mkdir: true,
-      symlink: true,
-      limit: { count: 5 },
-    });
+    let logStream: SonicBoom;
+    try {
+      await fsp.mkdir(logDir, { recursive: true });
+      logStream = await createPinoRoll({
+        file: path.join(logDir, `${cfg.name}.log`),
+        size: "5m",
+        mkdir: true,
+        symlink: true,
+        limit: { count: 5 },
+      });
+    } catch (err) {
+      if (this.stopping || entry.manuallyStopped) {
+        return;
+      }
+      entry.failureReason = `log setup: ${(err as Error).message}`;
+      // Don't touch the breaker for log-setup failures — the breaker
+      // decides based on real child-exit codes, not pre-spawn issues.
+      // scheduleRestart's own guard (stopping / manuallyStopped) is
+      // sufficient here; if the underlying condition persists (e.g.
+      // permanent disk failure), operators will see the failureReason
+      // through list() and stop it manually.
+      this.scheduleRestart(entry, attempt + 1);
+      return;
+    }
     if (this.stopping || entry.manuallyStopped) {
       try {
         logStream.end();
@@ -633,7 +664,13 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     );
     entry.restartTimer = setTimeout(() => {
       entry.restartTimer = undefined;
-      void this.spawn(entry, attempt);
+      // Same defensive-catch as register()'s fire-and-forget spawn:
+      // a rejection here (e.g. mkdir ENOENT if the log directory
+      // disappeared) would otherwise be uncaught, since the timer
+      // callback has no caller to await it.
+      this.spawn(entry, attempt).catch((err) => {
+        entry.failureReason = `spawn: ${(err as Error).message}`;
+      });
     }, delay);
     if (typeof entry.restartTimer.unref === "function") {
       entry.restartTimer.unref();

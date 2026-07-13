@@ -228,7 +228,22 @@ describe("ResilientWsStream", () => {
       method: "session/prompt",
       params: {},
     });
-    await new Promise((r) => setTimeout(r, 600));
+
+    // Poll until both messages have travelled the wire — a fixed 600ms
+    // sleep was insufficient under test-suite load (reconnect handshake
+    // + onConnect await + queued send drain can exceed the budget when
+    // many tests run in parallel), causing this assertion to flake with
+    // idxPrompt=-1. Wait up to 5s, checking every 20ms.
+    const start = Date.now();
+    while (Date.now() - start < 5_000) {
+      if (
+        wireOrder.includes("session/attach") &&
+        wireOrder.includes("session/prompt")
+      ) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
 
     // After both have travelled the wire the order must be attach then prompt.
     const idxAttach = wireOrder.indexOf("session/attach");

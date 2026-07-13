@@ -113,6 +113,14 @@ export interface AcpWsDeps {
   // hydra-acp/mcp_tools/register handler binds the registration here so
   // /mcp/<extension-name> resolves to the right connection.
   extensionMcp?: ExtensionMcpRegistry;
+  // Control surface for the extension-MCP HTTP routes. Currently
+  // exposes evictSessionExtension, called by the
+  // hydra-acp/mcp_tools/refresh_session handler so an extension can
+  // force one session's agent to re-list tools without disturbing
+  // any other session.
+  extensionMcpControls?: {
+    evictSessionExtension(sessionId: string, extName: string): void;
+  };
   // Lazy getter for the daemon's externally-reachable origin (scheme +
   // host + port). Lazy because the bound port isn't known until after
   // `app.listen` returns, which happens after this registration runs.
@@ -520,6 +528,35 @@ export function registerAcpWsEndpoint(
         );
         return { ok: true, registered: tools.length };
       });
+
+      // Per-session transport eviction. Extensions that expose
+      // different tools to different sessions (e.g. the planner's
+      // gateway-then-activate pattern) call this after mutating their
+      // per-session state so the affected agent reconnects and re-
+      // fetches tools/list — which the extension will answer
+      // dynamically via its hydra-acp/mcp_tools/list_tools handler.
+      // Silently no-ops when no matching transport exists (session
+      // never talked to this extension, already evicted, etc.).
+      if (deps.extensionMcpControls) {
+        const controls = deps.extensionMcpControls;
+        connection.onRequest(
+          "hydra-acp/mcp_tools/refresh_session",
+          async (raw) => {
+            const params = (raw ?? {}) as { sessionId?: unknown };
+            if (typeof params.sessionId !== "string" || params.sessionId.length === 0) {
+              throw rpcError(
+                JsonRpcErrorCodes.InvalidParams,
+                "refresh_session requires sessionId",
+              );
+            }
+            controls.evictSessionExtension(
+              params.sessionId,
+              processIdentity.name,
+            );
+            return { ok: true };
+          },
+        );
+      }
       connection.onClose(() => {
         mcpRegistry.clear(processIdentity.name);
       });
