@@ -14,6 +14,7 @@ import {
   extractInitialModel,
   extractInitialModels,
   effectiveInteractive,
+  mergeForPersistence,
 } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
 import {
@@ -4148,6 +4149,141 @@ describe("SessionManager.forkSession", () => {
     expect(forkMeta.importedFromMachine).toBeUndefined();
     expect(forkMeta.importedFromSessionId).toBeUndefined();
     expect(forkMeta.forkedFromSessionId).toBe(source.sessionId);
+  });
+});
+
+describe("SessionManager: extension state", () => {
+  const EXT_CWD = process.cwd();
+  function makeManagerForExt(): SessionManager {
+    return new SessionManager(fakeRegistry([fakeRegistryAgent("claude-code")]), () => {
+      const mock = makeMockAgent({ agentId: "claude-code", cwd: EXT_CWD });
+      const req = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      req.mockImplementation((method: string) => {
+        if (method === "initialize") return Promise.resolve({ protocolVersion: 1 });
+        if (method === "session/new") return Promise.resolve({ sessionId: `u_${Math.random()}` });
+        return Promise.resolve({});
+      });
+      return mock.agent;
+    });
+  }
+
+  it("set/get roundtrips a value under an extension's bucket", async () => {
+    const manager = makeManagerForExt();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    await manager.setExtensionStateKey(session.sessionId, "planner", "activated", true);
+    expect(await manager.getExtensionStateKey(session.sessionId, "planner", "activated")).toBe(true);
+  });
+
+  it("get returns undefined for a missing session, extension, or key", async () => {
+    const manager = makeManagerForExt();
+    expect(await manager.getExtensionStateKey("hydra_unknown", "planner", "k")).toBeUndefined();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    expect(await manager.getExtensionStateKey(session.sessionId, "planner", "missing")).toBeUndefined();
+    await manager.setExtensionStateKey(session.sessionId, "planner", "k", 1);
+    expect(await manager.getExtensionStateKey(session.sessionId, "other", "k")).toBeUndefined();
+  });
+
+  it("list returns just the caller extension's bucket, not others", async () => {
+    const manager = makeManagerForExt();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    await manager.setExtensionStateKey(session.sessionId, "planner", "activated", true);
+    await manager.setExtensionStateKey(session.sessionId, "planner", "runs", 3);
+    await manager.setExtensionStateKey(session.sessionId, "approver", "policy", "strict");
+    const plannerState = await manager.getExtensionState(session.sessionId, "planner");
+    expect(plannerState).toEqual({ activated: true, runs: 3 });
+    const approverState = await manager.getExtensionState(session.sessionId, "approver");
+    expect(approverState).toEqual({ policy: "strict" });
+  });
+
+  it("delete removes one key, leaves siblings intact", async () => {
+    const manager = makeManagerForExt();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    await manager.setExtensionStateKey(session.sessionId, "planner", "a", 1);
+    await manager.setExtensionStateKey(session.sessionId, "planner", "b", 2);
+    await manager.deleteExtensionStateKey(session.sessionId, "planner", "a");
+    expect(await manager.getExtensionState(session.sessionId, "planner")).toEqual({ b: 2 });
+  });
+
+  it("delete cleans up an empty bucket entirely", async () => {
+    const manager = makeManagerForExt();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    await manager.setExtensionStateKey(session.sessionId, "planner", "only", true);
+    await manager.deleteExtensionStateKey(session.sessionId, "planner", "only");
+    const rec = await manager.loadFromDisk(session.sessionId);
+    expect(rec).toBeDefined();
+    // The bucket key itself is gone — not lingering as {}.
+    expect((rec as unknown as { extensionState?: Record<string, unknown> }).extensionState?.planner).toBeUndefined();
+  });
+
+  it("rejects writes that would push a bucket past the size cap", async () => {
+    const manager = makeManagerForExt();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    // 64KB cap; a 70KB string is a clean rejection.
+    const huge = "x".repeat(70 * 1024);
+    await expect(
+      manager.setExtensionStateKey(session.sessionId, "planner", "blob", huge),
+    ).rejects.toThrow(/cap is/);
+    // The bucket should NOT have been partially updated.
+    expect(await manager.getExtensionStateKey(session.sessionId, "planner", "blob")).toBeUndefined();
+  });
+
+  it("extension state survives a cold reload from disk (persistence)", async () => {
+    const manager = makeManagerForExt();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    const id = session.sessionId;
+    await manager.setExtensionStateKey(id, "planner", "activated", true);
+    // Fresh manager reads the same on-disk meta.json.
+    const manager2 = makeManagerForExt();
+    expect(await manager2.getExtensionStateKey(id, "planner", "activated")).toBe(true);
+  });
+
+  it("mergeForPersistence preserves extensionState from the on-disk record (resurrect regression)", async () => {
+    // Regression: mergeForPersistence used to omit extensionState from
+    // the fields it read through from `existing`. Every routine
+    // session-lifecycle write path that goes through
+    // attachManagerHooks — create AND resurrect — calls
+    // mergeForPersistence(session, existing) + store.write(merged).
+    // Without an explicit `existing?.extensionState` pass-through, the
+    // resurrect write clobbered whatever an extension had just
+    // written, silently losing the session's activation flag /
+    // budgeter carryover / any other extension state.
+    const manager = makeManagerForExt();
+    const session = await manager.create({ cwd: EXT_CWD, agentId: "claude-code" });
+    const id = session.sessionId;
+    // Extension writes state through the daemon-side helper.
+    await manager.setExtensionStateKey(id, "planner", "activated", true);
+    // Read back the raw on-disk record — this is what a resurrect
+    // would pass as `existing` to mergeForPersistence (which needs
+    // the full SessionRecord, not the ResurrectParams projection
+    // loadFromDisk returns). Reach into the private store field via
+    // type cast — testing an internal invariant, so the ugly cast
+    // is deliberate.
+    const store = (manager as unknown as {
+      store: {
+        read(id: string): Promise<
+          | {
+              extensionState?: Record<string, Record<string, unknown>>;
+              [k: string]: unknown;
+            }
+          | undefined
+        >;
+      };
+    }).store;
+    const existing = (await store.read(id)) as
+      | Parameters<typeof mergeForPersistence>[1]
+      | undefined;
+    expect(existing).toBeDefined();
+    expect(existing!.extensionState).toEqual({
+      planner: { activated: true },
+    });
+    // Now invoke mergeForPersistence exactly the way attachManagerHooks
+    // does. The output must carry existing.extensionState through, or
+    // a subsequent store.write would wipe it.
+    const merged = mergeForPersistence(session, existing);
+    expect(merged.extensionState).toBeDefined();
+    expect(merged.extensionState).toEqual({
+      planner: { activated: true },
+    });
   });
 });
 

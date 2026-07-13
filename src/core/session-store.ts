@@ -205,6 +205,24 @@ export const SessionRecord = z.object({
   // sessions surface the correct awaitingInput state without depending on
   // history replay. Reconciled from disk on every load.
   attentionFlags: AttentionFlagArraySchema.default([]).optional(),
+  // Per-extension persistent key-value bucket. Each top-level key is an
+  // extension name (`processIdentity.name`); each nested map holds
+  // arbitrary JSON keyed by that extension's own naming. Extensions can
+  // ONLY read/write their own top-level bucket — the daemon enforces
+  // this via bearer-derived namespacing in the REST/WS handlers, so
+  // extensions physically can't touch each other's data.
+  //
+  // Lifecycle: preserved across cold/warm cycles and daemon restarts
+  // (it's just a SessionRecord field). Reset to {} on user-visible
+  // session forks (parent's state is bound to parent's identity;
+  // silent inheritance has burned every system that tried it).
+  // Preserved across compaction swap (same hydra sessionId, different
+  // upstream — the identity that matters is the hydra one).
+  //
+  // Size cap: enforced at write time (see session-manager.ts). Rejects
+  // writes that would push a single extension's bucket past the cap,
+  // returned as an actionable error to the extension.
+  extensionState: z.record(z.string(), z.record(z.string(), z.unknown())).default({}).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -354,6 +372,7 @@ export function recordFromMemorySession(args: {
   compactionState?: CompactionState;
   rollbackBreadcrumb?: RollbackBreadcrumb;
   attentionFlags?: AttentionFlag[];
+  extensionState?: Record<string, Record<string, unknown>>;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
@@ -390,6 +409,7 @@ export function recordFromMemorySession(args: {
     priority: args.priority,
     forwardedEnv: args.forwardedEnv,
       attentionFlags: args.attentionFlags ?? [],
+    extensionState: args.extensionState ?? {},
     createdAt: args.createdAt ?? now,
     updatedAt: args.updatedAt ?? now,
   };

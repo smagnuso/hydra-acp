@@ -3152,6 +3152,116 @@ export class SessionManager {
     });
   }
 
+  // ── Extension state ──────────────────────────────────────────────
+  //
+  // Per-(extension, session) key-value bucket persisted to meta.json.
+  // Extensions call these via the daemon's REST or WS surfaces, both
+  // of which enforce namespacing by deriving `extName` from the
+  // caller's bearer token / connection identity. The daemon core never
+  // synthesizes an `extName` from an untrusted input.
+  //
+  // Reads bypass the write queue (single async read from the store);
+  // writes go through the queue so concurrent set/delete calls under
+  // the same session don't interleave.
+
+  // Serialization cap enforced at write time. 64KB per extension bucket
+  // is generous for state that should be flags + small identifiers,
+  // and small enough that a runaway extension can't bloat meta.json to
+  // the point of slowing every session read.
+  private static readonly EXTENSION_STATE_CAP_BYTES = 64 * 1024;
+
+  // Fetch the entire bucket for one extension on one session. Returns
+  // an empty object when the session has no state for this extension
+  // (or no session at all — callers already handle "unknown session"
+  // via the outer HTTP/WS layer, this method just returns empty).
+  async getExtensionState(
+    sessionId: string,
+    extName: string,
+  ): Promise<Record<string, unknown>> {
+    const record = await this.store.read(sessionId);
+    return record?.extensionState?.[extName] ?? {};
+  }
+
+  // Fetch one key from one extension's bucket. Returns undefined for
+  // missing session, missing bucket, or missing key — caller decides
+  // whether that's a 404 or a null result.
+  async getExtensionStateKey(
+    sessionId: string,
+    extName: string,
+    key: string,
+  ): Promise<unknown> {
+    const bucket = await this.getExtensionState(sessionId, extName);
+    return bucket[key];
+  }
+
+  // Set one key on one extension's bucket. Rejects with a size-cap
+  // error when the serialized bucket would exceed the cap.
+  // Idempotent: writing the same value again is a no-op from the
+  // caller's perspective (the file gets rewritten with a fresh
+  // updatedAt, but no observable state change).
+  async setExtensionStateKey(
+    sessionId: string,
+    extName: string,
+    key: string,
+    value: unknown,
+  ): Promise<void> {
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record) {
+        return;
+      }
+      const all = { ...(record.extensionState ?? {}) };
+      const bucket = { ...(all[extName] ?? {}), [key]: value };
+      const size = Buffer.byteLength(JSON.stringify(bucket), "utf8");
+      if (size > SessionManager.EXTENSION_STATE_CAP_BYTES) {
+        throw new Error(
+          `extension_state: bucket for ${extName} would be ${size} bytes; cap is ${SessionManager.EXTENSION_STATE_CAP_BYTES}`,
+        );
+      }
+      all[extName] = bucket;
+      const next: SessionRecord = {
+        ...record,
+        extensionState: all,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.store.write(next);
+    });
+  }
+
+  // Remove one key from one extension's bucket. No-op if the key,
+  // bucket, or session doesn't exist. Cleans up an empty bucket so
+  // meta.json doesn't grow "{}" entries for extensions that touched
+  // and left.
+  async deleteExtensionStateKey(
+    sessionId: string,
+    extName: string,
+    key: string,
+  ): Promise<void> {
+    await this.enqueueMetaWrite(sessionId, async () => {
+      const record = await this.store.read(sessionId);
+      if (!record?.extensionState?.[extName]) {
+        return;
+      }
+      const all = { ...record.extensionState };
+      const bucket = { ...all[extName] };
+      if (!(key in bucket)) {
+        return;
+      }
+      delete bucket[key];
+      if (Object.keys(bucket).length === 0) {
+        delete all[extName];
+      } else {
+        all[extName] = bucket;
+      }
+      const next: SessionRecord = {
+        ...record,
+        extensionState: all,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.store.write(next);
+    });
+  }
+
   // Serialize meta.json writes per session id so concurrent
   // read-modify-write operations don't interleave reads.
   private enqueueMetaWrite(
@@ -3535,7 +3645,13 @@ function isSynopsisSession(cwd: string, sandboxDir: string): boolean {
 // fields from the live Session win for the things it tracks, and we
 // reach back to the on-disk record for fields the Session deliberately
 // doesn't carry across a resurrect (createdAt, agentCommands).
-function mergeForPersistence(
+// Exported for direct unit tests of the "read-through" contract:
+// every field this function pulls from the on-disk record MUST have
+// an explicit `existing?.X` fallback, or a routine session persist
+// (from attachManagerHooks / resurrect / create) will clobber it.
+// Adding a new persisted field? Add it here AND to the regression
+// tests in session-manager.test.ts.
+export function mergeForPersistence(
   session: Session,
   existing: SessionRecord | undefined,
 ): Omit<SessionRecord, "version"> {
@@ -3622,6 +3738,13 @@ function mergeForPersistence(
     // happen, but keeps round-trip safe for old records.
    forwardedEnv: session.forwardedEnv ?? existing?.forwardedEnv,
     attentionFlags: session.listAttentionFlags(),
+    // Preserve extension_state from the on-disk record. The live Session
+    // doesn't hold this — extensions read/write it via the daemon RPCs
+    // in acp-ws.ts, which mutate the record directly through
+    // setExtensionStateKey. Without this pass-through, every routine
+    // persistSnapshot (currentUsage / mode / model change) would clobber
+    // whatever an extension just wrote.
+    extensionState: existing?.extensionState,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }

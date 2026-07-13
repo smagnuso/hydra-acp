@@ -318,6 +318,232 @@ describe("acp-ws: register_mcp_tools", () => {
   });
 });
 
+describe("acp-ws: session/extension_state", () => {
+  // WS-level integration tests for the extension-state surface.
+  // Verifies the four handlers work end-to-end AND that namespacing is
+  // enforced by the daemon based on the caller's process identity —
+  // an extension physically cannot read or write another extension's
+  // bucket via this API. Storage-layer semantics (size cap, cleanup,
+  // persistence across cold reload) are covered separately in
+  // session-manager.test.ts; here we focus on the wire surface.
+  let tmpHome: string;
+  let handle: DaemonHandle | null = null;
+  let wsUrl: string;
+  let sessionId: string;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), "hydra-acp-extstate-test-"),
+    );
+    process.env.HYDRA_ACP_HOME = tmpHome;
+    handle = await startDaemon(testConfig(), TEST_TOKEN);
+    wsUrl = `ws://127.0.0.1:${port(handle)}/acp`;
+    // Write a minimal SessionRecord to disk directly. The
+    // extension_state handlers read/write the on-disk record via the
+    // manager's store; they don't need a live agent or a full
+    // manager.create() (which would go through registry lookup and
+    // fail in this test's zero-network config). Reaching in via a
+    // type cast is deliberately ugly to signal "test-only path."
+    sessionId = "hydra_session_extstate_" + Math.random().toString(36).slice(2, 10);
+    const store = (handle!.manager as unknown as {
+      store: import("../core/session-store.js").SessionStore;
+    }).store;
+    const now = new Date().toISOString();
+    await store.write({
+      sessionId,
+      upstreamSessionId: "",
+      agentId: "claude-acp",
+      cwd: os.homedir(),
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  afterEach(async () => {
+    if (handle) {
+      await handle.shutdown().catch(() => undefined);
+      handle = null;
+    }
+    await fs.rm(tmpHome, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  });
+
+  it("set + get + list + delete roundtrip for one extension", async () => {
+    const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
+    try {
+      const setResp = await request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        key: "flag",
+        value: true,
+      });
+      expect(setResp.error).toBeUndefined();
+      expect(setResp.result).toEqual({ ok: true });
+
+      const getResp = await request("hydra-acp/session/extension_state/get", {
+        sessionId,
+        key: "flag",
+      });
+      expect(getResp.error).toBeUndefined();
+      expect(getResp.result).toEqual({ value: true });
+
+      const listResp = await request("hydra-acp/session/extension_state/list", {
+        sessionId,
+      });
+      expect(listResp.error).toBeUndefined();
+      expect(listResp.result).toEqual({ state: { flag: true } });
+
+      const delResp = await request(
+        "hydra-acp/session/extension_state/delete",
+        { sessionId, key: "flag" },
+      );
+      expect(delResp.error).toBeUndefined();
+      expect(delResp.result).toEqual({ ok: true });
+
+      const getAfterDelete = await request(
+        "hydra-acp/session/extension_state/get",
+        { sessionId, key: "flag" },
+      );
+      expect(getAfterDelete.result).toEqual({ value: null });
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("extensions cannot read each other's buckets — daemon enforces namespacing by bearer", async () => {
+    const a = await openExtensionWs(wsUrl, handle!, "memory");
+    const b = await openExtensionWs(wsUrl, handle!, "notifier");
+    try {
+      await a.request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        key: "secret",
+        value: "memory-only",
+      });
+      // notifier reads the SAME sessionId + SAME key — must see null
+      // because its bearer resolves to a different extension name and
+      // the daemon uses that identity, not any caller-supplied name,
+      // to scope the read.
+      const otherGet = await b.request(
+        "hydra-acp/session/extension_state/get",
+        { sessionId, key: "secret" },
+      );
+      expect(otherGet.result).toEqual({ value: null });
+      // Same for list — notifier sees an empty bucket, not memory's.
+      const otherList = await b.request(
+        "hydra-acp/session/extension_state/list",
+        { sessionId },
+      );
+      expect(otherList.result).toEqual({ state: {} });
+    } finally {
+      a.ws.close();
+      b.ws.close();
+    }
+  });
+
+  it("extensions cannot overwrite each other's keys via a coincident name", async () => {
+    const a = await openExtensionWs(wsUrl, handle!, "memory");
+    const b = await openExtensionWs(wsUrl, handle!, "notifier");
+    try {
+      await a.request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        key: "shared_name",
+        value: "from-memory",
+      });
+      // notifier writes under the SAME key name. This must NOT
+      // overwrite memory's value — the daemon namespaces by extension.
+      await b.request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        key: "shared_name",
+        value: "from-notifier",
+      });
+      const memoryRead = await a.request(
+        "hydra-acp/session/extension_state/get",
+        { sessionId, key: "shared_name" },
+      );
+      expect(memoryRead.result).toEqual({ value: "from-memory" });
+    } finally {
+      a.ws.close();
+      b.ws.close();
+    }
+  });
+
+  it("extensions cannot delete each other's keys", async () => {
+    const a = await openExtensionWs(wsUrl, handle!, "memory");
+    const b = await openExtensionWs(wsUrl, handle!, "notifier");
+    try {
+      await a.request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        key: "target",
+        value: 1,
+      });
+      // notifier tries to delete — no-op in its own bucket.
+      await b.request("hydra-acp/session/extension_state/delete", {
+        sessionId,
+        key: "target",
+      });
+      const memoryRead = await a.request(
+        "hydra-acp/session/extension_state/get",
+        { sessionId, key: "target" },
+      );
+      expect(memoryRead.result).toEqual({ value: 1 });
+    } finally {
+      a.ws.close();
+      b.ws.close();
+    }
+  });
+
+  it("rejects requests missing sessionId or key", async () => {
+    const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
+    try {
+      const noSession = await request(
+        "hydra-acp/session/extension_state/get",
+        { key: "x" },
+      );
+      expect(noSession.error).toBeDefined();
+      expect(noSession.error!.message).toMatch(/sessionId/);
+
+      const noKey = await request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        value: 1,
+      });
+      expect(noKey.error).toBeDefined();
+      expect(noKey.error!.message).toMatch(/key/);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("rejects set with no value (use delete to remove)", async () => {
+    const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
+    try {
+      const resp = await request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        key: "k",
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.message).toMatch(/value/i);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("surfaces the size-cap message as an error the caller can act on", async () => {
+    const { ws, request } = await openExtensionWs(wsUrl, handle!, "memory");
+    try {
+      const huge = "x".repeat(70 * 1024);
+      const resp = await request("hydra-acp/session/extension_state/set", {
+        sessionId,
+        key: "blob",
+        value: huge,
+      });
+      expect(resp.error).toBeDefined();
+      expect(resp.error!.message).toMatch(/cap is/);
+    } finally {
+      ws.close();
+    }
+  });
+});
+
 describe("acp-ws: attention/set and attention/clear", () => {
   let tmpHome: string;
   let handle: DaemonHandle | null = null;

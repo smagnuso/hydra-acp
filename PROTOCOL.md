@@ -1319,10 +1319,11 @@ The notification is *not* keyed by `sessionId` — the session may not exist yet
 
 Hydra extensions and transformers connect to the daemon as ordinary ACP clients (over `/acp`) and authenticate with their `HYDRA_ACP_TOKEN` env var. After `initialize`, they identify themselves by name through the bearer token's process-identity binding; the daemon then registers the WS connection as the extension/transformer endpoint.
 
-Once registered, three surfaces become available to that process:
+Once registered, four surfaces become available to that process:
 
 - **Slash-command verbs.** Register with `hydra-acp/commands/register`. Whenever a user types `/hydra <name> <verb> …` in any session, the daemon forwards a `hydra-acp/commands/invoke` request to the registered connection.
-- **MCP tools.** Register with `hydra-acp/mcp_tools/register`. Agents see a `/mcp/<extension-name>` HTTP MCP server; when they call a tool, the daemon forwards a `hydra-acp/mcp_tools/invoke` request to the registered connection.
+- **MCP tools.** Register with `hydra-acp/mcp_tools/register`. Agents see a `/mcp/<extension-name>` HTTP MCP server; when they call a tool, the daemon forwards a `hydra-acp/mcp_tools/invoke` request to the registered connection. Extensions that want to change the tool list a session sees can do so per-session at runtime — see `hydra-acp/mcp_tools/list_tools` and `hydra-acp/mcp_tools/refresh_session` below.
+- **Per-session state.** Read/write a small durable key-value bucket attached to a specific session's `meta.json` via `hydra-acp/session/extension_state/{get,list,set,delete}`. Namespaced by the calling extension (bearer-derived); persists across daemon restarts.
 - **Transformer pipeline** (transformer-only). After `hydra-acp/transformer/initialize`, the daemon calls `hydra-acp/transformer/message` for each intercepted method and `hydra-acp/transformer/session_event` for lifecycle ticks.
 
 Registrations drop on disconnect — the daemon clears the entry and evicts any cached MCP transports.
@@ -1413,7 +1414,7 @@ Advertise MCP tools the process implements.
 { "ok": true, "registered": 2 }
 ```
 
-The daemon mints a per-session bearer at every `session/new` and injects `mcpServers` descriptors pointing at `/mcp/<process-name>` with that bearer. Re-calling overwrites the prior spec; the route's `onChange` listener evicts cached transports so agents reconnect against the fresh spec.
+The daemon mints a per-session bearer at every `session/new` and injects `mcpServers` descriptors pointing at `/mcp/<process-name>` with that bearer. Re-calling `hydra-acp/mcp_tools/register` overwrites the prior spec globally (across all sessions); the route's `onChange` listener disposes cached transports so any subsequent client reconnect re-lists against the fresh spec. For per-session changes to the tool list without disturbing other sessions, use `hydra-acp/mcp_tools/list_tools` + `hydra-acp/mcp_tools/refresh_session` (see below).
 
 #### Request (daemon → process): `hydra-acp/mcp_tools/invoke`
 
@@ -1436,6 +1437,119 @@ The MCP `tools/call` from the agent, forwarded to the registered process.
 ```
 
 `sessionId` carries the hydra session that originated the call. Extensions need this when their tools operate on per-session state (e.g. the planner managing a per-session project board) — agents don't see hydra session ids, so the extension can't derive this from `args`. The daemon resolves the session from the per-session bearer token used to call the MCP HTTP endpoint, so extensions can trust the value without further verification.
+
+#### Request (daemon → process): `hydra-acp/mcp_tools/list_tools`
+
+Optional per-session dynamic tool list. When the agent's MCP client sends a `tools/list` request for `/mcp/<extension-name>`, the daemon forwards the call to the extension for a session-specific answer. The extension replies with the tool set that particular session should see, which may differ from the static spec captured at `mcp_tools/register` time.
+
+```jsonc
+// params (daemon → process)
+{
+  "sessionId": "<id>"
+}
+// result — same tool shape as hydra-acp/mcp_tools/register:
+{
+  "tools": [
+    { "name": "…", "description": "…", "inputSchema": { … }, "outputSchema": { … } },
+    …
+  ]
+}
+```
+
+**Optional.** Extensions that don't implement this handler let the request fail with `MethodNotFound`; the daemon catches and falls back to whatever was registered via `mcp_tools/register`. So `list_tools` is purely an upgrade — pre-existing extensions keep working with static registration only.
+
+**Consulted only when the session is known.** The agent's initial MCP handshake (`initialize` + first `tools/list`) fires before the daemon's `session/new` has bound the token to a hydra session; during that handshake the daemon skips the dynamic path and serves the static spec, to avoid deadlocking against a `sessionId` that doesn't yet exist.
+
+**Used by** the planner's conservative-mode gating: register just `activate` statically, then return the full 16-tool spec via `list_tools` for sessions that have called `activate`.
+
+#### Request (process → daemon): `hydra-acp/mcp_tools/refresh_session`
+
+Tell the daemon this session's tool list changed. The daemon sends a `notifications/tools/list_changed` frame down the affected session's MCP transport; the agent's MCP client re-fetches `tools/list` on the same transport, which routes back through `hydra-acp/mcp_tools/list_tools` above.
+
+```jsonc
+// params (process → daemon)
+{
+  "sessionId": "<id>"
+}
+// result
+{ "ok": true }
+```
+
+**No transport reset.** The connection stays open, in-flight tool calls (including the one whose response triggered the refresh) complete normally, no re-`initialize`. This is the only safe way to change a per-session tool list mid-conversation for streamable HTTP MCP.
+
+**Silent when no transport exists.** If the session has never opened the MCP endpoint (or the transport is already gone), the call is a no-op — no error, no work.
+
+**Scoped by connection identity.** The daemon derives `<extension-name>` from the caller's bearer, so a refresh only affects that extension's MCP transport for the given session. Cross-extension refresh isn't expressible via this method.
+
+#### Requests (process → daemon): `hydra-acp/session/extension_state/{get,list,set,delete}`
+
+Per-(extension, session) durable key-value store, backed by the session's on-disk `meta.json`. Extensions use it to persist small pieces of state that should survive daemon restarts and cold/warm cycles — activation flags, policy decisions, spend carryover, last-seen markers, etc. The daemon enforces namespacing based on the caller's bearer: extensions can only read and write their own bucket, and there's no wire-shape way to spoof another extension's identity.
+
+**Persistence rules:**
+
+| operation | `extensionState` |
+|---|---|
+| `session/new` | initialized to `{}` |
+| daemon restart / cold session load | preserved (stored in `meta.json`) |
+| `session/fork` | reset to `{}` on the child; parent untouched |
+| compaction swap | preserved (same hydra `sessionId`) |
+| `session/delete` | deleted with the session |
+
+**Size cap.** Each `(extension, session)` bucket is capped at 64KB when serialized. A `set` that would exceed the cap rejects with a JSON-RPC `InvalidParams` error whose message includes the byte count and cap so the caller can trim.
+
+**`get` — read one key.**
+
+```jsonc
+// params
+{ "sessionId": "<id>", "key": "<key>" }
+// result
+{ "value": <any JSON value>  }   // when key exists
+{ "value": null }                // when key does not exist
+```
+
+**`list` — read the caller's full bucket for this session.**
+
+```jsonc
+// params
+{ "sessionId": "<id>" }
+// result
+{ "state": { "<key>": <value>, … } }   // {} when the extension has no keys yet
+```
+
+**`set` — write one key.**
+
+```jsonc
+// params
+{ "sessionId": "<id>", "key": "<key>", "value": <any JSON value> }
+// result
+{ "ok": true }
+```
+
+`value` is required (any JSON value including `null` is allowed). Use `delete` to remove a key entirely — `set` with `undefined`/missing `value` is rejected. Idempotent from the caller's perspective (writing the same value again is a no-op observably; the file gets rewritten with a fresh `updatedAt`).
+
+**`delete` — remove one key.**
+
+```jsonc
+// params
+{ "sessionId": "<id>", "key": "<key>" }
+// result
+{ "ok": true }
+```
+
+No-op when the key doesn't exist. When the last key in the caller's bucket is removed, the bucket entry itself is dropped from `meta.json` so extensions that touched and left don't leave `"<name>": {}` clutter behind.
+
+**Namespacing.** Every handler derives the effective `<extension-name>` from `processIdentity.name` on the WS connection — there is no wire-level knob to override it. A caller connected as `hydra-acp-planner` cannot read `hydra-acp-approver`'s bucket, cannot overwrite an approver-owned key by name, cannot delete an approver-owned key, and cannot see approver keys in `list`.
+
+**Failure modes.**
+
+| error | when |
+|---|---|
+| `-32602 InvalidParams: sessionId is required` | missing / empty `sessionId` |
+| `-32602 InvalidParams: key is required` | missing / empty `key` on any method other than `list` |
+| `-32602 InvalidParams: value is required (use extension_state/delete to remove)` | `set` called without `value` |
+| `-32602 InvalidParams: bucket for X would be N bytes; cap is Y` | `set` would exceed the 64KB cap |
+
+`get`/`list`/`delete` for an unknown session return normally (empty result) rather than erroring — the storage is optimistic about session existence; a session that just closed and was cleaned up shouldn't turn a stale write into a hard failure at the extension.
 
 ### Transformer-only methods
 

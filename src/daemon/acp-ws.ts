@@ -529,6 +529,113 @@ export function registerAcpWsEndpoint(
         return { ok: true, registered: tools.length };
       });
 
+      // Per-extension, per-session key-value state. Extensions call
+      // these to persist small pieces of state (activation flags,
+      // policy decisions, spend carryover, etc.) alongside a session's
+      // meta.json. Namespaced by processIdentity.name — extensions can
+      // only read/write their own bucket, never another extension's.
+      // The daemon core has no way to resolve a caller-supplied
+      // "extName" from these handlers; the identity comes from the
+      // connection itself, so cross-extension access is a physical
+      // impossibility, not a policy.
+      const requireSessionId = (raw: unknown): string => {
+        const params = (raw ?? {}) as { sessionId?: unknown };
+        if (typeof params.sessionId !== "string" || params.sessionId.length === 0) {
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidParams,
+            "sessionId is required",
+          );
+        }
+        return params.sessionId;
+      };
+      connection.onRequest(
+        "hydra-acp/session/extension_state/get",
+        async (raw) => {
+          const sessionId = requireSessionId(raw);
+          const params = (raw ?? {}) as { key?: unknown };
+          if (typeof params.key !== "string" || params.key.length === 0) {
+            throw rpcError(JsonRpcErrorCodes.InvalidParams, "key is required");
+          }
+          if (!deps.manager) {
+            throw rpcError(JsonRpcErrorCodes.InternalError, "manager not wired");
+          }
+          const value = await deps.manager.getExtensionStateKey(
+            sessionId,
+            processIdentity.name,
+            params.key,
+          );
+          return { value: value ?? null };
+        },
+      );
+      connection.onRequest(
+        "hydra-acp/session/extension_state/list",
+        async (raw) => {
+          const sessionId = requireSessionId(raw);
+          if (!deps.manager) {
+            throw rpcError(JsonRpcErrorCodes.InternalError, "manager not wired");
+          }
+          const state = await deps.manager.getExtensionState(
+            sessionId,
+            processIdentity.name,
+          );
+          return { state };
+        },
+      );
+      connection.onRequest(
+        "hydra-acp/session/extension_state/set",
+        async (raw) => {
+          const sessionId = requireSessionId(raw);
+          const params = (raw ?? {}) as { key?: unknown; value?: unknown };
+          if (typeof params.key !== "string" || params.key.length === 0) {
+            throw rpcError(JsonRpcErrorCodes.InvalidParams, "key is required");
+          }
+          if (params.value === undefined) {
+            throw rpcError(
+              JsonRpcErrorCodes.InvalidParams,
+              "value is required (use extension_state/delete to remove)",
+            );
+          }
+          if (!deps.manager) {
+            throw rpcError(JsonRpcErrorCodes.InternalError, "manager not wired");
+          }
+          try {
+            await deps.manager.setExtensionStateKey(
+              sessionId,
+              processIdentity.name,
+              params.key,
+              params.value,
+            );
+          } catch (err) {
+            // Surface the size-cap message as a spec-shape error so
+            // the caller sees the actual cap in bytes and can trim.
+            throw rpcError(
+              JsonRpcErrorCodes.InvalidParams,
+              (err as Error).message,
+            );
+          }
+          return { ok: true };
+        },
+      );
+      connection.onRequest(
+        "hydra-acp/session/extension_state/delete",
+        async (raw) => {
+          const sessionId = requireSessionId(raw);
+          const params = (raw ?? {}) as { key?: unknown };
+          if (typeof params.key !== "string" || params.key.length === 0) {
+            throw rpcError(JsonRpcErrorCodes.InvalidParams, "key is required");
+          }
+          if (!deps.manager) {
+            throw rpcError(JsonRpcErrorCodes.InternalError, "manager not wired");
+          }
+          await deps.manager.deleteExtensionStateKey(
+            sessionId,
+            processIdentity.name,
+            params.key,
+          );
+          return { ok: true };
+        },
+      );
+
       // Per-session tool-list refresh. Extensions that expose
       // different tools to different sessions (e.g. the planner's
       // conservative-then-activate pattern) call this after mutating
