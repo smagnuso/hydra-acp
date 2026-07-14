@@ -1436,6 +1436,7 @@ export function registerAcpWsEndpoint(
       let client: ReturnType<typeof bindClientToSession>;
       let replay: Awaited<ReturnType<typeof session.attach>>["entries"];
       try {
+        evictPriorAttachment(state, session, session.sessionId);
         client = bindClientToSession(connection, session, state);
         // No conversation history to replay on a fresh session, but
         // buildStateSnapshotReplay() still emits synthetic state snapshots
@@ -1634,6 +1635,7 @@ export function registerAcpWsEndpoint(
           onInstallProgress: makeInstallProgressForwarder(connection),
         });
       }
+      evictPriorAttachment(state, session, session.sessionId);
       const client = bindClientToSession(
         connection,
         session,
@@ -1991,6 +1993,7 @@ export function registerAcpWsEndpoint(
         }
         session = await resurrectFromDisk(deps, fromDisk);
       }
+      evictPriorAttachment(state, session, session.sessionId);
       const client = bindClientToSession(connection, session, state);
       await session.attach(client, "pending_only");
       state.attached.set(session.sessionId, {
@@ -2035,6 +2038,7 @@ export function registerAcpWsEndpoint(
         }
         session = await resurrectFromDisk(deps, fromDisk);
       }
+      evictPriorAttachment(state, session, session.sessionId);
       const client = bindClientToSession(connection, session, state);
       const { entries: replay } = await session.attach(client, "pending_only");
       state.attached.set(session.sessionId, {
@@ -3136,6 +3140,28 @@ function bindClientToSession(
     connection,
     clientInfo,
   };
+}
+
+// Drop any prior attachment from this connection to sessionId before we
+// register a new one. Standards-compliant ACP clients (e.g. AgentX's
+// Rust agent-client-protocol) issue session/load followed by
+// session/attach on the same connection — each hop generated a fresh
+// clientId and left a ghost entry in session.clients while state.attached
+// silently overwrote the previous clientId. That produced N copies of
+// every session/update on the wire and leaked ghost clients on the
+// session's client map until the session closed. Idempotent detach fixes
+// both.
+function evictPriorAttachment(
+  state: ClientState,
+  session: Session,
+  sessionId: string,
+): void {
+  const prior = state.attached.get(sessionId);
+  if (!prior) {
+    return;
+  }
+  session.detach(prior.clientId);
+  state.attached.delete(sessionId);
 }
 
 
