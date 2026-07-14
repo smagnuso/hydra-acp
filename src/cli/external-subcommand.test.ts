@@ -11,7 +11,7 @@ import {
 
 describe("isBuiltinSubcommand", () => {
   it("recognizes core verbs", () => {
-    for (const v of ["session", "daemon", "agent", "tui", "shim", "cat", "launch"]) {
+    for (const v of ["session", "daemon", "agent", "tui", "shim", "acp", "cat", "launch"]) {
       expect(isBuiltinSubcommand(v)).toBe(true);
     }
   });

@@ -27,6 +27,7 @@ const BUILTIN_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "registry",
   "session",
   "sessions",
+  "acp",
   "shim",
   "transformer",
   "transformers",

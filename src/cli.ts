@@ -295,6 +295,7 @@ async function main(): Promise<void> {
   }
 
   switch (subcommand) {
+    case "acp":
     case "shim": {
       suppressUpdateNotice = true;
       const shimOpts: Parameters<typeof runShim>[0] = {
@@ -907,7 +908,7 @@ type HelpLine =
   | { readonly globalOnly: string };
 
 const TUI = ["tui"] as const;
-const SHIM = ["shim"] as const;
+const SHIM = ["shim", "acp"] as const;
 const CAT = ["cat"] as const;
 const LAUNCH = ["launch"] as const;
 const INIT = ["init"] as const;
@@ -930,7 +931,8 @@ function printHelp(subcommand?: string): void {
     { globalOnly: "                                     Auto: TUI when stdout is a TTY, shim otherwise (the editor-spawned case)." },
     { globalOnly: "                                     With -p / --prompt and no subcommand, auto-dispatch to cat." },
     [TUI, "  hydra-acp tui   [same flags]       Force TUI explicitly."],
-    [SHIM, "  hydra-acp shim  [same flags]       Force shim explicitly (non-interactive; password prompts not allowed)."],
+    [SHIM, "  hydra-acp acp   [same flags]       Force shim explicitly (non-interactive; password prompts not allowed)."],
+    [SHIM, "  hydra-acp shim  [same flags]       Alias for `acp` (kept for backward compatibility)."],
     [CAT, "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--agent <id>] [--model <id>] [--name <label>]"],
     [CAT, "                                     Pipe-friendly headless mode. Reads stdin and sends it"],
     [CAT, "                                     as a prompt to a fresh session, streams the agent's"],
@@ -955,7 +957,7 @@ function printHelp(subcommand?: string): void {
     [LAUNCH, "                                     are forwarded to the agent's command."],
     "",
     ...(((): readonly HelpLine[] => {
-      const ENTRY = ["tui", "shim", "cat", "launch"] as const;
+      const ENTRY = ["tui", "shim", "acp", "cat", "launch"] as const;
       return [
         [ENTRY, "Session selection (any entry point):"],
         [ENTRY, "  --session <id>                     Attach to a local session by id."],
