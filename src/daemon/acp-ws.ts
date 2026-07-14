@@ -3018,6 +3018,7 @@ function buildInitializeResult(): InitializeResult {
     authMethods: [
       {
         id: "proxy",
+        name: "Hydra proxy",
         type: "agent",
         description:
           "Hydra proxies authentication to the downstream agent selected per session",

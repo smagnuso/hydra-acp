@@ -89,6 +89,11 @@ export interface AgentCapabilities {
 
 export interface AuthMethod {
   id: string;
+  // Human-readable label. Required by the ACP spec (strict Rust
+  // deserializers reject responses without it), but some upstream
+  // agents violate this — kept optional here so we can model their
+  // wire faithfully. Hydra fills it in from `id` before re-emitting.
+  name?: string;
   description: string;
   // ACP auth method type per AUTHENTICATION.md: "agent" (OAuth flow
   // managed by the agent) or "terminal" (interactive --setup). When
@@ -98,9 +103,6 @@ export interface AuthMethod {
   // agent's own spawn command to drive the auth flow (e.g. claude-acp
   // emits ["--cli","auth","login","--claudeai"]).
   args?: string[];
-  // Optional friendlier label some agents (e.g. qwen-code) include
-  // alongside `description`; banner code may prefer it for display.
-  name?: string;
   // Verbatim agent-supplied `_meta` envelope. Opaque to hydra: we
   // preserve it (when it is a plain object) so consumers like the
   // terminal-auth flow can read `_meta.type` / `_meta.args`, or the
