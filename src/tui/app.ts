@@ -121,6 +121,7 @@ import {
   parseDataUriImage,
 } from "./attachments.js";
 import { readClipboard, readPrimarySelection } from "./clipboard.js";
+import { runUserHotkey } from "./user-hotkey.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
@@ -2496,6 +2497,10 @@ async function runSession(
           void handleAttachmentPaths(ev.paths);
           continue;
         }
+        if (ev.type === "key" && tryHandleUserHotkey(ev.name)) {
+          writeDebugLine({ src: "key-swallowed", site: "userHotkey", name: ev.name });
+          continue;
+        }
         const effects = dispatcher.feed(ev);
         for (const effect of effects) {
           // Read-only mode: drop effects that mutate session state
@@ -2843,6 +2848,59 @@ async function runSession(
     }
     // Swallow anything else so it doesn't land in the prompt buffer behind
     // the modal.
+    return true;
+  };
+
+  // User-configured hotkeys from tui.hotkeys. Runs after every other
+  // modal/overlay interceptor and before dispatcher.feed, so a
+  // configured hotkey PRE-EMPTS whatever the composer/dispatcher would
+  // do with that key. Every ctrl-*/alt-* is bound to something (see
+  // input.ts) — the least-painful choices are the keys most users don't
+  // reach for: ctrl-y (yank), ctrl-underscore (undo composer),
+  // alt-underscore (redo composer). Configuring ctrl-c/ctrl-d/ctrl-r/
+  // etc. will happily disable the default behavior on that key.
+  const tryHandleUserHotkey = (name: string): boolean => {
+    const spec = (config.tui.hotkeys as Record<string, { command: string | string[] } | undefined>)[name];
+    if (!spec) {
+      return false;
+    }
+    runUserHotkey(
+      spec,
+      {
+        sessionId: resolvedSessionId,
+        cwd: resolvedCwd,
+        agentId: resolvedAgentId || agentInfoName || "",
+        baseUrl: target.baseUrl,
+        tokenFile: paths.authToken(),
+      },
+      {
+        notify: (msg) => screen.notify(msg),
+        cwd: resolvedCwd,
+        emitLines: (out) => {
+          screen.appendLines(
+            out.map((line) => {
+              let bodyStyle: string;
+              switch (line.style) {
+                case "meta":
+                  bodyStyle = "dim";
+                  break;
+                case "stderr":
+                case "error":
+                  bodyStyle = "tool-status-fail";
+                  break;
+                default:
+                  bodyStyle = "info";
+              }
+              return {
+                prefix: "  ",
+                body: line.text,
+                bodyStyle: bodyStyle as never,
+              };
+            }),
+          );
+        },
+      },
+    );
     return true;
   };
 

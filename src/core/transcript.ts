@@ -6,12 +6,22 @@ import type { Bundle } from "./bundle.js";
 import { mapUpdate, type RenderEvent } from "./render-update.js";
 import { stripHydraSessionPrefix } from "./session.js";
 
-export function bundleToMarkdown(bundle: Bundle): string {
+export interface TranscriptOptions {
+  // Include tool-call activity as a bulleted "- ✓ Read foo.ts" list per
+  // turn. Default true; set false for a prose-only transcript that
+  // matches the TUI's collapsed-tools default view.
+  includeTools?: boolean;
+}
+
+export function bundleToMarkdown(
+  bundle: Bundle,
+  options: TranscriptOptions = {},
+): string {
   const events = collectEvents(bundle);
   const toolFinalStates = collectToolFinalStates(events);
   const out: string[] = [];
   emitHeader(out, bundle);
-  emitBody(out, events, toolFinalStates);
+  emitBody(out, events, toolFinalStates, options.includeTools ?? true);
   // Single trailing newline.
   let text = out.join("\n");
   if (!text.endsWith("\n")) {
@@ -127,6 +137,7 @@ function emitBody(
   out: string[],
   events: TimedEvent[],
   toolFinalStates: Map<string, ToolFinalState>,
+  includeTools: boolean,
 ): void {
   if (!events.some((e) => isVisible(e.event))) {
     out.push("_No conversation history recorded._");
@@ -134,12 +145,40 @@ function emitBody(
     return;
   }
 
-  const seenToolIds = new Set<string>();
   let turn = 0;
   let agentBuffer = "";
+  // Thought fragments stream as many small chunks; buffer and emit as
+  // one blockquote so a single sentence doesn't render as a stack of
+  // one-word > _..._ lines with blanks between them.
+  let thoughtBuffer = "";
+  // Consecutive tool-call lines coalesce into one tight list so a run
+  // of N calls doesn't render as N paragraphs with blank lines in
+  // viewers that treat blank-line-separated bullets as loose lists.
+  let pendingToolLines: string[] = [];
+  const seenToolIds = new Set<string>();
   let inTurn = false;
 
+  const flushToolLines = (): void => {
+    if (pendingToolLines.length === 0) {
+      return;
+    }
+    for (const line of pendingToolLines) {
+      out.push(line);
+    }
+    out.push("");
+    pendingToolLines = [];
+  };
+
   const flushAgent = (): void => {
+    flushToolLines();
+    if (thoughtBuffer.length > 0) {
+      // Thoughts render in italic (`*...*`) so viewers style them
+      // distinctly from plain agent prose and from bold user prompts —
+      // three-way visual separation with no prefix glyphs.
+      emitStyledParagraphs(out, thoughtBuffer.trimEnd(), "*");
+      out.push("");
+      thoughtBuffer = "";
+    }
     if (agentBuffer.length === 0) {
       return;
     }
@@ -152,11 +191,8 @@ function emitBody(
     if (inTurn) {
       return;
     }
-    turn += 1;
-    out.push("---");
-    out.push("");
-    out.push(`## Turn ${turn}`);
-    out.push("");
+    // Cold-start (agent output before any user prompt in the bundle):
+    // no separator needed, just mark that we're in a turn.
     inTurn = true;
   };
 
@@ -164,18 +200,18 @@ function emitBody(
     switch (event.kind) {
       case "user-text": {
         flushAgent();
-        turn += 1;
+        // Between turns: a single `---` rule with the required
+        // surrounding blank lines. The blockquoted user text plus plain
+        // agent prose supplies enough visual contrast that per-turn
+        // headings and speaker labels are just noise.
         out.push("---");
         out.push("");
-        out.push(`## Turn ${turn}`);
-        out.push("");
-        out.push("**User:**");
-        out.push("");
-        for (const line of event.text.split("\n")) {
-          out.push(`> ${escapeInline(line)}`);
-        }
-        out.push("");
-        out.push("**Assistant:**");
+        turn += 1;
+        // User prompt is wrapped in `**...**` (bold) so the whole block
+        // picks up a distinct face in markdown viewers — no `>` or
+        // other prefix glyph needed. Each paragraph gets its own
+        // wrapping since bold in CommonMark doesn't span blank lines.
+        emitStyledParagraphs(out, event.text, "**");
         out.push("");
         inTurn = true;
         break;
@@ -186,17 +222,27 @@ function emitBody(
         break;
       case "agent-thought": {
         startTurnIfNeeded();
-        flushAgent();
-        const lines = event.text.split("\n");
-        for (const line of lines) {
-          out.push(`> _${escapeInline(line)}_`);
+        // Flush any buffered agent-text prose first so thought output
+        // appears after the text that preceded it, then coalesce this
+        // chunk with any already-buffered thought fragments.
+        if (agentBuffer.length > 0) {
+          out.push(agentBuffer.trimEnd());
+          out.push("");
+          agentBuffer = "";
         }
-        out.push("");
+        thoughtBuffer += event.text;
         break;
       }
       case "tool-call": {
+        if (!includeTools) {
+          break;
+        }
         startTurnIfNeeded();
-        flushAgent();
+        // Flush any buffered prose / thought before starting a tool
+        // list, but keep multiple consecutive tool-calls tight.
+        if (agentBuffer.length > 0 || thoughtBuffer.length > 0) {
+          flushAgent();
+        }
         if (seenToolIds.has(event.toolCallId)) {
           break;
         }
@@ -205,8 +251,9 @@ function emitBody(
           title: event.title,
           status: event.status ?? "pending",
         };
-        out.push(`- ${statusGlyph(final.status)} ${formatToolLine(final)}`);
-        out.push("");
+        pendingToolLines.push(
+          `- ${statusGlyph(final.status)} ${formatToolLine(final)}`,
+        );
         break;
       }
       case "tool-call-update":
@@ -295,6 +342,41 @@ function statusGlyph(status: string): string {
 // markdown so we DON'T touch ** / _ / # — those are intentional. This is
 // only used on fields that aren't supposed to be markdown (titles, mode
 // names, user prompts in blockquotes) where we want a literal rendering.
+// Wrap each paragraph of `text` in `marker` (e.g. "**" bold, "*"
+// italic). CommonMark emphasis doesn't span blank lines, so we split
+// on paragraph breaks and wrap independently. Internal soft line
+// breaks inside a paragraph stay put — the emphasis still spans them.
+function emitStyledParagraphs(
+  out: string[],
+  text: string,
+  marker: string,
+): void {
+  const paragraphs = text.split(/\n\s*\n/);
+  for (let p = 0; p < paragraphs.length; p++) {
+    const para = paragraphs[p]!;
+    if (para.trim().length === 0) {
+      continue;
+    }
+    const lines = para.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i]!;
+      const escaped = escapeInline(raw);
+      out.push(
+        i === 0 && i === lines.length - 1
+          ? `${marker}${escaped}${marker}`
+          : i === 0
+            ? `${marker}${escaped}`
+            : i === lines.length - 1
+              ? `${escaped}${marker}`
+              : escaped,
+      );
+    }
+    if (p < paragraphs.length - 1) {
+      out.push("");
+    }
+  }
+}
+
 function escapeInline(text: string): string {
   return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

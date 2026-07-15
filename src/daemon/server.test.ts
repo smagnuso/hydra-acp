@@ -56,6 +56,7 @@ function testConfig(): HydraConfig {
       maxPlanItems: 5,
       showFileUpdates: "none" as const,
       selectionClipboard: "both" as const,
+      hotkeys: {},
     },
     compaction: {
       tailK: 0,
@@ -1447,6 +1448,7 @@ describe("startDaemon — extensions REST lifecycle", () => {
         maxPlanItems: 5,
         showFileUpdates: "none" as const,
         selectionClipboard: "both" as const,
+        hotkeys: {},
       },
       compaction: {
         tailK: 0,

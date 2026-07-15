@@ -482,7 +482,8 @@ async function main(): Promise<void> {
       }
       if (sub === "transcript") {
         const out = resolveOption(flags, "out");
-        await runSessionsTranscript(positional[2], out);
+        const includeTools = flags["no-tools"] !== true;
+        await runSessionsTranscript(positional[2], out, { includeTools });
         return;
       }
       if (sub === "import") {

@@ -60,11 +60,12 @@ describe("bundleToMarkdown", () => {
         update({ sessionUpdate: "turn_complete" }, 1100),
       ]),
     );
-    expect(md).toContain("## Turn 1");
-    expect(md).toContain("**User:**");
-    expect(md).toContain("> hello");
-    expect(md).toContain("**Assistant:**");
+    expect(md).toContain("**hello**");
     expect(md).toContain("hi there");
+    expect(md).not.toContain("> hello");
+    expect(md).not.toContain("**User:**");
+    expect(md).not.toContain("**Assistant:**");
+    expect(md).not.toContain("## Turn");
   });
 
   it("concatenates streamed agent chunks before flushing", () => {
@@ -81,7 +82,7 @@ describe("bundleToMarkdown", () => {
     expect(md).not.toContain("hel\nlo");
   });
 
-  it("starts a new turn on each prompt_received", () => {
+  it("separates consecutive turns with a single `---` rule", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "one" }] }, 1000),
@@ -92,11 +93,13 @@ describe("bundleToMarkdown", () => {
         update({ sessionUpdate: "turn_complete" }, 1500),
       ]),
     );
-    expect(md).toContain("## Turn 1");
-    expect(md).toContain("## Turn 2");
-    expect(md.indexOf("## Turn 1")).toBeLessThan(md.indexOf("## Turn 2"));
-    expect(md.indexOf("a1")).toBeLessThan(md.indexOf("## Turn 2"));
-    expect(md.indexOf("a2")).toBeGreaterThan(md.indexOf("## Turn 2"));
+    // One `---` rule before the first turn (separating it from the
+    // metadata header) and one between the two turns.
+    const rules = md.match(/^---$/gm) ?? [];
+    expect(rules.length).toBe(2);
+    expect(md.indexOf("a1")).toBeLessThan(md.lastIndexOf("---"));
+    expect(md.lastIndexOf("---")).toBeLessThan(md.indexOf("two"));
+    expect(md.indexOf("two")).toBeLessThan(md.indexOf("a2"));
   });
 
   it("collapses a tool's lifecycle to a single line keyed by final status", () => {
@@ -112,31 +115,19 @@ describe("bundleToMarkdown", () => {
         update({
           sessionUpdate: "tool_call_update",
           toolCallId: "tc1",
-          status: "in_progress",
-        }),
-        update({
-          sessionUpdate: "tool_call_update",
-          toolCallId: "tc1",
           status: "completed",
         }),
         update({ sessionUpdate: "turn_complete" }),
       ]),
     );
     expect(md).toContain("- ✓ Read src/foo.ts");
-    // Pending / in_progress badges shouldn't leak into the final output.
-    expect(md).not.toContain("↻ Read");
-    expect(md).not.toContain("· Read");
   });
 
   it("marks failed tool calls with ✗ and a status suffix", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
-        update({
-          sessionUpdate: "tool_call",
-          toolCallId: "tc1",
-          title: "Bash boom",
-        }),
+        update({ sessionUpdate: "tool_call", toolCallId: "tc1", title: "Bash boom" }),
         update({
           sessionUpdate: "tool_call_update",
           toolCallId: "tc1",
@@ -162,6 +153,38 @@ describe("bundleToMarkdown", () => {
     expect(md).toContain("- ⊘ WebFetch _(cancelled)_");
   });
 
+  it("coalesces consecutive tool calls into a tight bullet list (no blank between lines)", () => {
+    const md = bundleToMarkdown(
+      makeBundle([
+        update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
+        update({ sessionUpdate: "tool_call", toolCallId: "t1", title: "Read a" }),
+        update({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed" }),
+        update({ sessionUpdate: "tool_call", toolCallId: "t2", title: "Read b" }),
+        update({ sessionUpdate: "tool_call_update", toolCallId: "t2", status: "completed" }),
+        update({ sessionUpdate: "tool_call", toolCallId: "t3", title: "Read c" }),
+        update({ sessionUpdate: "tool_call_update", toolCallId: "t3", status: "completed" }),
+      ]),
+    );
+    expect(md).toContain("- ✓ Read a\n- ✓ Read b\n- ✓ Read c\n");
+  });
+
+  it("omits tool activity when includeTools is false", () => {
+    const md = bundleToMarkdown(
+      makeBundle([
+        update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
+        update({ sessionUpdate: "tool_call", toolCallId: "tc1", title: "Read src/foo.ts" }),
+        update({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "tc1",
+          status: "completed",
+        }),
+      ]),
+      { includeTools: false },
+    );
+    expect(md).not.toContain("Read src/foo.ts");
+    expect(md).not.toMatch(/[✓✗⊘]/);
+  });
+
   it("emits agent thoughts as italic blockquote lines", () => {
     const md = bundleToMarkdown(
       makeBundle([
@@ -169,7 +192,32 @@ describe("bundleToMarkdown", () => {
         update({ sessionUpdate: "agent_thought", text: "thinking quietly" }),
       ]),
     );
-    expect(md).toContain("> _thinking quietly_");
+    expect(md).toContain("*thinking quietly*");
+  });
+
+  it("wraps each paragraph of a multi-paragraph thought independently in italic", () => {
+    const md = bundleToMarkdown(
+      makeBundle([
+        update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
+        update({
+          sessionUpdate: "agent_thought",
+          text: "first paragraph\n\nsecond paragraph",
+        }),
+      ]),
+    );
+    expect(md).toContain("*first paragraph*\n\n*second paragraph*");
+  });
+
+  it("coalesces streamed agent_thought fragments into one blockquote (no blank lines between fragments)", () => {
+    const md = bundleToMarkdown(
+      makeBundle([
+        update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
+        update({ sessionUpdate: "agent_thought", text: "I" }),
+        update({ sessionUpdate: "agent_thought", text: " need to" }),
+        update({ sessionUpdate: "agent_thought", text: " think." }),
+      ]),
+    );
+    expect(md).toContain("*I need to think.*");
   });
 
   it("renders plan entries as a markdown checklist", () => {
@@ -223,7 +271,7 @@ describe("bundleToMarkdown", () => {
         update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } }, 3),
       ]),
     );
-    expect(md).toContain("> p");
+    expect(md).toMatch(/^\*\*p\*\*$/m);
     expect(md).toContain("hi");
   });
 

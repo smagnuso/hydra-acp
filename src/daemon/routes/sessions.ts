@@ -517,8 +517,16 @@ export function registerSessionRoutes(
       machine: os.hostname(),
       hydraHost: resolveHydraHost(defaults),
     });
+    const q = request.query as { tools?: string } | undefined;
+    // ?tools=0 / false / no strips tool-call activity from the render.
+    // Everything else (including missing) keeps the default (tools on).
+    const includeTools = !(
+      q?.tools === "0" ||
+      q?.tools === "false" ||
+      q?.tools === "no"
+    );
     reply.header("Content-Type", "text/markdown; charset=utf-8");
-    reply.code(200).send(bundleToMarkdown(bundle));
+    reply.code(200).send(bundleToMarkdown(bundle, { includeTools }));
   });
 
   // Import a session bundle. Body shape: { bundle, replace? }. Without

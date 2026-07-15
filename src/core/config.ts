@@ -98,6 +98,55 @@ const AgentOverrideConfig = z.object({
 });
 export type AgentOverrideConfig = z.infer<typeof AgentOverrideConfig>;
 
+// Accepted keys for `tui.hotkeys`. Duplicates the KeyName union in
+// src/tui/input.ts intentionally — core/ must not import from tui/. If
+// the KeyName union grows, extend this list.
+const TUI_HOTKEY_KEY_NAMES = z.enum([
+  "enter",
+  "alt-enter",
+  "shift-enter",
+  "ctrl-enter",
+  "alt-b",
+  "alt-f",
+  "alt-n",
+  "alt-tab",
+  "shift-tab",
+  "tab",
+  "up",
+  "down",
+  "left",
+  "right",
+  "home",
+  "end",
+  "backspace",
+  "alt-backspace",
+  "delete",
+  "ctrl-a",
+  "ctrl-b",
+  "ctrl-c",
+  "ctrl-d",
+  "ctrl-e",
+  "ctrl-f",
+  "ctrl-g",
+  "ctrl-k",
+  "ctrl-l",
+  "ctrl-n",
+  "ctrl-o",
+  "ctrl-p",
+  "ctrl-q",
+  "ctrl-r",
+  "ctrl-s",
+  "ctrl-u",
+  "ctrl-v",
+  "ctrl-t",
+  "ctrl-w",
+  "ctrl-x",
+  "ctrl-y",
+  "ctrl-underscore",
+  "alt-underscore",
+  "escape",
+]);
+
 const TuiConfig = z.object({
   // Minimum interval (ms) between full-screen repaints driven by content
   // events (agent text chunks, tool/plan updates, elapsed-tick refreshes).
@@ -257,6 +306,25 @@ const TuiConfig = z.object({
     )
     .nonempty()
     .optional(),
+  // User-defined key bindings that spawn an external command. Keyed by
+  // the KeyName from src/tui/input.ts (e.g. "ctrl-x", "ctrl-underscore").
+  // The command runs detached with stdio ignored — fire-and-forget.
+  // Substitutions in string/array args: %s session id, %c cwd, %a agent
+  // id, %u daemon base URL, %t token-file path, %% literal %. The same
+  // values are also exported as HYDRA_SESSION_ID / HYDRA_CWD /
+  // HYDRA_AGENT / HYDRA_BASE_URL / HYDRA_TOKEN_FILE. Keys that collide
+  // with a hotkey the TUI already binds (ctrl-c, ctrl-r, ctrl-p, …) are
+  // pre-empted by that binding — set your hotkey to one of the unbound
+  // keys (ctrl-x, ctrl-y, ctrl-underscore). Example:
+  //   { "ctrl-x": { "command": "/home/me/bin/hydra-to-emacs.sh %s" } }
+  hotkeys: z
+    .record(
+      TUI_HOTKEY_KEY_NAMES,
+      z.object({
+        command: z.union([z.string(), z.array(z.string())]),
+      }),
+    )
+    .default({}),
 });
 
 const ExtensionName = z

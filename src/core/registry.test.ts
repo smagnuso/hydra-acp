@@ -91,6 +91,7 @@ function fakeConfig(): HydraConfig {
       maxPlanItems: 5,
       showFileUpdates: "none" as const,
       selectionClipboard: "both" as const,
+      hotkeys: {},
     },
     compaction: {
       tailK: 0,
