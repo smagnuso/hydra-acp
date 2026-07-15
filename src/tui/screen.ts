@@ -1121,6 +1121,12 @@ export class Screen {
   }
 
   private handleRawStdin(chunk: Buffer): void {
+    if (process.env.HYDRA_TUI_KEY_TRACE) {
+      const bytes = Array.from(chunk)
+        .map((b) => "0x" + b.toString(16).padStart(2, "0"))
+        .join(" ");
+      writeDebugLine({ tag: "raw", bytes, len: chunk.length });
+    }
     // Use 'binary' encoding so each byte maps to a single code unit —
     // important because the paste markers are byte-precise and we need
     // to slice them out cleanly. UTF-8 multibyte chars within paste
@@ -1206,6 +1212,25 @@ export class Screen {
     }
     if (text === "\x1b\x1f" || text === "\x1b_") {
       this.onKey([{ type: "key", name: "alt-underscore" }]);
+      return;
+    }
+    // Alt+Backspace — readline's word-kill-left chord. Most terminals
+    // send ESC + DEL (0x7f); a few (older linux console, some emulators)
+    // send ESC + BS (0x08). terminal-kit's keymap knows this too but its
+    // recognizer only fires when both bytes arrive in the same stdin
+    // read; latency in kitty / iTerm2 / muxed sessions can split them
+    // across reads and the ESC/BS then get dispatched independently
+    // (ESCAPE cancels a modal, BS deletes one char). Intercept BOTH the
+    // exact two-byte chunk AND a chunk that STARTS with the pair (some
+    // pastes concatenate it with follow-on bytes) so the binding fires
+    // regardless of chunking.
+    if (text === "\x1b\x7f" || text === "\x1b\x08") {
+      this.onKey([{ type: "key", name: "alt-backspace" }]);
+      return;
+    }
+    if (text.startsWith("\x1b\x7f") || text.startsWith("\x1b\x08")) {
+      this.onKey([{ type: "key", name: "alt-backspace" }]);
+      this.handleRawStdin(Buffer.from(text.slice(2), "binary"));
       return;
     }
     // Two families of "modified key" sequences leak through terminal-kit
@@ -2822,6 +2847,9 @@ export class Screen {
   }
 
   private handleKey(name: string, data: { isCharacter?: boolean }): void {
+    if (process.env.HYDRA_TUI_KEY_TRACE) {
+      writeDebugLine({ tag: "key", name, isChar: !!data.isCharacter });
+    }
     if (data.isCharacter) {
       this.onKey([{ type: "char", ch: name }]);
       return;
@@ -7545,6 +7573,13 @@ export function mapKeyName(name: string): KeyName | null {
       return "end";
     case "BACKSPACE":
       return "backspace";
+    case "ALT_BACKSPACE":
+    case "META_BACKSPACE":
+      // Readline convention: Alt+Backspace kills the word to the left
+      // of the cursor. terminal-kit doesn't always synthesize a name
+      // for this combo — the raw ESC 0x7f fallback in handleRawStdin
+      // covers terminals that just emit the bytes directly.
+      return "alt-backspace";
     case "DELETE":
       return "delete";
     case "CTRL_A":
@@ -7735,6 +7770,15 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
   }
   if (code === 127 && mod === 1) {
     return "backspace";
+  }
+  if (code === 127 && mod === 3) {
+    return "alt-backspace";
+  }
+  if (code === 8 && mod === 3) {
+    // Some terminals report Alt+Backspace with the BS control byte (0x08)
+    // rather than DEL (0x7f); accept both so the readline word-kill
+    // chord works regardless of which convention the terminal picked.
+    return "alt-backspace";
   }
   // Ctrl-_ (readline undo) and Alt-_ (our redo). codepoint 95 = '_'.
   // Some terminals advertise these as code 47 ('/') with ctrl, since

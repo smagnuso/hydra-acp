@@ -22,6 +22,7 @@ export type KeyName =
   | "home"
   | "end"
   | "backspace"
+  | "alt-backspace"
   | "delete"
   | "ctrl-a"
   | "ctrl-b"
@@ -657,6 +658,10 @@ export class InputDispatcher {
         this.recordEdit();
         this.killWord();
         return [];
+      case "alt-backspace":
+        this.recordEdit();
+        this.killWordAlpha();
+        return [];
       case "ctrl-x":
         return [{ type: "toggle-mouse" }];
       case "ctrl-y":
@@ -933,6 +938,45 @@ export class InputDispatcher {
       i -= 1;
     }
     while (i > 0 && !/\s/.test(line[i - 1] ?? "")) {
+      i -= 1;
+    }
+    const killed = line.slice(i, this.col);
+    if (killed.length > 0) {
+      this.killBuffer = killed;
+    }
+    this.setCurrentLine(line.slice(0, i) + line.slice(this.col));
+    this.col = i;
+  }
+
+  // Readline's backward-kill-word (M-DEL / M-Backspace). Distinct from
+  // killWord (^W, unix-word-rubout): the "word" here is alphanumeric-
+  // plus-underscore only, so `foo/bar` + Alt-Backspace deletes `bar` and
+  // leaves `foo/` — a slash, dot, or dash acts as a word boundary. Same
+  // scan shape as killWord but with the word test flipped from /\s/ to
+  // /[A-Za-z0-9_]/.
+  private killWordAlpha(): void {
+    const line = this.currentLine();
+    if (this.col === 0) {
+      this.backspace();
+      return;
+    }
+    const before = line.slice(0, this.col);
+    const m = before.match(PASTE_TOKEN_LEFT_RE);
+    if (m !== null) {
+      // Placeholder is one atomic unit regardless of which word grammar
+      // is in play — same policy killWord uses.
+      this.killBuffer = m[0];
+      const i = this.col - m[0].length;
+      this.setCurrentLine(line.slice(0, i) + line.slice(this.col));
+      this.col = i;
+      return;
+    }
+    const WORD = /[A-Za-z0-9_]/;
+    let i = this.col;
+    while (i > 0 && !WORD.test(line[i - 1] ?? "")) {
+      i -= 1;
+    }
+    while (i > 0 && WORD.test(line[i - 1] ?? "")) {
       i -= 1;
     }
     const killed = line.slice(i, this.col);

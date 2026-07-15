@@ -289,6 +289,43 @@ describe("InputDispatcher", () => {
     expect(d.state().col).toBe(6);
   });
 
+  it("alt-backspace kills the previous alphanumeric word (readline M-DEL semantics)", () => {
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "hello world" }]);
+    feed(d, [k("alt-backspace")]);
+    expect(d.state().buffer).toEqual(["hello "]);
+    expect(d.state().col).toBe(6);
+  });
+
+  it("alt-backspace stops at non-word chars: 'foo/bar' kills only 'bar'", () => {
+    // Distinct from ctrl-w (unix-word-rubout, whitespace-delimited).
+    // Readline's backward-kill-word treats a slash as a boundary, so
+    // Alt-Backspace on "foo/bar" leaves "foo/" behind.
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "foo/bar" }]);
+    feed(d, [k("alt-backspace")]);
+    expect(d.state().buffer).toEqual(["foo/"]);
+    expect(d.state().col).toBe(4);
+  });
+
+  it("alt-backspace skips trailing non-word chars before finding the word to kill", () => {
+    // "foo/bar/  " with the cursor at end: trailing spaces + '/' are
+    // non-word, then "bar" is the word to kill. Result: "foo/".
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "foo/bar/  " }]);
+    feed(d, [k("alt-backspace")]);
+    expect(d.state().buffer).toEqual(["foo/"]);
+  });
+
+  it("ctrl-w still uses unix-word semantics: 'foo/bar' kills the whole token", () => {
+    // Regression pin: killWord and killWordAlpha must diverge here.
+    const d = new InputDispatcher();
+    feed(d, [{ type: "paste", text: "foo/bar" }]);
+    feed(d, [k("ctrl-w")]);
+    expect(d.state().buffer).toEqual([""]);
+    expect(d.state().col).toBe(0);
+  });
+
   it("ctrl-w skips trailing whitespace before deleting the word", () => {
     const d = new InputDispatcher();
     feed(d, [{ type: "paste", text: "hello world  " }]);
