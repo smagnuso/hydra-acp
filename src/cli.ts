@@ -482,7 +482,7 @@ async function main(): Promise<void> {
       }
       if (sub === "transcript") {
         const out = resolveOption(flags, "out");
-        const includeTools = flags["no-tools"] !== true;
+        const includeTools = flags.tools === true;
         await runSessionsTranscript(positional[2], out, { includeTools });
         return;
       }

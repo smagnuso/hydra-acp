@@ -102,7 +102,7 @@ describe("bundleToMarkdown", () => {
     expect(md.indexOf("two")).toBeLessThan(md.indexOf("a2"));
   });
 
-  it("collapses a tool's lifecycle to a single line keyed by final status", () => {
+  it("collapses a tool's lifecycle to a single line keyed by final status (includeTools=true)", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
@@ -119,11 +119,12 @@ describe("bundleToMarkdown", () => {
         }),
         update({ sessionUpdate: "turn_complete" }),
       ]),
+      { includeTools: true },
     );
     expect(md).toContain("- ✓ Read src/foo.ts");
   });
 
-  it("marks failed tool calls with ✗ and a status suffix", () => {
+  it("marks failed tool calls with ✗ and a status suffix (includeTools=true)", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
@@ -134,11 +135,12 @@ describe("bundleToMarkdown", () => {
           status: "failed",
         }),
       ]),
+      { includeTools: true },
     );
     expect(md).toContain("- ✗ Bash boom _(failed)_");
   });
 
-  it("marks cancelled tool calls with ⊘", () => {
+  it("marks cancelled tool calls with ⊘ (includeTools=true)", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
@@ -149,11 +151,12 @@ describe("bundleToMarkdown", () => {
           status: "cancelled",
         }),
       ]),
+      { includeTools: true },
     );
     expect(md).toContain("- ⊘ WebFetch _(cancelled)_");
   });
 
-  it("coalesces consecutive tool calls into a tight bullet list (no blank between lines)", () => {
+  it("coalesces consecutive tool calls into a tight bullet list (includeTools=true)", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
@@ -164,11 +167,12 @@ describe("bundleToMarkdown", () => {
         update({ sessionUpdate: "tool_call", toolCallId: "t3", title: "Read c" }),
         update({ sessionUpdate: "tool_call_update", toolCallId: "t3", status: "completed" }),
       ]),
+      { includeTools: true },
     );
     expect(md).toContain("- ✓ Read a\n- ✓ Read b\n- ✓ Read c\n");
   });
 
-  it("omits tool activity when includeTools is false", () => {
+  it("omits tool activity by default", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
@@ -179,7 +183,6 @@ describe("bundleToMarkdown", () => {
           status: "completed",
         }),
       ]),
-      { includeTools: false },
     );
     expect(md).not.toContain("Read src/foo.ts");
     expect(md).not.toMatch(/[✓✗⊘]/);

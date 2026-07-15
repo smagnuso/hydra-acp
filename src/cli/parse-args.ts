@@ -26,7 +26,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "new",
   "no-color",
   "no-pager",
-  "no-tools",
+  "tools",
   "raw",
   "reattach",
   "readonly",

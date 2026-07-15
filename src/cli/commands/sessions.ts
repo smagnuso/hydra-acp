@@ -311,11 +311,11 @@ export async function runSessionsTranscript(
 ): Promise<void> {
   if (!idOrFile) {
     process.stderr.write(
-      "Usage: hydra-acp sessions transcript <session-id>|<file> [--out <file>|.] [--no-tools]\n",
+      "Usage: hydra-acp sessions transcript <session-id>|<file> [--out <file>|.] [--tools]\n",
     );
     process.exit(2);
   }
-  const includeTools = options.includeTools ?? true;
+  const includeTools = options.includeTools ?? false;
   // File-path branch: avoids a daemon round-trip and works on bundles
   // the user hasn't imported (or on hosts without a daemon running).
   let body: string;
@@ -332,8 +332,8 @@ export async function runSessionsTranscript(
     const url = new URL(
       `${baseUrl}/v1/sessions/${encodeURIComponent(idOrFile)}/transcript`,
     );
-    if (!includeTools) {
-      url.searchParams.set("tools", "0");
+    if (includeTools) {
+      url.searchParams.set("tools", "1");
     }
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${serviceToken}` },

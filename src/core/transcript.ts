@@ -8,8 +8,9 @@ import { stripHydraSessionPrefix } from "./session.js";
 
 export interface TranscriptOptions {
   // Include tool-call activity as a bulleted "- ✓ Read foo.ts" list per
-  // turn. Default true; set false for a prose-only transcript that
-  // matches the TUI's collapsed-tools default view.
+  // turn. Default false — most transcripts read cleaner as pure
+  // prose, matching the TUI's collapsed-tools default. Set true to
+  // restore the bulleted tool list.
   includeTools?: boolean;
 }
 
@@ -21,7 +22,7 @@ export function bundleToMarkdown(
   const toolFinalStates = collectToolFinalStates(events);
   const out: string[] = [];
   emitHeader(out, bundle);
-  emitBody(out, events, toolFinalStates, options.includeTools ?? true);
+  emitBody(out, events, toolFinalStates, options.includeTools ?? false);
   // Single trailing newline.
   let text = out.join("\n");
   if (!text.endsWith("\n")) {
