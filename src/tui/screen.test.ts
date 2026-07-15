@@ -2535,6 +2535,64 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("+        -e HOST_UID=$(id -u)");
   });
 
+  it("a click at a nearby but non-identical cell after a double-click is NOT a triple", () => {
+    // Regression: DOUBLE_CLICK_MAX_DIST (1 cell) intentionally tolerates
+    // mouse jitter between the two clicks of a double-click. That same
+    // slack must NOT carry into the triple upgrade — a user who moves
+    // to a wrapped continuation row on the same source line (y+1) and
+    // single-clicks there was clearly targeting a new spot; upgrading
+    // to whole-line select would silently paint content they didn't
+    // triple-click. Triple requires strict cell equality.
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Long enough to wrap so y+1 stays on the same source line.
+    screen.appendLine({
+      body:
+        "hello world this is deliberately a very long line so it wraps across visible rows",
+    });
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y: y - 1 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y: y - 1 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y: y - 1 });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y: y - 1 });
+    // Double-click word-snapped "hello" — a bounded selection.
+    const afterDouble = screen.getSelectionText();
+    expect(afterDouble.length).toBeGreaterThan(0);
+    expect(afterDouble.length).toBeLessThan(20);
+    // Third click one row down on the wrapped continuation. Same source
+    // line, so the id-check alone would still pass; strict cell equality
+    // is what breaks the chain here.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+    // Plain click: prior selection dismissed, no new selection.
+    expect(screen.hasSelection()).toBe(false);
+  });
+
+  it("scrolling between double- and third-click breaks the chain (no phantom triple)", () => {
+    // Regression: chain state used to compare screen cells only, so a
+    // double-click followed by a scroll followed by a single click on
+    // the same (x, y) would upgrade to triple even though the source
+    // line under the cell had changed.
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Enough scrollback that scrollBy actually moves.
+    for (let i = 0; i < 30; i++) {
+      screen.appendLine({ body: `line ${i}` });
+    }
+    const y = visibleRows(screen);
+    // Double-click on the bottom line's content — word-snap.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+    expect(screen.hasSelection()).toBe(true);
+    // Scroll up so the same (x, y) now points at a different source line.
+    screen.scrollBy(3);
+    // Third click on the same cell: must NOT upgrade to a whole-line
+    // selection of the new source line — it's a fresh single click.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
+    expect(screen.hasSelection()).toBe(false);
+  });
+
   it("a fourth click on the same cell does not extend beyond the whole-line selection", () => {
     // Sanity check: chain caps at 3. A stray fourth press restarts a
     // fresh single-click gesture (which clears the selection).

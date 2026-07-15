@@ -633,9 +633,18 @@ export class Screen {
   // Chain state for multi-click gestures. `count` reflects how many
   // consecutive same-cell clicks landed within DOUBLE_CLICK_MAX_MS of
   // each other — 1 for a plain click, 2 for double (word snap), 3 for
-  // triple (whole-line select). A break in the chain (too slow, too far,
-  // or a non-left-click event) resets back to 1 on the next press.
-  private lastLeftClick: { x: number; y: number; t: number; count: number } | null = null;
+  // triple (whole-line select). `sourceLineId` pins the chain to the
+  // source line under the initial click; a follow-up press that resolves
+  // to a different source line breaks the chain even when it lands on
+  // the same screen cell (the case where scrollback shifted between
+  // clicks). A break in the chain resets back to 1 on the next press.
+  private lastLeftClick: {
+    x: number;
+    y: number;
+    t: number;
+    count: number;
+    sourceLineId: number | null;
+  } | null = null;
   // Last drag cell + ticker used to autoscroll while selecting past the
   // top/bottom edge of the visible scrollback area. Set when a drag
   // motion lands on row 1 or the last scrollback row; cleared on
@@ -3143,13 +3152,29 @@ export class Screen {
       last !== null &&
       now - last.t <= DOUBLE_CLICK_MAX_MS &&
       Math.abs(cell.x - last.x) <= DOUBLE_CLICK_MAX_DIST &&
-      Math.abs(cell.y - last.y) <= DOUBLE_CLICK_MAX_DIST;
+      Math.abs(cell.y - last.y) <= DOUBLE_CLICK_MAX_DIST &&
+      // Cell-position agreement isn't enough on its own: if the user
+      // scrolled between clicks, the same (x,y) now points at a
+      // different source line and continuing the chain would silently
+      // "triple-click" content the user never double-clicked. Require
+      // an exact source line match so scrollback movement AND clicks on
+      // a different wrapped row of the same source line both break the
+      // chain unless the click really did land in the same spot.
+      last.sourceLineId !== null &&
+      last.sourceLineId === anchor.sourceLineId;
     // Third same-cell click inside the timing window → whole-line
-    // select. Matches exactly count===2 so the chain caps at three:
-    // a stray fourth press falls through to the plain-click path
-    // (which clears the selection), matching the "click once more to
-    // dismiss" affordance most terminals expose.
-    if (isChainCandidate && last!.count === 2) {
+    // select. Requires strict cell equality (not just jitter tolerance):
+    // a double-click that survives adjacent-cell jitter is fine, but a
+    // triple has to land in the exact same spot the double did or the
+    // user has clearly moved on. Also caps the chain at three so a stray
+    // fourth press falls through to the plain-click path (which clears
+    // the selection).
+    const isTripleClickCandidate =
+      isChainCandidate &&
+      last!.count === 2 &&
+      cell.x === last!.x &&
+      cell.y === last!.y;
+    if (isTripleClickCandidate) {
       this.pendingClickCount = 3;
       this.cancelPendingBlockClick();
       this.selectWholeSourceLine(anchor.sourceLineId);
@@ -3514,11 +3539,17 @@ export class Screen {
     if (cell !== null) {
       // Record the chain tip so the next same-cell press within
       // DOUBLE_CLICK_MAX_MS can upgrade single → double → triple.
+      // The resolved source id (may be null if release cell was outside
+      // scrollback) lets the chain check reject a follow-up click that
+      // lands on the same screen cell but a different source line — the
+      // scroll-between-clicks case that used to silently upgrade.
+      const resolved = this.resolveCellToSource(cell.x, cell.y);
       this.lastLeftClick = {
         x: cell.x,
         y: cell.y,
         t: Date.now(),
         count: this.pendingClickCount,
+        sourceLineId: resolved?.sourceLineId ?? null,
       };
     }
     this.pendingClickCount = 1;
