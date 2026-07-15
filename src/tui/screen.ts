@@ -81,16 +81,6 @@ const ASCII_WORD_RE = /[A-Za-z0-9_]/;
 // hyphens, tildes, and pluses that appear in real paths. The optional
 // `:<linenumber>` suffix is matched separately after the token boundary.
 const PATH_TOKEN_RE = /[A-Za-z0-9_./\-~+@]/;
-// ANSI SGR pattern used when stripping styling escapes from extracted
-// selection text so the clipboard payload is clean plaintext.
-const ANSI_STRIP_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
-// OSC 8 hyperlink framing: ESC ] 8 ; params ; URI ST, where ST is either
-// ESC '\' or BEL. Matches both the opening (URI-bearing) and closing
-// (empty) halves so stripping leaves just the visible link text. Applied
-// to selection text alongside ANSI_STRIP_RE so a line carrying an OSC 8
-// link (real http/https URLs still use OSC 8) doesn't leak escape bytes
-// into the clipboard.
-const OSC8_STRIP_RE = /\x1b\]8;[^;]*;[^\x1b\x07]*(?:\x1b\\|\x07)/g;
 // Matches hydra://sessions/<id> URLs (with optional host:port prefix and
 // #turn-<n> fragment). Used by the click handler to switch sessions.
 const HYDRA_SESSION_URL_RE =
@@ -618,6 +608,11 @@ export class Screen {
   // the finalize-vs-dismiss decision: dragStarted → copy; otherwise a
   // plain click clears any prior selection.
   private selectionDragStarted = false;
+  // Click count this press is contributing to (1=single, 2=double,
+  // 3=triple). Set during handleSelectionPress from the last-click chain
+  // state and consumed by handleSelectionRelease when recording the new
+  // chain tip on lastLeftClick. Defaults to 1 for a fresh chain.
+  private pendingClickCount: number = 1;
   // Set when a press is recognised as the second click of a double-click
   // and the anchor lands on a word character. Causes release to finalize
   // (copy) without requiring a drag, and suppresses the block-click
@@ -625,7 +620,12 @@ export class Screen {
   private doubleClickPending = false;
   // Timestamp + cell of the most recent left-button release, used to
   // decide whether the next press qualifies as a double-click.
-  private lastLeftClick: { x: number; y: number; t: number } | null = null;
+  // Chain state for multi-click gestures. `count` reflects how many
+  // consecutive same-cell clicks landed within DOUBLE_CLICK_MAX_MS of
+  // each other — 1 for a plain click, 2 for double (word snap), 3 for
+  // triple (whole-line select). A break in the chain (too slow, too far,
+  // or a non-left-click event) resets back to 1 on the next press.
+  private lastLeftClick: { x: number; y: number; t: number; count: number } | null = null;
   // Last drag cell + ticker used to autoscroll while selecting past the
   // top/bottom edge of the visible scrollback area. Set when a drag
   // motion lands on row 1 or the last scrollback row; cleared on
@@ -2012,29 +2012,18 @@ export class Screen {
         continue;
       }
       const rawBody = line.body ?? "";
-      let piece: string;
-      if (ansiLineWholeSelectOnly(line)) {
-        // Code-block bodies aren't selectable per-char: their offsets
-        // refer to raw code units that include SGR escape bytes, so a
-        // naive slice can land inside a sequence and paste garbage. Emit
-        // the FULL stripped body regardless of endpoint vs interior
-        // status — overshoots the visual selection at the endpoints
-        // slightly, but keeps every visible character intact so pasting
-        // a code block doesn't drop its first or last line (or, when a
-        // selection sits wholly inside a code block, produce an empty
-        // string).
-        piece = rawBody.replace(ANSI_STRIP_RE, "").replace(OSC8_STRIP_RE, "");
-      } else {
-        piece = rawBody.slice(bounds.start, bounds.end);
-        // Styled bodies route through the markup-interpreting writer, so
-        // `^X` / `^[...]` spans and OSC 8 hyperlink framing are visually
-        // zero-width but sit in the source as code units. Offsets land on
-        // markup boundaries (segment-aware, OSC-8-aware), so the slice
-        // contains whole markup / OSC 8 sequences only; strip them so the
-        // clipboard carries the visible characters alone.
-        if (bodyStyleUsesMarkup(line.bodyStyle)) {
-          piece = stripTkMarkup(piece);
-        }
+      let piece = rawBody.slice(bounds.start, bounds.end);
+      // Styled bodies route through the markup-interpreting writer, so
+      // `^X` / `^[...]` spans and OSC 8 hyperlink framing are visually
+      // zero-width but sit in the source as code units. Offsets land on
+      // markup boundaries (segment-aware, OSC-8-aware), so the slice
+      // contains whole markup / OSC 8 sequences only; strip them so the
+      // clipboard carries the visible characters alone. Ansi-flagged
+      // bodies (syntax-highlighted code fences) get the same treatment:
+      // matchTkMarkupAt now recognizes CSI SGR spans as zero-width, so
+      // segment-aware offsets land on visible-cell boundaries here too.
+      if (bodyStyleUsesMarkup(line.bodyStyle) || line.ansi) {
+        piece = stripTkMarkup(piece);
       }
       out.push(piece);
     }
@@ -2132,22 +2121,13 @@ export class Screen {
     if (interEnd <= interStart) {
       return null;
     }
-    // Syntax-highlighted code chunks can't be sliced per-char — SGR
-    // escape bytes inflate code-unit math and a partial slice would land
-    // mid-sequence. When any part of such a chunk overlaps the selection,
-    // highlight the WHOLE chunk (including fillRow padding). Matches the
-    // extractor's endpoint policy in getSelectionText, so the visual
-    // band and the copied text agree on which lines are "in". Agent /
-    // heading / plan chunks flagged ansi (OSC 8 links only) fall through
-    // to the per-char intersection below — matchTkMarkupAt treats their
-    // OSC 8 spans as zero-width so the offsets line up.
-    if (ansiLineWholeSelectOnly(line)) {
-      return {
-        start: 0,
-        end: line.body.length,
-        toEndOfLine: true,
-      };
-    }
+    // Ansi-flagged code chunks used to force whole-line selection here
+    // because raw code-unit slicing landed inside SGR sequences. That
+    // carve-out is gone: matchTkMarkupAt now treats CSI SGR spans as
+    // zero-width segments (same as OSC 8 and caret markup), so the
+    // per-char intersection below is safe for syntax-highlighted rows
+    // — offsets sit on visible-cell boundaries and never split an
+    // escape sequence.
     return {
       start: interStart - chunkStart,
       end: interEnd - chunkStart,
@@ -3087,6 +3067,7 @@ export class Screen {
     this.selectionAnchor = null;
     this.selectionDragStarted = false;
     this.doubleClickPending = false;
+    this.pendingClickCount = 1;
     if (!this.inAppSelectionEnabled || cell === null) {
       return;
     }
@@ -3120,12 +3101,31 @@ export class Screen {
     this.selectionAnchor = anchor;
     const now = Date.now();
     const last = this.lastLeftClick;
-    const isDoubleClickCandidate =
+    const isChainCandidate =
       last !== null &&
       now - last.t <= DOUBLE_CLICK_MAX_MS &&
       Math.abs(cell.x - last.x) <= DOUBLE_CLICK_MAX_DIST &&
       Math.abs(cell.y - last.y) <= DOUBLE_CLICK_MAX_DIST;
+    // Third same-cell click inside the timing window → whole-line
+    // select. Matches exactly count===2 so the chain caps at three:
+    // a stray fourth press falls through to the plain-click path
+    // (which clears the selection), matching the "click once more to
+    // dismiss" affordance most terminals expose.
+    if (isChainCandidate && last!.count === 2) {
+      this.pendingClickCount = 3;
+      this.cancelPendingBlockClick();
+      this.selectWholeSourceLine(anchor.sourceLineId);
+      // Word-snap on the second click set doubleClickPending so the
+      // release finalizes (extract + clipboard). We want the same
+      // for a triple: the line-select is complete on press, and the
+      // release should ship it to the clipboard without treating the
+      // gesture as a fresh single-click that would clear the selection.
+      this.doubleClickPending = true;
+      return;
+    }
+    const isDoubleClickCandidate = isChainCandidate && last!.count === 1;
     if (isDoubleClickCandidate) {
+      this.pendingClickCount = 2;
       // Any pending single-click toggle on the same cell is moot —
       // either we're about to open a file or word-snap, both of which
       // supersede the toggle. Cancel before either path runs so the
@@ -3198,11 +3198,26 @@ export class Screen {
         );
         this.doubleClickPending = true;
       }
-      // Reset chain so a triple-click is treated as a fresh single
-      // click rather than another double — keeps the gesture simple
-      // and predictable.
-      this.lastLeftClick = null;
+      // Fall through — handleSelectionRelease updates lastLeftClick
+      // with count=2 so a third same-cell press upgrades to the
+      // whole-line-select branch above.
     }
+  }
+
+  // Select the entire source line identified by `sourceLineId`. Used by
+  // the triple-click gesture (and available programmatically). No-op
+  // when the id is unknown; safe on ansi-flagged code rows since the
+  // selection range is the full body — no per-char offset math needed.
+  private selectWholeSourceLine(sourceLineId: number): void {
+    const line = this.lineById(sourceLineId);
+    if (line === null) {
+      return;
+    }
+    const bodyLen = (line.body ?? "").length;
+    this.setSelection(
+      { sourceLineId, offset: 0 },
+      { sourceLineId, offset: bodyLen },
+    );
   }
 
   // Drag-motion half of the gesture: extends the selection from the
@@ -3459,8 +3474,16 @@ export class Screen {
     this.selectionDragStarted = false;
     this.doubleClickPending = false;
     if (cell !== null) {
-      this.lastLeftClick = { x: cell.x, y: cell.y, t: Date.now() };
+      // Record the chain tip so the next same-cell press within
+      // DOUBLE_CLICK_MAX_MS can upgrade single → double → triple.
+      this.lastLeftClick = {
+        x: cell.x,
+        y: cell.y,
+        t: Date.now(),
+        count: this.pendingClickCount,
+      };
     }
+    this.pendingClickCount = 1;
     if (!this.inAppSelectionEnabled) {
       return;
     }
@@ -3486,7 +3509,7 @@ export class Screen {
     pos: { sourceLineId: number; offset: number },
   ): { start: number; end: number } | null {
     const line = this.lineById(pos.sourceLineId);
-    if (line === null || line.ansi) {
+    if (line === null) {
       return null;
     }
     const body = line.body ?? "";
@@ -3494,13 +3517,12 @@ export class Screen {
       return null;
     }
     // Styled bodies (agent / heading / thought) carry zero-width
-    // terminal-kit markup spans like `^Ccode^:`. Scanning the raw body
-    // directly lets the `C` from `^C` (and similar style chars) count
-    // as a word character, dragging the markup byte into the snapped
-    // range. Result: selection contains stray `C` chars and the
-    // offset math for rendering the inverse band is off by one. Mirror
-    // the markup-strip pattern from pathTokenAt — scan boundaries on
-    // the visible-only view, then project them back onto raw offsets.
+    // terminal-kit markup spans like `^Ccode^:`; ansi-flagged code rows
+    // carry zero-width CSI SGR spans (both recognized by matchTkMarkupAt).
+    // Scanning the raw body directly lets stray style bytes count as
+    // word characters, dragging escape junk into the snapped range.
+    // Mirror the markup-strip pattern from pathTokenAt — scan boundaries
+    // on the visible-only view, then project them back onto raw offsets.
     const { clean, rawToClean } = stripTkMarkupWithMap(body);
     if (clean.length === 0) {
       return null;
@@ -4132,7 +4154,15 @@ export class Screen {
     // spans are tagged as zero-width — the offset then lands at a
     // segment boundary and never inside a styling sequence. Plain
     // bodies stay on the grapheme-only fast path.
-    const localOffset = bodyStyleUsesMarkup(chunk.bodyStyle)
+    // Both bodyStyleUsesMarkup styles (agent / heading / thought / plan —
+    // caret markup + OSC 8) AND ansi-flagged bodies (syntax-highlighted
+    // code fences carrying real CSI SGR spans) need the segment-aware
+    // offset walk: matchTkMarkupAt treats both kinds of styling bytes as
+    // zero-width segments, so the click column lands on a visible-cell
+    // boundary instead of somewhere inside an escape sequence.
+    const needsSegments =
+      bodyStyleUsesMarkup(chunk.bodyStyle) || chunk.ansi === true;
+    const localOffset = needsSegments
       ? columnToOffsetFromSegments(segmentForWidth(chunk.body), colInBody)
       : columnToOffset(chunk.body, colInBody);
     return {
@@ -6216,29 +6246,26 @@ export class Screen {
         writeStyled(this.term, text, line.bodyStyle, hovered);
       }
     };
-    if (selectionRange !== null && ansiLineWholeSelectOnly(line)) {
-      // Syntax-highlighted code row inside the selection. Per-char
-      // slicing isn't safe (see selectionRangeForChunk), so drop the
-      // syntax coloring for the highlighted row and paint the plain
-      // text under the inverse-video selection style. Matches how most
-      // editors behave — selection color wins over syntax color.
-      const plain = bodyText.replace(ANSI_STRIP_RE, "").replace(OSC8_STRIP_RE, "");
-      writeStyled(this.term, plain, "selection-highlight", hovered);
-    } else if (selectionRange !== null) {
+    if (selectionRange !== null) {
       const selStart = Math.max(0, Math.min(bodyText.length, selectionRange.start));
       const selEnd = Math.max(selStart, Math.min(bodyText.length, selectionRange.end));
-      const usesMarkup = bodyStyleUsesMarkup(line.bodyStyle);
+      // Both markup-bearing bodies (caret spans) and ansi-flagged bodies
+      // (syntax-highlighted code with CSI SGR spans) need strip-and-prime
+      // treatment: the selection band must be a uniform inverse-video
+      // color (no striping across syntax tokens), and the trailing piece
+      // needs its style stack replayed after the band's SGR reset.
+      const usesMarkup =
+        bodyStyleUsesMarkup(line.bodyStyle) || line.ansi === true;
       renderPiece(bodyText.slice(0, selStart), 0);
       if (selEnd > selStart) {
         let selText = bodyText.slice(selStart, selEnd);
         if (usesMarkup) {
           // Body carries caret-markup spans (^+bold^:, ^Ccode^:, etc.)
-          // emitted by applyInlineMarkup. Strip them so the inverse
-          // band reads as one uniform color regardless of which span
-          // the selection happens to cross — leaving the markup in
+          // or CSI SGR spans from cli-highlight. Strip them so the
+          // inverse band reads as one uniform color regardless of which
+          // span the selection happens to cross — leaving the markup in
           // would either print carets literally (noFormat) or invert
-          // each span's own fg color (bold stays default, code flips
-          // to a cyan band), making the selection look striped.
+          // each span's own fg color, making the selection look striped.
           selText = stripTkMarkup(selText);
         }
         writeStyled(this.term, selText, "selection-highlight", hovered);
@@ -6588,18 +6615,6 @@ function bodyStyleUsesMarkup(style: Style | undefined): boolean {
   );
 }
 
-// True when an ansi-flagged line must be selected/copied as a whole unit
-// rather than sliced per character. Syntax-highlighted code blocks
-// (bodyStyle "code", real SGR spans throughout) qualify — code-unit
-// offsets can't be mapped to visible columns safely. Agent / thought /
-// heading / plan bodies flagged ansi carry only OSC 8 hyperlink framing
-// (zero-width, recognized by matchTkMarkupAt) plus zero-width caret
-// markup, so the markup-aware offset machinery CAN slice them per-char;
-// those return false and fall through to the normal selection path.
-function ansiLineWholeSelectOnly(line: FormattedLine): boolean {
-  return line.ansi === true && !bodyStyleUsesMarkup(line.bodyStyle);
-}
-
 function writeStyled(
   term: Terminal,
   text: string,
@@ -6922,10 +6937,40 @@ function matchOsc8At(text: string, i: number): string | null {
   return null;
 }
 
+// Match a CSI escape (ESC [ params intermediates final) starting at `i`.
+// Covers SGR (…m) plus any other CSI form; all are zero visible columns
+// once emitted. Returning them as zero-width segments lets the offset /
+// wrap / strip machinery slice syntax-highlighted code lines the same way
+// it slices caret-markup lines — click-drag selection lands on visible-
+// character boundaries instead of getting rounded up to the whole row.
+function matchCsiAt(text: string, i: number): string | null {
+  if (!text.startsWith("\x1b[", i)) {
+    return null;
+  }
+  let j = i + 2;
+  while (j < text.length) {
+    const c = text.charCodeAt(j);
+    if (c < 0x30 || c > 0x3f) break;
+    j += 1;
+  }
+  while (j < text.length) {
+    const c = text.charCodeAt(j);
+    if (c < 0x20 || c > 0x2f) break;
+    j += 1;
+  }
+  if (j >= text.length) return null;
+  const final = text.charCodeAt(j);
+  if (final < 0x40 || final > 0x7e) return null;
+  return text.slice(i, j + 1);
+}
+
 export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
   if (text.charCodeAt(i) === 0x1b /* ESC */) {
     const osc8 = matchOsc8At(text, i);
-    return osc8 === null ? null : { text: osc8, width: 0 };
+    if (osc8 !== null) return { text: osc8, width: 0 };
+    const csi = matchCsiAt(text, i);
+    if (csi !== null) return { text: csi, width: 0 };
+    return null;
   }
   if (text.charCodeAt(i) !== 0x5e /* ^ */) {
     return null;
@@ -7021,7 +7066,7 @@ export function stripTkMarkup(text: string): string {
 // style. Re-emitting a bare OSC 8 opener would start an unwanted hyperlink
 // on the trailing text and leak its escape bytes into the row.
 function tkMarkupTokensOnly(text: string): string {
-  if (!text.includes("^")) {
+  if (!text.includes("^") && !text.includes("\x1b")) {
     return "";
   }
   let out = "";
@@ -7029,8 +7074,17 @@ function tkMarkupTokensOnly(text: string): string {
   while (i < text.length) {
     const m = matchTkMarkupAt(text, i);
     if (m) {
-      if (m.width === 0 && m.text.charCodeAt(0) === 0x5e /* ^ */) {
-        out += m.text;
+      if (m.width === 0) {
+        const head = m.text.charCodeAt(0);
+        if (head === 0x5e /* ^ */) {
+          out += m.text;
+        } else if (head === 0x1b && m.text.charCodeAt(1) === 0x5b /* [ */) {
+          // CSI SGR span — a persistent style that must be replayed so
+          // the trailing piece keeps its color after the selection band's
+          // reset. OSC 8 (ESC ]) is deliberately excluded (link wrapper,
+          // not a style).
+          out += m.text;
+        }
       }
       i += m.text.length;
       continue;

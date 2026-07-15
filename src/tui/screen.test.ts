@@ -2437,6 +2437,74 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("beta");
   });
 
+  it("double-click on a word inside an ansi code row snaps to the word", () => {
+    const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
+    // Simulated diff-highlighted row. The stripped view is:
+    //   "+        -e HOST_UID=$(id -u)"
+    // Column 14 (1-based) targets the 'H' of "HOST_UID".
+    screen.appendLine({
+      body: "\x1b[32m+        -e HOST_UID=$(id -u)\x1b[0m",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 14, y });
+    expect(screen.getSelectionText()).toBe("HOST_UID");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 14, y });
+    expect(screen.getSelectionText()).toBe("HOST_UID");
+  });
+
+  it("triple-click selects the whole source line", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "alpha beta gamma" });
+    const y = visibleRows(screen);
+    // Three same-cell presses within the double-click window: the third
+    // upgrades from word-snap to whole-line select.
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    expect(screen.getSelectionText()).toBe("alpha beta gamma");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    expect(screen.getSelectionText()).toBe("alpha beta gamma");
+  });
+
+  it("triple-click on an ansi code row selects the whole line (SGR stripped)", () => {
+    const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
+    screen.appendLine({
+      body: "\x1b[32m+        -e HOST_UID=$(id -u)\x1b[0m",
+      bodyStyle: "code",
+      ansi: true,
+    });
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 14, y });
+    expect(screen.getSelectionText()).toBe("+        -e HOST_UID=$(id -u)");
+  });
+
+  it("a fourth click on the same cell does not extend beyond the whole-line selection", () => {
+    // Sanity check: chain caps at 3. A stray fourth press restarts a
+    // fresh single-click gesture (which clears the selection).
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "alpha beta gamma" });
+    const y = visibleRows(screen);
+    for (let i = 0; i < 3; i++) {
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+      dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    }
+    expect(screen.getSelectionText()).toBe("alpha beta gamma");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    expect(screen.hasSelection()).toBe(false);
+  });
+
   it("double-click on whitespace does not create a selection", () => {
     const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
     screen.appendLine({ body: "alpha beta" });
@@ -2930,12 +2998,13 @@ describe("Screen block-click routing", () => {
     }
   });
 
-  it("selection through a highlighted code block yields the full stripped code lines", () => {
+  it("selection through a highlighted code block yields per-line partial slices", () => {
     const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
-    // Simulate a fenced code block: three ANSI lines sandwiched between
-    // plain prose. The regression: prior behavior emitted "" for
-    // ANSI endpoints, so a selection anchored inside the code block
-    // silently dropped its first / last / only line.
+    // Three ANSI-styled code rows sandwiched between plain prose. The
+    // grammar recognizer treats CSI SGR spans as zero-width segments, so
+    // clicks land on visible-cell boundaries and selection returns the
+    // actual sliced text — not the "whole line" overshoot that the older
+    // code-unit fallback produced.
     screen.appendLine({ body: "before" });
     screen.appendLine({
       body: "\x1b[31mconst\x1b[0m x = 1;",
@@ -2954,23 +3023,23 @@ describe("Screen block-click routing", () => {
     });
     screen.appendLine({ body: "after" });
     const rows = visibleRows(screen);
-    // Anchor a selection wholly inside the code block (rows 2 and 3 of
-    // the code fence). Neither endpoint sits on a non-ANSI line.
+    // Anchor: col 3 of row "const x = 1;" (offset 2 in the stripped
+    // view = between 'o' and 'n'). End: col 5 of row "const y = 2;"
+    // (offset 4 = between 's' and 't'). Visible chars in [2,end) then
+    // [0,4) → "nst x = 1;\ncons". SGR bytes are stripped from the
+    // extracted text.
     const start = resolve(screen, 3, rows - 3)!;
     const end = resolve(screen, 5, rows - 2)!;
     screen.setSelection(start, end);
-    const text = screen.getSelectionText();
-    // Both ANSI lines contribute their FULL stripped bodies — no empty
-    // pieces, no leaked SGR escape bytes.
-    expect(text).toBe("const x = 1;\nconst y = 2;");
+    expect(screen.getSelectionText()).toBe("nst x = 1;\ncons");
   });
 
   it("selection through a code block highlights every ANSI row (not every other one)", () => {
-    // Regression: selectionRangeForChunk used to return null for any
-    // ANSI-bodied chunk, so selecting through a syntax-highlighted code
-    // block skipped the code rows and produced a striped "every other
-    // line" highlight. It now returns a full-body range for ANSI chunks
-    // that overlap the selection so every covered row paints.
+    // Regression coverage: selectionRangeForChunk used to return null for
+    // any ANSI-bodied chunk, so selecting through a syntax-highlighted
+    // code block skipped code rows and produced a striped "every other
+    // line" highlight. It now returns a segment-aware range for every
+    // chunk that overlaps the selection.
     const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
     screen.appendLine({ body: "before" });
     screen.appendLine({
@@ -2985,12 +3054,11 @@ describe("Screen block-click routing", () => {
     });
     screen.appendLine({ body: "after" });
     const rows = visibleRows(screen);
-    const start = resolve(screen, 6, rows - 3)!;
-    const end = resolve(screen, 6, rows - 1)!;
+    // Anchor above the code block, end below it, so both ansi rows are
+    // fully covered by the selection.
+    const start = resolve(screen, 1, rows - 3)!;
+    const end = resolve(screen, 1, rows)!;
     screen.setSelection(start, end);
-    // Query the wrap output directly (selectionRangeForChunk needs the
-    // WRAPPED chunk with wrapOrigin metadata attached, not the raw
-    // source line).
     const wrapped = wrapAll(screen, 80);
     const codeChunkA = wrapped[wrapped.length - 3]!;
     const codeChunkB = wrapped[wrapped.length - 2]!;
@@ -2998,8 +3066,9 @@ describe("Screen block-click routing", () => {
     const rangeB = selectionRangeFor(screen, codeChunkB);
     expect(rangeA).not.toBeNull();
     expect(rangeB).not.toBeNull();
-    // ANSI chunks always report a full-body range with toEndOfLine so
-    // the whole row (plus fillRow padding) paints as one band.
+    // Both interior rows sit fully inside the selection: start at 0, end
+    // at the chunk's body length, toEndOfLine so the row's fillRow padding
+    // participates in the band.
     expect(rangeA!.start).toBe(0);
     expect(rangeA!.end).toBe(codeChunkA.body.length);
     expect(rangeA!.toEndOfLine).toBe(true);
@@ -3008,7 +3077,7 @@ describe("Screen block-click routing", () => {
     expect(rangeB!.toEndOfLine).toBe(true);
   });
 
-  it("selection wholly inside a single highlighted code line still yields text", () => {
+  it("selection wholly inside a single highlighted code line yields the sliced text", () => {
     const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
     screen.appendLine({
       body: "\x1b[31mconst\x1b[0m only = 42;",
@@ -3016,10 +3085,11 @@ describe("Screen block-click routing", () => {
       ansi: true,
     });
     const rows = visibleRows(screen);
+    // Columns 1..5 (1-based) → visible cells [0, 4) → "cons".
     const start = resolve(screen, 1, rows)!;
     const end = resolve(screen, 5, rows)!;
     screen.setSelection(start, end);
-    expect(screen.getSelectionText()).toBe("const only = 42;");
+    expect(screen.getSelectionText()).toBe("cons");
   });
 
   it("opt-out: in-app selection disabled means no drag selection", () => {

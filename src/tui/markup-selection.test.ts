@@ -111,6 +111,58 @@ describe("stripTkMarkup — clipboard text is markup-free", () => {
   });
 });
 
+describe("CSI SGR — click-to-offset lands on visible-cell boundaries", () => {
+  it("treats CSI SGR sequences as zero-width segments", () => {
+    // Simulated cli-highlight output: red 'const' followed by reset and
+    // the rest of the line. Visible chars: "const x = 1;" (12 cells).
+    const body = "\x1b[31mconst\x1b[0m x = 1;";
+    const segs = [...segmentForWidth(body)];
+    const totalWidth = segs.reduce((n, s) => n + s.width, 0);
+    expect(totalWidth).toBe("const x = 1;".length);
+  });
+
+  it("offsets snap past preceding SGR openers so a slice starts on a visible char", () => {
+    const body = "\x1b[31mconst\x1b[0m only = 42;";
+    const segs = [...segmentForWidth(body)];
+    // Column 0 clamps to offset 0 by contract (pre-first-cell).
+    expect(columnToOffsetFromSegments(segs, 0)).toBe(0);
+    // Column 1 must skip the opening `\x1b[31m` and land on 'c' — the
+    // regression this fix targets: click-drag on a syntax-highlighted
+    // row used to snap to the whole line because the offset landed
+    // inside the SGR sequence.
+    expect(columnToOffsetFromSegments(segs, 1)).toBe("\x1b[31mc".length);
+    // Column 4 sits between 's' and 't' inside the styled span — still
+    // in front of the closing `\x1b[0m`.
+    expect(columnToOffsetFromSegments(segs, 4)).toBe("\x1b[31mcons".length);
+    // Round-trip every visible column.
+    const visible = "const only = 42;";
+    for (let c = 0; c <= visible.length; c++) {
+      const off = columnToOffsetFromSegments(segs, c);
+      expect(offsetToColumnFromSegments(segs, off)).toBe(c);
+    }
+  });
+
+  it("stripTkMarkup removes CSI SGR spans from a syntax-highlighted line", () => {
+    const body = "\x1b[31mconst\x1b[0m x = \x1b[32m1\x1b[0m;";
+    expect(stripTkMarkup(body)).toBe("const x = 1;");
+  });
+
+  it("a mid-line diff-style green span selects to the visible-char slice", () => {
+    // Approximation of a highlighted diff line: bright red '-e HOST_UID='
+    // hunk sitting inside a green added row.
+    const body = "\x1b[32m+        -e HOST_UID=$(id -u)\x1b[0m";
+    const segs = [...segmentForWidth(body)];
+    const visible = "+        -e HOST_UID=$(id -u)";
+    // Selecting "HOST_UID=" (visible cols 12..21).
+    const startOff = columnToOffsetFromSegments(segs, 12);
+    const endOff = columnToOffsetFromSegments(segs, 21);
+    expect(stripTkMarkup(body.slice(startOff, endOff))).toBe("HOST_UID=");
+    // The total visible width matches the stripped length.
+    const totalWidth = segs.reduce((n, s) => n + s.width, 0);
+    expect(totalWidth).toBe(visible.length);
+  });
+});
+
 describe("segmentForWidth — OSC 8 is zero-width", () => {
   it("treats an OSC 8 span as a single zero-width segment", () => {
     const body = "a\x1b]8;;https://x\x1b\\b\x1b]8;;\x1b\\c";
