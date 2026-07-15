@@ -51,8 +51,34 @@ describe("looksLikePath", () => {
 describe("completePathToken", () => {
   const dir = (entries: DirEntry[]) => () => entries;
 
-  it("returns null for non-path tokens", () => {
+  it("returns null for a bare word when nothing in cwd matches", () => {
     expect(completePathToken("hello", "/cwd", dir([]))).toBe(null);
+    expect(
+      completePathToken("hello", "/cwd", dir([{ name: "other", isDir: false }])),
+    ).toBe(null);
+  });
+
+  it("completes a bare word against cwd when a file matches", () => {
+    // The user's ask: type "Mak", press Tab, get "Makefile".
+    expect(
+      completePathToken("Mak", "/cwd", dir([{ name: "Makefile", isDir: false }])),
+    ).toEqual({ replacement: "Makefile", candidates: ["Makefile"] });
+  });
+
+  it("completes a bare word to the common prefix when multiple files match", () => {
+    expect(
+      completePathToken(
+        "co",
+        "/cwd",
+        dir([
+          { name: "config.json", isDir: false },
+          { name: "convention.md", isDir: false },
+        ]),
+      ),
+    ).toEqual({
+      replacement: "con",
+      candidates: ["config.json", "convention.md"],
+    });
   });
 
   it("returns null when the directory is unreadable", () => {

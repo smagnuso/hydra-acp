@@ -2437,6 +2437,52 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("beta");
   });
 
+  it("double-click on a bare URL snaps to the whole URL, not a word inside it", () => {
+    const opens: string[] = [];
+    const screen = makeTallScreen({
+      width: 200,
+      height: 24,
+      mouse: true,
+      // openFileCommand configured: without the URL guard, the URL would
+      // scan as an absolute path (strong-signal shortcut in
+      // resolvePathToken) and spawn the editor. Failing to select the
+      // URL AND spawning the editor were both symptoms of the bug.
+      openFileCommand: ["true"],
+    });
+    (
+      screen as unknown as {
+        onOpenPath?: (raw: string) => void;
+      }
+    ).onOpenPath = (raw) => opens.push(raw);
+    screen.appendLine({
+      body: "ran on https://nrdp.builds.test.netflix.net/job/nrdp-branch-builder/4690626/console and it looks updated",
+    });
+    const y = visibleRows(screen);
+    // Column 20 (1-based) lands somewhere inside "nrdp.builds.test.netflix.net".
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 20, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 20, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 20, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 20, y });
+    expect(screen.getSelectionText()).toBe(
+      "https://nrdp.builds.test.netflix.net/job/nrdp-branch-builder/4690626/console",
+    );
+    // The editor must NOT have been dispatched for the URL — that was
+    // the false-positive resolvePathToken was hitting.
+    expect(opens).toEqual([]);
+  });
+
+  it("double-click on a URL followed by a period drops the sentence terminator", () => {
+    const screen = makeTallScreen({ width: 120, height: 24, mouse: true });
+    screen.appendLine({ body: "see https://example.com/x. done" });
+    const y = visibleRows(screen);
+    // Column 8 lands inside "example".
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 12, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 12, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 12, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 12, y });
+    expect(screen.getSelectionText()).toBe("https://example.com/x");
+  });
+
   it("double-click on a word inside an ansi code row snaps to the word", () => {
     const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
     // Simulated diff-highlighted row. The stripped view is:

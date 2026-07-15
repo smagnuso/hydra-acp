@@ -121,11 +121,17 @@ export function completePathToken(
   cwd: string,
   listDir: (dir: string) => DirEntry[] | null = readDir,
 ): PathCompletion | null {
-  if (!looksLikePath(token)) {
-    return null;
-  }
   const raw = unescapeToken(token);
   const { dirPrefix, base } = splitToken(raw);
+  // Bare-word tokens (no slash, no ~/. anchor) get path-completion too
+  // when the cwd holds a matching entry — Tab-completing "Mak" to
+  // "Makefile" is the common case. When no entry matches, we return
+  // null so the caller falls through to plain Tab-indent behavior for
+  // ordinary prose. Path-shaped tokens still take the direct listDir
+  // path (unreadable directory → null → indent).
+  if (dirPrefix.length === 0 && !looksLikePath(token) && base.length === 0) {
+    return null;
+  }
   const dir = resolveDir(dirPrefix, cwd);
   const entries = listDir(dir);
   if (entries === null) {

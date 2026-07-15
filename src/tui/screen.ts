@@ -81,6 +81,16 @@ const ASCII_WORD_RE = /[A-Za-z0-9_]/;
 // hyphens, tildes, and pluses that appear in real paths. The optional
 // `:<linenumber>` suffix is matched separately after the token boundary.
 const PATH_TOKEN_RE = /[A-Za-z0-9_./\-~+@]/;
+// Wider still: characters permitted anywhere in a URI (RFC 3986 unreserved
+// + reserved + percent-encoding + common query/fragment punctuation).
+// Used by the double-click URL-snap gesture to grab a whole bare URL.
+// Deliberately excludes whitespace and matched-pair delimiters (`<>` `""`
+// `` `` ``) that reliably bracket URLs in prose without being part of them.
+const URL_CHAR_RE = /[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%\-]/;
+// Trailing punctuation to strip from a URL run — sentence terminators and
+// common bracket/quote closers that snuck into the greedy run because
+// URL_CHAR_RE includes them for the path/query interior.
+const URL_TRAILING_PUNCT_RE = /[.,;:!?)\]}'"]/;
 // Matches hydra://sessions/<id> URLs (with optional host:port prefix and
 // #turn-<n> fragment). Used by the click handler to switch sessions.
 const HYDRA_SESSION_URL_RE =
@@ -3533,6 +3543,35 @@ export class Screen {
     if (cleanOffset >= clean.length) {
       idx = clean.length - 1;
     }
+    if (!ASCII_WORD_RE.test(clean[idx]!) && !URL_CHAR_RE.test(clean[idx]!)) {
+      return null;
+    }
+    // URL-snap: expand to the enclosing non-whitespace run first, then
+    // check whether it contains a scheme delimiter (`://`). If so, use
+    // the URL bounds instead of the plain ASCII-word bounds so double-
+    // clicking anywhere inside `https://…/console` selects the whole URL
+    // (what "click a link to copy it" has to mean when we don't route
+    // URLs through the terminal's URL handler).
+    let urlStart = idx;
+    while (urlStart > 0 && URL_CHAR_RE.test(clean[urlStart - 1]!)) {
+      urlStart--;
+    }
+    let urlEnd = idx + 1;
+    while (urlEnd < clean.length && URL_CHAR_RE.test(clean[urlEnd]!)) {
+      urlEnd++;
+    }
+    // Strip trailing punctuation that's usually adjacent-to-not-in the
+    // URL (period at end of sentence, comma, closing bracket that opens
+    // outside the URL, etc.). Same shape as pathTokenAt's tail trim.
+    while (urlEnd > urlStart + 1 && URL_TRAILING_PUNCT_RE.test(clean[urlEnd - 1]!)) {
+      urlEnd--;
+    }
+    const runContainsScheme = clean.slice(urlStart, urlEnd).includes("://");
+    if (runContainsScheme) {
+      const cleanStart = urlStart;
+      const cleanEnd = urlEnd;
+      return this.projectCleanRangeToRaw(rawToClean, body.length, cleanStart, cleanEnd);
+    }
     if (!ASCII_WORD_RE.test(clean[idx]!)) {
       return null;
     }
@@ -3544,19 +3583,28 @@ export class Screen {
     while (cleanEnd < clean.length && ASCII_WORD_RE.test(clean[cleanEnd]!)) {
       cleanEnd++;
     }
-    // Project clean indices back to raw offsets. The first raw index
-    // whose rawToClean value equals cleanStart is the visible char's
-    // position in the raw body; for cleanEnd we want the position past
-    // the last visible char (i.e. the first raw index mapping to
-    // cleanEnd, which sits at the boundary after the word and before
-    // any trailing markup).
-    let start = body.length;
-    let end = body.length;
+    return this.projectCleanRangeToRaw(rawToClean, body.length, cleanStart, cleanEnd);
+  }
+
+  // Map a [cleanStart, cleanEnd) slice back to raw code-unit offsets.
+  // The first raw index whose rawToClean value equals cleanStart is the
+  // visible char's position in the raw body; for cleanEnd we want the
+  // position past the last visible char (i.e. the first raw index mapping
+  // to cleanEnd, which sits at the boundary after the run and before any
+  // trailing markup).
+  private projectCleanRangeToRaw(
+    rawToClean: number[],
+    bodyLen: number,
+    cleanStart: number,
+    cleanEnd: number,
+  ): { start: number; end: number } {
+    let start = bodyLen;
+    let end = bodyLen;
     for (let r = 0; r < rawToClean.length; r++) {
-      if (rawToClean[r] === cleanStart && start === body.length) {
+      if (rawToClean[r] === cleanStart && start === bodyLen) {
         start = r;
       }
-      if (rawToClean[r] === cleanEnd && end === body.length) {
+      if (rawToClean[r] === cleanEnd && end === bodyLen) {
         end = r;
         break;
       }
@@ -3640,6 +3688,20 @@ export class Screen {
     // not part of it (period at end of sentence, etc.).
     raw = raw.replace(/[.]+$/, "");
     if (raw.length === 0) {
+      return null;
+    }
+    // Reject the tail of a bare URL: PATH_TOKEN_RE includes '/' but
+    // not ':', so scanning back from any character inside
+    // `https://host/path/…` stops at the colon and yields a token that
+    // begins with `//` (the URL's authority). Without this guard the
+    // token passes as an absolute path, resolvePathToken's strong-signal
+    // branch short-circuits the stat probe, and the editor is dispatched
+    // to open a phantom `/host/path/…` file. Any click landing inside a
+    // URL bails here so the gesture falls through to the word-snap
+    // clipboard path — which is what "double-click a URL to copy it"
+    // has to do since terminal URL-open is a separate (browser) affordance
+    // we don't route through openFileCommand.
+    if (raw.startsWith("//")) {
       return null;
     }
     let lineNum: number | null = null;
