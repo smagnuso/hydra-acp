@@ -63,6 +63,7 @@ import {
   runAgentsPin,
   runAgentsAdd,
   runAgentsRemove,
+  runAgentsUninstall,
   runRegistryPin,
 } from "./cli/commands/agents.js";
 import { runAgentAuth } from "./cli/commands/agent-auth.js";
@@ -625,6 +626,10 @@ async function main(): Promise<void> {
         await runAgentsRemove(positional[2]);
         return;
       }
+      if (sub === "uninstall") {
+        await runAgentsUninstall(positional[2]);
+        return;
+      }
       if (sub === "log" || sub === "logs") {
         const agIdx = argv.indexOf(subcommand);
         const tail = argv.slice(agIdx + 2);
@@ -1016,7 +1021,8 @@ function printHelp(subcommand?: string): void {
     [AGENT, "  hydra-acp agent set [<id>] [model]          With no args, report the daemon's current default agent and its default model. With <id>, set <id> as the default agent (config.defaultAgent). With <id> and [model], set the per-agent default model (config.defaultModels[<id>])."],
     [AGENT, "  hydra-acp agent pin <id> [packageSpec]      Pin a registry agent to a specific npm version (e.g. opencode-ai@0.5.12). Omit packageSpec to clear. Sidesteps a broken upstream publish."],
     [AGENT, "  hydra-acp agent add <id> [--command CMD] [--args A,B,C] [--env K=V]...  Define a local agent that bypasses the registry (e.g. your system `opencode`). --command defaults to <id> (resolved off PATH)."],
-    [AGENT, "  hydra-acp agent remove <id>                 Remove a local agent."],
+    [AGENT, "  hydra-acp agent remove <id>                 Remove a local agent (config only; leaves the on-disk install cache)"],
+    [AGENT, "  hydra-acp agent uninstall <id>              Delete <id>'s cached install (~/.hydra-acp/agents/<platform>/<id>/) so the next session re-downloads"],
     [REGISTRY, "  hydra-acp registry pin | unpin              Freeze the daemon on its cached registry (pin) so a bad push isn't picked up, or resume normal TTL fetching (unpin). `agent refresh` still forces a fetch."],
     [AGENT, "  hydra-acp agent sync <id>                   Spawn <id> just long enough to ACP session/list it, then persist any sessions it remembers (across every cwd) as cold rows in `session list`"],
     [AGENT, "  hydra-acp agent log <id> [-f] [-n N]         Tail or follow an agent's spawn/stderr log"],

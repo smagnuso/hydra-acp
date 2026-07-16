@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import {
   loadConfig,
   setDefaultAgent,
@@ -8,6 +10,7 @@ import {
   type LocalAgentConfig,
 } from "../../core/config.js";
 import { paths } from "../../core/paths.js";
+import { currentPlatformKey } from "../../core/binary-install.js";
 import { runLogTail } from "./log-tail.js";
 import {
   daemonFetch,
@@ -508,6 +511,63 @@ export async function runAgentsRemove(agentId: string | undefined): Promise<void
   process.stdout.write(`Removed local agent ${agentId}.\n`);
   process.stdout.write(
     "Restart with `hydra-acp daemon restart` to apply to new sessions.\n",
+  );
+}
+
+// `hydra agent uninstall <id>` — purge the on-disk install cache for
+// <id> so the next launch triggers a fresh download / npm install.
+//
+// What this deletes:
+//   ~/.hydra-acp/agents/<platformKey>/<canonicalId>/
+//
+// That covers both binary and npx distributions (the npm ABI-keyed
+// subdir sits inside the version dir). Only the current platform is
+// touched — a Hydra home shared across machines keeps the other
+// platform's caches intact. Nothing else is disturbed: config,
+// registry cache, logs, sessions, and any user-defined local agent
+// override survive.
+//
+// Doesn't touch running agent processes. On Linux/macOS the kernel
+// keeps the inode alive as long as the process holds it, so an
+// in-flight agent finishes normally and only *new* spawns re-install.
+//
+// Local-only (like `agent remove`): operates on this machine's cache
+// via the filesystem, not a daemon REST call. Won't reach across to a
+// remote target.
+export async function runAgentsUninstall(
+  agentId: string | undefined,
+): Promise<void> {
+  if (!agentId) {
+    process.stderr.write("Usage: hydra-acp agent uninstall <id>\n");
+    process.exit(2);
+    return;
+  }
+  const canonical = await resolveAgentIdOrExit(agentId, "hydra agent uninstall");
+  const platform = currentPlatformKey();
+  if (platform === undefined) {
+    process.stderr.write(
+      "hydra agent uninstall: cannot determine current platform; nothing removed.\n",
+    );
+    process.exit(1);
+    return;
+  }
+  const installRoot = path.join(paths.agentsDir(), platform, canonical);
+  let existed = false;
+  try {
+    await fs.stat(installRoot);
+    existed = true;
+  } catch {
+    // ENOENT falls through as existed=false.
+  }
+  if (!existed) {
+    process.stdout.write(
+      `Nothing to remove: ${canonical} is not installed on ${platform}.\n`,
+    );
+    return;
+  }
+  await fs.rm(installRoot, { recursive: true, force: true });
+  process.stdout.write(
+    `Uninstalled ${canonical} (${platform}). Next session using it will re-install.\n`,
   );
 }
 
