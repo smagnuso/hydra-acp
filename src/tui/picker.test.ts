@@ -462,7 +462,7 @@ describe("pickSession composer", () => {
   it("returns kind:new with no prompt when Enter is hit on empty composer", async () => {
     const drv = makePicker({ sessions });
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
     });
@@ -472,7 +472,7 @@ describe("pickSession composer", () => {
     const drv = makePicker({ sessions });
     drv.type("hello world");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "hello world",
@@ -483,7 +483,7 @@ describe("pickSession composer", () => {
     const drv = makePicker({ sessions });
     drv.type("   ");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
     });
@@ -495,7 +495,7 @@ describe("pickSession composer", () => {
     drv.press("ALT_ENTER");
     drv.type("line two");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "line one\nline two",
@@ -506,7 +506,7 @@ describe("pickSession composer", () => {
     const drv = makePicker({ sessions });
     drv.press("DOWN");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "attach",
       sessionId: "hydra-aaa",
     });
@@ -518,7 +518,7 @@ describe("pickSession composer", () => {
     drv.press("UP");
     drv.type("from composer");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "from composer",
@@ -538,7 +538,7 @@ describe("pickSession composer", () => {
     }
     drv.type("still composer");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "still composer",
@@ -551,7 +551,7 @@ describe("pickSession composer", () => {
     drv.press("DOWN");
     drv.press("UP");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "draft",
@@ -562,7 +562,7 @@ describe("pickSession composer", () => {
     const drv = makePicker({ sessions: [] });
     drv.type("only choice");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "only choice",
@@ -577,13 +577,13 @@ describe("pickSession composer", () => {
     // Second ^c on the now-empty buffer emits the exit effect, which the
     // picker translates to an abort.
     drv.press("CTRL_C");
-    await expect(drv.resolveOnce).resolves.toEqual({ kind: "abort" });
+    await expect(drv.resolveOnce).resolves.toMatchObject({ kind: "abort" });
   });
 
   it("Ctrl+C aborts immediately when the composer is already empty", async () => {
     const drv = makePicker({ sessions });
     drv.press("CTRL_C");
-    await expect(drv.resolveOnce).resolves.toEqual({ kind: "abort" });
+    await expect(drv.resolveOnce).resolves.toMatchObject({ kind: "abort" });
   });
 
   it("^U clears the composer buffer", async () => {
@@ -591,7 +591,7 @@ describe("pickSession composer", () => {
     drv.type("scratch this");
     drv.press("CTRL_U");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
     });
@@ -602,7 +602,7 @@ describe("pickSession composer", () => {
     drv.type("hellox");
     drv.press("BACKSPACE");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "hello",
@@ -616,7 +616,7 @@ describe("pickSession composer", () => {
     // refresh / host-filter / kill.
     drv.type("hrkdcoqt?");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "hrkdcoqt?",
@@ -630,7 +630,7 @@ describe("pickSession composer", () => {
     // immediately submit.
     drv.paste("line one\nline two");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "line one\nline two",
@@ -641,7 +641,7 @@ describe("pickSession composer", () => {
     const drv = makePicker({ sessions });
     drv.paste("first\r\nsecond");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "first\nsecond",
@@ -653,7 +653,7 @@ describe("pickSession composer", () => {
     drv.type("prefix: ");
     drv.paste("pasted value");
     drv.press("ENTER");
-    await expect(drv.resolveOnce).resolves.toEqual({
+    await expect(drv.resolveOnce).resolves.toMatchObject({
       kind: "new",
       cwd: "/home/me/work/project",
       prompt: "prefix: pasted value",
@@ -714,7 +714,7 @@ describe("pickSession: killing the current session blocks abort", () => {
     // `exit` — the caller treats that as "exit hydra entirely" instead
     // of re-attaching to a session that no longer exists.
     drv.press("ESCAPE");
-    await expect(drv.resolveOnce).resolves.toEqual({ kind: "exit" });
+    await expect(drv.resolveOnce).resolves.toMatchObject({ kind: "exit" });
   });
 
   it("still aborts normally when a non-current session is killed", async () => {
@@ -745,6 +745,6 @@ describe("pickSession: killing the current session blocks abort", () => {
     drv.press("y", { isCharacter: true });
     await flush();
     drv.press("ESCAPE");
-    await expect(drv.resolveOnce).resolves.toEqual({ kind: "abort" });
+    await expect(drv.resolveOnce).resolves.toMatchObject({ kind: "abort" });
   });
 });

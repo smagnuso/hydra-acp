@@ -87,6 +87,11 @@ import {
   formatSummary as formatSessionInfoSummary,
 } from "../cli/commands/sessions-info.js";
 import { writeDebugLine } from "./debug-log.js";
+import {
+  createInstallStatusLine,
+  type InstallStatusLine,
+  type InstallStatusSink,
+} from "./install-status.js";
 
 export type PickerResult =
   | {
@@ -98,6 +103,13 @@ export type PickerResult =
       // and the TUI hides the composer. Set by the picker's `v`
       // keystroke; Enter leaves it undefined / false.
       readonly?: boolean;
+      // Same contract as the `new` variant: when set, picker deferred
+      // its cleanup and left its frame painted. Caller MUST finalize
+      // (directly or via runSession). Set on the main-picker attach
+      // paths (Enter, `v`, mouse click) so "Resuming session…" and any
+      // agent-install progress paint in the composer-adjacent status
+      // row instead of scrolling out below the picker.
+      installStatus?: InstallStatusLine;
     }
   | {
       // Picker's `f` keystroke. Outer flow runs the (optional) cwd
@@ -120,6 +132,13 @@ export type PickerResult =
       // before the session existed. Fired alongside `prompt` on the first
       // enqueuePrompt in the freshly-attached session.
       attachments?: Attachment[];
+      // When set, the picker deferred its terminal cleanup and left its
+      // rendered frame in place. The caller MUST invoke installStatus
+      // .finalize() (directly or via runSession) to trigger the deferred
+      // cleanup — otherwise input handlers stay off but the screen
+      // stays painted. Writes to `.write()` / `.applyProgress()` paint
+      // in the composer-adjacent status row.
+      installStatus?: InstallStatusLine;
     }
   | { kind: "abort" }
   | { kind: "exit" };
@@ -436,8 +455,24 @@ export async function pickSession(
   // but it comes from searchTerm/visible directly — formatComposerStatus
   // combines both.
   let composerHint: string | null = null;
+  // Post-selection install / launch status, painted in the same
+  // composer-adjacent row. Set only after the picker has resolved with
+  // a "new" selection and deferred its cleanup — while it's non-null
+  // the row displays this string in brightYellow (matching the pre-
+  // alt-screen stdout redraw) instead of the dim hint / search line.
+  // Precedence: installStatusText wins over search and hint.
+  let installStatusText: string | null = null;
 
   const formatComposerStatus = (): { plain: string; render: () => void } | null => {
+    if (installStatusText !== null) {
+      const text = installStatusText;
+      return {
+        plain: text,
+        render: () => {
+          term.brightYellow.noFormat(`  ${text}`);
+        },
+      };
+    }
     if (searchActive) {
       const matches =
         visible.length === 0
@@ -988,6 +1023,9 @@ export async function pickSession(
   const composerBotSig = (): string =>
     `cb|${composerFocusFlag()}|${composerBoxInner()}`;
   const composerStatusSig = (): string => {
+    if (installStatusText !== null) {
+      return `cs|i|${installStatusText}`;
+    }
     if (searchActive) {
       return `cs|s|${searchTerm}|${visible.length}`;
     }
@@ -1919,12 +1957,14 @@ export async function pickSession(
       prompt?: string;
       cwd?: string;
       attachments?: Attachment[];
+      installStatus?: InstallStatusLine;
     } => {
       const out: {
         kind: "new";
         prompt?: string;
         cwd?: string;
         attachments?: Attachment[];
+        installStatus?: InstallStatusLine;
       } = { kind: "new", cwd: currentCwd };
       const attached = composer.state().attachments;
       if (attached.length > 0) {
@@ -2003,11 +2043,20 @@ export async function pickSession(
       focusStack[focusStack.length - 1]?.onKey(name, null, {});
     };
 
-    const cleanup = (): void => {
-      if (resolved) {
+    // Every OS-/terminal-side listener and grab this picker owns. Runs
+    // idempotently: safe to call from both cleanup() (normal resolve)
+    // and makePickerInstallStatus() (deferred-cleanup resolve, where we
+    // keep the visible frame but must still detach input so keystrokes
+    // during the install window don't stack `rawStdinHandler`s across
+    // successive pickSession invocations — each leaked handler forwards
+    // every byte to termkit, so N leaks means the current picker's
+    // dispatch fires N times per keypress).
+    let inputDetached = false;
+    const detachInput = (): void => {
+      if (inputDetached) {
         return;
       }
-      resolved = true;
+      inputDetached = true;
       focusStack.length = 0;
       if (autoRefreshTimer) {
         clearInterval(autoRefreshTimer);
@@ -2021,7 +2070,6 @@ export async function pickSession(
       term.off("key", dispatch);
       term.off("mouse", onMouse);
       term.off("resize", dispatchResize);
-      // Restore terminal-kit's stdin listener and disable bracketed paste.
       process.stdout.write(BRACKETED_PASTE_OFF);
       process.stdout.write(FOCUS_TRACK_OFF);
       const tClean = term as unknown as { stdin: NodeJS.ReadableStream };
@@ -2033,7 +2081,17 @@ export async function pickSession(
       pasteActive = false;
       pasteBuffer = "";
       term.grabInput(false);
-      writeDebugLine({ src: "grab", site: "picker.cleanup", on: false });
+      writeDebugLine({ src: "grab", site: "picker.detachInput", on: false });
+    };
+    const cleanup = (): void => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      detachInput();
+      // Terminate the visible frame: park the cursor just below the
+      // picker so subsequent stdout writes (or the outer flow's own
+      // paint) don't overwrite our last row.
       term.hideCursor(false);
       term.moveTo(1, indicatorRow() + 1);
       term("\n");
@@ -2084,6 +2142,43 @@ export async function pickSession(
       }
       autoRefreshTimer = setInterval(autoRefreshTick, 3000);
     };
+    // Build an InstallStatusLine that paints into the picker's composer-
+    // adjacent status row and defers the terminal cleanup until finalize().
+    // Called on the "new"-selection paths so the launch label /
+    // agent-install progress lands in the visible picker frame instead
+    // of the pre-alt-screen stdout gap.
+    //
+    // Contract: caller MUST call .finalize() exactly once — that's what
+    // actually tears down input handlers, releases the terminal grab,
+    // and moves the cursor below the picker. Missing that call leaves
+    // the picker painted but frozen.
+    const makePickerInstallStatus = (): InstallStatusLine => {
+      // Full input teardown up front — including the raw stdin data
+      // listener and the terminal grab. Without this, a stacked
+      // rawStdinHandler from each prior deferred-cleanup pickSession
+      // would forward every keystroke through termkit N times, so the
+      // next picker's dispatch would fire N times per press (repro:
+      // start session → back to picker → start session → back to picker,
+      // then observe arrow keys moving the cursor by N rows). The
+      // visible frame is preserved because we skip the terminating
+      // cursor-move + newline; those run later inside finalize().
+      detachInput();
+      const sink: InstallStatusSink = {
+        write(text) {
+          installStatusText = text;
+          repaintComposerStatus();
+        },
+        finalize() {
+          installStatusText = null;
+          // Do NOT repaint the status row here — the row is about to be
+          // wiped by the alt-screen switch anyway, and repainting a
+          // now-null status could race the caller's next terminal write.
+          cleanup();
+        },
+      };
+      return createInstallStatusLine("", sink);
+    };
+
     // Abort returns the user to the session they opened the picker from.
     // If that session was killed/deleted in this picker session there's
     // nothing live to return to, so we resolve with `exit` instead — the
@@ -2793,12 +2888,12 @@ export async function pickSession(
           return;
         }
         if (name === "ENTER" || name === "KP_ENTER") {
-          cleanup();
           const text = composer.expandedText();
           const out = makeNewResult();
           if (text.trim().length > 0) {
             out.prompt = text;
           }
+          out.installStatus = makePickerInstallStatus();
           resolve(out);
           return;
         }
@@ -3033,7 +3128,7 @@ export async function pickSession(
           const result = makeNewResult();
           if (highlighted?.cwd)
             result.cwd = highlighted.cwd;
-          cleanup();
+          result.installStatus = makePickerInstallStatus();
           resolve(result);
           return;
         }
@@ -3098,7 +3193,6 @@ export async function pickSession(
           if (!session) {
             return;
           }
-          cleanup();
           const result: PickerResult = {
             kind: "attach",
             sessionId: session.sessionId,
@@ -3107,6 +3201,7 @@ export async function pickSession(
           if (session.agentId !== undefined) {
             result.agentId = session.agentId;
           }
+          result.installStatus = makePickerInstallStatus();
           resolve(result);
           return;
         }
@@ -3245,22 +3340,24 @@ export async function pickSession(
         case "ENTER":
         case "KP_ENTER": {
           if (composerHover) {
-            cleanup();
             const text = composer.expandedText();
             const out = makeNewResult();
             if (text.trim().length > 0) {
               out.prompt = text;
             }
+            out.installStatus = makePickerInstallStatus();
             resolve(out);
             return;
           }
-          cleanup();
           if (selectedIdx === 0) {
-            resolve(makeNewResult());
+            const out = makeNewResult();
+            out.installStatus = makePickerInstallStatus();
+            resolve(out);
             return;
           }
           const session = visible[selectedIdx - 1];
           if (!session) {
+            cleanup();
             resolve({ kind: "abort" });
             return;
           }
@@ -3271,6 +3368,7 @@ export async function pickSession(
           if (session.agentId !== undefined) {
             result.agentId = session.agentId;
           }
+          result.installStatus = makePickerInstallStatus();
           resolve(result);
           return;
         }
@@ -3511,7 +3609,6 @@ export async function pickSession(
       if (wasComposer || !alreadySelected) {
         return;
       }
-      cleanup();
       const result: PickerResult = {
         kind: "attach",
         sessionId: session.sessionId,
@@ -3519,6 +3616,7 @@ export async function pickSession(
       if (session.agentId !== undefined) {
         result.agentId = session.agentId;
       }
+      result.installStatus = makePickerInstallStatus();
       resolve(result);
     };
     const installGrab = (): void => {

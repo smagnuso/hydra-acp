@@ -89,6 +89,11 @@ import {
   type PickerPrefs,
   type PickerResult,
 } from "./picker.js";
+import {
+  createInstallStatusLine,
+  createStdoutInstallStatusSink,
+  type InstallStatusLine,
+} from "./install-status.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
 import { promptForAgent } from "./agent-prompt.js";
@@ -522,6 +527,18 @@ export interface TuiOptions {
   // (>1 = faster). Set via `--drip` / `--drip-speed`.
   drip?: boolean;
   dripSpeed?: number;
+  // Internal, runtime-only: a deferred-cleanup picker handle whose
+  // `.write()` / `.applyProgress()` paint into the picker's composer-
+  // adjacent status row. Set by `switchSession` after ^p resolves with
+  // a new session choice (attach or new), so the launch label + any
+  // agent-install progress land in the picker frame instead of at the
+  // bottom of the terminal. Consumed exactly once by runSession, which
+  // deletes the field and calls `.finalize()` after attach completes.
+  //
+  // Not part of the CLI-visible surface — nothing serializes this. The
+  // property lives on TuiOptions only because switchSession's hand-off
+  // channel is the outer runSession loop's `nextOpts` argument.
+  installStatus?: InstallStatusLine;
 }
 
 // Shared view-only preferences that persist across the runSession loop
@@ -577,6 +594,18 @@ interface SessionContext {
   // status line so the user sees "Forking session…" instead of the
   // generic "Resuming session…" while the daemon's synopsis pass runs.
   isFreshFork?: boolean;
+  // When the picker resolved with a "new" selection AND ensureAgentForNew
+  // was a no-op (no interactive agent-picker dialog), the picker leaves
+  // its rendered frame on screen and hands back a sink that paints the
+  // launch label / agent-install progress in the composer-adjacent
+  // status row. runSession uses it in place of createInstallStatusLine
+  // so the "downloading…" text shows up in the gap between composer and
+  // session list instead of at the bottom of the terminal.
+  //
+  // Undefined on every other path (--resume, direct sessionId, fork,
+  // imported-first-launch, agent-picker taken) — runSession falls back
+  // to the stdout-redraw sink.
+  installStatus?: InstallStatusLine;
 }
 
 // How long the upstream may be silent (no session/update arrivals)
@@ -1034,7 +1063,22 @@ async function runSession(
       : ctx.isFreshFork
         ? "Forking session…"
         : "Resuming session…";
-  const installStatus = createInstallStatusLine(term, launchLabelBase);
+  // Prefer a picker-provided sink when available (paints the launch /
+  // install-progress line in the composer-adjacent status row of the
+  // still-visible picker frame). Two channels feed it:
+  //   - ctx.installStatus: the initial-picker path via resolveSession.
+  //   - opts.installStatus: the ^p / switchSession hand-off path, which
+  //     bypasses resolveSession by setting opts.sessionId. Consume and
+  //     clear so a subsequent resume iteration doesn't reuse a stale
+  //     already-finalized handle.
+  const optsInstallStatus = opts.installStatus;
+  if (opts.installStatus) {
+    delete opts.installStatus;
+  }
+  const installStatus =
+    ctx.installStatus ??
+    optsInstallStatus ??
+    createInstallStatusLine(launchLabelBase, createStdoutInstallStatusSink(term));
   installStatus.write(launchLabelBase);
 
   // For local targets the URL embeds the daemon's plain-HTTP loopback
@@ -3680,6 +3724,10 @@ async function runSession(
           break;
         }
         if (choice.kind === "fork") {
+          // Fork-choice from the picker never carries an installStatus
+          // handle (only "new" / "attach" do), so no finalize needed
+          // here — but runForkFlow renders its own interactive dialogs,
+          // so if that ever changes it belongs here.
           const decided = await runForkFlow(term, target, choice, sessions);
           if (decided.kind === "cancel") {
             return;
@@ -3727,6 +3775,8 @@ async function runSession(
           ) {
             const v = await validateLocalCwd(chosen.cwd);
             if (!v.ok) {
+              choice.installStatus?.finalize();
+              delete choice.installStatus;
               const r = await promptForImportCwd(term, chosen, {
                 defaultCwd: expandHome(config.defaultCwd),
                 title: "Working directory missing — choose cwd",
@@ -3759,6 +3809,10 @@ async function runSession(
         // mutating the warm session's opts (which still owns the current
         // session). We translate the shim back into attachOverrides.
         const opsShim: TuiOptions = { ...opts, readonly: false };
+        // runImportedFirstLaunchFlow renders its own dialog on top of
+        // the alt screen — release the picker frame first.
+        choice.installStatus?.finalize();
+        delete choice.installStatus;
         const decided = await runImportedFirstLaunchFlow(term, target, chosen, choice, opsShim);
         if (decided.kind === "cancel") {
           return;
@@ -3810,6 +3864,13 @@ async function runSession(
         if (choice.attachments && choice.attachments.length > 0) {
           nextOpts.initialAttachments = choice.attachments;
         }
+        // Hand the still-live picker frame to the next runSession so
+        // "Starting new session…" + agent-install progress paint into
+        // its composer-status row. runSession consumes the handle
+        // exactly once and finalizes after attach completes.
+        if (choice.installStatus !== undefined) {
+          nextOpts.installStatus = choice.installStatus;
+        }
         resume(nextOpts);
         return;
       }
@@ -3837,6 +3898,16 @@ async function runSession(
         // Clear any stale hint inherited from the current session's opts —
         // it was for the previous attach, not the new one.
         delete nextOpts.resumeHint;
+      }
+      // Same hand-off as the "new" branch: keep the picker's status row
+      // live across the runSession boundary so "Resuming session…" and
+      // any cold-agent-install progress paint into it. Undefined when
+      // the branches above finalized eagerly (fork / cwd-missing /
+      // imported-first-launch).
+      if (choice.installStatus !== undefined) {
+        nextOpts.installStatus = choice.installStatus;
+      } else {
+        delete nextOpts.installStatus;
       }
       resume(nextOpts);
     } finally {
@@ -7037,14 +7108,37 @@ async function resolveSession(
       // session. Esc (back) re-shows the picker — opts.initialPrompt is
       // preserved above, so the composer re-opens with the typed text.
       // ^C (cancel) tears down the launch.
-      const agentStep = await ensureAgentForNew(term, target, opts, viewPrefs);
+      //
+      // The picker deferred its terminal cleanup so the launch/install
+      // status paints into its still-visible frame. If ensureAgentForNew
+      // has to render its own dialog, we can't share the screen with
+      // it — finalize the deferred cleanup first (via `beforeUi`) so the
+      // agent picker starts on a clean terminal, then drop the handle
+      // so runSession falls back to the stdout-redraw sink.
+      let installStatus = choice.installStatus;
+      const agentStep = await ensureAgentForNew(term, target, opts, viewPrefs, () => {
+        if (installStatus) {
+          installStatus.finalize();
+          installStatus = undefined;
+        }
+      });
       if (agentStep === "cancel") {
+        if (installStatus) {
+          installStatus.finalize();
+        }
         return null;
       }
       if (agentStep === "back") {
+        if (installStatus) {
+          installStatus.finalize();
+        }
         continue;
       }
-      return newCtx(opts, cwd, config);
+      const ctx = newCtx(opts, cwd, config);
+      if (installStatus) {
+        ctx.installStatus = installStatus;
+      }
+      return ctx;
     }
     if (choice.kind === "fork") {
       const decided = await runForkFlow(term, target, choice, sessions);
@@ -7062,6 +7156,21 @@ async function resolveSession(
     // this mutation, first-launch `v` opens non-readonly even though the
     // picker returned readonly:true.
     opts.readonly = choice.readonly === true;
+    // Picker may have deferred its cleanup so "Resuming session…" can
+    // paint in the composer-adjacent status row. Any branch below that
+    // renders an interactive dialog (imported-first-launch, cwd-missing
+    // prompt) MUST finalize the handle before it draws — otherwise the
+    // sub-dialog collides with the still-visible picker frame. On the
+    // straight-through path we propagate the handle into ctx so
+    // runSession keeps painting into the picker until the alt-screen
+    // switch wipes it.
+    let installStatus = choice.installStatus;
+    const finalizePicker = (): void => {
+      if (installStatus) {
+        installStatus.finalize();
+        installStatus = undefined;
+      }
+    };
     // First-launch-on-this-machine for an imported session: route through
     // the fork-vs-view dialog (and on fork-local, a cwd dialog). Cancel
     // tears down the TUI; back returns here to re-show the picker.
@@ -7072,6 +7181,7 @@ async function resolveSession(
       !chosen.upstreamSessionId &&
       !opts.readonly;
     if (isImportedFirstLaunch) {
+      finalizePicker();
       const decided = await runImportedFirstLaunchFlow(term, target, chosen, choice, opts);
       if (decided.kind === "cancel") {
         return null;
@@ -7092,6 +7202,7 @@ async function resolveSession(
     if (target.isLocal && chosen && !chosen.importedFromMachine && !opts.readonly) {
       const v = await validateLocalCwd(chosen.cwd);
       if (!v.ok) {
+        finalizePicker();
         const r = await promptForImportCwd(term, chosen, {
           defaultCwd: expandHome(config.defaultCwd),
           title: "Working directory missing — choose cwd",
@@ -7116,11 +7227,15 @@ async function resolveSession(
         };
       }
     }
-    return {
+    const ctx: SessionContext = {
       sessionId: choice.sessionId,
       agentId: choice.agentId ?? "",
       cwd,
     };
+    if (installStatus) {
+      ctx.installStatus = installStatus;
+    }
+    return ctx;
   }
 }
 
@@ -7346,6 +7461,11 @@ async function ensureAgentForNew(
   target: RemoteTarget,
   opts: TuiOptions,
   viewPrefs: ViewPrefs,
+  // Fired exactly once, immediately before promptForAgent renders its
+  // interactive dialog. Used by the picker "new" path to finalize the
+  // deferred picker cleanup (releasing its painted rows) so the agent
+  // prompt doesn't collide with the still-visible picker frame.
+  beforeUi?: () => void,
 ): Promise<"ok" | "back" | "cancel"> {
   if (opts.agentId) {
     return "ok";
@@ -7361,6 +7481,9 @@ async function ensureAgentForNew(
   }
   if (agents.length === 0) {
     return "ok";
+  }
+  if (beforeUi) {
+    beforeUi();
   }
   const config = await loadConfig();
   // Prefer the in-process last pick over config.defaultAgent (which is
@@ -7400,138 +7523,5 @@ function debugLogUpdate(update: unknown, event: RenderEvent | null): void {
   });
 }
 
-// Single-line, redraw-in-place status indicator used in the pre-screen
-// gap between the picker closing and screen.start() entering the
-// alternate screen. Backs the launch label ("Starting new session…"
-// / "Resuming session…") and overwrites it with live agent-install
-// progress when the daemon fires hydra-acp/agents/install_progress.
-//
-// Implementation notes:
-//   - We never know the previous line's printed width precisely (TTY
-//     line wrap, double-width glyphs), so we redraw by writing CR +
-//     eraseLineAfter + new content rather than counting columns.
-//   - OSC 9;4 (indeterminate pulse: ESC]9;4;3 ST, clear: ESC]9;4;0 ST)
-//     is emitted directly here — Screen.writeProgressIndicator only
-//     fires after .start(), and the install happens before that.
-//     Terminals that don't implement the sequence ignore it silently.
-//   - finalize() is idempotent: calling it after screen.start() (which
-//     wipes the line via alt-screen switch) is a no-op.
-interface InstallStatusLine {
-  write(text: string): void;
-  applyProgress(event: AgentInstallProgressParams): void;
-  finalize(): void;
-}
-
-function createInstallStatusLine(
-  term: termkit.Terminal,
-  baseLabel: string,
-): InstallStatusLine {
-  let finalized = false;
-  let lastText = "";
-  let osc94Active = false;
-
-  const writeOsc94 = (state: 0 | 3): void => {
-    if (finalized) {
-      return;
-    }
-    if (state === 3 && osc94Active) {
-      return;
-    }
-    if (state === 0 && !osc94Active) {
-      return;
-    }
-    osc94Active = state === 3;
-    process.stdout.write(`\x1b]9;4;${state}\x1b\\`);
-  };
-
-  const redraw = (text: string): void => {
-    if (finalized) {
-      return;
-    }
-    // CR + eraseLineAfter() rewrites in place without scrolling. We
-    // intentionally do NOT emit a trailing newline — the line stays
-    // open for the next redraw, then finalize() drops a newline once.
-    process.stdout.write("\r");
-    term.eraseLineAfter();
-    term.brightYellow(text);
-    lastText = text;
-  };
-
-  const formatProgressText = (event: AgentInstallProgressParams): string => {
-    const idVer = `${event.agentId}@${event.version}`;
-    if (event.source === "npm") {
-      if (event.phase === "install_start" || event.phase === "download_start") {
-        return `${baseLabel} installing ${idVer} via npm…`;
-      }
-      if (event.phase === "installed") {
-        return `${baseLabel} ${idVer} installed`;
-      }
-      return `${baseLabel} installing ${idVer} via npm…`;
-    }
-    // binary
-    if (event.phase === "download_start" || event.phase === "download_progress") {
-      const received = event.receivedBytes ?? 0;
-      const total = event.totalBytes ?? 0;
-      const rxMb = (received / 1_000_000).toFixed(1);
-      if (total > 0) {
-        const totalMb = (total / 1_000_000).toFixed(1);
-        const pct = Math.min(100, Math.floor((received / total) * 100));
-        return `${baseLabel} downloading ${idVer} ${rxMb}/${totalMb} MB (${pct}%)`;
-      }
-      return `${baseLabel} downloading ${idVer} ${rxMb} MB`;
-    }
-    if (event.phase === "download_done") {
-      return `${baseLabel} downloaded ${idVer}, verifying…`;
-    }
-    if (event.phase === "extract") {
-      return `${baseLabel} extracting ${idVer}…`;
-    }
-    if (event.phase === "installed") {
-      return `${baseLabel} ${idVer} installed`;
-    }
-    return lastText || baseLabel;
-  };
-
-  return {
-    write(text) {
-      if (finalized) {
-        return;
-      }
-      // First write — no leading CR needed, the cursor is already at
-      // column 1. Match the existing "static label" behavior of writing
-      // a single yellow line without a newline yet.
-      term.brightYellow(text);
-      lastText = text;
-    },
-    applyProgress(event) {
-      if (finalized) {
-        return;
-      }
-      const isActive =
-        event.phase === "download_start" ||
-        event.phase === "download_progress" ||
-        event.phase === "install_start" ||
-        event.phase === "extract" ||
-        event.phase === "download_done";
-      if (isActive) {
-        writeOsc94(3);
-      } else if (event.phase === "installed") {
-        writeOsc94(0);
-      }
-      redraw(formatProgressText(event));
-    },
-    finalize() {
-      if (finalized) {
-        return;
-      }
-      finalized = true;
-      writeOsc94(0);
-      // Drop a newline so anything we print next (or the alt-screen
-      // entry itself) starts on a fresh row rather than concatenating
-      // onto our status line.
-      process.stdout.write("\n");
-    },
-  };
-}
 
 
