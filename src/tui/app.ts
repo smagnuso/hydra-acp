@@ -94,6 +94,7 @@ import {
   createStdoutInstallStatusSink,
   type InstallStatusLine,
 } from "./install-status.js";
+import { canonicalAgentId } from "../cli/commands/agents.js";
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { promptForImportAction } from "./import-action-prompt.js";
 import { promptForAgent } from "./agent-prompt.js";
@@ -760,6 +761,26 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // network to spawn anything).
   if (target.isLocal && !opts.target) {
     await ensureDaemonReachable(config);
+  }
+  // Canonicalize --agent up front: e.g. `hydra --agent codex` resolves
+  // to `codex-acp` through the registry's exact-id → unique-prefix
+  // ladder. Doing it here (before viewPrefs, picker, session/new) means
+  // the canonical id flows through every downstream lookup — most
+  // importantly `config.defaultModels[<canonical>]` for the picker's
+  // top-right "agent•model" stamp, and the daemon's own session/new
+  // canonicalization, which now sees the same id we display. Silent
+  // no-op when the daemon is unreachable or the id doesn't resolve —
+  // the daemon will error on session/new with the real message.
+  if (opts.agentId) {
+    try {
+      const agents = await listAgents(target);
+      const canonical = canonicalAgentId(opts.agentId, agents.map((a) => a.id));
+      if (canonical !== undefined && canonical !== opts.agentId) {
+        opts.agentId = canonical;
+      }
+    } catch {
+      // Daemon unreachable — leave opts.agentId as-is.
+    }
   }
   const term = termkit.terminal;
   // terminal-kit hands back Infinity for width/height when stdout isn't a
@@ -3698,6 +3719,15 @@ async function runSession(
         // for everything and let prefs.filters.includeNonInteractive decide
         // what to render.
         const sessions = await listSessions(target, { includeNonInteractive: true });
+        // Match the initial-picker formula so the composer's top-right
+        // "agent•model" reflects what a fresh session from this composer
+        // would use — independent of which session the user is currently
+        // attached to.
+        const composerAgentId =
+          opts.agentId ?? viewPrefs.lastChosenAgent ?? config.defaultAgent;
+        const composerModel = composerAgentId
+          ? config.defaultModels?.[composerAgentId]
+          : undefined;
         const choice: PickerResult = await pickSession(term, {
           cwd: resolvedCwd,
           sessions,
@@ -3705,6 +3735,8 @@ async function runSession(
           target,
           currentSessionId: resolvedSessionId,
           prefs: pickerPrefs,
+          ...(composerAgentId ? { composerAgentId } : {}),
+          ...(composerModel ? { composerModel } : {}),
         });
         if (choice.kind === "abort") {
           // finally restarts the screen.
@@ -7077,12 +7109,19 @@ async function resolveSession(
   while (true) {
     // Picker manages its own interactive-only filter; ask for everything.
     const sessions = await listSessions(target, { includeNonInteractive: true });
+    const composerAgentId =
+      opts.agentId ?? viewPrefs.lastChosenAgent ?? config.defaultAgent;
+    const composerModel = composerAgentId
+      ? config.defaultModels?.[composerAgentId]
+      : undefined;
     const choice: PickerResult = await pickSession(term, {
       cwd,
       sessions,
       config,
       target,
       prefs: pickerPrefs,
+      ...(composerAgentId ? { composerAgentId } : {}),
+      ...(composerModel ? { composerModel } : {}),
       ...(opts.initialPrompt !== undefined
         ? { initialPrompt: opts.initialPrompt }
         : {}),

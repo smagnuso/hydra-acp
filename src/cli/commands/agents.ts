@@ -97,6 +97,29 @@ export async function runAgentsList(): Promise<void> {
 // the process with a clear message + the known ids on a definitive
 // mismatch. If the registry can't be reached we stay silent and let the
 // later session/new path surface whatever error it would have.
+// Pure prefix-match ladder shared by assertKnownAgent /
+// resolveAgentIdOrExit / TUI-side canonicalization. Mirrors
+// Registry.getAgent's resolution rules: exact id first, then unique
+// case-insensitive prefix. Returns undefined on unknown or ambiguous
+// input — callers decide whether that's fatal, silent, or a warning.
+export function canonicalAgentId(
+  agentId: string,
+  known: readonly string[],
+): string | undefined {
+  if (known.includes(agentId)) {
+    return agentId;
+  }
+  const lc = agentId.toLowerCase();
+  if (lc.length === 0) {
+    return undefined;
+  }
+  const prefixHits = known.filter((id) => id.toLowerCase().startsWith(lc));
+  if (prefixHits.length === 1) {
+    return prefixHits[0];
+  }
+  return undefined;
+}
+
 // Preflights an explicit --agent id against the daemon's registry so a
 // typo fails at the shell rather than mid-session after the TUI has
 // taken over the terminal. Exits the process on a definitive miss;
@@ -122,18 +145,8 @@ export async function assertKnownAgent(agentId: string): Promise<void> {
   } catch {
     return;
   }
-  if (known.includes(agentId)) {
+  if (canonicalAgentId(agentId, known) !== undefined) {
     return;
-  }
-  // Mirror Registry.getAgent's unique-prefix fallback so the preflight
-  // doesn't reject an id the daemon would happily resolve. Ambiguous
-  // prefixes fall through to the "unknown agent" error.
-  const lc = agentId.toLowerCase();
-  if (lc.length > 0) {
-    const prefixHits = known.filter((id) => id.toLowerCase().startsWith(lc));
-    if (prefixHits.length === 1) {
-      return;
-    }
   }
   process.stderr.write(
     `hydra-acp: unknown agent '${agentId}'. Run 'hydra-acp agent list' to see available agents.\n`,
@@ -161,15 +174,16 @@ export async function resolveAgentIdOrExit(
   } catch {
     return agentId;
   }
-  if (known.includes(agentId)) {
-    return agentId;
+  const canonical = canonicalAgentId(agentId, known);
+  if (canonical !== undefined) {
+    return canonical;
   }
+  // Distinguish ambiguous from unknown for a better error message.
+  // canonicalAgentId collapses both to `undefined`; re-derive the
+  // ambiguous case here.
   const lc = agentId.toLowerCase();
   if (lc.length > 0) {
     const prefixHits = known.filter((id) => id.toLowerCase().startsWith(lc));
-    if (prefixHits.length === 1) {
-      return prefixHits[0]!;
-    }
     if (prefixHits.length > 1) {
       process.stderr.write(
         `${commandLabel}: '${agentId}' is ambiguous (matches ${prefixHits.join(", ")}).\n`,

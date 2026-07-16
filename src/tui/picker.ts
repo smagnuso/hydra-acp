@@ -169,6 +169,15 @@ export interface PickOptions {
   // "__local") and the legacy "auto-bump to __all when current row is
   // imported" rule still applies.
   prefs?: PickerPrefs;
+  // Displayed in the top-right of the composer border as "agent•model".
+  // Reflects what a fresh session created from the composer would use
+  // (default agent + its configured default model). Both are optional:
+  // if agentId is undefined, the label is omitted entirely; if only
+  // model is undefined, we show just the agent id. Callers derive
+  // these from `opts.agentId ?? viewPrefs.lastChosenAgent ??
+  // config.defaultAgent` and `config.defaultModels[agentId]`.
+  composerAgentId?: string;
+  composerModel?: string;
 }
 
 // Picker filter state. `filters` is its own nested bag so future
@@ -727,15 +736,44 @@ export async function pickSession(
   // be invoked (grabInput hasn't been wired) so the defaults are safe.
   let resolved = false;
   let focusStackRef: FocusLayer[] = [];
+  // "agent•model" (or just "agent") stamp for the top-right of the
+  // composer border. Reflects what a fresh session created from the
+  // composer would use. Omitted entirely when the caller didn't supply
+  // an agent id — nothing to show, no reserved space in the border.
+  const composerAgentModelLabel = ((): string => {
+    const a = opts.composerAgentId;
+    if (!a) {
+      return "";
+    }
+    const m = opts.composerModel;
+    return m ? `${a}•${m}` : a;
+  })();
   const paintComposerTopBorder = (): void => {
     const inner = composerBoxInner();
     const titleFragment = `─ ${composerTitle} `;
-    const dashCount = Math.max(1, inner - titleFragment.length);
+    // "─ agent•model ─" glued to the right corner. Space padding on
+    // both sides keeps the label readable against the dashes. Suppress
+    // the fragment entirely when it wouldn't fit alongside the title
+    // — the title wins because the cwd is always relevant, whereas the
+    // agent stamp is a nice-to-have.
+    const rawRight = composerAgentModelLabel;
+    let rightFragment = "";
+    if (rawRight.length > 0) {
+      const candidate = `─ ${rawRight} `;
+      if (candidate.length + titleFragment.length + 1 <= inner) {
+        rightFragment = candidate;
+      }
+    }
+    const dashCount = Math.max(1, inner - titleFragment.length - rightFragment.length);
     const dashes = "─".repeat(dashCount);
-    if ((selectedIdx === 0 || composerHover) && terminalFocused) {
-      term.brightBlue.noFormat(`╭${titleFragment}${dashes}╮`);
+    const focused = (selectedIdx === 0 || composerHover) && terminalFocused;
+    // Whole border + title + right-fragment share one color so the
+    // agent•model label reads the same as the composer title text on
+    // the left (brightBlue when focused, dim otherwise).
+    if (focused) {
+      term.brightBlue.noFormat(`╭${titleFragment}${dashes}${rightFragment}╮`);
     } else {
-      term.dim.noFormat(`╭${titleFragment}${dashes}╮`);
+      term.dim.noFormat(`╭${titleFragment}${dashes}${rightFragment}╮`);
     }
   };
 
@@ -1019,7 +1057,7 @@ export async function pickSession(
     return selectedIdx === 0 ? "f" : composerHover ? "h" : "u";
   };
   const composerTopSig = (): string =>
-    `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}`;
+    `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}|${composerAgentModelLabel}`;
   const composerBotSig = (): string =>
     `cb|${composerFocusFlag()}|${composerBoxInner()}`;
   const composerStatusSig = (): string => {
