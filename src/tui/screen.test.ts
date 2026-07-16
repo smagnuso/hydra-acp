@@ -2437,6 +2437,28 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("beta");
   });
 
+  it("tryOpenPathString accepts a bare filename that stats as a file in cwd", async () => {
+    // Mirrors the tab-completion feature: click on "Makefile" (no
+    // slash, no ~, no absolute prefix) should open it when a file by
+    // that name exists in the session cwd. When the file is missing
+    // the gesture reports false so the double-click falls through to
+    // the word-snap copy path.
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hydra-open-"));
+    writeFileSync(path.join(dir, "Makefile"), "all:\n");
+    const screen = makeTallScreen({ openFileCommand: ["true"] });
+    screen.setSessionbar({ cwd: dir });
+    const open = (
+      screen as unknown as {
+        tryOpenPathString: (raw: string) => boolean;
+      }
+    ).tryOpenPathString.bind(screen);
+    expect(open("Makefile")).toBe(true);
+    expect(open("does-not-exist-anywhere")).toBe(false);
+  });
+
   it("double-click on a bare URL snaps to the whole URL, not a word inside it", () => {
     const opens: string[] = [];
     const screen = makeTallScreen({

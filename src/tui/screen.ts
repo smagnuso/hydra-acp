@@ -3830,16 +3830,18 @@ export class Screen {
       expanded = expanded === "~" ? homedir() : `${homedir()}/${expanded.slice(2)}`;
     }
     const strongSignal = isAbsolute(expanded) || raw.startsWith("~");
-    const hasSeparator = expanded.includes("/");
-    if (!strongSignal && !hasSeparator) {
-      return null;
-    }
     const base = isAbsolute(expanded)
       ? expanded
       : resolvePath(this.sessionbar.cwd, expanded);
     if (strongSignal) {
       return base;
     }
+    // Weak signal (no absolute prefix, no ~): includes both "src/foo.ts"
+    // and bare "Makefile". Both fall through to the stat probe below so
+    // we only open when a real file exists at the resolved path — this
+    // is what lets a plain filename click through (the user's ask) while
+    // keeping ordinary chat words ("hello", "react") from firing the
+    // editor when there's no matching file in cwd.
     try {
       const st = statSync(base);
       if (st.isFile()) {
