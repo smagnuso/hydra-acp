@@ -205,6 +205,54 @@ export class LineEditor {
     this.cur = i;
   }
 
+  // Alt-Backspace — readline `backward-kill-word`. Boundary is
+  // word-char (\w = alnum + underscore), NOT whitespace. Kills back to
+  // the previous non-word char, so `foo/bar<cur>` → `foo/`. Distinct
+  // from ^W (killWord), which uses a whitespace boundary and would
+  // eat the whole `foo/bar`.
+  killWordBackward(): void {
+    if (this.cur === 0) {
+      return;
+    }
+    let i = this.cur;
+    // Skip trailing non-word chars (whitespace, /, ., -, punctuation).
+    while (i > 0 && !/\w/.test(this.buffer[i - 1] ?? "")) {
+      i -= 1;
+    }
+    // Consume the word.
+    while (i > 0 && /\w/.test(this.buffer[i - 1] ?? "")) {
+      i -= 1;
+    }
+    if (i === this.cur) {
+      return;
+    }
+    this.recordEdit();
+    this.killBuf = this.buffer.slice(i, this.cur);
+    this.buffer = this.buffer.slice(0, i) + this.buffer.slice(this.cur);
+    this.cur = i;
+  }
+
+  // Alt-D — readline `kill-word` (forward). Same word-char boundary as
+  // killWordBackward: `foo/bar<cur before f>` → `<cur>/bar`.
+  killWordForward(): void {
+    if (this.cur >= this.buffer.length) {
+      return;
+    }
+    let i = this.cur;
+    while (i < this.buffer.length && !/\w/.test(this.buffer[i] ?? "")) {
+      i += 1;
+    }
+    while (i < this.buffer.length && /\w/.test(this.buffer[i] ?? "")) {
+      i += 1;
+    }
+    if (i === this.cur) {
+      return;
+    }
+    this.recordEdit();
+    this.killBuf = this.buffer.slice(this.cur, i);
+    this.buffer = this.buffer.slice(0, this.cur) + this.buffer.slice(i);
+  }
+
   yank(): void {
     if (this.killBuf.length === 0) {
       return;
@@ -262,7 +310,23 @@ export class LineEditor {
         this.killToEnd();
         return true;
       case "CTRL_W":
+        // ^W = readline unix-word-rubout: kill back to previous
+        // whitespace. `foo/bar<cur>` → "".
         this.killWord();
+        return true;
+      case "ALT_BACKSPACE":
+      case "META_BACKSPACE":
+        // Alt+Backspace = readline backward-kill-word: kill back to
+        // previous non-word char (whitespace, /, ., -, punctuation).
+        // `foo/bar<cur>` → "foo/", NOT "".
+        this.killWordBackward();
+        return true;
+      case "ALT_D":
+      case "META_D":
+        // Alt+D = readline kill-word (forward). Kept adjacent to
+        // Alt+Backspace so word-boundary editing works in both
+        // directions once you learn one of them.
+        this.killWordForward();
         return true;
       case "CTRL_Y":
         this.yank();

@@ -84,13 +84,45 @@ describe("LineEditor", () => {
     expect(e.cursor).toBe(5);
   });
 
-  it("^W kills previous word", () => {
+  it("^W kills previous word (whitespace boundary)", () => {
     const e = new LineEditor("foo bar baz");
     e.handleKey("CTRL_W", false);
     expect(e.text).toBe("foo bar ");
     e.handleKey("CTRL_W", false);
     expect(e.text).toBe("foo ");
     e.handleKey("CTRL_W", false);
+    expect(e.text).toBe("");
+  });
+
+  it("^W eats through path separators (whitespace boundary)", () => {
+    const e = new LineEditor("foo/bar/baz");
+    e.handleKey("CTRL_W", false);
+    expect(e.text).toBe("");
+  });
+
+  it("Alt+Backspace kills back to previous non-word char (word boundary)", () => {
+    const e = new LineEditor("foo/bar");
+    e.handleKey("ALT_BACKSPACE", false);
+    expect(e.text).toBe("foo/");
+    // Second invocation skips the trailing '/' (non-word) then eats "foo".
+    e.handleKey("ALT_BACKSPACE", false);
+    expect(e.text).toBe("");
+  });
+
+  it("Alt+Backspace skips trailing punctuation then kills the word", () => {
+    const e = new LineEditor("~/foo/bar/  ");
+    e.handleKey("ALT_BACKSPACE", false);
+    expect(e.text).toBe("~/foo/");
+  });
+
+  it("Alt+D kills next word (word boundary)", () => {
+    const e = new LineEditor("foo/bar/baz");
+    e.moveHome();
+    e.handleKey("ALT_D", false);
+    expect(e.text).toBe("/bar/baz");
+    e.handleKey("ALT_D", false);
+    expect(e.text).toBe("/baz");
+    e.handleKey("ALT_D", false);
     expect(e.text).toBe("");
   });
 
