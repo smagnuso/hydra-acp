@@ -23,7 +23,7 @@ import {
 } from "../cli/session-row.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
-import type { HydraConfig } from "../core/config.js";
+import { setDefaultAgent, type HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
 import {
   deleteSession,
@@ -35,9 +35,11 @@ import {
   searchSessions,
   setSessionPriority,
   syncInstalledAgents,
+  type DiscoveredAgent,
   type DiscoveredSession,
   type SessionHits,
 } from "./discovery.js";
+import { promptForAgent } from "./agent-prompt.js";
 import { loadHistory } from "./history.js";
 import { readClipboard } from "./clipboard.js";
 import {
@@ -133,12 +135,22 @@ export type PickerResult =
       // enqueuePrompt in the freshly-attached session.
       attachments?: Attachment[];
       // When set, the picker deferred its terminal cleanup and left its
-      // rendered frame in place. The caller MUST invoke installStatus
-      // .finalize() (directly or via runSession) to trigger the deferred
-      // cleanup — otherwise input handlers stay off but the screen
-      // stays painted. Writes to `.write()` / `.applyProgress()` paint
+      // rendered frame in place. The caller MUST finalize (directly or
+      // via runSession). Writes to `.write()` / `.applyProgress()` paint
       // in the composer-adjacent status row.
       installStatus?: InstallStatusLine;
+      // Present when the user clicked the composer's top-right agent
+      // label and picked a different agent (or the seed was already
+      // set). Undefined only when the caller supplied no seed AND the
+      // user never opened the agent picker. Caller uses this in place
+      // of opts.agentId when creating the session.
+      agentId?: string;
+      // Chosen model, tracked alongside agentId so the caller can seed
+      // config.defaultModels or forward to session/new. Currently only
+      // ever set indirectly: when the user switches agent via the
+      // composer's agent picker, model updates to
+      // config.defaultModels[newAgent] (undefined if none).
+      model?: string;
     }
   | { kind: "abort" }
   | { kind: "exit" };
@@ -176,8 +188,19 @@ export interface PickOptions {
   // model is undefined, we show just the agent id. Callers derive
   // these from `opts.agentId ?? viewPrefs.lastChosenAgent ??
   // config.defaultAgent` and `config.defaultModels[agentId]`.
+  //
+  // The label is also click-actionable: clicking on it opens an agent
+  // picker (see availableAgents). A change here overrides the seed and
+  // is reported back on the "new" PickerResult (agentId / model) so the
+  // caller can persist / launch with the user's choice.
   composerAgentId?: string;
   composerModel?: string;
+  // Populates the agent picker that opens when the user clicks the
+  // composer's top-right "agent•model" label. Callers fetch this via
+  // `listAgents(target)` once before invoking pickSession and pass the
+  // list through. When absent or empty, the click is a no-op — nothing
+  // to switch to.
+  availableAgents?: DiscoveredAgent[];
 }
 
 // Picker filter state. `filters` is its own nested bag so future
@@ -738,16 +761,36 @@ export async function pickSession(
   let focusStackRef: FocusLayer[] = [];
   // "agent•model" (or just "agent") stamp for the top-right of the
   // composer border. Reflects what a fresh session created from the
-  // composer would use. Omitted entirely when the caller didn't supply
-  // an agent id — nothing to show, no reserved space in the border.
-  const composerAgentModelLabel = ((): string => {
-    const a = opts.composerAgentId;
+  // composer would use. Omitted entirely when neither seed nor a
+  // click-through override supplied an agent id.
+  //
+  // Mutable: openAgentPrompt updates these on user choice, and the
+  // picker rerenders so the label follows. Read on the "new" result so
+  // the caller launches with the picked agent.
+  let composerAgentId = opts.composerAgentId;
+  let composerModel = opts.composerModel;
+  const composerAgentModelLabel = (): string => {
+    const a = composerAgentId;
     if (!a) {
       return "";
     }
-    const m = opts.composerModel;
+    const m = composerModel;
     return m ? `${a}•${m}` : a;
-  })();
+  };
+  // Screen-column ranges (1-indexed, inclusive) of the two click zones
+  // painted on the composer's top border (row = startRow). Updated by
+  // paintComposerTopBorder every time it paints. Nullable: null means
+  // "no click zone this frame" (e.g. the fragment didn't fit and was
+  // omitted). onMouse consults these on a click at startRow to decide
+  // between opening the cwd prompt, the agent picker, or falling
+  // through to the default composer-focus behavior.
+  let cwdClickRange: { start: number; end: number } | null = null;
+  let agentClickRange: { start: number; end: number } | null = null;
+  // Which top-border click zone the mouse is currently hovering. Drives
+  // the bold affordance on that fragment so it's obvious it's clickable
+  // — plain text otherwise, matching the rest of the border. Cleared
+  // when the mouse leaves the top border (or the composer entirely).
+  let composerTopHover: "cwd" | "agent" | null = null;
   const paintComposerTopBorder = (): void => {
     const inner = composerBoxInner();
     const titleFragment = `─ ${composerTitle} `;
@@ -756,7 +799,7 @@ export async function pickSession(
     // the fragment entirely when it wouldn't fit alongside the title
     // — the title wins because the cwd is always relevant, whereas the
     // agent stamp is a nice-to-have.
-    const rawRight = composerAgentModelLabel;
+    const rawRight = composerAgentModelLabel();
     let rightFragment = "";
     if (rawRight.length > 0) {
       const candidate = `─ ${rawRight} `;
@@ -767,14 +810,46 @@ export async function pickSession(
     const dashCount = Math.max(1, inner - titleFragment.length - rightFragment.length);
     const dashes = "─".repeat(dashCount);
     const focused = (selectedIdx === 0 || composerHover) && terminalFocused;
-    // Whole border + title + right-fragment share one color so the
-    // agent•model label reads the same as the composer title text on
-    // the left (brightBlue when focused, dim otherwise).
-    if (focused) {
-      term.brightBlue.noFormat(`╭${titleFragment}${dashes}${rightFragment}╮`);
+    // Column layout of the row we're about to paint (1-indexed screen
+    // columns): "╭" at col 1, then titleFragment, then dashes, then
+    // (optional) rightFragment, then "╮" at col inner+2. Record the
+    // click-through zones for onMouse. Whole "─ <cwd> " title fragment
+    // is clickable (including its own leading dash + trailing space,
+    // matching how obviously "titley" that segment reads); ditto for
+    // the right fragment.
+    // "╭" occupies column 1, then titleFragment spans columns 2..1+titleFragment.length.
+    cwdClickRange =
+      titleFragment.length > 0
+        ? { start: 2, end: 1 + titleFragment.length }
+        : null;
+    if (rightFragment.length > 0) {
+      // rightFragment sits between the trailing dashes and the "╮"
+      // corner. Its start column = 1 (corner) + titleFragment.length +
+      // dashCount + 1 (first char of rightFragment).
+      const rightStart = 1 + titleFragment.length + dashCount + 1;
+      agentClickRange = {
+        start: rightStart,
+        end: rightStart + rightFragment.length - 1,
+      };
     } else {
-      term.dim.noFormat(`╭${titleFragment}${dashes}${rightFragment}╮`);
+      agentClickRange = null;
     }
+    // Border color is brightBlue when focused, dim otherwise. The
+    // hovered fragment (cwd title on the left, agent•model on the
+    // right) gets bolded so it visibly reads as clickable. Non-hovered
+    // fragments and the surrounding dashes/corners stay unbolded.
+    const style = focused ? term.brightBlue : term.dim;
+    const boldStyle = focused ? term.brightBlue.bold : term.dim.bold;
+    const emitFragment = (frag: string, bold: boolean): void => {
+      (bold ? boldStyle : style).noFormat(frag);
+    };
+    style.noFormat("╭");
+    emitFragment(titleFragment, composerTopHover === "cwd");
+    style.noFormat(dashes);
+    if (rightFragment) {
+      emitFragment(rightFragment, composerTopHover === "agent");
+    }
+    style.noFormat("╮");
   };
 
   // Bottom border: ╰──...──╯ stretched to the terminal width.
@@ -1057,7 +1132,7 @@ export async function pickSession(
     return selectedIdx === 0 ? "f" : composerHover ? "h" : "u";
   };
   const composerTopSig = (): string =>
-    `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}|${composerAgentModelLabel}`;
+    `ct|${composerFocusFlag()}|${composerBoxInner()}|${composerTitle}|${composerAgentModelLabel()}|${composerTopHover ?? ""}`;
   const composerBotSig = (): string =>
     `cb|${composerFocusFlag()}|${composerBoxInner()}`;
   const composerStatusSig = (): string => {
@@ -1996,6 +2071,8 @@ export async function pickSession(
       cwd?: string;
       attachments?: Attachment[];
       installStatus?: InstallStatusLine;
+      agentId?: string;
+      model?: string;
     } => {
       const out: {
         kind: "new";
@@ -2003,10 +2080,18 @@ export async function pickSession(
         cwd?: string;
         attachments?: Attachment[];
         installStatus?: InstallStatusLine;
+        agentId?: string;
+        model?: string;
       } = { kind: "new", cwd: currentCwd };
       const attached = composer.state().attachments;
       if (attached.length > 0) {
         out.attachments = [...attached];
+      }
+      if (composerAgentId) {
+        out.agentId = composerAgentId;
+      }
+      if (composerModel) {
+        out.model = composerModel;
       }
       return out;
     };
@@ -2018,10 +2103,8 @@ export async function pickSession(
     const openCwdPrompt = async (): Promise<void> => {
       uninstallGrab();
       painter.clearCache();
-      term.moveTo(1, 1).eraseDisplayBelow();
-      // Push a focus layer so the auto-refresh tick is suppressed while the
-      // cwd prompt owns the terminal. The prompt manages its own input, so
-      // the layer's onKey/onResize don't need to do anything.
+      // Layer the modal on top of the picker frame — no eraseDisplayBelow,
+      // the picker's rows stay visible around the box.
       const cwdLayer: FocusLayer = { onKey: () => {}, onResize: () => {} };
       pushLayer(cwdLayer);
       let result;
@@ -2030,6 +2113,7 @@ export async function pickSession(
           defaultCwd: currentCwd,
           title: "Change cwd",
           intro: "New cwd for the picker and any new sessions:",
+          overlay: true,
         });
       } finally {
         popLayer();
@@ -2041,6 +2125,55 @@ export async function pickSession(
         // cwd, then re-run filters (cwd-only depends on currentCwd too).
         allSessions = sortSessions(allSessions, currentCwd);
         applyFilter();
+      }
+      if (!resolved) {
+        renderFromScratch();
+      }
+    };
+    // Sibling to openCwdPrompt: opened by clicking the composer's
+    // top-right "agent•model" label. Runs the standard promptForAgent
+    // modal, updates composerAgentId + composerModel on select, and
+    // re-renders. No-op if the caller didn't pass availableAgents (no
+    // list → no modal to show).
+    const openAgentPrompt = async (): Promise<void> => {
+      const agents = opts.availableAgents;
+      if (!agents || agents.length === 0) {
+        return;
+      }
+      uninstallGrab();
+      painter.clearCache();
+      const agentLayer: FocusLayer = { onKey: () => {}, onResize: () => {} };
+      pushLayer(agentLayer);
+      let result;
+      try {
+        result = await promptForAgent(term, agents, composerAgentId, {
+          title: "Switch agent",
+          intro: "Agent used when the composer creates a new session:",
+          overlay: true,
+        });
+      } finally {
+        popLayer();
+        installGrab();
+      }
+      if (result.kind === "select") {
+        composerAgentId = result.agentId;
+        // When the agent changes, the model tracks whatever's configured
+        // as the default for the new agent (or clears if none). If the
+        // user wants a specific model, `hydra agent set <id> <model>`
+        // still owns that persistence.
+        const models = opts.config.defaultModels;
+        composerModel = models ? models[result.agentId] : undefined;
+        if (result.persist) {
+          // Mirror ensureAgentForNew's persistence behavior: the `s`
+          // affordance in promptForAgent records the user's choice as
+          // config.defaultAgent. Best-effort — the picker still resolves
+          // with the chosen agent even if the config write fails.
+          try {
+            await setDefaultAgent(result.agentId);
+          } catch {
+            // ignore
+          }
+        }
       }
       if (!resolved) {
         renderFromScratch();
@@ -3572,6 +3705,49 @@ export async function pickSession(
       //     reshuffle anything.
       const overComposer = y >= startRow && y <= composerBottomRow();
       if (overComposer) {
+        // Track which top-border click zone (cwd / agent) the mouse is
+        // over so paintComposerTopBorder can bold the hovered fragment.
+        // Cleared as soon as the cursor leaves row=startRow (still over
+        // composer body) so the affordance goes away when the pointer
+        // moves off the clickable region.
+        let nextTopHover: "cwd" | "agent" | null = null;
+        if (y === startRow) {
+          const px = data?.x;
+          if (typeof px === "number") {
+            if (
+              agentClickRange !== null &&
+              px >= agentClickRange.start &&
+              px <= agentClickRange.end
+            ) {
+              nextTopHover = "agent";
+            } else if (
+              cwdClickRange !== null &&
+              px >= cwdClickRange.start &&
+              px <= cwdClickRange.end
+            ) {
+              nextTopHover = "cwd";
+            }
+          }
+        }
+        if (nextTopHover !== composerTopHover) {
+          composerTopHover = nextTopHover;
+          repaintComposerChrome();
+        }
+        // Top-border click zones: clicking the cwd title on the left
+        // opens the same modal `^o` uses; clicking the agent•model
+        // label on the right opens the agent picker. Motion / hover
+        // stays with the default composer-focus behavior — we only
+        // hijack an actual click.
+        if (isClick && y === startRow) {
+          if (composerTopHover === "agent") {
+            void openAgentPrompt();
+            return;
+          }
+          if (composerTopHover === "cwd") {
+            void openCwdPrompt();
+            return;
+          }
+        }
         if ((isClick || isSelectOnlyRelease) && selectedIdx !== 0) {
           composerHover = false;
           const old = selectedIdx;
@@ -3590,6 +3766,10 @@ export async function pickSession(
           });
         }
         return;
+      }
+      if (composerTopHover !== null) {
+        composerTopHover = null;
+        repaintComposerChrome();
       }
       if (composerHover) {
         composerHover = false;

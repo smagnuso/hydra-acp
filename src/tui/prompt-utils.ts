@@ -60,6 +60,13 @@ export interface DrawBoxOptions {
   // only the default, not a hard ceiling).
   contentWidth?: number;
   title?: string;
+  // When true, skip the eraseDisplayBelow that otherwise wipes the
+  // whole screen before drawing, and actively fill the box interior
+  // with spaces so whatever was painted underneath (e.g. the picker
+  // frame) doesn't bleed through the border. Use when the modal is
+  // meant to appear as an overlay on top of an existing UI rather
+  // than a full-screen dialog.
+  overlay?: boolean;
 }
 
 const MAX_BOX_WIDTH = 64;
@@ -110,7 +117,9 @@ export function drawBox(term: Terminal, opts: DrawBoxOptions): BoxLayout {
   const x = Math.max(1, Math.floor((termW - w) / 2) + 1);
   const y = Math.max(1, Math.floor((termH - h) / 2) + 1);
 
-  term.moveTo(1, 1).eraseDisplayBelow();
+  if (!opts.overlay) {
+    term.moveTo(1, 1).eraseDisplayBelow();
+  }
 
   const topInner = HORIZ.repeat(w - 2);
   const top = renderTitleStrip(topInner, opts.title);
@@ -121,6 +130,12 @@ export function drawBox(term: Terminal, opts: DrawBoxOptions): BoxLayout {
   for (let row = 1; row <= contentH; row++) {
     term.moveTo(x, y + row);
     term.dim.noFormat(VERT);
+    if (opts.overlay) {
+      // Wipe the interior — the caller paints its content on top, but
+      // any residue from the underlying frame would show through the
+      // gaps between painted glyphs (e.g. trailing partial lines).
+      term.noFormat(" ".repeat(contentW));
+    }
     term.moveTo(x + w - 1, y + row);
     term.dim.noFormat(VERT);
   }
@@ -204,6 +219,11 @@ export interface ModalKeyData {
   isCharacter?: boolean;
 }
 
+export interface ModalMouseData {
+  x?: number;
+  y?: number;
+}
+
 export interface RunModalOptions<T> {
   term: Terminal;
   render: () => void;
@@ -218,6 +238,22 @@ export interface RunModalOptions<T> {
   // Set this false for input-driven prompts that paint their own fake
   // cursor and want the real one to follow normal terminal-kit state.
   hideCursor?: boolean;
+  // When provided, the modal grabs mouse events too (motion + button +
+  // wheel) and dispatches them here. Only opt in for prompts that
+  // actually have something to click / scroll — grabbing mouse
+  // disables the terminal-emulator's own text-selection affordance
+  // for the duration of the modal.
+  onMouse?: (
+    name: string,
+    data: ModalMouseData | undefined,
+    finish: (value: T) => void,
+  ) => void;
+  // Skip the eraseDisplayBelow on cleanup. Pair with drawBox({overlay:
+  // true}) inside `render` when the modal is meant to sit on top of
+  // an existing UI (e.g. the picker frame). The caller is then
+  // responsible for repainting anything the box overwrote — the
+  // picker's renderFromScratch call after popLayer handles this.
+  overlay?: boolean;
 }
 
 // Owns the modal lifecycle shared by every pre-screen prompt:
@@ -226,7 +262,7 @@ export interface RunModalOptions<T> {
 // removal, grabInput off, eraseDisplayBelow). Callers only supply the
 // render + key logic.
 export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
-  const { term, render, onKey, onResize } = opts;
+  const { term, render, onKey, onResize, onMouse } = opts;
   const wantsHideCursor = opts.hideCursor !== false;
   render();
   if (wantsHideCursor) {
@@ -250,6 +286,15 @@ export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
       }
       onKey(name, matches, data, finish);
     };
+    const handleMouse = (
+      name: string,
+      data?: ModalMouseData,
+    ): void => {
+      if (resolved || !onMouse) {
+        return;
+      }
+      onMouse(name, data, finish);
+    };
     const cleanup = (): void => {
       if (resolved) {
         return;
@@ -257,16 +302,29 @@ export async function runModalPrompt<T>(opts: RunModalOptions<T>): Promise<T> {
       resolved = true;
       term.off("key", handleKey);
       term.off("resize", handleResize);
+      if (onMouse) {
+        term.off("mouse", handleMouse);
+      }
       term.grabInput(false);
       writeDebugLine({ src: "grab", site: "runModalPrompt.cleanup", on: false });
       term.hideCursor(false);
-      term.moveTo(1, 1).eraseDisplayBelow();
+      if (!opts.overlay) {
+        term.moveTo(1, 1).eraseDisplayBelow();
+      }
     };
     const finish = (value: T): void => {
       cleanup();
       resolve(value);
     };
-    term.grabInput({});
+    // Grab mouse motion when the caller wants clicks/wheel; otherwise
+    // stay keyboard-only so terminal-emulator text selection keeps
+    // working during the modal.
+    if (onMouse) {
+      term.grabInput({ mouse: "motion" });
+      term.on("mouse", handleMouse);
+    } else {
+      term.grabInput({});
+    }
     writeDebugLine({ src: "grab", site: "runModalPrompt.install", on: true });
     term.on("key", handleKey);
     term.on("resize", handleResize);

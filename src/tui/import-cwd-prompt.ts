@@ -37,6 +37,11 @@ export interface PromptOptions {
   title?: string;
   // Line shown above the input. Defaults to the fork-locally wording.
   intro?: string;
+  // Render as an overlay on top of an existing UI (no screen wipe, box
+  // interior gets an explicit blank fill so the underlying frame
+  // doesn't bleed through the border). The caller is responsible for
+  // repainting the underlying frame after the modal resolves.
+  overlay?: boolean;
 }
 
 export type CwdPromptResult =
@@ -75,12 +80,31 @@ export async function promptForImportCwd(
   let errorLine: string | null = null;
   let busy = false;
   let layout: BoxLayout | null = null;
+  // Screen coord bookkeeping for the mouse handler. `hintRowY` is the
+  // absolute row where the "Enter accept · Tab complete · Esc back ·
+  // ^U clear" line paints (only meaningful when errorLine === null;
+  // when set, the error replaces the hint at the same row). Ranges are
+  // screen columns (1-indexed, inclusive).
+  let hintRowY: number | null = null;
+  let acceptClickRange: { start: number; end: number } | null = null;
+  let backClickRange: { start: number; end: number } | null = null;
+
+  // Single source of truth for the hint text so paint + hit-test can't
+  // drift. Tab-completion and ^U are still bound at the key level but
+  // aren't advertised — the intro line above already establishes the
+  // context, so the hint stays minimal.
+  const HINT_TEXT = " Enter accept · Esc back";
+  const ACCEPT_LABEL = "Enter accept";
+  const BACK_LABEL = "Esc back";
+  const acceptOffset = HINT_TEXT.indexOf(ACCEPT_LABEL);
+  const backOffset = HINT_TEXT.indexOf(BACK_LABEL);
 
   const render = (): void => {
     const contentHeight = headerRows.length + 6;
     layout = drawBox(term, {
       contentHeight,
       title,
+      overlay: opts.overlay === true,
     });
     const innerW = layout.contentW;
     let row = 0;
@@ -96,14 +120,25 @@ export async function promptForImportCwd(
     row += 2;
     paintInputRow(row);
     row += 2;
+    const screenRow = layout.contentY + row;
     if (errorLine !== null) {
-      term.moveTo(layout.contentX, layout.contentY + row);
+      term.moveTo(layout.contentX, screenRow);
       term.red.noFormat(` ${truncate(errorLine, innerW - 2)}`);
+      hintRowY = null;
+      acceptClickRange = null;
+      backClickRange = null;
     } else {
-      term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(
-        " Enter accept · Tab complete · Esc back · ^U clear",
-      );
+      term.moveTo(layout.contentX, screenRow);
+      term.dim.noFormat(HINT_TEXT);
+      hintRowY = screenRow;
+      acceptClickRange = {
+        start: layout.contentX + acceptOffset,
+        end: layout.contentX + acceptOffset + ACCEPT_LABEL.length - 1,
+      };
+      backClickRange = {
+        start: layout.contentX + backOffset,
+        end: layout.contentX + backOffset + BACK_LABEL.length - 1,
+      };
     }
   };
 
@@ -123,9 +158,12 @@ export async function promptForImportCwd(
     term.moveTo(layout.contentX, layout.contentY + r).eraseLineAfter();
     term.moveTo(layout.x + layout.w - 1, layout.contentY + r);
     term.dim.noFormat("│");
+    // Single leading space of padding; the intro line above ("Pick a
+    // local cwd for this session:" / "New cwd for the picker …")
+    // already establishes what's being edited, so no "cwd:" label.
     term.moveTo(layout.contentX, layout.contentY + r);
-    term.bold.noFormat(" cwd: ");
-    const label = " cwd: ".length;
+    term.noFormat(" ");
+    const label = 1;
     const available = Math.max(1, layout.contentW - label - 2);
     const text = editor.text;
     const cur = editor.cursor;
@@ -168,37 +206,57 @@ export async function promptForImportCwd(
     term.moveTo(layout.contentX, layout.contentY + errRow).eraseLineAfter();
     term.moveTo(layout.x + layout.w - 1, layout.contentY + errRow);
     term.dim.noFormat("│");
-    term.moveTo(layout.contentX, layout.contentY + errRow);
+    const screenRow = layout.contentY + errRow;
+    term.moveTo(layout.contentX, screenRow);
     if (errorLine !== null) {
       term.red.noFormat(` ${truncate(errorLine, layout.contentW - 2)}`);
+      hintRowY = null;
+      acceptClickRange = null;
+      backClickRange = null;
     } else {
-      term.dim.noFormat(
-        " Enter accept · Tab complete · Esc back · ^U clear",
-      );
+      term.dim.noFormat(HINT_TEXT);
+      hintRowY = screenRow;
+      acceptClickRange = {
+        start: layout.contentX + acceptOffset,
+        end: layout.contentX + acceptOffset + ACCEPT_LABEL.length - 1,
+      };
+      backClickRange = {
+        start: layout.contentX + backOffset,
+        end: layout.contentX + backOffset + BACK_LABEL.length - 1,
+      };
     }
   };
 
+  // Extracted so both Enter and a click on "Enter accept" run the same
+  // validate-then-finish flow.
+  const submit = (finish: (v: CwdPromptResult) => void): void => {
+    if (busy) {
+      return;
+    }
+    const candidate = editor.text;
+    busy = true;
+    errorLine = null;
+    repaintInput();
+    void validateLocalCwd(candidate).then((result) => {
+      busy = false;
+      if (result.ok) {
+        finish({ kind: "ok", path: result.path });
+        return;
+      }
+      errorLine = result.reason;
+      repaintInput();
+    });
+  };
   return runModalPrompt<CwdPromptResult>({
     term,
     render,
+    overlay: opts.overlay === true,
     onKey: (name, _matches, data, finish) => {
       if (busy) {
         return;
       }
       if (name === "ENTER" || name === "KP_ENTER") {
-        const candidate = editor.text;
-        busy = true;
-        errorLine = null;
-        repaintInput();
-        void validateLocalCwd(candidate).then((result) => {
-          busy = false;
-          if (result.ok) {
-            finish({ kind: "ok", path: result.path });
-            return;
-          }
-          errorLine = result.reason;
-          repaintInput();
-        });
+        submit(finish);
         return;
       }
       if (name === "ESCAPE") {
@@ -238,6 +296,57 @@ export async function promptForImportCwd(
       if (editor.handleKey(name, data?.isCharacter === true)) {
         errorLine = null;
         repaintInput();
+        return;
+      }
+    },
+    // Click the "Enter accept" or "Esc back" hint labels to trigger
+    // their key equivalents. Only the two words carry click semantics;
+    // "Tab complete" needs a target string, "^U clear" is destructive.
+    // Enabling mouse here disables terminal-native text selection in
+    // the modal — accept that trade-off for the click affordance.
+    onMouse: (name, data, finish) => {
+      if (busy) {
+        return;
+      }
+      if (name !== "MOUSE_LEFT_BUTTON_PRESSED") {
+        return;
+      }
+      const x = data?.x;
+      const y = data?.y;
+      if (typeof x !== "number" || typeof y !== "number") {
+        return;
+      }
+      // Click outside the box → cancel (Esc equivalent).
+      if (
+        layout !== null &&
+        (x < layout.x ||
+          x >= layout.x + layout.w ||
+          y < layout.y ||
+          y >= layout.y + layout.h)
+      ) {
+        finish({ kind: "back" });
+        return;
+      }
+      if (hintRowY === null) {
+        return;
+      }
+      if (y !== hintRowY) {
+        return;
+      }
+      if (
+        acceptClickRange !== null &&
+        x >= acceptClickRange.start &&
+        x <= acceptClickRange.end
+      ) {
+        submit(finish);
+        return;
+      }
+      if (
+        backClickRange !== null &&
+        x >= backClickRange.start &&
+        x <= backClickRange.end
+      ) {
+        finish({ kind: "back" });
         return;
       }
     },

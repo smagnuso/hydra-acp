@@ -3728,6 +3728,12 @@ async function runSession(
         const composerModel = composerAgentId
           ? config.defaultModels?.[composerAgentId]
           : undefined;
+        let availableAgents: Awaited<ReturnType<typeof listAgents>> = [];
+        try {
+          availableAgents = await listAgents(target);
+        } catch {
+          // ignore
+        }
         const choice: PickerResult = await pickSession(term, {
           cwd: resolvedCwd,
           sessions,
@@ -3737,6 +3743,7 @@ async function runSession(
           prefs: pickerPrefs,
           ...(composerAgentId ? { composerAgentId } : {}),
           ...(composerModel ? { composerModel } : {}),
+          ...(availableAgents.length > 0 ? { availableAgents } : {}),
         });
         if (choice.kind === "abort") {
           // finally restarts the screen.
@@ -3895,6 +3902,18 @@ async function runSession(
         }
         if (choice.attachments && choice.attachments.length > 0) {
           nextOpts.initialAttachments = choice.attachments;
+        }
+        // Composer's click-to-switch-agent modal returned a picked
+        // agent (and its default model). Forward on nextOpts so the
+        // new session spawns with the user's choice — otherwise the
+        // {sessionId, agentId} spread above (which dropped agentId)
+        // would let ensureAgentForNew re-prompt.
+        if (choice.agentId !== undefined) {
+          nextOpts.agentId = choice.agentId;
+          viewPrefs.lastChosenAgent = choice.agentId;
+        }
+        if (choice.model !== undefined) {
+          nextOpts.model = choice.model;
         }
         // Hand the still-live picker frame to the next runSession so
         // "Starting new session…" + agent-install progress paint into
@@ -7114,6 +7133,15 @@ async function resolveSession(
     const composerModel = composerAgentId
       ? config.defaultModels?.[composerAgentId]
       : undefined;
+    // Fetch the agent list once so the picker's click-to-switch-agent
+    // modal has something to show. Best-effort: if the daemon is
+    // unreachable we omit — the click just becomes a no-op.
+    let availableAgents: Awaited<ReturnType<typeof listAgents>> = [];
+    try {
+      availableAgents = await listAgents(target);
+    } catch {
+      // ignore
+    }
     const choice: PickerResult = await pickSession(term, {
       cwd,
       sessions,
@@ -7122,6 +7150,7 @@ async function resolveSession(
       prefs: pickerPrefs,
       ...(composerAgentId ? { composerAgentId } : {}),
       ...(composerModel ? { composerModel } : {}),
+      ...(availableAgents.length > 0 ? { availableAgents } : {}),
       ...(opts.initialPrompt !== undefined
         ? { initialPrompt: opts.initialPrompt }
         : {}),
@@ -7133,6 +7162,16 @@ async function resolveSession(
       return null;
     }
     if (choice.kind === "new") {
+      // Composer's click-to-switch-agent picker can override the seed
+      // that came in on opts.agentId. Take it here so ensureAgentForNew
+      // (below) short-circuits, and downstream session/new uses it.
+      if (choice.agentId !== undefined) {
+        opts.agentId = choice.agentId;
+        viewPrefs.lastChosenAgent = choice.agentId;
+      }
+      if (choice.model !== undefined) {
+        opts.model = choice.model;
+      }
       if (choice.prompt !== undefined) {
         opts.initialPrompt = choice.prompt;
       }
