@@ -487,6 +487,14 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
         symlink: true,
         limit: { count: 5 },
       });
+      // pino-roll / sonic-boom emit 'error' asynchronously when a
+      // rotation open or write fails (disk full, log dir vanished, tmpdir
+      // cleaned mid-test, ...). Without a listener it becomes an uncaught
+      // exception and kills the daemon; swallow it into failureReason so
+      // the breaker and operators can see it via list().
+      logStream.on("error", (err: Error) => {
+        entry.failureReason = `log stream: ${err.message}`;
+      });
     } catch (err) {
       if (this.stopping || entry.manuallyStopped) {
         return;
