@@ -3035,6 +3035,23 @@ export async function pickSession(
       // into the next action's context. We still fall through and run
       // the key's normal behavior.
       clearTransient();
+      // Mouse hover over the composer visually pretends the composer
+      // is focused (border brightBlue, session-row highlight hidden)
+      // even though selectedIdx still points at a session row. The
+      // instant the user touches the keyboard they've switched to
+      // keyboard control — commit the visual to real focus so the
+      // subsequent handler runs against the composer branch. Without
+      // this, DOWN feels stuck (selectedIdx advances but the highlight
+      // stays hidden because composerHover suppresses it, so nothing
+      // visibly moves).
+      if (composerHover) {
+        composerHover = false;
+        selectedIdx = 0;
+        withSync(() => {
+          repaintComposerChrome();
+          repaintViewport();
+        });
+      }
       // ^F opens the find layer only when focus is in the session list.
       // In the composer it falls through to the InputDispatcher so it
       // behaves as the readline "forward-character" binding.

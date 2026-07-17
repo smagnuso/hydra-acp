@@ -128,6 +128,7 @@ import {
 } from "./attachments.js";
 import { readClipboard, readPrimarySelection } from "./clipboard.js";
 import { runUserHotkey } from "./user-hotkey.js";
+import { clearUserVar, emitSetUserVar } from "./terminal-user-var.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
@@ -862,6 +863,12 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       );
     }
   } finally {
+    // Clear the per-pane hydra_session user var so a tmux binding
+    // querying `#{@hydra_session}` after the TUI exits doesn't fire
+    // against a stale id. Written before leaveAltScreen since the OSC
+    // just goes on the wire and the terminal / tmux picks it up
+    // regardless of alt-screen state.
+    clearUserVar("hydra_session");
     leaveAltScreen();
     process.off("exit", altScreenCleanup);
   }
@@ -2135,6 +2142,7 @@ async function runSession(
     // user sees the launch label again while session bring-up continues.
     installStatus.write(launchLabelBase);
     resolvedSessionId = created.sessionId;
+    emitSetUserVar("hydra_session", resolvedSessionId);
     exitHint.sessionId = resolvedSessionId;
     exitHint.readonly = false;
     const hydraMeta = extractHydraMeta(created._meta ?? undefined);
@@ -2214,6 +2222,7 @@ async function runSession(
       _meta?: Record<string, unknown>;
     };
     resolvedSessionId = attached.sessionId;
+    emitSetUserVar("hydra_session", resolvedSessionId);
     if (attached.clientId) {
       ownClientId = attached.clientId;
     }
