@@ -27,7 +27,7 @@ function visibleWidth(line: FormattedLine): number {
   const text = (line.prefix ?? "") + line.body;
   const stripped = text
     .replace(/\^\^/g, "\u0000")
-    .replace(/\^[+CRGBMYWcrgbmyw:]/g, "")
+    .replace(/\^[+_CRGBMYWcrgbmyw:]/g, "")
     .replace(/\u0000/g, "^");
   return stringWidth(stripped);
 }
@@ -311,16 +311,18 @@ describe("parseAgentMarkdown", () => {
     expect(new Set(widths).size).toBe(1);
   });
 
-  it("aligns columns when cells contain *italic* markers (rendered literally)", () => {
-    // applyInlineMarkup doesn't process *…*, so the asterisks render
-    // literally and contribute to visible width. The padding math
-    // must account for them.
+  it("aligns columns when cells contain *italic* markers", () => {
+    // applyInlineMarkup rewrites *…* to ^_…^: caret markup (underline;
+    // zero-width at render time), so the asterisks contribute nothing
+    // to visible width and cellVisibleWidth strips them before the
+    // column-width math.
     const lines = parseAgentMarkdown(
       "| a | b |\n|---|---|\n| *italic cell* | plain |\n| plain | other |",
     );
     const widths = lines.map(visibleWidth);
     expect(new Set(widths).size).toBe(1);
-    expect(lines[2]?.body).toContain("*italic cell*");
+    expect(lines[2]?.body).toContain("^_italic cell^:");
+    expect(lines[2]?.body).not.toContain("*italic cell*");
   });
 
   it("aligns columns when cells contain wide glyphs (✓ check mark)", () => {
@@ -336,7 +338,9 @@ describe("parseAgentMarkdown", () => {
   // msg_e4d229630001llp4x7sqsGbWms, lines ~62-74 of the reconstructed
   // markdown), which surfaced the original alignment bug. Inlined
   // verbatim — do not "clean up" the unicode (→, em-dash) or the
-  // *italic* markers; they're exactly what triggered the misalign.
+  // *italic* markers; they're exactly what triggered the misalign
+  // (and now that italic is a real inline style, the width math has
+  // to account for the *…* pair being zero-width at render time).
   it("aligns the RFD audit table from hydra_session_w5CYtGbWRDnGOLVa", () => {
     const table = [
       "| RFD requirement | hydra-acp | Status |",

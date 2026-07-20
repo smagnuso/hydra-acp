@@ -196,12 +196,29 @@ export function formatEvent(
 //
 // Supported:
 //   **bold**         → ^+bold^:
+//   *italic*         → ^_italic^:         (rendered as underline, see below)
+//   _italic_         → ^_italic^:         (strict word-boundary flanking)
 //   `inline code`    → ^Cinline code^:    (bright-cyan tint)
 //
-// Skipped intentionally:
-//   *italic* / _italic_  — `*` and `_` are too common in code/paths/
-//                          shell args, false-positives would litter the
-//                          UI with spurious italics.
+// Italic maps to underline, not SGR italic (`\x1b[3m`). Real italic is
+// unreliable in practice: tmux mangles SGR 3 unless the outer TERM's
+// terminfo advertises `sitm`/`ritm`, and terminals without an italic
+// font (gnome-terminal on some setups, xterm defaults, most system
+// consoles) render `\x1b[3m` as inverse video — a solid highlighted
+// block that reads as "selected" and drowns out the surrounding prose.
+// Underline is the same convention `less` and `man` use for italic
+// runs from groff and works everywhere. Links carry underline PLUS a
+// color tint (bright cyan) so the two remain visually distinguishable.
+//
+// Italic parsing uses CommonMark-flavored flanking rules so the common
+// false-positive cases (`src/*.ts` globs, C-style pointer decls, `n * m`
+// multiplication, `intra_word` identifiers) don't italicize:
+//   `*x*`  opening `*` must have a non-alphanumeric char (or start of
+//          text) before it and a non-space/non-`*` char after; the
+//          matching closer mirrors those constraints.
+//   `_x_`  same, but both flanks must be a full word boundary — the
+//          outer side is non-alphanumeric-and-non-`_`. This stops
+//          `some_snake_case` from italicizing `snake`.
 //
 // boldReset/codeReset allow callers to substitute a non-full-reset sequence.
 // codeOpen defaults to "^C" (bright cyan); thoughts pass "^c" (dim cyan) so
@@ -210,7 +227,12 @@ export function formatEvent(
 // foreground to default — the brightBlack base color holds throughout.
 function applyInlineMarkup(
   text: string,
-  opts?: { codeOpen?: string; boldReset?: string; codeReset?: string },
+  opts?: {
+    codeOpen?: string;
+    boldReset?: string;
+    italicReset?: string;
+    codeReset?: string;
+  },
 ): string {
   return applyInlineMarkupWithLinks(text, opts).styled;
 }
@@ -232,6 +254,7 @@ function applyInlineMarkupWithLinks(
   opts?: {
     codeOpen?: string;
     boldReset?: string;
+    italicReset?: string;
     codeReset?: string;
     linkOpen?: string;
     linkReset?: string;
@@ -250,6 +273,7 @@ function applyInlineMarkupWithLinks(
   const codeOpen = opts?.codeOpen ?? "^C";
   const codeReset = opts?.codeReset ?? "^:";
   const boldReset = opts?.boldReset ?? "^:";
+  const italicReset = opts?.italicReset ?? "^:";
   // Links render bright-cyan-underline by default — same visual register
   // as inline `code` since the link text is usually a path/identifier.
   const linkOpen = opts?.linkOpen ?? "^C^_";
@@ -295,6 +319,112 @@ function applyInlineMarkupWithLinks(
         if (inner.ansi) ansi = true;
         i = close + 2;
         continue;
+      }
+    }
+    // *italic* — single `*` with flanking guards to avoid the common
+    // code-in-prose false positives (globs, pointers, multiplication).
+    // Bold is handled above; here we require text[i+1] !== '*' so we
+    // don't compete with `**bold**`. The opener must not be preceded
+    // by an alphanumeric (rules out `n*m`) and must be immediately
+    // followed by a non-space/non-`*` char (rules out `foo * bar`).
+    // The closer mirrors: not preceded by whitespace or `*`, and not
+    // followed by an alphanumeric. Same-line only.
+    if (c === "*" && text[i + 1] !== "*") {
+      const prev = i > 0 ? text[i - 1]! : "";
+      const nextCh = text[i + 1] ?? "";
+      const openable =
+        nextCh !== "" &&
+        nextCh !== " " &&
+        nextCh !== "\t" &&
+        nextCh !== "\n" &&
+        !/[A-Za-z0-9]/.test(prev);
+      if (openable) {
+        let close = -1;
+        for (let j = i + 1; j < text.length; j++) {
+          const cj = text[j]!;
+          if (cj === "\n")
+            break;
+          if (cj !== "*")
+            continue;
+          if (text[j + 1] === "*")
+            continue;
+          const before = text[j - 1]!;
+          const after = text[j + 1] ?? "";
+          if (before === " " || before === "\t" || before === "*")
+            continue;
+          if (/[A-Za-z0-9]/.test(after))
+            continue;
+          close = j;
+          break;
+        }
+        if (close !== -1 && close > i + 1) {
+          const innerText = text.slice(i + 1, close);
+          const inner = applyInlineMarkupWithLinks(innerText, opts);
+          const start = cleanLen;
+          styled += `^_${inner.styled}${italicReset}`;
+          for (const nested of inner.links) {
+            links.push({
+              start: start + nested.start,
+              end: start + nested.end,
+              url: nested.url,
+            });
+          }
+          cleanLen += inner.cleanLength;
+          if (inner.ansi)
+            ansi = true;
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+    // _italic_ — stricter than `*`: the outer flank must be a full
+    // word boundary (non-alphanumeric AND non-`_`) so identifiers like
+    // `foo_bar_baz` never emphasize `bar`.
+    if (c === "_") {
+      const prev = i > 0 ? text[i - 1]! : "";
+      const nextCh = text[i + 1] ?? "";
+      const openable =
+        nextCh !== "" &&
+        nextCh !== " " &&
+        nextCh !== "\t" &&
+        nextCh !== "\n" &&
+        nextCh !== "_" &&
+        !/[A-Za-z0-9_]/.test(prev);
+      if (openable) {
+        let close = -1;
+        for (let j = i + 1; j < text.length; j++) {
+          const cj = text[j]!;
+          if (cj === "\n")
+            break;
+          if (cj !== "_")
+            continue;
+          const before = text[j - 1]!;
+          const after = text[j + 1] ?? "";
+          if (before === " " || before === "\t" || before === "_")
+            continue;
+          if (/[A-Za-z0-9_]/.test(after))
+            continue;
+          close = j;
+          break;
+        }
+        if (close !== -1 && close > i + 1) {
+          const innerText = text.slice(i + 1, close);
+          const inner = applyInlineMarkupWithLinks(innerText, opts);
+          const start = cleanLen;
+          styled += `^_${inner.styled}${italicReset}`;
+          for (const nested of inner.links) {
+            links.push({
+              start: start + nested.start,
+              end: start + nested.end,
+              url: nested.url,
+            });
+          }
+          cleanLen += inner.cleanLength;
+          if (inner.ansi)
+            ansi = true;
+          i = close + 1;
+          continue;
+        }
       }
     }
     // `code` — same shape, single backtick fences. Stops at the next
@@ -433,32 +563,34 @@ function applyInlineMarkupWithLinks(
 function planInlineOptsFor(style: Style): {
   codeOpen: string;
   boldReset: string;
+  italicReset: string;
   codeReset: string;
 } {
   switch (style) {
     case "plan-done":
-      return { codeOpen: "^C", boldReset: "^:^g", codeReset: "^:^g" };
+      return { codeOpen: "^C", boldReset: "^:^g", italicReset: "^:^g", codeReset: "^:^g" };
     case "plan-pending":
-      return { codeOpen: "^C", boldReset: "^:^-", codeReset: "^:^-" };
+      return { codeOpen: "^C", boldReset: "^:^-", italicReset: "^:^-", codeReset: "^:^-" };
     case "plan":
     default:
-      return { codeOpen: "^C", boldReset: "^:^Y", codeReset: "^:^Y" };
+      return { codeOpen: "^C", boldReset: "^:^Y", italicReset: "^:^Y", codeReset: "^:^Y" };
   }
 }
 
 function headingInlineOptsFor(style: Style): {
   codeOpen: string;
   boldReset: string;
+  italicReset: string;
   codeReset: string;
 } {
   switch (style) {
     case "heading-1":
-      return { codeOpen: "^C", boldReset: "^+^Y", codeReset: "^+^Y" };
+      return { codeOpen: "^C", boldReset: "^+^Y", italicReset: "^+^Y", codeReset: "^+^Y" };
     case "heading-2":
-      return { codeOpen: "^Y", boldReset: "^+^C", codeReset: "^+^C" };
+      return { codeOpen: "^Y", boldReset: "^+^C", italicReset: "^+^C", codeReset: "^+^C" };
     case "heading-3":
     default:
-      return { codeOpen: "^C", boldReset: "^:^+", codeReset: "^:^+" };
+      return { codeOpen: "^C", boldReset: "^:^+", italicReset: "^:^+", codeReset: "^:^+" };
   }
 }
 
@@ -475,7 +607,12 @@ interface ParseMarkdownOpts {
   // Prefix for the first non-blank line. All other lines use "  ".
   firstPrefix?: string;
   // Passed to applyInlineMarkup for prose and list items.
-  inlineOpts?: { codeOpen?: string; boldReset?: string; codeReset?: string };
+  inlineOpts?: {
+    codeOpen?: string;
+    boldReset?: string;
+    italicReset?: string;
+    codeReset?: string;
+  };
   // Total terminal width available for the rendered block (including the
   // prefix). When set, pipe tables clamp column widths to fit and word-wrap
   // cells across multiple physical rows; without it tables stay natural-width
@@ -784,14 +921,19 @@ function isTableSeparatorLine(line: string): boolean {
 
 // Visible terminal width of a cell after applyInlineMarkup runs against it
 // — both header and body cells go through term(text) with markup
-// interpretation, so **bold** -> ^+bold^… and `code` -> ^Ccode^… are
-// zero-width markers. Italic *…* / _…_ stay intact, so they contribute
-// to visible width. Uses string-width so wide glyphs (CJK, emoji) count
-// as 2 cols and code-point oddities (combining marks, ZWJ sequences)
-// reflect their on-screen footprint rather than .length.
+// interpretation, so **bold** -> ^+bold^…, *italic* / _italic_ -> ^_…^:,
+// and `code` -> ^Ccode^… are all zero-width markers. Uses string-width
+// so wide glyphs (CJK, emoji) count as 2 cols and code-point oddities
+// (combining marks, ZWJ sequences) reflect their on-screen footprint
+// rather than .length. The italic strippers use conservative flanking
+// (whitespace/punctuation on the outer side) so they mirror the parser
+// in applyInlineMarkupWithLinks and don't over-strip false-positive
+// asterisks (globs, pointers) that will render literally.
 function cellVisibleWidth(cell: string): number {
   const visible = cell
     .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/(^|[^A-Za-z0-9*])\*([^\s*](?:[^*\n]*?[^\s*])?)\*(?![A-Za-z0-9])/g, "$1$2")
+    .replace(/(^|[^A-Za-z0-9_])_([^\s_](?:[^_\n]*?[^\s_])?)_(?![A-Za-z0-9_])/g, "$1$2")
     .replace(/`([^`]+)`/g, "$1");
   return stringWidth(visible);
 }
@@ -848,6 +990,68 @@ function tokenizeCell(cell: string): CellAtom[] {
           j = close + 2;
         }
         continue;
+      }
+      // *italic* — mirror applyInlineMarkupWithLinks' flanking guard
+      // so `n * m` and `src/*.ts` don't get glued into a single atom.
+      // When a valid italic span is found the whole `*...*` becomes
+      // one atom (spaces included), matching the treatment of bold.
+      if (c === "*" && cell[j + 1] !== "*") {
+        const prev = word.length > 0 ? word[word.length - 1]! : (j > 0 ? cell[j - 1]! : "");
+        const nextCh = cell[j + 1] ?? "";
+        const openable =
+          nextCh !== "" &&
+          nextCh !== " " &&
+          nextCh !== "\t" &&
+          nextCh !== "*" &&
+          !/[A-Za-z0-9]/.test(prev);
+        if (openable) {
+          let close = -1;
+          for (let k = j + 1; k < cell.length; k++) {
+            const ck = cell[k]!;
+            if (ck !== "*") continue;
+            if (cell[k + 1] === "*") continue;
+            const before = cell[k - 1]!;
+            const after = cell[k + 1] ?? "";
+            if (before === " " || before === "\t" || before === "*") continue;
+            if (/[A-Za-z0-9]/.test(after)) continue;
+            close = k;
+            break;
+          }
+          if (close !== -1 && close > j + 1) {
+            word += cell.slice(j, close + 1);
+            j = close + 1;
+            continue;
+          }
+        }
+      }
+      // _italic_ — strict word-boundary flanking.
+      if (c === "_") {
+        const prev = word.length > 0 ? word[word.length - 1]! : (j > 0 ? cell[j - 1]! : "");
+        const nextCh = cell[j + 1] ?? "";
+        const openable =
+          nextCh !== "" &&
+          nextCh !== " " &&
+          nextCh !== "\t" &&
+          nextCh !== "_" &&
+          !/[A-Za-z0-9_]/.test(prev);
+        if (openable) {
+          let close = -1;
+          for (let k = j + 1; k < cell.length; k++) {
+            const ck = cell[k]!;
+            if (ck !== "_") continue;
+            const before = cell[k - 1]!;
+            const after = cell[k + 1] ?? "";
+            if (before === " " || before === "\t" || before === "_") continue;
+            if (/[A-Za-z0-9_]/.test(after)) continue;
+            close = k;
+            break;
+          }
+          if (close !== -1 && close > j + 1) {
+            word += cell.slice(j, close + 1);
+            j = close + 1;
+            continue;
+          }
+        }
       }
       if (c === "`") {
         const close = cell.indexOf("`", j + 1);
@@ -926,7 +1130,10 @@ function wrapCellAtoms(atoms: CellAtom[], width: number): string[] {
         flush();
       }
       const hasMarkup =
-        atom.text.includes("**") || atom.text.includes("`");
+        atom.text.includes("**") ||
+        atom.text.includes("`") ||
+        atom.text.includes("*") ||
+        atom.text.includes("_");
       if (hasMarkup) {
         lines.push(atom.text);
       } else {
@@ -1048,7 +1255,12 @@ function formatTable(
   const renderRow = (
     cells: string[],
     style: Style,
-    inlineOpts?: { codeOpen?: string; boldReset?: string; codeReset?: string },
+    inlineOpts?: {
+      codeOpen?: string;
+      boldReset?: string;
+      italicReset?: string;
+      codeReset?: string;
+    },
   ): FormattedLine[] => {
     const wrapped: string[][] = [];
     let rowHeight = 1;
