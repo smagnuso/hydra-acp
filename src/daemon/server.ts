@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as net from "node:net";
+import * as path from "node:path";
 import * as tls from "node:tls";
 import Fastify, { type FastifyInstance } from "fastify";
 import websocketPlugin from "@fastify/websocket";
@@ -500,7 +501,44 @@ export async function startDaemon(
   };
 }
 
+const LOG_RETENTION_COUNT = 20;
+
+async function pruneRotatedLogsOnStartup(baseFile: string, keep: number): Promise<void> {
+  const dir = path.dirname(baseFile);
+  const base = path.basename(baseFile, ".log");
+  const pattern = new RegExp(`^${base}\\.(\\d+)\\.log$`);
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(dir);
+  } catch {
+    return;
+  }
+  const matches: Array<{ name: string; n: number }> = [];
+  for (const entry of entries) {
+    const m = entry.match(pattern);
+    if (m) {
+      matches.push({ name: entry, n: Number(m[1]) });
+    }
+  }
+  if (matches.length <= keep) {
+    return;
+  }
+  matches.sort((a, b) => a.n - b.n);
+  const toRemove = matches.slice(0, matches.length - keep);
+  await Promise.allSettled(
+    toRemove.map((m) => fsp.unlink(path.join(dir, m.name))),
+  );
+}
+
 async function buildLogStream(level: string) {
+  // pino-roll only prunes inside its rotation callback, which fires
+  // once the active file crosses `size`. That means a daemon that
+  // restarts often (each restart begins writing to a fresh number)
+  // can accumulate hundreds of rotated files before any single one
+  // fills up. Sweep the directory ourselves on startup so retention
+  // holds across restarts, then let pino-roll maintain it from there.
+  await pruneRotatedLogsOnStartup(paths.logFile(), LOG_RETENTION_COUNT);
+
   const fileStream = await createPinoRoll({
     file: paths.logFile(),
     size: "10m",
@@ -513,9 +551,12 @@ async function buildLogStream(level: string) {
     //
     // Note: `frequency` was previously also set to "daily", but in
     // pino-roll v4 the size accountant under-counts when both knobs
-    // are engaged via pino.multistream — single files grew into
-    // the hundreds of MB despite the 10m cap. Size-only is reliable.
-    limit: { count: 20 },
+    // are engaged via pino.multistream, single files grew into the
+    // hundreds of MB despite the 10m cap. Size-only is reliable.
+    // removeOtherLogFiles makes pino-roll sweep pre-existing rotated
+    // files during its rotation callback, so the pile shrinks even
+    // if the startup sweep above ever misses.
+    limit: { count: LOG_RETENTION_COUNT, removeOtherLogFiles: true },
   });
   const stderrStream = pino.destination(2);
   const stream = pino.multistream([
