@@ -285,9 +285,30 @@ function applyInlineMarkupWithLinks(
   let i = 0;
   while (i < text.length) {
     const c = text[i]!;
-    // Escape literal carets so user-typed `^` doesn't get mistaken for
-    // our markup. The stripped form is still a single `^` so cleanLen
-    // advances by 1.
+    // CommonMark backslash escapes: `\*`, `\_`, `` \` ``, `\[`, `\]`, `\\`
+    // emit the following char literally and skip inline-markup parsing on
+    // it. Without this, an agent typing `ls \*foo\*` in prose to prevent
+    // spurious italics on a glob would still get italic (both backslashes
+    // survive the flanking check) — worse than the unescaped form. We
+    // keep the escape set narrow (just the metachars we actually parse
+    // plus `\\` for the escape itself) to avoid swallowing backslashes
+    // that appear in real prose or shell examples.
+    if (c === "\\" && i + 1 < text.length) {
+      const nxt = text[i + 1]!;
+      if (
+        nxt === "*" ||
+        nxt === "_" ||
+        nxt === "`" ||
+        nxt === "[" ||
+        nxt === "]" ||
+        nxt === "\\"
+      ) {
+        styled += nxt;
+        cleanLen += 1;
+        i += 2;
+        continue;
+      }
+    }
     if (c === "^") {
       styled += "^^";
       cleanLen += 1;

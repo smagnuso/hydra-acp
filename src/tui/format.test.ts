@@ -311,6 +311,33 @@ describe("parseAgentMarkdown", () => {
     expect(new Set(widths).size).toBe(1);
   });
 
+  it("italicizes *foo* in prose", () => {
+    const lines = parseAgentMarkdown("emphasis *matters* here");
+    expect(lines[0]?.body).toContain("^_matters^:");
+  });
+
+  it("does not italicize globs, pointers, or multiplication", () => {
+    const cases = ["run ls src/*.ts", "int *p = &x", "area = w * h"];
+    for (const src of cases) {
+      const lines = parseAgentMarkdown(src);
+      expect(lines[0]?.body, `case: ${src}`).not.toContain("^_");
+    }
+  });
+
+  it("honors backslash-escaped asterisks (\\*) to suppress italic", () => {
+    const lines = parseAgentMarkdown("run ls \\*foo\\* to see them");
+    expect(lines[0]?.body).toContain("*foo*");
+    expect(lines[0]?.body).not.toContain("\\*");
+    expect(lines[0]?.body).not.toContain("^_");
+  });
+
+  it("honors backslash-escaped double asterisks (\\**) to suppress bold", () => {
+    const lines = parseAgentMarkdown("literal \\**foo\\** here");
+    expect(lines[0]?.body).toContain("**foo**");
+    expect(lines[0]?.body).not.toContain("\\*");
+    expect(lines[0]?.body).not.toContain("^+");
+  });
+
   it("aligns columns when cells contain *italic* markers", () => {
     // applyInlineMarkup rewrites *…* to ^_…^: caret markup (underline;
     // zero-width at render time), so the asterisks contribute nothing
