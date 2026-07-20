@@ -478,9 +478,14 @@ export class Screen {
   // body. Used by the active-match highlight in scrollback search to
   // map currentMatch (sourceLineId, sourceCol) onto the wrapped chunk
   // that owns it without scanning the wrap cache.
+  // sourceColEnd is set when the chunk's source window doesn't equal
+  // sourceColOffset + chunk.body.length. That happens for ansi-flagged
+  // (syntax-highlighted) lines whose continuation chunks carry a synthetic
+  // SGR prefix injected by wrap-ansi that isn't at that byte position in
+  // the source. When undefined, chunkStart + chunk.body.length is used.
   private wrapOrigin = new WeakMap<
     FormattedLine,
-    { sourceLineId: number; sourceColOffset: number }
+    { sourceLineId: number; sourceColOffset: number; sourceColEnd?: number }
   >();
   // Per-row signature cache + repaint throttle state live in the
   // shared RowPainter / RepaintScheduler (src/tui/screen/painter.ts);
@@ -2156,25 +2161,40 @@ export class Screen {
     if (!lineSel) {
       return null;
     }
-    // Intersect the line's selected window with this chunk's window
-    // [sourceColOffset, sourceColOffset + chunk.body.length).
+    // Intersect the line's selected window with this chunk's source
+    // window [sourceColOffset, sourceColEnd). For ansi lines sourceColEnd
+    // is recorded explicitly during wrap because wrap-ansi may inject
+    // synthetic SGR prefixes into chunk.body that don't correspond to
+    // any source position, so chunkStart + chunk.body.length overshoots.
     const chunkStart = origin.sourceColOffset;
-    const chunkEnd = chunkStart + line.body.length;
+    const chunkEnd = origin.sourceColEnd ?? chunkStart + line.body.length;
     const interStart = Math.max(lineSel.start, chunkStart);
     const interEnd = Math.min(lineSel.end, chunkEnd);
     if (interEnd <= interStart) {
       return null;
     }
-    // Ansi-flagged code chunks used to force whole-line selection here
-    // because raw code-unit slicing landed inside SGR sequences. That
-    // carve-out is gone: matchTkMarkupAt now treats CSI SGR spans as
-    // zero-width segments (same as OSC 8 and caret markup), so the
-    // per-char intersection below is safe for syntax-highlighted rows
-    // — offsets sit on visible-cell boundaries and never split an
-    // escape sequence.
+    let bStart: number;
+    let bEnd: number;
+    if (origin.sourceColEnd !== undefined) {
+      // Ansi chunk: translate source-code-unit offsets into chunk.body
+      // code-unit offsets by counting visible characters. chunk.body may
+      // have an SGR prefix + syntax-highlight spans that don't appear at
+      // the matching source positions, so direct subtraction is wrong.
+      const src = this.sourceBodyForId(origin.sourceLineId);
+      if (src === null) {
+        return null;
+      }
+      const vLeft = countVisibleChars(src, chunkStart, interStart);
+      const vSel = countVisibleChars(src, interStart, interEnd);
+      bStart = skipVisibleChars(line.body, 0, vLeft);
+      bEnd = skipVisibleChars(line.body, bStart, vSel);
+    } else {
+      bStart = interStart - chunkStart;
+      bEnd = interEnd - chunkStart;
+    }
     return {
-      start: interStart - chunkStart,
-      end: interEnd - chunkStart,
+      start: bStart,
+      end: bEnd,
       // True iff the selection extends past this chunk's end into
       // continuation chunks or to a later source line. drives whether
       // the fillRow padding should also be highlighted so a multi-row
@@ -2182,6 +2202,14 @@ export class Screen {
       // right edge.
       toEndOfLine: lineSel.toEnd || lineSel.end > chunkEnd,
     };
+  }
+
+  private sourceBodyForId(id: number): string | null {
+    const idx = this.lineIndexById(id);
+    if (idx === -1) {
+      return null;
+    }
+    return this.lines[idx]?.body ?? null;
   }
 
   // Pushed by the app each onKey tick to reflect prompt-history
@@ -4288,6 +4316,28 @@ export class Screen {
     const localOffset = needsSegments
       ? columnToOffsetFromSegments(segmentForWidth(chunk.body), colInBody)
       : columnToOffset(chunk.body, colInBody);
+    // For ansi wrapped chunks, chunk.body may carry a synthetic SGR
+    // prefix (injected by wrap-ansi) that doesn't exist at
+    // origin.sourceColOffset in source, so sourceColOffset + localOffset
+    // drifts. Translate via visible-char count: figure out how many
+    // visible chars are covered by [0, localOffset) in chunk.body, then
+    // skip that many visible chars from sourceColOffset in the source
+    // body to land on the correct source code-unit position.
+    if (origin.sourceColEnd !== undefined) {
+      const src = this.sourceBodyForId(origin.sourceLineId);
+      if (src !== null) {
+        const visible = countVisibleChars(chunk.body, 0, localOffset);
+        const srcOffset = skipVisibleChars(
+          src,
+          origin.sourceColOffset,
+          visible,
+        );
+        return {
+          sourceLineId: origin.sourceLineId,
+          offset: srcOffset,
+        };
+      }
+    }
     return {
       sourceLineId: origin.sourceLineId,
       offset: origin.sourceColOffset + localOffset,
@@ -6255,6 +6305,17 @@ export class Screen {
     // doesn't return offsets, but chunks are sequential portions and
     // indexOf from the previous chunk's end finds each one (even when
     // wrap dropped whitespace at a break — indexOf skips past it).
+    //
+    // For ansi-flagged lines the indexOf trick breaks: wrap-ansi injects
+    // a fresh SGR prefix at the start of each continuation chunk to keep
+    // colors alive across the wrap, and that prefix does NOT exist at
+    // that byte position in the source. Instead, compute the per-chunk
+    // source window by counting visible characters in each chunk and
+    // consuming the same number of visible chars from source (skipping
+    // zero-width SGR / OSC 8 spans on both sides via matchTkMarkupAt).
+    // Both endpoints go into wrapOrigin so selectionRangeForChunk can
+    // intersect against the true source window, not the drifted one.
+    let ansiSrcCursor = 0;
     let scanPos = 0;
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i] ?? "";
@@ -6289,13 +6350,62 @@ export class Screen {
         wrappedLine.iterm2Image = line.iterm2Image;
       }
       if (id !== undefined && chunk.length > 0) {
-        const found = line.body.indexOf(chunk, scanPos);
-        const colOffset = found === -1 ? scanPos : found;
-        this.wrapOrigin.set(wrappedLine, {
-          sourceLineId: id,
-          sourceColOffset: colOffset,
-        });
-        scanPos = colOffset + chunk.length;
+        if (line.ansi) {
+          const srcStart = ansiSrcCursor;
+          let visible = 0;
+          for (let ci = 0; ci < chunk.length; ) {
+            const m = matchTkMarkupAt(chunk, ci);
+            if (m) {
+              ci += m.text.length;
+              if (m.width > 0) {
+                visible += 1;
+              }
+              continue;
+            }
+            visible += 1;
+            ci += 1;
+          }
+          let toConsume = visible;
+          while (toConsume > 0 && ansiSrcCursor < line.body.length) {
+            const m = matchTkMarkupAt(line.body, ansiSrcCursor);
+            if (m) {
+              ansiSrcCursor += m.text.length;
+              if (m.width > 0) {
+                toConsume -= 1;
+              }
+              continue;
+            }
+            ansiSrcCursor += 1;
+            toConsume -= 1;
+          }
+          let srcEnd = ansiSrcCursor;
+          if (i === chunks.length - 1) {
+            // Absorb any trailing zero-width markup on the last chunk so
+            // selection-end at bodyLen lands on the same boundary
+            // getSelectionText's slice ends on.
+            while (srcEnd < line.body.length) {
+              const m = matchTkMarkupAt(line.body, srcEnd);
+              if (!m) {
+                break;
+              }
+              srcEnd += m.text.length;
+            }
+            ansiSrcCursor = srcEnd;
+          }
+          this.wrapOrigin.set(wrappedLine, {
+            sourceLineId: id,
+            sourceColOffset: srcStart,
+            sourceColEnd: srcEnd,
+          });
+        } else {
+          const found = line.body.indexOf(chunk, scanPos);
+          const colOffset = found === -1 ? scanPos : found;
+          this.wrapOrigin.set(wrappedLine, {
+            sourceLineId: id,
+            sourceColOffset: colOffset,
+          });
+          scanPos = colOffset + chunk.length;
+        }
       }
       wrapped.push(wrappedLine);
     }
@@ -7156,6 +7266,59 @@ export function stripTkMarkupWithMap(text: string): {
   }
   rawToClean[text.length] = clean.length;
   return { clean, rawToClean };
+}
+
+// Count visible characters in text[from..to), treating CSI SGR / OSC 8 /
+// caret-markup spans as zero-width (per matchTkMarkupAt). Used to
+// translate between source-body code-unit offsets and wrap-chunk-body
+// code-unit offsets for ansi-flagged (syntax-highlighted) lines whose
+// continuation chunks carry injected SGR prefixes that don't line up
+// with source positions.
+export function countVisibleChars(
+  text: string,
+  from: number,
+  to: number,
+): number {
+  let n = 0;
+  let i = from;
+  while (i < to) {
+    const m = matchTkMarkupAt(text, i);
+    if (m) {
+      i += m.text.length;
+      if (m.width > 0) {
+        n += 1;
+      }
+      continue;
+    }
+    n += 1;
+    i += 1;
+  }
+  return n;
+}
+
+// Advance from `from` in `text` past `n` visible characters, skipping
+// zero-width markup spans; return the resulting code-unit offset. Used
+// with countVisibleChars to translate visible-char counts into chunk-
+// body code-unit offsets.
+export function skipVisibleChars(
+  text: string,
+  from: number,
+  n: number,
+): number {
+  let i = from;
+  while (n > 0 && i < text.length) {
+    const m = matchTkMarkupAt(text, i);
+    if (m) {
+      i += m.text.length;
+      if (m.width > 0) {
+        n -= 1;
+      }
+      continue;
+    }
+    i += 1;
+    n -= 1;
+  }
+  return i;
 }
 
 export function stripTkMarkup(text: string): string {

@@ -3203,6 +3203,49 @@ describe("Screen block-click routing", () => {
     expect(rangeB!.toEndOfLine).toBe(true);
   });
 
+  it("full-line selection of an ansi line that wraps across multiple chunks highlights the tail chunk", () => {
+    // Regression: for ansi-flagged (syntax-highlighted) lines that wrap
+    // across many rows, wrap-ansi injects a fresh SGR prefix at the start
+    // of each continuation chunk. That prefix isn't at that byte position
+    // in source, so line.body.indexOf(chunk, scanPos) returned -1 and each
+    // subsequent chunk's sourceColOffset drifted further past the true
+    // position. selectionRangeForChunk then returned null for the tail
+    // chunks even though they were fully covered by the selection —
+    // clipboard copy still worked (that path slices the source directly),
+    // but the on-screen highlight cut off well before the visible end.
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    // Build a body that (a) is long enough to wrap into 3+ chunks at
+    // width 40 and (b) carries CSI SGR spans in the middle so wrap-ansi
+    // must re-emit style on continuations.
+    const body =
+      "\x1b[31msudo\x1b[0m sh -c 'aaaa bbbb cccc dddd " +
+      "eeee ffff gggg hhhh iiii jjjj kkkk' && " +
+      "\x1b[31msudo\x1b[0m apt update";
+    screen.appendLine({ body, bodyStyle: "code", ansi: true });
+    const rows = visibleRows(screen);
+    const wrapped = wrapAll(screen, 40);
+    // Should have wrapped into multiple chunks.
+    expect(wrapped.length).toBeGreaterThanOrEqual(3);
+    // Select from the first char of the source line to the last visible
+    // cell of the last chunk.
+    const firstChunkIdx = rows - wrapped.length + 1;
+    const lastChunkIdx = rows;
+    const start = resolve(screen, 1, firstChunkIdx)!;
+    const end = resolve(screen, 40, lastChunkIdx)!;
+    screen.setSelection(start, end);
+    // Every wrapped chunk should have a non-null selection range — the
+    // tail chunks used to return null under the indexOf-drift bug.
+    for (const chunk of wrapped) {
+      const range = selectionRangeFor(screen, chunk);
+      expect(range, `chunk with body ${JSON.stringify(chunk.body)}`).not.toBeNull();
+    }
+    // And getSelectionText should carry the full visible content
+    // (stripped of SGR) so the copy path is intact.
+    const copied = screen.getSelectionText();
+    expect(copied).toContain("sudo apt update");
+    expect(copied.startsWith("sudo sh -c")).toBe(true);
+  });
+
   it("selection wholly inside a single highlighted code line yields the sliced text", () => {
     const screen = makeTallScreen({ width: 80, height: 24, mouse: true });
     screen.appendLine({
