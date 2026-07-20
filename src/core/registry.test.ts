@@ -54,6 +54,8 @@ function fakeConfig(): HydraConfig {
       logLevel: "warn",
       sessionIdleTimeoutSeconds: 30,
       sessionHistoryMaxEntries: 1000,
+      sessionHistoryArchiveMaxBytes: 10_000_000,
+      sessionHistoryArchiveTiers: 10,
       agentStderrTailBytes: 4096,
       agentSyncIntervalMinutes: 0,
       sessionGcIntervalMinutes: 0,

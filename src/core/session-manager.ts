@@ -229,7 +229,13 @@ export interface SessionManagerOptions {
   // Cap on entries kept in each session's on-disk history.jsonl. Forwarded
   // to both the shared HistoryStore (read-side trim) and every Session
   // (write-side compact + derived 20%-of-cap compact trigger).
-  sessionHistoryMaxEntries?: number;
+   sessionHistoryMaxEntries?: number;
+  // Per-archive byte ceiling (see HistoryStore). Defaults match the
+  // HistoryStore built-in when omitted. Set 0 to disable spill archives
+  // and revert to silent-drop trimming.
+  sessionHistoryArchiveMaxBytes?: number;
+  // Max archive tiers kept per session (see HistoryStore).
+  sessionHistoryArchiveTiers?: number;
   // Default transformer names applied to every new session when the client
   // doesn't supply _meta["hydra-acp"].transformers.
   defaultTransformers?: string[];
@@ -344,7 +350,11 @@ export class SessionManager {
     this.store = store ?? new SessionStore();
     this.tombstones = options.tombstones ?? new TombstoneStore();
     this.sessionHistoryMaxEntries = options.sessionHistoryMaxEntries ?? 1000;
-    this.histories = new HistoryStore({ maxEntries: this.sessionHistoryMaxEntries });
+    this.histories = new HistoryStore({
+      maxEntries: this.sessionHistoryMaxEntries,
+      archiveMaxBytes: options.sessionHistoryArchiveMaxBytes,
+      archiveTiers: options.sessionHistoryArchiveTiers,
+    });
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
     this.idleEventTimeoutMs = options.idleEventTimeoutMs ?? 30_000;
     this.defaultModels = options.defaultModels ?? {};

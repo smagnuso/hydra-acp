@@ -209,6 +209,8 @@ export async function startDaemon(
     compactionModel: config.compaction?.model,
     defaultTransformers: config.defaultTransformers,
     sessionHistoryMaxEntries: config.daemon.sessionHistoryMaxEntries,
+    sessionHistoryArchiveMaxBytes: config.daemon.sessionHistoryArchiveMaxBytes,
+    sessionHistoryArchiveTiers: config.daemon.sessionHistoryArchiveTiers,
     logger: agentLogger,
     npmRegistry: config.npmRegistry,
     extensionCommands,

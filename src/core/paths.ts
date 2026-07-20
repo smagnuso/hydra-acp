@@ -117,6 +117,12 @@ export const paths = {
     path.join(hydraHome(), "sessions", id, "meta.json"),
   historyFile: (id: string) =>
     path.join(hydraHome(), "sessions", id, "history.jsonl"),
+  // Nth spill-archive of a session's history. N is monotonically assigned
+  // starting at 1 (first archive ever created for the session). Files are
+  // append-only once written and never renumbered, so the numbers double
+  // as an audit trail. See HistoryStore.compact for the spill semantics.
+  historyArchiveFile: (id: string, n: number) =>
+    path.join(hydraHome(), "sessions", id, `history.jsonl.${n}`),
   // Content-addressed store for heavy tool payload (diff bodies, stdout)
   // externalized out of history.jsonl. One file per unique blob, named by
   // its sha256, so repeated identical content (e.g. an agent re-emitting

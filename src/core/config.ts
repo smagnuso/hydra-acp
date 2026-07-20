@@ -26,6 +26,24 @@ const DaemonConfig = z.object({
   // to the tail at this length as a defensive measure against older
   // daemons that may have written unbounded files.
   sessionHistoryMaxEntries: z.number().int().positive().default(10_000),
+  // Per-archive byte ceiling for spilled history. When history.jsonl is
+  // trimmed to sessionHistoryMaxEntries, the evicted head is appended to
+  // history.jsonl.N (append-only, one entry per line, never split across
+  // files). Once that file's on-disk size exceeds this threshold, the
+  // next spill opens history.jsonl.N+1. Byte-based because entry sizes
+  // are heterogeneous (a tool-result blob can dwarf a plain prompt) and
+  // a byte budget gives a truthful disk ceiling. Cap is soft: a spill
+  // batch is written whole, so the final size can overshoot by up to
+  // one batch. Set 0 to disable archiving entirely (silent-drop, the
+  // pre-archive behavior).
+  sessionHistoryArchiveMaxBytes: z.number().int().nonnegative().default(10_000_000),
+  // Max number of history.jsonl.N archive files kept per session. Once
+  // this many exist and a new one would be needed, the oldest
+  // (history.jsonl.1 by monotonic assignment) is deleted first — the
+  // only place data is ever truly dropped. Combined with
+  // sessionHistoryArchiveMaxBytes this bounds worst-case per-session
+  // history footprint at roughly (tiers * maxBytes) + the live file.
+  sessionHistoryArchiveTiers: z.number().int().positive().default(10),
   // Bytes of trailing agent stderr buffered per AgentInstance so the
   // daemon can include it in the diagnostic message when a spawn fails.
   // Bump if your agents emit large tracebacks you want surfaced.
