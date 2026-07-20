@@ -832,6 +832,18 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     if (!altScreenEngaged) {
       return;
     }
+    // Restore every terminal mode the TUI enabled (mouse reporting,
+    // bracketed paste, modifyOtherKeys, kitty keyboard stack, DECAWM
+    // auto-wrap, cursor-key/keypad application mode, OSC 22 pointer
+    // shape, OSC 9;4 progress). screen.stop() with keepFullscreen:true
+    // (used by the picker round-trip AND by the final exit path since
+    // runTuiApp owns alt-screen entry/exit) skips this reset. Without
+    // it, ^D out of the TUI can leave the host shell with DECAWM off
+    // or SGR mouse mode 1006 stuck on — which shows up as "zsh ^R
+    // messes up the display, `reset` fixes it". Sequences are
+    // idempotent, so calling this even if screen.stop already ran the
+    // same reset (crash path, keepFullscreen:false) is harmless.
+    emergencyTerminalReset();
     term.fullscreen(false);
     altScreenEngaged = false;
     // Land on a fresh line below the restored shell prompt so any
