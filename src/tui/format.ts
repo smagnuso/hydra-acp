@@ -89,6 +89,12 @@ export interface FormattedLine {
   // click gesture: a click whose resolved offset falls inside a link
   // range opens the URL directly, skipping the path-token scan.
   links?: Array<{ start: number; end: number; url: string }>;
+  // Body-column indent applied to continuation chunks when the screen
+  // layer wraps this line. Used for hanging indent under bullet/ordered
+  // list items so wrapped text aligns under the item text, not under
+  // the bullet glyph. The first wrapped chunk gets no extra indent —
+  // its body already carries the "• " (or "N. ") prefix.
+  hangingIndent?: number;
 }
 
 export interface FormatEventOptions {
@@ -513,6 +519,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     prefix = "  ",
     links?: Array<{ start: number; end: number; url: string }>,
     ansi?: boolean,
+    hangingIndent?: number,
   ): void => {
     const entry: FormattedLine = { prefix, body, bodyStyle };
     if (prefixStyle !== undefined)
@@ -522,6 +529,9 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     }
     if (ansi) {
       entry.ansi = true;
+    }
+    if (hangingIndent !== undefined && hangingIndent > 0) {
+      entry.hangingIndent = hangingIndent;
     }
     out.push(entry);
   };
@@ -637,7 +647,14 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
         end: lk.end + shift,
         url: lk.url,
       }));
-      line(`${indent}• ${r.styled}`, proseStyle, nextPrefix(), shifted, r.ansi);
+      line(
+        `${indent}• ${r.styled}`,
+        proseStyle,
+        nextPrefix(),
+        shifted,
+        r.ansi,
+        indent.length + 2,
+      );
       continue;
     }
     const ordered = l.match(/^(\s*)(\d+)\.\s+(.*)$/);
@@ -652,7 +669,14 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
         end: lk.end + shift,
         url: lk.url,
       }));
-      line(`${indent}${num}. ${r.styled}`, proseStyle, nextPrefix(), shifted, r.ansi);
+      line(
+        `${indent}${num}. ${r.styled}`,
+        proseStyle,
+        nextPrefix(),
+        shifted,
+        r.ansi,
+        indent.length + num.length + 2,
+      );
       continue;
     }
     const isBlank = l.trim() === "";

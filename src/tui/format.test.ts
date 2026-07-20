@@ -861,6 +861,33 @@ describe("buildUnifiedDiff", () => {
   });
 });
 
+describe("parseAgentMarkdown — bullet hanging indent", () => {
+  it("sets hangingIndent=2 on a top-level bullet so wrapped lines align under the item text", () => {
+    const lines = parseAgentMarkdown("- first bullet body");
+    const bullet = lines.find((l) => l.body.includes("• first bullet body"));
+    expect(bullet?.hangingIndent).toBe(2);
+  });
+
+  it("scales hangingIndent for nested bullets by the leading indent width", () => {
+    const lines = parseAgentMarkdown("- outer\n  - nested bullet");
+    const bullet = lines.find((l) => l.body.includes("• nested bullet"));
+    expect(bullet?.hangingIndent).toBe(4);
+  });
+
+  it("sets hangingIndent to num+2 on ordered list items", () => {
+    const lines = parseAgentMarkdown("1. one\n10. ten");
+    const one = lines.find((l) => l.body.includes("1. one"));
+    const ten = lines.find((l) => l.body.includes("10. ten"));
+    expect(one?.hangingIndent).toBe(3);
+    expect(ten?.hangingIndent).toBe(4);
+  });
+
+  it("does not set hangingIndent on plain prose lines", () => {
+    const lines = parseAgentMarkdown("just some prose text here");
+    expect(lines[0]?.hangingIndent).toBeUndefined();
+  });
+});
+
 describe("formatExitPlanMode", () => {
   it("renders a Plan header followed by parsed markdown body", () => {
     const lines = formatExitPlanMode({

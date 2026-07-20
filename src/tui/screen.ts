@@ -485,7 +485,16 @@ export class Screen {
   // the source. When undefined, chunkStart + chunk.body.length is used.
   private wrapOrigin = new WeakMap<
     FormattedLine,
-    { sourceLineId: number; sourceColOffset: number; sourceColEnd?: number }
+    {
+      sourceLineId: number;
+      sourceColOffset: number;
+      sourceColEnd?: number;
+      // Number of leading spaces in line.body that are pure display
+      // padding (hanging-indent for wrapped bullet/ordered items). They
+      // don't correspond to any source position, so col↔source mappings
+      // that read/write line.body offsets must subtract/add this shift.
+      bodyDisplayShift?: number;
+    }
   >();
   // Per-row signature cache + repaint throttle state live in the
   // shared RowPainter / RepaintScheduler (src/tui/screen/painter.ts);
@@ -2167,7 +2176,9 @@ export class Screen {
     // synthetic SGR prefixes into chunk.body that don't correspond to
     // any source position, so chunkStart + chunk.body.length overshoots.
     const chunkStart = origin.sourceColOffset;
-    const chunkEnd = origin.sourceColEnd ?? chunkStart + line.body.length;
+    const shift = origin.bodyDisplayShift ?? 0;
+    const chunkEnd =
+      origin.sourceColEnd ?? chunkStart + line.body.length - shift;
     const interStart = Math.max(lineSel.start, chunkStart);
     const interEnd = Math.min(lineSel.end, chunkEnd);
     if (interEnd <= interStart) {
@@ -2186,11 +2197,13 @@ export class Screen {
       }
       const vLeft = countVisibleChars(src, chunkStart, interStart);
       const vSel = countVisibleChars(src, interStart, interEnd);
-      bStart = skipVisibleChars(line.body, 0, vLeft);
+      // Body's leading `shift` chars are pure display padding, skip them
+      // before walking visible chars in the body.
+      bStart = skipVisibleChars(line.body, shift, vLeft);
       bEnd = skipVisibleChars(line.body, bStart, vSel);
     } else {
-      bStart = interStart - chunkStart;
-      bEnd = interEnd - chunkStart;
+      bStart = interStart - chunkStart + shift;
+      bEnd = interEnd - chunkStart + shift;
     }
     return {
       start: bStart,
@@ -4293,12 +4306,15 @@ export class Screen {
       return null;
     }
     const prefixCols = cellWidth(chunk.prefix ?? "");
-    const colInBody = x - 1 - prefixCols;
-    if (colInBody < 0) {
-      // Click landed in the gutter / continuation indent: anchor to the
-      // chunk's start in the source rather than reporting non-selectable.
+    const shift = origin.bodyDisplayShift ?? 0;
+    const rawColInBody = x - 1 - prefixCols;
+    if (rawColInBody < shift) {
+      // Click landed in the gutter / continuation indent (either the
+      // prefix gutter or the hanging-indent padding on a wrapped bullet):
+      // anchor to the chunk's start in the source.
       return { sourceLineId: origin.sourceLineId, offset: origin.sourceColOffset };
     }
+    const colInBody = rawColInBody;
     // Styled bodies (agent / thoughts / headings) carry zero-width
     // caret-markup spans. The pure column→offset helper has no notion
     // of markup, so feed it a pre-segmented stream where `^X` / `^[...]`
@@ -4326,7 +4342,9 @@ export class Screen {
     if (origin.sourceColEnd !== undefined) {
       const src = this.sourceBodyForId(origin.sourceLineId);
       if (src !== null) {
-        const visible = countVisibleChars(chunk.body, 0, localOffset);
+        // Skip the hanging-indent padding (pure display, no source
+        // counterpart) before counting visible chars into the source.
+        const visible = countVisibleChars(chunk.body, shift, localOffset);
         const srcOffset = skipVisibleChars(
           src,
           origin.sourceColOffset,
@@ -4340,7 +4358,7 @@ export class Screen {
     }
     return {
       sourceLineId: origin.sourceLineId,
-      offset: origin.sourceColOffset + localOffset,
+      offset: origin.sourceColOffset + localOffset - shift,
     };
   }
 
@@ -4580,8 +4598,9 @@ export class Screen {
     if (!origin || origin.sourceLineId !== info.lineId) {
       return null;
     }
-    const colInChunk = info.col - origin.sourceColOffset;
-    if (colInChunk < 0 || colInChunk >= line.body.length) {
+    const shift = origin.bodyDisplayShift ?? 0;
+    const colInChunk = info.col - origin.sourceColOffset + shift;
+    if (colInChunk < shift || colInChunk >= line.body.length) {
       return null;
     }
     return colInChunk;
@@ -6291,6 +6310,13 @@ export class Screen {
     // deferred-wrap state. Same -1 convention picker.ts uses
     // (rowMaxWidth = termWidth - ROW_PREFIX_WIDTH - 1).
     const room = Math.max(1, width - prefixCols - 1);
+    // Hanging indent: when set, continuation chunks get `hang` leading
+    // spaces so wrapped bullet/ordered items line up under the item text
+    // rather than under the "• " glyph. Wrap at the narrower `room - hang`
+    // so first + continuation chunks all fit inside the terminal, and
+    // prepend the spaces to every chunk after the first below.
+    const hang = Math.max(0, Math.min(line.hangingIndent ?? 0, room - 1));
+    const wrapWidth = Math.max(1, room - hang);
     // The "agent", "thought", and "heading-*" bodyStyles are routed through
     // term-kit's markup-interpreting writer (see writeStyled); every other
     // style emits text via .noFormat, so caret sequences are literal there
@@ -6298,8 +6324,8 @@ export class Screen {
     // default preserves existing cwd/title/spec behavior.
     const stripMarkup = bodyStyleUsesMarkup(line.bodyStyle);
     const chunks = line.ansi
-      ? wrapAnsiBody(line.body, room)
-      : wrap(line.body, room, { stripMarkup });
+      ? wrapAnsiBody(line.body, hang > 0 ? wrapWidth : room)
+      : wrap(line.body, hang > 0 ? wrapWidth : room, { stripMarkup });
     const wrapped: FormattedLine[] = [];
     // Walk the source body to recover each chunk's starting col. wrap()
     // doesn't return offsets, but chunks are sequential portions and
@@ -6319,9 +6345,15 @@ export class Screen {
     let scanPos = 0;
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i] ?? "";
+      // Prepend hanging-indent spaces to continuation chunks. The
+      // wrapOrigin math below keys off `chunk` (source-derived), not
+      // the visible body, so selection/click mapping is unaffected by
+      // the added leading spaces.
+      const displayBody =
+        i === 0 || hang === 0 ? chunk : " ".repeat(hang) + chunk;
       const wrappedLine: FormattedLine = {
         prefix: i === 0 ? line.prefix : " ".repeat(prefixCols),
-        body: chunk,
+        body: displayBody,
       };
       if (line.prefixStyle !== undefined) {
         wrappedLine.prefixStyle = line.prefixStyle;
@@ -6392,18 +6424,36 @@ export class Screen {
             }
             ansiSrcCursor = srcEnd;
           }
-          this.wrapOrigin.set(wrappedLine, {
+          const entry: {
+            sourceLineId: number;
+            sourceColOffset: number;
+            sourceColEnd?: number;
+            bodyDisplayShift?: number;
+          } = {
             sourceLineId: id,
             sourceColOffset: srcStart,
             sourceColEnd: srcEnd,
-          });
+          };
+          if (i > 0 && hang > 0) {
+            entry.bodyDisplayShift = hang;
+          }
+          this.wrapOrigin.set(wrappedLine, entry);
         } else {
           const found = line.body.indexOf(chunk, scanPos);
           const colOffset = found === -1 ? scanPos : found;
-          this.wrapOrigin.set(wrappedLine, {
+          const entry: {
+            sourceLineId: number;
+            sourceColOffset: number;
+            sourceColEnd?: number;
+            bodyDisplayShift?: number;
+          } = {
             sourceLineId: id,
             sourceColOffset: colOffset,
-          });
+          };
+          if (i > 0 && hang > 0) {
+            entry.bodyDisplayShift = hang;
+          }
+          this.wrapOrigin.set(wrappedLine, entry);
           scanPos = colOffset + chunk.length;
         }
       }
