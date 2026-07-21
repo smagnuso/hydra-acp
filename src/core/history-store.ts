@@ -1,9 +1,16 @@
 import * as fs from "node:fs/promises";
+import { gzip as gzipCb, gunzip as gunzipCb } from "node:zlib";
+import { promisify } from "node:util";
 import { paths } from "./paths.js";
 import { externalizeToolEntry, expandToolRefs } from "./tool-content.js";
 import { putToolBlob, getToolBlob, deleteToolBlobs } from "./tool-store.js";
 
-const ARCHIVE_NAME_PATTERN = /^history\.jsonl\.(\d+)$/;
+const gzip = promisify(gzipCb);
+const gunzip = promisify(gunzipCb);
+
+// Matches both the plain (currently-writable) and gzipped (sealed on
+// roll) archive filenames. Group 1 = index, group 2 = ".gz" or "".
+const ARCHIVE_NAME_PATTERN = /^history\.jsonl\.(\d+)(\.gz)?$/;
 
 // One on-disk history.jsonl per session: the replay buffer of broadcast
 // notifications captured by Session.recordAndBroadcast. The point is to
@@ -155,6 +162,17 @@ export class HistoryStore {
   // write, and evicts the oldest archive when the tier count would
   // exceed archiveTiers. Called only from within the per-session write
   // queue (via compact), so archive index bookkeeping is race-free.
+  //
+  // Seal-on-roll: when the current archive crosses archiveMaxBytes, it
+  // is gzipped in place (`history.jsonl.N` → `history.jsonl.N.gz`) and
+  // the plain file unlinked, before the pointer advances to N+1. JSONL
+  // compresses ~5-10x on realistic session traffic, so sealed archives
+  // take a fraction of the byte cap on disk. The currently-writable
+  // archive stays plain-text (you can't cleanly append to a gzip stream
+  // and the append-only property is worth more than the last tier's
+  // compression). Recovery-safe: if a crash happens between gzip-write
+  // and plain-unlink, the reader prefers `.gz` and the stale plain file
+  // is cleaned up on the next spill's tier sweep.
   private async spillToArchive(
     sessionId: string,
     headLines: string[],
@@ -175,9 +193,39 @@ export class HistoryStore {
     // Cap is soft: this batch has already landed intact, we only advance
     // the pointer for future spills.
     if (size >= this.archiveMaxBytes) {
+      await this.sealArchive(sessionId, n);
       this.nextArchiveIndex.set(sessionId, n + 1);
     } else {
       this.nextArchiveIndex.set(sessionId, n);
+    }
+  }
+
+  // Compress `history.jsonl.N` in place: write the .gz alongside, fsync
+  // via close, then unlink the plain file. Idempotent — if a stale .gz
+  // is already present (crash between roll and this call), it's
+  // overwritten with the current plain contents. Silent no-op if the
+  // plain file has vanished for any reason.
+  private async sealArchive(sessionId: string, n: number): Promise<void> {
+    const plainPath = paths.historyArchiveFile(sessionId, n);
+    let raw: Buffer;
+    try {
+      raw = await fs.readFile(plainPath);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "ENOENT") {
+        return;
+      }
+      throw err;
+    }
+    const compressed = await gzip(raw);
+    await fs.writeFile(plainPath + ".gz", compressed, { mode: 0o600 });
+    try {
+      await fs.unlink(plainPath);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== "ENOENT") {
+        throw err;
+      }
     }
   }
 
@@ -192,18 +240,33 @@ export class HistoryStore {
     }
     const existing = await this.listArchiveIndices(sessionId);
     const max = existing.length === 0 ? 0 : existing[existing.length - 1]!;
-    // If the highest existing archive is already over cap, start a new
-    // one; otherwise keep appending to it. This is the resurrect-safe
-    // path: we don't create a fresh archive per resurrect cycle.
+    // If the highest existing archive is already sealed (present as .gz)
+    // or over cap in plain form, roll to N+1 on the next spill. Sealed
+    // archives are by definition full — that's why they were sealed —
+    // so appending to them would be doubly wrong (can't append to gzip,
+    // and we'd blow past the cap the seal was meant to lock in).
     let next = max === 0 ? 1 : max;
     if (max > 0) {
+      const plainPath = paths.historyArchiveFile(sessionId, max);
+      const gzPath = plainPath + ".gz";
+      let sealed = false;
       try {
-        const size = (await fs.stat(paths.historyArchiveFile(sessionId, max))).size;
-        if (size >= this.archiveMaxBytes) {
-          next = max + 1;
-        }
+        await fs.access(gzPath);
+        sealed = true;
       } catch {
-        next = max;
+        sealed = false;
+      }
+      if (sealed) {
+        next = max + 1;
+      } else {
+        try {
+          const size = (await fs.stat(plainPath)).size;
+          if (size >= this.archiveMaxBytes) {
+            next = max + 1;
+          }
+        } catch {
+          next = max;
+        }
       }
     }
     this.nextArchiveIndex.set(sessionId, next);
@@ -234,23 +297,36 @@ export class HistoryStore {
       const victim = existing[i]!;
       // Never evict the archive we're about to write to.
       if (victim !== candidateIndex) {
-        try {
-          await fs.unlink(paths.historyArchiveFile(sessionId, victim));
-        } catch (err) {
-          const e = err as NodeJS.ErrnoException;
-          if (e.code !== "ENOENT") {
-            throw err;
-          }
-        }
+        await this.unlinkArchive(sessionId, victim);
         overBy -= 1;
       }
       i += 1;
     }
   }
 
+  // Delete both variants of an archive index (plain and .gz). Either
+  // may be absent; only the "still there after we tried" case is an
+  // error.
+  private async unlinkArchive(sessionId: string, n: number): Promise<void> {
+    const plainPath = paths.historyArchiveFile(sessionId, n);
+    for (const p of [plainPath, plainPath + ".gz"]) {
+      try {
+        await fs.unlink(p);
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code !== "ENOENT") {
+          throw err;
+        }
+      }
+    }
+  }
+
   // Read the session dir once and return archive suffix numbers in
-  // ascending order (oldest first). Empty when the dir doesn't exist
-  // or contains no archives.
+  // ascending order (oldest first). Deduplicated across the plain and
+  // .gz variants — if both `history.jsonl.5` and `history.jsonl.5.gz`
+  // are present (crash between seal-write and plain-unlink), the index
+  // 5 appears once and the .gz form is preferred by listArchives.
+  // Empty when the dir doesn't exist or contains no archives.
   private async listArchiveIndices(sessionId: string): Promise<number[]> {
     let names: string[];
     try {
@@ -262,7 +338,7 @@ export class HistoryStore {
       }
       throw err;
     }
-    const out: number[] = [];
+    const seen = new Set<number>();
     for (const name of names) {
       const m = ARCHIVE_NAME_PATTERN.exec(name);
       if (!m) {
@@ -270,26 +346,38 @@ export class HistoryStore {
       }
       const n = Number.parseInt(m[1]!, 10);
       if (Number.isFinite(n) && n > 0) {
-        out.push(n);
+        seen.add(n);
       }
     }
-    out.sort((a, b) => a - b);
-    return out;
+    return [...seen].sort((a, b) => a - b);
   }
 
   // Enumerate the archive files for a session, oldest to newest by
   // suffix. Exposed so callers (recall MCP, forensic tooling) can walk
-  // spilled history without duplicating the readdir logic. Paths are
-  // absolute; entries can be parsed as JSONL, one HistoryEntry per line.
+  // spilled history without duplicating the readdir logic. `path` points
+  // at the .gz variant when present (sealed archives), otherwise the
+  // plain file (the still-writable current tier). Entries in either form
+  // are JSONL, one HistoryEntry per line — readers should gunzip when
+  // the path ends in .gz.
   async listArchives(sessionId: string): Promise<Array<{ index: number; path: string }>> {
     if (!SESSION_ID_PATTERN.test(sessionId)) {
       return [];
     }
     const indices = await this.listArchiveIndices(sessionId);
-    return indices.map((index) => ({
-      index,
-      path: paths.historyArchiveFile(sessionId, index),
-    }));
+    const out: Array<{ index: number; path: string }> = [];
+    for (const index of indices) {
+      const plainPath = paths.historyArchiveFile(sessionId, index);
+      const gzPath = plainPath + ".gz";
+      let usePath = plainPath;
+      try {
+        await fs.access(gzPath);
+        usePath = gzPath;
+      } catch {
+        usePath = plainPath;
+      }
+      out.push({ index, path: usePath });
+    }
+    return out;
   }
 
   // Load every archived entry for a session in chronological order
@@ -312,7 +400,12 @@ export class HistoryStore {
     for (const { path: filePath } of archives) {
       let raw: string;
       try {
-        raw = await fs.readFile(filePath, "utf8");
+        if (filePath.endsWith(".gz")) {
+          const buf = await fs.readFile(filePath);
+          raw = (await gunzip(buf)).toString("utf8");
+        } else {
+          raw = await fs.readFile(filePath, "utf8");
+        }
       } catch (err) {
         const e = err as NodeJS.ErrnoException;
         if (e.code === "ENOENT") {
@@ -469,18 +562,11 @@ export class HistoryStore {
           throw err;
         }
       }
-      // Sweep any spill archives too; missing files are fine (best-effort
-      // cleanup mirrors the live-file path above).
+      // Sweep any spill archives too (both .N and .N.gz variants);
+      // missing files are fine.
       const archives = await this.listArchiveIndices(sessionId);
       for (const n of archives) {
-        try {
-          await fs.unlink(paths.historyArchiveFile(sessionId, n));
-        } catch (err) {
-          const e = err as NodeJS.ErrnoException;
-          if (e.code !== "ENOENT") {
-            throw err;
-          }
-        }
+        await this.unlinkArchive(sessionId, n);
       }
       this.nextArchiveIndex.delete(sessionId);
       // Drop the externalized tool blobs alongside the history file.

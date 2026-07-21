@@ -280,6 +280,69 @@ describe("HistoryStore", () => {
     expect(live).toHaveLength(5);
   });
 
+  it("seals a full archive to .gz on roll and reads it back transparently", async () => {
+    // Tiny cap so the very first spill fills and seals .1; a second
+    // compact then spills into a plain .2.
+    const store = new HistoryStore({ archiveMaxBytes: 200, archiveTiers: 10 });
+    const sid = "hydra_session_seal";
+    for (let i = 0; i < 30; i++) {
+      await store.append(sid, { method: "x", params: { i }, recordedAt: i });
+    }
+    await store.compact(sid, 10);
+    // .1 got sealed on first spill (20 entries at ~45B each blows past 200B).
+    await expect(fs.access(paths.historyArchiveFile(sid, 1) + ".gz")).resolves.toBeUndefined();
+    await expect(fs.access(paths.historyArchiveFile(sid, 1))).rejects.toThrow();
+    // Add a small second batch so .2's post-write size is under the
+    // cap — it stays plain (currently-writable tier).
+    for (let i = 30; i < 33; i++) {
+      await store.append(sid, { method: "x", params: { i }, recordedAt: i });
+    }
+    await store.compact(sid, 10);
+    // With only 3 net entries above the live cap of 10, and live already
+    // holding 10 from the previous compact, live now has 13; compact
+    // evicts 3 → .2 is ~135B (under 200B cap).
+    await expect(fs.access(paths.historyArchiveFile(sid, 2))).resolves.toBeUndefined();
+    await expect(fs.access(paths.historyArchiveFile(sid, 2) + ".gz")).rejects.toThrow();
+    // listArchives prefers the .gz variant for sealed tiers.
+    const archives = await store.listArchives(sid);
+    expect(archives.map((a) => a.index)).toEqual([1, 2]);
+    expect(archives[0]?.path.endsWith(".gz")).toBe(true);
+    expect(archives[1]?.path.endsWith(".gz")).toBe(false);
+    // loadArchives round-trips through the gunzip path transparently.
+    const all = await store.loadArchives(sid);
+    expect(all.map((e) => (e.params as { i: number }).i)).toEqual(
+      Array.from({ length: 23 }, (_, i) => i),
+    );
+  });
+
+  it("resurrect after a seal rolls to the next tier instead of appending to the .gz", async () => {
+    // Pre-seed a sealed archive (as if the previous daemon rolled and
+    // exited). A fresh HistoryStore must not try to append to the .gz.
+    const sid = "hydra_session_seal_resume";
+    await fs.mkdir(paths.sessionDir(sid), { recursive: true });
+    const sealedBody =
+      JSON.stringify({ method: "old", params: {}, recordedAt: -1 }) + "\n";
+    // Write .3.gz directly using the same gzip Node ships with.
+    const zlib = await import("node:zlib");
+    const { promisify } = await import("node:util");
+    const gz = promisify(zlib.gzip);
+    await fs.writeFile(
+      paths.historyArchiveFile(sid, 3) + ".gz",
+      await gz(Buffer.from(sealedBody, "utf8")),
+    );
+    const store = new HistoryStore({ archiveMaxBytes: 10_000_000, archiveTiers: 10 });
+    for (let i = 0; i < 15; i++) {
+      await store.append(sid, { method: "x", params: { i }, recordedAt: i });
+    }
+    await store.compact(sid, 5);
+    // New spill lands in .4 (plain), .3.gz is untouched.
+    await expect(fs.access(paths.historyArchiveFile(sid, 4))).resolves.toBeUndefined();
+    await expect(fs.access(paths.historyArchiveFile(sid, 3) + ".gz")).resolves.toBeUndefined();
+    const spilled = await store.loadArchives(sid);
+    expect(spilled[0]?.method).toBe("old");
+    expect(spilled.map((e) => e.method).slice(1)).toEqual(Array(10).fill("x"));
+  });
+
   it("delete removes the archive files too", async () => {
     const store = new HistoryStore({ archiveMaxBytes: 10_000_000, archiveTiers: 10 });
     const sid = "hydra_session_del";
