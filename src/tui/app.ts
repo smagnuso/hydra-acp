@@ -128,7 +128,11 @@ import {
 } from "./attachments.js";
 import { readClipboard, readPrimarySelection } from "./clipboard.js";
 import { runUserHotkey } from "./user-hotkey.js";
-import { clearUserVar, emitSetUserVar } from "./terminal-user-var.js";
+import {
+  clearActiveHydraSession,
+  publishActiveHydraSession,
+  readStickyHydraSession,
+} from "./terminal-user-var.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
@@ -875,12 +879,12 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       );
     }
   } finally {
-    // Clear the per-pane hydra_session user var so a tmux binding
-    // querying `#{@hydra_session}` after the TUI exits doesn't fire
-    // against a stale id. Written before leaveAltScreen since the OSC
-    // just goes on the wire and the terminal / tmux picks it up
-    // regardless of alt-screen state.
-    clearUserVar("hydra_session");
+    // Clear the tmux pane option + OSC so consumers that treat the
+    // value as "hydra is running now" (tmux-hardcopy.sh) stop firing
+    // the transcript path after the TUI exits. The per-TTY sticky
+    // file is intentionally NOT touched — that's the pointer `hydra
+    // --reattach` reads to prefer the last session on this terminal.
+    clearActiveHydraSession();
     leaveAltScreen();
     process.off("exit", altScreenCleanup);
   }
@@ -2154,7 +2158,7 @@ async function runSession(
     // user sees the launch label again while session bring-up continues.
     installStatus.write(launchLabelBase);
     resolvedSessionId = created.sessionId;
-    emitSetUserVar("hydra_session", resolvedSessionId);
+    publishActiveHydraSession(resolvedSessionId);
     exitHint.sessionId = resolvedSessionId;
     exitHint.readonly = false;
     const hydraMeta = extractHydraMeta(created._meta ?? undefined);
@@ -2234,7 +2238,7 @@ async function runSession(
       _meta?: Record<string, unknown>;
     };
     resolvedSessionId = attached.sessionId;
-    emitSetUserVar("hydra_session", resolvedSessionId);
+    publishActiveHydraSession(resolvedSessionId);
     if (attached.clientId) {
       ownClientId = attached.clientId;
     }
@@ -7127,6 +7131,24 @@ async function resolveSession(
     return newCtx(opts, cwd, config);
   }
   if (opts.resume) {
+    // If this pane has a sticky per-tty pointer at a session the
+    // daemon still knows about, prefer that over the cwd-based
+    // "most recent" guess. The pane's own history is a stronger
+    // signal than "any session that touched this directory", and
+    // the pointer's session may live under a different cwd, so we
+    // query the unfiltered session list to find it.
+    const sticky = readStickyHydraSession();
+    if (sticky) {
+      const allSessions = await listSessions(target, { all: true, includeNonInteractive: true });
+      const match = allSessions.find((s) => s.sessionId === sticky);
+      if (match) {
+        return {
+          sessionId: match.sessionId,
+          agentId: match.agentId ?? "",
+          cwd: match.cwd ?? cwd,
+        };
+      }
+    }
     const sessions = await listSessions(target, { cwd, all: true });
     const recent = pickMostRecent(sessions, cwd);
     if (!recent) {

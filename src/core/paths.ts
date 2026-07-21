@@ -82,6 +82,16 @@ export const paths = {
   logFile: () => path.join(hydraHome(), "daemon.log"),
   currentLogFile: () => path.join(hydraHome(), "current.log"),
   registryCache: () => path.join(hydraHome(), "registry.json"),
+  // Per-TTY sticky pointer to the last hydra session that lived on
+  // this controlling terminal. Written on every TUI attach / session
+  // switch; NEVER cleared on exit. `hydra --reattach` reads this to
+  // prefer "the session that was on this terminal" over "the most
+  // recent session for cwd". Cross-platform: works for iTerm2, Kitty,
+  // WezTerm, Alacritty, Ghostty, plain xterm, tmux, screen — anywhere
+  // stdin points at a real TTY.
+  ttySessionDir: () => path.join(hydraHome(), "tty"),
+  ttySessionFile: (ttyBasename: string) =>
+    path.join(hydraHome(), "tty", ttyBasename),
   agentsDir: () => path.join(hydraHome(), "agents"),
   // Per-agent diagnostic log written by AgentInstance: spawn/exit
   // milestones plus every line the agent emits on stderr. Mirrors the
