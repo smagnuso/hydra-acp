@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
   __resetTtyCacheForTests,
   clearActiveHydraSession,
+  listLiveHydraTtys,
   publishActiveHydraSession,
   readStickyHydraSession,
 } from "./terminal-user-var.js";
@@ -67,27 +68,43 @@ describe("terminal-user-var", () => {
     expect(readStickyHydraSession()).toBeNull();
   });
 
-  it("writes and reads a per-tty sticky file when stdin resolves to a tty", () => {
-    // Fake a resolvable /proc/self/fd/0 by pointing our resolveTtyBasename at
-    // a controlled tempdir link. Simulate by placing a symlink in
-    // tmpHome and stubbing readlinkSync via a wrapper isn't trivial;
-    // instead, use the process.stdin.isTTY + spawnSync("tty") path
-    // in an environment where `tty` will fail, and separately verify
-    // the file layer directly. So here: verify the round-trip by
-    // driving the fs helpers via a synthetic tty basename.
-    (process.stdin as { isTTY?: boolean }).isTTY = true;
-    // Point the resolver at a synthetic fd-link we control.
-    const fakeTty = path.join(tmpHome, "pts-test");
-    fs.writeFileSync(fakeTty, "");
-    // Precondition: without a real /proc link we still expect nothing.
-    // The public API contract is "best-effort" — this test doubles as a
-    // regression guard that a missing tty doesn't crash.
-    publishActiveHydraSession("hydra_session_xyz");
-    // Nothing to assert about the sticky file here since we can't
-    // portably fake ttyname; the fs read/write path is a straight
-    // fs.writeFileSync + fs.readFileSync roundtrip which node
-    // guarantees. The important behavior — no crash, no partial
-    // state, no thrown error — is covered by reaching this line.
-    expect(chunks.length).toBeGreaterThan(0);
+  // The file-format tests below exercise listLiveHydraTtys /
+  // readStickyHydraSession via files we plant directly, since we can't
+  // portably fake /proc/self/fd/0 to stress writeTtyStickyFile end-to-end.
+  const seedStickyFile = (name: string, contents: string): void => {
+    const dir = path.join(tmpHome, "tty");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, name), contents);
+  };
+
+  it("listLiveHydraTtys reports liveness via kill(pid, 0)", () => {
+    seedStickyFile("42", `${process.pid}:${process.ppid}:hydra_session_alive\n`);
+    seedStickyFile("99", `999999:1:hydra_session_dead\n`);
+    seedStickyFile("legacy", `hydra_session_bare_id\n`);
+    const entries = listLiveHydraTtys().sort((a, b) =>
+      a.ttyBasename.localeCompare(b.ttyBasename),
+    );
+    expect(entries).toHaveLength(3);
+    expect(entries[0]).toMatchObject({
+      ttyBasename: "42",
+      sessionId: "hydra_session_alive",
+      alive: true,
+    });
+    expect(entries[1]).toMatchObject({
+      ttyBasename: "99",
+      sessionId: "hydra_session_dead",
+      alive: false,
+    });
+    expect(entries[2]).toMatchObject({
+      ttyBasename: "legacy",
+      sessionId: "hydra_session_bare_id",
+      alive: false,
+      hydraPid: 0,
+      parentPid: 0,
+    });
+  });
+
+  it("listLiveHydraTtys returns [] when the tty dir doesn't exist", () => {
+    expect(listLiveHydraTtys()).toEqual([]);
   });
 });

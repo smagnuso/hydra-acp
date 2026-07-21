@@ -104,6 +104,14 @@ function ttyBasename(): string | null {
   return cachedTtyBasename;
 }
 
+// File format: `<hydra-pid>:<parent-pid>:<session-id>\n`. Keys by pty
+// basename so the total file count is bounded by unique ptys the
+// machine has ever handed out (no GC needed). The parent-pid field
+// lets --reattach detect "same shell instance" (staleness after a
+// tab close/reopen even if the pty basename gets reused). The
+// hydra-pid field lets any consumer walking the dir cheaply tell
+// live-attached TUIs from stale entries via `kill(pid, 0)` — used
+// for potential features like `hydra ttys` listing.
 function writeTtyStickyFile(sessionId: string): void {
   const base = ttyBasename();
   if (!base) {
@@ -111,25 +119,127 @@ function writeTtyStickyFile(sessionId: string): void {
   }
   try {
     fs.mkdirSync(paths.ttySessionDir(), { recursive: true });
-    fs.writeFileSync(paths.ttySessionFile(base), sessionId + "\n", {
-      mode: 0o600,
-    });
+    const line = `${process.pid}:${process.ppid}:${sessionId}\n`;
+    fs.writeFileSync(paths.ttySessionFile(base), line, { mode: 0o600 });
   } catch {
     // Best-effort; --reattach falls back to cwd-based selection.
   }
 }
 
-function readTtyStickyFile(): string | null {
+interface StickyRecord {
+  hydraPid: number;
+  parentPid: number;
+  sessionId: string;
+}
+
+function parseStickyLine(raw: string): StickyRecord | null {
+  const line = raw.trim();
+  if (line.length === 0) {
+    return null;
+  }
+  // Legacy shape (before the pid fields) was just the bare session
+  // id. Detect it by the absence of colons and treat as no-parent-pid
+  // (staleness check is skipped — worst case is one wrong-reattach
+  // during migration).
+  if (!line.includes(":")) {
+    return { hydraPid: 0, parentPid: 0, sessionId: line };
+  }
+  const parts = line.split(":");
+  if (parts.length < 3) {
+    return null;
+  }
+  const hydraPid = Number.parseInt(parts[0]!, 10);
+  const parentPid = Number.parseInt(parts[1]!, 10);
+  const sessionId = parts.slice(2).join(":");
+  if (!Number.isFinite(hydraPid) || !Number.isFinite(parentPid) || sessionId.length === 0) {
+    return null;
+  }
+  return { hydraPid, parentPid, sessionId };
+}
+
+function readStickyRecord(): StickyRecord | null {
   const base = ttyBasename();
   if (!base) {
     return null;
   }
   try {
-    const raw = fs.readFileSync(paths.ttySessionFile(base), "utf8").trim();
-    return raw.length > 0 ? raw : null;
+    const raw = fs.readFileSync(paths.ttySessionFile(base), "utf8");
+    return parseStickyLine(raw);
   } catch {
     return null;
   }
+}
+
+// Returns the session id from the sticky file if the recorded
+// parent-pid still matches the caller's parent — i.e. the same shell
+// instance that originally wrote the file is now running the
+// --reattach. Legacy files (no pid fields) are trusted as a
+// migration convenience.
+function readTtyStickyFile(): string | null {
+  const rec = readStickyRecord();
+  if (!rec) {
+    return null;
+  }
+  if (rec.parentPid > 0 && rec.parentPid !== process.ppid) {
+    return null;
+  }
+  return rec.sessionId;
+}
+
+// Enumerate every recorded (pty-basename, session-id, is-live) tuple
+// so consumers (e.g. `hydra ttys`) can render "which TUIs are
+// currently attached" without touching the daemon. `alive` is true
+// when the recorded hydra pid still exists (checked via kill(pid,
+// 0)); it doesn't verify that the pid is *hydra* specifically, only
+// that the process is still around — good enough for a status
+// display where the alternative is "definitely dead". Legacy files
+// without a pid always return alive=false.
+export interface LiveTtyEntry {
+  ttyBasename: string;
+  sessionId: string;
+  hydraPid: number;
+  parentPid: number;
+  alive: boolean;
+}
+
+export function listLiveHydraTtys(): LiveTtyEntry[] {
+  const dir = paths.ttySessionDir();
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: LiveTtyEntry[] = [];
+  for (const name of names) {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(dir, name), "utf8");
+    } catch {
+      continue;
+    }
+    const rec = parseStickyLine(raw);
+    if (!rec) {
+      continue;
+    }
+    let alive = false;
+    if (rec.hydraPid > 0) {
+      try {
+        process.kill(rec.hydraPid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+    }
+    out.push({
+      ttyBasename: name,
+      sessionId: rec.sessionId,
+      hydraPid: rec.hydraPid,
+      parentPid: rec.parentPid,
+      alive,
+    });
+  }
+  return out;
 }
 
 export function publishActiveHydraSession(sessionId: string): void {
