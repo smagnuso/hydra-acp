@@ -48,7 +48,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
   // so `killall hydra` (matches user-invoked TUI/cat) leaves these
   // alone, and `killall hydra-shim` cleanly takes out only the
   // editor-spawned children. Same logic as the daemon's
-  // process.title = "hydra-daemon" override: the user didn't pick
+  // process.title = "hydra-acp-daemon" override: the user didn't pick
   // this name, so it shouldn't follow the bin they invoked.
   //
   // The `ps`/`top` argv column still shows the full invocation

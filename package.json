@@ -32,13 +32,8 @@
   ],
   "bin": {
     "hydra-acp": "dist/cli.js",
-    "hydra": "dist/cli.js"
-  },
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+    "hydra": "dist/cli.js",
+    "hydra-acp-daemon": "dist/daemon.js"
   },
   "scripts": {
     "build": "tsup",

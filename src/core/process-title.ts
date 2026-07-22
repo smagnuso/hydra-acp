@@ -9,8 +9,8 @@ import { invokedBinName } from "./bin-name.js";
 // `hydra`; invoke as `hydra-acp` and comm is `hydra-acp`. This makes
 // `killall <bin>` match the bin the user actually typed at the shell.
 // The daemon is the one exception: it sets `process.title =
-// "hydra-daemon"` explicitly so it's always reaped by `killall
-// hydra-daemon` regardless of which bin started it.
+// "hydra-acp-daemon"` explicitly so it's always reaped by `killall
+// hydra-acp-daemon` regardless of which bin started it.
 //
 // Node's stock `process.title = ...` writes BOTH argv AND comm with
 // the same string. Comm gets truncated to 15 chars by the kernel,

@@ -37,9 +37,9 @@ export async function runDaemonStart(
     // Only the foreground branch becomes the long-lived daemon — the
     // non-foreground branch is a transient parent that spawns a
     // detached child which re-enters this function with --foreground.
-    // Rename here so `killall hydra-daemon` finds the real daemon and
+    // Rename here so `killall hydra-acp-daemon` finds the real daemon and
     // `killall hydra-tui` leaves it alone.
-    process.title = "hydra-daemon";
+    process.title = "hydra-acp-daemon";
     const handle = await startDaemon(config, serviceToken);
     process.stdout.write(
       `hydra-acp daemon listening on ${config.daemon.host}:${config.daemon.port}\n`,

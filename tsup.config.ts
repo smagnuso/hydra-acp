@@ -3,7 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: {
     cli: "src/cli.ts",
-    index: "src/index.ts",
+    daemon: "src/daemon-entry.ts",
   },
   format: ["esm"],
   target: "node20",

@@ -767,7 +767,7 @@ async function dispatchTui(
   // Rewrite argv0 so `ps`/`top` show the full command (TUI vs which
   // session etc.) while `killall hydra` still finds every interactive
   // hydra process without also killing the daemon. The daemon sets
-  // its own kernel comm name to "hydra-daemon" in runDaemonStart;
+  // its own kernel comm name to "hydra-acp-daemon" in runDaemonStart;
   // setHydraProcessTitle keeps interactive procs anchored at "hydra".
   setHydraProcessTitle(buildTitleFromArgv(process.argv.slice(2)));
   const { runTui } = await import("./tui/index.js");

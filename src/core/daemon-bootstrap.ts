@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { invokedBinName } from "./bin-name.js";
 import type { HydraConfig } from "./config.js";
@@ -119,19 +121,20 @@ export async function fetchDaemonHealth(
 }
 
 export function spawnDaemonDetached(): void {
-  const cliPath = process.argv[1];
-  if (!cliPath) {
-    throw new Error("Cannot determine hydra-acp binary path to spawn daemon");
-  }
-  const child = spawn(
-    process.execPath,
-    [cliPath, "daemon", "start", "--foreground"],
-    {
-      detached: true,
-      stdio: "ignore",
-      env: process.env,
-    },
-  );
+  // The daemon has its own bundle (`dist/daemon.js`) sitting next to
+  // the CLI bundle (`dist/cli.js`). Resolve it relative to this module
+  // so we don't depend on PATH containing the npm-installed bin dir.
+  // Dev-mode (`tsx src/cli.ts`) users should use `daemon start
+  // --foreground`; spawning a .ts child from node without tsx would
+  // fail, and forcing tsx in the parent's execPath here isn't worth
+  // the complexity.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const daemonBundle = resolve(here, "./daemon.js");
+  const child = spawn(process.execPath, [daemonBundle], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
   child.unref();
 }
 
