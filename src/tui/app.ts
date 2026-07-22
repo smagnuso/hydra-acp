@@ -545,6 +545,15 @@ export interface TuiOptions {
   // property lives on TuiOptions only because switchSession's hand-off
   // channel is the outer runSession loop's `nextOpts` argument.
   installStatus?: InstallStatusLine;
+  // Optional snapshot of the target session as it appeared in the caller's
+  // most recent listSessions() result. Threaded through by the three
+  // callers that already resolve a full record before switching sessions
+  // (picker double-click, Alt+N/P cycle, in-transcript hydra:// link).
+  // Treated as a hint only — the live daemon response after attach is
+  // still authoritative. Consumed for e.g. picking "Attaching to session…"
+  // over the default "Resuming session…" launch banner when the record
+  // is warm.
+  resolved?: DiscoveredSession;
 }
 
 // Shared view-only preferences that persist across the runSession loop
@@ -612,6 +621,10 @@ interface SessionContext {
   // imported-first-launch, agent-picker taken) — runSession falls back
   // to the stdout-redraw sink.
   installStatus?: InstallStatusLine;
+  // Mirror of TuiOptions.resolved (see there). Forwarded onto ctx by
+  // resolveSession when the caller already has a DiscoveredSession in
+  // hand, so runSession can pick a more accurate launch banner.
+  resolved?: DiscoveredSession;
 }
 
 // How long the upstream may be silent (no session/update arrivals)
@@ -1102,12 +1115,20 @@ async function runSession(
   // npm package is being downloaded (see hydra-acp/agents/install_progress
   // handler below) so the user gets bytes-and-percent feedback during
   // what would otherwise look like a multi-second hang.
+  // Warm attach against a local daemon completes in tens of milliseconds,
+  // so the banner would only flash as a stutter before the alt-screen
+  // switch wipes it. Suppress in that case. Remote warm attach can still
+  // take a real network beat, so keep the label there.
+  const skipLaunchLabel =
+    ctx.resolved?.status === "warm" && target.isLocal;
   const launchLabelBase =
     ctx.sessionId === "__new__"
       ? "Starting new session…"
       : ctx.isFreshFork
         ? "Forking session…"
-        : "Resuming session…";
+        : ctx.resolved?.status === "warm"
+          ? "Attaching to session…"
+          : "Resuming session…";
   // Prefer a picker-provided sink when available (paints the launch /
   // install-progress line in the composer-adjacent status row of the
   // still-visible picker frame). Two channels feed it:
@@ -1123,8 +1144,13 @@ async function runSession(
   const installStatus =
     ctx.installStatus ??
     optsInstallStatus ??
-    createInstallStatusLine(launchLabelBase, createStdoutInstallStatusSink(term));
-  installStatus.write(launchLabelBase);
+    createInstallStatusLine(
+      skipLaunchLabel ? "" : launchLabelBase,
+      createStdoutInstallStatusSink(term),
+    );
+  if (!skipLaunchLabel) {
+    installStatus.write(launchLabelBase);
+  }
 
   // For local targets the URL embeds the daemon's plain-HTTP loopback
   // port — an ephemeral that changes across `daemon restart`. Pass a
@@ -4024,6 +4050,7 @@ async function runSession(
       sessionId: next.sessionId,
       cwd: resolvedCwd,
       readonly: false,
+      resolved: next,
     };
     if (next.agentId !== undefined)
       nextOpts.agentId = next.agentId;
@@ -4074,6 +4101,7 @@ async function runSession(
       sessionId: match.sessionId,
       cwd: match.cwd ?? resolvedCwd,
       readonly: false,
+      resolved: match,
     };
     if (match.agentId !== undefined)
       nextOpts.agentId = match.agentId;
@@ -7123,6 +7151,9 @@ async function resolveSession(
     if (opts.resumeHint !== undefined) {
       ctx.resumeHint = opts.resumeHint;
     }
+    if (opts.resolved !== undefined) {
+      ctx.resolved = opts.resolved;
+    }
     return ctx;
   }
   if (opts.forceNew) {
@@ -7150,6 +7181,7 @@ async function resolveSession(
           sessionId: match.sessionId,
           agentId: match.agentId ?? "",
           cwd: match.cwd ?? cwd,
+          resolved: match,
         };
       }
     }
@@ -7163,6 +7195,7 @@ async function resolveSession(
       sessionId: recent.sessionId,
       agentId: recent.agentId ?? "",
       cwd,
+      resolved: recent,
     };
   }
   // Smart default: show every warm session plus up to PICKER_COLD_LIMIT
@@ -7359,6 +7392,9 @@ async function resolveSession(
     };
     if (installStatus) {
       ctx.installStatus = installStatus;
+    }
+    if (chosen !== undefined) {
+      ctx.resolved = chosen;
     }
     return ctx;
   }
