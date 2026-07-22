@@ -12,6 +12,7 @@ export type KeyName =
   | "alt-b"
   | "alt-f"
   | "alt-n"
+  | "alt-p"
   | "alt-tab"
   | "shift-tab"
   | "tab"
@@ -113,6 +114,7 @@ export type InputEffect =
   | { type: "scroll-to-bottom" }
   | { type: "switch-session" }
   | { type: "next-live-session" }
+  | { type: "prev-live-session" }
   | { type: "toggle-options" }
   | { type: "toggle-questions" }
   | { type: "toggle-thoughts" }
@@ -635,6 +637,8 @@ export class InputDispatcher {
       case "alt-n":
       case "alt-tab":
         return [{ type: "next-live-session" }];
+      case "alt-p":
+        return [{ type: "prev-live-session" }];
       case "ctrl-r":
         return this.startHistorySearch();
       case "ctrl-s":

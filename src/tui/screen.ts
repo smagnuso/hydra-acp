@@ -7798,6 +7798,9 @@ export function mapKeyName(name: string): KeyName | null {
     case "ALT_N":
     case "META_N":
       return "alt-n";
+    case "ALT_P":
+    case "META_P":
+      return "alt-p";
     case "ALT_TAB":
     case "META_TAB":
       return "alt-tab";
@@ -8047,6 +8050,9 @@ export function mapCsiUToKeyName(code: number, mod: number): KeyName | null {
     }
     if (code === 110 || code === 78) {
       return "alt-n";
+    }
+    if (code === 112 || code === 80) {
+      return "alt-p";
     }
     if (code === 95) {
       return "alt-underscore";

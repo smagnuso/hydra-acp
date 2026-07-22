@@ -660,6 +660,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   null,
   ["^P", "switch session (picker)"],
   ["Alt+N / Alt+Tab", "next warm session"],
+  ["Alt+P", "previous warm session"],
   ["^T", "show / hide thoughts"],
   ["^V", "paste image from clipboard"],
   ["^O", "session options (tools · plan · thoughts · diffs · mouse · enter)"],
@@ -4225,7 +4226,10 @@ async function runSession(
         });
         return;
       case "next-live-session":
-        void cycleLiveSession().catch(() => undefined);
+        void cycleLiveSession("next").catch(() => undefined);
+        return;
+      case "prev-live-session":
+        void cycleLiveSession("prev").catch(() => undefined);
         return;
       case "toggle-options":
         toggleOptionsModal();
