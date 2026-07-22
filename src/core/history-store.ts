@@ -1,5 +1,7 @@
 import * as fs from "node:fs/promises";
-import { gzip as gzipCb, gunzip as gunzipCb } from "node:zlib";
+import { createReadStream } from "node:fs";
+import { createGunzip, gzip as gzipCb, gunzip as gunzipCb } from "node:zlib";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { paths } from "./paths.js";
 import { externalizeToolEntry, expandToolRefs } from "./tool-content.js";
@@ -32,6 +34,21 @@ const DEFAULT_MAX_ENTRIES = 1000;
 const DEFAULT_ARCHIVE_MAX_BYTES = 10_000_000;
 const DEFAULT_ARCHIVE_TIERS = 10;
 
+export interface ArchiveLineCount {
+  index: number;
+  path: string;
+  lineCount: number;
+}
+
+// One entry yielded by the recall iterator: the entry itself plus its
+// stable global id in the archives-first concatenated view. Callers
+// (recall MCP tools) return entryId to the agent so a follow-up
+// range() can address the same entry.
+export interface RecallEntry {
+  entryId: number;
+  entry: HistoryEntry;
+}
+
 export interface HistoryStoreOptions {
   // Defensive cap applied on read: even if a file grew unbounded (older
   // daemon, manual edit), load() tails to this many entries. Mirrors the
@@ -60,6 +77,13 @@ export class HistoryStore {
   // in-process when the current archive fills. Unset means "haven't
   // scanned yet."
   private nextArchiveIndex = new Map<string, number>();
+  // Cached line counts per sealed/growing archive, populated on first
+  // touch and reused for entry-id math and range() targeting. Sealed
+  // (.gz) archives are immutable so their counts are permanent; the
+  // currently-writable archive's count is refreshed on every spill
+  // (spillToArchive updates it in-place). Invalidated wholesale when
+  // new archives are created or when the store is reconstructed.
+  private archiveLineCounts = new Map<string, ArchiveLineCount[]>();
 
   constructor(options: HistoryStoreOptions = {}) {
     this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
@@ -198,6 +222,10 @@ export class HistoryStore {
     } else {
       this.nextArchiveIndex.set(sessionId, n);
     }
+    // Both a fresh spill (current archive grew) and a seal-plus-roll
+    // (path .N → .N.gz + new .N+1) invalidate any cached line counts
+    // for this session. Drop the cache; the next reader repopulates.
+    this.archiveLineCounts.delete(sessionId);
   }
 
   // Compress `history.jsonl.N` in place: write the .gz alongside, fsync
@@ -319,6 +347,7 @@ export class HistoryStore {
         }
       }
     }
+    this.archiveLineCounts.delete(sessionId);
   }
 
   // Read the session dir once and return archive suffix numbers in
@@ -441,6 +470,308 @@ export class HistoryStore {
       }
     }
     return out;
+  }
+
+  // Stream a single history file (plain or .gz) as an async iterator of
+  // parsed HistoryEntry objects. Decompression, if any, happens in ~64KB
+  // chunks flowing through zlib.createGunzip → readline; peak RAM per
+  // file is a couple of chunks regardless of the file's uncompressed
+  // size. Consumers that early-exit (break out of the for-await loop)
+  // close the underlying stream through readline's own teardown, so
+  // partial reads pay only for the bytes they consumed. Malformed
+  // lines are skipped silently, matching load() and loadArchives().
+  async *streamFile(filePath: string): AsyncGenerator<HistoryEntry> {
+    let readStream: ReturnType<typeof createReadStream>;
+    try {
+      readStream = createReadStream(filePath);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "ENOENT") {
+        return;
+      }
+      throw err;
+    }
+    // The read stream may not error until the first read; wrap with a
+    // one-shot check via an event listener so an ENOENT surfaces as a
+    // clean early return rather than an unhandled event.
+    const missing = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const done = (v: boolean) => {
+        if (!settled) {
+          settled = true;
+          resolve(v);
+        }
+      };
+      readStream.once("error", (err) => {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code === "ENOENT") {
+          done(true);
+        } else {
+          readStream.destroy();
+          done(false);
+        }
+      });
+      readStream.once("readable", () => done(false));
+      readStream.once("end", () => done(false));
+    });
+    if (missing) {
+      return;
+    }
+    const source = filePath.endsWith(".gz")
+      ? readStream.pipe(createGunzip())
+      : readStream;
+    const rl = createInterface({ input: source, crlfDelay: Infinity });
+    try {
+      for await (const line of rl) {
+        if (line.length === 0) {
+          continue;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          continue;
+        }
+        const obj = parsed as Record<string, unknown>;
+        if (typeof obj.method !== "string") {
+          continue;
+        }
+        if (typeof obj.recordedAt !== "number") {
+          continue;
+        }
+        yield {
+          method: obj.method,
+          params: obj.params,
+          recordedAt: obj.recordedAt,
+        };
+      }
+    } finally {
+      rl.close();
+      readStream.destroy();
+    }
+  }
+
+  // Return per-archive line counts, populating the cache on first
+  // touch. The cache is invalidated on spill (spillToArchive) and on
+  // seal (sealArchive) so callers always see a snapshot consistent
+  // with the on-disk state at call time. Sealed archives are
+  // immutable so their counts, once measured, never change; the
+  // currently-writable archive is re-counted when it grows.
+  async getArchiveLineCounts(sessionId: string): Promise<ArchiveLineCount[]> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      return [];
+    }
+    const cached = this.archiveLineCounts.get(sessionId);
+    const archives = await this.listArchives(sessionId);
+    // Fast path: shape matches cache (same indices in same order,
+    // same paths — .gz vs plain distinction matters because a seal
+    // changes the path). Trust the cache.
+    if (
+      cached &&
+      cached.length === archives.length &&
+      cached.every(
+        (c, i) => c.index === archives[i]!.index && c.path === archives[i]!.path,
+      )
+    ) {
+      return cached;
+    }
+    const out: ArchiveLineCount[] = [];
+    for (const { index, path: filePath } of archives) {
+      // Reuse a cached count when the same index+path is already known
+      // (only the tail archive typically changes across calls).
+      const known = cached?.find((c) => c.index === index && c.path === filePath);
+      if (known) {
+        out.push(known);
+        continue;
+      }
+      let lineCount = 0;
+      for await (const _ of this.streamFile(filePath)) {
+        lineCount += 1;
+      }
+      out.push({ index, path: filePath, lineCount });
+    }
+    this.archiveLineCounts.set(sessionId, out);
+    return out;
+  }
+
+  // Hydrate a single entry: expand any tool-content blob refs back to
+  // inline content, using a per-session cache for repeated hashes.
+  // Extracted so both the iterator and rangeSlice can share it without
+  // rebuilding the cache each call.
+  private async hydrateEntry(
+    sessionId: string,
+    entry: HistoryEntry,
+    blobCache: Map<string, string | null>,
+  ): Promise<HistoryEntry> {
+    return expandToolRefs(entry, async (hash) => {
+      const cached = blobCache.get(hash);
+      if (cached !== undefined) {
+        return cached;
+      }
+      const value = await getToolBlob(sessionId, hash);
+      blobCache.set(hash, value);
+      return value;
+    });
+  }
+
+  // Yield every historical entry newest-first: live tail (from newest
+  // recorded to oldest) followed by each archive (highest N first,
+  // and within each archive newest to oldest). Each yielded RecallEntry
+  // carries a stable global entryId matching the archives-first
+  // concatenated view (so entryId 0 = oldest archive line, entryId
+  // total-1 = newest live line). Consumers early-exit by breaking out
+  // of the for-await loop; unopened archives cost nothing.
+  //
+  // Within a single archive we buffer the file's lines to yield them
+  // in reverse (gzip is sequential-forward only, so this is the price
+  // of the newest-first walk). Peak RAM per call is therefore one
+  // archive's worth of parsed entries (~10MB uncompressed worst case
+  // at default archiveMaxBytes), dropping to O(1) between archives.
+  //
+  // Live entries are also buffered for the reverse-yield, but the live
+  // file is entry-capped (sessionHistoryMaxEntries) so this is bounded
+  // by the operator's config, not by archive depth.
+  async *iterRecallNewestFirst(
+    sessionId: string,
+  ): AsyncGenerator<RecallEntry> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      return;
+    }
+    const pending = this.writeQueues.get(sessionId);
+    if (pending) {
+      await pending;
+    }
+    const metadata = await this.getArchiveLineCounts(sessionId);
+    let archivedTotal = 0;
+    for (const m of metadata) {
+      archivedTotal += m.lineCount;
+    }
+    const blobCache = new Map<string, string | null>();
+    const live: HistoryEntry[] = [];
+    for await (const e of this.streamFile(paths.historyFile(sessionId))) {
+      live.push(e);
+    }
+    for (let i = live.length - 1; i >= 0; i--) {
+      const hydrated = await this.hydrateEntry(sessionId, live[i]!, blobCache);
+      yield { entryId: archivedTotal + i, entry: hydrated };
+    }
+    // Walk archives newest first (highest index) and yield entries
+    // within each archive newest first too. Precompute the cumulative
+    // base id for each archive so the yield doesn't need a running sum.
+    const bases: number[] = new Array(metadata.length);
+    let running = 0;
+    for (let i = 0; i < metadata.length; i++) {
+      bases[i] = running;
+      running += metadata[i]!.lineCount;
+    }
+    for (let ai = metadata.length - 1; ai >= 0; ai--) {
+      const m = metadata[ai]!;
+      const bucket: HistoryEntry[] = [];
+      for await (const e of this.streamFile(m.path)) {
+        bucket.push(e);
+      }
+      const base = bases[ai]!;
+      for (let i = bucket.length - 1; i >= 0; i--) {
+        const hydrated = await this.hydrateEntry(sessionId, bucket[i]!, blobCache);
+        yield { entryId: base + i, entry: hydrated };
+      }
+    }
+  }
+
+  // Read a specific slice [fromEntryId, toEntryId] out of the recall
+  // view without materializing everything. Uses the archive line-count
+  // cache to figure out which file(s) actually contain the requested
+  // range and streams only those. Returns entries in ascending entryId
+  // order (chronological). Callers should clamp their inputs to the
+  // total entry count reported by getRecallTotalCount(); out-of-range
+  // ids yield an empty result rather than throwing.
+  async rangeSlice(
+    sessionId: string,
+    fromEntryId: number,
+    toEntryId: number,
+  ): Promise<RecallEntry[]> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      return [];
+    }
+    if (toEntryId < fromEntryId) {
+      return [];
+    }
+    const pending = this.writeQueues.get(sessionId);
+    if (pending) {
+      await pending;
+    }
+    const metadata = await this.getArchiveLineCounts(sessionId);
+    let archivedTotal = 0;
+    for (const m of metadata) {
+      archivedTotal += m.lineCount;
+    }
+    const out: RecallEntry[] = [];
+    const blobCache = new Map<string, string | null>();
+    // Archives: walk in order and stream only those overlapping the range.
+    let base = 0;
+    for (const m of metadata) {
+      const start = base;
+      const end = base + m.lineCount; // exclusive
+      base = end;
+      if (end <= fromEntryId) {
+        continue;
+      }
+      if (start > toEntryId) {
+        break;
+      }
+      let localIdx = 0;
+      for await (const entry of this.streamFile(m.path)) {
+        const globalId = start + localIdx;
+        localIdx += 1;
+        if (globalId < fromEntryId) {
+          continue;
+        }
+        if (globalId > toEntryId) {
+          break;
+        }
+        const hydrated = await this.hydrateEntry(sessionId, entry, blobCache);
+        out.push({ entryId: globalId, entry: hydrated });
+      }
+    }
+    // Live file: stream if the range overlaps.
+    if (toEntryId >= archivedTotal) {
+      const liveFrom = Math.max(fromEntryId - archivedTotal, 0);
+      const liveTo = toEntryId - archivedTotal;
+      let idx = 0;
+      for await (const entry of this.streamFile(paths.historyFile(sessionId))) {
+        if (idx > liveTo) {
+          break;
+        }
+        if (idx >= liveFrom) {
+          const hydrated = await this.hydrateEntry(sessionId, entry, blobCache);
+          out.push({ entryId: archivedTotal + idx, entry: hydrated });
+        }
+        idx += 1;
+      }
+    }
+    return out;
+  }
+
+  // Total number of entries visible to the recall iterator (archives
+  // plus live). Reads only metadata + one file stat's worth of work,
+  // no per-line parsing beyond what the line-count cache already did.
+  async getRecallTotalCount(sessionId: string): Promise<number> {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
+      return 0;
+    }
+    const metadata = await this.getArchiveLineCounts(sessionId);
+    let total = 0;
+    for (const m of metadata) {
+      total += m.lineCount;
+    }
+    let liveCount = 0;
+    for await (const _ of this.streamFile(paths.historyFile(sessionId))) {
+      liveCount += 1;
+    }
+    return total + liveCount;
   }
 
   // `tools` selects how externalized tool content is materialized:
@@ -569,6 +900,7 @@ export class HistoryStore {
         await this.unlinkArchive(sessionId, n);
       }
       this.nextArchiveIndex.delete(sessionId);
+      this.archiveLineCounts.delete(sessionId);
       // Drop the externalized tool blobs alongside the history file.
       await deleteToolBlobs(sessionId);
       // Best-effort cleanup: if no other tenant (meta.json, etc.) is

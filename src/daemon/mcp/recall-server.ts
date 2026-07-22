@@ -16,6 +16,16 @@
 // the swap mints a fresh token, the next request hits cache-miss and
 // the rebuild registers the tools.
 //
+// History scope: recall tools consume session.getRecallHistorySnapshot(),
+// which returns every spilled history.jsonl.N archive (gunzipped
+// transparently) concatenated with the live history.jsonl. So the agent
+// can reach turns that were trimmed off the live working set long ago,
+// as long as the archives haven't rolled off the tier ring. Entry
+// indices in this view are ephemeral: stable within one MCP session,
+// but a tier eviction between calls can shift them. Not a concern in
+// practice — tier evictions require hundreds of MB of write pressure —
+// but callers should not persist entry ids across sessions.
+//
 // Why a separate route from /mcp/hydra-acp-stdin: recall tools are
 // available to every session (TUI, cat, future clients); stdin tools
 // are only minted for hydra cat. Bundling them would either leak
@@ -34,7 +44,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Session } from "../../core/session.js";
 import { renderTranscript } from "../../core/history-transcript.js";
-import { iterSessionUpdates, mcpJsonResult } from "./helpers.js";
+import { classifyUpdate, mcpJsonResult } from "./helpers.js";
 import { extractBearer } from "./bearer.js";
 import type { McpTokenRegistry } from "./token-registry.js";
 
@@ -153,41 +163,47 @@ export function buildRecallMcpServer(
             note: "This session has no compacted history. `search` retrieves detail from entries that were summarized out of the working conversation; nothing has been summarized yet.",
           });
         }
-        const history = await session.getHistorySnapshot();
         const matches: Array<{
           entryId: number;
           speaker: "user" | "agent" | "tool";
           snippet: string;
           timestamp?: string;
         }> = [];
-
-        for (const { entryId, entry, kind } of iterSessionUpdates(history)) {
+        const needle = query.toLowerCase();
+        // Newest-first streaming walk with early exit. The iterator opens
+        // archives lazily — a query satisfied inside the live tail never
+        // touches archive files at all.
+        for await (const { entryId, entry } of session.iterRecallNewestFirst()) {
+          const classified = classifyUpdate(entry);
+          if (!classified) {
+            continue;
+          }
+          const { kind } = classified;
           if (kind === "tool_call" && !include_tool_calls) {
             continue;
           }
-
           const rendered = renderTranscript([entry] as unknown as Parameters<
             typeof renderTranscript
           >[0]);
-
-          const idx = rendered.toLowerCase().indexOf(query.toLowerCase());
+          const idx = rendered.toLowerCase().indexOf(needle);
           if (idx < 0) {
             continue;
           }
-
           const speaker = getSpeaker(kind);
           const snippet = makeSnippet(rendered, idx);
           const timestamp =
             typeof entry.recordedAt === "number" ? String(entry.recordedAt) : undefined;
-
           matches.push({ entryId, speaker, snippet, timestamp });
-
           if (matches.length >= limit) {
             break;
           }
         }
-
-        const truncated = matches.length >= limit && matches.length < history.length;
+        // Sort newest-first matches back into chronological order so
+        // the response is stable regardless of walk direction.
+        matches.sort((a, b) => a.entryId - b.entryId);
+        // Truncation flag: hit the limit — there may be more matches we
+        // stopped scanning for. Cheap to compute without a total count.
+        const truncated = matches.length >= limit;
         return mcpJsonResult({ matches, total_matched: matches.length, truncated });
       },
     );
@@ -231,9 +247,12 @@ export function buildRecallMcpServer(
             `range: range size (${range_size}) exceeds maximum of 50 entries`,
           );
         }
-        const history = await session.getHistorySnapshot();
-        const clamped_from = Math.min(from_entry, history.length - 1);
-        const clamped_to = Math.min(to_entry, history.length - 1);
+        const total = await session.getRecallTotalCount();
+        if (total === 0) {
+          return mcpJsonResult({ text: "", entry_count: 0, truncated: false });
+        }
+        const clamped_from = Math.min(from_entry, total - 1);
+        const clamped_to = Math.min(to_entry, total - 1);
         const truncated = clamped_from > from_entry || clamped_to < to_entry;
         if (clamped_from > clamped_to) {
           return {
@@ -241,7 +260,9 @@ export function buildRecallMcpServer(
             structuredContent: { text: "", entry_count: 0, truncated },
           };
         }
-        const slice = history.slice(clamped_from, clamped_to + 1);
+        // Slice fetches only the archives that overlap [from, to] and
+        // streams them; a range near the live tail opens no archives.
+        const slice = await session.sliceRecallHistory(clamped_from, clamped_to);
         const text = renderTranscript(slice as unknown as Parameters<typeof renderTranscript>[0]);
         return {
           content: [{ type: "text", text }],
@@ -277,13 +298,18 @@ export function buildRecallMcpServer(
             "tool_calls: at least one of tool_name or file_path must be provided",
           );
         }
-        const history = await session.getHistorySnapshot();
-
         // Coalesce tool_call + subsequent tool_call_update events for each
         // toolCallId. The initial tool_call typically ships with empty
         // rawInput; the real args (and locations[].path) arrive in
         // follow-up tool_call_update events. Merge them so filters see
         // the full picture.
+        //
+        // Streaming newest-first with early exit: once we have `limit`
+        // completed calls (matching filters), we stop. Because we walk
+        // backwards, the first tool_call_update we see for a given id
+        // is the LATEST one (final status, most complete rawInput);
+        // the initial tool_call event with the name lands last. We
+        // merge symmetrically so ordering within an id doesn't matter.
         interface Merged {
           entryId: number;
           toolName: string;
@@ -292,10 +318,20 @@ export function buildRecallMcpServer(
           status: string;
           timestamp?: string;
         }
-        const order: string[] = [];
         const merged = new Map<string, Merged>();
+        // We only know a call is complete once we've walked past its
+        // initial tool_call event, so we can't emit incrementally.
+        // Instead we track how many *distinct* toolCallIds we've seen
+        // and bail once we've collected ~2x the limit (rough guard
+        // against pathological runs of updates without matching calls).
+        const softCap = Math.max(limit * 4, 200);
 
-        for (const { entryId, entry, kind, update } of iterSessionUpdates(history)) {
+        for await (const { entryId, entry } of session.iterRecallNewestFirst()) {
+          const classified = classifyUpdate(entry);
+          if (!classified) {
+            continue;
+          }
+          const { kind, update } = classified;
           if (kind !== "tool_call" && kind !== "tool_call_update") {
             continue;
           }
@@ -314,13 +350,19 @@ export function buildRecallMcpServer(
               status: "in_progress",
             };
             merged.set(id, m);
-            order.push(id);
+          }
+          // Keep the LOWEST entryId across all events for a call — that
+          // matches the pre-streaming behavior (initial tool_call is
+          // the anchor). Walking newest-first means the initial event
+          // arrives last, so the smaller entryId always wins here.
+          if (entryId < m.entryId) {
+            m.entryId = entryId;
           }
 
           if (typeof update.name === "string" && update.name.length > 0) {
             m.toolName = update.name;
           } else if (
-            (m.toolName === "(unnamed)" || kind === "tool_call") &&
+            m.toolName === "(unnamed)" &&
             typeof update.title === "string" &&
             update.title.length > 0
           ) {
@@ -330,7 +372,12 @@ export function buildRecallMcpServer(
           const ri = update.rawInput;
           if (ri && typeof ri === "object" && !Array.isArray(ri) && Object.keys(ri).length > 0) {
             for (const [k, v] of Object.entries(ri as Record<string, unknown>)) {
-              m.rawInput[k] = v;
+              // Newest-first walk means older tool_call_update writes
+              // arrive later; don't overwrite a value we already have
+              // (which is newer).
+              if (m.rawInput[k] === undefined) {
+                m.rawInput[k] = v;
+              }
             }
           }
 
@@ -343,14 +390,26 @@ export function buildRecallMcpServer(
             }
           }
 
-          if (typeof update.status === "string") {
+          // First status we see (newest-first) is the final one — later
+          // updates for the same call are earlier in wall-clock time.
+          if (typeof update.status === "string" && m.status === "in_progress") {
             m.status = update.status;
           }
 
           if (entry.recordedAt !== undefined && m.timestamp === undefined) {
             m.timestamp = String(entry.recordedAt);
           }
+
+          if (merged.size >= softCap) {
+            break;
+          }
         }
+
+        // Emit oldest first (ascending entryId) to match pre-streaming
+        // response ordering.
+        const order = [...merged.keys()].sort(
+          (a, b) => merged.get(a)!.entryId - merged.get(b)!.entryId,
+        );
 
         const calls: Array<{
           entryId: number;

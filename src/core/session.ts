@@ -1690,6 +1690,51 @@ export class Session {
     return this.historyStore.load(this.sessionId, { tools }).catch(() => []);
   }
 
+  // Newest-first async iterator over the recall view (archives + live).
+  // Streams each file through zlib (for .gz) → readline, so peak RAM is
+  // one archive's parsed entries at a time. Consumers that early-exit
+  // (break out of the loop) pay only for the archives they open —
+  // matching in the live tail costs zero archive I/O. Yielded entries
+  // carry the stable global entryId in the archives-first concatenated
+  // view; the same id can be passed to sliceRecallHistory() to fetch
+  // an exact range verbatim.
+  async *iterRecallNewestFirst(): AsyncGenerator<{
+    entryId: number;
+    entry: CachedNotification;
+  }> {
+    if (!this.historyStore) {
+      return;
+    }
+    yield* this.historyStore.iterRecallNewestFirst(this.sessionId);
+  }
+
+  // Return the total number of entries in the recall view (archives +
+  // live). Used by recall tools to report "we hit the limit but there
+  // are more" style truncation flags without walking everything.
+  async getRecallTotalCount(): Promise<number> {
+    if (!this.historyStore) {
+      return 0;
+    }
+    return this.historyStore.getRecallTotalCount(this.sessionId).catch(() => 0);
+  }
+
+  // Fetch a contiguous [from, to] slice of the recall view without
+  // materializing the whole thing. Uses the archive line-count cache to
+  // open only the archive(s) that actually contain the requested range,
+  // so range() calls near the live tail don't touch deep archives.
+  async sliceRecallHistory(
+    fromEntryId: number,
+    toEntryId: number,
+  ): Promise<CachedNotification[]> {
+    if (!this.historyStore) {
+      return [];
+    }
+    const slice = await this.historyStore
+      .rangeSlice(this.sessionId, fromEntryId, toEntryId)
+      .catch(() => []);
+    return slice.map((r) => r.entry);
+  }
+
   // Subscribe to recordable broadcast entries — fires once per entry
   // that lands in history (so snapshot-shaped session_info/model/mode/
   // available_commands updates do NOT trigger this; they're broadcast

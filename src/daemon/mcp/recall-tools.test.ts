@@ -52,6 +52,90 @@ function populateHistory(
   );
 }
 
+describe("search — archives are walked", () => {
+  let h: Harness | null = null;
+  let session: Session;
+  let client: Client | null = null;
+  const token = "archive-search-token";
+
+  beforeEach(async () => {
+    h = await makeHarness();
+    // Tiny archive cap forces the compact to spill everything below the
+    // live tail into history.jsonl.1, verifying that recall reaches past
+    // the live file into the sealed archive.
+    const historyStore = new HistoryStore({
+      archiveMaxBytes: 10_000_000,
+      archiveTiers: 10,
+    });
+    session = makeStreamSession({ historyStore });
+    h.registry.bind(token, session);
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${h.baseUrl}/mcp/hydra-acp-recall`),
+      {
+        requestInit: {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      },
+    );
+    client = new Client({ name: "test-client", version: "0.0.1" });
+    await client.connect(transport);
+
+    // Ten entries; only the first mentions "needle". Compact to a live
+    // cap of 3 so the needle-carrying entry ends up in the archive, not
+    // in history.jsonl.
+    for (let i = 0; i < 10; i++) {
+      await historyStore.append(session.sessionId, {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "prompt_received",
+            prompt: i === 0 ? "needle in a haystack" : `filler ${i}`,
+          },
+        },
+        recordedAt: 1000 + i,
+      });
+    }
+    await historyStore.compact(session.sessionId, 3);
+  });
+
+  afterEach(async () => {
+    if (client) {
+      await client.close().catch(() => undefined);
+      client = null;
+    }
+    if (h) {
+      await h.app.close().catch(() => undefined);
+      h = null;
+    }
+  });
+
+  it("search finds a match that lives only in the archive", async () => {
+    const r = await client!.callTool({
+      name: "search",
+      arguments: { query: "needle" },
+    });
+    const sc = r.structuredContent as {
+      matches: Array<{ entryId: number; speaker: string; snippet: string }>;
+      total_matched: number;
+    };
+    expect(sc.matches).toHaveLength(1);
+    expect(sc.matches[0]!.speaker).toBe("user");
+    expect(sc.matches[0]!.snippet).toContain("needle");
+    // Entry id is in the archive prefix (index 0 of the concatenated view).
+    expect(sc.matches[0]!.entryId).toBe(0);
+  });
+
+  it("range reads back an entry that lives only in the archive", async () => {
+    const r = await client!.callTool({
+      name: "range",
+      arguments: { from_entry: 0, to_entry: 0 },
+    });
+    const sc = r.structuredContent as { text: string; entry_count: number };
+    expect(sc.entry_count).toBe(1);
+    expect(sc.text).toContain("needle in a haystack");
+  });
+});
+
 describe("search — empty query rejected", () => {
   let h: Harness | null = null;
   let client: Client | null = null;
