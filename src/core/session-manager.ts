@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import { thisMachine } from "./machine.js";
 import * as path from "node:path";
 import { customAlphabet } from "nanoid";
 import { AgentInstance, type AgentInstanceOptions, type AgentLogger } from "./agent-instance.js";
@@ -2754,7 +2755,7 @@ export class SessionManager {
       history: slicedHistory,
       promptHistory: promptHistory.length > 0 ? promptHistory : undefined,
       hydraVersion: HYDRA_VERSION,
-      machine: os.hostname(),
+      machine: thisMachine(),
     });
 
     const newId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;

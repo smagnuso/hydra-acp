@@ -21,6 +21,7 @@ import {
   type Widths,
   type FormatOptions,
 } from "../cli/session-row.js";
+import { localMachines } from "../core/machine.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { setDefaultAgent, type HydraConfig } from "../core/config.js";
@@ -4000,28 +4001,50 @@ export function sortSessions(
   });
 }
 
+// A session is "from this machine" when it was never imported OR the
+// exporting host matches thisMachine() — a bundle round-tripped through
+// export/import on the same box (e.g. archiver undelete of a local
+// session) is by definition local, not a peer mirror. See
+// core/machine.ts for the identity source and the HYDRA_ACP_LOCAL_HOSTS
+// override.
+function isFromThisMachine(
+  importedFromMachine: string | undefined,
+  locals: Set<string>,
+): boolean {
+  if (!importedFromMachine) return true;
+  return locals.has(importedFromMachine);
+}
+
 // Apply the picker's host filter to a session list. Sentinel values:
 //   "__all"   — no filter.
-//   "__local" — sessions created here OR imported and already bound to
-//               a local agent (upstreamSessionId set). The "I'm working
-//               on this here" bucket.
+//   "__local" — sessions created here, imported from this machine
+//               (self-restore via archiver / manual export+import), OR
+//               imported from another host and already bound to a local
+//               agent (upstreamSessionId set). The "I'm working on this
+//               here" bucket.
 //   <host>    — passive mirrors imported from <host> that haven't been
 //               attached locally yet. Once you attach, the session
 //               graduates to "__local" and stops appearing here.
 export function filterByHost(
   sessions: DiscoveredSession[],
   hostFilter: string,
+  hostnames: Set<string> = localMachines(),
 ): DiscoveredSession[] {
   if (hostFilter === "__all") {
     return sessions;
   }
   if (hostFilter === "__local") {
     return sessions.filter(
-      (s) => !s.importedFromMachine || !!s.upstreamSessionId,
+      (s) =>
+        isFromThisMachine(s.importedFromMachine, hostnames) ||
+        !!s.upstreamSessionId,
     );
   }
   return sessions.filter(
-    (s) => s.importedFromMachine === hostFilter && !s.upstreamSessionId,
+    (s) =>
+      s.importedFromMachine === hostFilter &&
+      !hostnames.has(hostFilter) &&
+      !s.upstreamSessionId,
   );
 }
 
@@ -4029,17 +4052,24 @@ export function filterByHost(
 // least one passive mirror (alphabetical) → "__all" → back to "__local".
 // A peer host whose sessions have all been attached locally drops out
 // of the cycle because the "<host>" filter would render an empty list
-// for it. Exported so picker.test.ts can drive the transitions.
+// for it. Local hostnames (this box or HYDRA_ACP_LOCAL_HOSTS) also drop
+// out since they roll up into "__local". Exported so picker.test.ts can
+// drive the transitions.
 export function nextHostFilter(
   current: string,
   sessions: ReadonlyArray<{
     importedFromMachine?: string;
     upstreamSessionId?: string;
   }>,
+  hostnames: Set<string> = localMachines(),
 ): string {
   const hosts = new Set<string>();
   for (const s of sessions) {
-    if (s.importedFromMachine && !s.upstreamSessionId) {
+    if (
+      s.importedFromMachine &&
+      !s.upstreamSessionId &&
+      !hostnames.has(s.importedFromMachine)
+    ) {
       hosts.add(s.importedFromMachine);
     }
   }

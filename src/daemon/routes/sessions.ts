@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import type { FastifyInstance } from "fastify";
+import { thisMachine } from "../../core/machine.js";
 import { paths } from "../../core/paths.js";
 import { expandHome, type CompactionConfig } from "../../core/config.js";
 import { shouldCompactSession, estimateTokens } from "../../core/compaction-heuristic.js";
@@ -430,7 +431,7 @@ export function registerSessionRoutes(
         ? { toolBlobs: exported.toolBlobs }
         : {}),
       hydraVersion: HYDRA_VERSION,
-      machine: os.hostname(),
+      machine: thisMachine(),
       hydraHost: resolveHydraHost(defaults),
     });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -514,7 +515,7 @@ export function registerSessionRoutes(
       promptHistory:
         exported.promptHistory.length > 0 ? exported.promptHistory : undefined,
       hydraVersion: HYDRA_VERSION,
-      machine: os.hostname(),
+      machine: thisMachine(),
       hydraHost: resolveHydraHost(defaults),
     });
     const q = request.query as { tools?: string } | undefined;

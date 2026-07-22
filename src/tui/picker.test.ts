@@ -226,6 +226,17 @@ describe("nextHostFilter", () => {
     expect(nextHostFilter("__local", mixed)).toBe("machine-a");
     expect(nextHostFilter("machine-a", mixed)).toBe("__all");
   });
+
+  it("skips this machine's hostname since self-imports roll into __local", () => {
+    const items = [
+      { importedFromMachine: "blackbox" },
+      { importedFromMachine: "machine-a" },
+    ];
+    const locals = new Set(["blackbox"]);
+    expect(nextHostFilter("__local", items, locals)).toBe("machine-a");
+    expect(nextHostFilter("machine-a", items, locals)).toBe("__all");
+    expect(nextHostFilter("__all", items, locals)).toBe("__local");
+  });
 });
 
 describe("filterByHost", () => {
@@ -284,6 +295,21 @@ describe("filterByHost", () => {
       }),
     ];
     expect(filterByHost(items, "__all")).toEqual(items);
+  });
+
+  it("__local: self-imports (importedFromMachine === thisHost) count as local", () => {
+    const selfImport = session({ importedFromMachine: "blackbox" });
+    const peerImport = session({ importedFromMachine: "broom" });
+    const locals = new Set(["blackbox"]);
+    expect(filterByHost([selfImport, peerImport], "__local", locals)).toEqual([
+      selfImport,
+    ]);
+  });
+
+  it("<host>: never returns anything for a local hostname", () => {
+    const selfImport = session({ importedFromMachine: "blackbox" });
+    const locals = new Set(["blackbox"]);
+    expect(filterByHost([selfImport], "blackbox", locals)).toEqual([]);
   });
 });
 
