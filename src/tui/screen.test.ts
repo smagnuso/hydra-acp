@@ -2459,6 +2459,19 @@ describe("Screen block-click routing", () => {
     expect(open("does-not-exist-anywhere")).toBe(false);
   });
 
+  it("double-click on a hyphenated identifier snaps the whole hyphenated token", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "the foo-bar-baz thing" });
+    const y = visibleRows(screen);
+    // Column 8 lands inside "foo-bar-baz" (on 'o' of "foo").
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    expect(screen.getSelectionText()).toBe("foo-bar-baz");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    expect(screen.getSelectionText()).toBe("foo-bar-baz");
+  });
+
   it("double-click on a bare URL snaps to the whole URL, not a word inside it", () => {
     const opens: string[] = [];
     const screen = makeTallScreen({

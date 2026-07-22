@@ -73,9 +73,11 @@ const DOUBLE_CLICK_MAX_MS = 500;
 // would defeat the gesture on terminals that wobble by a single column.
 const DOUBLE_CLICK_MAX_DIST = 1;
 // ASCII-word-character regex for double-click word snap. We deliberately
-// restrict to ASCII for this version (per spec) — Unicode word boundary
-// expansion would require ICU or per-codepoint category tables.
-const ASCII_WORD_RE = /[A-Za-z0-9_]/;
+// restrict to ASCII for this version (per spec), Unicode word boundary
+// expansion would require ICU or per-codepoint category tables. Hyphen
+// is included so hyphenated identifiers ("foo-bar", "state-of-the-art")
+// snap as a single word, matching what most terminals and editors do.
+const ASCII_WORD_RE = /[A-Za-z0-9_\-]/;
 // Path-token characters scanned for the double-click "open file" gesture.
 // Wider than ASCII_WORD_RE: includes the filesystem separators, dots,
 // hyphens, tildes, and pluses that appear in real paths. The optional
