@@ -2,6 +2,8 @@
 // the input dispatcher together.
 
 import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
+import { writeHeapSnapshot } from "node:v8";
 import { nanoid } from "nanoid";
 import termkit from "terminal-kit";
 import { JsonRpcConnection } from "../acp/connection.js";
@@ -763,10 +765,45 @@ function installCrashLogging(): void {
       writeDebugLine({ src: "process-exit", code });
     }
   });
+  // Diagnostic: with HYDRA_HEAP_SNAPSHOT=1 set, `kill -USR2 <pid>`
+  // writes a V8 heap snapshot to /tmp/hydra-heap-<pid>-<ts>.heapsnapshot.
+  // Gated behind an env var because writeHeapSnapshot is synchronous
+  // and blocks the event loop for hundreds of ms on a 40MB heap — a
+  // stray SIGUSR2 would visibly freeze the TUI. Windows has no
+  // SIGUSR2 so gate on platform too.
+  if (process.platform !== "win32" && process.env.HYDRA_HEAP_SNAPSHOT === "1") {
+    process.on("SIGUSR2", () => {
+      try {
+        const target = `/tmp/hydra-heap-${process.pid}-${Date.now()}.heapsnapshot`;
+        const written = writeHeapSnapshot(target);
+        const mem = process.memoryUsage();
+        writeDebugLine({
+          src: "heap-snapshot",
+          path: written,
+          rss: mem.rss,
+          heapUsed: mem.heapUsed,
+          heapTotal: mem.heapTotal,
+          external: mem.external,
+        });
+        process.stderr.write(`\n[heap] ${written} rss=${mem.rss} heapUsed=${mem.heapUsed}\n`);
+      } catch (err) {
+        writeDebugLine({
+          src: "heap-snapshot-failed",
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
 }
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   installCrashLogging();
+  // undici (Node's global fetch) records a PerformanceResourceTiming
+  // entry for every HTTP request and retains them in the global
+  // performance buffer forever. In a long-lived TUI that polls the
+  // daemon on every session cycle, that buffer grows unboundedly. Zero
+  // the buffer here — we don't consume resource timing anyway.
+  performance.setResourceTimingBufferSize(0);
   const config = await loadConfig();
   // Local daemon target unless the caller pre-resolved a remote one.
   // `hydra session attach hydra://...` does the resolution up front so
@@ -3641,6 +3678,8 @@ async function runSession(
   };
 
   const teardown = (): void => {
+    if (teardownStarted)
+      return;
     // Set first so any inbound notification/request that lands between
     // here and stream.close() bails before touching the screen.
     teardownStarted = true;
@@ -3928,8 +3967,12 @@ async function runSession(
       // subsequent throw must not retry to restart this dead screen.
       const resume = finishSession;
       finishSession = null;
-      process.off("SIGINT", sigintHandler);
-      void stream.close().catch(() => undefined);
+      // teardown() is idempotent — screen.stop / stream.close above may
+      // already have run on this path, but SIGCONT removal and timer
+      // cleanup have not. Route through the shared teardown so all three
+      // hand-off sites (^P picker, alt+n/p cycle, /session <id>) shed the
+      // same listener/timer set.
+      teardown();
       handedOff = true;
       if (choice.kind === "new") {
         const { sessionId: _drop, agentId: _dropAgent, ...rest } = opts;
@@ -4040,8 +4083,11 @@ async function runSession(
     const next = live[nextIdx]!;
     const resume = finishSession;
     finishSession = null;
-    process.off("SIGINT", sigintHandler);
-    void stream.close().catch(() => undefined);
+    // Full teardown: without it, SIGCONT/timer/screen listeners registered
+    // by this runSession iteration would leak on every alt+n/alt+p cycle
+    // (each retaining the whole closure through the persistent process
+    // reference). See teardown() below.
+    teardown();
     // Live sessions are by definition agent-bound, so dropping any
     // pending readonly state matches what the user expects when
     // bouncing between active work.
@@ -4094,8 +4140,9 @@ async function runSession(
     }
     const resume = finishSession;
     finishSession = null;
-    process.off("SIGINT", sigintHandler);
-    void stream.close().catch(() => undefined);
+    // Same reason as cycleLiveSession: full teardown to avoid leaking
+    // SIGCONT/timer/screen listeners across a session hand-off.
+    teardown();
     const nextOpts: TuiOptions = {
       ...opts,
       sessionId: match.sessionId,
