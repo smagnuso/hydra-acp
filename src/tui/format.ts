@@ -1369,6 +1369,17 @@ const HIGHLIGHT_THEME = {
 // line. When the language is unknown / unsupported, or highlight.js
 // throws on malformed input, falls back to plain lines with ansi=false
 // so the caller still gets a 1:1 mapping back to FormattedLines.
+// LRU cache for highlighted code blocks. cli-highlight's underlying
+// hljs.highlight() calls compileLanguage() on every invocation, which
+// allocates fresh MultiRegex/ResumableMultiRegex closures per call.
+// Session re-attach re-renders the whole transcript, calling us once
+// per code block; without a cache we re-highlight identical text on
+// every alt+n/alt+p cycle. Keyed by "lang\0source" so the same source
+// under different languages is a separate entry. Bounded at 512 entries
+// (rough one-transcript-plus-headroom) so an unusual session with
+// thousands of unique fences can't unbounded-grow the cache itself.
+const HIGHLIGHT_CACHE_MAX = 512;
+const highlightCache = new Map<string, string>();
 function highlightFencedBlock(
   lang: string,
   lines: string[],
@@ -1376,27 +1387,44 @@ function highlightFencedBlock(
   if (lang.length === 0 || !supportsLanguage(lang)) {
     return lines.map((body) => ({ body, ansi: false }));
   }
+  const source = lines.join("\n");
+  const cacheKey = `${lang}\u0000${source}`;
+  const cached = highlightCache.get(cacheKey);
   let highlighted: string;
-  try {
-    highlighted = highlight(lines.join("\n"), {
-      language: lang,
-      theme: HIGHLIGHT_THEME,
-      ignoreIllegals: true,
-    });
-  } catch {
-    return lines.map((body) => ({ body, ansi: false }));
+  if (cached !== undefined) {
+    // LRU touch: re-insert to move to end.
+    highlightCache.delete(cacheKey);
+    highlightCache.set(cacheKey, cached);
+    highlighted = cached;
+  } else {
+    let raw: string;
+    try {
+      raw = highlight(source, {
+        language: lang,
+        theme: HIGHLIGHT_THEME,
+        ignoreIllegals: true,
+      });
+    } catch {
+      return lines.map((body) => ({ body, ansi: false }));
+    }
+    // chalk closes color spans with `\x1b[39m` (reset fg to terminal
+    // default). That works when the surrounding context is the terminal
+    // default, but our "code" body sits on a `bgColorGrayscale(28).white`
+    // base, so the close drops the rest of the line to whatever the user's
+    // default foreground is (blue / gray / etc. depending on theme) instead
+    // of back to our explicit white. Rewrite every fg-close to an explicit
+    // "set fg to white" so closes always restore the base we set in
+    // screen.ts. Side-effect: nested chalk closes also land at white, which
+    // matches the behavior cli-highlight already had (it concatenates spans
+    // without re-emitting parents).
+    highlighted = raw.replace(/\x1b\[39m/g, "\x1b[37m");
+    if (highlightCache.size >= HIGHLIGHT_CACHE_MAX) {
+      const oldestKey = highlightCache.keys().next().value;
+      if (oldestKey !== undefined)
+        highlightCache.delete(oldestKey);
+    }
+    highlightCache.set(cacheKey, highlighted);
   }
-  // chalk closes color spans with `\x1b[39m` (reset fg to terminal
-  // default). That works when the surrounding context is the terminal
-  // default — but our "code" body sits on a `bgColorGrayscale(28).white`
-  // base, so the close drops the rest of the line to whatever the user's
-  // default foreground is (blue / gray / etc. depending on theme) instead
-  // of back to our explicit white. Rewrite every fg-close to an explicit
-  // "set fg to white" so closes always restore the base we set in
-  // screen.ts. Side-effect: nested chalk closes also land at white, which
-  // matches the behavior cli-highlight already had (it concatenates spans
-  // without re-emitting parents).
-  highlighted = highlighted.replace(/\x1b\[39m/g, "\x1b[37m");
   const out = highlighted.split("\n");
   // Defensive: highlight.js should preserve newline count, but if it
   // didn't, prefer the source line count to keep wrap math sane.
