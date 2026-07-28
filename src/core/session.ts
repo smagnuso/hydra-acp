@@ -308,6 +308,12 @@ export interface SessionInit {
   // performs all guards and the actual rollback. Returns a rejected
   // promise with a descriptive Error on guard failure.
   uncompactHook?: () => Promise<void>;
+  // Called when /hydra fork is invoked. Provided by SessionManager;
+  // wraps SessionManager.forkSession(sourceSessionId, opts) and returns
+  // the new session id plus fork breadcrumb.
+  forkHook?: (opts?: {
+    mode?: "verbatim" | "synthesis";
+  }) => Promise<{ sessionId: string; forkedFromSessionId: string; forkedAt: string }>;
 }
 
 export interface CloseOptions {
@@ -612,6 +618,11 @@ export class Session {
   private clearRollbackBreadcrumbHook: (() => void) | undefined;
   private onCompactionSwapHook: ((breadcrumb: RollbackBreadcrumb) => void) | undefined;
   private uncompactHook: (() => Promise<void>) | undefined;
+  private forkHook:
+    | ((opts?: {
+        mode?: "verbatim" | "synthesis";
+      }) => Promise<{ sessionId: string; forkedFromSessionId: string; forkedAt: string }>)
+    | undefined;
   private readonly mcpServersConfig: unknown[] | undefined;
   // See SessionInit.forwardedEnv. Mutable so a fresh session/attach can
   // overwrite it; read by respawnAgent to thread into the replacement
@@ -804,6 +815,7 @@ export class Session {
     this.clearRollbackBreadcrumbHook = init.clearRollbackBreadcrumbHook;
     this.onCompactionSwapHook = init.onCompactionSwapHook;
     this.uncompactHook = init.uncompactHook;
+    this.forkHook = init.forkHook;
     this.mcpServersConfig = init.mcpServers;
     this.forwardedEnv = init.forwardedEnv;
     this.availableAgentsFn = init.availableAgents;
@@ -4390,6 +4402,8 @@ export class Session {
           return inline ? this.runCompactCommandInline(remainder) : this.runCompactCommand(remainder);
         case "uncompact":
           return inline ? this.runUncompactCommandInline() : this.runUncompactCommand();
+        case "fork":
+          return inline ? this.runForkCommandInline(remainder) : this.runForkCommand(remainder);
         default: {
           const err = new Error(
             `no dispatcher for /hydra verb ${first}`,
@@ -5164,6 +5178,45 @@ export class Session {
     } catch (err) {
       this.emitExtensionReply(
         `Rollback failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return { stopReason: "end_turn" };
+  }
+
+  // "/hydra fork [verbatim]" — fork the current conversation into a new
+  // session. Default mode is synthesis (full history + generated brief);
+  // pass "verbatim" to slice at the last completed turn instead. Runs
+  // out of the prompt queue so it doesn't fight in-flight turns.
+  private runForkCommand(arg?: string): Promise<unknown> {
+    return this.enqueuePrompt(() => this.runForkCommandInline(arg));
+  }
+
+  private async runForkCommandInline(arg?: string): Promise<unknown> {
+    if (!this.forkHook) {
+      this.emitExtensionReply("Fork not configured for this session.");
+      return { stopReason: "end_turn" };
+    }
+    const trimmed = (arg ?? "").trim();
+    let mode: "verbatim" | "synthesis" | undefined;
+    if (trimmed === "verbatim") {
+      mode = "verbatim";
+    } else if (trimmed === "synthesis" || trimmed === "") {
+      mode = undefined;
+    } else {
+      this.emitExtensionReply(
+        `Unknown fork argument: \`${trimmed}\`. Use \`/hydra fork\` or \`/hydra fork verbatim\`.`,
+      );
+      return { stopReason: "end_turn" };
+    }
+    try {
+      const r = await this.forkHook(mode ? { mode } : undefined);
+      const shortId = r.sessionId.replace(/^hydra_session_/, "");
+      this.emitExtensionReply(
+        `Forked to [\`${shortId}\`](hydra://sessions/${shortId}) click to jump.`,
+      );
+    } catch (err) {
+      this.emitExtensionReply(
+        `Fork failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
     return { stopReason: "end_turn" };

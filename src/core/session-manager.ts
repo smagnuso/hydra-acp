@@ -701,6 +701,7 @@ export class SessionManager {
       getCompactionState: () => this.getCompactionState(session.sessionId),
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
+      forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -980,6 +981,7 @@ export class SessionManager {
       getCompactionState: () => this.getCompactionState(session.sessionId),
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
+      forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>
@@ -1084,6 +1086,7 @@ export class SessionManager {
       getCompactionState: () => this.getCompactionState(session.sessionId),
       getPendingAgentSwap: () => this.getPendingAgentSwap(session.sessionId),
       uncompactHook: () => this.performUncompact(session.sessionId),
+      forkHook: (opts) => this.forkSession(session.sessionId, opts ?? {}),
       onCompactionSwapHook: (breadcrumb) =>
         void this.mutateRecord(session.sessionId, { rollbackBreadcrumb: breadcrumb }).catch(() => undefined),
       clearRollbackBreadcrumbHook: () =>

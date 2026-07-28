@@ -54,6 +54,13 @@ export const HYDRA_COMMANDS: readonly HydraCommandSpec[] = [
       "Roll back the most recent compaction swap (only available immediately after a swap, before any new turns)",
   },
   {
+    verb: "fork",
+    name: "hydra fork",
+    argsHint: "[verbatim]",
+    description:
+      "Fork this conversation into a new session (default: synthesis mode with a synopsis brief; pass 'verbatim' to slice at the last completed turn instead)",
+  },
+  {
     verb: "config",
     name: "hydra config",
     argsHint: "[<id> [<value>]]",
