@@ -535,7 +535,7 @@ function applyInlineMarkupWithLinks(
           const isHydraSessionUrl = HYDRA_SESSION_URL_RE.test(url);
           const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url);
           const isLocalPath = !isFileUrl && !isHydraSessionUrl && !hasScheme;
-          if (isFileUrl || isLocalPath) {
+          if (isFileUrl || isLocalPath || isHydraSessionUrl) {
             styled += `${linkOpen}${inner.styled}${linkReset}`;
           } else {
             // OSC 8 framing: ESC ] 8 ; ; URL ST … ESC ] 8 ; ; ST.

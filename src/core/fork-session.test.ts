@@ -296,16 +296,15 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
 
     const forkMeta = await readMeta(fork.sessionId);
     expect(forkMeta.synopsis).toBeUndefined();
-    // forkAt is silently ignored in synthesis mode — full history always copied.
-    expect(forkMeta.summarizedThroughEntry).toBe(3);
+    // forkAt slices in synthesis mode too (m_one + m_two = 2 entries).
+    expect(forkMeta.summarizedThroughEntry).toBe(2);
     expect(forkMeta.forkSynthesisState).toBe("running");
 
-    // Full history (3 entries), NOT sliced to forkAt.
     const forkHistory = await readHistory(fork.sessionId);
-    expect(forkHistory.length).toBe(3);
+    expect(forkHistory.length).toBe(2);
   });
 
-  it("synthesis fork with opts.forkAt that does not resolve + synopsis failure — full history copied", async () => {
+  it("synthesis fork with opts.forkAt that does not resolve — throws InvalidParams", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
@@ -325,23 +324,13 @@ describe("forkSession — synthesis with synopsis failure (graceful degrade)", (
       }),
     );
 
-    // generateSynopsis fails; forkAt="m_nonexistent" does not exist in source.
     mockGenerate.mockResolvedValue(undefined);
 
-    const fork = await manager.forkSession(source.sessionId, { forkAt: "m_nonexistent" });
-
-    // Should NOT throw — synopsis failure is always graceful degrade.
-    expect(fork.forkedFromSessionId).toBe(source.sessionId);
-
-    // In two-phase mode: full history always copied regardless of synopsis outcome.
-    const forkMeta = await readMeta(fork.sessionId);
-    expect(forkMeta.synopsis).toBeUndefined();
-    expect(forkMeta.summarizedThroughEntry).toBe(3);
-    expect(forkMeta.forkSynthesisState).toBe("running");
-
-    // Full history (3 entries), NOT sliced.
-    const forkHistory = await readHistory(fork.sessionId);
-    expect(forkHistory.length).toBe(3);
+    // Unresolvable forkAt is a caller error in synthesis mode too now
+    // that the option is honored.
+    await expect(
+      manager.forkSession(source.sessionId, { forkAt: "m_nonexistent" }),
+    ).rejects.toThrow(/forkAt messageId not found/);
   });
 
   it("fork still succeeds when generateSynopsis throws", async () => {
@@ -410,7 +399,7 @@ describe("forkSession — verbatim mode preserves today's behavior", () => {
     expect(forkMeta.summarizedThroughEntry).toBe(2);
   });
 
-  it("forkAt is ignored (silently) in synthesis mode — full history always copied", async () => {
+  it("forkAt slices history in synthesis mode too", async () => {
     const manager = new SessionManager(
       fakeRegistry([fakeRegistryAgent("claude-code")]),
       () => {
@@ -420,23 +409,21 @@ describe("forkSession — verbatim mode preserves today's behavior", () => {
 
     const source = await manager.importBundle(
       bundleWith({
-        lineageId: "lin_forkat_ignored",
+        lineageId: "lin_forkat_synth_slice",
         history: [turnComplete("m_one"), turnComplete("m_two")],
       }),
     );
 
     mockGenerate.mockResolvedValue({ title: "x", synopsis: { goal: "g" } });
 
-    // forkAt is provided but should be silently ignored in synthesis mode
     const fork = await manager.forkSession(source.sessionId, { forkAt: "m_one" });
 
-    // Full history copied despite forkAt hint
+    // Sliced to the entry at (and including) forkAt = m_one.
     const forkHistory = await readHistory(fork.sessionId);
-    expect(forkHistory.length).toBe(2);
+    expect(forkHistory.length).toBe(1);
 
     const forkMeta = await readMeta(fork.sessionId);
-    // summarizedThroughEntry = full parent history length, not the forkAt-sliced count
-    expect(forkMeta.summarizedThroughEntry).toBe(2);
+    expect(forkMeta.summarizedThroughEntry).toBe(1);
   });
 });
 

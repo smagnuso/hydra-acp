@@ -2662,14 +2662,25 @@ export class SessionManager {
         }
       }
    } else {
-      // synthesis mode — full history always; forkAt is silently ignored.
-      if (opts.forkAt !== undefined) {
-        this.logger?.warn(
-          `synthesis fork: ignoring forkAt=${opts.forkAt} (synthesis covers full history)`,
-        );
+      // synthesis mode — full history by default. When forkAt is set,
+      // slice sourceHistory *and* the synopsis input at that boundary
+      // so callers mid-turn (e.g. /hydra fork excluding its own trigger
+      // message) don't carry an in-flight turn into the fork.
+      if (opts.forkAt !== undefined && opts.forkAt !== "") {
+        const ci = findMessageIdIndex(sourceHistory, opts.forkAt);
+        if (ci < 0) {
+          const err = new Error(
+            `forkAt messageId not found in source history: ${opts.forkAt}`,
+          ) as Error & { code: number };
+          err.code = JsonRpcErrorCodes.InvalidParams;
+          throw err;
+        }
+        forkedAt = opts.forkAt;
+        slicedHistory = sourceHistory.slice(0, ci + 1);
+      } else {
+        forkedAt = "";
+        slicedHistory = sourceHistory; // full copy
       }
-      forkedAt = "";
-      slicedHistory = sourceHistory; // full copy
 
       // Validate target agent exists (cheap registry lookup). The
       // expensive part — planSpawn / npm-prefetch — is deferred to phase 2
@@ -2793,7 +2804,7 @@ export class SessionManager {
             agentId: targetAgentId,
             cwd: opts.cwd ?? paths.sessionDir(sourceSessionId),
             plan: spawnPlan,
-            history: sourceHistory,
+            history: slicedHistory,
             // sourceModel deliberately — synopsis is a one-shot prep step,
             // not the review work. Using opts.model here would burn premium
             // tokens (and possibly rate-limit) on history summarization the

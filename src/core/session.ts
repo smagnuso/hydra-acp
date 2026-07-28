@@ -313,6 +313,7 @@ export interface SessionInit {
   // the new session id plus fork breadcrumb.
   forkHook?: (opts?: {
     mode?: "verbatim" | "synthesis";
+    forkAt?: string;
   }) => Promise<{ sessionId: string; forkedFromSessionId: string; forkedAt: string }>;
 }
 
@@ -621,6 +622,7 @@ export class Session {
   private forkHook:
     | ((opts?: {
         mode?: "verbatim" | "synthesis";
+        forkAt?: string;
       }) => Promise<{ sessionId: string; forkedFromSessionId: string; forkedAt: string }>)
     | undefined;
   private readonly mcpServersConfig: unknown[] | undefined;
@@ -4403,7 +4405,9 @@ export class Session {
         case "uncompact":
           return inline ? this.runUncompactCommandInline() : this.runUncompactCommand();
         case "fork":
-          return inline ? this.runForkCommandInline(remainder) : this.runForkCommand(remainder);
+          return inline
+            ? this.runForkCommandInline(remainder, messageId)
+            : this.runForkCommand(remainder);
         default: {
           const err = new Error(
             `no dispatcher for /hydra verb ${first}`,
@@ -5188,10 +5192,40 @@ export class Session {
   // pass "verbatim" to slice at the last completed turn instead. Runs
   // out of the prompt queue so it doesn't fight in-flight turns.
   private runForkCommand(arg?: string): Promise<unknown> {
-    return this.enqueuePrompt(() => this.runForkCommandInline(arg));
+    return this.enqueuePrompt(() => this.runForkCommandInline(arg, undefined));
   }
 
-  private async runForkCommandInline(arg?: string): Promise<unknown> {
+  // Walk the persisted history and return the messageId of the last
+  // session/update entry whose messageId != `target` and that appears
+  // before `target`. Returns undefined when there is no such entry
+  // (target is the first, or history load fails).
+  private async findMessageIdBefore(target: string): Promise<string | undefined> {
+    if (!this.historyStore) {
+      return undefined;
+    }
+    const entries = await this.historyStore.load(this.sessionId);
+    let last: string | undefined;
+    for (const entry of entries) {
+      if (entry.method !== "session/update") {
+        continue;
+      }
+      const params = entry.params as { update?: { messageId?: unknown } } | undefined;
+      const id = params?.update?.messageId;
+      if (typeof id !== "string") {
+        continue;
+      }
+      if (id === target) {
+        return last;
+      }
+      last = id;
+    }
+    return undefined;
+  }
+
+  private async runForkCommandInline(
+    arg: string | undefined,
+    messageId: string | undefined,
+  ): Promise<unknown> {
     if (!this.forkHook) {
       this.emitExtensionReply("Fork not configured for this session.");
       return { stopReason: "end_turn" };
@@ -5209,10 +5243,30 @@ export class Session {
       return { stopReason: "end_turn" };
     }
     try {
-      const r = await this.forkHook(mode ? { mode } : undefined);
+      const forkOpts: {
+        mode?: "verbatim" | "synthesis";
+        forkAt?: string;
+      } = {};
+      if (mode) {
+        forkOpts.mode = mode;
+      }
+      // Anchor the fork just before the /hydra fork trigger turn so the
+      // in-flight command doesn't render as a phantom open turn in the
+      // new session. Walk history for the last session/update messageId
+      // that precedes ours; if there isn't one (fork issued as the very
+      // first prompt), let forkSession fall back to its default anchor.
+      if (messageId && this.historyStore) {
+        const prev = await this.findMessageIdBefore(messageId).catch(() => undefined);
+        if (prev) {
+          forkOpts.forkAt = prev;
+        }
+      }
+      const r = await this.forkHook(
+        Object.keys(forkOpts).length > 0 ? forkOpts : undefined,
+      );
       const shortId = r.sessionId.replace(/^hydra_session_/, "");
       this.emitExtensionReply(
-        `Forked to [\`${shortId}\`](hydra://sessions/${shortId}) click to jump.`,
+        `Forked to [\`${shortId}\`](hydra://sessions/${shortId}).`,
       );
     } catch (err) {
       this.emitExtensionReply(

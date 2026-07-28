@@ -1392,9 +1392,9 @@ describe("renderToolDetail", () => {
     const lines = parseAgentMarkdown("[join session](hydra://sessions/abc123)");
     expect(lines).toHaveLength(1);
     const body = lines[0]?.body ?? "";
-    // OSC 8 hyperlink wrapping (non-file URL)
-    expect(body).toContain("\x1b]8;;hydra://sessions/abc123\x1b\\");
-    // Sidecar link entry
+    // hydra:// session URLs go to the sidecar only (no OSC 8 wrapping),
+    // so findLinkUrlAt (which bails on ansi lines) can resolve the click.
+    expect(body).not.toContain("\x1b]8;;");
     const links = lines[0]?.links;
     expect(links).toHaveLength(1);
     expect(links?.[0]?.url).toBe("hydra://sessions/abc123");
