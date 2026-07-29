@@ -1093,11 +1093,65 @@ main()
     // the stderr line below is wiped by the TUI's alt-screen reset — so
     // log the full stack to tui.log too, or a fatal in the pre-screen
     // flow (picker, new-session agent prompt) leaves only an exit code.
+    // undici's `TypeError: fetch failed` stashes the real reason
+    // (ECONNREFUSED, socket hang up, ENOTFOUND, etc.) in `err.cause`,
+    // and its own stack is just the message; walk the cause chain so
+    // the operator sees what actually broke.
     writeDebugLine({
       src: "cli-fatal",
       stack: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      cause: describeCause((err as { cause?: unknown }).cause),
     });
-    process.stderr.write(`hydra-acp: ${(err as Error).message}\n`);
+    const causeSummary = formatCauseSummary(
+      (err as { cause?: unknown }).cause,
+    );
+    const suffix = causeSummary ? ` (${causeSummary})` : "";
+    process.stderr.write(`hydra-acp: ${(err as Error).message}${suffix}\n`);
     await maybePrintUpdateNotice();
     process.exit(1);
   });
+
+function describeCause(cause: unknown): unknown {
+  if (cause === undefined || cause === null) {
+    return undefined;
+  }
+  if (cause instanceof Error) {
+    const c = cause as NodeJS.ErrnoException & {
+      address?: string;
+      port?: number;
+      cause?: unknown;
+    };
+    return {
+      message: c.message,
+      code: c.code,
+      errno: c.errno,
+      syscall: c.syscall,
+      address: c.address,
+      port: c.port,
+      stack: c.stack,
+      cause: describeCause(c.cause),
+    };
+  }
+  return String(cause);
+}
+
+function formatCauseSummary(cause: unknown): string {
+  if (!(cause instanceof Error)) {
+    return "";
+  }
+  const c = cause as NodeJS.ErrnoException & {
+    address?: string;
+    port?: number;
+  };
+  const parts: string[] = [];
+  if (c.code) {
+    parts.push(c.code);
+  }
+  if (c.address !== undefined || c.port !== undefined) {
+    parts.push(`${c.address ?? ""}:${c.port ?? ""}`);
+  }
+  if (c.message && parts.length === 0) {
+    parts.push(c.message);
+  }
+  return parts.join(" ");
+}

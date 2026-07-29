@@ -6,6 +6,7 @@ import { invokedBinName } from "./bin-name.js";
 import type { HydraConfig } from "./config.js";
 import { computeConfigDigest } from "./config-digest.js";
 import { isProcessAlive, readDaemonPidFile } from "./daemon-pidfile.js";
+import type { RemoteTarget } from "./remote-target.js";
 
 // Read the daemon's pidfile to learn the plain-HTTP loopback URL it's
 // serving on. Returns undefined when no daemon is running (pidfile
@@ -49,20 +50,40 @@ export async function probeDaemon(config: HydraConfig): Promise<DaemonProbe> {
     : "mismatch";
 }
 
-export async function ensureDaemonReachable(config: HydraConfig): Promise<void> {
+export async function ensureDaemonReachable(
+  config: HydraConfig,
+  target?: RemoteTarget,
+): Promise<void> {
   const probe = await probeDaemon(config);
-  if (probe === "match") {
-    return;
-  }
   if (probe === "mismatch") {
     const bin = invokedBinName();
     throw new Error(
       `config changed since daemon started — run \`${bin} daemon restart\` to apply.`,
     );
   }
-  process.stderr.write("hydra-acp: daemon not running; starting it...\n");
-  spawnDaemonDetached();
-  await waitForDaemonReady(config);
+  if (probe === "missing") {
+    process.stderr.write("hydra-acp: daemon not running; starting it...\n");
+    spawnDaemonDetached();
+    await waitForDaemonReady(config);
+  }
+  // When TLS is configured, config.daemon.port hosts the TLS
+  // terminator and Fastify binds a separate loopback ephemeral port
+  // that's only discoverable via the pidfile. A target synthesized
+  // BEFORE the daemon started points at the TLS port with a plain
+  // http:// scheme, which fetches fail against with "fetch failed"
+  // (TLS handshake on a plain HTTP request). If the caller passed
+  // its pre-resolved target, patch its URLs to point at the
+  // now-known loopback port so the very next fetch/WS dial lands
+  // on the real Fastify listener.
+  if (target !== undefined) {
+    const info = await readDaemonPidFile();
+    if (info && isProcessAlive(info.pid)) {
+      const loopback = `http://127.0.0.1:${info.loopbackPort}`;
+      target.baseUrl = loopback;
+      target.wsUrl = `ws://127.0.0.1:${info.loopbackPort}/acp`;
+    }
+    await waitForUrlReady(`${target.baseUrl}/v1/health`);
+  }
 }
 
 export async function pingHealth(_config: HydraConfig): Promise<boolean> {
@@ -136,6 +157,34 @@ export function spawnDaemonDetached(): void {
     env: process.env,
   });
   child.unref();
+}
+
+async function pingUrl(url: string, timeoutMs = 500): Promise<boolean> {
+  try {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { Connection: "close" },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function waitForUrlReady(
+  url: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await pingUrl(url)) {
+      return;
+    }
+    await sleep(150);
+  }
+  throw new Error(
+    `hydra-acp daemon did not answer ${url} within ${timeoutMs}ms`,
+  );
 }
 
 export async function waitForDaemonReady(

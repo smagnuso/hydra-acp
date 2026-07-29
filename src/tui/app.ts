@@ -816,7 +816,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // isn't up, which is the right behavior (we can't reach across the
   // network to spawn anything).
   if (target.isLocal && !opts.target) {
-    await ensureDaemonReachable(config);
+    await ensureDaemonReachable(config, target);
   }
   // Canonicalize --agent up front: e.g. `hydra --agent codex` resolves
   // to `codex-acp` through the registry's exact-id → unique-prefix

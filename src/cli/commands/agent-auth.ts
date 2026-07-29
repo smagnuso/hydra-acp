@@ -212,7 +212,7 @@ export async function runAgentAuth(
 
   const config = await loadConfig();
   const target = await resolveLocalTarget(config);
-  await ensureDaemonReachable(config);
+  await ensureDaemonReachable(config, target);
 
   const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];
   const ws = await openWs(target.wsUrl, subprotocols);

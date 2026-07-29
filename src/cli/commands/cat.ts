@@ -198,7 +198,7 @@ export async function runCat(opts: CatOptions): Promise<void> {
   const config = await loadConfig();
   const target = opts.target ?? (await resolveLocalTarget(config));
   if (target.isLocal && !opts.target) {
-    await ensureDaemonReachable(config);
+    await ensureDaemonReachable(config, target);
   }
 
   const subprotocols = ["acp.v1", `hydra-acp-token.${target.token}`];

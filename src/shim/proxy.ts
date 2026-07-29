@@ -64,7 +64,7 @@ export async function runShim(opts: ShimOptions): Promise<void> {
   // remote target either has the daemon up (good) or doesn't (we
   // can't help from here; the WS layer will surface the failure).
   if (target.isLocal && !opts.target) {
-    await ensureDaemonReachable(config);
+    await ensureDaemonReachable(config, target);
   }
 
   const tracker = new SessionTracker();
