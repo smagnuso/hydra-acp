@@ -181,6 +181,7 @@ import {
   collapseEditedFiles,
   editedFileFromTool,
 } from "./sidebar/edited-files.js";
+import { parseTodoWrite } from "./sidebar/todos.js";
 import { execFile } from "node:child_process";
 
 // Pure helper: filter a question array down to entries that should appear
@@ -5463,6 +5464,10 @@ async function runSession(
   // after the call completes — an overwrite instead of a double count.
   // Cleared only by /clear, which is the user asking for a clean slate.
   const sessionEditedByTool = new Map<string, SidebarEditedFile>();
+  // Latest todo list seen from a todowrite tool call. Latest-wins, not
+  // accumulated: each call carries the COMPLETE list, so merging would
+  // resurrect entries the agent has dropped.
+  let sessionTodos: PlanEntry[] = [];
   // Per-turn key for the tools block. A fresh key each turn (rather than a
   // single reused "tools") lets every turn's frozen block stay individually
   // addressable for click-to-expand. Bumped in startToolsBlock; the live
@@ -6019,6 +6024,15 @@ async function runSession(
     // that later locations[] and which carries no diff — never contributed
     // a row. Re-folding is idempotent by construction.
     noteEditedFile(id, state);
+    // todowrite carries its list in rawInput, which the mapped event
+    // doesn't expose — so read it off the raw update here. Null means "not
+    // a todo payload"; an empty array is a real event (the agent cleared
+    // its list) and must clear the gadget.
+    const todos = parseTodoWrite(rawUpdate);
+    if (todos !== null) {
+      sessionTodos = todos;
+      onSidebarRelevantChange();
+    }
     if (wasNew) {
       // The block is normally anchored by startToolsBlock on the user-text
       // event; this fallback covers replay/edge cases where a tool call
@@ -6410,8 +6424,17 @@ async function runSession(
     });
   };
 
-  const planEntriesForSidebar = (): PlanEntry[] =>
-    lastPlanEvent === null ? [] : lastPlanEvent.entries;
+  // The gadget takes whichever source the agent actually uses. ACP `plan`
+  // updates win when present (spec-native, and an agent sending them is
+  // stating the list authoritatively); otherwise fall back to the todos
+  // scraped off todowrite tool calls, which is what every agent on disk
+  // really emits. See sidebar/todos.ts.
+  const planEntriesForSidebar = (): PlanEntry[] => {
+    if (lastPlanEvent !== null && lastPlanEvent.entries.length > 0) {
+      return lastPlanEvent.entries;
+    }
+    return sessionTodos;
+  };
 
   const editedFilesForSidebar = (): SidebarEditedFile[] =>
     collapseEditedFiles(sessionEditedByTool.values());

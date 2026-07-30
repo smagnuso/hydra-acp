@@ -1,0 +1,119 @@
+import { describe, expect, it } from "vitest";
+import { parseTodoWrite } from "./todos.js";
+
+const update = (rawInput: unknown): unknown => ({
+  sessionUpdate: "tool_call_update",
+  toolCallId: "t1",
+  title: "todowrite",
+  rawInput,
+});
+
+describe("parseTodoWrite", () => {
+  it("reads a real todowrite payload", () => {
+    expect(
+      parseTodoWrite(
+        update({
+          todos: [
+            { content: "Extract the module", status: "completed", priority: "high" },
+            { content: "Wire it up", status: "in_progress", priority: "high" },
+            { content: "Run tests", status: "pending", priority: "medium" },
+          ],
+        }),
+      ),
+    ).toEqual([
+      { content: "Extract the module", status: "completed", priority: "high" },
+      { content: "Wire it up", status: "in_progress", priority: "high" },
+      { content: "Run tests", status: "pending", priority: "medium" },
+    ]);
+  });
+
+  // Null and [] mean different things: null is "this update says nothing
+  // about todos, leave the gadget alone", [] is "the agent cleared its
+  // list, empty the gadget".
+  it("distinguishes 'not a todo payload' from 'an empty list'", () => {
+    expect(parseTodoWrite(update({ todos: [] }))).toEqual([]);
+    expect(parseTodoWrite(update({ command: "ls" }))).toBeNull();
+    expect(parseTodoWrite(update({}))).toBeNull();
+  });
+
+  it("returns null for updates with no rawInput at all", () => {
+    expect(parseTodoWrite({ sessionUpdate: "tool_call", title: "todowrite" })).toBeNull();
+    expect(parseTodoWrite(undefined)).toBeNull();
+    expect(parseTodoWrite(null)).toBeNull();
+    expect(parseTodoWrite("nope")).toBeNull();
+  });
+
+  it("returns null when todos is present but not an array", () => {
+    expect(parseTodoWrite(update({ todos: "one, two" }))).toBeNull();
+    expect(parseTodoWrite(update({ todos: { a: 1 } }))).toBeNull();
+  });
+
+  it("defaults a missing or unrecognized status to pending", () => {
+    const out = parseTodoWrite(
+      update({
+        todos: [
+          { content: "no status" },
+          { content: "odd status", status: "halfway" },
+          { content: "wrong type", status: 3 },
+        ],
+      }),
+    );
+    expect(out!.map((e) => e.status)).toEqual([
+      "pending",
+      "pending",
+      "pending",
+    ]);
+  });
+
+  it("preserves the three known statuses verbatim", () => {
+    const out = parseTodoWrite(
+      update({
+        todos: [
+          { content: "a", status: "pending" },
+          { content: "b", status: "in_progress" },
+          { content: "c", status: "completed" },
+        ],
+      }),
+    );
+    expect(out!.map((e) => e.status)).toEqual([
+      "pending",
+      "in_progress",
+      "completed",
+    ]);
+  });
+
+  it("omits priority when absent or unusable rather than inventing one", () => {
+    const out = parseTodoWrite(
+      update({
+        todos: [
+          { content: "a" },
+          { content: "b", priority: "" },
+          { content: "c", priority: 7 },
+        ],
+      }),
+    );
+    expect(out!.every((e) => e.priority === undefined)).toBe(true);
+  });
+
+  it("drops entries with no usable content", () => {
+    const out = parseTodoWrite(
+      update({
+        todos: [
+          { content: "keep me" },
+          { content: "" },
+          { content: 42 },
+          null,
+          "string entry",
+        ],
+      }),
+    );
+    expect(out).toEqual([{ content: "keep me", status: "pending" }]);
+  });
+
+  it("preserves order", () => {
+    const out = parseTodoWrite(
+      update({ todos: [{ content: "1" }, { content: "2" }, { content: "3" }] }),
+    );
+    expect(out!.map((e) => e.content)).toEqual(["1", "2", "3"]);
+  });
+});
