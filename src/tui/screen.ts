@@ -10,6 +10,9 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import { RepaintScheduler, RowPainter } from "./screen/painter.js";
+import { SidebarRenderer } from "./sidebar/registry.js";
+import { emptySnapshot } from "./sidebar/types.js";
+import type { SidebarBorder, SidebarSnapshot } from "./sidebar/types.js";
 import wrapAnsi from "wrap-ansi";
 import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { paths, shortenHomePath } from "../core/paths.js";
@@ -203,6 +206,12 @@ export interface ScreenOptions {
   // ^Z is silently dropped (it would otherwise be passed through as
   // a Ctrl+Z keystroke, which no current binding consumes).
   onSuspend?: () => void;
+  // Fired when the content width changes (terminal resize, sidebar
+  // toggle). Formatters bake screen.width() into their FormattedLines —
+  // markdown tables, unified diffs, the btw overlay — so a width change
+  // needs those blocks re-rendered, not merely re-wrapped. The handler
+  // runs before the ensuing repaint.
+  onLayoutChange?: () => void;
 }
 
 interface BannerState {
@@ -340,6 +349,21 @@ const SEPARATOR_ROWS = 1;
 // chrome row math expressions that already account for it.
 const BANNER_SEPARATOR_ROWS = 1;
 export const MAX_PROMPT_ROWS = 8;
+// Sidebar column sizing. The gutter is the single blank column between
+// the transcript and the sidebar body; it doubles as the region boundary
+// the left pass pads to. Below MIN_SIDEBAR_HOST_WIDTH the sidebar
+// suppresses itself rather than squeezing the transcript.
+const SIDEBAR_MIN_WIDTH = 20;
+const SIDEBAR_MAX_WIDTH = 36;
+const SIDEBAR_GUTTER = 2;
+// The rightmost terminal column the sidebar deliberately never writes.
+// See sidebarReserved() for why.
+const SIDEBAR_RIGHT_RESERVE = 1;
+const MIN_SIDEBAR_HOST_WIDTH = 80;
+// Columns of transcript the sidebar will never take, however wide it is
+// configured to be. A column that covers everything is indistinguishable
+// from a broken screen.
+const MIN_VISIBLE_TRANSCRIPT = 12;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
 const MAX_OPTIONS_ROWS = 12;
@@ -427,6 +451,7 @@ export class Screen {
     | undefined;
   private onBlockVisible: ((key: string) => void) | undefined;
   private onSuspend: (() => void) | undefined;
+  private onLayoutChange: (() => void) | undefined;
   // Keyed blocks awaiting a one-shot "became visible" notification.
   private pendingVisibleKeys = new Set<string>();
   private lines: FormattedLine[] = [];
@@ -501,6 +526,32 @@ export class Screen {
   // Per-row signature cache + repaint throttle state live in the
   // shared RowPainter / RepaintScheduler (src/tui/screen/painter.ts);
   // see paintRow() / scheduleRepaint() below for the local delegates.
+  // Sidebar (^S). A fixed-width column down the right edge of the
+  // scrollback region only — rows 1..scrollbackBottom. The prompt, both
+  // separators and the sessionbar stay full terminal width so prompt
+  // editing is never narrowed. Toggling it changes contentWidth(), which
+  // reflows the transcript exactly the way a terminal resize does.
+  private sidebarVisible = false;
+  private sidebarConfiguredWidth: number | null = null;
+  private sidebarRenderer = new SidebarRenderer();
+  private sidebarBorder: SidebarBorder = "frame";
+  private sidebarSnapshot: SidebarSnapshot = emptySnapshot();
+  // Row → openable file path for the sidebar column, rebuilt on every
+  // sidebar paint. Backs double-click-to-open on git and edited-file rows.
+  // Keyed by terminal row; entries for rows the column no longer covers
+  // are dropped when the map is rebuilt.
+  private sidebarRowPaths = new Map<number, string>();
+  // Independent double-click chain for the sidebar. The transcript's
+  // chain (lastLeftClick) is bound to resolved source anchors, which the
+  // sidebar has none of, and this also has to work with in-app selection
+  // switched off.
+  private lastSidebarClick: { x: number; y: number; t: number } | null = null;
+  // Sidebar scroll window. `offset` counts rows hidden above the top of
+  // the column; `overflowRows` is how many rows don't fit, recomputed on
+  // every sidebar paint (gadgets come and go on their own, so an offset
+  // that was valid last frame can be stale now).
+  private sidebarScrollOffset = 0;
+  private sidebarOverflowRows = 0;
   private permissionPrompt: PermissionPromptSpec | null = null;
   private optionsPrompt: OptionsPromptSpec | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
@@ -774,6 +825,7 @@ export class Screen {
     this.onHoverRun = opts.onHoverRun;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
+    this.onLayoutChange = opts.onLayoutChange;
     this.contentRepaintThrottleMs =
       opts.repaintThrottleMs ?? DEFAULT_CONTENT_REPAINT_THROTTLE_MS;
     this.painter = new RowPainter(this.term);
@@ -803,7 +855,15 @@ export class Screen {
     this.openFileCommand = ofcArgv && ofcArgv.length > 0 ? ofcArgv : null;
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
     this.readonly = opts.readonly ?? false;
-    this.resizeHandler = () => this.repaint();
+    this.resizeHandler = () => {
+      // A resize changes contentWidth, so width-baked blocks are stale.
+      // Drop the row cache (the terminal cleared it for us anyway) and
+      // let the app re-render before we paint.
+      this.painter.clearCache();
+      this.sidebarRenderer.invalidate();
+      this.onLayoutChange?.();
+      this.repaint();
+    };
     this.keyHandler = (name, _matches, data) => this.handleKey(name, data);
     this.mouseHandler = (name, data) => this.handleMouse(name, data);
     this.rawStdinHandler = (chunk) => this.handleRawStdin(chunk);
@@ -1444,8 +1504,181 @@ export class Screen {
   // narrowly enough that the screen-layer wrap is a no-op. Returns 0 if the
   // terminal hasn't reported a width yet, in which case callers should fall
   // back to natural-width formatting.
+  // Returns the width available to *transcript content*, i.e. minus the
+  // sidebar column when one is visible. Formatters (parseAgentMarkdown
+  // tables, buildUnifiedDiff, the btw overlay buffer) bake this into the
+  // FormattedLines they produce, which is why toggleSidebar() and the
+  // resize handler have to trigger a re-render of those blocks and not
+  // merely a re-wrap.
   width(): number {
+    return this.contentWidth();
+  }
+
+  // Total terminal columns, ignoring the sidebar. Used by the chrome that
+  // spans the full width regardless: both separators and the sessionbar.
+  private termWidth(): number {
     return this.term.width || 0;
+  }
+
+  // Column count reserved by the sidebar: gutter + body + the one
+  // rightmost column we never write. Zero when hidden. Auto-hides below
+  // MIN_SIDEBAR_HOST_WIDTH: stealing 24 columns from a 70-column
+  // transcript is a net loss, and silently yielding is friendlier than
+  // refusing the keystroke.
+  //
+  // The trailing reserved column is not cosmetic. Writing into the last
+  // terminal column latches the terminal's deferred-wrap flag, and the
+  // next paint drops or shifts that glyph — which showed up as the
+  // right-aligned gadget values losing their final character (the "s" of
+  // an elapsed time, so "1m 32s" read as "1m 32"). Every other painter
+  // here shaves a column for the same reason; see wrapOne's `room` and
+  // picker.ts's rowMaxWidth.
+  private sidebarReserved(): number {
+    if (!this.sidebarVisible) {
+      return 0;
+    }
+    const w = this.term.width || 0;
+    if (w < MIN_SIDEBAR_HOST_WIDTH) {
+      return 0;
+    }
+    const desired =
+      this.sidebarConfiguredWidth ??
+      Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.floor(w * 0.28)));
+    // A configured width is honored as asked, bounded only so the column
+    // can't consume the entire terminal. Auto-sizing stays well under half,
+    // so the overlay mode below is only ever reached deliberately (a wide
+    // pinned width) or on a cramped terminal.
+    // The cap is on the RESERVED span, not the body: the gutter and the
+    // untouched right column also come out of the transcript's share.
+    const maxBody =
+      w - MIN_VISIBLE_TRANSCRIPT - SIDEBAR_GUTTER - SIDEBAR_RIGHT_RESERVE;
+    const capped = Math.min(desired, Math.max(SIDEBAR_MIN_WIDTH, maxBody));
+    return capped + SIDEBAR_GUTTER + SIDEBAR_RIGHT_RESERVE;
+  }
+
+  // True when the column is wide enough that reflowing the transcript
+  // around it stops being worthwhile, so it floats OVER the transcript
+  // instead of narrowing it.
+  //
+  // The threshold is "the sidebar wants more than half the terminal".
+  // Below it, reflowing gives the transcript a real column and losing the
+  // width is worth it. Above it, the transcript would be squeezed into the
+  // smaller half — rewrapping prose into ~35 columns costs far more
+  // readability than temporarily covering its right-hand side, and the
+  // transcript keeps its geometry so dismissing the sidebar restores the
+  // previous view exactly instead of triggering another reflow.
+  private sidebarOverlay(): boolean {
+    const reserved = this.sidebarReserved();
+    return reserved > 0 && reserved * 2 > (this.term.width || 0);
+  }
+
+  // First terminal column the sidebar paints into. Identical in both modes
+  // — the column always hugs the right edge; the only difference is whether
+  // the transcript's width was reduced to make room.
+  private sidebarColumnStart(): number {
+    const reserved = this.sidebarReserved();
+    return reserved === 0 ? 0 : (this.term.width || 0) - reserved + 1;
+  }
+
+  private contentWidth(): number {
+    const w = this.term.width || 0;
+    // Overlay mode deliberately reports the FULL width: formatters bake
+    // this into their line geometry, and the whole point is that nothing
+    // re-wraps.
+    return this.sidebarOverlay() ? w : Math.max(0, w - this.sidebarReserved());
+  }
+
+  // Rightmost column the transcript is actually VISIBLE in. In reflow mode
+  // that's the content width; in overlay mode the transcript still occupies
+  // the full row but its tail is hidden under the column, so hit-testing
+  // and selection have to stop at the overlay's edge.
+  private transcriptVisibleWidth(): number {
+    const start = this.sidebarColumnStart();
+    return start === 0 ? this.contentWidth() : start - 1;
+  }
+
+  // Body width inside the sidebar: reserved less the gutter and the
+  // untouched rightmost column.
+  private sidebarBodyWidth(): number {
+    const reserved = this.sidebarReserved();
+    return reserved === 0
+      ? 0
+      : reserved - SIDEBAR_GUTTER - SIDEBAR_RIGHT_RESERVE;
+  }
+
+  isSidebarVisible(): boolean {
+    return this.sidebarVisible;
+  }
+
+  // True when the sidebar is on but suppressed by a too-narrow terminal.
+  // app.ts surfaces this as a toast so ^S doesn't look like a no-op.
+  isSidebarSuppressed(): boolean {
+    return this.sidebarVisible && this.sidebarReserved() === 0;
+  }
+
+  // Whether the column is currently floating over the transcript rather
+  // than narrowing it. Exposed for tests and for app.ts, which can skip the
+  // width-sensitive re-render entirely in overlay mode — contentWidth
+  // didn't change, so nothing needs re-formatting.
+  isSidebarOverlay(): boolean {
+    return this.sidebarOverlay();
+  }
+
+  setSidebarVisible(visible: boolean): void {
+    if (this.sidebarVisible === visible) {
+      return;
+    }
+    this.sidebarVisible = visible;
+    this.lastSidebarClick = null;
+    this.sidebarRowPaths.clear();
+    this.sidebarScrollOffset = 0;
+    this.sidebarOverflowRows = 0;
+    // contentWidth changed, so every cached row signature and every
+    // width-baked FormattedLine is stale. The caller (app.ts) re-renders
+    // the width-sensitive blocks and then calls fullRedraw().
+    this.sidebarRenderer.invalidate();
+    this.painter.clearCache();
+  }
+
+  toggleSidebar(): boolean {
+    this.setSidebarVisible(!this.sidebarVisible);
+    return this.sidebarVisible;
+  }
+
+  setSidebarGadgets(ids: readonly string[]): void {
+    this.sidebarRenderer.setGadgets(ids);
+    this.scheduleRepaint();
+  }
+
+  isSidebarGadgetConfigured(id: string): boolean {
+    return this.sidebarRenderer.isConfigured(id);
+  }
+
+  setSidebarBorder(border: SidebarBorder): void {
+    if (this.sidebarBorder === border) {
+      return;
+    }
+    this.sidebarBorder = border;
+    // Border mode is part of the gadget cache key and changes the gutter
+    // glyph on every row, so both caches have to go.
+    this.sidebarRenderer.invalidate();
+    this.painter.clearCache();
+    this.scheduleRepaint();
+  }
+
+  setSidebarWidth(width: number | null): void {
+    this.sidebarConfiguredWidth = width;
+    this.painter.clearCache();
+  }
+
+  // Merge a partial snapshot. app.ts pushes deltas from the paths that
+  // already track this state (usage-update, turn-complete, plan, tool
+  // completion) rather than assembling a whole snapshot each time.
+  setSidebarSnapshot(patch: Partial<SidebarSnapshot>): void {
+    this.sidebarSnapshot = { ...this.sidebarSnapshot, ...patch };
+    if (this.sidebarVisible) {
+      this.scheduleRepaint();
+    }
   }
 
   appendLines(lines: FormattedLine[]): void {
@@ -1488,7 +1721,7 @@ export class Screen {
   // current width so a resize that hasn't yet been picked up by
   // drawScrollback can't return stale counts during an insert.
   private wrappedRowsOf(line: FormattedLine): number {
-    const w = this.term.width;
+    const w = this.contentWidth();
     if (this.wrapCacheWidth !== w) {
       this.wrapCache.clear();
       this.wrapCacheWidth = w;
@@ -2928,12 +3161,22 @@ export class Screen {
     // mouse: "drag") MOUSE_DRAG on the "mouse" event channel, not "key".
     // Wheel events keep their existing scrollback behaviour and are NOT
     // forwarded to onMouse.
-    if (name === "MOUSE_WHEEL_UP") {
-      this.scrollBy(3);
-      return;
-    }
-    if (name === "MOUSE_WHEEL_DOWN") {
-      this.scrollBy(-3);
+    if (name === "MOUSE_WHEEL_UP" || name === "MOUSE_WHEEL_DOWN") {
+      const delta = name === "MOUSE_WHEEL_UP" ? 3 : -3;
+      // Wheel over the sidebar scrolls the sidebar, not the transcript —
+      // the pointer is the disambiguator, same as any tiled UI. Falls
+      // through to the transcript when the column isn't scrollable, so a
+      // wheel over a short sidebar still does the useful thing instead of
+      // nothing.
+      const wheelCell = this.mouseCell(data);
+      if (
+        wheelCell !== null &&
+        this.isSidebarCell(wheelCell.x, wheelCell.y) &&
+        this.scrollSidebarBy(delta)
+      ) {
+        return;
+      }
+      this.scrollBy(delta);
       return;
     }
     // When the terminal window doesn't have keyboard focus, drop every
@@ -3067,6 +3310,13 @@ export class Screen {
       if (!sameCell) {
         this.flushPendingBlockClick();
       }
+      // Sidebar clicks are handled entirely by the column: they must not
+      // anchor a transcript selection or toggle a scrollback block.
+      if (this.handleSidebarPress(cell)) {
+        this.pressCell = null;
+        this.clearSelection();
+        return;
+      }
       this.pressCell = cell;
       this.handleSelectionPress(cell, mouseModifier(data, "shift"));
       return;
@@ -3137,7 +3387,12 @@ export class Screen {
           }
         }
       }
-      this.handleSelectionRelease(cell);
+      // A release inside the sidebar is not part of the transcript's
+      // click chain: letting it through would record lastLeftClick and
+      // make the user's next transcript click read as a double.
+      if (cell === null || !this.isSidebarCell(cell.x, cell.y)) {
+        this.handleSelectionRelease(cell);
+      }
     }
   }
 
@@ -3402,7 +3657,7 @@ export class Screen {
     if (visibleRows <= 0 || this.lines.length === 0) {
       return null;
     }
-    const w = this.term.width;
+    const w = this.contentWidth();
     const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
     const end = wrapped.length - this.scrollOffset;
     const start = Math.max(0, end - visibleRows);
@@ -3462,8 +3717,7 @@ export class Screen {
     if (visibleRows <= 0) {
       return null;
     }
-    const w = this.term.width;
-    const snapX = Math.max(1, Math.min(w, x));
+    const snapX = Math.max(1, Math.min(this.transcriptVisibleWidth(), x));
     for (let d = 1; d < visibleRows; d++) {
       const up = y - d;
       if (up >= 1) {
@@ -4186,7 +4440,7 @@ export class Screen {
   // and carries its stamp. Returns null for padding rows, rows outside
   // the scrollback area, or plainly-appended (unkeyed) lines.
   private keyAtRow(y: number): string | null {
-    const w = this.term.width;
+    const w = this.contentWidth();
     const top = 1;
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
@@ -4241,7 +4495,7 @@ export class Screen {
   // by the mouse motion handler to decide which contiguous run of rows
   // brightens together.
   private keyAndSubAtRow(y: number): { key: string; sub: string | null } | null {
-    const w = this.term.width;
+    const w = this.contentWidth();
     const top = 1;
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) return null;
@@ -4277,7 +4531,7 @@ export class Screen {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       return null;
     }
-    const w = this.term.width;
+    const w = this.contentWidth();
     const top = 1;
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
@@ -4287,7 +4541,11 @@ export class Screen {
     if (rowIdx < 0 || rowIdx >= visibleRows) {
       return null;
     }
-    if (x < 1 || x > w) {
+    // Bound by what's VISIBLE, not by the wrap width. Overlay mode leaves
+    // contentWidth at the full terminal width, so the transcript's tail is
+    // still laid out under the column — resolving a click there would
+    // select text the user cannot see.
+    if (x < 1 || x > this.transcriptVisibleWidth()) {
       return null;
     }
     const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
@@ -4613,7 +4871,7 @@ export class Screen {
   // Walks wrapTail to count wrapped rows between the target line and
   // the tail.
   private scrollToMatch(match: { lineIdx: number; col: number }): void {
-    const w = this.term.width;
+    const w = this.contentWidth();
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
       return;
@@ -4677,7 +4935,7 @@ export class Screen {
 
   private maxScrollOffset(): number {
     const { rows } = this.wrapTail(
-      this.term.width,
+      this.contentWidth(),
       Number.POSITIVE_INFINITY,
     );
     return Math.max(0, rows.length - this.scrollbackVisibleRows());
@@ -4706,11 +4964,18 @@ export class Screen {
   // blank mid-frame. The styleReset stops the trailing erase from
   // inheriting the paint's last SGR (a bgBlue selection slice, etc.)
   // and painting the rest of the line in that colour.
-  private paintRow(row: number, signature: string, paint: () => void): void {
+  private paintRow(
+    row: number,
+    signature: string,
+    paint: () => void,
+    // Region/column/erase overrides, used by the two passes that share
+    // rows (scrollback + sidebar). See RowPainter.paintRow.
+    opts?: { region?: string; column?: number; erase?: boolean },
+  ): boolean {
     if (!this.started) {
-      return;
+      return false;
     }
-    this.painter.paintRow(row, signature, paint);
+    return this.painter.paintRow(row, signature, paint, opts);
   }
 
   private repaint(): void {
@@ -4748,6 +5013,11 @@ export class Screen {
       // alternate-screen mode means the buffer starts clean; resize
       // triggers a repaint that covers all rows in the new size.)
       this.drawScrollback();
+      // Second pass over the same rows the scrollback just painted, in
+      // its own cache region and its own columns. drawScrollback opted
+      // out of eraseLineAfter and padded to contentWidth, so the two
+      // regions never overwrite each other and draw order is free.
+      this.drawSidebar(1, this.scrollbackVisibleRows());
       this.drawBtwOverlay();
       this.drawCompletionZone();
       this.drawQueuedZone();
@@ -5173,7 +5443,15 @@ export class Screen {
   }
 
   private drawScrollback(): void {
-    const w = this.term.width;
+    const w = this.contentWidth();
+    // Whether this pass has to clear its own tail. In reflow mode the row is
+    // shared, so it pads to contentWidth and skips eraseLineAfter. In
+    // overlay mode the transcript owns the whole line and keeps the erase —
+    // the column simply paints over it afterwards.
+    const sharesRow = this.sidebarReserved() > 0 && !this.sidebarOverlay();
+    // The column occupies cells on these rows in EITHER mode, so its cache
+    // has to be dropped for any row this pass emits.
+    const sidebarPresent = this.sidebarBodyWidth() > 0;
     const top = 1;
     const visibleRows = this.scrollbackVisibleRows();
     if (visibleRows <= 0) {
@@ -5267,11 +5545,39 @@ export class Screen {
           activeCol,
           selRange,
         ) + (hovered ? "|H" : "");
-      this.paintRow(row, sig, () => {
-        if (line) {
-          this.writeFormattedLine(line, w, activeCol, activeLength, selRange, hovered);
-        }
-      });
+      // With a sidebar present this row is shared with the sidebar
+      // region, so we must not eraseLineAfter (it would wipe the sidebar
+      // cells) and must pad our own content out to contentWidth so a
+      // shrinking line doesn't leave stale glyphs in the gutter.
+      const emitted = this.paintRow(
+        row,
+        sig,
+        () => {
+          if (line) {
+            this.writeFormattedLine(
+              line,
+              w,
+              activeCol,
+              activeLength,
+              selRange,
+              hovered,
+              sharesRow,
+            );
+          } else if (sharesRow) {
+            this.term(" ".repeat(w));
+          }
+        },
+        sharesRow ? { erase: false } : undefined,
+      );
+      // A transcript row that overruns contentWidth paints over the
+      // sidebar's cells. That happens for ANSI bodies (deliberately not
+      // truncated — see writeFormattedLine) and for blocks whose wrap was
+      // baked at a wider terminal. The sidebar's own signature is unchanged
+      // in that case, so without dropping it here the intruding glyphs
+      // would sit in the column until something else forced a repaint.
+      if (emitted && sidebarPresent) {
+        this.painter.invalidate("sidebar", row);
+      }
     }
     // Fire one-shot visibility callbacks for any registered keyed block
     // whose rows are in the painted slice. Done after the paint loop so the
@@ -5295,6 +5601,185 @@ export class Screen {
         this.onBlockVisible(key);
       }
     }
+  }
+
+  // Paint the sidebar column over rows [top, top+rows). Runs as its own
+  // pass with its own signature-cache region, so an unchanged gadget
+  // emits zero bytes even while the transcript streams beside it.
+  //
+  // The column owns the gutter as well as its body: nothing else writes
+  // those columns (the transcript pass pads only to contentWidth and
+  // deliberately skips eraseLineAfter), so leaving them to no one would
+  // strand whatever glyphs were there before the sidebar opened. The
+  // gutter doubles as the scroll-indicator channel — the arrows cost no
+  // body width.
+  //
+  // Content is top-anchored. The transcript grows upward from the prompt
+  // because its newest line is the interesting one; the sidebar has no
+  // such gradient — it is a fixed set of readouts in configured priority
+  // order, so the first gadget belongs at the top of the column where the
+  // eye lands, and it stays put as gadgets appear and disappear below it.
+  private drawSidebar(top: number, rows: number): void {
+    const bodyWidth = this.sidebarBodyWidth();
+    if (bodyWidth <= 0 || rows <= 0) {
+      this.sidebarOverflowRows = 0;
+      return;
+    }
+    const col = this.sidebarColumnStart();
+    const ctx = {
+      metrics: { cellWidth, truncate },
+      width: bodyWidth,
+      border: this.sidebarBorder,
+    };
+    // now is stamped once per frame so every elapsed-style gadget in the
+    // column agrees on the clock.
+    const snapshot = { ...this.sidebarSnapshot, now: Date.now() };
+    const lines = this.sidebarRenderer.render(snapshot, ctx);
+    // Clamp here rather than at wheel time: gadgets appear and disappear
+    // on their own (a turn ends, the work tree goes clean), so an offset
+    // that was valid a second ago can be past the end now.
+    this.sidebarOverflowRows = Math.max(0, lines.length - rows);
+    if (this.sidebarScrollOffset > this.sidebarOverflowRows) {
+      this.sidebarScrollOffset = this.sidebarOverflowRows;
+    }
+    const start = this.sidebarScrollOffset;
+    this.sidebarRowPaths.clear();
+    for (let i = 0; i < rows; i++) {
+      const row = top + i;
+      const idx = i + start;
+      const line = lines[idx];
+      if (line?.openPath !== undefined) {
+        this.sidebarRowPaths.set(row, line.openPath);
+      }
+      // The gutter channel carries the border rule, overridden by a
+      // scroll arrow on the column's first/last row when there is content
+      // out of view in that direction — knowing content is hidden beats an
+      // unbroken rule.
+      const marker =
+        i === 0 && start > 0
+          ? "▲"
+          : i === rows - 1 && start < this.sidebarOverflowRows
+            ? "▼"
+            : (line?.gutter ?? " ");
+      const sig =
+        formattedLineSig("sbar", bodyWidth, line, null, null, null) +
+        `|${marker}`;
+      this.paintRow(
+        row,
+        sig,
+        () => {
+          // Gutter: blank columns, then the rule/indicator channel
+          // immediately left of the body.
+          this.term(" ".repeat(Math.max(0, SIDEBAR_GUTTER - 1)));
+          if (marker === " ") {
+            this.term(" ");
+          } else {
+            writeStyled(this.term, marker, "dim", false);
+          }
+          if (line) {
+            this.writeFormattedLine(line, bodyWidth, null, 0, null, false, true);
+          } else {
+            this.term(" ".repeat(bodyWidth));
+          }
+        },
+        { region: "sidebar", column: col },
+      );
+    }
+  }
+
+  // Scroll the sidebar column by `delta` rows (positive scrolls toward
+  // older/earlier content, matching scrollBy's transcript convention).
+  // Returns false when the column has nothing hidden, which tells the
+  // caller to let the transcript have the wheel event instead.
+  private scrollSidebarBy(delta: number): boolean {
+    if (this.sidebarOverflowRows <= 0) {
+      return false;
+    }
+    const next = Math.max(
+      0,
+      Math.min(this.sidebarOverflowRows, this.sidebarScrollOffset - delta),
+    );
+    if (next === this.sidebarScrollOffset) {
+      // Already pinned at the end in that direction. Still consume the
+      // event: falling through would scroll the transcript under a
+      // pointer that's over the sidebar, which reads as a glitch.
+      return true;
+    }
+    this.sidebarScrollOffset = next;
+    this.repaintNow();
+    return true;
+  }
+
+  // Test/introspection helpers for the sidebar scroll window.
+  sidebarScrollState(): { offset: number; overflow: number } {
+    return {
+      offset: this.sidebarScrollOffset,
+      overflow: this.sidebarOverflowRows,
+    };
+  }
+
+  // True when the cell falls inside the sidebar column, gutter included.
+  // The gutter belongs to the sidebar region (the sidebar pass paints it,
+  // and the wheel should scroll the column when the pointer is over the
+  // indicator arrows), so events there are the column's to consume — a
+  // click on it simply finds no file target.
+  private isSidebarCell(x: number, y: number): boolean {
+    const first = this.sidebarColumnStart();
+    if (first === 0) {
+      return false;
+    }
+    return (
+      x >= first &&
+      x <= (this.term.width || 0) &&
+      y >= 1 &&
+      y <= this.scrollbackVisibleRows()
+    );
+  }
+
+  // Sidebar half of the left-click gesture. Double-click on a row that
+  // carries a path opens it through the same tryOpenPathString() the
+  // transcript's double-click uses, so tui.openFileCommand, the :line
+  // suffix handling and the stat check all behave identically. Returns
+  // true when the press was inside the column, which tells the caller to
+  // consume it: transcript selection must not anchor in the sidebar, and
+  // a stray click on a non-file row shouldn't start a drag either.
+  private handleSidebarPress(cell: { x: number; y: number } | null): boolean {
+    if (cell === null || !this.isSidebarCell(cell.x, cell.y)) {
+      return false;
+    }
+    const now = Date.now();
+    const last = this.lastSidebarClick;
+    const isDouble =
+      last !== null &&
+      now - last.t <= DOUBLE_CLICK_MAX_MS &&
+      // Row equality is what matters — the whole row is one target, so
+      // horizontal jitter within it is irrelevant.
+      cell.y === last.y;
+    if (isDouble) {
+      // Consume the chain so a third click starts fresh rather than
+      // re-opening the file.
+      this.lastSidebarClick = null;
+      const path = this.sidebarRowPaths.get(cell.y);
+      if (path !== undefined && !this.tryOpenPathString(path)) {
+        // Path-shaped but unopenable: most often the file was deleted
+        // (a "dirty" git row for a removed file) or no openFileCommand is
+        // configured. Say which rather than failing silently.
+        this.notify(
+          this.hasOpenFileCommand()
+            ? `can't open ${path}`
+            : "no tui.openFileCommand configured",
+        );
+      }
+      return true;
+    }
+    this.lastSidebarClick = { x: cell.x, y: cell.y, t: now };
+    return true;
+  }
+
+  // Whether an editor command is configured at all, so callers can tell
+  // "nothing to open with" apart from "that file isn't there".
+  hasOpenFileCommand(): boolean {
+    return this.openFileCommand !== null;
   }
 
   // Register a keyed block to receive a single onBlockVisible callback the
@@ -6474,6 +6959,11 @@ export class Screen {
     activeMatchLength: number = 0,
     selectionRange: { start: number; end: number; toEndOfLine: boolean } | null = null,
     hovered: boolean = false,
+    // Pad the row out to `width` unconditionally. Set by callers that
+    // share their row with another paint region (scrollback and sidebar
+    // when the sidebar is visible) and therefore can't rely on
+    // eraseLineAfter to clear the previous frame's longer content.
+    padToWidth: boolean = false,
   ): void {
     if (line.prefix) {
       writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle, hovered);
@@ -6583,8 +7073,17 @@ export class Screen {
     } else {
       writeStyled(this.term, bodyText, line.bodyStyle, hovered);
     }
-    if (line.fillRow || hovered) {
-      const visible = line.ansi ? stringWidth(bodyText) : cellWidth(bodyText);
+    if (line.fillRow || hovered || padToWidth) {
+      // Measure what the terminal will actually SHOW. Caret markup
+      // (`^+bold^:`, `^Ccode^:`) is zero-width once terminal-kit renders
+      // it, so a markup-bearing body must be measured stripped — counting
+      // the markup as visible columns understates the pad and leaves the
+      // tail of the row un-cleared, which surfaced as leftover glyphs at
+      // the end of agent/thought/heading lines. (Harmless before this row
+      // had to clear its own tail: eraseLineAfter mopped it up.)
+      const visible = line.ansi
+        ? stringWidth(bodyText)
+        : cellWidth(stripMarkup ? stripTkMarkup(bodyText) : bodyText);
       const pad = remaining - visible;
       if (pad > 0) {
         // When the selection extends past this chunk's body (multi-
@@ -6596,10 +7095,16 @@ export class Screen {
         // blank-body rows — otherwise moving the pointer into a blank
         // line inside a thought (or past end-of-text) reads as "hover
         // was lost" even though the block is still hovered.
+        // Pure region padding (padToWidth with no fillRow/hover/selection
+        // band) writes unstyled spaces: it exists only to clear the
+        // previous frame's glyphs, and inheriting bodyStyle would drag a
+        // background color out to the gutter.
         const fillStyle: Style | undefined =
           selectionRange !== null && selectionRange.toEndOfLine
             ? "selection-highlight"
-            : line.bodyStyle;
+            : line.fillRow || hovered
+              ? line.bodyStyle
+              : undefined;
         writeStyled(this.term, " ".repeat(pad), fillStyle, hovered);
       }
     }

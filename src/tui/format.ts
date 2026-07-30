@@ -1605,6 +1605,13 @@ export function formatElapsed(ms: number): string {
 }
 
 export interface ToolLineState {
+  // ACP tool `kind` from the wire ("read" | "edit" | "delete" | "move" |
+  // "search" | "execute" | "think" | "fetch" | "other"), when the agent
+  // sends one. This is the only reliable signal for "did this call mutate
+  // a file": `locations[]` is populated by read and execute calls too — a
+  // bash call in the repo root reports the directory, which is how the
+  // sidebar's edited-files list ended up showing "cli".
+  rawKind?: string;
   // The title from the initial `tool_call` event — usually the tool's
   // generic name (e.g. "Terminal", "Read File").
   initialTitle: string;

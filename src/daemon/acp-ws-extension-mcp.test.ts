@@ -56,6 +56,7 @@ function testConfig(): HydraConfig {
       maxPlanItems: 5,
       showFileUpdates: "none" as const,
       selectionClipboard: "both" as const,
+      sidebar: { enabled: false, border: "frame" as const, gadgets: [] },
       hotkeys: {},
     },
     compaction: {

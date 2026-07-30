@@ -156,6 +156,7 @@ import {
   type AvailableCommand,
   type AvailableMode,
   type EditDiff,
+  type PlanEntry,
   type RenderEvent,
 } from "../core/render-update.js";
 import type { ConfigOption } from "../core/hydra-commands.js";
@@ -174,6 +175,13 @@ import {
   type FormattedLine,
   type ToolLineState,
 } from "./format.js";
+import type { SidebarEditedFile } from "./sidebar/types.js";
+import { parseGitPorcelainV2 } from "./sidebar/git-status.js";
+import {
+  collapseEditedFiles,
+  editedFileFromTool,
+} from "./sidebar/edited-files.js";
+import { execFile } from "node:child_process";
 
 // Pure helper: filter a question array down to entries that should appear
 // in the ^Q modal. Both `open` (never-answered) and `pending-delivery`
@@ -677,13 +685,15 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+N / Alt+Tab", "next warm session"],
   ["Alt+P", "previous warm session"],
   ["^T", "show / hide thoughts"],
+  ["^S", "show / hide sidebar (with an empty draft; amends otherwise)"],
   ["^V", "paste image from clipboard"],
-  ["^O", "session options (tools · plan · thoughts · diffs · mouse · enter)"],
+  ["^O", "session options (tools · plan · thoughts · diffs · mouse · enter · sidebar)"],
   null,
   ["^R", "history reverse search (^S walks forward once engaged)"],
   ["PgUp / PgDn", "scroll scrollback"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
+  ["Double-click", "open file under cursor / sidebar file row in $EDITOR"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
   ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
   null,
@@ -1328,6 +1338,11 @@ async function runSession(
   // Drives the banner's elapsed counter so the user sees "● running 30s"
   // for peer-triggered turns too, not just our own.
   let sessionBusySince: number | null = null;
+  // Wall clock of the moment the session last went quiet, i.e. the last
+  // transition to zero pending turns. Feeds the sidebar's idle counter;
+  // null until the first turn completes (a freshly attached session shows
+  // "ready", not "idle 0s").
+  let lastTurnEndedAt: number | null = null;
   let sessionElapsedTimer: NodeJS.Timeout | null = null;
   // Timer that periodically polls the daemon for the current session's
   // forkSynthesisState so the banner indicator stays in sync while
@@ -1384,6 +1399,7 @@ async function runSession(
       cancelling = false;
       sessionBusySince = Date.now();
       lastUpdateAt = Date.now();
+      screenRef?.setSidebarSnapshot({ busySince: sessionBusySince });
       dispatcherRef?.setTurnRunning(true);
       if (screenReady) {
         screenRef!.setBanner({ status: "busy", elapsedMs: 0, stalled: false });
@@ -1399,6 +1415,8 @@ async function runSession(
     } else if (before > 0 && pendingTurns === 0) {
       cancelling = false;
       sessionBusySince = null;
+      lastTurnEndedAt = Date.now();
+      screenRef?.setSidebarSnapshot({ busySince: null, lastTurnEndedAt });
       lastUpdateAt = null;
       dispatcherRef?.setTurnRunning(false);
       if (sessionElapsedTimer !== null) {
@@ -2475,6 +2493,11 @@ async function runSession(
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
     onSuspend: process.platform !== "win32" ? onSuspend : undefined,
+    // Content width changed (resize, or a sidebar toggle). Re-render the
+    // blocks whose FormattedLines have the old width baked in.
+    onLayoutChange: () => {
+      reflowWidthSensitiveBlocks();
+    },
     // Click a collapsed/expanded scrollback block to toggle just that one
     // block (the ^O dialog toggles all blocks of a type session-wide).
     // Routes by key prefix to the matching per-block override.
@@ -3058,7 +3081,18 @@ async function runSession(
     return true;
   };
 
-  const sessionbarAgent = resolvedAgentId || agentInfoName || "?";
+  // Display name for the agent. Order matters: `agentInfoName` is the
+  // name from the ACP initialize response, and the TUI's ACP peer is the
+  // DAEMON, not the agent — so that field reads "hydra" regardless of
+  // which agent is actually running. The hydra-side agent id is the real
+  // answer; agentInfoName is only a fallback for the degenerate case where
+  // we never learned an id.
+  //
+  // One helper for every surface so the sessionbar and the sidebar can't
+  // disagree (they did: the sidebar showed "hydra" while the sessionbar
+  // showed "opencode").
+  const agentLabel = (): string => resolvedAgentId || agentInfoName || "?";
+  const sessionbarAgent = agentLabel();
   // Running usage snapshot — seeded from the daemon's attach _meta so the
   // sessionbar shows tokens/cost immediately on reopen, then merged in
   // place by the usage-update event handler.
@@ -3071,6 +3105,23 @@ async function runSession(
   // (so the picker lives in there too); skip the per-session toggle.
   screen.start({ skipFullscreen: true });
   screen.setHideThoughts(!viewPrefs.showThoughts);
+  // Seed the sidebar from config. Gadget list and width first, so the
+  // initial paint (if enabled) already has the user's column layout.
+  screen.setSidebarGadgets(config.tui.sidebar.gadgets);
+  screen.setSidebarWidth(config.tui.sidebar.width ?? null);
+  screen.setSidebarBorder(config.tui.sidebar.border);
+  screen.setSidebarSnapshot({
+    usage: { ...usage },
+    model: initialModel ?? null,
+    mode: initialMode ?? null,
+    // Strip the hydra_session_ prefix the way every other display of a
+    // session id does (picker, exit hint, session info). Without this the
+    // sidebar's sid row was showing the prefix itself.
+    sessionId: resolvedSessionId === null
+      ? null
+      : stripHydraSessionPrefix(resolvedSessionId),
+    agent: sessionbarAgent,
+  });
   screen.setSessionbar({
     agent: sessionbarAgent,
     cwd: resolvedCwd,
@@ -3285,6 +3336,7 @@ async function runSession(
     "diffs",
     "mouse",
     "enter",
+    "sidebar",
   ] as const;
   type OptionId = (typeof OPTION_IDS)[number];
   let optionsSelectedIndex = 0;
@@ -3316,6 +3368,8 @@ async function runSession(
         return viewPrefs.mouseEnabled ? "on" : "off";
       case "enter":
         return viewPrefs.defaultEnterAction;
+      case "sidebar":
+        return screen.isSidebarVisible() ? "shown" : "hidden";
     }
   };
 
@@ -3333,6 +3387,8 @@ async function runSession(
         return "Mouse capture";
       case "enter":
         return "Enter key";
+      case "sidebar":
+        return "Sidebar";
     }
   };
 
@@ -3466,6 +3522,9 @@ async function runSession(
         viewPrefs.defaultEnterAction =
           viewPrefs.defaultEnterAction === "amend" ? "enqueue" : "amend";
         break;
+      case "sidebar":
+        setSidebarVisible(!screen.isSidebarVisible());
+        break;
     }
     refreshOptionsPrompt();
   };
@@ -3499,6 +3558,12 @@ async function runSession(
               "defaultEnterAction",
               viewPrefs.defaultEnterAction,
             );
+            break;
+          case "sidebar":
+            await setTuiConfigValue("sidebar", {
+              ...config.tui.sidebar,
+              enabled: screen.isSidebarVisible(),
+            });
             break;
         }
         screen.notify(`saved default: ${optionLabel(id)} ${optionValue(id)}`);
@@ -3718,6 +3783,12 @@ async function runSession(
       clearTimeout(timer);
     }
     amendPendingPaintTimers.clear();
+    // Sidebar clock + git poller. The Screen instance outlives a single
+    // session (runTuiApp creates it once and ^P reuses it), so a surviving
+    // ticker would keep pushing this session's snapshot into the next
+    // session's sidebar.
+    stopSidebarTicker();
+    stopGitPoll();
     screen.clearWindowTitle();
     // runTuiApp owns alt-screen entry/exit for the whole TUI lifetime,
     // so don't toggle fullscreen here — that's done after the outer
@@ -4309,6 +4380,9 @@ async function runSession(
       case "toggle-options":
         toggleOptionsModal();
         return;
+      case "toggle-sidebar":
+        setSidebarVisible(!screen.isSidebarVisible());
+        return;
       case "toggle-questions":
         toggleQuestionsModal();
         return;
@@ -4554,6 +4628,7 @@ async function runSession(
     const displayTexts = entries.map(formatQueueChipText);
     screen.setQueuedPrompts(displayTexts);
     screen.setBanner({ queued: entries.length });
+    screen.setSidebarSnapshot({ queued: entries.length });
     dispatcher.setQueue(entries.map((e) => e.text));
   };
 
@@ -4759,6 +4834,7 @@ async function runSession(
         toolStates.clear();
         exitPlanStates.clear();
         toolCallOrder.length = 0;
+        sessionEditedByTool.clear();
         toolsBlockStartedAt = null;
         toolsBlockEndedAt = null;
         toolsBlockStopReason = null;
@@ -5377,6 +5453,16 @@ async function runSession(
   // "most recent K" window in the tools block and is the source of
   // truth for the "ran N tools" header count.
   const toolCallOrder: string[] = [];
+  // SESSION-scoped edited-file contributions, one entry per mutating tool
+  // call, keyed by toolCallId and in first-seen order. Deliberately not
+  // derived from toolStates/toolCallOrder at render time: those are
+  // per-turn and get wiped on turn-complete and on each new prompt, so the
+  // sidebar's "edited" gadget emptied out the instant a turn finished.
+  // Keying by toolCallId (rather than appending) makes the late diff
+  // resolution — the deferred `toolContent: "references"` fetch lands well
+  // after the call completes — an overwrite instead of a double count.
+  // Cleared only by /clear, which is the user asking for a clean slate.
+  const sessionEditedByTool = new Map<string, SidebarEditedFile>();
   // Per-turn key for the tools block. A fresh key each turn (rather than a
   // single reused "tools") lets every turn's frozen block stay individually
   // addressable for click-to-expand. Bumped in startToolsBlock; the live
@@ -5809,6 +5895,39 @@ async function runSession(
     });
   };
 
+  // Fold one tool call into the session-scoped edited-file map. Safe — and
+  // expected — to call repeatedly for the same id: the entry is keyed by
+  // toolCallId and replaced, so re-folding upgrades it (a diff resolving
+  // after completion adds the line counts) without counting the file twice.
+  // A call that stops qualifying is removed rather than left stale.
+  //
+  // Takes the state by value where the caller has it. recordToolCall works
+  // on a state object it only inserts into `toolStates` at the very end, so
+  // a lookup by id here misses any call whose FIRST event already carries a
+  // terminal status — which is what an incremental reattach replay delivers
+  // for a tool call that started before the disconnect. That miss was
+  // permanent, because the entry is only ever folded on the transition into
+  // a terminal state.
+  const noteEditedFile = (
+    toolCallId: string,
+    known?: ToolLineState,
+  ): void => {
+    const state = known ?? toolStates.get(toolCallId);
+    if (state === undefined) {
+      return;
+    }
+    const entry = editedFileFromTool(
+      state,
+      renderedEditDiffs.get(toolCallId) ?? state.editDiff,
+      resolvedCwd,
+    );
+    if (entry === null) {
+      sessionEditedByTool.delete(toolCallId);
+      return;
+    }
+    sessionEditedByTool.set(toolCallId, entry);
+  };
+
   const recordToolCall = (
     id: string,
     title: string | undefined,
@@ -5820,6 +5939,7 @@ async function runSession(
     locations: import("../core/render-update.js").ToolCallLocation[] | undefined,
     workerTaskId?: string,
     rawUpdate?: unknown,
+    rawKind?: string,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -5831,6 +5951,11 @@ async function runSession(
     };
     if (!existing && workerTaskId !== undefined) {
       state.workerTaskId = workerTaskId;
+    }
+    // First-wins: the kind arrives on the initial tool_call, and updates
+    // don't re-send it.
+    if (rawKind !== undefined && state.rawKind === undefined) {
+      state.rawKind = rawKind;
     }
     if (existing && title !== undefined) {
       state.latestTitle = title;
@@ -5860,6 +5985,9 @@ async function runSession(
     // status; a started-but-not-yet-ended call keeps ticking live.
     if (state.endedAt === undefined && isTerminalToolStatus(state.status)) {
       state.endedAt = Date.now();
+      // A tool just finished: the edited-files list may have grown and the
+      // work tree may have moved. Refresh rather than wait out the poll.
+      onSidebarRelevantChange();
     }
     if (errorText !== undefined) {
       state.errorText = errorText;
@@ -5882,6 +6010,15 @@ async function runSession(
       }
     }
     toolStates.set(id, state);
+    // Fold into the session-scoped edited-file list on EVERY update, not
+    // just on the transition to a terminal status. The path arrives
+    // piecemeal: agents emit the initial tool_call with empty rawInput and
+    // no locations, and only name the file in a follow-up update (the same
+    // invariant history-aggregate.ts:122 calls out). Folding once, at one
+    // specific moment, meant a write-style call — whose only path source is
+    // that later locations[] and which carries no diff — never contributed
+    // a row. Re-folding is idempotent by construction.
+    noteEditedFile(id, state);
     if (wasNew) {
       // The block is normally anchored by startToolsBlock on the user-text
       // event; this fallback covers replay/edge cases where a tool call
@@ -5968,6 +6105,9 @@ async function runSession(
       if (st?.editDiff) {
         st.editDiff = resolved;
       }
+      // The diff we just fetched carries the line counts the gadget row
+      // shows, so re-fold this call now that they're known.
+      noteEditedFile(toolCallId);
       fetchingDiffs.delete(toolCallId);
       // Re-render at whatever mode the block is currently showing.
       const override = editDiffOverrides.get(toolCallId);
@@ -6050,6 +6190,7 @@ async function runSession(
     // Remember the payload so a later ^O mode toggle can re-render this
     // diff even after the turn boundary wipes toolStates/toolCallOrder.
     renderedEditDiffs.set(toolCallId, diff);
+    noteEditedFile(toolCallId);
     renderEditDiffBlock(toolCallId, diff, mode);
   };
 
@@ -6074,6 +6215,206 @@ async function runSession(
       renderEditDiffBlock(toolCallId, diff, mode === "diff" ? "diff" : "edit");
     }
   };
+
+  // ── Sidebar ──────────────────────────────────────────────────────────
+  //
+  // Showing or hiding the sidebar changes screen.width(), and several
+  // formatters bake that width into the FormattedLines they emit
+  // (markdown tables in parseAgentMarkdown, unified diffs, tool detail
+  // truncation). Re-wrapping alone would leave those blocks sized for the
+  // old width, so a layout change re-renders exactly the blocks that are
+  // width-sensitive. This is also wired to terminal resize via
+  // Screen.onLayoutChange, which fixes the same latent staleness that
+  // resize has always had.
+  const reflowWidthSensitiveBlocks = (): void => {
+    // Nothing to do when the content width didn't change. A sidebar in
+    // overlay mode floats over the transcript instead of narrowing it, so
+    // re-formatting every block would be pure work for an identical result.
+    if (screen.isSidebarOverlay()) {
+      return;
+    }
+    reRenderAllTools();
+    reRenderAllEditDiffs();
+    rerenderPlan();
+    renderAgentBlock();
+    renderThoughtBlock();
+  };
+
+  // ── git status polling ───────────────────────────────────────────────
+  //
+  // Only runs while the sidebar is visible AND the git gadget is in the
+  // configured list: shelling out every few seconds to feed a hidden
+  // gadget is exactly the kind of cost a relevance predicate is supposed
+  // to avoid. A tool completing also nudges a poll, so an edit shows up
+  // without waiting out the interval.
+  const GIT_POLL_MS = 5_000;
+  let gitPollTimer: NodeJS.Timeout | null = null;
+  let gitPollInFlight = false;
+
+  // git reports paths relative to the repo toplevel, which is not
+  // necessarily the session cwd, so resolve once and cache. null means
+  // "not a repo" / lookup failed, in which case file rows are omitted
+  // (a path we can't make absolute isn't safe to hand to an editor).
+  let gitTopLevel: string | null = null;
+
+  const runGitStatus = (cwd: string): void => {
+    execFile(
+      "git",
+      ["status", "--porcelain=v2", "--branch"],
+      { cwd, timeout: 3_000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        gitPollInFlight = false;
+        // Not a repo, git missing, or the call timed out: null means the
+        // gadget reports itself irrelevant and contributes no rows.
+        screen.setSidebarSnapshot({
+          git: err ? null : parseGitPorcelainV2(stdout, gitTopLevel),
+        });
+      },
+    );
+  };
+
+  const pollGitOnce = (): void => {
+    if (gitPollInFlight || resolvedCwd === null) {
+      return;
+    }
+    const cwd = resolvedCwd;
+    gitPollInFlight = true;
+    if (gitTopLevel !== null) {
+      runGitStatus(cwd);
+      return;
+    }
+    // Resolve the repo root BEFORE the first status parse — running the
+    // two concurrently would leave the first poll's file rows empty
+    // (paths can't be absolutized yet), so the sidebar would show counts
+    // for a full poll interval before any row became clickable. A failure
+    // here still runs the status call: counts are useful on their own,
+    // and the next poll retries the lookup.
+    execFile(
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      { cwd, timeout: 3_000 },
+      (err, stdout) => {
+        if (!err) {
+          gitTopLevel = stdout.trim() || null;
+        }
+        runGitStatus(cwd);
+      },
+    );
+  };
+
+  const startGitPoll = (): void => {
+    if (gitPollTimer !== null || !screen.isSidebarGadgetConfigured("git")) {
+      return;
+    }
+    pollGitOnce();
+    gitPollTimer = setInterval(pollGitOnce, GIT_POLL_MS);
+    // Don't hold the event loop open on the poll timer — a detach or
+    // agent exit must be able to end the process.
+    gitPollTimer.unref?.();
+  };
+
+  const stopGitPoll = (): void => {
+    if (gitPollTimer !== null) {
+      clearInterval(gitPollTimer);
+      gitPollTimer = null;
+    }
+    screen.setSidebarSnapshot({ git: null });
+  };
+
+  // Sidebar clock. The activity gadget counts up, so the column needs a
+  // tick of its own — but only while the sidebar is actually visible, and
+  // only at 1 Hz while a turn is in flight. Idle sessions tick at 5s: the
+  // idle counter is mostly reading minutes, and waking the renderer every
+  // second to redraw a quiet screen is exactly the kind of background
+  // churn the repaint throttle exists to avoid.
+  const SIDEBAR_IDLE_TICK_DIVISOR = 5;
+  let sidebarTicker: NodeJS.Timeout | null = null;
+  let sidebarTickCount = 0;
+
+  const startSidebarTicker = (): void => {
+    if (sidebarTicker !== null) {
+      return;
+    }
+    sidebarTicker = setInterval(() => {
+      sidebarTickCount++;
+      if (
+        sessionBusySince !== null ||
+        sidebarTickCount % SIDEBAR_IDLE_TICK_DIVISOR === 0
+      ) {
+        refreshSidebarSnapshot();
+      }
+    }, 1_000);
+    sidebarTicker.unref?.();
+  };
+
+  const stopSidebarTicker = (): void => {
+    if (sidebarTicker !== null) {
+      clearInterval(sidebarTicker);
+      sidebarTicker = null;
+    }
+  };
+
+  // Called from the paths that can change derived sidebar content (plan
+  // updates, tool completion, turn boundaries). No-op when the sidebar is
+  // hidden, so none of these paths pay for a feature that's off.
+  const onSidebarRelevantChange = (): void => {
+    if (!screen.isSidebarVisible()) {
+      return;
+    }
+    refreshSidebarSnapshot();
+    if (screen.isSidebarGadgetConfigured("git")) {
+      pollGitOnce();
+    }
+  };
+
+  const setSidebarVisible = (visible: boolean): void => {
+    screen.setSidebarVisible(visible);
+    reflowWidthSensitiveBlocks();
+    refreshSidebarSnapshot();
+    if (screen.isSidebarSuppressed()) {
+      // The sidebar is on but self-suppressed because the terminal is too
+      // narrow to give it columns. Say so, otherwise ^S looks broken.
+      screen.notify("sidebar needs a wider terminal (80+ columns)");
+    } else if (visible && screen.isSidebarOverlay()) {
+      // Wide column: it covers the transcript rather than reflowing it.
+      // Worth saying once, because the transcript's right-hand side
+      // disappearing looks like corruption if you don't know why.
+      screen.notify("sidebar overlaying transcript (too wide to reflow)");
+    }
+    screen.fullRedraw();
+    if (visible) {
+      startGitPoll();
+      startSidebarTicker();
+    } else {
+      stopGitPoll();
+      stopSidebarTicker();
+    }
+  };
+
+  // Collect the derived parts of the snapshot (the parts that aren't
+  // pushed incrementally from their own event handlers) and hand them to
+  // Screen. Cheap enough to call on any state change; Screen only
+  // schedules a repaint when the sidebar is actually visible.
+  const refreshSidebarSnapshot = (): void => {
+    screen.setSidebarSnapshot({
+      busySince: sessionBusySince,
+      lastTurnEndedAt: lastTurnEndedAt,
+      queued: queueCache.size,
+      plan: planEntriesForSidebar(),
+      editedFiles: editedFilesForSidebar(),
+      sessionId:
+        resolvedSessionId === null
+          ? null
+          : stripHydraSessionPrefix(resolvedSessionId),
+      agent: agentLabel(),
+    });
+  };
+
+  const planEntriesForSidebar = (): PlanEntry[] =>
+    lastPlanEvent === null ? [] : lastPlanEvent.entries;
+
+  const editedFilesForSidebar = (): SidebarEditedFile[] =>
+    collapseEditedFiles(sessionEditedByTool.values());
 
   // Route a left-click on a keyed scrollback block to a per-block
   // expand/collapse toggle. Only the clicked block changes; the global ^O
@@ -6297,6 +6638,7 @@ async function runSession(
       ) {
         resolvedAgentId = agentOpt.currentValue;
         screen.setSessionbar({ agent: agentOpt.currentValue });
+        screen.setSidebarSnapshot({ agent: agentLabel() });
       }
       // opencode 1.15.13+ advertises its mode list inside the unified
       // config snapshot rather than via available_modes_update. Map the
@@ -6314,6 +6656,7 @@ async function runSession(
     }
     if (event.kind === "mode-changed") {
       screen.setBanner({ currentMode: event.mode || undefined });
+      screen.setSidebarSnapshot({ mode: event.mode || null });
       return;
     }
     if (event.kind === "session-info") {
@@ -6323,6 +6666,7 @@ async function runSession(
       if (event.agentId !== undefined && event.agentId !== resolvedAgentId) {
         resolvedAgentId = event.agentId;
         screen.setSessionbar({ agent: event.agentId });
+        screen.setSidebarSnapshot({ agent: agentLabel() });
       }
       // A pending /hydra agent switch reuses the compaction banner slot:
       // a string names the target while synthesis runs, null clears it
@@ -6368,6 +6712,7 @@ async function runSession(
       }
       if (changed) {
         screen.setSessionbar({ usage: { ...usage } });
+        screen.setSidebarSnapshot({ usage: { ...usage } });
       }
       return;
     }
@@ -6501,6 +6846,7 @@ async function runSession(
         event.locations,
         event.workerTaskId,
         rawUpdate,
+        event.rawKind,
       );
       renderToolsBlock();
       maybeRenderEditDiff(event.toolCallId);
@@ -6513,6 +6859,7 @@ async function runSession(
       closeAgentText();
       closeThought();
       lastPlanEvent = event;
+      onSidebarRelevantChange();
       const lines = formatEvent(event, planFormatOptions());
       if (lines.length > 0) {
         // Leading blank stays part of the keyed block so it floats with
@@ -6567,6 +6914,7 @@ async function runSession(
       // Sessionbar reflects live state; scrollback still gets the line
       // below for a visible audit trail.
       screen.setSessionbar({ model: event.model });
+      screen.setSidebarSnapshot({ model: event.model });
     }
     const formatted = formatEvent(event);
     if (formatted.length > 0) {
@@ -6746,6 +7094,17 @@ async function runSession(
     }
   }
   livePeerHistoryRecording = true;
+
+  // Open the sidebar last: setSidebarVisible re-renders the width-baked
+  // blocks, so it has to run after the replay drain has populated them
+  // (and after the helper consts it closes over are initialized).
+  // The Screen instance is shared across sessions (^P reuses it), so a
+  // sidebar the user toggled on in the previous session is still visible
+  // here — carry it forward rather than leaving a visible column with a
+  // stopped ticker and the old session's data in it.
+  if (config.tui.sidebar.enabled || screen.isSidebarVisible()) {
+    setSidebarVisible(true);
+  }
 
   // Attach-time compaction work — two independent concerns share one
   // GET /compact/status call:

@@ -285,6 +285,47 @@ const TuiConfig = z.object({
   // left when truncation kicks in. 0 disables the cap — every plan
   // entry is rendered.
   maxPlanItems: z.number().int().nonnegative().default(5),
+  // Sidebar (^S, or the Sidebar row in ^O). A column down the right edge
+  // of the transcript region; the prompt and sessionbar keep the full
+  // terminal width.
+  //
+  // `gadgets` is the top-to-bottom display order, and therefore also
+  // priority order: the column scrolls under the mouse wheel, so a stack
+  // taller than the terminal isn't truncated — the gadgets listed first
+  // are simply the ones visible without scrolling. Unknown ids are
+  // ignored. Known ids: activity (thinking/idle timer), context (token
+  // window + cost), queue, todo, files (edited this session), git,
+  // session.
+  //
+  // `width` pins the body width in columns; omit to size it as ~28% of the
+  // terminal, clamped to 20..36. A pinned width is honored even when large:
+  // once the column would take more than half the terminal it stops
+  // reflowing the transcript and floats over it instead, since rewrapping
+  // prose into the smaller half costs more than covering its right-hand
+  // side. The sidebar suppresses itself entirely below an 80-column
+  // terminal.
+  sidebar: z
+    .object({
+      enabled: z.boolean().default(false),
+      width: z.number().int().positive().optional(),
+      // How the column is framed:
+      //   "frame" (default) — a continuous left edge with a horizontal rule
+      //     at each boundary, using the box-drawing junction the position
+      //     calls for: "┌" opens the column, "├" separates gadgets, "└"
+      //     closes it off at the bottom.
+      //   "rule" — one unbroken vertical rule and nothing else; gadgets
+      //     separated by a blank row.
+      //   "none" — no rules at all, blank-row separation only.
+      border: z.enum(["none", "rule", "frame"]).default("frame"),
+      gadgets: z
+        .array(z.string())
+        .default(["activity", "context", "queue", "todo", "files", "git", "session"]),
+    })
+    .default({
+      enabled: false,
+      border: "frame",
+      gadgets: ["activity", "context", "queue", "todo", "files", "git", "session"],
+    }),
   // How edit-style tool calls (Edit, Write, str_replace) render in
   // scrollback, *in addition to* the normal tool row inside the tools
   // block.
@@ -485,6 +526,11 @@ export const HydraConfig = z.object({
     maxPlanItems: 5,
     showFileUpdates: "edit",
     selectionClipboard: "both",
+    sidebar: {
+      enabled: false,
+      border: "frame",
+      gadgets: ["activity", "context", "queue", "todo", "files", "git", "session"],
+    },
   }),
 });
 

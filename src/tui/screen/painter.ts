@@ -16,7 +16,10 @@
 import type { Terminal } from "terminal-kit";
 
 export class RowPainter {
-  private lastFrameRows = new Map<number, string>();
+  // Keyed by region-qualified row ("12" for the default region,
+  // "sidebar:12" for a named one) so two regions on one row cache
+  // independently.
+  private lastFrameRows = new Map<string, string>();
   private lastFrameW = 0;
   private lastFrameH = 0;
 
@@ -53,18 +56,52 @@ export class RowPainter {
   // brackets. The styleReset stops the trailing erase from
   // inheriting the paint's last SGR (e.g. a bgBlue selection
   // slice) and painting the rest of the line in that colour.
-  paintRow(row: number, signature: string, paint: () => void): void {
+  // A row can be owned by more than one region once the sidebar is
+  // visible: the scrollback occupies columns 1..contentWidth and the
+  // sidebar occupies the columns to its right, on the same rows. Regions
+  // get separate cache namespaces (a single row-keyed cache would thrash,
+  // since the two passes present different signatures for the same row)
+  // and the left region opts out of the trailing erase, padding its own
+  // content to the region boundary instead — eraseLineAfter would wipe
+  // the sidebar cells. The rightmost region keeps the erase so leftovers
+  // past the end of the line still get cleared.
+  // Forget one region's cached signature for a row, so the next paintRow
+  // for it is guaranteed to emit. Used when something OUTSIDE that region
+  // has overwritten its cells: a transcript row wider than the content
+  // region paints into the sidebar's columns, and the sidebar would
+  // otherwise skip the row as unchanged and leave the intruding glyphs on
+  // screen.
+  invalidate(region: string | undefined, row: number): void {
+    this.lastFrameRows.delete(
+      region === undefined ? String(row) : `${region}:${row}`,
+    );
+  }
+
+  // Returns true when the row was actually emitted (signature differed),
+  // so callers can react to "this row changed" — see Screen.drawScrollback
+  // invalidating the sidebar region for rows it repainted.
+  paintRow(
+    row: number,
+    signature: string,
+    paint: () => void,
+    opts?: { region?: string; column?: number; erase?: boolean },
+  ): boolean {
     if (row < 1 || row > this.term.height) {
-      return;
+      return false;
     }
-    if (this.lastFrameRows.get(row) === signature) {
-      return;
+    const region = opts?.region;
+    const cacheKey = region === undefined ? String(row) : `${region}:${row}`;
+    if (this.lastFrameRows.get(cacheKey) === signature) {
+      return false;
     }
-    this.lastFrameRows.set(row, signature);
-    this.term.moveTo(1, row);
+    this.lastFrameRows.set(cacheKey, signature);
+    this.term.moveTo(opts?.column ?? 1, row);
     paint();
     this.term.styleReset();
-    this.term.eraseLineAfter();
+    if (opts?.erase !== false) {
+      this.term.eraseLineAfter();
+    }
+    return true;
   }
 }
 

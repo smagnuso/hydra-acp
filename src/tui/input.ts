@@ -118,6 +118,7 @@ export type InputEffect =
   | { type: "toggle-options" }
   | { type: "toggle-questions" }
   | { type: "toggle-thoughts" }
+  | { type: "toggle-sidebar" }
   | { type: "toggle-mouse" }
   | { type: "show-help" }
   // Dispatcher → app: please acquire content from the named source and
@@ -651,7 +652,17 @@ export class InputDispatcher {
         // (`stty -ixon` not set) will swallow ^S before it reaches us.
         // Inside history search, this case never runs — feed() peels
         // ^S there and routes it to retreatHistorySearch.
-        return this.amend();
+        //
+        // With an empty draft amend() is a no-op ([] — no text, no
+        // attachments, no queue slot being edited), so ^S falls through
+        // to toggling the sidebar. Same fallthrough idiom as Home/End
+        // (edit action if it applies, otherwise scroll) and Escape. This
+        // keeps the vte Shift+Enter substitute intact: the moment there's
+        // anything to submit, ^S submits.
+        {
+          const effects = this.amend();
+          return effects.length > 0 ? effects : [{ type: "toggle-sidebar" }];
+        }
       case "ctrl-u":
         this.recordEdit();
         this.killLine();

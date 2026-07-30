@@ -731,9 +731,26 @@ describe("InputDispatcher", () => {
     expect(d.state().buffer).toEqual([""]);
   });
 
-  it("^S on an empty draft is a no-op", () => {
+  // ^S is overloaded: it amends when there is something to submit, and
+  // falls through to the sidebar toggle when there isn't. Same idiom as
+  // Home/End (edit action if it applies, otherwise scroll).
+  it("^S on an empty draft toggles the sidebar instead of amending", () => {
     const d = new InputDispatcher();
-    expect(feed(d, [k("ctrl-s")])).toEqual([]);
+    expect(feed(d, [k("ctrl-s")])).toEqual([{ type: "toggle-sidebar" }]);
+    expect(d.state().buffer).toEqual([""]);
+  });
+
+  it("^S with only an attachment amends rather than toggling the sidebar", () => {
+    const d = new InputDispatcher();
+    d.addAttachment({
+      mimeType: "image/png",
+      data: "AAAA",
+      name: "a.png",
+      sizeBytes: 3,
+    });
+    const effects = feed(d, [k("ctrl-s")]);
+    expect(effects.some((e) => e.type === "toggle-sidebar")).toBe(false);
+    expect(effects.some((e) => e.type === "amend")).toBe(true);
   });
 
   it("^S on a loaded queue slot drops it and emits amend (alias for Shift+Enter)", () => {
