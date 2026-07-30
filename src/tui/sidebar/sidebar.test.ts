@@ -600,7 +600,7 @@ describe("session gadget", () => {
     expect(rows.some((b) => b.startsWith("agent"))).toBe(true);
     expect(rows.some((b) => b.startsWith("model"))).toBe(true);
     expect(rows.some((b) => b.startsWith("mode"))).toBe(true);
-    expect(rows.some((b) => b.startsWith("sid"))).toBe(true);
+    expect(rows.some((b) => b.startsWith("id"))).toBe(true);
   });
 
   // Colour in the sidebar marks state; these are identity strings, so the

@@ -3148,7 +3148,7 @@ async function runSession(
     mode: initialMode ?? null,
     // Strip the hydra_session_ prefix the way every other display of a
     // session id does (picker, exit hint, session info). Without this the
-    // sidebar's sid row was showing the prefix itself.
+    // sidebar's id row was showing the prefix itself.
     sessionId: resolvedSessionId === null
       ? null
       : stripHydraSessionPrefix(resolvedSessionId),

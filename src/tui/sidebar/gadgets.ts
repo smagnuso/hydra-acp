@@ -477,7 +477,7 @@ export const sessionGadget: Gadget = {
       field("mode", s.mode);
     }
     if (s.sessionId !== null) {
-      field("sid", s.sessionId);
+      field("id", s.sessionId);
     }
     return lines;
   },
