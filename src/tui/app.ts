@@ -5583,6 +5583,39 @@ async function runSession(
     const expanded = planOverride ?? viewPrefs.planExpanded;
     return { maxPlanItems: expanded ? Infinity : PLAN_VISIBLE_LIMIT };
   };
+  // Paint (or repaint in place) the turn's task list as the keyed "plan"
+  // block. Shared by the two channels agents use to report the same thing:
+  // the spec-native `plan` session update, and a `todowrite` tool call whose
+  // rawInput carries the identical list. Which one you get is the agent's
+  // choice and not a stable one — the same opencode build sends `plan` in
+  // one session and only todowrite in the next — so routing both here is
+  // what keeps the transcript from silently losing the block. See
+  // sidebar/todos.ts for the wire shapes.
+  const renderPlanBlock = (event: Extract<RenderEvent, { kind: "plan" }>): void => {
+    const lines = formatEvent(event, planFormatOptions());
+    if (lines.length > 0) {
+      // Leading blank stays part of the keyed block so it floats with the
+      // plan when sticky bumps it back to the tail — keeping the visual gap
+      // between the plan and whatever's above it. ensureSeparator is taught
+      // to skip when the sticky block already starts with this blank, so
+      // other code paths don't stack a second one on top.
+      screen.upsertLines("plan", [{ body: "" }, ...lines]);
+    }
+    // While the plan still has open entries it anchors to the bottom of the
+    // turn (the sticky float bumps it back below any tool calls / agent text
+    // that lands afterward). Once every entry is checked off the plan is
+    // historical: drop the sticky float so further activity appends below
+    // it. We keep the upsert key tracked so a redundant all-completed
+    // snapshot (some agents send the same plan more than once) still splices
+    // in place — clearing the key here was the cause of duplicate plan
+    // blocks. If the agent later re-opens an entry, the next event flips
+    // sticky back on.
+    const allComplete =
+      event.entries.length > 0 &&
+      event.entries.every((e) => (e.status ?? "pending") === "completed");
+    screen.setStickyBottomKey(allComplete ? null : "plan");
+  };
+
   // Re-render the current turn's plan block under the active expand
   // setting. Driven by the ^O "Plan" toggle. A no-op once the turn ended
   // (lastPlanEvent is cleared and the block frozen) — only the live plan
@@ -6064,6 +6097,18 @@ async function runSession(
     if (todos !== null) {
       sessionTodos = todos;
       onSidebarRelevantChange();
+      // Also paint the transcript block, exactly as an ACP `plan` update
+      // would. An agent that reports its task list through todowrite gets
+      // the same checklist as one that reports it through `plan`, rather
+      // than the list existing only in the sidebar while the transcript
+      // shows an inscrutable "todowrite" tool row. Keyed upsert, so the
+      // repeated snapshots a todo list generates splice in place instead of
+      // stacking. Deliberately does NOT touch lastPlanEvent: that drives
+      // the sidebar's source precedence, where a real `plan` update must
+      // keep winning over scraped todos.
+      if (todos.length > 0) {
+        renderPlanBlock({ kind: "plan", entries: todos });
+      }
     }
     if (wasNew) {
       // The block is normally anchored by startToolsBlock on the user-text
@@ -7083,32 +7128,7 @@ async function runSession(
       closeThought();
       lastPlanEvent = event;
       onSidebarRelevantChange();
-      const lines = formatEvent(event, planFormatOptions());
-      if (lines.length > 0) {
-        // Leading blank stays part of the keyed block so it floats with
-        // the plan when sticky bumps it back to the tail — keeping the
-        // visual gap between the plan and whatever's above it.
-        // ensureSeparator is taught to skip when the sticky block
-        // already starts with this blank, so other code paths don't
-        // stack a second one on top.
-        screen.upsertLines("plan", [{ body: "" }, ...lines]);
-      }
-      // While the plan still has open entries it anchors to the bottom
-      // of the turn (the sticky float bumps it back below any tool
-      // calls / agent text that lands afterward). Once every entry is
-      // checked off the plan is historical: drop the sticky float so
-      // further activity appends below it. We keep the upsert key
-      // tracked so a redundant all-completed snapshot (some agents send
-      // the same plan more than once) still splices in place — clearing
-      // the key here was the cause of duplicate plan blocks. If the
-      // agent later re-opens an entry, the next event flips sticky
-      // back on.
-      const allComplete =
-        event.entries.length > 0 &&
-        event.entries.every(
-          (e) => (e.status ?? "pending") === "completed",
-        );
-      screen.setStickyBottomKey(allComplete ? null : "plan");
+      renderPlanBlock(event);
       return;
     }
     if (event.kind === "tool-call-update") {
