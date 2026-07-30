@@ -602,6 +602,12 @@ interface ViewPrefs {
   // What unmodified Enter does in the composer. Mirrors
   // config.tui.defaultEnterAction; the options dialog flips it live.
   defaultEnterAction: "enqueue" | "amend";
+  // Whether the sidebar column is open. Mirrors config.tui.sidebar.enabled.
+  // Lives here rather than being read off the Screen at attach because
+  // every session builds a NEW Screen — so the column's state has to be
+  // carried in the prefs container like every other toggle, or ^S is
+  // silently undone by the next session switch.
+  sidebarVisible: boolean;
   // In-process memory of the last agent the user picked in the new-session
   // agent prompt. Used to highlight that row first on the next prompt so
   // they don't have to scroll back. Not persisted: pressing `s` in the
@@ -881,6 +887,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     mouseEnabled: config.tui.mouse,
     inAppSelectionEnabled: resolveInAppSelection(config),
     defaultEnterAction: config.tui.defaultEnterAction,
+    sidebarVisible: config.tui.sidebar.enabled,
     ...(opts.agentId ? { lastChosenAgent: opts.agentId } : {}),
   };
   // Picker filter toggles (cwd-only, host) are mutated in place by the
@@ -6560,6 +6567,10 @@ async function runSession(
   };
 
   const setSidebarVisible = (visible: boolean): void => {
+    // Record the intent, not the outcome: a too-narrow terminal suppresses
+    // the column, but the user still asked for it and a later session on a
+    // wider terminal should honor that.
+    viewPrefs.sidebarVisible = visible;
     screen.setSidebarVisible(visible);
     reflowWidthSensitiveBlocks();
     refreshSidebarSnapshot();
@@ -7301,11 +7312,14 @@ async function runSession(
   // Open the sidebar last: setSidebarVisible re-renders the width-baked
   // blocks, so it has to run after the replay drain has populated them
   // (and after the helper consts it closes over are initialized).
-  // The Screen instance is shared across sessions (^P reuses it), so a
-  // sidebar the user toggled on in the previous session is still visible
-  // here — carry it forward rather than leaving a visible column with a
-  // stopped ticker and the old session's data in it.
-  if (config.tui.sidebar.enabled || screen.isSidebarVisible()) {
+  //
+  // Read from viewPrefs, not from config or from the Screen. Every session
+  // builds a fresh Screen, so asking the Screen always answers "hidden";
+  // asking config ignores the toggle entirely, which made ^S asymmetric —
+  // opening the column didn't survive a session switch, and closing it
+  // didn't either when the config default was on. The prefs container is
+  // how every other ^O toggle carries across sessions.
+  if (viewPrefs.sidebarVisible) {
     setSidebarVisible(true);
   }
 
