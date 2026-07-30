@@ -25,6 +25,14 @@
 // long-lived agent that is currently idle would still read high — actively
 // misleading for a live monitor. Delta-over-elapsed is a real interval
 // measurement.
+//
+// On Linux that delta also picks up descendants that lived and died between
+// two samples, via the kernel's reaped-children counters. Polling alone
+// cannot see a 40ms `rg`, and an agent that shells out for everything spends
+// most of its CPU in exactly those processes — without this the tree reads
+// near 0% while genuinely busy. macOS has no portable equivalent through
+// `ps`, so that path measures live processes only and under-reports a
+// subprocess-heavy tree.
 
 export interface ProcRow {
   pid: number;
@@ -34,6 +42,16 @@ export interface ProcRow {
   rssBytes: number;
   // Cumulative CPU time consumed since the process started, in seconds.
   cpuSeconds: number;
+  // Cumulative CPU time consumed by this process's REAPED children, in
+  // seconds, recursively (a reaped child's own child-time rolls up into its
+  // parent's). This is the only way to see processes that live and die
+  // between two samples: polling can't catch a 40ms `rg`, but the kernel
+  // banks its cost here the moment it's waited on, and it stays banked.
+  //
+  // Undefined when the sampler can't supply it — `ps` has no portable
+  // column for it, so the non-Linux path leaves it out and treeUsage falls
+  // back to live-process accounting alone.
+  childCpuSeconds?: number;
 }
 
 export interface ProcTreeUsage {
@@ -76,11 +94,14 @@ export function parseProcStat(content: string): ProcRow | null {
     return null;
   }
   const pid = Number(content.slice(0, content.indexOf(" ")));
-  // Fields after comm: state(3) ppid(4) ... utime(14) stime(15)
+  // Fields after comm: state(3) ppid(4) ... utime(14) stime(15) cutime(16)
+  // cstime(17). Field n is at rest[n - 3].
   const rest = content.slice(close + 2).split(" ");
   const ppid = Number(rest[1]);
   const utime = Number(rest[11]);
   const stime = Number(rest[12]);
+  const cutime = Number(rest[13]);
+  const cstime = Number(rest[14]);
   if (
     !Number.isInteger(pid) ||
     !Number.isInteger(ppid) ||
@@ -89,6 +110,13 @@ export function parseProcStat(content: string): ProcRow | null {
   ) {
     return null;
   }
+  // Child times are additive extra, not load-bearing: a truncated line
+  // still yields usable self-CPU, so a missing pair degrades to the
+  // live-process-only accounting rather than dropping the row.
+  const childCpuSeconds =
+    Number.isFinite(cutime) && Number.isFinite(cstime)
+      ? (cutime + cstime) / USER_HZ
+      : undefined;
   return {
     pid,
     ppid,
@@ -97,6 +125,7 @@ export function parseProcStat(content: string): ProcRow | null {
     // size — assuming 4K would be wrong on a 16K-page arm64 kernel.
     rssBytes: 0,
     cpuSeconds: (utime + stime) / USER_HZ,
+    ...(childCpuSeconds === undefined ? {} : { childCpuSeconds }),
   };
 }
 
@@ -231,11 +260,22 @@ export function collectTree(
 
 // Sum a tree's usage, differencing CPU against a previous sample.
 //
-// CPU accounting only counts pids present in BOTH samples: a process that
-// started during the interval has no baseline, and treating its whole
+// Live processes are differenced pid by pid: a process present in BOTH
+// samples contributes the growth in its own cpuSeconds. A process that
+// appeared during the interval has no baseline, and treating its whole
 // lifetime CPU as interval usage would spike the reading (a fresh `bash -c`
-// would read as hundreds of percent). Its RSS still counts — that's a
-// point-in-time measure and needs no baseline.
+// would read as hundreds of percent), so its CPU waits for the next
+// interval. Its RSS still counts — that's a point-in-time measure and needs
+// no baseline.
+//
+// That alone systematically UNDER-reports, because it can only see what
+// polling catches. An agent that shells out constantly spends its CPU in
+// processes that are born and reaped between two 5s samples: never in two
+// consecutive samples, so never counted, and a genuinely busy tree reads
+// near 0%. The reaped-children counters (ProcRow.childCpuSeconds) close
+// that: the kernel banks a child's cost on its parent at reap time,
+// whatever the child's lifetime. See reapedChildDelta for the correction
+// that keeps it from double-counting.
 //
 // Returns null when the sample doesn't carry RSS for the whole tree, which
 // means it was taken for a DIFFERENT root than the one being summed. No
@@ -267,12 +307,78 @@ export function treeUsage(
       cpuDelta += Math.max(0, row.cpuSeconds - before.cpuSeconds);
     }
   }
+  if (comparable && previous !== null) {
+    cpuDelta += reapedChildDelta(current, previous, tree, root);
+  }
   const usage: ProcTreeUsage = { processes: tree.size, rssBytes };
   const elapsedMs = previous === null ? 0 : current.at - previous.at;
   if (comparable && elapsedMs > 0) {
-    usage.cpuFraction = cpuDelta / (elapsedMs / 1000);
+    // Clamped: the correction below can overshoot when a process leaves the
+    // tree without being reaped inside it, and a negative "CPU used" is
+    // never a reading worth showing.
+    usage.cpuFraction = Math.max(0, cpuDelta) / (elapsedMs / 1000);
   }
   return usage;
+}
+
+// CPU consumed during the interval by descendants that DIED during it,
+// which the live-process pass cannot see.
+//
+// Two terms:
+//
+//   + the growth in every surviving tree member's reaped-children counter.
+//     Summed over all live members, not just the root: a grandchild is
+//     reaped by whichever process spawned it, so its cost sits there until
+//     that process itself dies and rolls up.
+//
+//   − everything already billed for each pid that was in the tree last
+//     sample and is gone now: its own CPU (charged by the live pass) plus
+//     its own reaped-children time (charged by the term above). Without
+//     this we double-count, because the parent's counter jumps by the dead
+//     process's ENTIRE lifetime — self and descendants both — at reap.
+//     Subtracting what we already billed leaves exactly the sliver it
+//     burned between the last sample and its exit.
+//
+// A child that lived and died entirely between two samples was never
+// billed, so nothing is subtracted for it and its full cost lands in the
+// interval it died in — which is the only interval we could have learned
+// about it at all.
+//
+// Returns 0 when the sampler doesn't supply child times (the `ps` path),
+// leaving the live-process accounting exactly as it was.
+function reapedChildDelta(
+  current: ProcSample,
+  previous: ProcSample,
+  tree: Set<number>,
+  root: number,
+): number {
+  let delta = 0;
+  let known = false;
+  for (const pid of tree) {
+    const now = current.rows.get(pid)!.childCpuSeconds;
+    const before = previous.rows.get(pid)?.childCpuSeconds;
+    if (now === undefined || before === undefined) {
+      continue;
+    }
+    known = true;
+    // Same recycled-pid clamp as the live pass.
+    delta += Math.max(0, now - before);
+  }
+  if (!known) {
+    return 0;
+  }
+  for (const pid of collectTree(previous.rows, root)) {
+    if (tree.has(pid)) {
+      continue;
+    }
+    const gone = previous.rows.get(pid);
+    // Only correct for pids from a source that tracks child time; a row
+    // without it was never part of this accounting.
+    if (gone !== undefined && gone.childCpuSeconds !== undefined) {
+      delta -= gone.cpuSeconds + gone.childCpuSeconds;
+    }
+  }
+  return delta;
 }
 
 // ── samplers ─────────────────────────────────────────────────────────────

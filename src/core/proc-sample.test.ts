@@ -182,6 +182,9 @@ const statLine = (
   ppid: number,
   utime: number,
   stime: number,
+  // cutime/cstime: CPU banked by this process's reaped children.
+  cutime = 0,
+  cstime = 0,
 ): string => {
   const after = [
     "S",
@@ -197,8 +200,8 @@ const statLine = (
     "0",
     String(utime),
     String(stime),
-    "0",
-    "0",
+    String(cutime),
+    String(cstime),
     "20",
     "0",
     "1",
@@ -328,6 +331,120 @@ describe("sampleProcfs / fillRssBytes", () => {
     const usage = treeUsage({ at: 1_000, rows }, null, 100)!;
     expect(usage.processes).toBe(2);
     expect(usage.rssBytes).toBe((50_000 + 20_000) * 1024);
+  });
+});
+
+// Descendants that live and die between two samples are invisible to
+// polling; the kernel banks their CPU on whoever reaps them. These cover
+// the correction that folds that in without double-counting.
+describe("treeUsage reaped-child accounting", () => {
+  // Build a /proc-shaped sample: [pid, ppid, cpuSelf, cpuChildren].
+  const procSample = (
+    at: number,
+    rows: Array<[number, number, number, number]>,
+  ): ProcSample => ({
+    at,
+    rows: new Map(
+      rows.map(([pid, ppid, self, kids]) => [
+        pid,
+        { pid, ppid, rssBytes: 0, cpuSeconds: self, childCpuSeconds: kids },
+      ]),
+    ),
+  });
+
+  const cpu = (a: ProcSample, b: ProcSample, root = 100): number =>
+    treeUsage(b, a, root)!.cpuFraction!;
+
+  // The whole point: a child born and reaped inside one interval is never
+  // in two consecutive samples, so the live-process pass sees nothing.
+  it("counts a child that lived and died entirely within the interval", () => {
+    const before = procSample(0, [[100, 1, 10, 0]]);
+    // 2s of grep, reaped. The agent itself did nothing.
+    const after = procSample(1000, [[100, 1, 10, 2]]);
+    expect(cpu(before, after)).toBeCloseTo(2, 5);
+  });
+
+  it("still reports zero for a genuinely idle tree", () => {
+    const before = procSample(0, [[100, 1, 10, 5]]);
+    const after = procSample(1000, [[100, 1, 10, 5]]);
+    expect(cpu(before, after)).toBe(0);
+  });
+
+  // The trap. A child we watched for several intervals was billed as it
+  // went; at reap the parent's counter jumps by its WHOLE lifetime.
+  it("does not double-count a child it had already been billing", () => {
+    // Child 101 is alive with 3s burned, all of it already reported.
+    const before = procSample(0, [
+      [100, 1, 10, 0],
+      [101, 100, 3, 0],
+    ]);
+    // It ran 0.5s more, then exited and was reaped: parent banks 3.5s.
+    const after = procSample(1000, [[100, 1, 10, 3.5]]);
+    expect(cpu(before, after)).toBeCloseTo(0.5, 5);
+  });
+
+  it("subtracts a dead child's own child-time too, not just its self-time", () => {
+    // 101 had itself reaped 4s of grandchildren, already billed.
+    const before = procSample(0, [
+      [100, 1, 10, 0],
+      [101, 100, 3, 4],
+    ]);
+    // 101 exits: 3 + 4 roll up into 100, plus 0.5s of new work.
+    const after = procSample(1000, [[100, 1, 10, 7.5]]);
+    expect(cpu(before, after)).toBeCloseTo(0.5, 5);
+  });
+
+  // A grandchild is reaped by whichever process spawned it, so the counter
+  // that moves is the intermediate's — summing only the root would miss it.
+  it("counts children reaped by an intermediate process", () => {
+    const before = procSample(0, [
+      [100, 1, 10, 0],
+      [101, 100, 3, 0],
+    ]);
+    const after = procSample(1000, [
+      [100, 1, 10, 0],
+      [101, 100, 3, 2],
+    ]);
+    expect(cpu(before, after)).toBeCloseTo(2, 5);
+  });
+
+  it("adds live-process CPU and reaped-child CPU in the same interval", () => {
+    const before = procSample(0, [[100, 1, 10, 0]]);
+    // 1s of its own work plus 2s of reaped children over 2s of wall clock.
+    const after = procSample(2000, [[100, 1, 11, 2]]);
+    expect(cpu(before, after)).toBeCloseTo(1.5, 5);
+  });
+
+  // A pid recycled onto a new process reads LOWER than its predecessor.
+  it("clamps a counter that went backwards", () => {
+    const before = procSample(0, [[100, 1, 10, 9]]);
+    const after = procSample(1000, [[100, 1, 1, 0]]);
+    expect(cpu(before, after)).toBe(0);
+  });
+
+  // Reparenting: the process left our tree without being reaped in it, so
+  // the correction subtracts CPU that never gets added back.
+  it("never reports a negative reading", () => {
+    const before = procSample(0, [
+      [100, 1, 10, 0],
+      [101, 100, 50, 0],
+    ]);
+    const after = procSample(1000, [[100, 1, 10, 0]]);
+    expect(cpu(before, after)).toBe(0);
+  });
+
+  // macOS: ps has no portable reaped-children column, so rows carry no
+  // childCpuSeconds and the accounting stays live-process only.
+  it("falls back to live-process accounting when child times are absent", () => {
+    const before: ProcSample = {
+      at: 0,
+      rows: parsePsOutput("  100     1   50000  00:00:10"),
+    };
+    const after: ProcSample = {
+      at: 1000,
+      rows: parsePsOutput("  100     1   50000  00:00:11"),
+    };
+    expect(treeUsage(after, before, 100)!.cpuFraction).toBeCloseTo(1, 5);
   });
 });
 
