@@ -1893,6 +1893,30 @@ describe("Screen block-click routing", () => {
     expect(callKeyAtRow(screen, visibleRows(screen) + 1)).toBeNull();
   });
 
+  // Hover is resolved from the ROW alone, so without a column bound the
+  // pointer sliding sideways into the sidebar leaves the transcript row it
+  // came from highlighted — and in overlay mode that row is underneath the
+  // column it's now pointing at.
+  it("drops the transcript hover when the pointer moves into the sidebar", () => {
+    const screen = makeTallScreen({ mouse: true, width: 100 });
+    screen.setSidebarVisible(true);
+    screen.upsertLines("tools:1", [{ body: "tool-header" }]);
+    const y = visibleRows(screen);
+    const hovered = (): string | null =>
+      (screen as unknown as { hoveredBlockKey: string | null }).hoveredBlockKey;
+
+    dispatchMouse(screen, "MOUSE_MOTION", { x: 3, y });
+    expect(hovered()).toBe("tools:1");
+
+    // Same row, but now over the column.
+    dispatchMouse(screen, "MOUSE_MOTION", { x: 99, y });
+    expect(hovered()).toBeNull();
+
+    // And back.
+    dispatchMouse(screen, "MOUSE_MOTION", { x: 3, y });
+    expect(hovered()).toBe("tools:1");
+  });
+
   it("a full click (press+release same cell) fires onBlockClick", () => {
     const clicks: string[] = [];
     const screen = makeTallScreen({

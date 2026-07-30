@@ -3240,7 +3240,15 @@ export class Screen {
     // intent on whatever the press already armed. keyAtRow !== null
     // means the row belongs to a clickable scrollback block; that's
     // exactly the affordance we want to surface.
-    if (cell !== null && kind !== "release") {
+    // Hover is resolved per ROW, so without a column check the pointer
+    // moving sideways into the sidebar leaves the transcript row it came
+    // from lit up — and in overlay mode that row is literally underneath
+    // the column. Treat any cell at or past the sidebar's first column
+    // (the gutter included: it belongs to the column, not the transcript)
+    // as "off the transcript", the same bound resolveCellToSource uses.
+    const overTranscript =
+      cell !== null && cell.x >= 1 && cell.x <= this.transcriptVisibleWidth();
+    if (cell !== null && overTranscript && kind !== "release") {
       const rawInfo = this.keyAndSubAtRow(cell.y);
       // agent_message blocks carry a blockKey only so streaming chunks
       // can re-render in place via upsertLines — they have no click or
@@ -3287,17 +3295,25 @@ export class Screen {
           this.syncedPartialRepaint(() => this.drawScrollback());
         }
       }
-    } else if (
-      cell === null &&
-      kind === "move" &&
-      (this.hoveredBlockKey !== null ||
+    } else if (kind === "move") {
+      // Off the transcript entirely — no cell at all, or the pointer is
+      // over the sidebar. Drop the highlight and the pointer shape with
+      // it: a hand cursor over the column would advertise a click target
+      // that the transcript's hit-testing has already stopped answering
+      // for.
+      if (cell !== null && !overTranscript) {
+        this.setPointerShape("default");
+      }
+      if (
+        this.hoveredBlockKey !== null ||
         this.hoveredSubKey !== null ||
-        this.hoveredRunKeys !== null)
-    ) {
-      this.hoveredBlockKey = null;
-      this.hoveredSubKey = null;
-      this.hoveredRunKeys = null;
-      this.syncedPartialRepaint(() => this.drawScrollback());
+        this.hoveredRunKeys !== null
+      ) {
+        this.hoveredBlockKey = null;
+        this.hoveredSubKey = null;
+        this.hoveredRunKeys = null;
+        this.syncedPartialRepaint(() => this.drawScrollback());
+      }
     }
     // Left-click on a keyed scrollback block toggles that single block's
     // expand/collapse via the app. We require a full click — press and

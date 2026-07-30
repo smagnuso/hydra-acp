@@ -1353,6 +1353,17 @@ async function runSession(
   // null until the first turn completes (a freshly attached session shows
   // "ready", not "idle 0s").
   let lastTurnEndedAt: number | null = null;
+  // False until the attach handshake has finished replaying history. The
+  // turn transitions that replay drives are HISTORICAL — the turn they
+  // report ended whenever it ended, not now — so they must not stamp
+  // lastTurnEndedAt, or the idle counter restarts from zero every time you
+  // open a session. The real baseline is seeded after attach from the
+  // daemon's updatedAt (the history file's mtime).
+  let attachSettled = false;
+  // Whether the replay contained a completed turn at all. A session that
+  // has never been prompted has no last-turn time to seed, and should keep
+  // reading "ready" rather than counting idle from its creation.
+  let replayedTurnEndSeen = false;
   let sessionElapsedTimer: NodeJS.Timeout | null = null;
   // Timer that periodically polls the daemon for the current session's
   // forkSynthesisState so the banner indicator stays in sync while
@@ -1425,7 +1436,11 @@ async function runSession(
     } else if (before > 0 && pendingTurns === 0) {
       cancelling = false;
       sessionBusySince = null;
-      lastTurnEndedAt = Date.now();
+      if (attachSettled) {
+        lastTurnEndedAt = Date.now();
+      } else {
+        replayedTurnEndSeen = true;
+      }
       screenRef?.setSidebarSnapshot({ busySince: null, lastTurnEndedAt });
       lastUpdateAt = null;
       dispatcherRef?.setTurnRunning(false);
@@ -7351,10 +7366,17 @@ async function runSession(
     }
   })();
 
-  // Attach-time fork-synthesis check — mirrors the compaction block above.
-  // If this session is a synthesis fork that's still in progress, seed the
-  // banner indicator and start a periodic poller so the user sees state
-  // transitions (completion / failure) without having to re-attach.
+  // Attach-time session-record read — mirrors the compaction block above,
+  // and like it, two concerns share the one GET:
+  //   A. If this session is a synthesis fork that's still in progress, seed
+  //      the banner indicator and start a periodic poller so the user sees
+  //      state transitions (completion / failure) without re-attaching.
+  //   B. Seed the sidebar's idle baseline. Replayed turn_completes are
+  //      historical and deliberately don't stamp lastTurnEndedAt, so
+  //      without this the counter would sit on "ready" for a session that
+  //      last ran hours ago. `updatedAt` is the history file's mtime — the
+  //      moment the session last did anything — which for an idle session
+  //      is the end of its last turn.
   void (async () => {
     try {
       const res = await fetch(
@@ -7364,7 +7386,27 @@ async function runSession(
       if (!res.ok) {
         return;
       }
-      const data = (await res.json()) as { forkSynthesisState?: "running" | "failed" };
+      const data = (await res.json()) as {
+        forkSynthesisState?: "running" | "failed";
+        updatedAt?: string;
+      };
+      // Only when the replay actually contained a finished turn (a session
+      // that has never been prompted has no last-turn time and should keep
+      // reading "ready"), and only if nothing has happened since — a turn
+      // that started or ended while this request was in flight is newer
+      // than anything the daemon told us here.
+      if (
+        replayedTurnEndSeen &&
+        lastTurnEndedAt === null &&
+        sessionBusySince === null &&
+        typeof data.updatedAt === "string"
+      ) {
+        const endedAt = Date.parse(data.updatedAt);
+        if (Number.isFinite(endedAt)) {
+          lastTurnEndedAt = endedAt;
+          screen.setSidebarSnapshot({ lastTurnEndedAt });
+        }
+      }
       if (data.forkSynthesisState === "running") {
         screen.setSynthesisIndicator("synthesizing context…");
         startSynthesisPoll();
@@ -7419,6 +7461,12 @@ async function runSession(
     // entry). Snap pendingTurns to 0 so the prompt queue can drain.
     adjustPendingTurns(-pendingTurns);
   }
+
+  // Everything from here on is live. Set after the reconcile above, not
+  // after the replay drain: that snap-to-zero is still accounting for
+  // history, and stamping the idle clock off it would date the session's
+  // last turn to the moment we attached.
+  attachSettled = true;
 
   // Tear down volatile in-flight UI state ahead of a reconnect attach.
   // Deliberately leaves the tools block live (toolsBlockStartedAt stays
