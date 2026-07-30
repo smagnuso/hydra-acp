@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseTodoWrite } from "./todos.js";
+import { formatEvent } from "../format.js";
 
 const update = (rawInput: unknown): unknown => ({
   sessionUpdate: "tool_call_update",
@@ -115,5 +116,33 @@ describe("parseTodoWrite", () => {
       update({ todos: [{ content: "1" }, { content: "2" }, { content: "3" }] }),
     );
     expect(out!.map((e) => e.content)).toEqual(["1", "2", "3"]);
+  });
+});
+
+// The transcript renders a task list only from a `plan` RenderEvent, so an
+// agent reporting through todowrite gets a block only if this adapter's
+// output drops straight into one (app.ts renderPlanBlock). That composition
+// is the contract worth pinning: the two shapes have to stay assignable and
+// the formatter has to accept the result.
+describe("todowrite feeding the transcript plan block", () => {
+  it("parses into entries a plan event can be built from and formatted", () => {
+    const entries = parseTodoWrite(
+      update({
+        todos: [
+          { content: "Step 1: read the code", status: "completed" },
+          { content: "Step 3: per-binding storage", status: "in_progress" },
+          { content: "Step 4: tests", status: "pending" },
+        ],
+      }),
+    );
+    expect(entries).not.toBeNull();
+    const lines = formatEvent(
+      { kind: "plan", entries: entries! },
+      { maxPlanItems: Infinity },
+    );
+    const text = lines.map((l) => `${l.prefix ?? ""}${l.body ?? ""}`).join("\n");
+    expect(text).toContain("Step 3: per-binding storage");
+    expect(text).toContain("Step 1: read the code");
+    expect(text).toContain("Step 4: tests");
   });
 });

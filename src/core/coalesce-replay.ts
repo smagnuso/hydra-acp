@@ -13,7 +13,11 @@ import type { HistoryEntry } from "./history-store.js";
 //  - tool_call_update: per toolCallId, only the last update is emitted;
 //    its content array is the concatenation of every dropped update's
 //    content plus its own. Other fields (status, title, kind, ...)
-//    come from the last update by virtue of it being the emitted one.
+//    come from the last update by virtue of it being the emitted one —
+//    EXCEPT the two that identify what the call acted on, `rawInput` and
+//    `locations`, which agents send on an intermediate update and omit from
+//    the terminal one. Those are carried forward explicitly; see
+//    CARRIED_FIELDS.
 //  - plan: each plan event is a full snapshot, so only the last plan
 //    within a turn (between prompt_received and turn_complete) is kept.
 //  - everything else: passed through unchanged.
@@ -24,10 +28,8 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
 
   const lastToolUpdateIndex = new Map<string, number>();
   const mergedToolContent = new Map<string, unknown[]>();
-  // The command/file path rides on intermediate updates and is gone by the
-  // terminal update we keep; carry the last non-empty rawInput forward so
-  // the replayed tool row can still show what it acted on.
-  const carriedRawInput = new Map<string, unknown>();
+  // Per toolCallId, the last non-empty value seen for each carried field.
+  const carried = new Map<string, Map<string, unknown>>();
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     if (entry === undefined) {
@@ -42,13 +44,16 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
       continue;
     }
     lastToolUpdateIndex.set(id, i);
-    if (
-      upd.rawInput &&
-      typeof upd.rawInput === "object" &&
-      !Array.isArray(upd.rawInput) &&
-      Object.keys(upd.rawInput).length > 0
-    ) {
-      carriedRawInput.set(id, upd.rawInput);
+    for (const field of CARRIED_FIELDS) {
+      if (!isNonEmpty(upd[field])) {
+        continue;
+      }
+      const forId = carried.get(id);
+      if (forId === undefined) {
+        carried.set(id, new Map([[field, upd[field]]]));
+      } else {
+        forId.set(field, upd[field]);
+      }
     }
     if (Array.isArray(upd.content) && upd.content.length > 0) {
       const buf = mergedToolContent.get(id);
@@ -109,9 +114,16 @@ export function coalesceReplay(entries: HistoryEntry[]): HistoryEntry[] {
         id !== undefined && mergedToolContent.has(id)
           ? withReplacedContent(entry, mergedToolContent.get(id) ?? [])
           : entry;
-      // Restore the command/path detail dropped by the terminal update.
-      if (id !== undefined && carriedRawInput.has(id) && !hasRawInput(emitted)) {
-        emitted = withRawInput(emitted, carriedRawInput.get(id));
+      // Restore the identity of what the call acted on. Only when the
+      // terminal update didn't supply it itself: an agent that re-sends the
+      // field is authoritative over anything we remembered.
+      const forId = id === undefined ? undefined : carried.get(id);
+      if (forId !== undefined) {
+        for (const [field, value] of forId) {
+          if (!isNonEmpty(readUpdate(emitted)?.[field])) {
+            emitted = withUpdateField(emitted, field, value);
+          }
+        }
       }
       out.push(emitted);
       continue;
@@ -200,25 +212,43 @@ function withReplacedContent(
   };
 }
 
-function hasRawInput(entry: HistoryEntry): boolean {
-  const update = readUpdate(entry);
-  const ri = update?.rawInput;
-  return (
-    !!ri &&
-    typeof ri === "object" &&
-    !Array.isArray(ri) &&
-    Object.keys(ri).length > 0
-  );
+// Fields on a tool_call_update that name WHAT the call acted on, rather than
+// describing its progress. Agents populate these on an intermediate update
+// and omit them from the terminal one (the initial `tool_call` usually
+// carries an empty placeholder), so dropping intermediates loses them
+// outright — the coalescer has to carry them across.
+//
+// `locations[]` in particular is the only path source for a write-style call:
+// no diff, and `rawInput` is a tool-specific blob that consumers are right
+// not to guess at. Losing it made the TUI's edited-files gadget list a
+// single file for a session that had written several, because only the tool
+// call still in flight at attach time had its path delivered live.
+const CARRIED_FIELDS = ["rawInput", "locations"] as const;
+
+// Non-empty in the sense the carry cares about: a value worth remembering.
+// `{}` and `[]` are what agents send as placeholders on the initial call, so
+// they must not displace a real value seen later.
+function isNonEmpty(value: unknown): boolean {
+  if (value === null || value === undefined || typeof value !== "object") {
+    return false;
+  }
+  return Array.isArray(value)
+    ? value.length > 0
+    : Object.keys(value).length > 0;
 }
 
-function withRawInput(entry: HistoryEntry, rawInput: unknown): HistoryEntry {
+function withUpdateField(
+  entry: HistoryEntry,
+  field: string,
+  value: unknown,
+): HistoryEntry {
   const params = (entry.params ?? {}) as Record<string, unknown>;
   const update = (params.update ?? {}) as Record<string, unknown>;
   return {
     ...entry,
     params: {
       ...params,
-      update: { ...update, rawInput },
+      update: { ...update, [field]: value },
     },
   };
 }

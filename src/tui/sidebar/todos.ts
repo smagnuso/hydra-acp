@@ -1,21 +1,23 @@
-// Todo extraction for the sidebar's `todo` gadget.
+// Todo extraction from a `todowrite` tool call, for anything that wants an
+// agent's task list.
 //
-// The gadget was built against the ACP `plan` session update, which is the
-// spec-native way to express a task list. In practice no agent sends it:
-// across every session on disk — both opencode and claude-acp — there are
-// zero `plan` updates. Both agents express todos as a `todowrite` TOOL CALL
-// whose rawInput carries the whole list:
+// There are two channels for the same information and agents pick between
+// them arbitrarily. The spec-native one is the ACP `plan` session update;
+// the other is a `todowrite` TOOL CALL whose rawInput carries the whole list:
 //
 //   { todos: [ { content, status, priority }, ... ] }
 //
-// which is structurally identical to PlanEntry. So the gadget reads either
-// source, and this module is the adapter for the one that actually fires.
+// structurally identical to PlanEntry. This module is the adapter for the
+// second.
 //
-// Deliberately scoped to the sidebar. Synthesizing a `plan` RenderEvent in
-// render-update.ts would also make the transcript grow a plan block for
-// every agent that uses todowrite — a much larger behavioural change, and
-// one that would sit alongside the todowrite row already in the tools
-// block.
+// Do not assume either channel is dead. Measured across the sessions on
+// disk: claude-acp sends thousands of `plan` updates and no todowrite;
+// opencode sends both, and WHICH ONE varies session to session for the same
+// build — some of its sessions carry only `plan`, some only todowrite, some
+// both. So a consumer that reads just one silently loses the list for an
+// arbitrary subset of sessions. That is exactly what happened to the
+// transcript's plan block, which understood only `plan` until app.ts started
+// routing this adapter's output through renderPlanBlock too.
 
 import type { PlanEntry } from "../../core/render-update.js";
 

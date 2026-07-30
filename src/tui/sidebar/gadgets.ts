@@ -384,8 +384,12 @@ export const filesGadget: Gadget = {
     s.editedFiles.map((f) => `${f.path}:${f.added ?? ""}:${f.removed ?? ""}`).join("\u0000"),
   render: (s, ctx) => {
     const { truncate, cellWidth } = ctx.metrics;
-    // Most recent first, all of them — the column scrolls, so a cap here
-    // would make older edits unreachable rather than merely off-screen.
+    // Most recently edited first, all of them — the column scrolls, so a cap
+    // here would make older edits unreachable rather than merely off-screen.
+    // The reverse relies on collapseEditedFiles ordering by LAST touch; with
+    // first-touch order this puts the file the agent has finished with above
+    // the one it's editing now, which is precisely inverted when pagination
+    // squeezes the list down to one row.
     const shown = [...s.editedFiles].reverse();
     const lines: SidebarLine[] = [];
     if (shown.length > 1) {

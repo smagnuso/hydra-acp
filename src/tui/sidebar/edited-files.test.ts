@@ -143,13 +143,17 @@ describe("editedFileFromTool + collapseEditedFiles", () => {
     ).toEqual([]);
   });
 
-  it("preserves first-touch order", () => {
+  // Ordered by LAST touch. The gadget reverses this list and pagination can
+  // squeeze it to a single row, so the ordering decides which file survives
+  // — and that should be whatever is being edited now. b.ts is touched
+  // first and last here, so it belongs at the end.
+  it("orders by last touch, not first", () => {
     const files = collect([
       ["t1", state({ rawKind: "edit", locations: [{ path: "b.ts" }] })],
       ["t2", state({ rawKind: "edit", locations: [{ path: "a.ts" }] })],
       ["t3", state({ rawKind: "edit", locations: [{ path: "b.ts" }] })],
     ]);
-    expect(files.map((f) => f.path)).toEqual(["/repo/b.ts", "/repo/a.ts"]);
+    expect(files.map((f) => f.path)).toEqual(["/repo/a.ts", "/repo/b.ts"]);
   });
 
   it("leaves paths untouched when there is no cwd", () => {

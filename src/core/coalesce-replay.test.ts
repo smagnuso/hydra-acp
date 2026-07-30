@@ -185,6 +185,75 @@ describe("coalesceReplay", () => {
     expect(upd.rawInput?.command).toBe("grep -n foo x.ts");
   });
 
+  // The bug this guards: a write-style tool call names its file ONLY in
+  // locations[] on an intermediate update. Dropping intermediates without
+  // carrying locations forward left the replayed call with no path at all,
+  // so the TUI's edited-files gadget showed one file for a session that had
+  // written several — the only one with a path was the call still in flight
+  // at attach, whose updates arrived live rather than through replay.
+  it("carries locations forward to the surviving tool_call_update", () => {
+    const mkUpd = (
+      status: string,
+      locations?: Array<{ path: string }>,
+    ): HistoryEntry => ({
+      method: "session/update",
+      params: {
+        sessionId: SID,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          status,
+          ...(locations ? { locations } : {}),
+        },
+      },
+      recordedAt: 0,
+    });
+    const out = coalesceReplay([
+      // An empty array is the placeholder agents send before they know the
+      // path; it must not displace the real value that arrives later.
+      mkUpd("pending", []),
+      mkUpd("in_progress", [{ path: "/repo/plan.md" }]),
+      mkUpd("completed"),
+    ]);
+    expect(out).toHaveLength(1);
+    const upd = (
+      out[0]!.params as {
+        update: { status: string; locations?: Array<{ path: string }> };
+      }
+    ).update;
+    expect(upd.status).toBe("completed");
+    expect(upd.locations).toEqual([{ path: "/repo/plan.md" }]);
+  });
+
+  // An agent that re-sends the field on the terminal update is
+  // authoritative; the carry must not overwrite it with a stale value.
+  it("does not override a field the terminal update supplied itself", () => {
+    const mkUpd = (
+      status: string,
+      locations?: Array<{ path: string }>,
+    ): HistoryEntry => ({
+      method: "session/update",
+      params: {
+        sessionId: SID,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "t1",
+          status,
+          ...(locations ? { locations } : {}),
+        },
+      },
+      recordedAt: 0,
+    });
+    const out = coalesceReplay([
+      mkUpd("in_progress", [{ path: "/repo/old.md" }]),
+      mkUpd("completed", [{ path: "/repo/new.md" }]),
+    ]);
+    const upd = (
+      out[0]!.params as { update: { locations?: Array<{ path: string }> } }
+    ).update;
+    expect(upd.locations).toEqual([{ path: "/repo/new.md" }]);
+  });
+
   it("keeps only the last plan within a turn", () => {
     const out = coalesceReplay([
       simpleUpdate("prompt_received", { messageId: "m_p1" }),

@@ -72,9 +72,18 @@ export function editedFileFromTool(
   };
 }
 
-// Collapse per-tool-call entries into one row per file, summing line
-// counts, in first-touch order. A file edited five times is one row, so it
-// can't push everything else out of the column.
+// Collapse per-tool-call entries into one row per file, summing line counts.
+// A file edited five times is one row, so it can't push everything else out
+// of the column.
+//
+// Ordered by LAST touch, not first. Callers show the tail of this list when
+// the column is short (the gadget reverses it), so the ordering decides
+// which file survives a squeezed page — and the interesting one is whatever
+// the agent is working on now. First-touch order gets that exactly backwards
+// on the common shape: a file created early and edited throughout the
+// session stays pinned at position 0 while a file written once and abandoned
+// sits later and wins the last slot. `Map.set` on an existing key does NOT
+// reorder, so the repeat case has to re-insert explicitly.
 export function collapseEditedFiles(
   entries: Iterable<SidebarEditedFile>,
 ): SidebarEditedFile[] {
@@ -91,6 +100,8 @@ export function collapseEditedFiles(
     if (entry.removed !== undefined) {
       existing.removed = (existing.removed ?? 0) + entry.removed;
     }
+    byPath.delete(entry.path);
+    byPath.set(entry.path, existing);
   }
   return [...byPath.values()];
 }
