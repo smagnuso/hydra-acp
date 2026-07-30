@@ -98,9 +98,32 @@ export function isFramedBorder(border: SidebarBorder): boolean {
   return border === "frame";
 }
 
+// Click target on a sidebar row, in columns relative to the row BODY
+// (1-based), so the screen layer only has to add the body's origin.
+export interface SidebarAction {
+  start: number;
+  end: number;
+  // Set the named gadget's page to this index. Absolute rather than a
+  // delta, so the renderer does the clamping once (it knows the page count)
+  // and the screen layer never has to reason about bounds.
+  page: { gadget: string; index: number };
+}
+
 export interface SidebarContext {
   metrics: SidebarTextMetrics;
   border: SidebarBorder;
+  // Current page per gadget id, for gadgets that paginate. Missing means
+  // page 0. Clamped by the renderer against the live item count.
+  pages?: Readonly<Record<string, number>>;
+  // Body rows the column can show at once. The renderer paginates only as
+  // much as it must: with room for every item it shows them all and emits no
+  // pagers at all, and when it does have to window it grows the page as
+  // large as still fits rather than falling back to the gadget's default.
+  //
+  // Undefined means "available height unknown", and the renderer then
+  // paginates at each gadget's declared pageSize — the conservative choice,
+  // since assuming unlimited room would silently disable windowing.
+  maxRows?: number;
   // Inner width available to a gadget body, i.e. the column width less
   // the gutter. Gadgets must not emit rows wider than this; the screen
   // layer truncates defensively but a too-wide row means a wrong bar.
@@ -114,6 +137,13 @@ export interface SidebarContext {
 // honours tui.openFileCommand with no separate plumbing.
 export interface SidebarLine extends FormattedLine {
   openPath?: string;
+  // Marks a row as one of the gadget's list ITEMS, i.e. a row that
+  // pagination may window out. Rows without it (titles, summary counts) are
+  // structural and always render. Keeping the distinction on the line means
+  // gadgets stay pure list-builders and the renderer owns paging.
+  item?: boolean;
+  // Single-click regions on this row (the pager arrows).
+  actions?: SidebarAction[];
   // Glyph the screen layer paints in the gutter for this row (the border
   // rules). Undefined means blank. The scroll-indicator arrows override it
   // on the column's first and last row — knowing there is content out of
@@ -122,6 +152,9 @@ export interface SidebarLine extends FormattedLine {
 }
 
 export interface Gadget {
+  // Max item rows to show at once. Undefined means "never paginate" —
+  // the gadget's rows are all structural, or its list is inherently short.
+  pageSize?: number;
   id: string;
   // Rendered as a dim header row above the body. Omit for gadgets that
   // are self-describing in one line (activity).

@@ -12,6 +12,8 @@
 // as optional (zod's z.unknown() permits undefined) while the runtime
 // HistoryEntry has params required. Same field, different optionality
 // — accepting both lets callers pass either without casts.
+import { locationPaths } from "./tool-edit.js";
+
 type HistoryEntryLike = {
   method?: unknown;
   params?: unknown;
@@ -196,6 +198,14 @@ function readToolName(update: ToolCallUpdate): string {
 // is a best-effort scan — we'd rather over-include a Bash command's
 // `--file` arg than miss real edits. Bash commands themselves aren't
 // decomposed; we just look for `file_path` / `path` keys.
+//
+// NOTE ON THE MISSING KIND GATE. This deliberately does NOT consult the
+// tool `kind`, unlike Session's file.edited event and the TUI's
+// edited-files gadget (both of which must, and both of which take the rule
+// from core/tool-edit.ts). The question here is which files a session
+// TOUCHED — for `hydra session info` and the synopsis prefill — and a file
+// that was only read is a legitimate answer. Gating on kind would silently
+// narrow those surfaces from "touched" to "edited".
 function extractPaths(rawInput: unknown, locations: unknown): Set<string> {
   const out = new Set<string>();
   if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {
@@ -217,15 +227,8 @@ function extractPaths(rawInput: unknown, locations: unknown): Set<string> {
       }
     }
   }
-  if (Array.isArray(locations)) {
-    for (const loc of locations) {
-      if (loc && typeof loc === "object") {
-        const p = (loc as { path?: unknown }).path;
-        if (typeof p === "string") {
-          out.add(p);
-        }
-      }
-    }
+  for (const p of locationPaths(locations)) {
+    out.add(p);
   }
   return out;
 }

@@ -15,6 +15,7 @@ import { BUILTIN_GADGETS } from "./gadgets.js";
 import { isFramedBorder } from "./types.js";
 import type {
   Gadget,
+  SidebarAction,
   SidebarContext,
   SidebarLine,
   SidebarSnapshot,
@@ -59,6 +60,143 @@ function blockRule(width: number, junction: FrameJunction): SidebarLine {
     bodyStyle: "dim",
     gutter: junction,
   };
+}
+
+// Pager glyphs. Single characters so the control costs 7 body columns at
+// most ("‹ 9/9 ›"), which fits even a 20-column body beside a short title.
+const PAGE_PREV = "‹";
+const PAGE_NEXT = "›";
+
+// Window a block's item rows to the requested page and stamp the pager onto
+// its title row. Returns the block unchanged when it fits on one page, so a
+// short list never grows a control it doesn't need.
+//
+// The pager is right-aligned on the TITLE row rather than given a row of its
+// own: a dedicated row would cost exactly the row that paging is trying to
+// save. The arrows carry absolute target pages (not deltas) so clamping
+// happens here, once, where the page count is known — and an arrow at the
+// end of its range simply records no action, rendering inert.
+function paginate(
+  gadget: Gadget,
+  block: SidebarLine[],
+  ctx: SidebarContext,
+  pageSize: number,
+): SidebarLine[] {
+  if (pageSize <= 0 || !Number.isFinite(pageSize)) {
+    return block;
+  }
+  const itemCount = countItems(block);
+  if (itemCount <= pageSize) {
+    return block;
+  }
+  const pageCount = Math.ceil(itemCount / pageSize);
+  const requested = ctx.pages?.[gadget.id] ?? 0;
+  const page = Math.max(0, Math.min(pageCount - 1, requested));
+  const from = page * pageSize;
+  const to = from + pageSize;
+
+  const out: SidebarLine[] = [];
+  let seen = 0;
+  for (const line of block) {
+    if (line.item !== true) {
+      out.push(line);
+      continue;
+    }
+    const idx = seen++;
+    if (idx >= from && idx < to) {
+      out.push(line);
+    }
+  }
+
+  // Stamp the pager onto the title row, which is the block's first row when
+  // the gadget declares a title. Without one there's nowhere to put the
+  // control, so the window still applies but silently.
+  if (gadget.title === undefined || out.length === 0) {
+    return out;
+  }
+  const { cellWidth, truncate } = ctx.metrics;
+  const label = `${PAGE_PREV} ${page + 1}/${pageCount} ${PAGE_NEXT}`;
+  const labelWidth = cellWidth(label);
+  const room = ctx.width - labelWidth - 1;
+  if (room < 1) {
+    // Too narrow for title + pager; the window still applies, but showing a
+    // truncated control would be worse than showing none.
+    return out;
+  }
+  const title = truncate(gadget.title, room);
+  const gap = ctx.width - cellWidth(title) - labelWidth;
+  const body = `${title}${" ".repeat(Math.max(1, gap))}${label}`;
+  // Body-relative columns of the two arrows (1-based).
+  const prevCol = cellWidth(body) - labelWidth + 1;
+  const nextCol = cellWidth(body);
+  const actions: SidebarAction[] = [];
+  if (page > 0) {
+    actions.push({
+      start: prevCol,
+      end: prevCol,
+      page: { gadget: gadget.id, index: page - 1 },
+    });
+  }
+  if (page < pageCount - 1) {
+    actions.push({
+      start: nextCol,
+      end: nextCol,
+      page: { gadget: gadget.id, index: page + 1 },
+    });
+  }
+  out[0] = { ...out[0]!, body, actions };
+  return out;
+}
+
+function countItems(block: SidebarLine[]): number {
+  return block.reduce((n, l) => n + (l.item === true ? 1 : 0), 0);
+}
+
+// Largest uniform page size that fits the column, or Infinity when every
+// item fits and nothing needs windowing.
+//
+// Only ITEM rows are elastic: structural rows (titles, summary counts) and
+// the border rules are present regardless, and the pager rides on the title
+// row rather than claiming one of its own — so total height is
+// `structural + Σ min(items, limit)` and the search is one-dimensional.
+//
+// Returns the largest limit that fits. When even one item per gadget
+// overflows, that floor is returned anyway: the column scrolls, which is a
+// better failure mode than pages of zero items.
+//
+// The limit is uniform across gadgets, so with N paginated gadgets the
+// height moves in steps of N and up to N-1 rows can go unused. Distributing
+// the remainder unevenly would reclaim them, at the cost of a column whose
+// gadgets show different numbers of items for no reason the user can see.
+function fitPageSize(
+  blocks: SidebarLine[][],
+  paginated: boolean[],
+  structuralRows: number,
+  maxRows: number,
+): number {
+  const itemCounts = blocks.map((b, i) => (paginated[i] ? countItems(b) : 0));
+  const fixedItems = blocks.reduce(
+    (n, b, i) => n + (paginated[i] ? 0 : countItems(b)),
+    0,
+  );
+  const height = (limit: number): number =>
+    structuralRows +
+    fixedItems +
+    itemCounts.reduce((n, count) => n + Math.min(count, limit), 0);
+
+  const maxItems = Math.max(0, ...itemCounts);
+  if (height(maxItems) <= maxRows) {
+    return Number.POSITIVE_INFINITY;
+  }
+  let best = 1;
+  for (let limit = 1; limit <= maxItems; limit++) {
+    if (height(limit) <= maxRows) {
+      best = limit;
+    } else {
+      break;
+    }
+  }
+  return best;
 }
 
 interface CacheEntry {
@@ -125,6 +263,8 @@ export class SidebarRenderer {
       return [];
     }
     const blocks: SidebarLine[][] = [];
+    // Parallel to `blocks`; null for a gadget that never paginates.
+    const pagedGadgets: Array<Gadget | null> = [];
     for (const gadget of this.gadgets) {
       if (!gadget.relevant(snapshot)) {
         continue;
@@ -168,11 +308,51 @@ export class SidebarRenderer {
       if (block.length === 0) {
         continue;
       }
+      // Paging is applied to the CACHED block rather than baked into it: the
+      // cache key covers the gadget's data, not the user's page, so paging
+      // through a list must not invalidate (and re-render) its rows.
       blocks.push(block);
+      pagedGadgets.push(gadget);
     }
     if (blocks.length === 0) {
       return [];
     }
+
+    // Decide how much to elide, then elide. Pagination is a response to
+    // scarcity: with vertical room for every item the column shows them all
+    // and no pager appears anywhere. Only when the stack genuinely doesn't
+    // fit does windowing start, and even then the page grows to whatever
+    // still fits rather than snapping to the gadget's declared default —
+    // otherwise a tall terminal would show five of nine files and leave a
+    // third of the column empty.
+    const borderRows = isFramedBorder(ctx.border)
+      ? blocks.length + 1
+      : Math.max(0, blocks.length - 1);
+    const paginable = pagedGadgets.map(
+      (g) => g !== null && g.pageSize !== undefined && g.pageSize > 0,
+    );
+    const structuralRows =
+      borderRows +
+      blocks.reduce((n, b) => n + b.length - countItems(b), 0);
+    let limit: number;
+    if (ctx.maxRows === undefined) {
+      // Height unknown: fall back to each gadget's declared page size.
+      limit = Number.NaN;
+    } else {
+      limit = fitPageSize(blocks, paginable, structuralRows, ctx.maxRows);
+    }
+    const paged = blocks.map((block, i) => {
+      const gadget = pagedGadgets[i];
+      const pageSize = gadget?.pageSize;
+      if (gadget === null || gadget === undefined || pageSize === undefined) {
+        return block;
+      }
+      const effective = Number.isNaN(limit) ? pageSize : limit;
+      return paginate(gadget, block, ctx, effective);
+    });
+    blocks.length = 0;
+    blocks.push(...paged);
+
     // Block boundaries.
     //
     // "none" / "rule": a blank row between blocks, none leading or trailing

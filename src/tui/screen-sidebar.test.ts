@@ -626,13 +626,24 @@ describe("Screen sidebar scrolling", () => {
   });
 
   it("paints scroll indicators only in the directions with hidden rows", () => {
+    // Overflow now has to come from the number of GADGETS, not the length of
+    // one list: the list gadgets paginate, so no single gadget can outgrow
+    // the column on its own.
     const { screen, ops } = makeScreen(100, 14);
     (screen as unknown as { started: boolean }).started = true;
     screen.setSidebarSnapshot({
+      busySince: Date.now(),
+      usage: { used: 43_000, size: 200_000, costAmount: 1.5 },
+      queued: 2,
       plan: Array.from({ length: 12 }, (_, i) => ({
         content: `task ${i}`,
         status: "pending" as const,
       })),
+      editedFiles: [{ path: "/repo/a.ts" }, { path: "/repo/b.ts" }],
+      sessionId: "abc12345",
+      agent: "opencode",
+      model: "sonnet",
+      mode: "build",
     });
     screen.setSidebarVisible(true);
     const painted = (): string => {
@@ -1092,5 +1103,153 @@ describe("Screen sidebar overlay mode", () => {
     expect(
       (screen as unknown as { transcriptVisibleWidth(): number }).transcriptVisibleWidth(),
     ).toBeGreaterThanOrEqual(12);
+  });
+});
+
+describe("Screen sidebar pager clicks", () => {
+  beforeEach(() => {
+    vi.spyOn(process.stdout, "write").mockReturnValue(true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const click = (screen: Screen, x: number, y: number): void => {
+    const dispatch = (name: string): void =>
+      (
+        screen as unknown as {
+          handleMouse: (n: string, d?: unknown) => void;
+        }
+      ).handleMouse(name, { x, y });
+    dispatch("MOUSE_LEFT_BUTTON_PRESSED");
+    dispatch("MOUSE_LEFT_BUTTON_RELEASED");
+  };
+
+  type PagerAction = {
+    start: number;
+    end: number;
+    gadget: string;
+    index: number;
+  };
+
+  const rowActions = (screen: Screen): Map<number, PagerAction[]> =>
+    (
+      screen as unknown as { sidebarRowActions: Map<number, PagerAction[]> }
+    ).sidebarRowActions;
+
+  // Cell of the arrow that jumps to `target`, as currently painted. Re-read
+  // after every click: which arrows exist depends on the page you're on.
+  const arrowTo = (
+    screen: Screen,
+    target: number,
+  ): { x: number; y: number } | null => {
+    for (const [row, list] of rowActions(screen)) {
+      for (const a of list) {
+        if (a.index === target) {
+          return { x: a.start, y: row };
+        }
+      }
+    }
+    return null;
+  };
+
+  // A column that genuinely cannot fit its list, which is now the only way
+  // to get a pager at all: a short terminal plus far more files than rows.
+  // (On a tall terminal the same list renders complete, with no pager —
+  // that's the point of the fitting pass, and it's covered below.)
+  const paged = (): Screen => {
+    const { screen } = makeScreen(100, 14);
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSidebarGadgets(["files"]);
+    screen.setSidebarSnapshot({
+      editedFiles: Array.from({ length: 40 }, (_, i) => ({
+        path: `/repo/f${i}.ts`,
+      })),
+    });
+    screen.setSidebarVisible(true);
+    screen.fullRedraw();
+    return screen;
+  };
+
+  const page = (screen: Screen): number => screen.sidebarPageState().files ?? 0;
+
+  it("pages forward on a single click of the forward arrow", () => {
+    const screen = paged();
+    expect(page(screen)).toBe(0);
+    const next = arrowTo(screen, 1)!;
+    click(screen, next.x, next.y);
+    expect(page(screen)).toBe(1);
+  });
+
+  it("pages back again", () => {
+    const screen = paged();
+    const next = arrowTo(screen, 1)!;
+    click(screen, next.x, next.y);
+    const back = arrowTo(screen, 0)!;
+    click(screen, back.x, back.y);
+    expect(page(screen)).toBe(0);
+  });
+
+  it("offers no back arrow on the first page", () => {
+    expect(arrowTo(paged(), -1)).toBeNull();
+    // Page 0 offers exactly one arrow: forward.
+    const screen = paged();
+    expect([...rowActions(screen).values()].flat()).toHaveLength(1);
+  });
+
+  it("stops at the last page, with no forward arrow there", () => {
+    const screen = paged();
+    // Page count depends on the fitted page size, so walk forward until the
+    // forward arrow disappears rather than assuming a count.
+    for (let i = 0; i < 50; i++) {
+      const forward = arrowTo(screen, page(screen) + 1);
+      if (forward === null) {
+        break;
+      }
+      click(screen, forward.x, forward.y);
+    }
+    expect(page(screen)).toBeGreaterThan(0);
+    expect(arrowTo(screen, page(screen) + 1)).toBeNull();
+    // The back arrow is still there on the last page.
+    expect(arrowTo(screen, page(screen) - 1)).not.toBeNull();
+  });
+
+  it("offers both arrows on a middle page", () => {
+    const screen = paged();
+    click(screen, arrowTo(screen, 1)!.x, arrowTo(screen, 1)!.y);
+    expect([...rowActions(screen).values()].flat()).toHaveLength(2);
+  });
+
+  it("ignores a click next to the arrow", () => {
+    const screen = paged();
+    const next = arrowTo(screen, 1)!;
+    click(screen, next.x - 2, next.y);
+    expect(page(screen)).toBe(0);
+  });
+
+  it("does not open a file when clicking the pager row", () => {
+    const screen = paged();
+    const opened: string[] = [];
+    (
+      screen as unknown as { tryOpenPathString: (p: string) => boolean }
+    ).tryOpenPathString = (p) => {
+      opened.push(p);
+      return true;
+    };
+    const next = arrowTo(screen, 1)!;
+    click(screen, next.x, next.y);
+    // A second click on what is now the back arrow's row must still not be
+    // read as a double-click-to-open.
+    click(screen, next.x, next.y);
+    expect(opened).toEqual([]);
+  });
+
+  it("forgets pages when the sidebar is hidden", () => {
+    const screen = paged();
+    const next = arrowTo(screen, 1)!;
+    click(screen, next.x, next.y);
+    expect(screen.sidebarPageState().files).toBe(1);
+    screen.setSidebarVisible(false);
+    expect(screen.sidebarPageState().files).toBeUndefined();
   });
 });

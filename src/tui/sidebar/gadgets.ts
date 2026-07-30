@@ -59,6 +59,11 @@ export function meterBar(fraction: number, width: number): string {
   return filled + "·".repeat(Math.max(0, width - full - (partial ? 1 : 0)));
 }
 
+// Item rows per page for the list gadgets. Bounding each gadget keeps every
+// gadget visible at once, which is the point: an unbounded list pushed the
+// ones below it off the bottom of the column even though the column scrolls.
+const SIDEBAR_PAGE_SIZE = 5;
+
 function row(body: string, bodyStyle?: FormattedLine["bodyStyle"]): SidebarLine {
   return { body, bodyStyle };
 }
@@ -105,7 +110,9 @@ function fileRow(
   openPath: string,
   bodyStyle?: FormattedLine["bodyStyle"],
 ): SidebarLine {
-  return { body, bodyStyle, openPath };
+  // item: these are the rows pagination windows; the block's title and
+  // summary rows are structural and always shown.
+  return { body, bodyStyle, openPath, item: true };
 }
 
 // Right-align a value against a label on one row, filling the gap with
@@ -167,7 +174,7 @@ export const contextGadget: Gadget = {
   versionKey: (s, ctx) =>
     `${s.usage.used ?? ""}/${s.usage.size ?? ""}/${s.usage.costAmount ?? ""}/${ctx.width}`,
   render: (s, ctx) => {
-    const lines: FormattedLine[] = [];
+    const lines: SidebarLine[] = [];
     const { used, size, costAmount, costCurrency } = s.usage;
     if (used !== undefined && size !== undefined && size > 0) {
       const pct = used / size;
@@ -213,13 +220,14 @@ export const queueGadget: Gadget = {
 export const todoGadget: Gadget = {
   id: "todo",
   title: "todo",
+  pageSize: SIDEBAR_PAGE_SIZE,
   relevant: (s) => s.plan.length > 0,
   versionKey: (s, ctx) =>
     `${ctx.width}|` + s.plan.map((e) => `${e.status}:${e.content}`).join("\u0000"),
   render: (s, ctx) => {
     const { truncate } = ctx.metrics;
     const done = s.plan.filter((e) => e.status === "completed").length;
-    const lines: FormattedLine[] = [
+    const lines: SidebarLine[] = [
       row(labelValue("", `${done}/${s.plan.length}`, ctx), "dim"),
     ];
     // Every entry, not a window: the column scrolls under the wheel, so
@@ -233,7 +241,11 @@ export const todoGadget: Gadget = {
           : entry.status === "in_progress"
             ? "plan"
             : "plan-pending";
-      lines.push(row(truncate(`${glyph} ${entry.content}`, ctx.width), style));
+      lines.push({
+        body: truncate(`${glyph} ${entry.content}`, ctx.width),
+        bodyStyle: style,
+        item: true,
+      });
     }
     return lines;
   },
@@ -261,6 +273,7 @@ export function displayPaths(paths: string[]): string[] {
 export const filesGadget: Gadget = {
   id: "files",
   title: "edited",
+  pageSize: SIDEBAR_PAGE_SIZE,
   relevant: (s) => s.editedFiles.length > 0,
   versionKey: (s, ctx) =>
     `${ctx.width}|` +
@@ -270,7 +283,7 @@ export const filesGadget: Gadget = {
     // Most recent first, all of them — the column scrolls, so a cap here
     // would make older edits unreachable rather than merely off-screen.
     const shown = [...s.editedFiles].reverse();
-    const lines: FormattedLine[] = [];
+    const lines: SidebarLine[] = [];
     if (shown.length > 1) {
       lines.push(row(labelValue("", `${shown.length} files`, ctx), "dim"));
     }
@@ -297,6 +310,7 @@ export const filesGadget: Gadget = {
 export const gitGadget: Gadget = {
   id: "git",
   title: "git",
+  pageSize: SIDEBAR_PAGE_SIZE,
   // Clean repos and non-repos both contribute nothing: a row reading
   // "0 changes" is noise, and s.git stays null outside a work tree.
   relevant: (s) =>
@@ -320,7 +334,7 @@ export const gitGadget: Gadget = {
       return [];
     }
     const { truncate } = ctx.metrics;
-    const lines: FormattedLine[] = [];
+    const lines: SidebarLine[] = [];
     if (g.branch !== null) {
       const track =
         (g.ahead > 0 ? `↑${g.ahead}` : "") + (g.behind > 0 ? `↓${g.behind}` : "");

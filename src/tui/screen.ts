@@ -541,6 +541,17 @@ export class Screen {
   // Keyed by terminal row; entries for rows the column no longer covers
   // are dropped when the map is rebuilt.
   private sidebarRowPaths = new Map<number, string>();
+  // Row → pager click regions, in absolute terminal columns. Rebuilt on
+  // every sidebar paint alongside sidebarRowPaths.
+  private sidebarRowActions = new Map<
+    number,
+    Array<{ start: number; end: number; gadget: string; index: number }>
+  >();
+  // Per-gadget page index for the paginated list gadgets. Survives repaints
+  // and gadget data changes; the renderer clamps it against the live item
+  // count, so a list that shrinks under a high page just shows its last
+  // page instead of going blank.
+  private sidebarPages: Record<string, number> = {};
   // Independent double-click chain for the sidebar. The transcript's
   // chain (lastLeftClick) is bound to resolved source anchors, which the
   // sidebar has none of, and this also has to work with in-app selection
@@ -1631,6 +1642,8 @@ export class Screen {
     this.sidebarVisible = visible;
     this.lastSidebarClick = null;
     this.sidebarRowPaths.clear();
+    this.sidebarRowActions.clear();
+    this.sidebarPages = {};
     this.sidebarScrollOffset = 0;
     this.sidebarOverflowRows = 0;
     // contentWidth changed, so every cached row signature and every
@@ -5630,6 +5643,12 @@ export class Screen {
       metrics: { cellWidth, truncate },
       width: bodyWidth,
       border: this.sidebarBorder,
+      pages: this.sidebarPages,
+      // Height available to the column. The renderer only elides items when
+      // this forces it to, and grows pages to fill whatever room exists — so
+      // a tall terminal shows complete lists with no pagers, and shrinking
+      // the terminal reintroduces them.
+      maxRows: rows,
     };
     // now is stamped once per frame so every elapsed-style gadget in the
     // column agrees on the clock.
@@ -5644,12 +5663,27 @@ export class Screen {
     }
     const start = this.sidebarScrollOffset;
     this.sidebarRowPaths.clear();
+    this.sidebarRowActions.clear();
+    // Body origin: the gutter (blank columns + the rule/indicator channel)
+    // sits between the column start and the body.
+    const bodyCol = col + SIDEBAR_GUTTER;
     for (let i = 0; i < rows; i++) {
       const row = top + i;
       const idx = i + start;
       const line = lines[idx];
       if (line?.openPath !== undefined) {
         this.sidebarRowPaths.set(row, line.openPath);
+      }
+      if (line?.actions !== undefined && line.actions.length > 0) {
+        this.sidebarRowActions.set(
+          row,
+          line.actions.map((a) => ({
+            start: bodyCol + a.start - 1,
+            end: bodyCol + a.end - 1,
+            gadget: a.page.gadget,
+            index: a.page.index,
+          })),
+        );
       }
       // The gutter channel carries the border rule, overridden by a
       // scroll arrow on the column's first/last row when there is content
@@ -5711,6 +5745,11 @@ export class Screen {
   }
 
   // Test/introspection helpers for the sidebar scroll window.
+  // Test/introspection accessor for the per-gadget page indices.
+  sidebarPageState(): Readonly<Record<string, number>> {
+    return this.sidebarPages;
+  }
+
   sidebarScrollState(): { offset: number; overflow: number } {
     return {
       offset: this.sidebarScrollOffset,
@@ -5746,6 +5785,24 @@ export class Screen {
   private handleSidebarPress(cell: { x: number; y: number } | null): boolean {
     if (cell === null || !this.isSidebarCell(cell.x, cell.y)) {
       return false;
+    }
+    // Pager arrows are buttons: they fire on a SINGLE click, unlike the
+    // double-click-to-open on file rows. Paging is cheap and reversible, so
+    // requiring a double-click would just make it feel unresponsive — and
+    // the arrows are their own targets, so there's no ambiguity with the
+    // row-level open gesture (title rows carry no path).
+    for (const action of this.sidebarRowActions.get(cell.y) ?? []) {
+      if (cell.x >= action.start && cell.x <= action.end) {
+        this.sidebarPages = {
+          ...this.sidebarPages,
+          [action.gadget]: action.index,
+        };
+        // Paging changes which rows the column shows, so the click chain
+        // is irrelevant afterwards.
+        this.lastSidebarClick = null;
+        this.repaintNow();
+        return true;
+      }
     }
     const now = Date.now();
     const last = this.lastSidebarClick;

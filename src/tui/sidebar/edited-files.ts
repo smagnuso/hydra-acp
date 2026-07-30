@@ -17,31 +17,24 @@
 //    life of the session and collapses by path at render time.
 
 import { resolve as resolvePath } from "node:path";
+import { firstLocationPath, isFileMutatingKind } from "../../core/tool-edit.js";
 import { countDiffChanges } from "../format.js";
 import type { ToolLineState } from "../format.js";
 import type { EditDiff } from "../../core/render-update.js";
 import type { SidebarEditedFile } from "./types.js";
 
-// ACP tool kinds that mutate a file. "delete" and "move" belong here even
-// though the old path may no longer exist: the gadget reports what the
-// session changed, and a stale row is better than silently omitting a
-// destructive operation.
-const FILE_MUTATING_KINDS = new Set(["edit", "delete", "move"]);
-
-// A diff payload is direct proof of a mutation, so it wins outright.
-// Otherwise the ACP kind has to say so. Calls from agents that send no
-// kind and no diff contribute nothing: under-reporting an edit costs a row
-// in a summary gadget, whereas over-reporting puts directories and
-// read-only paths in a list labelled "edited" — actively misleading, and
-// since the rows are clickable it also hands the editor a directory.
+// A diff payload is direct proof of a mutation, so it wins outright —
+// whatever kind the agent declared. Otherwise the kind has to say so
+// (core/tool-edit.ts owns that vocabulary). Calls from agents that send
+// neither contribute nothing: under-reporting an edit costs a row in a
+// summary gadget, whereas over-reporting puts directories and read-only
+// paths in a list labelled "edited" — actively misleading, and since the
+// rows are clickable it also hands the editor a directory.
 export function isFileMutatingTool(
   state: Pick<ToolLineState, "rawKind">,
   diff: EditDiff | undefined,
 ): boolean {
-  if (diff !== undefined) {
-    return true;
-  }
-  return state.rawKind !== undefined && FILE_MUTATING_KINDS.has(state.rawKind);
+  return diff !== undefined || isFileMutatingKind(state.rawKind);
 }
 
 // One tool call's contribution, or null when the call didn't mutate a file
@@ -65,7 +58,7 @@ export function editedFileFromTool(
   if (!isFileMutatingTool(state, diff)) {
     return null;
   }
-  const reported = diff?.path ?? state.locations?.[0]?.path;
+  const reported = diff?.path ?? firstLocationPath(state.locations);
   if (reported === undefined || reported === "") {
     return null;
   }

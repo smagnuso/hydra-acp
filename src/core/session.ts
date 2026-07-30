@@ -38,6 +38,7 @@ export function stripHydraSessionPrefix(id: string): string {
     : id;
 }
 import { AgentInstance } from "./agent-instance.js";
+import { FILE_EDITED_EVENT_KIND, ToolKindTracker } from "./tool-edit.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import {
   SessionStreamBuffer,
@@ -648,13 +649,15 @@ export class Session {
   //     wins per call.
   //   toolCallKind: toolCallId → tool kind ("edit", "execute", …) from
   //     the originating tool_call. Used to gate file.edited emission to
-  //     edit-kind tools only (avoiding over-fire on grep/read).
+  //     edit-kind tools only (avoiding over-fire on grep/read). The
+  //     remember-the-first-kind rule is shared with the other consumers of
+  //     this wire shape — see core/tool-edit.ts.
   //   filesEditedSeen: paths already emitted as lifecycle:file.edited.
   //     Dedups across multiple tool_call_update events that re-emit the
   //     same path, and across multiple edit-kind tool calls touching
   //     the same file.
   private toolCompletionSeen = new Map<string, string>();
-  private toolCallKind = new Map<string, string>();
+  private toolCallKind = new ToolKindTracker();
   private filesEditedSeen = new Set<string>();
   private agentChangeHandlers: Array<
     (info: { agentId: string; upstreamSessionId: string }) => void
@@ -6196,12 +6199,15 @@ export class Session {
     // file.edited can gate on edit-kind even if a later tool_call_update
     // omits the kind field.
     const toolKind = typeof u.kind === "string" ? u.kind : undefined;
-    if (toolKind && !this.toolCallKind.has(toolCallId)) {
-      this.toolCallKind.set(toolCallId, toolKind);
-    }
+    this.toolCallKind.note(toolCallId, toolKind);
+    const effectiveKind = this.toolCallKind.effective(toolCallId, toolKind);
     // file.edited: emit once per (session, path) for edit-kind tools.
-    const effectiveKind = toolKind ?? this.toolCallKind.get(toolCallId);
-    if (effectiveKind === "edit" && Array.isArray(u.locations)) {
+    //
+    // Deliberately the narrow `edit`-only rule, not tool-edit's broader
+    // FILE_MUTATING_KINDS: PROTOCOL.md pins this event's contract to
+    // `kind: "edit"`, so broadening it would change observable wire
+    // behaviour for every attached transformer.
+    if (effectiveKind === FILE_EDITED_EVENT_KIND && Array.isArray(u.locations)) {
       for (const loc of u.locations) {
         if (!loc || typeof loc !== "object") {
           continue;
@@ -6214,6 +6220,11 @@ export class Session {
           continue;
         }
         this.filesEditedSeen.add(path);
+        // `line` is read inline rather than through tool-edit's path
+        // helper: consumers disagree about it, legitimately. This event
+        // passes through whatever the agent reported, while an editor-jump
+        // consumer treats 0 as "no line" and floors the value. Sharing the
+        // extraction would force one of those semantics on the other.
         const line = (loc as { line?: unknown }).line;
         const filePayload: Record<string, unknown> = { path, toolCallId };
         if (typeof line === "number") {
