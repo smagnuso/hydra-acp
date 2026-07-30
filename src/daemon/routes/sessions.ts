@@ -518,13 +518,21 @@ export function registerSessionRoutes(
       machine: thisMachine(),
       hydraHost: resolveHydraHost(defaults),
     });
-    const q = request.query as { tools?: string } | undefined;
-    // ?tools=1 / true / yes opts into the bulleted tool list.
-    // Default (missing or anything else) omits tool activity.
-    const includeTools =
-      q?.tools === "1" || q?.tools === "true" || q?.tools === "yes";
+    const q = request.query as
+      | { tools?: string; thoughts?: string }
+      | undefined;
+    // ?tools=1 / true / yes opts into the bulleted tool list, and
+    // ?thoughts=1 into the reasoning stream. Default (missing or
+    // anything else) omits both.
+    const isTruthy = (v: string | undefined): boolean =>
+      v === "1" || v === "true" || v === "yes";
     reply.header("Content-Type", "text/markdown; charset=utf-8");
-    reply.code(200).send(bundleToMarkdown(bundle, { includeTools }));
+    reply.code(200).send(
+      bundleToMarkdown(bundle, {
+        includeTools: isTruthy(q?.tools),
+        includeThoughts: isTruthy(q?.thoughts),
+      }),
+    );
   });
 
   // Import a session bundle. Body shape: { bundle, replace? }. Without

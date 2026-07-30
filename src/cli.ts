@@ -484,7 +484,11 @@ async function main(): Promise<void> {
       if (sub === "transcript") {
         const out = resolveOption(flags, "out");
         const includeTools = flags.tools === true;
-        await runSessionsTranscript(positional[2], out, { includeTools });
+        const includeThoughts = flags.thoughts === true;
+        await runSessionsTranscript(positional[2], out, {
+          includeTools,
+          includeThoughts,
+        });
         return;
       }
       if (sub === "import") {
@@ -999,8 +1003,8 @@ function printHelp(subcommand?: string): void {
     [SESSION, "                                     Delete cold sessions that were never promoted to a real conversation — `hydra cat` one-shots (interactive=false) AND editor-spawned panels that never had a turn (interactive=undefined). With no --max-age-days, collects every matching cold row regardless of age (you typed `collect`, so collect it all). Pass --max-age-days N to scope to anything older than N days; 0 is the same as omitting it. --keep-undecided narrows to only explicit interactive=false rows (matches what the background timer does). --limit caps deletions per call (default 1000); re-run to drain a larger backlog. The daemon also runs this on a timer using config.daemon.sessionGcMaxAgeDays (with the conservative explicit-only policy) — this is the manual trigger."],
     [SESSION, "  hydra-acp session export <id> [--out <file>|.]"],
     [SESSION, "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout"],
-    [SESSION, "  hydra-acp session transcript <id>|<file> [--out <file>|.]"],
-    [SESSION, "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout"],
+    [SESSION, "  hydra-acp session transcript <id>|<file> [--out <file>|.] [--tools] [--thoughts]"],
+    [SESSION, "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout. --tools adds the tool-call list, --thoughts adds the agent's reasoning stream (both off by default)"],
     [SESSION, "  hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]"],
     [SESSION, "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing"],
     [SESSION, "  hydra-acp session share [<id>] [--host <name>] [--cwd <path>]"],

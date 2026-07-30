@@ -307,15 +307,16 @@ export async function runSessionsExport(
 export async function runSessionsTranscript(
   idOrFile: string | undefined,
   outPath: string | undefined,
-  options: { includeTools?: boolean } = {},
+  options: { includeTools?: boolean; includeThoughts?: boolean } = {},
 ): Promise<void> {
   if (!idOrFile) {
     process.stderr.write(
-      "Usage: hydra-acp sessions transcript <session-id>|<file> [--out <file>|.] [--tools]\n",
+      "Usage: hydra-acp sessions transcript <session-id>|<file> [--out <file>|.] [--tools] [--thoughts]\n",
     );
     process.exit(2);
   }
   const includeTools = options.includeTools ?? false;
+  const includeThoughts = options.includeThoughts ?? false;
   // File-path branch: avoids a daemon round-trip and works on bundles
   // the user hasn't imported (or on hosts without a daemon running).
   let body: string;
@@ -323,7 +324,7 @@ export async function runSessionsTranscript(
   const localFile = await readBundleFileIfExists(idOrFile);
   if (localFile !== null) {
     const bundle = decodeBundleOrExit(localFile.raw);
-    body = bundleToMarkdown(bundle, { includeTools });
+    body = bundleToMarkdown(bundle, { includeTools, includeThoughts });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     defaultName = `${path.basename(idOrFile, path.extname(idOrFile))}-${stamp}.md`;
   } else {
@@ -334,6 +335,9 @@ export async function runSessionsTranscript(
     );
     if (includeTools) {
       url.searchParams.set("tools", "1");
+    }
+    if (includeThoughts) {
+      url.searchParams.set("thoughts", "1");
     }
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${serviceToken}` },

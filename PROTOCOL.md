@@ -415,6 +415,11 @@ Reconstructed per-file diff for a session — the same aggregation `hydra sessio
 
 Render a session as a markdown transcript. Shares bundle assembly with `/export`, then pipes through `bundleToMarkdown` — byte-identical to what the CLI's `session transcript` produces.
 
+**Query parameters**
+
+- `tools=1|true|yes`: include the per-turn bulleted tool-call list. Off by default.
+- `thoughts=1|true|yes`: include the agent's reasoning/thought stream. Off by default.
+
 **Response — `200 OK`**
 
 - `Content-Type: text/markdown; charset=utf-8`

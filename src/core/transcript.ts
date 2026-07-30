@@ -12,6 +12,10 @@ export interface TranscriptOptions {
   // prose, matching the TUI's collapsed-tools default. Set true to
   // restore the bulleted tool list.
   includeTools?: boolean;
+  // Include the agent's reasoning/thought stream as italic paragraphs.
+  // Default false, same rationale as includeTools: thoughts are bulky
+  // and rarely what a reader of the transcript wants.
+  includeThoughts?: boolean;
 }
 
 export function bundleToMarkdown(
@@ -22,7 +26,10 @@ export function bundleToMarkdown(
   const toolFinalStates = collectToolFinalStates(events);
   const out: string[] = [];
   emitHeader(out, bundle);
-  emitBody(out, events, toolFinalStates, options.includeTools ?? false);
+  emitBody(out, events, toolFinalStates, {
+    includeTools: options.includeTools ?? false,
+    includeThoughts: options.includeThoughts ?? false,
+  });
   // Single trailing newline.
   let text = out.join("\n");
   if (!text.endsWith("\n")) {
@@ -138,9 +145,10 @@ function emitBody(
   out: string[],
   events: TimedEvent[],
   toolFinalStates: Map<string, ToolFinalState>,
-  includeTools: boolean,
+  opts: { includeTools: boolean; includeThoughts: boolean },
 ): void {
-  if (!events.some((e) => isVisible(e.event))) {
+  const { includeTools, includeThoughts } = opts;
+  if (!events.some((e) => isVisible(e.event, includeThoughts))) {
     out.push("_No conversation history recorded._");
     out.push("");
     return;
@@ -222,6 +230,9 @@ function emitBody(
         agentBuffer += event.text;
         break;
       case "agent-thought": {
+        if (!includeThoughts) {
+          break;
+        }
         startTurnIfNeeded();
         // Flush any buffered agent-text prose first so thought output
         // appears after the text that preceded it, then coalesce this
@@ -300,8 +311,10 @@ function emitBody(
   flushAgent();
 }
 
-function isVisible(event: RenderEvent): boolean {
+function isVisible(event: RenderEvent, includeThoughts: boolean): boolean {
   switch (event.kind) {
+    case "agent-thought":
+      return includeThoughts;
     case "usage-update":
     case "available-commands":
     case "session-info":

@@ -188,12 +188,23 @@ describe("bundleToMarkdown", () => {
     expect(md).not.toMatch(/[✓✗⊘]/);
   });
 
-  it("emits agent thoughts as italic blockquote lines", () => {
+  it("omits agent thoughts by default", () => {
     const md = bundleToMarkdown(
       makeBundle([
         update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
         update({ sessionUpdate: "agent_thought", text: "thinking quietly" }),
       ]),
+    );
+    expect(md).not.toContain("thinking quietly");
+  });
+
+  it("emits agent thoughts as italic blockquote lines with includeThoughts", () => {
+    const md = bundleToMarkdown(
+      makeBundle([
+        update({ sessionUpdate: "prompt_received", prompt: [{ type: "text", text: "p" }] }),
+        update({ sessionUpdate: "agent_thought", text: "thinking quietly" }),
+      ]),
+      { includeThoughts: true },
     );
     expect(md).toContain("*thinking quietly*");
   });
@@ -207,6 +218,7 @@ describe("bundleToMarkdown", () => {
           text: "first paragraph\n\nsecond paragraph",
         }),
       ]),
+      { includeThoughts: true },
     );
     expect(md).toContain("*first paragraph*\n\n*second paragraph*");
   });
@@ -219,6 +231,7 @@ describe("bundleToMarkdown", () => {
         update({ sessionUpdate: "agent_thought", text: " need to" }),
         update({ sessionUpdate: "agent_thought", text: " think." }),
       ]),
+      { includeThoughts: true },
     );
     expect(md).toContain("*I need to think.*");
   });
