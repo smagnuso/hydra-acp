@@ -33,6 +33,20 @@ export function shortDuration(ms: number): string {
   return `${hours}h ${String(mins % 60).padStart(2, "0")}m`;
 }
 
+// Round a duration DOWN to a whole multiple of `stepMs`.
+//
+// Used for the idle counter, which refreshes every few seconds: rendering
+// exact seconds at that cadence made the value visibly jump ("idle 4s" →
+// "idle 9s" → "idle 14s"), advertising a precision the clock doesn't keep.
+// Quantizing to the refresh step means every value shown is one the next
+// refresh will still agree with.
+export function quantizeDuration(ms: number, stepMs: number): number {
+  if (stepMs <= 0) {
+    return ms;
+  }
+  return Math.floor(Math.max(0, ms) / stepMs) * stepMs;
+}
+
 export function compactCount(n: number): string {
   if (n < 1000) {
     return String(n);
@@ -134,6 +148,12 @@ function labelValue(
 // busy/not-busy they'd be mutually exclusive for free, but every gadget
 // below them would shift up or down a row at each turn boundary. One
 // gadget in a fixed slot keeps the whole column stable.
+// Granularity of the idle readout, matching the sidebar ticker's slow
+// cadence (app.ts SIDEBAR_SLOW_TICKS × 1s). Keep the two in step: showing
+// finer detail than the clock delivers makes the counter stutter, and
+// coarser wastes refreshes.
+const IDLE_STEP_MS = 5_000;
+
 export const activityGadget: Gadget = {
   id: "activity",
   relevant: () => true,
@@ -142,7 +162,10 @@ export const activityGadget: Gadget = {
       return `busy:${Math.floor((s.now - s.busySince) / 1000)}`;
     }
     if (s.lastTurnEndedAt !== null) {
-      return `idle:${Math.floor((s.now - s.lastTurnEndedAt) / 1000)}`;
+      // Quantized, so the key changes exactly as often as the display does
+      // — an un-quantized key re-rendered the gadget every second to
+      // produce identical bytes.
+      return `idle:${quantizeDuration(s.now - s.lastTurnEndedAt, IDLE_STEP_MS)}`;
     }
     return "fresh";
   },
@@ -158,7 +181,13 @@ export const activityGadget: Gadget = {
     if (s.lastTurnEndedAt !== null) {
       return [
         row(
-          labelValue("○ idle", shortDuration(s.now - s.lastTurnEndedAt), ctx),
+          labelValue(
+            "○ idle",
+            shortDuration(
+              quantizeDuration(s.now - s.lastTurnEndedAt, IDLE_STEP_MS),
+            ),
+            ctx,
+          ),
           "dim",
         ),
       ];
@@ -454,6 +483,74 @@ export const sessionGadget: Gadget = {
   },
 };
 
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${Math.max(0, Math.round(bytes))}B`;
+  }
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) {
+    return `${Math.round(bytes / 1024)}K`;
+  }
+  if (mb < 1024) {
+    return mb < 10 ? `${mb.toFixed(1)}M` : `${Math.round(mb)}M`;
+  }
+  const gb = mb / 1024;
+  return `${gb.toFixed(1)}G`;
+}
+
+// CPU as a percentage of one core. Not clamped at 100: a tree spanning
+// several cores really does use more, and hiding that would misreport the
+// thing the row exists to show.
+//
+// Padded to a fixed width so the rows form columns. The whole value is
+// right-aligned in the row, so a variable-width CPU field drags the memory
+// figure left and right with it and the two readings never line up. One
+// decimal below 100% (where readings normally sit) and whole percent above,
+// which keeps the field at CPU_FIELD_WIDTH for everything up to 9999%.
+const CPU_FIELD_WIDTH = 5;
+
+export function formatCpu(fraction: number | undefined): string {
+  if (fraction === undefined) {
+    // No baseline yet (first sample). A dash reads as "not known", where a
+    // "0%" would be a claim.
+    return "–".padStart(CPU_FIELD_WIDTH);
+  }
+  const pct = fraction * 100;
+  const text = pct < 100 ? `${pct.toFixed(1)}%` : `${Math.round(pct)}%`;
+  return text.padStart(CPU_FIELD_WIDTH);
+}
+
+export const resourcesGadget: Gadget = {
+  id: "resources",
+  title: "resources",
+  relevant: (s) => s.resources.length > 0,
+  versionKey: (s, ctx) =>
+    `${ctx.width}|` +
+    s.resources
+      .map(
+        (r) =>
+          // Quantized to what's displayed: raw byte counts and CPU
+          // fractions change on every sample, so keying on them would
+          // re-render the gadget to produce identical text.
+          `${r.label}:${formatBytes(r.rssBytes)}:${formatCpu(r.cpuFraction)}:${r.processes}`,
+      )
+      .join("\u0000"),
+  render: (s, ctx) => {
+    const { cellWidth, truncate } = ctx.metrics;
+    return s.resources.map((usage) => {
+      const value = `${formatBytes(usage.rssBytes)} ${formatCpu(usage.cpuFraction)}`;
+      // The process count only earns space once a tree is more than the
+      // root: "agent ×4" is informative, "×1" is noise.
+      const label =
+        usage.processes > 1 ? `${usage.label} ×${usage.processes}` : usage.label;
+      const budget = ctx.width - cellWidth(value) - 1;
+      // fieldRow gives the dim-label / plain-value pairing and the
+      // right-alignment padding, same as the session block.
+      return fieldRow(truncate(label, Math.max(1, budget)), value, ctx);
+    });
+  },
+};
+
 // Default order == display order, top to bottom. Also the order the
 // screen layer sheds gadgets in when the column is too short — from the
 // bottom up, so activity and context survive.
@@ -464,5 +561,6 @@ export const BUILTIN_GADGETS: Gadget[] = [
   todoGadget,
   filesGadget,
   gitGadget,
+  resourcesGadget,
   sessionGadget,
 ];

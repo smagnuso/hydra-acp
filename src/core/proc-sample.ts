@@ -1,0 +1,419 @@
+// Process-tree resource sampling: RSS and CPU% for a pid and all its
+// descendants.
+//
+// Why a tree and not a single process: an agent is rarely one process. It
+// spawns shells, language servers, MCP servers and other helpers, and the
+// interesting number is what the agent costs you in total. Same for the
+// daemon, which owns every agent.
+//
+// Sampling strategy, in order of preference:
+//
+//   1. THIS process — `process.memoryUsage.rss()` + `process.cpuUsage()`.
+//      Exact, in-process, free. Never sample ourselves externally: doing it
+//      by shelling out means the sampler is our own child, so it lands in
+//      our tree and charges its cost to us. The monitor measured itself.
+//   2. Another tree on Linux — read `/proc` directly. No process creation
+//      at all, which matters more than it sounds: forking from a process
+//      with a large heap, every few seconds, to read a table the kernel
+//      will hand us as files is pure waste.
+//   3. Another tree anywhere else — `ps`, parsed here. macOS has no
+//      `/proc`, so this is the fallback rather than the default.
+//
+// CPU is computed from CUMULATIVE cpu-time deltas between two samples, not
+// from `ps`'s own `%cpu` column. That column reports an average over the
+// process's whole lifetime on Linux (and a decaying average on macOS), so a
+// long-lived agent that is currently idle would still read high — actively
+// misleading for a live monitor. Delta-over-elapsed is a real interval
+// measurement.
+
+export interface ProcRow {
+  pid: number;
+  ppid: number;
+  // Resident set size in bytes. Zero until filled: the /proc sampler reads
+  // topology first and RSS only for the pids that end up in a sampled tree.
+  rssBytes: number;
+  // Cumulative CPU time consumed since the process started, in seconds.
+  cpuSeconds: number;
+}
+
+export interface ProcTreeUsage {
+  // Processes in the tree, including the root.
+  processes: number;
+  rssBytes: number;
+  // Share of ONE core, as a fraction: 1.0 means one core saturated. A tree
+  // can exceed 1.0 across multiple cores, and is deliberately not clamped —
+  // "300%" is real and worth seeing. Undefined on the first sample, when
+  // there's no previous reading to difference against.
+  cpuFraction?: number;
+}
+
+export interface ProcSample {
+  at: number;
+  rows: Map<number, ProcRow>;
+  // Pids whose rssBytes was actually read. The /proc sampler only reads RSS
+  // for the trees it was asked about, so a row outside those trees carries a
+  // placeholder 0 rather than a measurement — indistinguishable from a real
+  // zero unless the sample says which is which. Absent on the ps path, where
+  // every row's RSS comes from the same output.
+  rssKnown?: Set<number>;
+}
+
+// Linux exposes CPU time in USER_HZ units, which the kernel fixes at 100
+// for /proc regardless of the configured tick rate. Node exposes no
+// sysconf(), so this is assumed rather than queried — it is part of the
+// /proc ABI, not a build-time detail.
+const USER_HZ = 100;
+
+// Parse one /proc/<pid>/stat line into topology + cumulative CPU.
+//
+// Field 2 is the executable name wrapped in parentheses, and it can contain
+// BOTH spaces and parentheses ("(Web Content)", "(foo) bar"). Splitting on
+// whitespace is therefore wrong — the standard fix is to slice after the
+// LAST ')' and index from there.
+export function parseProcStat(content: string): ProcRow | null {
+  const close = content.lastIndexOf(")");
+  if (close === -1) {
+    return null;
+  }
+  const pid = Number(content.slice(0, content.indexOf(" ")));
+  // Fields after comm: state(3) ppid(4) ... utime(14) stime(15)
+  const rest = content.slice(close + 2).split(" ");
+  const ppid = Number(rest[1]);
+  const utime = Number(rest[11]);
+  const stime = Number(rest[12]);
+  if (
+    !Number.isInteger(pid) ||
+    !Number.isInteger(ppid) ||
+    !Number.isFinite(utime) ||
+    !Number.isFinite(stime)
+  ) {
+    return null;
+  }
+  return {
+    pid,
+    ppid,
+    // RSS is filled in later from /proc/<pid>/status, which reports it in
+    // explicit kB. stat's rss field is in PAGES, and Node exposes no page
+    // size — assuming 4K would be wrong on a 16K-page arm64 kernel.
+    rssBytes: 0,
+    cpuSeconds: (utime + stime) / USER_HZ,
+  };
+}
+
+// VmRSS from /proc/<pid>/status, in bytes. Null when absent (kernel threads
+// have no VmRSS line).
+export function parseVmRss(content: string): number | null {
+  const match = /^VmRSS:\s+(\d+)\s+kB$/m.exec(content);
+  if (match === null) {
+    return null;
+  }
+  const kb = Number(match[1]);
+  return Number.isFinite(kb) ? kb * 1024 : null;
+}
+
+// CPU share of one core for THIS process, from Node's own counters.
+export function selfCpuFraction(
+  current: NodeJS.CpuUsage,
+  previous: NodeJS.CpuUsage | null,
+  elapsedMs: number,
+): number | undefined {
+  if (previous === null || elapsedMs <= 0) {
+    return undefined;
+  }
+  const deltaMicros =
+    current.user - previous.user + (current.system - previous.system);
+  return Math.max(0, deltaMicros / 1000 / elapsedMs);
+}
+
+// Parse `ps -A -o pid=,ppid=,rss=,time=` output.
+//
+// Tolerant by construction: this is scraped text from a program whose exact
+// column formatting varies by platform, so an unparseable line is skipped
+// rather than throwing. Losing one row degrades a diagnostic readout; a
+// throw would take down the caller's poll loop.
+export function parsePsOutput(stdout: string): Map<number, ProcRow> {
+  const rows = new Map<number, ProcRow>();
+  for (const line of stdout.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4) {
+      continue;
+    }
+    const pid = Number(parts[0]);
+    const ppid = Number(parts[1]);
+    const rssKb = Number(parts[2]);
+    const cpuSeconds = parseCpuTime(parts[3]!);
+    if (
+      !Number.isInteger(pid) ||
+      !Number.isInteger(ppid) ||
+      !Number.isFinite(rssKb) ||
+      cpuSeconds === null
+    ) {
+      continue;
+    }
+    // ps reports RSS in kilobytes on both Linux and macOS.
+    rows.set(pid, { pid, ppid, rssBytes: rssKb * 1024, cpuSeconds });
+  }
+  return rows;
+}
+
+// ps TIME formats: "MM:SS", "MM:SS.CC", "HH:MM:SS", "D-HH:MM:SS", and macOS
+// occasionally "H:MM.SS". Returns null when the field isn't a duration.
+export function parseCpuTime(field: string): number | null {
+  let rest = field;
+  let days = 0;
+  const dash = rest.indexOf("-");
+  if (dash !== -1) {
+    // Must be "<days>-<clock>": a leading dash means the field is negative
+    // (or otherwise malformed), and Number("") is 0, so an emptiness check
+    // is required or "-1:00" would parse as 0 days + 60 seconds.
+    const daysPart = rest.slice(0, dash);
+    if (daysPart.length === 0) {
+      return null;
+    }
+    days = Number(daysPart);
+    rest = rest.slice(dash + 1);
+    if (!Number.isInteger(days) || days < 0) {
+      return null;
+    }
+  }
+  const parts = rest.split(":");
+  if (parts.length < 2 || parts.length > 3) {
+    return null;
+  }
+  let seconds = 0;
+  for (const part of parts) {
+    const value = Number(part);
+    if (!Number.isFinite(value) || value < 0) {
+      return null;
+    }
+    seconds = seconds * 60 + value;
+  }
+  return days * 86_400 + seconds;
+}
+
+// Every pid in the tree rooted at `root`, root included.
+//
+// Guards against cycles. A parent/child cycle shouldn't be possible in a
+// real process table, but this parses untrusted-ish scraped text and a
+// malformed row pair would otherwise hang the walk.
+export function collectTree(
+  rows: Map<number, ProcRow>,
+  root: number,
+): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const row of rows.values()) {
+    const list = children.get(row.ppid);
+    if (list === undefined) {
+      children.set(row.ppid, [row.pid]);
+    } else {
+      list.push(row.pid);
+    }
+  }
+  const seen = new Set<number>();
+  if (!rows.has(root)) {
+    return seen;
+  }
+  const stack = [root];
+  while (stack.length > 0) {
+    const pid = stack.pop()!;
+    if (seen.has(pid)) {
+      continue;
+    }
+    seen.add(pid);
+    for (const child of children.get(pid) ?? []) {
+      if (!seen.has(child)) {
+        stack.push(child);
+      }
+    }
+  }
+  return seen;
+}
+
+// Sum a tree's usage, differencing CPU against a previous sample.
+//
+// CPU accounting only counts pids present in BOTH samples: a process that
+// started during the interval has no baseline, and treating its whole
+// lifetime CPU as interval usage would spike the reading (a fresh `bash -c`
+// would read as hundreds of percent). Its RSS still counts — that's a
+// point-in-time measure and needs no baseline.
+//
+// Returns null when the sample doesn't carry RSS for the whole tree, which
+// means it was taken for a DIFFERENT root than the one being summed. No
+// reading is better than the alternative: unread rows hold a placeholder 0,
+// so the tree would total 0B and look like a live agent using no memory.
+export function treeUsage(
+  current: ProcSample,
+  previous: ProcSample | null,
+  root: number,
+): ProcTreeUsage | null {
+  const tree = collectTree(current.rows, root);
+  if (tree.size === 0) {
+    return null;
+  }
+  let rssBytes = 0;
+  let cpuDelta = 0;
+  let comparable = false;
+  for (const pid of tree) {
+    if (current.rssKnown !== undefined && !current.rssKnown.has(pid)) {
+      return null;
+    }
+    const row = current.rows.get(pid)!;
+    rssBytes += row.rssBytes;
+    const before = previous?.rows.get(pid);
+    if (before !== undefined) {
+      comparable = true;
+      // Clamp: cpuSeconds is monotonic per process, but a recycled pid
+      // could read lower than its predecessor.
+      cpuDelta += Math.max(0, row.cpuSeconds - before.cpuSeconds);
+    }
+  }
+  const usage: ProcTreeUsage = { processes: tree.size, rssBytes };
+  const elapsedMs = previous === null ? 0 : current.at - previous.at;
+  if (comparable && elapsedMs > 0) {
+    usage.cpuFraction = cpuDelta / (elapsedMs / 1000);
+  }
+  return usage;
+}
+
+// ── samplers ─────────────────────────────────────────────────────────────
+
+// Read every process's topology + CPU from /proc. One readdir plus one small
+// file read per process, no process creation.
+//
+// RSS is deliberately NOT filled here: it needs a second file per process
+// (/proc/<pid>/status, for explicit kB), and only the handful of pids in the
+// trees we care about need it. fillRssBytes does that pass.
+export async function sampleProcfs(
+  readDir: (path: string) => Promise<string[]>,
+  readFile: (path: string) => Promise<string>,
+): Promise<Map<number, ProcRow>> {
+  const rows = new Map<number, ProcRow>();
+  let entries: string[];
+  try {
+    entries = await readDir("/proc");
+  } catch {
+    return rows;
+  }
+  await Promise.all(
+    entries.map(async (entry) => {
+      // Numeric entries are pids; everything else in /proc is not a process.
+      if (!/^\d+$/.test(entry)) {
+        return;
+      }
+      try {
+        const row = parseProcStat(await readFile(`/proc/${entry}/stat`));
+        if (row !== null) {
+          rows.set(row.pid, row);
+        }
+      } catch {
+        // The process exited between readdir and read. Normal; skip it.
+      }
+    }),
+  );
+  return rows;
+}
+
+// Fill in RSS for just the given pids, from /proc/<pid>/status.
+export async function fillRssBytes(
+  rows: Map<number, ProcRow>,
+  pids: Iterable<number>,
+  readFile: (path: string) => Promise<string>,
+): Promise<void> {
+  await Promise.all(
+    [...pids].map(async (pid) => {
+      const row = rows.get(pid);
+      if (row === undefined) {
+        return;
+      }
+      try {
+        const rss = parseVmRss(await readFile(`/proc/${pid}/status`));
+        if (rss !== null) {
+          row.rssBytes = rss;
+        }
+      } catch {
+        // Exited mid-sample; leave rssBytes at 0 rather than dropping the
+        // process, since its CPU delta is still meaningful.
+      }
+    }),
+  );
+}
+
+// Platform-dispatched sample of the trees rooted at `roots`.
+//
+// Linux reads /proc; everything else shells out to `ps` once. That fallback
+// is the same thing `pidusage` does on macOS, which is why this doesn't
+// carry a dependency to reach it — and unlike ps's own `%cpu` column, both
+// paths here difference cumulative CPU time, so a long-idle process reads as
+// idle on both.
+//
+// RESOLUTION CAVEAT. `ps -o time` on Linux truncates to whole seconds
+// (measured: /proc reports 3471.41s where ps reports 3471s for the same
+// pid), so per-process CPU deltas over a few seconds quantize to 0 or 1 —
+// enough to read 0% for a tree that is genuinely busy. That is why Linux
+// uses /proc rather than treating ps as good enough everywhere. macOS ps
+// reports centiseconds (`MM:SS.CC`, which parseCpuTime handles), so the
+// platform that actually takes this path has usable resolution — though
+// that is from pidusage's parser and macOS documentation, not measured
+// here. If a macOS reading looks quantized, lengthening the baseline (
+// differencing against a sample several ticks back instead of the previous
+// one) is the fix, not switching to %cpu.
+//
+// Injectable IO so both paths are testable without a process table.
+export interface SampleDeps {
+  platform?: string;
+  readDir?: (path: string) => Promise<string[]>;
+  readFile?: (path: string) => Promise<string>;
+  runPs?: () => Promise<string>;
+}
+
+export async function sampleTrees(
+  roots: readonly number[],
+  deps: SampleDeps = {},
+): Promise<ProcSample> {
+  const platform = deps.platform ?? process.platform;
+  const at = Date.now();
+  if (platform === "linux") {
+    const readDir =
+      deps.readDir ??
+      (async (path: string) => {
+        const { readdir } = await import("node:fs/promises");
+        return readdir(path);
+      });
+    const readFile =
+      deps.readFile ??
+      (async (path: string) => {
+        const { readFile: rf } = await import("node:fs/promises");
+        return rf(path, "utf8");
+      });
+    const rows = await sampleProcfs(readDir, readFile);
+    // RSS only for the pids that actually land in a requested tree —
+    // that's ~20 extra file reads instead of ~1000.
+    const wanted = new Set<number>();
+    for (const root of roots) {
+      for (const pid of collectTree(rows, root)) {
+        wanted.add(pid);
+      }
+    }
+    await fillRssBytes(rows, wanted, readFile);
+    return { at, rows, rssKnown: wanted };
+  }
+  const runPs =
+    deps.runPs ??
+    (async () => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const { stdout } = await promisify(execFile)(
+        "ps",
+        ["-A", "-o", "pid=,ppid=,rss=,time="],
+        { timeout: 5_000, maxBuffer: 8 * 1024 * 1024 },
+      );
+      return stdout;
+    });
+  try {
+    return { at, rows: parsePsOutput(await runPs()) };
+  } catch {
+    // No ps, or it timed out. An empty table makes treeUsage return null,
+    // which drops the rows rather than showing stale numbers as current.
+    return { at, rows: new Map() };
+  }
+}

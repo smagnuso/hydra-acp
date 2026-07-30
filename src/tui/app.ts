@@ -175,13 +175,22 @@ import {
   type FormattedLine,
   type ToolLineState,
 } from "./format.js";
-import type { SidebarEditedFile } from "./sidebar/types.js";
+import type {
+  SidebarEditedFile,
+  SidebarProcUsage,
+} from "./sidebar/types.js";
 import { parseGitPorcelainV2 } from "./sidebar/git-status.js";
 import {
   collapseEditedFiles,
   editedFileFromTool,
 } from "./sidebar/edited-files.js";
 import { parseTodoWrite } from "./sidebar/todos.js";
+import {
+  sampleTrees,
+  selfCpuFraction,
+  treeUsage,
+} from "../core/proc-sample.js";
+import type { ProcSample } from "../core/proc-sample.js";
 import { execFile } from "node:child_process";
 
 // Pure helper: filter a question array down to entries that should appear
@@ -3784,10 +3793,10 @@ async function runSession(
       clearTimeout(timer);
     }
     amendPendingPaintTimers.clear();
-    // Sidebar clock + git poller. The Screen instance outlives a single
-    // session (runTuiApp creates it once and ^P reuses it), so a surviving
-    // ticker would keep pushing this session's snapshot into the next
-    // session's sidebar.
+    // The sidebar's clock, which also drives the work-tree poll. The Screen
+    // instance outlives a single session (runTuiApp creates it once and ^P
+    // reuses it), so a surviving ticker would keep pushing this session's
+    // snapshot into the next session's sidebar.
     stopSidebarTicker();
     stopGitPoll();
     screen.clearWindowTitle();
@@ -6261,8 +6270,6 @@ async function runSession(
   // gadget is exactly the kind of cost a relevance predicate is supposed
   // to avoid. A tool completing also nudges a poll, so an edit shows up
   // without waiting out the interval.
-  const GIT_POLL_MS = 5_000;
-  let gitPollTimer: NodeJS.Timeout | null = null;
   let gitPollInFlight = false;
 
   // git reports paths relative to the repo toplevel, which is not
@@ -6316,32 +6323,174 @@ async function runSession(
     );
   };
 
+  // ── resource sampling ────────────────────────────────────────────────
+  //
+  // Two trees: this TUI process, and the agent's. The agent is a child of
+  // the DAEMON, not of us, so its pid has to come off the wire
+  // (SessionListEntry.agentPid) — there is no local parent/child link to
+  // follow.
+  //
+  // Only meaningful against a LOCAL daemon. Against a remote one the pid
+  // belongs to another machine's process table, where it either doesn't
+  // exist or — worse — names an unrelated local process. So the agent row
+  // is omitted unless the daemon is on this host.
+  const RESOURCE_LABEL_TUI = "hydra";
+  const RESOURCE_LABEL_AGENT = "agent";
+  let procPrevious: ProcSample | null = null;
+  let procSampleInFlight = false;
+  // Baseline for this process's own CPU accounting, kept separately from the
+  // external sample because it comes from Node's counters rather than the
+  // process table.
+  let selfCpuPrevious: NodeJS.CpuUsage | null = null;
+  let selfCpuPreviousAt: number | null = null;
+  let agentPid: number | null = null;
+  let agentPidFetchInFlight = false;
+
+  // A daemon reached over loopback is this machine's; anything else is
+  // another host's process table.
+  const daemonIsLocal = ((): boolean => {
+    try {
+      const host = new URL(target.baseUrl).hostname;
+      return (
+        host === "127.0.0.1" ||
+        host === "localhost" ||
+        host === "::1" ||
+        host === "[::1]"
+      );
+    } catch {
+      return false;
+    }
+  })();
+
+  const refreshAgentPid = (): void => {
+    if (agentPidFetchInFlight || resolvedSessionId === null) {
+      return;
+    }
+    agentPidFetchInFlight = true;
+    void (async (): Promise<void> => {
+      try {
+        const res = await fetch(
+          `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}`,
+          { headers: { Authorization: `Bearer ${target.token}` } },
+        );
+        if (res.ok) {
+          const data = (await res.json()) as { agentPid?: number };
+          agentPid = typeof data.agentPid === "number" ? data.agentPid : null;
+        }
+      } catch {
+        // Daemon unreachable: leave the last known pid alone. treeUsage
+        // drops the row on its own once the process is gone.
+      } finally {
+        agentPidFetchInFlight = false;
+      }
+    })();
+  };
+
+  const sampleResources = (): void => {
+    if (procSampleInFlight) {
+      return;
+    }
+    procSampleInFlight = true;
+    void (async (): Promise<void> => {
+      try {
+        const rows: SidebarProcUsage[] = [];
+
+        // This process, measured from the inside. Never sampled externally:
+        // an external sampler is our own child, so it lands in our tree and
+        // charges its own cost to us — the monitor would be measuring
+        // itself. Node's counters are exact and free.
+        const nowCpu = process.cpuUsage();
+        const nowAt = Date.now();
+        rows.push({
+          label: RESOURCE_LABEL_TUI,
+          rssBytes: process.memoryUsage.rss(),
+          cpuFraction: selfCpuFraction(
+            nowCpu,
+            selfCpuPrevious,
+            selfCpuPreviousAt === null ? 0 : nowAt - selfCpuPreviousAt,
+          ),
+          processes: 1,
+        });
+        selfCpuPrevious = nowCpu;
+        selfCpuPreviousAt = nowAt;
+
+        // The agent tree needs an outside view: it is a child of the daemon,
+        // not of us. /proc on Linux, ps elsewhere — see core/proc-sample.ts.
+        // Read the pid ONCE. sampleTrees only fills RSS for the pids in the
+        // trees it was asked for, so if refreshAgentPid lands mid-await and
+        // treeUsage then sums a different root, every process in that tree
+        // has an unfilled rssBytes of 0 — the row reads "0B" for a live
+        // agent. An agent swap (/hydra restart, forceCancel) makes that a
+        // real sequence, not a theoretical one.
+        const sampledPid = agentPid;
+        if (sampledPid !== null) {
+          const current = await sampleTrees([sampledPid]);
+          const agent = treeUsage(current, procPrevious, sampledPid);
+          if (agent !== null) {
+            rows.push({ label: RESOURCE_LABEL_AGENT, ...agent });
+          }
+          procPrevious = current;
+        }
+        screen.setSidebarSnapshot({ resources: rows });
+      } finally {
+        procSampleInFlight = false;
+      }
+    })();
+  };
+
+  const startResourceSampling = (): void => {
+    if (!screen.isSidebarGadgetConfigured("resources")) {
+      return;
+    }
+    // First sample establishes the CPU baselines; readings appear on the
+    // second one (the gadget renders "–" until then rather than claiming 0%).
+    procPrevious = null;
+    selfCpuPrevious = null;
+    selfCpuPreviousAt = null;
+    if (daemonIsLocal) {
+      refreshAgentPid();
+    }
+    sampleResources();
+  };
+
+  const stopResourceSampling = (): void => {
+    procPrevious = null;
+    selfCpuPrevious = null;
+    selfCpuPreviousAt = null;
+    agentPid = null;
+    screen.setSidebarSnapshot({ resources: [] });
+  };
+
+  // Prime the work-tree state once when the column opens; the recurring
+  // poll rides the sidebar ticker's slow tick from then on.
   const startGitPoll = (): void => {
-    if (gitPollTimer !== null || !screen.isSidebarGadgetConfigured("git")) {
+    if (!screen.isSidebarGadgetConfigured("git")) {
       return;
     }
     pollGitOnce();
-    gitPollTimer = setInterval(pollGitOnce, GIT_POLL_MS);
-    // Don't hold the event loop open on the poll timer — a detach or
-    // agent exit must be able to end the process.
-    gitPollTimer.unref?.();
   };
 
   const stopGitPoll = (): void => {
-    if (gitPollTimer !== null) {
-      clearInterval(gitPollTimer);
-      gitPollTimer = null;
-    }
     screen.setSidebarSnapshot({ git: null });
   };
 
-  // Sidebar clock. The activity gadget counts up, so the column needs a
-  // tick of its own — but only while the sidebar is actually visible, and
-  // only at 1 Hz while a turn is in flight. Idle sessions tick at 5s: the
-  // idle counter is mostly reading minutes, and waking the renderer every
-  // second to redraw a quiet screen is exactly the kind of background
-  // churn the repaint throttle exists to avoid.
-  const SIDEBAR_IDLE_TICK_DIVISOR = 5;
+  // The sidebar's clock. Painting is demand-driven — state changes call
+  // scheduleRepaint and the RepaintScheduler coalesces them — so anything
+  // that advances on its own needs a timer to mark it dirty. This is that
+  // timer, and it is the ONLY periodic work the column does: the git poll
+  // rides on it as a counter rather than owning a second interval.
+  //
+  // 1 Hz while a turn is in flight (the thinking counter reads seconds);
+  // every SIDEBAR_SLOW_TICKS while quiet, because waking the renderer once
+  // a second to redraw a still screen is exactly the churn the repaint
+  // throttle exists to prevent. The idle counter's DISPLAY is quantized to
+  // match (see shortDuration callers in gadgets.ts) so it never shows a
+  // precision this cadence can't keep current.
+  //
+  // Not folded into sessionElapsedTimer, which would be the obvious home:
+  // that timer is started and cleared with the turn, so it doesn't exist
+  // while idle — precisely when the idle counter needs ticking.
+  const SIDEBAR_SLOW_TICKS = 5;
   let sidebarTicker: NodeJS.Timeout | null = null;
   let sidebarTickCount = 0;
 
@@ -6349,13 +6498,27 @@ async function runSession(
     if (sidebarTicker !== null) {
       return;
     }
+    sidebarTickCount = 0;
     sidebarTicker = setInterval(() => {
       sidebarTickCount++;
-      if (
-        sessionBusySince !== null ||
-        sidebarTickCount % SIDEBAR_IDLE_TICK_DIVISOR === 0
-      ) {
+      const slowTick = sidebarTickCount % SIDEBAR_SLOW_TICKS === 0;
+      if (sessionBusySince !== null || slowTick) {
         refreshSidebarSnapshot();
+      }
+      // Work tree polling shares the slow tick. A dedicated 5s interval
+      // bought nothing: both wake for the same reason and both end in one
+      // coalesced repaint.
+      if (slowTick && screen.isSidebarGadgetConfigured("git")) {
+        pollGitOnce();
+      }
+      if (slowTick && screen.isSidebarGadgetConfigured("resources")) {
+        // The agent pid can change under us (agent swap, crash-restart), so
+        // re-read it alongside the sample rather than caching it for the
+        // session's life.
+        if (daemonIsLocal) {
+          refreshAgentPid();
+        }
+        sampleResources();
       }
     }, 1_000);
     sidebarTicker.unref?.();
@@ -6398,9 +6561,11 @@ async function runSession(
     screen.fullRedraw();
     if (visible) {
       startGitPoll();
+      startResourceSampling();
       startSidebarTicker();
     } else {
       stopGitPoll();
+      stopResourceSampling();
       stopSidebarTicker();
     }
   };

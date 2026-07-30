@@ -295,7 +295,9 @@ const TuiConfig = z.object({
   // are simply the ones visible without scrolling. Unknown ids are
   // ignored. Known ids: activity (thinking/idle timer), context (token
   // window + cost), queue, todo, files (edited this session), git,
-  // session.
+  // resources (memory/CPU for this TUI and the agent's process tree — the
+  // agent row needs a local daemon, since a remote agent's pid means
+  // nothing in this machine's process table), session.
   //
   // `width` pins the body width in columns; omit to size it as ~28% of the
   // terminal, clamped to 20..36. A pinned width is honored even when large:
@@ -319,12 +321,30 @@ const TuiConfig = z.object({
       border: z.enum(["none", "rule", "frame"]).default("frame"),
       gadgets: z
         .array(z.string())
-        .default(["activity", "context", "queue", "todo", "files", "git", "session"]),
+        .default([
+          "activity",
+          "context",
+          "queue",
+          "todo",
+          "files",
+          "git",
+          "resources",
+          "session",
+        ]),
     })
     .default({
       enabled: false,
       border: "frame",
-      gadgets: ["activity", "context", "queue", "todo", "files", "git", "session"],
+      gadgets: [
+        "activity",
+        "context",
+        "queue",
+        "todo",
+        "files",
+        "git",
+        "resources",
+        "session",
+      ],
     }),
   // How edit-style tool calls (Edit, Write, str_replace) render in
   // scrollback, *in addition to* the normal tool row inside the tools
@@ -529,7 +549,16 @@ export const HydraConfig = z.object({
     sidebar: {
       enabled: false,
       border: "frame",
-      gadgets: ["activity", "context", "queue", "todo", "files", "git", "session"],
+      gadgets: [
+        "activity",
+        "context",
+        "queue",
+        "todo",
+        "files",
+        "git",
+        "resources",
+        "session",
+      ],
     },
   }),
 });

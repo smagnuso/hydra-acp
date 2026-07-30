@@ -1207,6 +1207,14 @@ export class Session {
     return this.promptStartedAt;
   }
 
+  // OS pid of the live agent child, for diagnostics only (a local client
+  // sampling the agent's resource usage — it has no other way to find the
+  // process, since the daemon owns it). Follows an agent swap, because it
+  // reads through the current `agent` reference rather than caching.
+  get agentPid(): number | undefined {
+    return this.agent.pid;
+  }
+
   // True when the agent is blocked on the user: an outstanding
   // session/request_permission (which also carries agent-posed
   // questions — there's no separate "ask the user" request in ACP).

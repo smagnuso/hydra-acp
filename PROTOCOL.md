@@ -972,6 +972,7 @@ The shared core (identical to the [`session/list` entry meta](#on-sessionlist-en
 | `attachedClients` | `number` | Always present. Count of currently-attached clients. |
 | `upstreamSessionId` | `string` | The agent's own session id (distinct from the daemon's id). |
 | `agentId` | `string` | Resolved agent id (after registry id lookup / npx-basename fallback). |
+| `agentPid` | `number` | Present only while an agent process is live for the session; absent on cold sessions. OS pid of the agent child. **Diagnostic only.** It exists so a *local* client can sample the agent's resource usage (memory/CPU of its process tree) — the agent is a child of the daemon, so a client has no other way to locate it. Two caveats: it is meaningless to a client on another host, since it indexes the daemon machine's process table and may collide with an unrelated local pid there; and clients must not signal it — the daemon owns process lifecycle and signals the whole process group (`Session.kill`). It changes across an agent swap or crash-restart, so callers that care should re-read rather than cache it for the session's lifetime. |
 | `cwd` | `string` | Effective working directory. |
 | `title` | `string?` | Session label (`Session.title`). Matches the top-level `title` on `session/list`. |
 | `currentModel` | `string?` | Last-known model id; lets attach paint header state before any new updates land. |
@@ -1020,6 +1021,8 @@ Per the [Session List Protocol](https://agentclientprotocol.com/protocol/session
       "busy": false,            // mid-turn flag (live sessions only)
       "awaitingInput": false,   // any attention flag raised (permission, transformer flag, etc.); cold sessions too
       "agentId": "claude-acp",
+      "agentPid": 51234,        // live sessions only; diagnostic, local clients only — see field table
+
       "upstreamSessionId": "<agent id>",
       "currentModel": "claude-opus-4-7",
       "currentUsage": { "used": 12345, "costAmount": 0.18, "costCurrency": "USD" },

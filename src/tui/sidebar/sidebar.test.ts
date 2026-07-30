@@ -8,6 +8,10 @@ import {
   filesGadget,
   gitGadget,
   meterBar,
+  formatBytes,
+  formatCpu,
+  quantizeDuration,
+  resourcesGadget,
   shortDuration,
   fitIdentifier,
   sessionGadget,
@@ -18,6 +22,7 @@ import { emptySnapshot } from "./types.js";
 import type {
   SidebarBorder,
   SidebarContext,
+  SidebarProcUsage,
   SidebarSnapshot,
 } from "./types.js";
 
@@ -947,5 +952,184 @@ describe("pagination fits the available height", () => {
     // Nothing is elided, so the page index has nothing to select.
     expect(lines.filter((l) => l.item).length).toBe(12);
     expect(lines.some((l) => l.actions !== undefined)).toBe(false);
+  });
+});
+
+// The idle readout refreshes on the sidebar ticker's slow cadence, so it
+// must not display a precision that cadence can't sustain — exact seconds
+// made it jump "4s → 9s → 14s", which reads as a stuttering clock rather
+// than a coarse one.
+describe("idle counter precision", () => {
+  const idleAt = (ms: number): string =>
+    activityGadget.render(
+      snap({ now: 1_000_000, lastTurnEndedAt: 1_000_000 - ms }),
+      ctx(),
+    )[0]!.body;
+
+  it("quantizes the displayed value to the refresh step", () => {
+    expect(idleAt(4_000)).toContain("0s");
+    expect(idleAt(6_000)).toContain("5s");
+    expect(idleAt(9_999)).toContain("5s");
+    expect(idleAt(10_000)).toContain("10s");
+  });
+
+  it("holds steady between refreshes rather than stepping every second", () => {
+    const within = [5_000, 6_200, 7_500, 9_900].map(idleAt);
+    expect(new Set(within).size).toBe(1);
+  });
+
+  it("advances at the step boundary", () => {
+    expect(idleAt(9_900)).not.toBe(idleAt(10_100));
+  });
+
+  // An un-quantized key re-rendered the gadget every second to produce
+  // byte-identical output.
+  it("changes its version key only when the display changes", () => {
+    const key = (ms: number): string =>
+      activityGadget.versionKey(
+        snap({ now: 1_000_000, lastTurnEndedAt: 1_000_000 - ms }),
+        ctx(),
+      );
+    expect(key(5_000)).toBe(key(9_900));
+    expect(key(9_900)).not.toBe(key(10_100));
+  });
+
+  // The busy counter is on the fast tick, so it keeps second precision.
+  it("leaves the thinking counter at one-second precision", () => {
+    const busy = (ms: number): string =>
+      activityGadget.render(
+        snap({ now: 1_000_000, busySince: 1_000_000 - ms }),
+        ctx(),
+      )[0]!.body;
+    expect(busy(4_000)).toContain("4s");
+    expect(busy(5_000)).toContain("5s");
+  });
+});
+
+describe("quantizeDuration", () => {
+  it("rounds down to the step", () => {
+    expect(quantizeDuration(0, 5_000)).toBe(0);
+    expect(quantizeDuration(4_999, 5_000)).toBe(0);
+    expect(quantizeDuration(5_000, 5_000)).toBe(5_000);
+    expect(quantizeDuration(12_345, 5_000)).toBe(10_000);
+  });
+
+  it("clamps negatives and tolerates a zero step", () => {
+    expect(quantizeDuration(-9, 5_000)).toBe(0);
+    expect(quantizeDuration(1_234, 0)).toBe(1_234);
+  });
+});
+
+describe("resources gadget", () => {
+  const usage = (patch: Partial<SidebarProcUsage> = {}): SidebarProcUsage => ({
+    label: "hydra",
+    rssBytes: 142 * 1024 * 1024,
+    cpuFraction: 0.031,
+    processes: 1,
+    ...patch,
+  });
+
+  it("hides itself when there is nothing to report", () => {
+    expect(resourcesGadget.relevant(snap())).toBe(false);
+    expect(resourcesGadget.relevant(snap({ resources: [usage()] }))).toBe(true);
+  });
+
+  it("renders one row per tree, memory then cpu", () => {
+    const lines = resourcesGadget.render(
+      snap({
+        resources: [
+          usage(),
+          usage({ label: "agent", rssBytes: 1.25 * 1024 ** 3, cpuFraction: 0.87, processes: 4 }),
+        ],
+      }),
+      ctx(26),
+    );
+    expect(lines).toHaveLength(2);
+    const rows = lines.map(rowText);
+    expect(rows[0]).toContain("hydra");
+    expect(rows[0]).toContain("142M");
+    expect(rows[1]).toContain("agent");
+    // 1.25 GiB rounds to 1.3, not truncates to 1.2.
+    expect(rows[1]).toContain("1.3G");
+    expect(rows[1]).toContain("87.0%");
+  });
+
+  // "×1" is noise; a real tree is worth flagging.
+  it("shows the process count only for a multi-process tree", () => {
+    const one = rowText(
+      resourcesGadget.render(snap({ resources: [usage()] }), ctx(26))[0]!,
+    );
+    const many = rowText(
+      resourcesGadget.render(
+        snap({ resources: [usage({ processes: 6 })] }),
+        ctx(26),
+      )[0]!,
+    );
+    expect(one).not.toContain("×");
+    expect(many).toContain("×6");
+  });
+
+  it("stays inside the column", () => {
+    for (const width of [14, 20, 26, 40]) {
+      const lines = resourcesGadget.render(
+        snap({
+          resources: [usage({ label: "a-very-long-label-indeed", processes: 12 })],
+        }),
+        ctx(width),
+      );
+      for (const line of lines) {
+        expect(stringWidth(rowText(line))).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  // Sampling produces new byte counts constantly; keying on raw values would
+  // re-render the gadget every tick to emit identical text.
+  it("keys its version on the displayed text, not the raw numbers", () => {
+    const key = (rssBytes: number): string =>
+      resourcesGadget.versionKey(snap({ resources: [usage({ rssBytes })] }), ctx(26));
+    // Both round to the same displayed megabytes.
+    expect(key(142 * 1024 ** 2)).toBe(key(142 * 1024 ** 2 + 5000));
+    expect(key(142 * 1024 ** 2)).not.toBe(key(200 * 1024 ** 2));
+  });
+});
+
+describe("formatBytes", () => {
+  it("scales units and keeps the string short", () => {
+    expect(formatBytes(0)).toBe("0B");
+    expect(formatBytes(900)).toBe("900B");
+    expect(formatBytes(64 * 1024)).toBe("64K");
+    expect(formatBytes(5.5 * 1024 ** 2)).toBe("5.5M");
+    expect(formatBytes(142 * 1024 ** 2)).toBe("142M");
+    expect(formatBytes(1.25 * 1024 ** 3)).toBe("1.3G");
+    expect(formatBytes(1.24 * 1024 ** 3)).toBe("1.2G");
+  });
+});
+
+describe("formatCpu", () => {
+  it("reports a fraction of one core as a percentage", () => {
+    expect(formatCpu(0).trim()).toBe("0.0%");
+    expect(formatCpu(0.031).trim()).toBe("3.1%");
+    expect(formatCpu(0.87).trim()).toBe("87.0%");
+  });
+
+  // A tree spanning cores really does exceed 100%; clamping would misreport
+  // exactly the situation the row exists to surface.
+  it("does not clamp at one core", () => {
+    expect(formatCpu(3.4).trim()).toBe("340%");
+  });
+
+  it("distinguishes 'no reading yet' from zero", () => {
+    expect(formatCpu(undefined).trim()).toBe("–");
+    expect(formatCpu(0)).not.toBe(formatCpu(undefined));
+  });
+
+  // The field is padded so the rows column up: the value is right-aligned
+  // as a whole, so a ragged CPU field walks the memory figure sideways.
+  it("pads every reading to one width", () => {
+    const widths = [undefined, 0, 0.031, 0.87, 3.4, 12].map(
+      (f) => formatCpu(f).length,
+    );
+    expect(new Set(widths).size).toBe(1);
   });
 });

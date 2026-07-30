@@ -2190,6 +2190,7 @@ export class SessionManager {
       status: "warm",
       busy: session.turnStartedAt !== undefined,
       awaitingInput: session.awaitingInput,
+      agentPid: session.agentPid,
     };
   }
 
@@ -2230,6 +2231,7 @@ export class SessionManager {
         updatedAt: used,
         attachedClients: live.attachedCount,
         status: "warm",
+        agentPid: live.agentPid,
         busy: live.turnStartedAt !== undefined,
         awaitingInput: live.awaitingInput,
       };
@@ -2360,6 +2362,7 @@ export class SessionManager {
         updatedAt: used,
         attachedClients: session.attachedCount,
         status: "warm",
+        agentPid: session.agentPid,
         busy: session.turnStartedAt !== undefined,
         awaitingInput: session.awaitingInput,
         compactionState: session.compactionState,

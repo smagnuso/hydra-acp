@@ -55,6 +55,16 @@ export interface SidebarEditedFile {
   removed?: number;
 }
 
+// Resource reading for one process tree.
+export interface SidebarProcUsage {
+  label: string;
+  rssBytes: number;
+  // Fraction of one core; may exceed 1 on a multi-core tree. Undefined
+  // before the second sample, when there's no baseline to difference.
+  cpuFraction?: number;
+  processes: number;
+}
+
 export interface SidebarSnapshot {
   // Paint-time clock. Passed in rather than read via Date.now() inside
   // gadgets so elapsed rendering is deterministic under test.
@@ -71,6 +81,11 @@ export interface SidebarSnapshot {
   // null when the cwd isn't a git repo, or when the git gadget isn't
   // configured (in which case app.ts never runs the poller at all).
   git: SidebarGitStatus | null;
+  // Resource readings, in display order. Empty when the resources gadget
+  // isn't configured, when sampling isn't possible, or when the daemon is
+  // remote — the agent's pid then belongs to another machine's process
+  // table, so measuring it locally would report someone else's process.
+  resources: SidebarProcUsage[];
   sessionId: string | null;
   agent: string | null;
   model: string | null;
@@ -179,6 +194,7 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     plan: [],
     editedFiles: [],
     git: null,
+    resources: [],
     sessionId: null,
     agent: null,
     model: null,

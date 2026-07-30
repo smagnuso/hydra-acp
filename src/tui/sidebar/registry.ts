@@ -28,6 +28,7 @@ export const DEFAULT_GADGET_IDS = [
   "todo",
   "files",
   "git",
+  "resources",
   "session",
 ] as const;
 

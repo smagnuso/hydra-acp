@@ -88,6 +88,17 @@ export const SessionListEntry = z.object({
   // those that have never been compacted. Lets list views surface a
   // badge without needing a per-session GET /compact call.
   compactionState: z.any().optional(),
+  // OS pid of the live agent process for this session, when there is one.
+  // Absent for cold sessions (nothing is running) and for remote sessions
+  // as seen from a client (the pid belongs to another machine's process
+  // table, so it is meaningless locally).
+  //
+  // Diagnostic only: it exists so a local client can sample the agent's
+  // resource usage — the agent is a child of the DAEMON, so a client has no
+  // other way to find it. Callers must not signal it; the daemon owns the
+  // process lifecycle (see Session.kill / killProcessGroup, which signal the
+  // whole group).
+  agentPid: z.number().int().positive().optional(),
   // Present when this session is a fork whose synopsis is being
   // generated in the background. Values: "running" | "failed".
   // Absent when not a synthesis fork or when synopsis is already
