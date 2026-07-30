@@ -9,6 +9,7 @@
 //   - render() must not exceed ctx.width cells per row.
 
 import type { FormattedLine } from "../format.js";
+import { RUNNING_TOOL_CAP } from "./running-tools.js";
 import type {
   Gadget,
   SidebarContext,
@@ -193,6 +194,80 @@ export const activityGadget: Gadget = {
       ];
     }
     return [row("○ ready", "dim")];
+  },
+};
+
+// What the agent is doing RIGHT NOW. The tools block lives in scrollback
+// and scrolls off the top on a long turn, which leaves no way to see the
+// in-flight call; this is that view, pinned.
+//
+// Deliberately declares no `pageSize`. See running-tools.ts — the
+// renderer's page budget is shared across all paginated gadgets, and a
+// list that churns on a per-tool-call cadence would resize todo/edited
+// underneath the user. It caps itself instead.
+//
+// Sits LAST in the default order for the same reason. This list appears
+// and empties on a per-tool-call cadence, so anything below it visibly
+// jumps every few seconds; at the bottom there is nothing below it to
+// shove around. The cost is that the bottom is also where the column
+// sheds gadgets when the terminal is short — see BUILTIN_GADGETS.
+//
+// The snapshot field stays `running` while the gadget is titled "tools":
+// the gadget answers "what are the tools doing", but the field holds
+// specifically the IN-FLIGHT ones, and calling it `tools` would invite
+// someone to start putting completed calls in it.
+export const toolsGadget: Gadget = {
+  id: "tools",
+  title: "tools",
+  relevant: (s) => s.running.length > 0,
+  versionKey: (s, ctx) => {
+    const shown = s.running.slice(0, RUNNING_TOOL_CAP);
+    return (
+      `${ctx.width}|${s.running.length}|` +
+      shown
+        .map((t) => {
+          // Quantized to whole seconds, which is all the row displays.
+          // Keying on raw startedAt vs now would re-render every frame to
+          // emit identical bytes (same trap as the activity gadget).
+          const secs =
+            t.startedAt === undefined
+              ? ""
+              : Math.floor(Math.max(0, s.now - t.startedAt) / 1000);
+          return `${t.verb}:${t.detail ?? ""}:${secs}`;
+        })
+        .join("\u0000")
+    );
+  },
+  render: (s, ctx) => {
+    const { truncate, cellWidth } = ctx.metrics;
+    const lines: SidebarLine[] = [];
+    const shown = s.running.slice(0, RUNNING_TOOL_CAP);
+    for (const tool of shown) {
+      const elapsed =
+        tool.startedAt === undefined
+          ? ""
+          : shortDuration(Math.max(0, s.now - tool.startedAt));
+      // The verb is the part that must never be clipped — it's the
+      // at-a-glance signal. The detail gets whatever's left, and an
+      // execute call's command is routinely longer than that.
+      const head = `▸ ${tool.verb}`;
+      const budget =
+        ctx.width - cellWidth(head) - (elapsed === "" ? 0 : cellWidth(elapsed) + 1) - 1;
+      const detail =
+        tool.detail === undefined || budget < 4
+          ? ""
+          : ` ${truncate(tool.detail, budget)}`;
+      const body = `${head}${detail}`;
+      lines.push({
+        body: elapsed === "" ? body : labelValue(body, elapsed, ctx),
+        bodyStyle: "tool-status-running",
+        openPath: tool.path,
+      });
+    }
+    if (s.running.length > shown.length) {
+      lines.push(row(`  +${s.running.length - shown.length} more`, "dim"));
+    }
+    return lines;
   },
 };
 
@@ -563,4 +638,5 @@ export const BUILTIN_GADGETS: Gadget[] = [
   gitGadget,
   resourcesGadget,
   sessionGadget,
+  toolsGadget,
 ];

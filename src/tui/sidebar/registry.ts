@@ -30,6 +30,7 @@ export const DEFAULT_GADGET_IDS = [
   "git",
   "resources",
   "session",
+  "tools",
 ] as const;
 
 export function gadgetById(id: string): Gadget | undefined {

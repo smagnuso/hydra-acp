@@ -297,7 +297,11 @@ const TuiConfig = z.object({
   // window + cost), queue, todo, files (edited this session), git,
   // resources (memory/CPU for this TUI and the agent's process tree — the
   // agent row needs a local daemon, since a remote agent's pid means
-  // nothing in this machine's process table), session.
+  // nothing in this machine's process table), session, tools (the tool calls
+  // in flight right now, so a long turn's current call stays visible after
+  // the tools block has scrolled off the top of the transcript — listed
+  // last by default because it fills and empties on a per-tool-call
+  // cadence, which shoves anything below it around).
   //
   // `width` pins the body width in columns; omit to size it as ~28% of the
   // terminal, clamped to 20..36. A pinned width is honored even when large:
@@ -330,6 +334,7 @@ const TuiConfig = z.object({
           "git",
           "resources",
           "session",
+          "tools",
         ]),
     })
     .default({
@@ -344,6 +349,7 @@ const TuiConfig = z.object({
         "git",
         "resources",
         "session",
+        "tools",
       ],
     }),
   // How edit-style tool calls (Edit, Write, str_replace) render in
@@ -558,6 +564,7 @@ export const HydraConfig = z.object({
         "git",
         "resources",
         "session",
+        "tools",
       ],
     },
   }),

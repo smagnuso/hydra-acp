@@ -55,6 +55,24 @@ export interface SidebarEditedFile {
   removed?: number;
 }
 
+// One tool call currently in flight. Derived per-repaint from the app's
+// per-turn tool state; see running-tools.ts for why this list is capped
+// rather than paginated.
+export interface SidebarRunningTool {
+  // Short verb from the ACP `kind` ("read" / "edit" / "run" / "fetch" …),
+  // already normalized. "tool" when the agent sent no kind.
+  verb: string;
+  // Single-line, whitespace-collapsed hint of what the call acts on. This
+  // is ToolLineState.detail (the CLIPPED hint), never detailFull — an
+  // execute call's full command line is unbounded.
+  detail?: string;
+  // Wall clock the call started, for the live elapsed column. Undefined
+  // for calls that arrived without one; the row then omits the timer.
+  startedAt?: number;
+  // Absolute where known, for double-click-to-open.
+  path?: string;
+}
+
 // Resource reading for one process tree.
 export interface SidebarProcUsage {
   label: string;
@@ -78,6 +96,9 @@ export interface SidebarSnapshot {
   usage: SidebarUsage;
   plan: PlanEntry[];
   editedFiles: SidebarEditedFile[];
+  // Tool calls in flight right now, in the same order as the tools block.
+  // Empty while idle, which is also when the gadget hides itself.
+  running: SidebarRunningTool[];
   // null when the cwd isn't a git repo, or when the git gadget isn't
   // configured (in which case app.ts never runs the poller at all).
   git: SidebarGitStatus | null;
@@ -193,6 +214,7 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     usage: {},
     plan: [],
     editedFiles: [],
+    running: [],
     git: null,
     resources: [],
     sessionId: null,

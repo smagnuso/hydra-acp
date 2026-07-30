@@ -184,6 +184,7 @@ import {
   collapseEditedFiles,
   editedFileFromTool,
 } from "./sidebar/edited-files.js";
+import { runningTools } from "./sidebar/running-tools.js";
 import { parseTodoWrite } from "./sidebar/todos.js";
 import {
   sampleTrees,
@@ -6079,6 +6080,13 @@ async function runSession(
         toolsBlockStopReason = null;
       }
       toolCallOrder.push(id);
+      // A tool just STARTED: the running gadget should show it now, not up
+      // to a second later when the ticker next fires. Deliberately not
+      // onSidebarRelevantChange() — that also kicks a git poll, and a tool
+      // starting says nothing about the work tree.
+      if (screen.isSidebarVisible()) {
+        refreshSidebarSnapshot();
+      }
     }
   };
 
@@ -6607,6 +6615,7 @@ async function runSession(
       queued: queueCache.size,
       plan: planEntriesForSidebar(),
       editedFiles: editedFilesForSidebar(),
+      running: runningTools(toolCallOrder, toolStates, resolvedCwd),
       sessionId:
         resolvedSessionId === null
           ? null
