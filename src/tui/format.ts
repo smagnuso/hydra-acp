@@ -124,6 +124,12 @@ export interface FormattedLine {
   // click gesture: a click whose resolved offset falls inside a link
   // range opens the URL directly, skipping the path-token scan.
   links?: Array<{ start: number; end: number; url: string }>;
+  // Populated by the screen layer, not by this module: `links` projected
+  // out of clean-body coords into THIS line's body coords, clipped to the
+  // line's wrap window, and filtered/rewritten to the URLs the terminal
+  // can actually open (see Screen.osc8UrlFor). Consumed only to emit OSC 8
+  // brackets at paint time.
+  linkSpans?: Array<{ start: number; end: number; url: string }>;
   // Body-column indent applied to continuation chunks when the screen
   // layer wraps this line. Used for hanging indent under bullet/ordered
   // list items so wrapped text aligns under the item text, not under
@@ -558,41 +564,16 @@ function applyInlineMarkupWithLinks(
           //     different apps (ours honors openFileCommand, the
           //     terminal's goes through xdg-open); that's accepted.
           //
-          //   relative local paths — sidecar only. file:// requires an
-          //     absolute path and this module has no session cwd to
-          //     resolve against, so there's nothing valid to emit. The
-          //     file-links skill's `[foo.ts:42](foo.ts#L42)` lands here.
+          // Every link, whatever its scheme, becomes a links[] sidecar
+          // entry and nothing else. This module emits no escape bytes:
+          // deciding which schemes the terminal can actually open, and
+          // resolving relative paths against the session cwd, both need
+          // knowledge this layer doesn't have. The screen layer owns that
+          // policy and brackets the span in OSC 8 at paint time.
           //
-          //   hydra://sessions/<id> — sidecar only. Means "switch
-          //     session", which only our click handler can do.
-          //
-          // Everything else (http, https, ssh, mailto, …) is OSC 8 only:
-          // our internal handler has nothing useful to do with it.
-          const isFileUrl = url.startsWith("file://");
-          const isHydraSessionUrl = HYDRA_SESSION_URL_RE.test(url);
-          const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url);
-          const isLocalPath = !isFileUrl && !isHydraSessionUrl && !hasScheme;
-          // Only absolute paths can become a valid file:// target. `~` is
-          // deliberately excluded: the URL is consumed by the terminal's
-          // handler, which does no shell expansion.
-          const isAbsLocalPath = isLocalPath && url.startsWith("/");
-          const osc8Url = isFileUrl
-            ? url
-            : isAbsLocalPath
-              ? fileUrlForPath(url)
-              : null;
-          if (isHydraSessionUrl || (isLocalPath && !isAbsLocalPath)) {
-            styled += `${linkOpen}${inner.styled}${linkReset}`;
-          } else if (osc8Url !== null) {
-            styled += `\x1b]8;;${osc8Url}\x1b\\${linkOpen}${inner.styled}${linkReset}\x1b]8;;\x1b\\`;
-            ansi = true;
-          } else {
-            // OSC 8 framing: ESC ] 8 ; ; URL ST … ESC ] 8 ; ; ST.
-            // We use ST = ESC '\\' (the spec-canonical terminator);
-            // works in iTerm2, kitty, WezTerm, GNOME, Windows Term.
-            styled += `\x1b]8;;${url}\x1b\\${linkOpen}${inner.styled}${linkReset}\x1b]8;;\x1b\\`;
-            ansi = true;
-          }
+          // Keeping `body` free of escapes is what lets the path-token
+          // scanner, selection-copy and width accounting stay simple.
+          styled += `${linkOpen}${inner.styled}${linkReset}`;
           // Shift any nested link ranges (links inside links — rare).
           for (const nested of inner.links) {
             links.push({
@@ -602,12 +583,7 @@ function applyInlineMarkupWithLinks(
             });
           }
           cleanLen += inner.cleanLength;
-          // file://, hydra://sessions/<id>, and scheme-less local paths
-          // go in the sidecar so the TUI click handler can act on them
-          // instead of trying to spawn an editor or browser.
-          if (isFileUrl || isHydraSessionUrl || isLocalPath) {
-            links.push({ start, end: cleanLen, url });
-          }
+          links.push({ start, end: cleanLen, url });
           i = closeParen + 1;
           continue;
         }
@@ -1767,11 +1743,14 @@ export function formatToolLine(
   // Append the detail hint (bash command / file path) after the verb, so a
   // generic "bash"/"edit" row says which command/file — unless the title
   // already carries it (e.g. an agent that refines the title to the path).
-  // Link ranges to stash on the FormattedLine so click-to-open can
-  // resolve any truncated-path span (`…/foo`) back to its full path.
-  // Offsets are in the eventual body string (post `· ` joins) and get
-  // back-filled as each appended piece lands at a known offset.
+  // Link ranges stashed on the FormattedLine: the screen layer brackets
+  // them in OSC 8 and click-to-open resolves them, so a clipped `…/foo`
+  // span still reaches the real file. Computed after the title is fully
+  // assembled (see below) rather than back-filled per piece.
   const titleLinks: Array<{ start: number; end: number; url: string }> = [];
+  // The detail form actually appended to the title, when one was (it may
+  // be head-clipped to `…/foo/bar.ts`). Used below to locate the path run.
+  let appendedDetail: string | null = null;
   if (state.detail) {
     // Some adapters encode the tool verb into rawInput.command (e.g.
     // `command: "Read /foo"` for a Read tool), which would otherwise
@@ -1797,27 +1776,8 @@ export function formatToolLine(
       title.includes(detail) ||
       (state.detailFull !== undefined && title.includes(state.detailFull));
     if (detail.length > 0 && !dup) {
-      const detailStart = title.length + 3; // " · " is 3 chars
       title = `${title} · ${detail}`;
-      // Attach a click-target for truncated paths so a double-click on
-      // `…/foo/bar.ts` still resolves to the real file. Prefer the
-      // agent-reported absolute path (locations[0].path), falling back
-      // to state.detailFull. Skip for non-path details (e.g. a clipped
-      // bash command) — locations is only populated for filesystem
-      // tools, and detailFull starts with `/` or `~` for paths.
-      if (detail.startsWith("…")) {
-        const fullPath =
-          state.locations?.[0]?.path ?? state.detailFull ?? "";
-        const looksPathy =
-          fullPath.startsWith("/") || fullPath.startsWith("~");
-        if (looksPathy) {
-          titleLinks.push({
-            start: detailStart,
-            end: detailStart + detail.length,
-            url: fullPath,
-          });
-        }
-      }
+      appendedDetail = detail;
     }
   }
   // Append a duration: a live "running for Xs" counter while in flight,
@@ -1826,6 +1786,48 @@ export function formatToolLine(
   if (state.startedAt !== undefined) {
     const end = state.endedAt ?? now;
     title = `${title} · ${formatElapsed(end - state.startedAt)}`;
+  }
+  // Attach a click/link target covering the path as DISPLAYED. Filesystem
+  // tools show their path in one of several forms depending on how the
+  // adapter titled the call and how much room there was: the full path,
+  // the ~-contracted form, or a head-clipped `…/foo/bar.ts`. Whichever it
+  // is, the span must cover exactly that run so only the path underlines.
+  //
+  // Previously only the head-clipped case got a range, which meant the
+  // common Read/Edit shape (title already normalized to the full path, so
+  // the detail append is skipped as a duplicate) had no link at all.
+  const fullPath = state.locations?.[0]?.path ?? state.detailFull;
+  if (fullPath !== undefined && fullPath.length > 0) {
+    const looksPathy =
+      fullPath.startsWith("/") ||
+      fullPath.startsWith("~") ||
+      state.locations?.[0] !== undefined;
+    if (looksPathy) {
+      // Longest first: prefer matching the fullest displayed form so a
+      // basename occurring inside a longer path doesn't win.
+      const candidates = [
+        state.detailFull,
+        fullPath,
+        shortenHomePath(fullPath),
+        appendedDetail,
+      ]
+        .filter((c): c is string => c !== null && c !== undefined && c.length > 0)
+        .sort((a, b) => b.length - a.length);
+      for (const candidate of candidates) {
+        const at = title.indexOf(candidate);
+        if (at !== -1) {
+          // Line number rides in the fragment so the link can position,
+          // matching the file-links convention already parsed elsewhere.
+          const line = state.locations?.[0]?.line;
+          titleLinks.push({
+            start: at,
+            end: at + candidate.length,
+            url: line === undefined ? fullPath : `${fullPath}#L${line}`,
+          });
+          break;
+        }
+      }
+    }
   }
   const headLine: FormattedLine = {
     prefix: `  ${toolStatusIcon(state.status)} `,
@@ -1988,28 +1990,23 @@ export function formatEditDiffBlock(
   // ▸ (closed) for the terse one-line "edit" mark or a header-only diff.
   const header = (open: boolean): FormattedLine => {
     const shown = sanitizeSingleLine(shortenHomePath(diff.path!));
-    const marker = open ? "▾" : "▸";
-    // Hyperlink just the path, not the whole row: the marker and the
-    // (+n -m) summary aren't the file. Only absolute paths can form a
-    // valid file:// target; the visible text keeps the ~/... short form
-    // while the link carries the real path.
-    if (diff.path !== undefined && diff.path.startsWith("/")) {
-      const url = fileUrlForPath(diff.path);
-      return {
-        prefix: "  ",
-        body: `${marker} Edited \x1b]8;;${url}\x1b\\${shown}\x1b]8;;\x1b\\${summary}`,
-        bodyStyle: "dim",
-        // Escape bytes in the body: width accounting and wrapping must
-        // route through the ANSI-aware helpers. ansiIsLinksOnly keeps the
-        // path-token scanner working on this row anyway.
-        ansi: true,
-      };
-    }
-    return {
+    const marker = open ? "\u25be" : "\u25b8";
+    const lead = `${marker} Edited `;
+    const line: FormattedLine = {
       prefix: "  ",
-      body: `${marker} Edited ${shown}${summary}`,
+      body: `${lead}${shown}${summary}`,
       bodyStyle: "dim",
     };
+    // Link the path run only — not the marker, not the (+n -m) summary.
+    // The URL stays the raw path; the screen layer resolves it (including
+    // relative paths, against the session cwd) and decides whether the
+    // terminal can open it. Body carries no escape bytes.
+    if (diff.path !== undefined) {
+      line.links = [
+        { start: lead.length, end: lead.length + shown.length, url: diff.path },
+      ];
+    }
+    return line;
   };
   if (mode === "edit") {
     if (diff.path) {

@@ -4014,21 +4014,12 @@ export class Screen {
     if (line === null) {
       return null;
     }
-    // `ansi` is set by two very different producers and only one of them
-    // is hostile to offset math:
-    //
-    //   cli-highlight fenced blocks — CSI SGR spans densely interleaved
-    //     with code. Offsets there aren't trustworthy enough to scan, and
-    //     a path token inside highlighted code is reachable via the
-    //     enclosing block key anyway. Still excluded.
-    //
-    //   OSC 8 link wrapping — a couple of zero-width spans bracketing
-    //     link text on an otherwise plain prose line. matchTkMarkupAt
-    //     already recognizes these as zero-width, so stripTkMarkupWithMap
-    //     projects through them correctly. Excluding these would mean
-    //     decorating one link in a line silently killed path detection on
-    //     every other token in it.
-    if (line.ansi && !ansiIsLinksOnly(line.body ?? "")) {
+    // Syntax-highlighted bodies (cli-highlight CSI SGR spans densely
+    // interleaved with code) aren't worth scanning: offsets there are
+    // untrustworthy and a path inside highlighted code is reachable via
+    // the enclosing block key. Link decoration no longer sets `ansi`, so
+    // this guard is back to meaning only what it says.
+    if (line.ansi) {
       return null;
     }
     const rawBody = line.body ?? "";
@@ -4131,10 +4122,7 @@ export class Screen {
     if (line === null || !line.links) {
       return null;
     }
-    // Same split as pathTokenAt: OSC 8-only bodies project offsets fine,
-    // and file:// sidecar entries now coexist with OSC 8 wrapping, so
-    // bailing on every ansi line would strand them.
-    if (line.ansi && !ansiIsLinksOnly(line.body ?? "")) {
+    if (line.ansi) {
       return null;
     }
     // Strip terminal-kit markup to get the clean view, then project the
@@ -4177,6 +4165,68 @@ export class Screen {
   //
   // Returns the absolute path on success, null when the token isn't
   // path-shaped enough or fails the weak-signal existence check.
+  // Which sidecar URLs the terminal can be handed, and in what form.
+  // This is the one place that decides; format.ts deliberately doesn't
+  // know. Returns null when the link should stay click-only.
+  private osc8UrlFor(url: string): string | null {
+    if (HYDRA_SESSION_URL_RE.test(url)) {
+      // "Switch session" — meaningless to an external URL handler.
+      return null;
+    }
+    if (url.startsWith("file://")) {
+      return url;
+    }
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) {
+      // http, https, ssh, mailto, … — hand over verbatim.
+      return url;
+    }
+    // Scheme-less: a filesystem path. Split the #L42 fragment off before
+    // resolving, then re-attach it. Relative paths resolve against the
+    // session cwd — the same basis resolvePathToken uses for clicks, so
+    // the link and the gesture agree.
+    const hashAt = url.indexOf("#");
+    const bare = hashAt === -1 ? url : url.slice(0, hashAt);
+    const fragment = hashAt === -1 ? "" : url.slice(hashAt);
+    if (bare.length === 0) {
+      return null;
+    }
+    let abs = bare;
+    if (bare === "~" || bare.startsWith("~/")) {
+      abs = bare === "~" ? homedir() : `${homedir()}/${bare.slice(2)}`;
+    } else if (!isAbsolute(bare)) {
+      abs = resolvePath(this.sessionbar.cwd, bare);
+    }
+    return fileUrlForPath(abs + fragment);
+  }
+
+  // Project a line's clean-coord links into body coords, apply the scheme
+  // policy, and clip into [windowStart, windowEnd) shifted by `shift`.
+  // Returns null when nothing survives.
+  private linkSpansForWindow(
+    sourceBody: string,
+    links: ReadonlyArray<{ start: number; end: number; url: string }>,
+    windowStart: number,
+    windowEnd: number,
+    shift: number,
+  ): Array<{ start: number; end: number; url: string }> | null {
+    const cleanToRaw = cleanToRawOffsets(sourceBody);
+    const out: Array<{ start: number; end: number; url: string }> = [];
+    for (const link of links) {
+      const url = this.osc8UrlFor(link.url);
+      if (url === null) {
+        continue;
+      }
+      const rawStart = cleanToRaw[link.start] ?? sourceBody.length;
+      const rawEnd = cleanToRaw[link.end] ?? sourceBody.length;
+      const from = Math.max(rawStart, windowStart);
+      const to = Math.min(rawEnd, windowEnd);
+      if (to > from) {
+        out.push({ start: from - windowStart + shift, end: to - windowStart + shift, url });
+      }
+    }
+    return out.length > 0 ? out : null;
+  }
+
   private resolvePathToken(raw: string): string | null {
     let expanded = raw;
     if (expanded === "~" || expanded.startsWith("~/")) {
@@ -5618,6 +5668,7 @@ export class Screen {
               selRange,
               hovered,
               sharesRow,
+              line.linkSpans ?? null,
             );
           } else if (sharesRow) {
             this.term(" ".repeat(w));
@@ -7057,6 +7108,18 @@ export class Screen {
             entry.bodyDisplayShift = hang;
           }
           this.wrapOrigin.set(wrappedLine, entry);
+          if (line.links !== undefined) {
+            const spans = this.linkSpansForWindow(
+              line.body,
+              line.links,
+              srcStart,
+              srcEnd,
+              i === 0 || hang === 0 ? 0 : hang,
+            );
+            if (spans !== null) {
+              wrappedLine.linkSpans = spans;
+            }
+          }
         } else {
           const found = line.body.indexOf(chunk, scanPos);
           const colOffset = found === -1 ? scanPos : found;
@@ -7073,6 +7136,18 @@ export class Screen {
             entry.bodyDisplayShift = hang;
           }
           this.wrapOrigin.set(wrappedLine, entry);
+          if (line.links !== undefined) {
+            const spans = this.linkSpansForWindow(
+              line.body,
+              line.links,
+              colOffset,
+              colOffset + chunk.length,
+              i === 0 || hang === 0 ? 0 : hang,
+            );
+            if (spans !== null) {
+              wrappedLine.linkSpans = spans;
+            }
+          }
           scanPos = colOffset + chunk.length;
         }
       }
@@ -7945,28 +8020,6 @@ function matchCsiAt(text: string, i: number): string | null {
   return text.slice(i, j + 1);
 }
 
-// True when the body's raw-escape content consists solely of OSC 8
-// hyperlink spans, i.e. it carries no CSI SGR sequences. Distinguishes a
-// prose line that merely had a link wrapped in it from a syntax-
-// highlighted body, which pathTokenAt must keep skipping.
-export function ansiIsLinksOnly(body: string): boolean {
-  for (let i = 0; i < body.length; ) {
-    if (body.charCodeAt(i) !== 0x1b /* ESC */) {
-      i += 1;
-      continue;
-    }
-    const osc8 = matchOsc8At(body, i);
-    if (osc8 !== null) {
-      i += osc8.length;
-      continue;
-    }
-    // Any other escape (CSI SGR from cli-highlight, or something we
-    // don't model) disqualifies the line.
-    return false;
-  }
-  return true;
-}
-
 export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
   if (text.charCodeAt(i) === 0x1b /* ESC */) {
     const osc8 = matchOsc8At(text, i);
@@ -8036,6 +8089,29 @@ export function stripTkMarkupWithMap(text: string): {
   }
   rawToClean[text.length] = clean.length;
   return { clean, rawToClean };
+}
+
+// Inverse of stripTkMarkupWithMap's rawToClean: cleanToRaw[cleanOffset] is
+// the raw index where that clean offset begins. FormattedLine.links carries
+// clean-body offsets (so it survives the zero-width caret markup a styled
+// body wears), but the paint layer slices the RAW body, so link spans have
+// to be projected before they can be used.
+//
+// Maps the leading edge: for a run of raw bytes collapsing to one clean
+// index (a markup span), the earliest raw index wins, so an opener sitting
+// immediately before a link's first visible char lands inside the span
+// rather than outside it. That's the behavior we want — the style token
+// belongs to the text it styles.
+export function cleanToRawOffsets(rawBody: string): number[] {
+  const { clean, rawToClean } = stripTkMarkupWithMap(rawBody);
+  const cleanToRaw = new Array<number>(clean.length + 1).fill(rawBody.length);
+  for (let raw = rawBody.length; raw >= 0; raw--) {
+    const c = rawToClean[raw];
+    if (c !== undefined) {
+      cleanToRaw[c] = raw;
+    }
+  }
+  return cleanToRaw;
 }
 
 // Count visible characters in text[from..to), treating CSI SGR / OSC 8 /

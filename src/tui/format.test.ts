@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { thisMachine } from "../core/machine.js";
-import { ansiIsLinksOnly } from "./screen.js";
+import { stripTkMarkupWithMap } from "./screen.js";
 import stringWidth from "string-width";
 import {
   buildUnifiedDiff,
@@ -65,20 +65,16 @@ describe("parseAgentMarkdown", () => {
       "https://kibana.example.net/app/discover#/?_a=(filters:!((meta:(alias:signature,disabled:!f),query:(match_phrase:(crash_properties.coarseSignature:'ABORT:V8_OOM:6096e1')))))";
     const lines = parseAgentMarkdown(`[Open in Kibana](${url})`);
     expect(lines).toHaveLength(1);
-    const body = lines[0]?.body ?? "";
-    expect(body).toContain(`\x1b]8;;${url}\x1b\\`);
-    // No stray ')))' should spill into the visible label after the
-    // OSC 8 terminator (the bug truncated the URL at the first inner
-    // ')' and left the rest as literal text).
-    const afterTerminator = body.split("\x1b]8;;\x1b\\")[1] ?? "";
-    expect(afterTerminator).not.toContain(")");
+    // The whole URL lands in the sidecar; the bug truncated it at the
+    // first inner ')' and spilled the rest into the visible label.
+    expect(lines[0]?.links?.[0]?.url).toBe(url);
+    expect(lines[0]?.body).not.toContain(")");
   });
 
   it("[text](url) honors backslash-escaped closing paren in URL", () => {
     const url = "https://example.com/a\\)b";
     const lines = parseAgentMarkdown(`[x](${url})`);
-    const body = lines[0]?.body ?? "";
-    expect(body).toContain(`\x1b]8;;${url}\x1b\\`);
+    expect(lines[0]?.links?.[0]?.url).toBe(url);
   });
 
   it("highlights a ```diff block — +/- lines carry ANSI", () => {
@@ -546,6 +542,82 @@ describe("formatToolLine", () => {
     ).toBe("edit · src/tui/format.ts");
   });
 
+  it("links the path when the title already carries it (Read/Edit shape)", () => {
+    // This is the common filesystem-tool shape: the adapter normalized the
+    // title to the full path, so the detail append is skipped as a
+    // duplicate. Previously that left the row with no link at all.
+    const line = formatToolLine({
+      initialTitle: "Read",
+      latestTitle: "/repo/src/alpha.ts",
+      detail: "/repo/src/alpha.ts",
+      detailFull: "/repo/src/alpha.ts",
+      locations: [{ path: "/repo/src/alpha.ts" }],
+      status: "completed",
+    })[0];
+    const link = line?.links?.[0];
+    expect(link?.url).toBe("/repo/src/alpha.ts");
+    expect((line?.body ?? "").slice(link!.start, link!.end)).toBe(
+      "/repo/src/alpha.ts",
+    );
+  });
+
+  it("carries the line number in the fragment when locations report one", () => {
+    const line = formatToolLine({
+      initialTitle: "Edit",
+      latestTitle: "/repo/src/beta.ts",
+      locations: [{ path: "/repo/src/beta.ts", line: 42 }],
+      status: "completed",
+    })[0];
+    expect(line?.links?.[0]?.url).toBe("/repo/src/beta.ts#L42");
+  });
+
+  it("links a head-clipped path span back to the full path", () => {
+    const line = formatToolLine({
+      initialTitle: "Read",
+      latestTitle: "Read",
+      detail: "…/src/alpha.ts",
+      detailFull: "/very/long/repo/src/alpha.ts",
+      locations: [{ path: "/very/long/repo/src/alpha.ts" }],
+      status: "completed",
+    })[0];
+    const link = line?.links?.[0];
+    // Span covers the clipped display form; the URL is the real path.
+    expect(link?.url).toBe("/very/long/repo/src/alpha.ts");
+    expect((line?.body ?? "").slice(link!.start, link!.end)).toBe(
+      "…/src/alpha.ts",
+    );
+  });
+
+  it("does not link a bash command that merely looks wordy", () => {
+    const line = formatToolLine({
+      initialTitle: "bash",
+      latestTitle: "bash",
+      detail: "grep -n foo src/x.ts",
+      status: "completed",
+    })[0];
+    // No locations[] and no detailFull => nothing to link.
+    expect(line?.links).toBeUndefined();
+  });
+
+  it("excludes the duration suffix from the link span", () => {
+    const line = formatToolLine(
+      {
+        initialTitle: "Read",
+        latestTitle: "/repo/src/alpha.ts",
+        locations: [{ path: "/repo/src/alpha.ts" }],
+        status: "completed",
+        startedAt: 0,
+        endedAt: 1500,
+      },
+      1500,
+    )[0];
+    const link = line?.links?.[0];
+    const body = line?.body ?? "";
+    expect(body).toContain("·");
+    expect(body.slice(link!.start, link!.end)).toBe("/repo/src/alpha.ts");
+    expect(body.slice(link!.end)).not.toContain("/repo");
+  });
+
   it("strips a leading copy of the title from the detail before appending", () => {
     expect(
       formatToolLine({
@@ -685,12 +757,6 @@ describe("formatElapsed", () => {
 });
 
 
-// The edit-diff header hyperlinks its path span, so `body` carries OSC 8
-// escapes. These assertions care about what the user sees, not the link
-// bytes, so compare against the stripped form.
-const visibleBody = (body: string | undefined): string =>
-  (body ?? "").replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "");
-
 describe("formatEditDiffBlock", () => {
   it("in 'edit' mode emits just the dim path header", () => {
     const lines = formatEditDiffBlock(
@@ -698,7 +764,7 @@ describe("formatEditDiffBlock", () => {
       "edit",
     );
     expect(lines).toHaveLength(1);
-    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited /repo/src/foo.ts (+1 -1)");
+    expect(lines[0]?.body).toBe("▸ Edited /repo/src/foo.ts (+1 -1)");
     expect(lines[0]?.bodyStyle).toBe("dim");
   });
 
@@ -714,7 +780,7 @@ describe("formatEditDiffBlock", () => {
     // leading blank separator + 1 path header + 2 diff lines (1 removed, 1 added)
     expect(lines).toHaveLength(4);
     expect(lines[0]?.body).toBe("");
-    expect(visibleBody(lines[1]?.body)).toBe("▾ Edited /repo/src/foo.ts (+1 -1)");
+    expect(lines[1]?.body).toBe("▾ Edited /repo/src/foo.ts (+1 -1)");
     expect(lines[1]).toMatchObject({
       bodyStyle: "dim",
     });
@@ -754,7 +820,7 @@ describe("formatEditDiffBlock", () => {
     );
     expect(lines).toHaveLength(1);
     // ~12 KB total, rendered as an approximate size rather than +N/-M.
-    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited /repo/foo.ts (~12 KB)");
+    expect(lines[0]?.body).toBe("▸ Edited /repo/foo.ts (~12 KB)");
   });
 
   it("shows a fetching placeholder for a deferred diff expanded to 'diff'", () => {
@@ -768,7 +834,7 @@ describe("formatEditDiffBlock", () => {
       "diff",
     );
     const bodies = lines.map((l) => l.body);
-    expect(bodies.map(visibleBody)).toContain("▾ Edited /repo/foo.ts (~2 KB)");
+    expect(bodies).toContain("▾ Edited /repo/foo.ts (~2 KB)");
     expect(bodies).toContain("⋯ fetching diff…");
   });
 
@@ -786,7 +852,7 @@ describe("formatEditDiffBlock", () => {
     const err = lines.find((l) => l.body === "⚠ failed to load diff");
     expect(err).toBeDefined();
     expect(err?.bodyStyle).toBe("tool-status-fail");
-    expect(lines.map((l) => visibleBody(l.body))).toContain(
+    expect(lines.map((l) => l.body)).toContain(
       "▾ Edited /repo/foo.ts (~2 KB)",
     );
   });
@@ -797,7 +863,7 @@ describe("formatEditDiffBlock", () => {
       { path: `${home}/dev/proj/foo.ts`, oldText: "x", newText: "y" },
       "edit",
     );
-    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited ~/dev/proj/foo.ts (+1 -1)");
+    expect(lines[0]?.body).toBe("▸ Edited ~/dev/proj/foo.ts (+1 -1)");
   });
 
   it("summarizes added-only and removed-only edits", () => {
@@ -805,12 +871,12 @@ describe("formatEditDiffBlock", () => {
       { path: "/repo/a.ts", oldText: "", newText: "l1\nl2\nl3\n" },
       "edit",
     );
-    expect(visibleBody(added[0]?.body)).toBe("▸ Edited /repo/a.ts (+3)");
+    expect(added[0]?.body).toBe("▸ Edited /repo/a.ts (+3)");
     const removed = formatEditDiffBlock(
       { path: "/repo/b.ts", oldText: "l1\nl2\n", newText: "" },
       "edit",
     );
-    expect(visibleBody(removed[0]?.body)).toBe("▸ Edited /repo/b.ts (-2)");
+    expect(removed[0]?.body).toBe("▸ Edited /repo/b.ts (-2)");
   });
 
   it("omits the summary when nothing changed", () => {
@@ -818,7 +884,7 @@ describe("formatEditDiffBlock", () => {
       { path: "/repo/c.ts", oldText: "same\n", newText: "same\n" },
       "edit",
     );
-    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited /repo/c.ts");
+    expect(lines[0]?.body).toBe("▸ Edited /repo/c.ts");
   });
 });
 
@@ -1433,11 +1499,13 @@ describe("renderToolDetail", () => {
     expect(links?.[0]?.url).toBe("hydra://tunnel.example.com:7000/sessions/def456#turn-2");
   });
 
-  it("non-hydra-session URLs are not in the sidecar", () => {
+  it("http URLs go in the sidecar like every other link", () => {
+    // format.ts no longer discriminates by scheme: every link is a span,
+    // and the screen layer decides what the terminal can open.
     const lines = parseAgentMarkdown("[open](https://example.com/page)");
     expect(lines).toHaveLength(1);
-    const links = lines[0]?.links;
-    expect(links).toBeUndefined();
+    expect(lines[0]?.links?.[0]?.url).toBe("https://example.com/page");
+    expect(lines[0]?.body).not.toContain("\x1b");
   });
 
   it("scheme-less path links (file-links skill #L) go in the sidecar, not OSC 8", () => {
@@ -1466,59 +1534,35 @@ describe("renderToolDetail", () => {
     expect(lines[0]?.ansi).toBeFalsy();
   });
 
-  it("absolute path links get BOTH OSC 8 file:// and a sidecar entry", () => {
+  it("absolute path links become a sidecar span with no escapes in body", () => {
     const lines = parseAgentMarkdown("[foo.ts:42](/abs/src/foo.ts#L42)");
     expect(lines).toHaveLength(1);
-    const body = lines[0]?.body ?? "";
-    // OSC 8 so the terminal paints it as a link and ctrl-click works.
-    expect(body).toContain(`file://${thisMachine()}/abs/src/foo.ts#L42`);
-    expect(lines[0]?.ansi).toBe(true);
-    // Sidecar too, so our double-click gesture stays authoritative and
-    // routes through tui.openFileCommand rather than xdg-open.
-    const links = lines[0]?.links;
-    expect(links).toHaveLength(1);
-    expect(links?.[0]?.url).toBe("/abs/src/foo.ts#L42");
+    // No escape bytes and not ansi-flagged: the screen layer brackets the
+    // span at paint time, so width accounting and the path scanner stay
+    // on the simple path.
+    expect(lines[0]?.body).not.toContain("\x1b");
+    expect(lines[0]?.ansi).toBeFalsy();
+    const link = lines[0]?.links?.[0];
+    expect(link?.url).toBe("/abs/src/foo.ts#L42");
+    // Span covers exactly the visible label. Offsets are CLEAN-body
+    // coords (they have to survive the zero-width caret markup the link
+    // styling wears), so compare against the stripped view.
+    const clean = stripTkMarkupWithMap(lines[0]?.body ?? "").clean;
+    expect(clean.slice(link!.start, link!.end)).toBe("foo.ts:42");
   });
 
-  it("file:// links get BOTH OSC 8 and a sidecar entry", () => {
-    const url = "file:///abs/src/bar.ts";
-    const lines = parseAgentMarkdown(`[bar.ts](${url})`);
-    const body = lines[0]?.body ?? "";
-    expect(body).toContain(`\x1b]8;;${url}\x1b\\`);
-    expect(lines[0]?.links?.[0]?.url).toBe(url);
+  it("file:// links keep their scheme verbatim in the sidecar", () => {
+    const lines = parseAgentMarkdown("[bar.ts](file:///abs/src/bar.ts)");
+    expect(lines[0]?.links?.[0]?.url).toBe("file:///abs/src/bar.ts");
+    expect(lines[0]?.body).not.toContain("\x1b");
   });
 
-  it("percent-encodes spaces in the file:// target but not the sidecar path", () => {
-    const lines = parseAgentMarkdown("[x](/abs/my dir/a.ts)");
-    const body = lines[0]?.body ?? "";
-    expect(body).toContain("/abs/my%20dir/a.ts");
-    // The sidecar keeps the raw path — resolvePathToken wants a real
-    // filesystem path, not a URL-encoded one.
-    expect(lines[0]?.links?.[0]?.url).toBe("/abs/my dir/a.ts");
+  it("relative path links are sidecar spans too (screen resolves the cwd)", () => {
+    const lines = parseAgentMarkdown("[a.ts](src/a.ts#L7)");
+    expect(lines[0]?.links?.[0]?.url).toBe("src/a.ts#L7");
+    expect(lines[0]?.ansi).toBeFalsy();
   });
 
-  it("~-relative paths are NOT OSC 8-wrapped (no shell expansion in URL handlers)", () => {
-    const lines = parseAgentMarkdown("[notes](~/notes/draft.md)");
-    const body = lines[0]?.body ?? "";
-    expect(body).not.toContain("\x1b]8;;");
-    expect(lines[0]?.links?.[0]?.url).toBe("~/notes/draft.md");
-  });
-
-  it("an OSC 8-wrapped absolute path leaves the rest of the line scannable", () => {
-    const lines = parseAgentMarkdown("see [a](/abs/a.ts) and also src/b.ts:12");
-    const body = lines[0]?.body ?? "";
-    expect(lines[0]?.ansi).toBe(true);
-    // The whole point of ansiIsLinksOnly: no CSI escapes, so pathTokenAt
-    // can still find src/b.ts:12 on this line.
-    expect(ansiIsLinksOnly(body)).toBe(true);
-  });
-
-  it("syntax-highlighted bodies are not link-only ansi", () => {
-    const lines = parseAgentMarkdown("```ts\nconst x: string = src/b.ts;\n```");
-    const highlighted = lines.find((l) => l.ansi === true);
-    expect(highlighted).toBeDefined();
-    expect(ansiIsLinksOnly(highlighted?.body ?? "")).toBe(false);
-  });
 });
 
 
@@ -1529,25 +1573,23 @@ describe("edit-diff header hyperlink", () => {
     newText: "a\nc\n",
   });
 
-  it("hyperlinks only the path span, not the marker or the +/- summary", () => {
+  it("links only the path span, not the marker or the +/- summary", () => {
     const lines = formatEditDiffBlock(diff("/repo/src/alpha.ts"), "edit");
     expect(lines).toHaveLength(1);
     const body = lines[0]?.body ?? "";
-    expect(body).toContain(`file://${thisMachine()}/repo/src/alpha.ts`);
-    expect(lines[0]?.ansi).toBe(true);
-    // The opener must sit after "Edited " and the closer before the
-    // summary, so the terminal underlines the path alone.
-    const open = body.indexOf("\x1b]8;;file:");
-    const close = body.indexOf("\x1b]8;;\x1b\\");
-    expect(body.slice(0, open)).toBe("\u25b8 Edited ");
-    expect(body.slice(close + 6)).toContain("(+1 -1)");
-    // Link-only ansi, so pathTokenAt still scans the row.
-    expect(ansiIsLinksOnly(body)).toBe(true);
+    expect(body).not.toContain("\x1b");
+    expect(lines[0]?.ansi).toBeFalsy();
+    const link = lines[0]?.links?.[0];
+    expect(link?.url).toBe("/repo/src/alpha.ts");
+    expect(body.slice(link!.start, link!.end)).toBe("/repo/src/alpha.ts");
+    // Marker before, summary after, both outside the span.
+    expect(body.slice(0, link!.start)).toBe("\u25b8 Edited ");
+    expect(body.slice(link!.end)).toBe(" (+1 -1)");
   });
 
-  it("leaves a relative path unlinked (no valid file:// target)", () => {
+  it("links a relative path too — the screen layer resolves it", () => {
     const lines = formatEditDiffBlock(diff("src/rel.ts"), "edit");
-    expect(lines[0]?.body).not.toContain("\x1b]8;;");
+    expect(lines[0]?.links?.[0]?.url).toBe("src/rel.ts");
     expect(lines[0]?.ansi).toBeFalsy();
   });
 });

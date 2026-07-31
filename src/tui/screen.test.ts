@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { thisMachine } from "../core/machine.js";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
@@ -2496,31 +2497,58 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("foo-bar-baz");
   });
 
-  it("path token stays clickable on a line that also carries an OSC 8 link", () => {
-    const screen = makeTallScreen({
-      width: 200,
-      height: 24,
-      mouse: true,
-      openFileCommand: ["true"],
-    });
-    // An OSC 8 span earlier in the line sets ansi=true. Before
-    // ansiIsLinksOnly, pathTokenAt bailed on the whole line and the
-    // trailing absolute path silently stopped being clickable.
-    //
-    // Observable: a resolved path-open returns true from tryOpenFileAt,
-    // which suppresses the word-snap selection fallback. So "no
-    // selection" is the signal that the open path won.
+  it("paints a prose link span as OSC 8, bracketing only the label", () => {
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    const screen = makeTallScreen({ width: 200, height: 24 });
+    (screen as unknown as { started: boolean }).started = true;
+    // Body is plain text; the span lives in the sidecar. This is the whole
+    // point of step 3 — format.ts emits no escapes.
     screen.appendLine({
-      body: "see \x1b]8;;file://host/abs/a.ts\x1b\\a.ts\x1b]8;;\x1b\\ and /abs/b.ts too",
-      ansi: true,
+      body: "see alpha.ts for details",
+      links: [{ start: 4, end: 12, url: "/abs/src/alpha.ts" }],
     });
-    const y = visibleRows(screen);
-    const x = 18;
-    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
-    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
-    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
-    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
-    expect(screen.getSelectionText()).toBe("");
+    screen.repaintNow();
+    const all = writes.join("");
+    spy.mockRestore();
+    // Escapes go to process.stdout while the label text goes through the
+    // term writer, so only the brackets are observable here. That the
+    // bracket covers just the label is asserted at the format level (span
+    // offsets) and by the withLinks subdivision.
+    expect(all).toContain(`\x1b]8;;file://${thisMachine()}/abs/src/alpha.ts\x1b\\`);
+    // Exactly one opener and one closer: an unbalanced pair would bleed
+    // the link across the rest of the screen.
+    expect(all.split("\x1b]8;;file:").length - 1).toBe(1);
+    expect(all.split("\x1b]8;;\x1b\\").length - 1).toBe(1);
+  });
+
+  it("resolves a relative prose link against the session cwd", () => {
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    const screen = makeTallScreen({ width: 200, height: 24 });
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSessionbar({ cwd: "/repo/proj" });
+    // Relative paths used to go undecorated (format.ts has no cwd). The
+    // screen layer does, so they now resolve on the same basis the
+    // double-click gesture uses.
+    screen.appendLine({
+      body: "edit src/a.ts now",
+      links: [{ start: 5, end: 13, url: "src/a.ts#L7" }],
+    });
+    screen.repaintNow();
+    const all = writes.join("");
+    spy.mockRestore();
+    expect(all).toContain("/repo/proj/src/a.ts#L7");
   });
 
   it("syntax-highlighted (CSI) bodies still skip the path scan", () => {
@@ -2530,8 +2558,8 @@ describe("Screen block-click routing", () => {
       mouse: true,
       openFileCommand: ["true"],
     });
-    // CSI SGR present => not links-only => pathTokenAt bails, so the
-    // double-click falls through to word-snap selection.
+    // pathTokenAt bails on ansi bodies, so the double-click falls
+    // through to word-snap selection.
     screen.appendLine({
       body: "\x1b[32mconst p = /abs/b.ts\x1b[0m",
       ansi: true,
