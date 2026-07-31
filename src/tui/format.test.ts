@@ -1,5 +1,7 @@
 import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { thisMachine } from "../core/machine.js";
+import { ansiIsLinksOnly } from "./screen.js";
 import stringWidth from "string-width";
 import {
   buildUnifiedDiff,
@@ -682,6 +684,13 @@ describe("formatElapsed", () => {
   });
 });
 
+
+// The edit-diff header hyperlinks its path span, so `body` carries OSC 8
+// escapes. These assertions care about what the user sees, not the link
+// bytes, so compare against the stripped form.
+const visibleBody = (body: string | undefined): string =>
+  (body ?? "").replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "");
+
 describe("formatEditDiffBlock", () => {
   it("in 'edit' mode emits just the dim path header", () => {
     const lines = formatEditDiffBlock(
@@ -689,10 +698,8 @@ describe("formatEditDiffBlock", () => {
       "edit",
     );
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({
-      body: "▸ Edited /repo/src/foo.ts (+1 -1)",
-      bodyStyle: "dim",
-    });
+    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited /repo/src/foo.ts (+1 -1)");
+    expect(lines[0]?.bodyStyle).toBe("dim");
   });
 
   it("in 'diff' mode emits the header followed by a highlighted diff body", () => {
@@ -707,8 +714,8 @@ describe("formatEditDiffBlock", () => {
     // leading blank separator + 1 path header + 2 diff lines (1 removed, 1 added)
     expect(lines).toHaveLength(4);
     expect(lines[0]?.body).toBe("");
+    expect(visibleBody(lines[1]?.body)).toBe("▾ Edited /repo/src/foo.ts (+1 -1)");
     expect(lines[1]).toMatchObject({
-      body: "▾ Edited /repo/src/foo.ts (+1 -1)",
       bodyStyle: "dim",
     });
     expect(lines[2]?.bodyStyle).toBe("code");
@@ -747,7 +754,7 @@ describe("formatEditDiffBlock", () => {
     );
     expect(lines).toHaveLength(1);
     // ~12 KB total, rendered as an approximate size rather than +N/-M.
-    expect(lines[0]?.body).toBe("▸ Edited /repo/foo.ts (~12 KB)");
+    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited /repo/foo.ts (~12 KB)");
   });
 
   it("shows a fetching placeholder for a deferred diff expanded to 'diff'", () => {
@@ -761,7 +768,7 @@ describe("formatEditDiffBlock", () => {
       "diff",
     );
     const bodies = lines.map((l) => l.body);
-    expect(bodies).toContain("▾ Edited /repo/foo.ts (~2 KB)");
+    expect(bodies.map(visibleBody)).toContain("▾ Edited /repo/foo.ts (~2 KB)");
     expect(bodies).toContain("⋯ fetching diff…");
   });
 
@@ -779,7 +786,9 @@ describe("formatEditDiffBlock", () => {
     const err = lines.find((l) => l.body === "⚠ failed to load diff");
     expect(err).toBeDefined();
     expect(err?.bodyStyle).toBe("tool-status-fail");
-    expect(lines.map((l) => l.body)).toContain("▾ Edited /repo/foo.ts (~2 KB)");
+    expect(lines.map((l) => visibleBody(l.body))).toContain(
+      "▾ Edited /repo/foo.ts (~2 KB)",
+    );
   });
 
   it("contracts a home-prefixed path to ~ in the header", () => {
@@ -788,7 +797,7 @@ describe("formatEditDiffBlock", () => {
       { path: `${home}/dev/proj/foo.ts`, oldText: "x", newText: "y" },
       "edit",
     );
-    expect(lines[0]?.body).toBe("▸ Edited ~/dev/proj/foo.ts (+1 -1)");
+    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited ~/dev/proj/foo.ts (+1 -1)");
   });
 
   it("summarizes added-only and removed-only edits", () => {
@@ -796,12 +805,12 @@ describe("formatEditDiffBlock", () => {
       { path: "/repo/a.ts", oldText: "", newText: "l1\nl2\nl3\n" },
       "edit",
     );
-    expect(added[0]?.body).toBe("▸ Edited /repo/a.ts (+3)");
+    expect(visibleBody(added[0]?.body)).toBe("▸ Edited /repo/a.ts (+3)");
     const removed = formatEditDiffBlock(
       { path: "/repo/b.ts", oldText: "l1\nl2\n", newText: "" },
       "edit",
     );
-    expect(removed[0]?.body).toBe("▸ Edited /repo/b.ts (-2)");
+    expect(visibleBody(removed[0]?.body)).toBe("▸ Edited /repo/b.ts (-2)");
   });
 
   it("omits the summary when nothing changed", () => {
@@ -809,7 +818,7 @@ describe("formatEditDiffBlock", () => {
       { path: "/repo/c.ts", oldText: "same\n", newText: "same\n" },
       "edit",
     );
-    expect(lines[0]?.body).toBe("▸ Edited /repo/c.ts");
+    expect(visibleBody(lines[0]?.body)).toBe("▸ Edited /repo/c.ts");
   });
 });
 
@@ -1456,5 +1465,89 @@ describe("renderToolDetail", () => {
     expect(links?.[0]?.url).toBe("gaming/d2d/game-loader-resource.ts");
     expect(lines[0]?.ansi).toBeFalsy();
   });
+
+  it("absolute path links get BOTH OSC 8 file:// and a sidecar entry", () => {
+    const lines = parseAgentMarkdown("[foo.ts:42](/abs/src/foo.ts#L42)");
+    expect(lines).toHaveLength(1);
+    const body = lines[0]?.body ?? "";
+    // OSC 8 so the terminal paints it as a link and ctrl-click works.
+    expect(body).toContain(`file://${thisMachine()}/abs/src/foo.ts#L42`);
+    expect(lines[0]?.ansi).toBe(true);
+    // Sidecar too, so our double-click gesture stays authoritative and
+    // routes through tui.openFileCommand rather than xdg-open.
+    const links = lines[0]?.links;
+    expect(links).toHaveLength(1);
+    expect(links?.[0]?.url).toBe("/abs/src/foo.ts#L42");
+  });
+
+  it("file:// links get BOTH OSC 8 and a sidecar entry", () => {
+    const url = "file:///abs/src/bar.ts";
+    const lines = parseAgentMarkdown(`[bar.ts](${url})`);
+    const body = lines[0]?.body ?? "";
+    expect(body).toContain(`\x1b]8;;${url}\x1b\\`);
+    expect(lines[0]?.links?.[0]?.url).toBe(url);
+  });
+
+  it("percent-encodes spaces in the file:// target but not the sidecar path", () => {
+    const lines = parseAgentMarkdown("[x](/abs/my dir/a.ts)");
+    const body = lines[0]?.body ?? "";
+    expect(body).toContain("/abs/my%20dir/a.ts");
+    // The sidecar keeps the raw path — resolvePathToken wants a real
+    // filesystem path, not a URL-encoded one.
+    expect(lines[0]?.links?.[0]?.url).toBe("/abs/my dir/a.ts");
+  });
+
+  it("~-relative paths are NOT OSC 8-wrapped (no shell expansion in URL handlers)", () => {
+    const lines = parseAgentMarkdown("[notes](~/notes/draft.md)");
+    const body = lines[0]?.body ?? "";
+    expect(body).not.toContain("\x1b]8;;");
+    expect(lines[0]?.links?.[0]?.url).toBe("~/notes/draft.md");
+  });
+
+  it("an OSC 8-wrapped absolute path leaves the rest of the line scannable", () => {
+    const lines = parseAgentMarkdown("see [a](/abs/a.ts) and also src/b.ts:12");
+    const body = lines[0]?.body ?? "";
+    expect(lines[0]?.ansi).toBe(true);
+    // The whole point of ansiIsLinksOnly: no CSI escapes, so pathTokenAt
+    // can still find src/b.ts:12 on this line.
+    expect(ansiIsLinksOnly(body)).toBe(true);
+  });
+
+  it("syntax-highlighted bodies are not link-only ansi", () => {
+    const lines = parseAgentMarkdown("```ts\nconst x: string = src/b.ts;\n```");
+    const highlighted = lines.find((l) => l.ansi === true);
+    expect(highlighted).toBeDefined();
+    expect(ansiIsLinksOnly(highlighted?.body ?? "")).toBe(false);
+  });
 });
 
+
+describe("edit-diff header hyperlink", () => {
+  const diff = (path: string) => ({
+    path,
+    oldText: "a\nb\n",
+    newText: "a\nc\n",
+  });
+
+  it("hyperlinks only the path span, not the marker or the +/- summary", () => {
+    const lines = formatEditDiffBlock(diff("/repo/src/alpha.ts"), "edit");
+    expect(lines).toHaveLength(1);
+    const body = lines[0]?.body ?? "";
+    expect(body).toContain(`file://${thisMachine()}/repo/src/alpha.ts`);
+    expect(lines[0]?.ansi).toBe(true);
+    // The opener must sit after "Edited " and the closer before the
+    // summary, so the terminal underlines the path alone.
+    const open = body.indexOf("\x1b]8;;file:");
+    const close = body.indexOf("\x1b]8;;\x1b\\");
+    expect(body.slice(0, open)).toBe("\u25b8 Edited ");
+    expect(body.slice(close + 6)).toContain("(+1 -1)");
+    // Link-only ansi, so pathTokenAt still scans the row.
+    expect(ansiIsLinksOnly(body)).toBe(true);
+  });
+
+  it("leaves a relative path unlinked (no valid file:// target)", () => {
+    const lines = formatEditDiffBlock(diff("src/rel.ts"), "edit");
+    expect(lines[0]?.body).not.toContain("\x1b]8;;");
+    expect(lines[0]?.ansi).toBeFalsy();
+  });
+});

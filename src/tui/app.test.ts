@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ToolLineState } from "./format.js";
-import { toggleToolExpansion, resolveToolsClick, _buildToolsLines } from "./app.js";
+import {
+  toggleToolExpansion,
+  resolveToolsClick,
+  resolveOpenFileCommand,
+  _buildToolsLines,
+} from "./app.js";
 
 describe("toggleToolExpansion", () => {
   it("adds a toolCallId to the set on first toggle", () => {
@@ -318,5 +323,39 @@ describe("_buildToolsLines", () => {
     expect(result.rowOwners[0]).toBeNull();
     expect(result.rowOwners[1]).toBe("tc-x");
     expect(result.rowOwners[2]).toBe("tc-y");
+  });
+});
+
+describe("resolveOpenFileCommand", () => {
+  it("prefers the configured value over the environment", () => {
+    expect(
+      resolveOpenFileCommand("code --goto %f:%n", { VISUAL: "vim", EDITOR: "nano" }),
+    ).toBe("code --goto %f:%n");
+  });
+
+  it("preserves the array form as-is", () => {
+    expect(resolveOpenFileCommand(["code", "--goto", "%f:%n"], {})).toEqual([
+      "code",
+      "--goto",
+      "%f:%n",
+    ]);
+  });
+
+  it("falls back to $VISUAL before $EDITOR", () => {
+    expect(resolveOpenFileCommand(undefined, { VISUAL: "gvim", EDITOR: "nano" })).toBe(
+      "gvim",
+    );
+  });
+
+  it("falls back to $EDITOR when $VISUAL is unset", () => {
+    expect(resolveOpenFileCommand(undefined, { EDITOR: "nano" })).toBe("nano");
+  });
+
+  it("stays undefined when nothing is set, keeping the feature off", () => {
+    expect(resolveOpenFileCommand(undefined, {})).toBeUndefined();
+  });
+
+  it("does not treat an empty-string EDITOR as configured", () => {
+    expect(resolveOpenFileCommand(undefined, { EDITOR: "" })).toBeFalsy();
   });
 });

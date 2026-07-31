@@ -686,6 +686,23 @@ function isReadonlyForbiddenEffect(effect: InputEffect): boolean {
   }
 }
 
+// tui.openFileCommand wins; absent that, fall back to $VISUAL then
+// $EDITOR. The env forms carry no %f/%n placeholders, so tryOpenPathString
+// appends the path and drops the line number — acceptable for GUI/client
+// editors (code, emacsclient -n, subl), which is what these variables
+// usually name on a desktop. Note the fallback also enables the
+// single-click debounce that defers block toggles by 500ms so a
+// double-click can win; that's the cost of having the gesture live at all.
+export function resolveOpenFileCommand(
+  configured: string | string[] | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | string[] | undefined {
+  if (configured !== undefined) {
+    return configured;
+  }
+  return env.VISUAL ?? env.EDITOR;
+}
+
 const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Alt+Enter", "newline in prompt"],
   ["Shift+Tab", "cycle agent modes (plan / accept-edits / etc.)"],
@@ -710,7 +727,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["PgUp / PgDn", "scroll scrollback"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
-  ["Double-click", "open file under cursor / sidebar file row in $EDITOR"],
+  ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $VISUAL/$EDITOR)"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
   ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
   null,
@@ -2522,7 +2539,7 @@ async function runSession(
     mouse: viewPrefs.mouseEnabled,
     inAppSelection: viewPrefs.inAppSelectionEnabled,
     selectionClipboard: config.tui.selectionClipboard,
-    openFileCommand: config.tui.openFileCommand,
+    openFileCommand: resolveOpenFileCommand(config.tui.openFileCommand),
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
     onSuspend: process.platform !== "win32" ? onSuspend : undefined,

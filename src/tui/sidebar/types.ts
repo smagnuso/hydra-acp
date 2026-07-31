@@ -173,6 +173,17 @@ export interface SidebarContext {
 // honours tui.openFileCommand with no separate plumbing.
 export interface SidebarLine extends FormattedLine {
   openPath?: string;
+  // The run of `body` that actually names the file, as [start, end) byte
+  // offsets. Gadgets compose rows out of glyphs, deltas and gap padding
+  // ("● alpha.ts", "alpha.ts    +3 -1"), and only this run should render
+  // as a hyperlink — underlining the glyph, the delta or the gap reads as
+  // a rendering bug. Omitted means "no link span", in which case the
+  // screen layer falls back to the row's trimmed extent.
+  //
+  // Click routing still uses openPath for the whole row: the row is a
+  // bigger, more forgiving double-click target than the name alone, and
+  // that asymmetry is deliberate.
+  openSpan?: { start: number; end: number };
   // Marks a row as one of the gadget's list ITEMS, i.e. a row that
   // pagination may window out. Rows without it (titles, summary counts) are
   // structural and always render. Keeping the distinction on the line means

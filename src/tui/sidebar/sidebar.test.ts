@@ -16,10 +16,12 @@ import {
   fitIdentifier,
   sessionGadget,
   todoGadget,
+  toolsGadget,
 } from "./gadgets.js";
 import { SidebarRenderer } from "./registry.js";
 import { emptySnapshot } from "./types.js";
 import type {
+  SidebarLine,
   SidebarBorder,
   SidebarContext,
   SidebarProcUsage,
@@ -1131,5 +1133,79 @@ describe("formatCpu", () => {
       (f) => formatCpu(f).length,
     );
     expect(new Set(widths).size).toBe(1);
+  });
+});
+
+describe("file row link spans", () => {
+  it("spans only the name in a files row that carries a +/- delta", () => {
+    const lines = filesGadget.render(
+      {
+        ...emptySnapshot(),
+        editedFiles: [{ path: "/repo/src/alpha.ts", added: 3, removed: 1 }],
+      },
+      ctx(30),
+    );
+    const fileLine = lines.find((l) => l.openPath !== undefined);
+    expect(fileLine).toBeDefined();
+    expect(fileLine?.openSpan).toBeDefined();
+    const { start, end } = fileLine!.openSpan!;
+    const body = fileLine!.body ?? "";
+    // The bracketed run is the name alone: no delta, no gap padding.
+    expect(body.slice(start, end)).toBe("alpha.ts");
+    expect(body).toContain("+3 -1");
+  });
+
+  it("spans only the name in a git row, excluding the state glyph", () => {
+    const lines = gitGadget.render(
+      {
+        ...emptySnapshot(),
+        git: {
+          branch: "main",
+          ahead: 0,
+          behind: 0,
+          staged: 0,
+          unstaged: 1,
+          untracked: 0,
+          files: [{ path: "/repo/src/beta.ts", state: "dirty" }],
+        },
+      },
+      ctx(30),
+    );
+    const fileLine = lines.find((l) => l.openPath !== undefined);
+    expect(fileLine).toBeDefined();
+    const { start, end } = fileLine!.openSpan!;
+    const body = fileLine!.body ?? "";
+    expect(body.slice(start, end)).toBe("beta.ts");
+    // The glyph is in the body but outside the span.
+    expect(body.startsWith("○ ")).toBe(true);
+    expect(start).toBeGreaterThan(0);
+  });
+});
+
+describe("running-tools row link span", () => {
+  const running = (path: string | undefined, detail: string) => ({
+    ...emptySnapshot(),
+    now: 1_000,
+    running: [{ verb: "Read", detail, path, startedAt: 0 }],
+  });
+
+  it("spans the basename when it is visible in the row", () => {
+    const lines = toolsGadget.render(running("/repo/src/gamma.ts", "src/gamma.ts"), ctx(40));
+    const l = lines.find((x: SidebarLine) => x.openPath !== undefined);
+    expect(l?.openSpan).toBeDefined();
+    const { start, end } = l!.openSpan!;
+    expect((l!.body ?? "").slice(start, end)).toBe("gamma.ts");
+  });
+
+  it("omits the span when the row shows a command instead of the path", () => {
+    const lines = toolsGadget.render(
+      running("/repo/src/gamma.ts", "pnpm test --run"),
+      ctx(40),
+    );
+    const l = lines.find((x: SidebarLine) => x.openPath !== undefined);
+    // Still clickable via openPath, but nothing is underlined: the visible
+    // text doesn't name the file.
+    expect(l?.openPath).toBe("/repo/src/gamma.ts");
+    expect(l?.openSpan).toBeUndefined();
   });
 });

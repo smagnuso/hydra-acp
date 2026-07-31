@@ -18,7 +18,7 @@ import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
-import { formatElapsed } from "./format.js";
+import { fileUrlForPath, formatElapsed } from "./format.js";
 import type { FormattedLine, Style } from "./format.js";
 
 export { formatElapsed };
@@ -858,6 +858,10 @@ export class Screen {
     // when disabled). String form is shell-style split on whitespace —
     // good enough for editor invocations without quoted spaces; users
     // who need a literal space in an arg pass the array form instead.
+    // Purely option-driven: the $VISUAL / $EDITOR fallback is resolved by
+    // resolveOpenFileCommand at the config-wiring layer, not here, so
+    // Screen's behavior doesn't shift with the ambient environment (it
+    // gates the click-debounce path, which tests and users both notice).
     const ofc = opts.openFileCommand;
     const ofcArgv =
       typeof ofc === "string"
@@ -4007,7 +4011,24 @@ export class Screen {
     pos: { sourceLineId: number; offset: number },
   ): { raw: string; line: number | null } | null {
     const line = this.lineById(pos.sourceLineId);
-    if (line === null || line.ansi) {
+    if (line === null) {
+      return null;
+    }
+    // `ansi` is set by two very different producers and only one of them
+    // is hostile to offset math:
+    //
+    //   cli-highlight fenced blocks — CSI SGR spans densely interleaved
+    //     with code. Offsets there aren't trustworthy enough to scan, and
+    //     a path token inside highlighted code is reachable via the
+    //     enclosing block key anyway. Still excluded.
+    //
+    //   OSC 8 link wrapping — a couple of zero-width spans bracketing
+    //     link text on an otherwise plain prose line. matchTkMarkupAt
+    //     already recognizes these as zero-width, so stripTkMarkupWithMap
+    //     projects through them correctly. Excluding these would mean
+    //     decorating one link in a line silently killed path detection on
+    //     every other token in it.
+    if (line.ansi && !ansiIsLinksOnly(line.body ?? "")) {
       return null;
     }
     const rawBody = line.body ?? "";
@@ -4107,7 +4128,13 @@ export class Screen {
     pos: { sourceLineId: number; offset: number },
   ): string | null {
     const line = this.lineById(pos.sourceLineId);
-    if (line === null || line.ansi || !line.links) {
+    if (line === null || !line.links) {
+      return null;
+    }
+    // Same split as pathTokenAt: OSC 8-only bodies project offsets fine,
+    // and file:// sidecar entries now coexist with OSC 8 wrapping, so
+    // bailing on every ansi line would strand them.
+    if (line.ansi && !ansiIsLinksOnly(line.body ?? "")) {
       return null;
     }
     // Strip terminal-kit markup to get the clean view, then project the
@@ -5711,9 +5738,32 @@ export class Screen {
           : i === rows - 1 && start < this.sidebarOverflowRows
             ? "▼"
             : (line?.gutter ?? " ");
+      // Absolute path rows become OSC 8 file:// links so the terminal
+      // paints them as clickable and ctrl-click works, in addition to the
+      // double-click gesture that routes through openFileCommand. Relative
+      // paths can't form a valid file:// target and are skipped; sidebar
+      // gadgets absolutize against the session cwd, so in practice this is
+      // just a guard.
+      // Prefer the gadget-supplied name span so only the filename
+      // underlines; fall back to the row's trimmed extent for rows that
+      // carry a path but no span (leading indent and trailing pad are
+      // excluded either way).
+      const rowLinkSpans = ((): Array<{ start: number; end: number; url: string }> | null => {
+        if (line?.openPath === undefined || !line.openPath.startsWith("/")) {
+          return null;
+        }
+        // An explicit span is required: rows compose glyphs, deltas,
+        // commands and gap padding, so guessing the extent is how the
+        // whole row ends up underlined. Rows without a span simply don't
+        // paint a link — they remain double-clickable via openPath.
+        if (line.openSpan === undefined) {
+          return null;
+        }
+        return [{ ...line.openSpan, url: fileUrlForPath(line.openPath) }];
+      })();
       const sig =
         formattedLineSig("sbar", bodyWidth, line, null, null, null) +
-        `|${marker}`;
+        `|${marker}|${rowLinkSpans === null ? "" : rowLinkSpans.map((sp) => `${sp.start}:${sp.end}:${sp.url}`).join(",")}`;
       this.paintRow(
         row,
         sig,
@@ -5727,7 +5777,16 @@ export class Screen {
             writeStyled(this.term, marker, "dim", false);
           }
           if (line) {
-            this.writeFormattedLine(line, bodyWidth, null, 0, null, false, true);
+            this.writeFormattedLine(
+              line,
+              bodyWidth,
+              null,
+              0,
+              null,
+              false,
+              true,
+              rowLinkSpans,
+            );
           } else {
             this.term(" ".repeat(bodyWidth));
           }
@@ -7037,6 +7096,17 @@ export class Screen {
     // when the sidebar is visible) and therefore can't rely on
     // eraseLineAfter to clear the previous frame's longer content.
     padToWidth: boolean = false,
+    // Hyperlink spans in bodyText coordinates. Each span's text is
+    // bracketed in OSC 8 so the terminal paints exactly that run as a
+    // link — not the prefix, not the trailing pad, not the whole row.
+    //
+    // These are applied INSIDE the piece renderer below rather than around
+    // it. OSC 8 open/close are zero-width raw writes independent of SGR,
+    // so they can be emitted between writeStyled calls; that's what lets
+    // link spans overlap the selection band and search matches without
+    // another layer of nested branching. Callers pass spans already
+    // projected into bodyText coords (see cleanToRawOffset).
+    linkSpans: ReadonlyArray<{ start: number; end: number; url: string }> | null = null,
   ): void {
     if (line.prefix) {
       writeStyled(this.term, line.prefix, line.prefixStyle ?? line.bodyStyle, hovered);
@@ -7072,27 +7142,75 @@ export class Screen {
     // piece always renders as "selection-highlight" so the inverse
     // band is unmistakable regardless of base style or whether a
     // search match also lands inside the range.
+    // Normalize + clamp once: drop empties, sort by start, and clip to the
+    // (possibly truncated) bodyText so a span pointing past the visible
+    // text can't emit an unterminated opener.
+    const spans =
+      linkSpans === null || linkSpans.length === 0
+        ? null
+        : linkSpans
+            .map((sp) => ({
+              start: Math.max(0, Math.min(bodyText.length, sp.start)),
+              end: Math.max(0, Math.min(bodyText.length, sp.end)),
+              url: sp.url,
+            }))
+            .filter((sp) => sp.end > sp.start)
+            .sort((a, b) => a.start - b.start);
+    // Write `text` (which occupies [baseOffset, baseOffset+len) of
+    // bodyText) with `write`, subdividing at link-span boundaries and
+    // bracketing the covered runs in OSC 8.
+    const withLinks = (
+      text: string,
+      baseOffset: number,
+      write: (chunk: string, chunkBase: number) => void,
+    ): void => {
+      if (spans === null) {
+        write(text, baseOffset);
+        return;
+      }
+      const end = baseOffset + text.length;
+      let cursor = baseOffset;
+      for (const sp of spans) {
+        if (sp.end <= cursor || sp.start >= end) {
+          continue;
+        }
+        const from = Math.max(sp.start, cursor);
+        const to = Math.min(sp.end, end);
+        if (from > cursor) {
+          write(text.slice(cursor - baseOffset, from - baseOffset), cursor);
+        }
+        process.stdout.write(`\x1b]8;;${sp.url}\x1b\\`);
+        write(text.slice(from - baseOffset, to - baseOffset), from);
+        process.stdout.write("\x1b]8;;\x1b\\");
+        cursor = to;
+      }
+      if (cursor < end) {
+        write(text.slice(cursor - baseOffset), cursor);
+      }
+    };
     const renderPiece = (text: string, baseOffset: number) => {
       if (text.length === 0) {
         return;
       }
-      if (this.scrollbackHighlight !== null && !line.ansi) {
-        const adjustedActive =
-          activeMatchCol !== null && activeMatchCol >= baseOffset
-            ? activeMatchCol - baseOffset
-            : null;
-        writeBodyWithHighlight(
-          this.term,
-          text,
-          line.bodyStyle,
-          this.scrollbackHighlight,
-          adjustedActive,
-          activeMatchLength,
-          hovered,
-        );
-      } else {
-        writeStyled(this.term, text, line.bodyStyle, hovered);
-      }
+      withLinks(text, baseOffset, (chunk, chunkBase) => {
+        if (this.scrollbackHighlight !== null && !line.ansi) {
+          const adjustedActive =
+            activeMatchCol !== null && activeMatchCol >= chunkBase
+              ? activeMatchCol - chunkBase
+              : null;
+          writeBodyWithHighlight(
+            this.term,
+            chunk,
+            line.bodyStyle,
+            this.scrollbackHighlight,
+            adjustedActive,
+            activeMatchLength,
+            hovered,
+          );
+        } else {
+          writeStyled(this.term, chunk, line.bodyStyle, hovered);
+        }
+      });
     };
     if (selectionRange !== null) {
       const selStart = Math.max(0, Math.min(bodyText.length, selectionRange.start));
@@ -7116,7 +7234,17 @@ export class Screen {
           // each span's own fg color, making the selection look striped.
           selText = stripTkMarkup(selText);
         }
-        writeStyled(this.term, selText, "selection-highlight", hovered);
+        // The band renders as one uniform inverse run; subdivide only to
+        // emit the link brackets so a selected path stays clickable.
+        // Offsets are the pre-strip ones when usesMarkup, so skip
+        // subdivision there rather than mis-slice.
+        if (usesMarkup) {
+          writeStyled(this.term, selText, "selection-highlight", hovered);
+        } else {
+          withLinks(selText, selStart, (chunk) => {
+            writeStyled(this.term, chunk, "selection-highlight", hovered);
+          });
+        }
       }
       let after = bodyText.slice(selEnd);
       if (usesMarkup && selEnd > selStart) {
@@ -7133,18 +7261,8 @@ export class Screen {
         }
       }
       renderPiece(after, selEnd);
-    } else if (this.scrollbackHighlight !== null && !line.ansi) {
-      writeBodyWithHighlight(
-        this.term,
-        bodyText,
-        line.bodyStyle,
-        this.scrollbackHighlight,
-        activeMatchCol,
-        activeMatchLength,
-        hovered,
-      );
     } else {
-      writeStyled(this.term, bodyText, line.bodyStyle, hovered);
+      renderPiece(bodyText, 0);
     }
     if (line.fillRow || hovered || padToWidth) {
       // Measure what the terminal will actually SHOW. Caret markup
@@ -7825,6 +7943,28 @@ function matchCsiAt(text: string, i: number): string | null {
   const final = text.charCodeAt(j);
   if (final < 0x40 || final > 0x7e) return null;
   return text.slice(i, j + 1);
+}
+
+// True when the body's raw-escape content consists solely of OSC 8
+// hyperlink spans, i.e. it carries no CSI SGR sequences. Distinguishes a
+// prose line that merely had a link wrapped in it from a syntax-
+// highlighted body, which pathTokenAt must keep skipping.
+export function ansiIsLinksOnly(body: string): boolean {
+  for (let i = 0; i < body.length; ) {
+    if (body.charCodeAt(i) !== 0x1b /* ESC */) {
+      i += 1;
+      continue;
+    }
+    const osc8 = matchOsc8At(body, i);
+    if (osc8 !== null) {
+      i += osc8.length;
+      continue;
+    }
+    // Any other escape (CSI SGR from cli-highlight, or something we
+    // don't model) disqualifies the line.
+    return false;
+  }
+  return true;
 }
 
 export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {

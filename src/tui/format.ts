@@ -5,6 +5,7 @@
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
 import stringWidth from "string-width";
+import { thisMachine } from "../core/machine.js";
 import { shortenHomePath } from "../core/paths.js";
 import {
   sanitizeSingleLine,
@@ -19,6 +20,40 @@ import {
 // prefix and #turn-<n> fragment; v1 captures the id but ignores those.
 const HYDRA_SESSION_URL_RE =
   /^hydra:\/\/(?:[^/\s]+\/)?sessions\/([A-Za-z0-9_-]+)(?:#turn-(\d+))?$/;
+
+// Resolved once. The one environment read in an otherwise pure module.
+//
+// The authority is here for remote-aware handlers (kitty, WezTerm) that
+// compare it against the local host and can route over SSH. It is NOT a
+// safety mechanism: GIO — and therefore GNOME Terminal, which activates
+// links via gtk_show_uri — discards the authority outright.
+// file://other-box/tmp/x normalizes to file:///tmp/x and opens the LOCAL
+// file at that path, with no error. So under GNOME over SSH, ctrl+click
+// can open a same-path local file that isn't the file the link named.
+// Emitting an empty authority wouldn't help (identical behavior), which
+// is why the host stays; it just buys nothing there.
+//
+// Also note GIO drops the fragment, so #L42 gives no line positioning
+// via the terminal's handler. Line numbers only work through our own
+// double-click path (tryOpenPathString → tui.openFileCommand).
+const OSC8_HOST = thisMachine();
+
+// Build a file:// URL for an absolute local path. Percent-encodes per
+// segment so spaces / #  / ? in filenames survive, and preserves any
+// existing fragment verbatim — callers pass GitHub-style `#L42` (what
+// the file-links skill emits) and terminal handlers differ on whether
+// they want `#42` or `#L42`, so rewriting it would just trade one
+// incompatibility for another.
+export function fileUrlForPath(absPath: string): string {
+  const hashAt = absPath.indexOf("#");
+  const path = hashAt === -1 ? absPath : absPath.slice(0, hashAt);
+  const fragment = hashAt === -1 ? "" : absPath.slice(hashAt);
+  const encoded = path
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  return `file://${OSC8_HOST}${encoded}${fragment}`;
+}
 
 export type Style =
   | "user"
@@ -512,31 +547,45 @@ function applyInlineMarkupWithLinks(
           const url = text.slice(closeBracket + 2, closeParen);
           const inner = applyInlineMarkupWithLinks(linkText, opts);
           const start = cleanLen;
-          // file:// URLs stay in the sidecar so our double-click
-          // gesture can open them via the configured editor command;
-          // OSC 8 would route them through the terminal's URL
-          // handler, which usually means a browser. Non-file URLs
-          // (http, https, ssh, mailto, …) get wrapped in OSC 8 so
-          // modern terminals expose ctrl/cmd-click and hover tooltips
-          // — none of which our internal handler can do for a URL
-          // that isn't a filesystem path anyway.
+          // Three dispositions here, and the key thing is that OSC 8
+          // wrapping and the sidecar are NOT mutually exclusive:
           //
-          // hydra://sessions/<id> URLs are also added to the sidecar
-          // so the TUI click handler can switch sessions when clicked.
+          //   file:// and absolute local paths — BOTH. The sidecar keeps
+          //     the double-click gesture authoritative (it routes through
+          //     tui.openFileCommand), while OSC 8 gives the terminal a
+          //     paintable link so the text is visibly clickable and
+          //     ctrl/cmd-click works. The two gestures can land in
+          //     different apps (ours honors openFileCommand, the
+          //     terminal's goes through xdg-open); that's accepted.
           //
-          // Scheme-less URLs are treated as project-relative filesystem
-          // paths (the file-links skill emits `[foo.ts:42](foo.ts#L42)`
-          // with no scheme). Like file:// they go in the sidecar and are
-          // NOT OSC 8-wrapped: the terminal's URL handler can't open a
-          // bare relative path, and wrapping would (a) break our double-
-          // click open gesture and (b) leak OSC 8 bytes + caret markup
-          // into the clipboard on selection-copy.
+          //   relative local paths — sidecar only. file:// requires an
+          //     absolute path and this module has no session cwd to
+          //     resolve against, so there's nothing valid to emit. The
+          //     file-links skill's `[foo.ts:42](foo.ts#L42)` lands here.
+          //
+          //   hydra://sessions/<id> — sidecar only. Means "switch
+          //     session", which only our click handler can do.
+          //
+          // Everything else (http, https, ssh, mailto, …) is OSC 8 only:
+          // our internal handler has nothing useful to do with it.
           const isFileUrl = url.startsWith("file://");
           const isHydraSessionUrl = HYDRA_SESSION_URL_RE.test(url);
           const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url);
           const isLocalPath = !isFileUrl && !isHydraSessionUrl && !hasScheme;
-          if (isFileUrl || isLocalPath || isHydraSessionUrl) {
+          // Only absolute paths can become a valid file:// target. `~` is
+          // deliberately excluded: the URL is consumed by the terminal's
+          // handler, which does no shell expansion.
+          const isAbsLocalPath = isLocalPath && url.startsWith("/");
+          const osc8Url = isFileUrl
+            ? url
+            : isAbsLocalPath
+              ? fileUrlForPath(url)
+              : null;
+          if (isHydraSessionUrl || (isLocalPath && !isAbsLocalPath)) {
             styled += `${linkOpen}${inner.styled}${linkReset}`;
+          } else if (osc8Url !== null) {
+            styled += `\x1b]8;;${osc8Url}\x1b\\${linkOpen}${inner.styled}${linkReset}\x1b]8;;\x1b\\`;
+            ansi = true;
           } else {
             // OSC 8 framing: ESC ] 8 ; ; URL ST … ESC ] 8 ; ; ST.
             // We use ST = ESC '\\' (the spec-canonical terminator);
@@ -1937,11 +1986,31 @@ export function formatEditDiffBlock(
   // Build the header lazily so the marker reflects whether a diff body
   // actually follows: ▾ (open) when an expanded body is rendered below,
   // ▸ (closed) for the terse one-line "edit" mark or a header-only diff.
-  const header = (open: boolean): FormattedLine => ({
-    prefix: "  ",
-    body: `${open ? "▾" : "▸"} Edited ${sanitizeSingleLine(shortenHomePath(diff.path!))}${summary}`,
-    bodyStyle: "dim",
-  });
+  const header = (open: boolean): FormattedLine => {
+    const shown = sanitizeSingleLine(shortenHomePath(diff.path!));
+    const marker = open ? "▾" : "▸";
+    // Hyperlink just the path, not the whole row: the marker and the
+    // (+n -m) summary aren't the file. Only absolute paths can form a
+    // valid file:// target; the visible text keeps the ~/... short form
+    // while the link carries the real path.
+    if (diff.path !== undefined && diff.path.startsWith("/")) {
+      const url = fileUrlForPath(diff.path);
+      return {
+        prefix: "  ",
+        body: `${marker} Edited \x1b]8;;${url}\x1b\\${shown}\x1b]8;;\x1b\\${summary}`,
+        bodyStyle: "dim",
+        // Escape bytes in the body: width accounting and wrapping must
+        // route through the ANSI-aware helpers. ansiIsLinksOnly keeps the
+        // path-token scanner working on this row anyway.
+        ansi: true,
+      };
+    }
+    return {
+      prefix: "  ",
+      body: `${marker} Edited ${shown}${summary}`,
+      bodyStyle: "dim",
+    };
+  };
   if (mode === "edit") {
     if (diff.path) {
       lines.push(header(false));

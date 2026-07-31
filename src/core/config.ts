@@ -214,7 +214,10 @@ const TuiConfig = z.object({
   //   - Array: pre-split argv with the same %f / %n substitution rules
   //     (use this when an arg must contain literal whitespace). Example:
   //       ["code", "--goto", "%f:%n"]
-  // Unset (the default) means the feature is off — double-click
+  // Unset falls back to $VISUAL, then $EDITOR, treated as the string
+  // form. Those carry no %f/%n, so the path is appended and the line
+  // number is dropped; set this key explicitly to get line positioning.
+  // With none of the three set the feature is off — double-click
   // continues to snap the word for clipboard copy. The process is
   // spawned detached with stdio ignored; failures are surfaced via the
   // in-app notification line, not blocking the TUI.

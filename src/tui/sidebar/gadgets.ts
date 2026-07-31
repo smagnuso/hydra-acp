@@ -124,10 +124,22 @@ function fileRow(
   body: string,
   openPath: string,
   bodyStyle?: FormattedLine["bodyStyle"],
+  // The displayed file name as it appears in `body`. Used to derive the
+  // hyperlink span; pass it whenever `body` is a composite so only the
+  // name underlines. Located by indexOf, which is unambiguous here
+  // because the name is the only free-form text in these rows.
+  displayName?: string,
 ): SidebarLine {
   // item: these are the rows pagination windows; the block's title and
   // summary rows are structural and always shown.
-  return { body, bodyStyle, openPath, item: true };
+  const line: SidebarLine = { body, bodyStyle, openPath, item: true };
+  if (displayName !== undefined && displayName.length > 0) {
+    const at = body.indexOf(displayName);
+    if (at !== -1) {
+      line.openSpan = { start: at, end: at + displayName.length };
+    }
+  }
+  return line;
 }
 
 // Right-align a value against a label on one row, filling the gap with
@@ -258,11 +270,25 @@ export const toolsGadget: Gadget = {
           ? ""
           : ` ${truncate(tool.detail, budget)}`;
       const body = `${head}${detail}`;
-      lines.push({
-        body: elapsed === "" ? body : labelValue(body, elapsed, ctx),
+      const rendered = elapsed === "" ? body : labelValue(body, elapsed, ctx);
+      const toolLine: SidebarLine = {
+        body: rendered,
         bodyStyle: "tool-status-running",
         openPath: tool.path,
-      });
+      };
+      // Link the file name only when it's actually visible in the row.
+      // `detail` is often a command rather than a path (an execute call),
+      // and underlining a command as if it were the file would misdescribe
+      // the target. No span means no hyperlink; the row stays clickable
+      // via openPath either way.
+      if (tool.path !== undefined) {
+        const base = tool.path.slice(tool.path.lastIndexOf("/") + 1);
+        const at = base.length > 0 ? rendered.indexOf(base) : -1;
+        if (at !== -1) {
+          toolLine.openSpan = { start: at, end: at + base.length };
+        }
+      }
+      lines.push(toolLine);
     }
     if (s.running.length > shown.length) {
       lines.push(row(`  +${s.running.length - shown.length} more`, "dim"));
@@ -408,6 +434,7 @@ export const filesGadget: Gadget = {
           delta ? labelValue(name, delta, ctx) : name,
           file.path,
           "tool",
+          name,
         ),
       );
     });
@@ -487,6 +514,7 @@ export const gitGadget: Gadget = {
           truncate(`${glyph} ${names[i]!}`, ctx.width),
           file.path,
           style,
+          names[i]!,
         ),
       );
     });

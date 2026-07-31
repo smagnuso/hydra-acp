@@ -2496,6 +2496,54 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("foo-bar-baz");
   });
 
+  it("path token stays clickable on a line that also carries an OSC 8 link", () => {
+    const screen = makeTallScreen({
+      width: 200,
+      height: 24,
+      mouse: true,
+      openFileCommand: ["true"],
+    });
+    // An OSC 8 span earlier in the line sets ansi=true. Before
+    // ansiIsLinksOnly, pathTokenAt bailed on the whole line and the
+    // trailing absolute path silently stopped being clickable.
+    //
+    // Observable: a resolved path-open returns true from tryOpenFileAt,
+    // which suppresses the word-snap selection fallback. So "no
+    // selection" is the signal that the open path won.
+    screen.appendLine({
+      body: "see \x1b]8;;file://host/abs/a.ts\x1b\\a.ts\x1b]8;;\x1b\\ and /abs/b.ts too",
+      ansi: true,
+    });
+    const y = visibleRows(screen);
+    const x = 18;
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x, y });
+    expect(screen.getSelectionText()).toBe("");
+  });
+
+  it("syntax-highlighted (CSI) bodies still skip the path scan", () => {
+    const screen = makeTallScreen({
+      width: 200,
+      height: 24,
+      mouse: true,
+      openFileCommand: ["true"],
+    });
+    // CSI SGR present => not links-only => pathTokenAt bails, so the
+    // double-click falls through to word-snap selection.
+    screen.appendLine({
+      body: "\x1b[32mconst p = /abs/b.ts\x1b[0m",
+      ansi: true,
+    });
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 14, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 14, y });
+    expect(screen.getSelectionText()).not.toBe("");
+  });
+
   it("double-click on a bare URL snaps to the whole URL, not a word inside it", () => {
     const opens: string[] = [];
     const screen = makeTallScreen({

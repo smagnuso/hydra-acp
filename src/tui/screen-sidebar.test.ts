@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { thisMachine } from "../core/machine.js";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import { Screen } from "./screen.js";
@@ -463,6 +464,71 @@ describe("Screen sidebar double-click to open", () => {
     click(screen, sidebarCol, fileRow);
     // The chain was reset, so this is a first click, not a double.
     expect(opened).toEqual([]);
+  });
+
+  it("emits an OSC 8 file:// hyperlink for absolute-path sidebar rows", () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const { screen } = makeScreen(100, 40);
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSidebarGadgets(["files"]);
+    screen.setSidebarSnapshot({
+      editedFiles: [{ path: "/repo/src/alpha.ts" }],
+    });
+    screen.setSidebarVisible(true);
+    screen.repaintNow();
+    const all = writes.join("");
+    expect(all).toContain(`file://${thisMachine()}/repo/src/alpha.ts`);
+    // Opener must be balanced by a closer, else the link bleeds into
+    // every row painted after it.
+    const openers = all.split("\x1b]8;;").length - 1;
+    expect(openers).toBeGreaterThanOrEqual(2);
+    expect(all).toContain("\x1b]8;;\x1b\\");
+  });
+
+  it("hyperlinks only the file name, not the glyph, delta or gap padding", () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const { screen } = makeScreen(100, 40);
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSidebarGadgets(["files"]);
+    screen.setSidebarSnapshot({
+      editedFiles: [{ path: "/repo/src/alpha.ts", added: 3, removed: 1 }],
+    });
+    screen.setSidebarVisible(true);
+    screen.repaintNow();
+    const all = writes.join("");
+    const open = all.indexOf("\x1b]8;;file:");
+    const close = all.indexOf("\x1b]8;;\x1b\\", open);
+    expect(open).toBeGreaterThan(-1);
+    expect(close).toBeGreaterThan(open);
+    // Whatever is bracketed must not include the +/- delta or run of gap
+    // spaces — that was the bug: the terminal underlined the whole row.
+    const bracketed = all.slice(open, close);
+    expect(bracketed).not.toContain("+3");
+    expect(bracketed).not.toContain("-1");
+    expect(bracketed).not.toMatch(/ {3}/);
+  });
+
+  it("does not hyperlink sidebar rows whose path is not absolute", () => {
+    const writes: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    const { screen } = makeScreen(100, 40);
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSidebarGadgets(["files"]);
+    screen.setSidebarSnapshot({ editedFiles: [{ path: "src/rel.ts" }] });
+    screen.setSidebarVisible(true);
+    screen.repaintNow();
+    expect(writes.join("")).not.toContain("\x1b]8;;");
   });
 
   it("reports whether an editor command is configured", () => {
