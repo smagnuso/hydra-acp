@@ -27,6 +27,7 @@ import {
   loadConfig,
   expandHome,
   setTuiConfigValue,
+  setTuiSidebarEnabled,
   setDefaultAgent,
   hasConfiguredDefaultAgent,
   resolveInAppSelection,
@@ -3607,10 +3608,9 @@ async function runSession(
             );
             break;
           case "sidebar":
-            await setTuiConfigValue("sidebar", {
-              ...config.tui.sidebar,
-              enabled: screen.isSidebarVisible(),
-            });
+            // Only the `enabled` key: see setTuiSidebarEnabled for why the
+            // resolved object must not be written back wholesale.
+            await setTuiSidebarEnabled(screen.isSidebarVisible());
             break;
         }
         screen.notify(`saved default: ${optionLabel(id)} ${optionValue(id)}`);

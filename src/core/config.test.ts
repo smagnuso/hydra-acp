@@ -8,6 +8,7 @@ import {
   expandHome,
   loadConfig,
   migrateLegacyAuthToken,
+  setTuiSidebarEnabled,
   writeConfig,
 } from "./config.js";
 import type { CompactionConfig } from "./config.js";
@@ -295,5 +296,44 @@ describe("expandHome", () => {
 
   it("does not expand a tilde mid-string", () => {
     expect(expandHome("/tmp/~oddname")).toBe("/tmp/~oddname");
+  });
+});
+
+// The ^O options dialog's `s` key persists the sidebar toggle. It must touch
+// exactly that key: writing the resolved sidebar object back would stamp
+// today's `gadgets` list and `border` into the user's file, silently pinning
+// them to defaults the user never chose (and freezing out gadgets added
+// later).
+describe("setTuiSidebarEnabled", () => {
+  it("writes only the enabled flag when nothing is on disk", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(paths.config(), JSON.stringify({}) + "\n", "utf8");
+    await setTuiSidebarEnabled(true);
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.tui.sidebar).toEqual({ enabled: true });
+  });
+
+  it("preserves sibling keys the user did set", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(
+      paths.config(),
+      JSON.stringify({
+        tui: { sidebar: { width: 30, gadgets: ["git"] }, showThoughts: false },
+      }) + "\n",
+      "utf8",
+    );
+    await setTuiSidebarEnabled(true);
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.tui.sidebar).toEqual({ width: 30, gadgets: ["git"], enabled: true });
+    expect(raw.tui.showThoughts).toBe(false);
+  });
+
+  it("round-trips off again without adding anything", async () => {
+    await fs.mkdir(paths.home(), { recursive: true });
+    await fs.writeFile(paths.config(), JSON.stringify({}) + "\n", "utf8");
+    await setTuiSidebarEnabled(true);
+    await setTuiSidebarEnabled(false);
+    const raw = JSON.parse(await fs.readFile(paths.config(), "utf8"));
+    expect(raw.tui.sidebar).toEqual({ enabled: false });
   });
 });

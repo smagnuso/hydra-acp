@@ -743,6 +743,32 @@ export async function setTuiConfigValue<K extends keyof HydraConfig["tui"]>(
   });
 }
 
+// Persist ONLY tui.sidebar.enabled, leaving every sibling key exactly as it
+// is on disk — present or absent.
+//
+// Not setTuiConfigValue("sidebar", {...config.tui.sidebar, enabled}): that
+// writes the RESOLVED object, so saving the visibility toggle also stamps
+// `border` and the full `gadgets` array into the file at whatever today's
+// defaults happen to be. The user then stops tracking the defaults they
+// never chose to pin — a newly added built-in gadget would never appear for
+// them, because their config lists the nine that existed when they last
+// pressed `s` on an unrelated row.
+export async function setTuiSidebarEnabled(enabled: boolean): Promise<void> {
+  await updateRawConfig((raw) => {
+    const tui =
+      raw.tui && typeof raw.tui === "object" && !Array.isArray(raw.tui)
+        ? (raw.tui as Record<string, unknown>)
+        : {};
+    const sidebar =
+      tui.sidebar && typeof tui.sidebar === "object" && !Array.isArray(tui.sidebar)
+        ? (tui.sidebar as Record<string, unknown>)
+        : {};
+    sidebar.enabled = enabled;
+    tui.sidebar = sidebar;
+    raw.tui = tui;
+  });
+}
+
 // Convenience over updateRawConfig for persisting the default agent and
 // optionally its default model in one atomic write. Used by `hydra agent
 // set` and the TUI agent switch. Pass model=undefined to set only the
