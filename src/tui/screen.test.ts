@@ -1951,23 +1951,57 @@ describe("Screen block-click routing", () => {
     }
   });
 
-  it("when onBlockDoubleClick claims the gesture, the deferred toggle never fires", () => {
+  it("dispatches a block's link from a body row that has no span of its own", () => {
+    const screen = makeTallScreen({ mouse: true, openFileCommand: ["true"] });
+    // Header row carries the link; the diff body row below it does not.
+    // The retired app-side block handler opened the file from any row in
+    // the block, and that reach has to survive the migration.
+    screen.upsertLines("editdiff:xyz", [
+      {
+        body: "\u25be Edited /abs/x.ts",
+        links: [{ start: 9, end: 18, url: "/abs/x.ts" }],
+      },
+      { body: "-  const a = 1;" },
+      { body: "+  const a = 2;" },
+    ]);
+    const y = visibleRows(screen);
+    // Click the LAST row (a diff body line, no links of its own).
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 5, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 5, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 5, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 5, y });
+    // Claimed by the block-scope fallback, so no word-snap selection.
+    expect(screen.getSelectionText()).toBe("");
+  });
+
+  it("leaves a link-free block to the word-snap fallback", () => {
+    const screen = makeTallScreen({ mouse: true, openFileCommand: ["true"] });
+    screen.upsertLines("thought:1", [{ body: "pondering alpha beta" }]);
+    const y = visibleRows(screen);
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 12, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 12, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 12, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 12, y });
+    // No link anywhere in the block => the gesture must NOT be claimed.
+    expect(screen.getSelectionText()).not.toBe("");
+  });
+
+  it("when a link span claims the gesture, the deferred toggle never fires", () => {
     const clicks: string[] = [];
-    const opens: Array<{ key: string; rowOffset: number }> = [];
     const screen = makeTallScreen({
       mouse: true,
       onBlockClick: (key, _rowOffset) => clicks.push(key),
       openFileCommand: ["true"],
     });
-    (
-      screen as unknown as {
-        onBlockDoubleClick: (key: string, rowOffset: number) => boolean;
-      }
-    ).onBlockDoubleClick = (key, rowOffset) => {
-      opens.push({ key, rowOffset });
-      return true;
-    };
-    screen.upsertLines("editdiff:xyz", [{ body: "diff-row" }]);
+    // A keyed block whose row carries a link span. The span claims the
+    // double-click (this used to be an app-side onBlockDoubleClick hook),
+    // and claiming must suppress the debounced single-click toggle.
+    screen.upsertLines("editdiff:xyz", [
+      {
+        body: "diff-row /abs/x.ts",
+        links: [{ start: 9, end: 18, url: "/abs/x.ts" }],
+      },
+    ]);
     vi.useFakeTimers();
     try {
       const y = visibleRows(screen);
@@ -1975,11 +2009,10 @@ describe("Screen block-click routing", () => {
       dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
       dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 3, y });
       dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 3, y });
-      // The press scheduled NO new pending toggle (because the second
-      // release saw doubleClickPending=true and skipped it). Advance
-      // past the debounce window to be sure nothing fires later.
+      // Advance past the debounce window to be sure nothing fires later.
       vi.runAllTimers();
-      expect(opens).toEqual([{ key: "editdiff:xyz", rowOffset: 0 }]);
+      // x=3 missed the span, but the row has one, so the forgiving
+      // row-level fallback claimed it — and no toggle was scheduled.
       expect(clicks).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -2573,22 +2606,15 @@ describe("Screen block-click routing", () => {
   });
 
   it("double-click on a bare URL snaps to the whole URL, not a word inside it", () => {
-    const opens: string[] = [];
     const screen = makeTallScreen({
       width: 200,
       height: 24,
       mouse: true,
       // openFileCommand configured: without the URL guard, the URL would
       // scan as an absolute path (strong-signal shortcut in
-      // resolvePathToken) and spawn the editor. Failing to select the
-      // URL AND spawning the editor were both symptoms of the bug.
+      // resolvePathToken) and spawn the editor.
       openFileCommand: ["true"],
     });
-    (
-      screen as unknown as {
-        onOpenPath?: (raw: string) => void;
-      }
-    ).onOpenPath = (raw) => opens.push(raw);
     screen.appendLine({
       body: "ran on https://nrdp.builds.test.netflix.net/job/nrdp-branch-builder/4690626/console and it looks updated",
     });
@@ -2601,9 +2627,11 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe(
       "https://nrdp.builds.test.netflix.net/job/nrdp-branch-builder/4690626/console",
     );
-    // The editor must NOT have been dispatched for the URL — that was
-    // the false-positive resolvePathToken was hitting.
-    expect(opens).toEqual([]);
+    // Selecting the whole URL is the observable: had resolvePathToken
+    // false-positived on it, tryOpenFileAt would have claimed the gesture
+    // and suppressed the selection entirely.
+    // (The old assertion here read an `onOpenPath` hook that never existed
+    // in src/, so it could not fail.)
   });
 
   it("double-click on a URL followed by a period drops the sentence terminator", () => {

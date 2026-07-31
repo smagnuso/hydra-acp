@@ -126,7 +126,6 @@ export interface ScreenOptions {
   // the screen then skips its own path-token scan and the word-snap
   // copy fallback. Return false to fall through to the default
   // double-click handling. Coordinates match onBlockClick.
-  onBlockDoubleClick?: (key: string, rowOffset: number) => boolean;
    // Invoked when the double-click gesture resolves to a hydra session id
    // — either because the click landed inside a hydra://sessions/<id>
    // link span, or because the bare token under the cursor matched the
@@ -439,9 +438,6 @@ export class Screen {
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
   private onBlockClick: ((key: string, rowOffset: number) => void) | undefined;
-  private onBlockDoubleClick:
-    | ((key: string, rowOffset: number) => boolean)
-    | undefined;
   private onHydraLinkClick:
     | ((sessionId: string) => boolean)
     | undefined;
@@ -830,7 +826,6 @@ export class Screen {
       hostOnKey(events);
     };
     this.onBlockClick = opts.onBlockClick;
-    this.onBlockDoubleClick = opts.onBlockDoubleClick;
     this.onHydraLinkClick = opts.onHydraLinkClick;
     this.onMouse = opts.onMouse;
     this.onHoverRun = opts.onHoverRun;
@@ -3525,54 +3520,26 @@ export class Screen {
       // supersede the toggle. Cancel before either path runs so the
       // block doesn't flicker open/closed behind the gesture.
       this.cancelPendingBlockClick();
-      // Block-level override: if the press landed on a keyed block and
-      // the app supplies onBlockDoubleClick, give it first refusal.
-      // The app has authoritative knowledge of what each block carries
-      // (a tool's recorded file path, an edit-diff target) which beats
-      // scraping the rendered row text. Return true claims the gesture.
-      if (this.onBlockDoubleClick && cell !== null) {
-        const blockKey = this.keyAtRow(cell.y);
-        if (blockKey !== null) {
-          let firstRowY = cell.y;
-          while (firstRowY > 1 && this.keyAtRow(firstRowY - 1) === blockKey) {
-            firstRowY -= 1;
-          }
-          const rowOffset = cell.y - firstRowY;
-          if (this.onBlockDoubleClick(blockKey, rowOffset)) {
-            // Mark the gesture as a double-click finalize so the
-            // upcoming release skips scheduling a fresh block toggle.
-            // Without this, the second release re-enters
-            // schedulePendingBlockClick and the block expands ~500ms
-            // after the file opens.
-            this.doubleClickPending = true;
-            this.lastLeftClick = null;
-            return;
-          }
-        }
+      // Unified link dispatch: any sidecar span on the clicked row wins,
+      // whatever produced it (prose markdown, edit-diff header, tool row).
+      // Scheme decides the action — see dispatchLinkUrl. This replaced a
+      // first-refusal chain of bespoke handlers (an app-side block
+      // resolver, then a hydra-link special case, then the path scan)
+      // where the ordering, rather than the data, decided which target a
+      // click resolved to.
+      if (this.tryOpenLinkAt(anchor, cell?.y ?? null)) {
+        // Mark the gesture as a double-click finalize so the upcoming
+        // release skips scheduling a fresh block toggle. Without this the
+        // block expands ~500ms after the file opens.
+        this.doubleClickPending = true;
+        this.lastLeftClick = null;
+        return;
       }
-       // Hydra session link: if the click landed inside a hydra://sessions/<id>
-       // link span, extract the session id and hand it to the app's handler.
-       // This runs after onBlockDoubleClick so keyed-block overrides (editdiff,
-       // tools) get first refusal; falls through to open-file for path tokens.
-       if (this.onHydraLinkClick && cell !== null) {
-         const linkUrl = this.findLinkUrlAt(anchor);
-         if (linkUrl !== null && HYDRA_SESSION_URL_RE.test(linkUrl)) {
-           const m = linkUrl.match(HYDRA_SESSION_URL_RE);
-           const sessionId = m?.[1] ?? null;
-           if (sessionId && this.onHydraLinkClick(sessionId)) {
-             this.doubleClickPending = true;
-             this.lastLeftClick = null;
-             return;
-           }
-         }
-       }
-       // Try the open-file gesture first: when the click landed on a
-       // filesystem-path token, hand it to the configured editor command
-      // and skip the word-snap/clipboard path entirely. When the token
-      // isn't a file (or no command is configured) fall through to the
-      // existing word-snap copy behaviour so the gesture remains useful.
+      // Row text scan: unstructured output (stack traces, grep hits, bash
+      // output) carries no sidecar, so the token scan remains the fallback
+      // tier. Nothing structured reaches here.
       if (this.tryOpenFileAt(anchor)) {
-        // See onBlockDoubleClick branch above — flag this as a
+        // As in the link-dispatch branch above — flag this as a
         // finalized double-click so the second release doesn't
         // schedule a delayed block toggle behind the opened file.
         this.doubleClickPending = true;
@@ -4322,6 +4289,88 @@ export class Screen {
     return this.onHydraLinkClick(resolved);
   }
 
+  // Single dispatch point for a sidecar link URL, whatever produced it
+  // (prose markdown, an edit-diff header, a tool row, a sidebar file row).
+  // Scheme decides the action; this is the one place that mapping lives.
+  //
+  // Returns true when the gesture was claimed, so callers know to skip the
+  // word-snap/clipboard fallback.
+  private dispatchLinkUrl(url: string): boolean {
+    const hydra = url.match(HYDRA_SESSION_URL_RE);
+    if (hydra) {
+      const sessionId = hydra[1] ?? null;
+      return sessionId !== null && this.onHydraLinkClick !== undefined
+        ? this.onHydraLinkClick(sessionId)
+        : false;
+    }
+    // http(s), ssh, mailto, … — the terminal's own OSC 8 activation
+    // handles these. We deliberately don't shell out: spawning a browser
+    // behind a double-click the user aimed at text would be a surprise.
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url) && !url.startsWith("file://")) {
+      return false;
+    }
+    // file:// or a bare path. Reduce to "<path>[:line]" and hand to the
+    // editor dispatcher, which owns cwd/~ resolution, the stat check and
+    // %f/%n substitution.
+    let bare = url;
+    if (bare.startsWith("file://")) {
+      // Drop the authority: an absolute path follows it. Percent-decode
+      // because fileUrlForPath encodes each segment.
+      const afterScheme = bare.slice("file://".length);
+      const slash = afterScheme.indexOf("/");
+      bare = slash === -1 ? "" : afterScheme.slice(slash);
+      try {
+        bare = decodeURIComponent(bare);
+      } catch {
+        // Leave it as-is; a malformed escape shouldn't drop the gesture.
+      }
+    }
+    if (bare.length === 0) {
+      return false;
+    }
+    // GitHub-style #L42 (optionally #L42-L50) becomes the :42 suffix
+    // tryOpenPathString already understands. A non-numeric anchor is left
+    // attached so it can't silently change which file is opened.
+    const frag = bare.match(/^(.*?)#L(\d+)(?:-L?\d+)?$/);
+    if (frag) {
+      return this.tryOpenPathString(`${frag[1]!}:${frag[2]!}`);
+    }
+    return this.tryOpenPathString(bare);
+  }
+
+  // Resolve a click to a link span on that row and dispatch it. Falls back
+  // to the row's FIRST span when the click missed every span but the row
+  // has one: rows like a tool call or an edit-diff header are conceptually
+  // one target, and requiring a hit on the path text alone would make them
+  // much fussier to click than they are today. The narrow span still
+  // governs what gets UNDERLINED — only the click target is forgiving.
+  private tryOpenLinkAt(
+    pos: { sourceLineId: number; offset: number },
+    row: number | null,
+  ): boolean {
+    // 1. Exact hit on a span.
+    const exact = this.findLinkUrlAt(pos);
+    if (exact !== null) {
+      return this.dispatchLinkUrl(exact);
+    }
+    // 2. Missed every span, but the row has one: rows like a tool call or
+    //    an edit-diff header are conceptually one target.
+    const line = this.lineById(pos.sourceLineId);
+    const onRow = line?.links?.[0]?.url;
+    if (onRow !== undefined) {
+      return this.dispatchLinkUrl(onRow);
+    }
+    // 3. Still nothing, but the enclosing keyed block has a link (the
+    //    edit-diff body-row case).
+    if (row !== null) {
+      const inBlock = this.blockLinkUrlAt(row);
+      if (inBlock !== null) {
+        return this.dispatchLinkUrl(inBlock);
+      }
+    }
+    return false;
+  }
+
   // Public entrypoint shared by the in-line word-click path and the
   // app's block double-click handler (which feeds an authoritative
   // token, e.g. a tool's detailFull path, instead of scraping it from
@@ -4545,6 +4594,38 @@ export class Screen {
   // whose key was already forgotten via clearKey — the line stays painted
   // and carries its stamp. Returns null for padding rows, rows outside
   // the scrollback area, or plainly-appended (unkeyed) lines.
+  // First link URL anywhere in the keyed block that owns row `y`.
+  //
+  // Restores the reach the retired app-side block handler had: an
+  // edit-diff block's link lives on its header row, but a double-click on
+  // any of its diff-body rows used to open the file too, and that should
+  // keep working. Underlining stays narrow (only real spans paint); this
+  // widens the CLICK target to the block, not the decoration.
+  private blockLinkUrlAt(y: number): string | null {
+    const key = this.keyAtRow(y);
+    if (key === null) {
+      return null;
+    }
+    const w = this.contentWidth();
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0) {
+      return null;
+    }
+    const { rows: wrapped } = this.wrapTail(w, visibleRows + this.scrollOffset);
+    // Scans linkSpans rather than links: wrapped rows are derived objects
+    // and only the projected spans are propagated onto them. Spans carry
+    // the resolved URL, which is all this needs. Consequence: a block whose
+    // only link is one the terminal can't open (hydra://, filtered out by
+    // osc8UrlFor) isn't reachable by this widest fallback — those live in
+    // prose, where the exact-hit and row-level tiers already cover them.
+    for (const row of wrapped) {
+      if (row.blockKey === key && row.linkSpans !== undefined && row.linkSpans.length > 0) {
+        return row.linkSpans[0]?.url ?? null;
+      }
+    }
+    return null;
+  }
+
   private keyAtRow(y: number): string | null {
     const w = this.contentWidth();
     const top = 1;
@@ -5943,7 +6024,9 @@ export class Screen {
       // re-opening the file.
       this.lastSidebarClick = null;
       const path = this.sidebarRowPaths.get(cell.y);
-      if (path !== undefined && !this.tryOpenPathString(path)) {
+      // Same dispatcher the transcript uses, so a sidebar row honours the
+      // #L fragment and scheme rules identically.
+      if (path !== undefined && !this.dispatchLinkUrl(path)) {
         // Path-shaped but unopenable: most often the file was deleted
         // (a "dirty" git row for a removed file) or no openFileCommand is
         // configured. Say which rather than failing silently.

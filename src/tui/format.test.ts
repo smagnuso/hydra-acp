@@ -588,6 +588,35 @@ describe("formatToolLine", () => {
     );
   });
 
+  it("does not link a directory that is only a PREFIX of the displayed path", () => {
+    // Real shape from a bash tool: the reported location is the working
+    // directory, while the row displays a longer command containing it.
+    // indexOf used to match the prefix, underlining ~/…/main and leaving
+    // /src/platform/… bare.
+    const line = formatToolLine({
+      initialTitle: "bash",
+      latestTitle: "bash",
+      detail: "cd ~/netflix/git/nrdp/nrdp/main/src/platform/gibbon/tsbridge/src/wasm &",
+      locations: [{ path: "~/netflix/git/nrdp/nrdp/main" }],
+      status: "completed",
+    })[0];
+    expect(line?.links ?? []).toEqual([]);
+  });
+
+  it("still links a path that ends the title (no trailing path chars)", () => {
+    const line = formatToolLine({
+      initialTitle: "Read",
+      latestTitle: "Read",
+      detail: "/repo/src/alpha.ts",
+      locations: [{ path: "/repo/src/alpha.ts" }],
+      status: "completed",
+    })[0];
+    const link = line?.links?.[0];
+    expect((line?.body ?? "").slice(link!.start, link!.end)).toBe(
+      "/repo/src/alpha.ts",
+    );
+  });
+
   it("does not link a bash command that merely looks wordy", () => {
     const line = formatToolLine({
       initialTitle: "bash",

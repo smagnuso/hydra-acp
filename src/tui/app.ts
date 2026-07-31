@@ -2561,9 +2561,6 @@ async function runSession(
     // returning true claims the gesture so the screen skips its own
     // open-file scan and the word-snap copy fallback. Returning false
     // lets the screen fall through to its row-text scan.
-    onBlockDoubleClick: (key: string, rowOffset: number): boolean => {
-      return handleBlockDoubleClick(key, rowOffset);
-    },
     // Click a hydra://sessions/<id> link in scrollback to jump to that
     // session. Returns true to claim the gesture (skip word-snap copy).
     onHydraLinkClick: (sessionId: string): boolean => {
@@ -6203,7 +6200,11 @@ async function runSession(
         (diff.newRef !== undefined && newText === null);
       if (failed) {
         fetchingDiffs.delete(toolCallId);
-        const out = formatEditDiffBlock(diff, "diff", { deferredStatus: "error" });
+        const out = withHeaderLine(
+          toolCallId,
+          diff,
+          formatEditDiffBlock(diff, "diff", { deferredStatus: "error" }),
+        );
         if (out.length > 0) {
           screen.upsertLines(`editdiff:${toolCallId}`, out);
           screen.repaintNow();
@@ -6241,13 +6242,44 @@ async function runSession(
 
   // Upsert a diff block at the given mode, kicking off a lazy fetch when an
   // expanded diff is still in deferred (references) form.
+  // format.ts is pure, so it links the edit-diff header's path with no
+  // line number. The line has to come from disk (locations[0].line when the
+  // agent supplied one, else anchoring the first changed snippet line in
+  // the file), so it's baked into the link's #L fragment here instead.
+  // Cached per toolCallId: blocks re-render on resize and sidebar toggles,
+  // and firstChangedFileLine reads the file each time.
+  const editDiffLineCache = new Map<string, number | null>();
+  const withHeaderLine = (
+    toolCallId: string,
+    diff: EditDiff,
+    lines: FormattedLine[],
+  ): FormattedLine[] => {
+    let lineNum = editDiffLineCache.get(toolCallId);
+    if (lineNum === undefined) {
+      const loc = toolStates.get(toolCallId)?.locations?.[0];
+      lineNum = loc?.line ?? firstChangedFileLine(diff);
+      editDiffLineCache.set(toolCallId, lineNum);
+    }
+    if (lineNum === null) {
+      return lines;
+    }
+    return lines.map((l) =>
+      l.links === undefined
+        ? l
+        : {
+            ...l,
+            links: l.links.map((lk) => ({ ...lk, url: `${lk.url}#L${lineNum}` })),
+          },
+    );
+  };
+
   const renderEditDiffBlock = (
     toolCallId: string,
     diff: EditDiff,
     mode: "edit" | "diff",
   ): void => {
     const key = `editdiff:${toolCallId}`;
-    const out = formatEditDiffBlock(diff, mode);
+    const out = withHeaderLine(toolCallId, diff, formatEditDiffBlock(diff, mode));
     if (out.length === 0) {
       screen.removeKey(key);
       return;
@@ -6749,67 +6781,6 @@ async function runSession(
       }
     }
     return null;
-  };
-
-  // Resolve the file path a keyed block is about (tool detail / edit
-  // diff target) and hand it to the screen's open-file dispatcher.
-  // Returns true when the path was real and a spawn was attempted, so
-  // the screen knows to suppress its row-text scan + word-snap copy
-  // fallback. False means "I don't have a path for this block — go
-  // ahead with the default double-click handling."
-  const handleBlockDoubleClick = (key: string, rowOffset: number): boolean => {
-    // Edit-diff block: combine the best path (locations[] is canonical
-    // when present, otherwise the diff.path) with the best line
-    // (locations[0].line when present, otherwise the first-changed
-    // file line derived from the diff body + file on disk). Agents
-    // like Claude often populate locations with a path but no line —
-    // an all-or-nothing locations check would dispatch with no line
-    // info and skip the in-file lookup that knows where the change
-    // actually landed.
-    if (key.startsWith("editdiff:")) {
-      const id = key.slice("editdiff:".length);
-      const diff = renderedEditDiffs.get(id);
-      const state = toolStates.get(id);
-      const loc = state?.locations?.[0];
-      const filePath = loc?.path ?? diff?.path;
-      if (!filePath) {
-        return false;
-      }
-      let lineNum: number | null = null;
-      if (loc?.line !== undefined) {
-        lineNum = loc.line;
-      } else if (diff) {
-        lineNum = firstChangedFileLine(diff);
-      }
-      const suffix = lineNum === null ? "" : `:${lineNum}`;
-      return screen.tryOpenPathString(filePath + suffix);
-    }
-    // Tools block: prefer locations[] (canonical {path, line}) when
-    // present; otherwise fall back to whatever path the tool's detail
-    // string carries (line info not available there).
-    if (key.startsWith("tools:")) {
-      if (rowOffset === 0) {
-        return false;
-      }
-      const owners = rowOwners.get(key);
-      const toolCallId = owners ? owners[rowOffset] : undefined;
-      if (!toolCallId) {
-        return false;
-      }
-      const state = toolStates.get(toolCallId);
-      const loc = state?.locations?.[0];
-      if (loc) {
-        const suffix = loc.line === undefined ? "" : `:${loc.line}`;
-        if (screen.tryOpenPathString(loc.path + suffix)) {
-          return true;
-        }
-      }
-      const candidate = state?.detailFull ?? state?.detail;
-      if (candidate) {
-        return screen.tryOpenPathString(candidate);
-      }
-    }
-    return false;
   };
 
   const handleBlockClick = (key: string, rowOffset: number): void => {

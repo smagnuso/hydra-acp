@@ -18,6 +18,10 @@ import {
 // Regex for hydra://sessions/<id> URLs that the TUI click handler
 // interprets as "switch to this session". Accepts optional host:port
 // prefix and #turn-<n> fragment; v1 captures the id but ignores those.
+// Characters that continue a filesystem path. Used to reject a candidate
+// match that is only part of a longer path run (see formatToolLine).
+const PATH_BOUNDARY_RE = /[A-Za-z0-9_./\-~+@]/;
+
 const HYDRA_SESSION_URL_RE =
   /^hydra:\/\/(?:[^/\s]+\/)?sessions\/([A-Za-z0-9_-]+)(?:#turn-(\d+))?$/;
 
@@ -1805,16 +1809,41 @@ export function formatToolLine(
     if (looksPathy) {
       // Longest first: prefer matching the fullest displayed form so a
       // basename occurring inside a longer path doesn't win.
+      // appendedDetail only qualifies when it LOOKS like a path display:
+      // it's the head-clipped form ("…/src/alpha.ts") for filesystem tools,
+      // but for a bash tool it's the command ("cd ~/repo && make"), and
+      // spanning that would underline a whole command line as if it were
+      // a file.
+      const detailIsPathy =
+        appendedDetail !== null &&
+        (appendedDetail.startsWith("\u2026") ||
+          appendedDetail.startsWith("/") ||
+          appendedDetail.startsWith("~"));
       const candidates = [
         state.detailFull,
         fullPath,
         shortenHomePath(fullPath),
-        appendedDetail,
+        detailIsPathy ? appendedDetail : null,
       ]
         .filter((c): c is string => c !== null && c !== undefined && c.length > 0)
         .sort((a, b) => b.length - a.length);
+      // A candidate must match a WHOLE path run, not a prefix or suffix of
+      // one. Bash tools routinely report their working directory as the
+      // location while displaying a longer command
+      // ("bash · cd ~/repo/main/src/x &&"), and indexOf happily matches
+      // ~/repo/main inside it — underlining the first half of a path and
+      // leaving the rest bare. Require a non-path char (or the string
+      // edge) on both sides.
+      const isWholeRun = (at: number, len: number): boolean => {
+        const before = at === 0 ? "" : title[at - 1]!;
+        const after = title[at + len] ?? "";
+        return !PATH_BOUNDARY_RE.test(before) && !PATH_BOUNDARY_RE.test(after);
+      };
       for (const candidate of candidates) {
-        const at = title.indexOf(candidate);
+        let at = title.indexOf(candidate);
+        while (at !== -1 && !isWholeRun(at, candidate.length)) {
+          at = title.indexOf(candidate, at + 1);
+        }
         if (at !== -1) {
           // Line number rides in the fragment so the link can position,
           // matching the file-links convention already parsed elsewhere.
