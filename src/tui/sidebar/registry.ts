@@ -154,6 +154,35 @@ function countItems(block: SidebarLine[]): number {
   return block.reduce((n, l) => n + (l.item === true ? 1 : 0), 0);
 }
 
+// The block's header: the gadget's title, plus its counter right-aligned if
+// it has one and the row is wide enough to hold both. Same slot and same
+// layout the pager uses — and paginate() overwrites this row when it fires,
+// so the two can never collide.
+function titleRow(
+  gadget: Gadget,
+  snapshot: SidebarSnapshot,
+  ctx: SidebarContext,
+): SidebarLine {
+  const title = gadget.title ?? "";
+  const note = gadget.titleNote?.(snapshot, ctx);
+  if (note === undefined || note.length === 0) {
+    return { body: title, bodyStyle: "dim" };
+  }
+  const { cellWidth, truncate } = ctx.metrics;
+  const noteWidth = cellWidth(note);
+  const room = ctx.width - noteWidth - 1;
+  if (room < 1) {
+    // Too narrow for both. The title identifies the block, so it wins.
+    return { body: truncate(title, ctx.width), bodyStyle: "dim" };
+  }
+  const clipped = truncate(title, room);
+  const gap = ctx.width - cellWidth(clipped) - noteWidth;
+  return {
+    body: `${clipped}${" ".repeat(Math.max(1, gap))}${note}`,
+    bodyStyle: "dim",
+  };
+}
+
 // Largest uniform page size that fits the column, or Infinity when every
 // item fits and nothing needs windowing.
 //
@@ -293,7 +322,7 @@ export class SidebarRenderer {
         const withTitle =
           gadget.title === undefined
             ? lines
-            : [{ body: gadget.title, bodyStyle: "dim" as const }, ...lines];
+            : [titleRow(gadget, snapshot, ctx), ...lines];
         // Gutter glyphs are applied here, inside the cache, rather than at
         // assemble time: decorating on every frame would allocate a fresh
         // row object per frame and cost this layer its referential

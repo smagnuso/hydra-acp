@@ -206,6 +206,16 @@ export interface Gadget {
   // Rendered as a dim header row above the body. Omit for gadgets that
   // are self-describing in one line (activity).
   title?: string;
+  // Optional counter right-aligned on the TITLE row ("edited      2 files").
+  // Both gadgets that have one used to spend a whole row on it, with an
+  // empty left-hand side — which reads as a stray blank line under the
+  // title rather than as a count. The title row already has the space, and
+  // in a column where pagination is fighting for rows, a row that carries
+  // one number is a poor trade.
+  //
+  // Dropped when the block is paginated: the pager owns the same slot, and
+  // "‹ 1/3 ›" is the more urgent of the two.
+  titleNote?(s: SidebarSnapshot, ctx: SidebarContext): string | undefined;
   // Cheap, allocation-free predicate. False means the gadget is skipped
   // entirely — no header, no blank separator, and (for git) no polling.
   relevant(s: SidebarSnapshot): boolean;

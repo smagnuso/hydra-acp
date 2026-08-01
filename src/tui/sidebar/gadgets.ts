@@ -352,14 +352,13 @@ export const todoGadget: Gadget = {
   title: "todo",
   pageSize: SIDEBAR_PAGE_SIZE,
   relevant: (s) => s.plan.length > 0,
+  titleNote: (s) =>
+    `${s.plan.filter((e) => e.status === "completed").length}/${s.plan.length}`,
   versionKey: (s, ctx) =>
     `${ctx.width}|` + s.plan.map((e) => `${e.status}:${e.content}`).join("\u0000"),
   render: (s, ctx) => {
     const { truncate } = ctx.metrics;
-    const done = s.plan.filter((e) => e.status === "completed").length;
-    const lines: SidebarLine[] = [
-      row(labelValue("", `${done}/${s.plan.length}`, ctx), "dim"),
-    ];
+    const lines: SidebarLine[] = [];
     // Every entry, not a window: the column scrolls under the wheel, so
     // truncating here would hide entries the user has no way to reach.
     for (const entry of s.plan) {
@@ -405,6 +404,10 @@ export const filesGadget: Gadget = {
   title: "edited",
   pageSize: SIDEBAR_PAGE_SIZE,
   relevant: (s) => s.editedFiles.length > 0,
+  // Only once there's more than one: "1 files" is noise, and a single row
+  // counts itself.
+  titleNote: (s) =>
+    s.editedFiles.length > 1 ? `${s.editedFiles.length} files` : undefined,
   versionKey: (s, ctx) =>
     `${ctx.width}|` +
     s.editedFiles.map((f) => `${f.path}:${f.added ?? ""}:${f.removed ?? ""}`).join("\u0000"),
@@ -418,9 +421,6 @@ export const filesGadget: Gadget = {
     // squeezes the list down to one row.
     const shown = [...s.editedFiles].reverse();
     const lines: SidebarLine[] = [];
-    if (shown.length > 1) {
-      lines.push(row(labelValue("", `${shown.length} files`, ctx), "dim"));
-    }
     const names = displayPaths(shown.map((f) => f.path));
     shown.forEach((file, i) => {
       const delta =

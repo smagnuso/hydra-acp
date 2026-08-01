@@ -199,13 +199,23 @@ describe("files gadget", () => {
 
   // No internal cap: the column scrolls, so every edited file gets a row
   // (and therefore stays clickable) rather than being hidden behind one.
-  it("lists every edited file and heads the block with a count", () => {
+  it("lists every edited file, and every row is a file", () => {
     const editedFiles = Array.from({ length: 9 }, (_, i) => ({
       path: `/repo/f${i}.ts`,
     }));
     const lines = filesGadget.render(snap({ editedFiles }), ctx());
-    expect(lines[0]!.body).toContain("9 files");
+    expect(lines).toHaveLength(9);
     expect(lines.filter((l) => l.openPath !== undefined)).toHaveLength(9);
+  });
+
+  // The count rides on the title row (registry stamps it) rather than
+  // costing a row of its own with an empty left-hand side.
+  it("reports its count as a title note, only when there's more than one", () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ path: `/repo/f${i}.ts` }));
+    expect(filesGadget.titleNote!(snap({ editedFiles: many }), ctx())).toBe("9 files");
+    expect(
+      filesGadget.titleNote!(snap({ editedFiles: [{ path: "/repo/a.ts" }] }), ctx()),
+    ).toBeUndefined();
   });
 
   it("omits the count row for a single edited file", () => {
@@ -701,7 +711,8 @@ describe("pagination", () => {
     const lines = render(5);
     expect(lines.filter((l) => l.item).length).toBe(5);
     expect(lines.some((l) => l.actions !== undefined)).toBe(false);
-    expect(lines[0]!.body).toBe("edited");
+    expect(lines[0]!.body).toContain("edited");
+    expect(lines[0]!.body).toContain("5 files");
   });
 
   it("windows a longer list and stamps a pager on the title row", () => {
@@ -712,12 +723,20 @@ describe("pagination", () => {
     expect(lines[0]!.actions).toBeDefined();
   });
 
-  it("keeps structural rows on every page", () => {
+  it("keeps the title row, and only that, on every page", () => {
     for (const page of [0, 1, 2]) {
       const lines = render(12, { files: page });
-      // Title plus the "N files" summary row survive the window.
-      expect(lines.filter((l) => l.item !== true).length).toBe(2);
+      expect(lines.filter((l) => l.item !== true).length).toBe(1);
     }
+  });
+
+  // The count and the pager share the title row's right-hand slot. When
+  // both apply the pager wins outright — it's the more urgent of the two,
+  // and showing them together would need width the column may not have.
+  it("replaces the count with the pager when windowing", () => {
+    const windowed = render(12)[0]!.body!;
+    expect(windowed).toContain("1/3");
+    expect(windowed).not.toContain("files");
   });
 
   it("shows the requested page's items", () => {
@@ -870,7 +889,8 @@ describe("pagination fits the available height", () => {
     const lines = render(12, 40);
     expect(lines.filter((l) => l.item).length).toBe(12);
     expect(lines.some((l) => l.actions !== undefined)).toBe(false);
-    expect(lines[0]!.body).toBe("edited");
+    expect(lines[0]!.body).toContain("edited");
+    expect(lines[0]!.body).toContain("12 files");
     expect(lines.length).toBeLessThanOrEqual(40);
   });
 
