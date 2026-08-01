@@ -455,6 +455,19 @@ export const gitGadget: Gadget = {
       s.git.untracked > 0 ||
       s.git.ahead > 0 ||
       s.git.behind > 0),
+  // A count, not the staged/dirty/new breakdown, for two reasons: the
+  // breakdown is 26 cells wide and the body is ~24, and every file row now
+  // carries its own state word — so the split is on screen already and the
+  // header only has to say how many rows there are. Omitted for one file,
+  // which counts itself.
+  //
+  // Counts ROWS, not g.staged + g.unstaged + g.untracked: a file that is
+  // both staged and dirty increments two of those counters while producing
+  // a single row, so the sum overstates the list.
+  titleNote: (s) =>
+    s.git !== null && s.git.files.length > 1
+      ? `${s.git.files.length} files`
+      : undefined,
   versionKey: (s, ctx) => {
     const g = s.git;
     if (g === null) {
@@ -468,7 +481,7 @@ export const gitGadget: Gadget = {
     if (g === null) {
       return [];
     }
-    const { truncate } = ctx.metrics;
+    const { truncate, cellWidth } = ctx.metrics;
     const lines: SidebarLine[] = [];
     if (g.branch !== null) {
       const track =
@@ -482,40 +495,33 @@ export const gitGadget: Gadget = {
           : { body: truncate(g.branch, ctx.width) },
       );
     }
-    const parts: string[] = [];
-    if (g.staged > 0) {
-      parts.push(`${g.staged} staged`);
-    }
-    if (g.unstaged > 0) {
-      parts.push(`${g.unstaged} dirty`);
-    }
-    if (g.untracked > 0) {
-      parts.push(`${g.untracked} new`);
-    }
-    if (parts.length > 0) {
-      lines.push(row(truncate(parts.join(" · "), ctx.width), "dim"));
-    }
     // Individual files, so a double-click can open them. All of them: the
     // column scrolls, and the summary row above already gives the shape of
     // the change set at a glance.
     const shown = g.files;
     const names = displayPaths(shown.map((f) => f.path));
     shown.forEach((file, i) => {
-      const glyph =
-        file.state === "staged" ? "●" : file.state === "dirty" ? "○" : "+";
+      // The state as a WORD, right-aligned, rather than a leading glyph.
+      // Two reasons, one taste and one mechanical:
+      //
+      //   - "● / ○ / +" has to be learned, and nothing on screen teaches
+      //     it. The words are the same vocabulary as the summary row above
+      //     ("3 staged · 2 dirty · 1 new"), so the block explains itself.
+      //   - ● and ○ are East Asian AMBIGUOUS width. Terminals disagree on
+      //     whether they occupy one cell or two, and a row that guesses
+      //     wrong shifts every character after it — which is why these rows
+      //     didn't line up with each other. The words are pure ASCII and
+      //     right-alignment puts the ragged edge where names already differ.
       const style =
         file.state === "staged"
           ? "plan-done"
           : file.state === "dirty"
             ? "tool"
             : "plan-pending";
+      const budget = ctx.width - cellWidth(file.state) - 1;
+      const name = truncate(names[i]!, Math.max(1, budget));
       lines.push(
-        fileRow(
-          truncate(`${glyph} ${names[i]!}`, ctx.width),
-          file.path,
-          style,
-          names[i]!,
-        ),
+        fileRow(labelValue(name, file.state, ctx), file.path, style, name),
       );
     });
     return lines;

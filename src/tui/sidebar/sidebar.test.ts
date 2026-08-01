@@ -288,7 +288,7 @@ describe("openPath targets", () => {
     ]);
   });
 
-  it("leaves summary and header rows without a click target", () => {
+  it("leaves the branch row without a click target", () => {
     const lines = gitGadget.render(
       snap({
         git: {
@@ -303,11 +303,11 @@ describe("openPath targets", () => {
       }),
       ctx(),
     );
-    // branch row + summary row carry no path; only the file row does.
-    expect(lines.filter((l) => l.openPath === undefined).length).toBe(2);
+    // Only the file row is openable; the branch row is not.
+    expect(lines.filter((l) => l.openPath === undefined).length).toBe(1);
   });
 
-  it("lists every changed file, uncapped, alongside the totals", () => {
+  it("lists every changed file, uncapped, and counts them on the title", () => {
     const files = Array.from({ length: 20 }, (_, i) => ({
       path: `/repo/f${i}.ts`,
       state: "dirty" as const,
@@ -327,7 +327,34 @@ describe("openPath targets", () => {
       ctx(),
     );
     expect(lines.filter((l) => l.openPath).length).toBe(20);
-    expect(lines.some((l) => l.body.includes("20 dirty"))).toBe(true);
+    // The count rides on the title row the registry stamps, not on a row of
+    // the gadget's own.
+    expect(lines.every((l) => l.openPath !== undefined || l.body === "main")).toBe(true);
+  });
+
+  // The old summary row read "1 staged · 2 dirty · 1 new". Its counters can
+  // exceed the number of rows, because a file that is both staged and
+  // unstaged bumps two of them while producing one (dirty) row — so the
+  // header counts rows instead.
+  it("counts rows, not the staged/unstaged/untracked totals", () => {
+    const note = gitGadget.titleNote!(
+      snap({
+        git: {
+          branch: "main",
+          staged: 2,
+          unstaged: 2,
+          untracked: 0,
+          ahead: 0,
+          behind: 0,
+          files: [
+            { path: "/repo/a.ts", state: "dirty" },
+            { path: "/repo/b.ts", state: "dirty" },
+          ],
+        },
+      }),
+      ctx(),
+    );
+    expect(note).toBe("2 files");
   });
 
   it("re-renders git when only the file list changed", () => {
@@ -1175,7 +1202,7 @@ describe("file row link spans", () => {
     expect(body).toContain("+3 -1");
   });
 
-  it("spans only the name in a git row, excluding the state glyph", () => {
+  it("spans only the name in a git row, excluding the state word", () => {
     const lines = gitGadget.render(
       {
         ...emptySnapshot(),
@@ -1196,9 +1223,11 @@ describe("file row link spans", () => {
     const { start, end } = fileLine!.openSpan!;
     const body = fileLine!.body ?? "";
     expect(body.slice(start, end)).toBe("beta.ts");
-    // The glyph is in the body but outside the span.
-    expect(body.startsWith("○ ")).toBe(true);
-    expect(start).toBeGreaterThan(0);
+    // The state word is in the body but outside the span: only the name is
+    // a link target, so a click on "dirty" doesn't try to open a file.
+    expect(body).toContain("dirty");
+    expect(end).toBeLessThan(body.length);
+    expect(start).toBe(0);
   });
 });
 
