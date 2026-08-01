@@ -19,6 +19,31 @@
 //   3. Another tree anywhere else — `ps`, parsed here. macOS has no
 //      `/proc`, so this is the fallback rather than the default.
 //
+// COST. This runs every few seconds for the life of a TUI, so the naive
+// implementation is not good enough. Measured on a 940-process box, per
+// sample of two agent trees (8 processes between them):
+//
+//   full /proc scan, async fs      124.0ms cpu     ← the obvious version
+//   tree walk, async fs             10.1ms cpu
+//   tree walk, sync fs               1.1ms cpu     ← what this module does
+//
+// Two independent factors, both worth understanding before changing this:
+//
+//   TOPOLOGY. Reading all 940 `stat` files to discover which 8 are in the
+//   tree is 100x more work than asking. `/proc/<pid>/task/<tid>/children`
+//   names a thread's children directly, so the tree can be walked from its
+//   root touching only its own nodes. It needs CONFIG_PROC_CHILDREN, which
+//   is near-universal but not guaranteed — sampleTrees falls back to the
+//   full scan when the file isn't there.
+//
+//   SYNC IO. Async `fs` costs ~130us per tiny /proc file against ~10us
+//   sync: the threadpool handoff dwarfs the read. The usual "never block
+//   the event loop" rule is about waiting on hardware, and procfs has none
+//   — the kernel generates these bytes on read, so there is nothing to wait
+//   for. Blocking for ~1ms every few seconds is cheaper than a repaint.
+//   The injectable deps stay async-COMPATIBLE (they may return a promise or
+//   a value) so tests can keep using async fakes.
+//
 // CPU is computed from CUMULATIVE cpu-time deltas between two samples, not
 // from `ps`'s own `%cpu` column. That column reports an average over the
 // process's whole lifetime on Linux (and a decaying average on macOS), so a
@@ -33,6 +58,8 @@
 // near 0% while genuinely busy. macOS has no portable equivalent through
 // `ps`, so that path measures live processes only and under-reports a
 // subprocess-heavy tree.
+
+import { readdirSync, readFileSync } from "node:fs";
 
 export interface ProcRow {
   pid: number;
@@ -383,6 +410,120 @@ function reapedChildDelta(
 
 // ── samplers ─────────────────────────────────────────────────────────────
 
+// IO the samplers need. Values may be returned directly or as promises:
+// production passes the synchronous fs calls (see the COST note at the top
+// of this file), tests pass async fakes, and `await` accepts both.
+type ReadDir = (path: string) => Promise<string[]> | string[];
+type ReadFile = (path: string) => Promise<string> | string;
+
+// Direct children of `pid`, from /proc/<pid>/task/<tid>/children.
+//
+// Unioned over every thread, not just the main one: `children` is a
+// per-THREAD file, and a process that spawns from a worker thread would
+// otherwise have that subtree silently missing. Costs one small read per
+// thread, which is still a rounding error next to scanning /proc.
+//
+// Throws only when the children FILE is unavailable on the root itself,
+// which sampleTrees uses to detect a kernel without CONFIG_PROC_CHILDREN.
+// A thread that exits mid-walk is normal and skipped.
+export async function readChildPids(
+  pid: number,
+  readDir: ReadDir,
+  readFile: ReadFile,
+): Promise<number[]> {
+  const out: number[] = [];
+  let tids: string[];
+  try {
+    tids = await readDir(`/proc/${pid}/task`);
+  } catch {
+    // The process exited between being named as a child and being walked.
+    return out;
+  }
+  for (const tid of tids) {
+    if (!/^\d+$/.test(tid)) {
+      continue;
+    }
+    let text: string;
+    try {
+      text = await readFile(`/proc/${pid}/task/${tid}/children`);
+    } catch {
+      continue;
+    }
+    for (const token of text.split(/\s+/)) {
+      if (token.length === 0) {
+        continue;
+      }
+      const child = Number(token);
+      if (Number.isInteger(child) && child > 0) {
+        out.push(child);
+      }
+    }
+  }
+  return out;
+}
+
+// Walk the trees rooted at `roots`, reading only their own nodes.
+//
+// Returns null when the kernel doesn't expose `children` at all, so the
+// caller can fall back to the full scan rather than silently reporting a
+// one-process tree for an agent that has spawned a dozen.
+export async function sampleProcTree(
+  roots: readonly number[],
+  readDir: ReadDir,
+  readFile: ReadFile,
+): Promise<Map<number, ProcRow> | null> {
+  const rows = new Map<number, ProcRow>();
+  const seen = new Set<number>();
+  for (const root of roots) {
+    if (seen.has(root)) {
+      continue;
+    }
+    // Probe the root before walking: distinguishes "no such feature" from
+    // "no children". A root that has exited is not evidence either way, so
+    // it's skipped rather than treated as a missing feature.
+    let rootStat: string;
+    try {
+      rootStat = await readFile(`/proc/${root}/stat`);
+    } catch {
+      continue;
+    }
+    try {
+      await readFile(`/proc/${root}/task/${root}/children`);
+    } catch {
+      return null;
+    }
+    const rootRow = parseProcStat(rootStat);
+    if (rootRow === null) {
+      continue;
+    }
+    rows.set(root, rootRow);
+    seen.add(root);
+    const stack = [root];
+    while (stack.length > 0) {
+      const pid = stack.pop()!;
+      for (const child of await readChildPids(pid, readDir, readFile)) {
+        if (seen.has(child)) {
+          continue;
+        }
+        seen.add(child);
+        let row: ProcRow | null;
+        try {
+          row = parseProcStat(await readFile(`/proc/${child}/stat`));
+        } catch {
+          // Exited mid-walk; its CPU is already banked on its parent's
+          // reaped-children counter, so nothing is lost by skipping it.
+          continue;
+        }
+        if (row !== null) {
+          rows.set(child, row);
+          stack.push(child);
+        }
+      }
+    }
+  }
+  return rows;
+}
+
 // Read every process's topology + CPU from /proc. One readdir plus one small
 // file read per process, no process creation.
 //
@@ -390,8 +531,8 @@ function reapedChildDelta(
 // (/proc/<pid>/status, for explicit kB), and only the handful of pids in the
 // trees we care about need it. fillRssBytes does that pass.
 export async function sampleProcfs(
-  readDir: (path: string) => Promise<string[]>,
-  readFile: (path: string) => Promise<string>,
+  readDir: ReadDir,
+  readFile: ReadFile,
 ): Promise<Map<number, ProcRow>> {
   const rows = new Map<number, ProcRow>();
   let entries: string[];
@@ -423,25 +564,23 @@ export async function sampleProcfs(
 export async function fillRssBytes(
   rows: Map<number, ProcRow>,
   pids: Iterable<number>,
-  readFile: (path: string) => Promise<string>,
+  readFile: ReadFile,
 ): Promise<void> {
-  await Promise.all(
-    [...pids].map(async (pid) => {
-      const row = rows.get(pid);
-      if (row === undefined) {
-        return;
+  for (const pid of pids) {
+    const row = rows.get(pid);
+    if (row === undefined) {
+      continue;
+    }
+    try {
+      const rss = parseVmRss(await readFile(`/proc/${pid}/status`));
+      if (rss !== null) {
+        row.rssBytes = rss;
       }
-      try {
-        const rss = parseVmRss(await readFile(`/proc/${pid}/status`));
-        if (rss !== null) {
-          row.rssBytes = rss;
-        }
-      } catch {
-        // Exited mid-sample; leave rssBytes at 0 rather than dropping the
-        // process, since its CPU delta is still meaningful.
-      }
-    }),
-  );
+    } catch {
+      // Exited mid-sample; leave rssBytes at 0 rather than dropping the
+      // process, since its CPU delta is still meaningful.
+    }
+  }
 }
 
 // Platform-dispatched sample of the trees rooted at `roots`.
@@ -467,8 +606,8 @@ export async function fillRssBytes(
 // Injectable IO so both paths are testable without a process table.
 export interface SampleDeps {
   platform?: string;
-  readDir?: (path: string) => Promise<string[]>;
-  readFile?: (path: string) => Promise<string>;
+  readDir?: ReadDir;
+  readFile?: ReadFile;
   runPs?: () => Promise<string>;
 }
 
@@ -479,25 +618,23 @@ export async function sampleTrees(
   const platform = deps.platform ?? process.platform;
   const at = Date.now();
   if (platform === "linux") {
-    const readDir =
-      deps.readDir ??
-      (async (path: string) => {
-        const { readdir } = await import("node:fs/promises");
-        return readdir(path);
-      });
-    const readFile =
-      deps.readFile ??
-      (async (path: string) => {
-        const { readFile: rf } = await import("node:fs/promises");
-        return rf(path, "utf8");
-      });
-    const rows = await sampleProcfs(readDir, readFile);
-    // RSS only for the pids that actually land in a requested tree —
-    // that's ~20 extra file reads instead of ~1000.
+    const readDir = deps.readDir ?? ((path: string) => readdirSync(path));
+    const readFile = deps.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+    // Preferred path: touch only the trees asked for.
+    const walked = await sampleProcTree(roots, readDir, readFile);
+    const rows = walked ?? (await sampleProcfs(readDir, readFile));
+    // The walk already produced exactly the tree; the fallback produced
+    // everything and has to be filtered down to it.
     const wanted = new Set<number>();
-    for (const root of roots) {
-      for (const pid of collectTree(rows, root)) {
+    if (walked !== null) {
+      for (const pid of rows.keys()) {
         wanted.add(pid);
+      }
+    } else {
+      for (const root of roots) {
+        for (const pid of collectTree(rows, root)) {
+          wanted.add(pid);
+        }
       }
     }
     await fillRssBytes(rows, wanted, readFile);
