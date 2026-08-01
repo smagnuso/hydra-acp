@@ -78,9 +78,14 @@ const DOUBLE_CLICK_MAX_DIST = 1;
 // ASCII-word-character regex for double-click word snap. We deliberately
 // restrict to ASCII for this version (per spec), Unicode word boundary
 // expansion would require ICU or per-codepoint category tables. Hyphen
-// is included so hyphenated identifiers ("foo-bar", "state-of-the-art")
+// and colon are included so hyphenated / colon-joined identifiers
+// ("foo-bar", "state-of-the-art", "std::vector", "namespace:thing")
 // snap as a single word, matching what most terminals and editors do.
-const ASCII_WORD_RE = /[A-Za-z0-9_\-]/;
+const ASCII_WORD_RE = /[A-Za-z0-9_:\-]/;
+// Trailing / leading connector punctuation that we allow *inside* a word
+// but strip from the boundaries. A double-click on "note:" should still
+// select "note", and "foo-" at end of a sentence shouldn't grab the dash.
+const WORD_EDGE_TRIM_RE = /[:\-]/;
 // Path-token characters scanned for the double-click "open file" gesture.
 // Wider than ASCII_WORD_RE: includes the filesystem separators, dots,
 // hyphens, tildes, and pluses that appear in real paths. The optional
@@ -3938,6 +3943,12 @@ export class Screen {
     let cleanEnd = idx + 1;
     while (cleanEnd < clean.length && ASCII_WORD_RE.test(clean[cleanEnd]!)) {
       cleanEnd++;
+    }
+    while (cleanEnd > cleanStart + 1 && WORD_EDGE_TRIM_RE.test(clean[cleanEnd - 1]!)) {
+      cleanEnd--;
+    }
+    while (cleanStart < cleanEnd - 1 && WORD_EDGE_TRIM_RE.test(clean[cleanStart]!)) {
+      cleanStart++;
     }
     return this.projectCleanRangeToRaw(rawToClean, body.length, cleanStart, cleanEnd);
   }

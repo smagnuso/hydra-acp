@@ -2605,6 +2605,28 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).not.toBe("");
   });
 
+  it("double-click on a colon-joined identifier snaps the whole token but trims trailing colon", () => {
+    const screen = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen.appendLine({ body: "call std::vector now" });
+    const y = visibleRows(screen);
+    // Column 8 lands inside "std::vector" (on 't' of "std").
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_PRESSED", { x: 8, y });
+    expect(screen.getSelectionText()).toBe("std::vector");
+    dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
+
+    const screen2 = makeTallScreen({ width: 40, height: 24, mouse: true });
+    screen2.appendLine({ body: "note: hello world" });
+    const y2 = visibleRows(screen2);
+    // Column 2 lands inside "note" (on 'o').
+    dispatchMouse(screen2, "MOUSE_LEFT_BUTTON_PRESSED", { x: 2, y: y2 });
+    dispatchMouse(screen2, "MOUSE_LEFT_BUTTON_RELEASED", { x: 2, y: y2 });
+    dispatchMouse(screen2, "MOUSE_LEFT_BUTTON_PRESSED", { x: 2, y: y2 });
+    expect(screen2.getSelectionText()).toBe("note");
+    dispatchMouse(screen2, "MOUSE_LEFT_BUTTON_RELEASED", { x: 2, y: y2 });
+  });
+
   it("double-click on a bare URL snaps to the whole URL, not a word inside it", () => {
     const screen = makeTallScreen({
       width: 200,
