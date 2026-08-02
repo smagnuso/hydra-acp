@@ -40,6 +40,11 @@ interface KeyDriver {
   // Simulate a bracketed-paste by sending the start/end markers + text
   // through the raw stdin handler that pickSession installs.
   paste(text: string): void;
+  // Every string the picker painted since the last clear. The fake
+  // terminal has no grid, so this is a flat transcript of writes — good
+  // enough to assert "this label was rendered", not layout.
+  output(): string;
+  clearOutput(): void;
   resolveOnce: Promise<PickerResult>;
 }
 
@@ -65,8 +70,16 @@ function makePicker(opts: {
     },
   };
 
+  const writes: string[] = [];
   const handler: ProxyHandler<(...args: unknown[]) => unknown> = {
-    apply: () => term,
+    apply: (_t, _this, args) => {
+      for (const a of args) {
+        if (typeof a === "string") {
+          writes.push(a);
+        }
+      }
+      return term;
+    },
     get(_target, prop) {
       if (prop === "width") return 80;
       if (prop === "height") return 24;
@@ -128,6 +141,10 @@ function makePicker(opts: {
       // Send as a single chunk exactly as a terminal would for a paste.
       const payload = `\x1b[200~${text}\x1b[201~`;
       stdinDataHandler(Buffer.from(payload, "binary"));
+    },
+    output: () => writes.join(""),
+    clearOutput: () => {
+      writes.length = 0;
     },
     resolveOnce,
   };
@@ -772,5 +789,216 @@ describe("pickSession: killing the current session blocks abort", () => {
     await flush();
     drv.press("ESCAPE");
     await expect(drv.resolveOnce).resolves.toMatchObject({ kind: "abort" });
+  });
+});
+
+describe("pickSession: ^F find mode", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const target = {
+    baseUrl: "http://localhost:9999",
+    token: "test-token",
+    isLocal: true,
+  } as unknown as RemoteTarget;
+
+  const flush = async (): Promise<void> => {
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  const alpha = session({
+    sessionId: "hydra_session_alpha",
+    title: "Alpha session",
+    cwd: "/home/me/work/alpha",
+    agentId: "claude-code",
+    updatedAt: "2026-05-14T10:00:00Z",
+  });
+  const beta = session({
+    sessionId: "hydra_session_beta",
+    title: "Beta session",
+    cwd: "/home/me/work/beta",
+    agentId: "codex",
+    updatedAt: "2026-05-14T09:00:00Z",
+  });
+
+  const hits = [
+    {
+      sessionId: "hydra_session_alpha",
+      cwd: "/home/me/work/alpha",
+      status: "cold" as const,
+      updatedAt: "2026-05-14T10:00:00Z",
+      title: "Alpha session",
+      totalMatches: 3,
+      snippets: [
+        {
+          kind: "agent" as const,
+          text: "the needle is here",
+          recordedAt: 1,
+        },
+        {
+          kind: "tool" as const,
+          toolName: "Edit",
+          text: "another needle",
+          recordedAt: 2,
+        },
+      ],
+    },
+  ];
+
+  const stubSearch = (): void => {
+    globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      if (url.includes("/sessions/search")) {
+        return new Response(
+          JSON.stringify({ query: "needle", truncated: false, results: hits }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/export")) {
+        return new Response(JSON.stringify({}), {
+          status: 500,
+        });
+      }
+      return new Response(JSON.stringify({ sessions: [alpha, beta] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+  };
+
+  // ^F only opens find when focus is in the session list, not the
+  // composer (there it's readline forward-char), hence the DOWN first.
+  const openFind = (drv: ReturnType<typeof makePicker>): void => {
+    drv.press("DOWN");
+    drv.press("CTRL_F");
+  };
+
+  // Drive: open find, type the query, run the search.
+  const runSearch = async (drv: ReturnType<typeof makePicker>): Promise<void> => {
+    openFind(drv);
+    drv.type("needle");
+    drv.press("ENTER");
+    await flush();
+  };
+
+  it("persists the query and results onto prefs when find is dismissed", async () => {
+    stubSearch();
+    const prefs = createPickerPrefs();
+    const drv = makePicker({ sessions: [alpha, beta], prefs, target });
+    await runSearch(drv);
+    expect(prefs.lastFind).toBeUndefined();
+    drv.press("ESCAPE");
+    expect(prefs.lastFind?.query).toBe("needle");
+    expect(prefs.lastFind?.results.map((r) => r.sessionId)).toEqual([
+      "hydra_session_alpha",
+    ]);
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("restores the previous search on the next ^F, landing in the results", async () => {
+    stubSearch();
+    const prefs = createPickerPrefs();
+    const first = makePicker({ sessions: [alpha, beta], prefs, target });
+    await runSearch(first);
+    first.press("ESCAPE");
+    first.press("CTRL_C");
+    await first.resolveOnce;
+
+    // A brand-new pickSession, same prefs — as if the user had opened a
+    // hit and come back via ^p.
+    const second = makePicker({ sessions: [alpha, beta], prefs, target });
+    second.clearOutput();
+    openFind(second);
+    const out = second.output();
+    // Query is back in the box and the hit's snippet is on screen without
+    // the user having pressed Enter again.
+    expect(out).toContain("needle");
+    expect(out).toContain("the needle is here");
+    // Esc leaves the find layer; only then does ^C abort the picker.
+    second.press("ESCAPE");
+    second.press("CTRL_C");
+    await second.resolveOnce;
+  });
+
+  it("drops restored hits whose session is no longer visible", async () => {
+    stubSearch();
+    const prefs = createPickerPrefs();
+    const first = makePicker({ sessions: [alpha, beta], prefs, target });
+    await runSearch(first);
+    first.press("ESCAPE");
+    first.press("CTRL_C");
+    await first.resolveOnce;
+
+    // alpha is gone (killed + deleted since the search).
+    const second = makePicker({ sessions: [beta], prefs, target });
+    second.clearOutput();
+    openFind(second);
+    expect(second.output()).not.toContain("the needle is here");
+    // Esc leaves the find layer; only then does ^C abort the picker.
+    second.press("ESCAPE");
+    second.press("CTRL_C");
+    await second.resolveOnce;
+  });
+
+  it("renders find hits with the same columns as the picker list", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    drv.clearOutput();
+    await runSearch(drv);
+    const out = drv.output();
+    // The picker's column header, and the agent column — neither of which
+    // the old id/status/title find row carried.
+    expect(out).toContain("SESSION");
+    expect(out).toContain("AGE");
+    expect(out).toContain("claude-code");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("puts the snippet counter on the snippet line, not the column row", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    const out = drv.output();
+    // Counter leads the snippet line rather than trailing the columns,
+    // where it read as a value in the AGENT / COST column.
+    expect(out).toContain("[1/2] the needle is here");
+    // Snippet kind labels are gone; tool names survive.
+    expect(out).not.toContain("agent  the needle");
+    drv.clearOutput();
+    drv.press("n", { isCharacter: true });
+    const after = drv.output();
+    expect(after).toContain("[2/2] Edit  another needle");
+    expect(after).not.toContain("tool · Edit");
+    // The counter is not focus-gated — an unfocused row still carries it,
+    // pinned to its first snippet.
+    drv.press("DOWN");
+    drv.clearOutput();
+    drv.press("UP");
+    expect(drv.output()).toContain("[1/2] the needle is here");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("`i` on a hit opens the session info overlay", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.clearOutput();
+    drv.press("i", { isCharacter: true });
+    expect(drv.output()).toContain("Session info");
+    // Esc dismisses the overlay and lands back on the results.
+    drv.clearOutput();
+    drv.press("ESCAPE");
+    expect(drv.output()).toContain("the needle is here");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
   });
 });

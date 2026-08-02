@@ -239,6 +239,63 @@ describe("parseQuery", () => {
   });
 });
 
+describe("buildSnippet width", () => {
+  const text = "x".repeat(200) + "needle" + "y".repeat(200);
+  const idx = text.toLowerCase().indexOf("needle");
+
+  it("honors an explicit width instead of a fixed 60-char window", () => {
+    const narrow = buildSnippet(text, idx, 6, 40);
+    const wide = buildSnippet(text, idx, 6, 200);
+    // Strip the leading/trailing ellipses before measuring.
+    const body = (s: string): string => s.replace(/^…/, "").replace(/…$/, "");
+    expect(body(narrow).length).toBe(40);
+    expect(body(wide).length).toBe(200);
+    expect(wide.length).toBeGreaterThan(narrow.length);
+    expect(wide).toContain("needle");
+  });
+
+  it("clamps absurd widths rather than trusting the caller", () => {
+    const body = (s: string): string => s.replace(/^…/, "").replace(/…$/, "");
+    expect(body(buildSnippet(text, idx, 6, 1)).length).toBe(24);
+    // Clamped to MAX_SNIPPET_WIDTH (512), which exceeds this fragment,
+    // so the whole 406-char text comes back with no ellipses.
+    expect(body(buildSnippet(text, idx, 6, 100000)).length).toBe(text.length);
+    expect(body(buildSnippet(text, idx, 6, Number.NaN)).length).toBe(72);
+  });
+
+  it("spends the unused side of the budget on the other side", () => {
+    // Match at the very start: nothing to show before it, so the whole
+    // context budget should go after it rather than being wasted.
+    const head = "needle" + "y".repeat(200);
+    const snippet = buildSnippet(head, 0, 6, 100);
+    expect(snippet.startsWith("needle")).toBe(true);
+    expect(snippet.replace(/…$/, "").length).toBe(100);
+  });
+
+  it("threads the width from searchHistories through to the snippet", async () => {
+    const long = "a".repeat(300) + "needle" + "b".repeat(300);
+    const manager = fakeManager([
+      {
+        sessionId: "hydra_session_w",
+        cwd: "/a",
+        status: "cold",
+        updatedAt: "2026-05-20T00:00:00Z",
+        history: [agentEntry(long)],
+      },
+    ]);
+    const narrow = await searchHistories(manager, "needle", {
+      snippetWidth: 40,
+    });
+    const wide = await searchHistories(manager, "needle", {
+      snippetWidth: 240,
+    });
+    const len = (r: SessionSearchResponse): number =>
+      r.results[0]!.snippets[0]!.text.length;
+    expect(len(narrow)).toBeLessThan(len(wide));
+    expect(len(wide)).toBeGreaterThan(200);
+  });
+});
+
 describe("buildSnippet", () => {
   it("centers the match with surrounding context and ellipses", () => {
     const text = "x".repeat(200) + "needle" + "y".repeat(200);

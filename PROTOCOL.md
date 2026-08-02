@@ -250,18 +250,51 @@ Substring search across session transcripts. POST (not GET) because the optional
 
 ```jsonc
 {
-  "q":          "regression",
-  "sessionIds": [ "<id>", … ]   // optional scope filter
+  "q":            "regression",
+  "sessionIds":   [ "<id>", … ], // optional scope filter
+  "snippetWidth": 160            // optional; target chars per snippet
 }
 ```
+
+`q` is tokenized on whitespace, quote-aware. Bare terms default to `OR`; a
+standalone `and` / `or` token (any case) sets the operator for the whole
+query, and `AND` wins if both appear. Wrap a phrase in double quotes to
+match it literally, operators included. A term may carry a scope prefix:
+`prompt:` (user text), `response:` (agent text + thoughts), `tool:` (tool
+titles, names, rawInput, locations).
+
+`snippetWidth` is the caller's render width in characters, match text
+included. Clamped to `[24, 512]`; defaults to `72`. Snippets are built by
+centring the match in that budget and spending either side's unused
+allowance on the other.
+
+Tool *output* is not indexed — only conversation text, tool inputs, and
+the failure text of tool calls that ended `failed` / `rejected` /
+`cancelled`.
 
 **Response — `200 OK`**
 
 ```jsonc
 {
-  "matches": [
-    { "sessionId": "<id>", "messageId": "<id>", "snippet": "…regression…" },
-    …
+  "query":     "regression",
+  "truncated": false,          // true when the session cap (200) was hit
+  "results": [
+    {
+      "sessionId":    "<id>",
+      "cwd":          "/path",
+      "status":       "warm" | "cold",
+      "updatedAt":    "<iso8601>",
+      "title":        "…",     // omitted when the session has none
+      "totalMatches": 12,      // every occurrence, not just the shown ones
+      "snippets": [            // capped at 5/session, budgeted per term
+        {
+          "kind":       "agent" | "user" | "thought" | "tool" | "tool-input",
+          "toolName":   "Edit", // only for tool / tool-input kinds
+          "text":       "…regression…",
+          "recordedAt": 1782587063587
+        }
+      ]
+    }
   ]
 }
 ```

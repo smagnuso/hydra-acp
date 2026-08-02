@@ -61,7 +61,7 @@ import {
 import { promptForImportCwd } from "./import-cwd-prompt.js";
 import { LineEditor } from "./line-editor.js";
 import { completePathToken, extractPathToken } from "./file-completion.js";
-import { readTermHeight, readTermWidth } from "./prompt-utils.js";
+import { drawBox, readTermHeight, readTermWidth } from "./prompt-utils.js";
 import { RowPainter } from "./screen/painter.js";
 import { withSync } from "./sync.js";
 import {
@@ -225,6 +225,22 @@ export interface PickerFilters {
 // ^p.
 export interface PickerPrefs {
   filters: PickerFilters;
+  // Last ^F search, retained so that opening a hit and coming back
+  // doesn't cost you the query and the scroll position. Selecting a hit
+  // tears the whole picker down (cleanup + resolve), so this has to live
+  // on the caller-owned prefs container rather than in pickSession's
+  // closure. Never cleared implicitly; to forget a search, empty the
+  // query box (^U) and Esc out.
+  lastFind?: FindState;
+}
+
+export interface FindState {
+  query: string;
+  results: SessionHits[];
+  truncated: boolean;
+  selectedIdx: number;
+  snippetIdx: number;
+  scrollOffset: number;
 }
 
 export function createPickerPrefs(): PickerPrefs {
@@ -275,6 +291,8 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   null,
   ["/", "search sessions (metadata)"],
   ["^f", "find in session history (content + tool inputs)"],
+  ["  in results", "n/p cycle snippets · i info · Enter open"],
+  ["  ", "the query and results survive opening a hit"],
   ["o", "toggle cwd-only filter"],
   ["h", "cycle host filter (local / <peer> / all)"],
   ["^o", "change cwd (for the picker and any new sessions)"],
@@ -472,6 +490,35 @@ export async function pickSession(
   // way "busy" does for kill/delete, but with its own indicator so the
   // user sees "searching…" instead of "working on <id>…".
   let findInFlight = false;
+  // Rendered rows for the sessions behind findResults, keyed by session
+  // id, plus the column widths computed across just that set. Rebuilt by
+  // rebuildFindRows() whenever findResults changes so a hit's identity
+  // line is formatted by the same code path as the main picker list.
+  let findRows = new Map<string, Row>();
+  let findWidths: Widths = computeWidths([], formatOpts);
+  let findHeaderLine = "";
+  const findRowFor = (sessionId: string): Row | null =>
+    findRows.get(sessionId) ?? null;
+  const rebuildFindRows = (): void => {
+    const now = Date.now();
+    const byId = new Map(visible.map((s) => [s.sessionId, s]));
+    const rowList: Row[] = [];
+    findRows = new Map();
+    for (const hit of findResults) {
+      const session = byId.get(hit.sessionId);
+      if (!session) {
+        continue;
+      }
+      const row = toRow(session, now);
+      findRows.set(hit.sessionId, row);
+      rowList.push(row);
+    }
+    findWidths = computeWidths(rowList, formatOpts);
+    const budget = Math.max(20, readTermWidth(term) - ROW_PREFIX_WIDTH);
+    findHeaderLine = formatRow(HEADER, findWidths, budget, formatOpts).padEnd(
+      budget,
+    );
+  };
   // Rename input buffer. Pre-filled with the current title when `t` is
   // pressed on a live row; the user edits in-place with full readline
   // motion (arrows, ^A/^E, word motion, ^U/^K/^W, ^Y, ^_ undo, Alt-_
@@ -1263,15 +1310,21 @@ export async function pickSession(
   //   row 2..findBoxRows+1  │ body rows     │
   //   row findBoxRows+2  ╰─────────────────╯
   //   row findBoxRows+3  (blank)
-  //   row findBoxRows+4  ❯ session-id  cold  Title   ← findResultsStartRow()
+  //   row findBoxRows+4  SESSION STATE AGE CWD TITLE…   ← findHeaderRow()
+  //   row findBoxRows+5  ❯ session-id  cold  Title   ← findResultsStartRow()
   //   ...
   //   last               indicator
-  const findResultsStartRow = (): number => findBoxRows + 4;
+  //
+  // The column header is the same one the main picker paints, and the
+  // result rows are formatted by the same formatRow — a hit should read
+  // identically to its row in the list you came from.
+  const findHeaderRow = (): number => findBoxRows + 4;
+  const findResultsStartRow = (): number => findBoxRows + 5;
   const FIND_FOOTER_ROWS = 2;
   let findScrollOffset = 0;
   const findViewportSize = (): number => {
     termHeight = readTermHeight(term);
-    const avail = Math.max(2, termHeight - (findBoxRows + 3) - FIND_FOOTER_ROWS);
+    const avail = Math.max(2, termHeight - (findBoxRows + 4) - FIND_FOOTER_ROWS);
     return Math.max(1, Math.floor(avail / 2));
   };
   const adjustFindScroll = (): void => {
@@ -1403,13 +1456,19 @@ export async function pickSession(
     });
   };
 
-  const SNIPPET_KIND_GLYPH: Record<string, string> = {
-    user: "user",
-    agent: "agent",
-    thought: "thought",
-    tool: "tool",
-    "tool-input": "tool-input",
-  };
+  // Snippet indent on the result's second row ("    " before the prefix).
+  const SNIPPET_INDENT = 4;
+  // Room reserved for the "[1/5] ToolName  " prefix when asking the
+  // daemon for a snippet width. Rows whose prefix runs longer than this
+  // get trimmed client-side; rows with a shorter one just don't use the
+  // full budget. Guessing here beats asking per-row — the width is a
+  // property of the whole request.
+  const SNIPPET_PREFIX_RESERVE = 16;
+  const snippetRenderWidth = (): number =>
+    Math.max(
+      24,
+      readTermWidth(term) - 1 - SNIPPET_INDENT - SNIPPET_PREFIX_RESERVE,
+    );
 
   // Shared data for painting one result row. Extracted so paintFindResultA
   // and paintFindResultB stay in sync without duplicating field reads.
@@ -1428,25 +1487,62 @@ export async function pickSession(
     }
     const w = readTermWidth(term);
     const rowBudget = Math.max(20, w - ROW_PREFIX_WIDTH);
-    const shortId = stripHydraSessionPrefix(hit.sessionId);
-    const title = hit.title ?? shortenHomePath(hit.cwd);
+    // Render the identity line with the picker's own row formatter so a
+    // hit shows the same columns (age, agent, cwd, title, cost) in the
+    // same places as the main list. findWidths is computed across just
+    // the hit sessions, so the find list is internally aligned even
+    // though its column widths won't match the picker's. Nothing is
+    // appended to this line — a counter tacked on the end lands under
+    // whichever column happens to be last (AGENT / COST) and reads like
+    // a value in it.
+    const row = findRowFor(hit.sessionId);
+    const line1 =
+      row !== null
+        ? formatRow(row, findWidths, rowBudget, formatOpts).padEnd(rowBudget)
+        : // Session retired out from under the results (killed, or a
+          // filter change since the search). Fall back to what the hit
+          // itself carries.
+          `${stripHydraSessionPrefix(hit.sessionId)}  ${hit.status === "warm" ? "warm" : "cold"}  ${truncateMiddle(
+            hit.title ?? shortenHomePath(hit.cwd),
+            Math.max(5, rowBudget - 20),
+          )}`.padEnd(rowBudget);
+    // Snippet line: counter first (it's about the snippets, so it belongs
+    // on the snippet row), then the tool name when there is one. The
+    // snippet *kind* (agent / thought / user) is deliberately omitted —
+    // it's noise next to the matched text, which speaks for itself.
+    // Shown on every row, not just the focused one. Hiding it until focus
+    // made rows change shape as the cursor moved, and it hid the one fact
+    // that tells you whether a hit is worth stepping into.
+    const snippetIdx = focused ? findSnippetIdx : 0;
+    const snippet = hit.snippets[snippetIdx];
     const counterText =
-      focused && hit.snippets.length > 1
-        ? `  [${findSnippetIdx + 1}/${hit.snippets.length}]`
-        : focused && hit.totalMatches > hit.snippets.length
-          ? `  [${hit.snippets.length} of ${hit.totalMatches}]`
+      hit.snippets.length > 1
+        ? `[${snippetIdx + 1}/${hit.snippets.length}] `
+        : hit.totalMatches > hit.snippets.length
+          ? `[${hit.snippets.length} of ${hit.totalMatches}] `
           : "";
-    const head = `${shortId}  ${hit.status === "warm" ? "warm" : "cold"}`;
-    const titleBudget = Math.max(5, rowBudget - head.length - counterText.length - 2);
-    const titleSlice = truncateMiddle(title, titleBudget);
-    const line1 = `${head}  ${titleSlice}${counterText}`.padEnd(rowBudget);
-    const snippet = hit.snippets[focused ? findSnippetIdx : 0];
-    const kind = snippet ? (SNIPPET_KIND_GLYPH[snippet.kind] ?? snippet.kind) : "";
-    const prefix = snippet?.toolName ? `${kind} · ${snippet.toolName}` : kind;
-    const snippetBudget = Math.max(10, rowBudget - prefix.length - 6);
+    const toolPart = snippet?.toolName ? `${snippet.toolName}  ` : "";
+    const prefix = `${counterText}${toolPart}`;
+    // Exactly what's left on the row: full width, less the last column we
+    // leave unwritten (auto-wrap guard), less the indent and prefix. The
+    // daemon already sized the snippet to roughly this, so in the common
+    // case truncateMiddle is a no-op rather than a second haircut on top
+    // of the server's.
+    const snippetBudget = Math.max(
+      10,
+      w - 1 - SNIPPET_INDENT - prefix.length,
+    );
     const text = snippet ? truncateMiddle(snippet.text, snippetBudget) : "";
-    const line2 = snippet ? `    ${prefix}  ${text}` : "    (no snippet)";
+    const line2 = snippet ? `    ${prefix}${text}` : "    (no snippet)";
     return { rowBudget, line1, line2: line2.padEnd(rowBudget + ROW_PREFIX_WIDTH), focusedRow: focused };
+  };
+
+  // Column header for the results list. Same content as the main
+  // picker's header, dimmed and indented by the 2-col row prefix so the
+  // columns line up with the result rows below it.
+  const paintFindHeader = (): void => {
+    term.dim.noFormat(`  ${findHeaderLine}`);
+    term.styleReset();
   };
 
   // Paint just the title/id row for one result (no newline). Full-width
@@ -1494,7 +1590,7 @@ export async function pickSession(
           ? `  ${sCount} ${sCount === 1 ? "session" : "sessions"} match${truncSuffix}  ·  `
           : "  ";
       term.dim.noFormat(
-        `${countPart}↑ edit query · Up/Down sessions · n/p snippets · Enter open · Esc back`,
+        `${countPart}↑ edit query · Up/Down sessions · n/p snippets · i info · Enter open · Esc back`,
       );
       term.styleReset();
       term.eraseLineAfter();
@@ -1538,6 +1634,8 @@ export async function pickSession(
         paintFindIndicator();
       } else {
         adjustFindScroll();
+        term.moveTo(1, findHeaderRow());
+        paintFindHeader();
         const v = findViewportSize();
         const listFocused = findSubMode !== "input";
         for (let i = 0; i < v; i++) {
@@ -1654,8 +1752,10 @@ export async function pickSession(
     try {
       const out = await searchSessions(opts.target, query, {
         sessionIds: visible.map((s) => s.sessionId),
+        snippetWidth: snippetRenderWidth(),
       });
       findResults = out.results;
+      rebuildFindRows();
       findTruncated = out.truncated;
       findSelectedIdx = 0;
       findSnippetIdx = 0;
@@ -1670,6 +1770,26 @@ export async function pickSession(
       findInFlight = false;
       renderFind();
     }
+  };
+
+  // Snapshot the current find state onto the caller-owned prefs so the
+  // next ^F (in this picker or after a round-trip through a session)
+  // picks up where this one left off. Called on exit and just before
+  // resolving into a session.
+  const persistFind = (): void => {
+    const query = findQueryText();
+    if (query.trim().length === 0 && findResults.length === 0) {
+      delete prefs.lastFind;
+      return;
+    }
+    prefs.lastFind = {
+      query,
+      results: findResults,
+      truncated: findTruncated,
+      selectedIdx: findSelectedIdx,
+      snippetIdx: findSnippetIdx,
+      scrollOffset: findScrollOffset,
+    };
   };
 
   // exitFind is forward-declared here and assigned inside the Promise
@@ -2181,6 +2301,7 @@ export async function pickSession(
       }
     };
     exitFind = (): void => {
+      persistFind();
       findComposer = new InputDispatcher({
         history: [],
         collapsePastes: false,
@@ -2649,26 +2770,66 @@ export async function pickSession(
       let lines: string[] | null = null;
       let error: string | null = null;
       let loading = true;
+      let infoScroll = 0;
 
+      // Rendered as an overlay box (drawBox({overlay:true})) rather than
+      // a full-screen wipe, so whatever you opened it from — the picker
+      // list or the ^F results — stays visible around the edges and is
+      // still there when you Esc out.
+      const infoBody = (): string[] => {
+        if (loading) {
+          return ["loading…"];
+        }
+        if (error !== null) {
+          return [error];
+        }
+        return lines ?? [];
+      };
       const renderInfo = (): void => {
         withSync(() => {
           term.hideCursor();
           painter.clearCache();
-          term.moveTo(1, 1).eraseDisplayBelow();
-          term.brightWhite.bold.noFormat(
-            `  Session info — ${stripHydraSessionPrefix(session.sessionId)}`,
-          )("\n\n");
-          if (loading) {
-            term.dim.noFormat("  loading…")("\n");
-          } else if (error !== null) {
-            term.brightRed.noFormat(`  ${error}`)("\n");
-          } else if (lines !== null) {
-            for (const line of lines) {
-              term.noFormat(`  ${line}`)("\n");
+          const body = infoBody();
+          const termH = readTermHeight(term);
+          const termW = readTermWidth(term);
+          // +1 for the footer hint row. Cap so drawBox's own clamp never
+          // silently eats content rows we counted on.
+          const maxBody = Math.max(3, termH - 6);
+          const bodyRows = Math.min(body.length, maxBody);
+          const widest = body.reduce((m, l) => Math.max(m, l.length), 0);
+          const contentWidth = Math.min(
+            Math.max(40, widest + 2),
+            Math.max(20, termW - 6),
+          );
+          const layout = drawBox(term, {
+            contentHeight: bodyRows + 2,
+            contentWidth,
+            title: `Session info — ${stripHydraSessionPrefix(session.sessionId)}`,
+            overlay: true,
+          });
+          infoScroll = Math.max(
+            0,
+            Math.min(infoScroll, Math.max(0, body.length - bodyRows)),
+          );
+          for (let i = 0; i < bodyRows; i++) {
+            const line = body[infoScroll + i] ?? "";
+            term.moveTo(layout.contentX, layout.contentY + i);
+            const slice = line.slice(0, layout.contentW - 1);
+            if (error !== null) {
+              term.brightRed.noFormat(` ${slice}`);
+            } else {
+              term.noFormat(` ${slice}`);
             }
+            term.styleReset();
           }
-          term("\n");
-          term.dim.noFormat("  Esc / ^C to return")("\n");
+          const more = body.length - bodyRows;
+          const hint =
+            more > 0
+              ? `↑/↓ scroll (${more} more) · Esc to return`
+              : "Esc to return";
+          term.moveTo(layout.contentX, layout.contentY + bodyRows + 1);
+          term.dim.noFormat(` ${hint}`);
+          term.styleReset();
         });
       };
 
@@ -2682,6 +2843,19 @@ export async function pickSession(
           if (name === "ESCAPE" || name === "CTRL_C") {
             infoAbort.abort();
             popLayer();
+            return;
+          }
+          if (name === "UP" || name === "PAGE_UP") {
+            if (infoScroll === 0) {
+              return;
+            }
+            infoScroll -= name === "UP" ? 1 : 5;
+            renderInfo();
+            return;
+          }
+          if (name === "DOWN" || name === "PAGE_DOWN") {
+            infoScroll += name === "DOWN" ? 1 : 5;
+            renderInfo();
             return;
           }
         },
@@ -2732,16 +2906,36 @@ export async function pickSession(
         history: [],
         collapsePastes: false,
       });
-      findResults = [];
-      findTruncated = false;
-      findSelectedIdx = 0;
+      // Restore the previous search if there is one. Results are only
+      // reusable when they're still in `visible` — a filter change or a
+      // kill since the last search can retire rows out from under us, so
+      // drop any hit that no longer has a session behind it.
+      const saved = prefs.lastFind;
+      const stillVisible = new Set(visible.map((s) => s.sessionId));
+      const restored = saved
+        ? saved.results.filter((h) => stillVisible.has(h.sessionId))
+        : [];
+      if (saved && saved.query.length > 0) {
+        findComposer.setBuffer(saved.query);
+      }
+      findResults = restored;
+      rebuildFindRows();
+      findTruncated = saved?.truncated ?? false;
+      findSelectedIdx = Math.min(
+        Math.max(0, saved?.selectedIdx ?? 0),
+        Math.max(0, restored.length - 1),
+      );
       findSnippetIdx = 0;
       findScrollOffset = 0;
       findError = null;
       findInFlight = false;
-      findSubMode = "input";
+      // Land straight on the results when we have some — the user came
+      // back to keep browsing, not to retype the query. ^F or ↑ from the
+      // top of the list gets back to the input box.
+      findSubMode = restored.length > 0 ? "results" : "input";
       findLayerActive = true;
       computeFindBoxLayout();
+      adjustFindScroll();
       renderFind();
 
       const findOnKey = (
@@ -2843,6 +3037,7 @@ export async function pickSession(
             const isImportedPassive =
               !!session?.importedFromMachine && !session.upstreamSessionId;
             if (isImportedPassive) {
+              persistFind();
               cleanup();
               const result: PickerResult = {
                 kind: "attach",
@@ -2861,12 +3056,14 @@ export async function pickSession(
                 cwd: hit.cwd,
               }, focus);
               if (action === "cancel") {
+                persistFind();
                 cleanup();
                 resolve({ kind: "abort" });
                 return;
               }
               // No re-attach needed — focus.pop() inside promptForLaunchOrView restores the find layer
               if (action === "back") return;
+              persistFind();
               cleanup();
               const result: PickerResult = {
                 kind: "attach",
@@ -2878,6 +3075,21 @@ export async function pickSession(
               }
               resolve(result);
             })();
+            return;
+          }
+          // `i` mirrors the main picker's info key. The find layer stays
+          // on the stack underneath, so Esc out of the info overlay lands
+          // back on the results with the selection intact.
+          if (data?.isCharacter && name === "i") {
+            const hit = findResults[findSelectedIdx];
+            if (!hit) {
+              return;
+            }
+            const session = visible.find((s) => s.sessionId === hit.sessionId);
+            if (!session) {
+              return;
+            }
+            openInfoLayer(session);
             return;
           }
           if (data?.isCharacter && (name === "n" || name === "N")) {

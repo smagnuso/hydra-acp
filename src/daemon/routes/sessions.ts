@@ -126,6 +126,7 @@ export function registerSessionRoutes(
     const body = (request.body ?? {}) as {
       q?: unknown;
       sessionIds?: unknown;
+      snippetWidth?: unknown;
     };
     const q = typeof body.q === "string" ? body.q : "";
     if (q.trim().length === 0) {
@@ -135,7 +136,13 @@ export function registerSessionRoutes(
     const ids = Array.isArray(body.sessionIds)
       ? body.sessionIds.filter((s): s is string => typeof s === "string" && s.length > 0)
       : undefined;
-    const out = await searchHistories(manager, q, { sessionIds: ids });
+    // Client-declared render width. searchHistories clamps it; an absent
+    // or non-numeric value falls back to the 80-column default.
+    const opts: Parameters<typeof searchHistories>[2] = { sessionIds: ids };
+    if (typeof body.snippetWidth === "number") {
+      opts.snippetWidth = body.snippetWidth;
+    }
+    const out = await searchHistories(manager, q, opts);
     return out;
   });
 

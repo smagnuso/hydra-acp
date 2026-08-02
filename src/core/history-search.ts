@@ -61,6 +61,11 @@ export interface SearchOptions {
   sessionIds?: string[];
   maxSnippetsPerSession?: number;
   maxSessions?: number;
+  // Target width in characters for each snippet, match text included.
+  // The caller knows how much room it has to paint; a fixed server-side
+  // width either wastes half a wide terminal or overflows a narrow one.
+  // Clamped to [MIN_SNIPPET_WIDTH, MAX_SNIPPET_WIDTH].
+  snippetWidth?: number;
 }
 
 // Which fragment kinds to include when matching. Controlled by an
@@ -201,10 +206,21 @@ function scopeMatchesKind(scope: SearchScope, kind: SnippetKind): boolean {
 
 const DEFAULT_MAX_SNIPPETS_PER_SESSION = 5;
 const DEFAULT_MAX_SESSIONS = 200;
-// Half-width on each side of the match in a snippet. The snippet ends
-// up roughly SNIPPET_SIDE * 2 + matchLen chars before ellipses; a typical
-// terminal row can show this comfortably alongside the row prefix.
-const SNIPPET_SIDE = 30;
+// Default total snippet width when the caller doesn't say how much room
+// it has. Sized for an 80-column terminal minus the row indent.
+const DEFAULT_SNIPPET_WIDTH = 72;
+// Floor keeps a pathologically narrow request from producing snippets
+// that are all ellipsis; ceiling bounds the response size for a caller
+// that asks for something absurd.
+const MIN_SNIPPET_WIDTH = 24;
+const MAX_SNIPPET_WIDTH = 512;
+
+function clampSnippetWidth(width: number): number {
+  if (!Number.isFinite(width)) {
+    return DEFAULT_SNIPPET_WIDTH;
+  }
+  return Math.max(MIN_SNIPPET_WIDTH, Math.min(MAX_SNIPPET_WIDTH, Math.floor(width)));
+}
 
 export async function searchHistories(
   manager: SessionManager,
@@ -218,6 +234,9 @@ export async function searchHistories(
   const maxPerSession =
     opts.maxSnippetsPerSession ?? DEFAULT_MAX_SNIPPETS_PER_SESSION;
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const snippetWidth = clampSnippetWidth(
+    opts.snippetWidth ?? DEFAULT_SNIPPET_WIDTH,
+  );
   const allow = opts.sessionIds ? new Set(opts.sessionIds) : null;
 
   const all = await manager.list();
@@ -237,7 +256,7 @@ export async function searchHistories(
     const entries = await manager
       .loadHistory(candidate.sessionId, { tools: "references" })
       .catch(() => [] as HistoryEntry[]);
-    const found = scanSessionEntries(entries, parsed, maxPerSession);
+    const found = scanSessionEntries(entries, parsed, maxPerSession, snippetWidth);
     if (found.snippets.length === 0) {
       continue;
     }
@@ -272,6 +291,7 @@ export function scanSessionEntries(
   entries: ReadonlyArray<HistoryEntry>,
   query: ParsedQuery,
   maxSnippets: number,
+  snippetWidth: number = DEFAULT_SNIPPET_WIDTH,
 ): ScanResult {
   if (query.terms.length === 0) {
     return { totalMatches: 0, snippets: [] };
@@ -285,7 +305,7 @@ export function scanSessionEntries(
   const perTerm = Math.max(1, Math.floor(maxSnippets / query.terms.length));
   const spare: Snippet[] = [];
   for (const { scope, term } of query.terms) {
-    const result = scanForTerm(entries, term, scope, maxSnippets);
+    const result = scanForTerm(entries, term, scope, maxSnippets, snippetWidth);
     if (query.operator === "AND" && result.totalMatches === 0) {
       // Short-circuit: this term has no matches, so the AND fails.
       return { totalMatches: 0, snippets: [] };
@@ -312,6 +332,7 @@ function scanForTerm(
   term: string,
   scope: SearchScope,
   snippetBudget: number,
+  snippetWidth: number,
 ): ScanResult {
   const needle = term.toLowerCase();
   let totalMatches = 0;
@@ -336,7 +357,7 @@ function scanForTerm(
         const first = hay.indexOf(needle);
         const snippet: Snippet = {
           kind: frag.kind,
-          text: buildSnippet(frag.text, first, needle.length),
+          text: buildSnippet(frag.text, first, needle.length, snippetWidth),
           recordedAt: entry.recordedAt,
         };
         if (frag.toolName !== undefined) {
@@ -597,6 +618,7 @@ export function buildSnippet(
   text: string,
   matchIdx: number,
   matchLen: number,
+  width: number = DEFAULT_SNIPPET_WIDTH,
 ): string {
   const flat = text.replace(/\s+/g, " ").trim();
   if (flat.length === 0) {
@@ -616,8 +638,20 @@ export function buildSnippet(
   if (pos === -1) {
     pos = 0;
   }
-  const start = Math.max(0, pos - SNIPPET_SIDE);
-  const end = Math.min(flat.length, pos + needleSlice.length + SNIPPET_SIDE);
+  // Budget the context around the match, then spend whatever one side
+  // can't use on the other — a match near the start of the fragment
+  // should still fill the row with trailing context rather than leaving
+  // the right half blank.
+  const target = clampSnippetWidth(width);
+  const context = Math.max(0, target - needleSlice.length);
+  const half = Math.floor(context / 2);
+  const wantBefore = Math.min(half, pos);
+  const wantAfter = Math.min(
+    context - wantBefore,
+    flat.length - (pos + needleSlice.length),
+  );
+  const start = Math.max(0, pos - (context - wantAfter));
+  const end = Math.min(flat.length, pos + needleSlice.length + wantAfter);
   const head = start > 0 ? "…" : "";
   const tail = end < flat.length ? "…" : "";
   return `${head}${flat.slice(start, end)}${tail}`;

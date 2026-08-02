@@ -485,12 +485,19 @@ export async function regenSessionTitle(
 export async function searchSessions(
   target: RemoteTarget,
   query: string,
-  opts: { sessionIds?: string[] } = {},
+  opts: { sessionIds?: string[]; snippetWidth?: number } = {},
   fetchImpl: typeof fetch = fetch,
 ): Promise<SessionSearchResponse> {
-  const body: { q: string; sessionIds?: string[] } = { q: query };
+  const body: { q: string; sessionIds?: string[]; snippetWidth?: number } = {
+    q: query,
+  };
   if (opts.sessionIds && opts.sessionIds.length > 0) {
     body.sessionIds = opts.sessionIds;
+  }
+  // Tell the daemon how much room we have to paint, so it centres the
+  // match in a snippet that actually fills the row.
+  if (opts.snippetWidth !== undefined) {
+    body.snippetWidth = opts.snippetWidth;
   }
   const response = await fetchWithTimeout(
     `${target.baseUrl}/v1/sessions/search`,

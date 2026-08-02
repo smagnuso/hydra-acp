@@ -300,7 +300,14 @@ export async function promptForLaunchOrView(
   ];
 
   const render = (): void => {
-    const layout = drawBox(term, { contentHeight: 11, title: "Open session" });
+    // overlay: the only caller is the picker's ^F results list, and
+    // wiping the screen there loses the results the user is choosing
+    // from — they'd have no context for which hit this modal is about.
+    const layout = drawBox(term, {
+      contentHeight: 11,
+      title: "Open session",
+      overlay: true,
+    });
     const innerW = layout.contentW;
     let row = 0;
     term.moveTo(layout.contentX, layout.contentY + row);
