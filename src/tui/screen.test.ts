@@ -105,6 +105,44 @@ function wrapAll(screen: Screen, width: number): FormattedLine[] {
   ).wrapTail(width, Number.POSITIVE_INFINITY).rows;
 }
 
+describe("Screen maxWrapRows clamp", () => {
+  it("clips an over-long body to the cap and marks it with an ellipsis", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "w ".repeat(200).trim(), maxWrapRows: 2 });
+    const rows = wrapAll(screen, 40);
+    expect(rows.length).toBe(2);
+    expect(rows[1]?.body.endsWith("…")).toBe(true);
+    // The clipped row still respects the wrap budget (width - 1).
+    expect(rows[1]!.body.length).toBeLessThanOrEqual(39);
+  });
+
+  it("leaves a body that fits within the cap untouched", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "short body", maxWrapRows: 2 });
+    const rows = wrapAll(screen, 40);
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.body).toBe("short body");
+  });
+
+  it("re-upserting the same body with the cap lifted un-clips the row", () => {
+    const screen = makeScreen();
+    const body = "w ".repeat(200).trim();
+    screen.upsertLines("tools:1", [{ body, maxWrapRows: 2 }]);
+    expect(wrapAll(screen, 40).length).toBe(2);
+    // Same body, cap removed (the expand gesture). upsertLines reuses
+    // FormattedLine identities for unchanged rows, so this only works if
+    // sameRenderedLine treats maxWrapRows as part of the rendered form.
+    screen.upsertLines("tools:1", [{ body }]);
+    expect(wrapAll(screen, 40).length).toBeGreaterThan(2);
+  });
+
+  it("ignores the cap for ansi bodies (clip is not escape-aware)", () => {
+    const screen = makeScreen();
+    screen.appendLine({ body: "w ".repeat(200).trim(), ansi: true, maxWrapRows: 2 });
+    expect(wrapAll(screen, 40).length).toBeGreaterThan(2);
+  });
+});
+
 describe("Screen scrollback cap", () => {
   it("drops oldest lines when over the cap", () => {
     const screen = makeScreen({ maxScrollbackLines: 100 });
@@ -1729,7 +1767,11 @@ describe("Screen block-click routing", () => {
   // positive and the row→line mapping has real geometry to walk.
   function makeTallScreen(opts: {
     mouse?: boolean;
-    onBlockClick?: (key: string, rowOffset: number) => void;
+    onBlockClick?: (
+      key: string,
+      rowOffset: number,
+      subKey: string | null,
+    ) => void;
     onBlockVisible?: (key: string) => void;
     width?: number;
     height?: number;
@@ -2201,6 +2243,40 @@ describe("Screen block-click routing", () => {
       clickAt(screen, 3, blockRows[i]!);
       expect(clicks).toEqual([{ key: "tools:1", rowOffset: i }]);
     }
+  });
+
+  it("reports the row's hoverSubKey, which survives wrapping (rowOffset does not)", () => {
+    const clicks: Array<{ rowOffset: number; subKey: string | null }> = [];
+    const screen = makeTallScreen({
+      mouse: true,
+      onBlockClick: (_key, rowOffset, subKey) =>
+        clicks.push({ rowOffset, subKey }),
+    });
+    // tool-a's body wraps to 2 rows at width 40, so every row below it
+    // has a rowOffset one greater than its logical index. subKey is
+    // immune to that drift.
+    screen.upsertLines("tools:1", [
+      { body: "header" },
+      { body: "w ".repeat(40).trim(), hoverSubKey: "tc-a" },
+      { body: "tool-b", hoverSubKey: "tc-b" },
+    ]);
+    const rows = visibleRows(screen);
+    const blockRows: number[] = [];
+    for (let y = rows; y >= 1; y--) {
+      if (callKeyAtRow(screen, y) === "tools:1") {
+        blockRows.unshift(y);
+      } else if (blockRows.length > 0) {
+        break;
+      }
+    }
+    // header + 2 wrapped rows for tool-a + 1 for tool-b.
+    expect(blockRows.length).toBeGreaterThanOrEqual(4);
+    const last = blockRows[blockRows.length - 1]!;
+    clickAt(screen, 3, last);
+    expect(clicks).toHaveLength(1);
+    expect(clicks[0]!.subKey).toBe("tc-b");
+    // The drift this guards against: rowOffset no longer equals 2.
+    expect(clicks[0]!.rowOffset).toBeGreaterThan(2);
   });
 
   // Visible (non-skipped) line bodies, top-to-bottom, via the same wrapTail

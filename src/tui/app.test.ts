@@ -5,6 +5,7 @@ import {
   resolveToolsClick,
   resolveOpenFileCommand,
   _buildToolsLines,
+  TOOL_ROW_MAX_WRAP_ROWS,
 } from "./app.js";
 
 describe("toggleToolExpansion", () => {
@@ -175,6 +176,26 @@ describe("_buildToolsLines", () => {
     expect(result.rowOwners).toHaveLength(2);
     expect(result.rowOwners[0]).toBeNull();
     expect(result.rowOwners[1]).toBe("tc-aaa");
+  });
+
+  it("caps a collapsed tool row's wrapped height, but not an expanded one", () => {
+    const order = ["tc-aaa"];
+    const states = new Map([["tc-aaa", makeState("tc-aaa")]]);
+    const base = {
+      order,
+      states,
+      startedAt: 1_000,
+      endedAt: 2_000,
+      stopReason: "end_turn",
+      expanded: false,
+    };
+    const collapsed = _buildToolsLines(base);
+    expect(collapsed.lines[1]?.maxWrapRows).toBe(TOOL_ROW_MAX_WRAP_ROWS);
+    const expanded = _buildToolsLines({
+      ...base,
+      perToolExpanded: new Set(["tc-aaa"]),
+    });
+    expect(expanded.lines[1]?.maxWrapRows).toBeUndefined();
   });
 
   it("expanded non-edit tool with detail+resultText → summary + body lines, rowOwners for both", () => {

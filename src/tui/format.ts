@@ -140,6 +140,13 @@ export interface FormattedLine {
   // the bullet glyph. The first wrapped chunk gets no extra indent —
   // its body already carries the "• " (or "N. ") prefix.
   hangingIndent?: number;
+  // Cap on the number of physical rows this line may occupy once the
+  // screen layer wraps it. When the body needs more, the last kept row
+  // is clipped and gets an "…" so a pathological body (a 600-char bash
+  // command in a tool row) can't swallow the transcript. The full text
+  // stays in the source line, so mouse selection / copy is unaffected.
+  // Ignored for `ansi` bodies (the clip isn't escape-sequence aware).
+  maxWrapRows?: number;
 }
 
 export interface FormatEventOptions {

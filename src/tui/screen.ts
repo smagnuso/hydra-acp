@@ -122,7 +122,11 @@ export interface ScreenOptions {
   // single block's expand/collapse. `rowOffset` is the 0-based index of
   // the clicked terminal row within that block (0 = top line of the
   // block). Clicks on unkeyed rows are ignored.
-  onBlockClick?: (key: string, rowOffset: number) => void;
+  // `subKey` is the row's hoverSubKey when it has one (tool rows carry
+  // their toolCallId). Prefer it over rowOffset: rowOffset counts WRAPPED
+  // rows, so it desyncs from a block's logical row map as soon as any row
+  // wraps.
+  onBlockClick?: (key: string, rowOffset: number, subKey: string | null) => void;
   // Invoked on a double-click that lands on a row owned by a keyed
   // block, BEFORE the screen's own open-file scan of the row text.
   // Lets the app override the gesture with authoritative knowledge of
@@ -442,7 +446,9 @@ export class Screen {
   private term: Terminal;
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
-  private onBlockClick: ((key: string, rowOffset: number) => void) | undefined;
+  private onBlockClick:
+    | ((key: string, rowOffset: number, subKey: string | null) => void)
+    | undefined;
   private onHydraLinkClick:
     | ((sessionId: string) => boolean)
     | undefined;
@@ -743,7 +749,12 @@ export class Screen {
   // double-click arrives in time; handleSelectionPress cancels it when
   // it does. Null when no toggle is pending.
   private pendingBlockClick:
-    | { timer: ReturnType<typeof setTimeout>; key: string; rowOffset: number }
+    | {
+        timer: ReturnType<typeof setTimeout>;
+        key: string;
+        rowOffset: number;
+        subKey: string | null;
+      }
     | null = null;
   private started = false;
   // Bracketed-paste-mode state. terminal-kit doesn't natively support
@@ -3407,7 +3418,8 @@ export class Screen {
         ) {
           this.onHydraLinkClick(region.sessionId);
         } else if (this.onBlockClick) {
-          const key = this.keyAtRow(cell.y);
+          const hit = this.keyAndSubAtRow(cell.y);
+          const key = hit?.key ?? null;
           if (key !== null) {
             // Scan upward to find the block's top row so we can report a
             // 0-based offset within the block. Relies on the invariant
@@ -3416,7 +3428,11 @@ export class Screen {
             while (firstRowY > 1 && this.keyAtRow(firstRowY - 1) === key) {
               firstRowY -= 1;
             }
-            this.schedulePendingBlockClick(key, cell.y - firstRowY);
+            this.schedulePendingBlockClick(
+              key,
+              cell.y - firstRowY,
+              hit?.sub ?? null,
+            );
           }
         }
       }
@@ -4455,7 +4471,11 @@ export class Screen {
   // a second click intervening the toggle runs unchanged. Replaces any
   // earlier pending toggle — if a press lands on a new cell before the
   // previous one fired, the previous block was clearly abandoned.
-  private schedulePendingBlockClick(key: string, rowOffset: number): void {
+  private schedulePendingBlockClick(
+    key: string,
+    rowOffset: number,
+    subKey: string | null,
+  ): void {
     if (!this.onBlockClick) {
       return;
     }
@@ -4463,21 +4483,21 @@ export class Screen {
     // so deferring the toggle would just add lag with no upside. Fire
     // the toggle synchronously, matching the pre-debounce behaviour.
     if (this.openFileCommand === null) {
-      this.onBlockClick(key, rowOffset);
+      this.onBlockClick(key, rowOffset, subKey);
       return;
     }
     this.cancelPendingBlockClick();
     const handler = this.onBlockClick;
     const timer = setTimeout(() => {
       this.pendingBlockClick = null;
-      handler(key, rowOffset);
+      handler(key, rowOffset, subKey);
     }, DOUBLE_CLICK_MAX_MS);
     // Don't hold the event loop open just for a pending UI toggle;
     // node shouldn't wait on this when the rest of the app has settled.
     if (typeof timer.unref === "function") {
       timer.unref();
     }
-    this.pendingBlockClick = { timer, key, rowOffset };
+    this.pendingBlockClick = { timer, key, rowOffset, subKey };
   }
 
   // Clear any pending block-click toggle without firing it. Called when
@@ -4508,7 +4528,7 @@ export class Screen {
     clearTimeout(pending.timer);
     this.pendingBlockClick = null;
     if (this.onBlockClick) {
-      this.onBlockClick(pending.key, pending.rowOffset);
+      this.onBlockClick(pending.key, pending.rowOffset, pending.subKey);
     }
   }
 
@@ -7090,6 +7110,15 @@ export class Screen {
     const chunks = line.ansi
       ? wrapAnsiBody(line.body, hang > 0 ? wrapWidth : room)
       : wrap(line.body, hang > 0 ? wrapWidth : room, { stripMarkup });
+    // Row cap: drop the overflow chunks and mark the last kept one with
+    // an ellipsis. Skipped for ansi bodies since the clip below isn't
+    // escape-aware. The dropped text is still in the source line, so
+    // selection/copy and the expanded view keep the whole thing.
+    const maxRows = line.ansi ? 0 : (line.maxWrapRows ?? 0);
+    const clamped = maxRows > 0 && chunks.length > maxRows;
+    if (clamped) {
+      chunks.length = maxRows;
+    }
     const wrapped: FormattedLine[] = [];
     // Walk the source body to recover each chunk's starting col. wrap()
     // doesn't return offsets, but chunks are sequential portions and
@@ -7113,8 +7142,11 @@ export class Screen {
       // wrapOrigin math below keys off `chunk` (source-derived), not
       // the visible body, so selection/click mapping is unaffected by
       // the added leading spaces.
-      const displayBody =
+      let displayBody =
         i === 0 || hang === 0 ? chunk : " ".repeat(hang) + chunk;
+      if (clamped && i === chunks.length - 1) {
+        displayBody = truncate(`${displayBody}…`, room, { stripMarkup });
+      }
       const wrappedLine: FormattedLine = {
         prefix: i === 0 ? line.prefix : " ".repeat(prefixCols),
         body: displayBody,
@@ -7516,7 +7548,13 @@ function sameRenderedLine(a: FormattedLine, b: FormattedLine): boolean {
     Boolean(a.fillRow) !== Boolean(b.fillRow) ||
     Boolean(a.collapsed) !== Boolean(b.collapsed) ||
     (a.blockKey ?? "") !== (b.blockKey ?? "") ||
-    (a.hoverSubKey ?? "") !== (b.hoverSubKey ?? "")
+    (a.hoverSubKey ?? "") !== (b.hoverSubKey ?? "") ||
+    // Identity reuse would otherwise keep the OLD line object — and its
+    // cached, already-clipped wrap — when only the row cap changed. That
+    // is exactly the expand gesture on a clipped tool row: same body,
+    // cap lifted, and the row would stay visually truncated.
+    (a.maxWrapRows ?? 0) !== (b.maxWrapRows ?? 0) ||
+    (a.hangingIndent ?? 0) !== (b.hangingIndent ?? 0)
   ) {
     return false;
   }

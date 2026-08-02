@@ -1041,6 +1041,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
 // id is present, its detail body (detail, errorText, resultText) renders
 // inline below the summary row. Exported for unit testing without wiring
 // through runSession's closure scope.
+// Physical rows a collapsed tool row may occupy before it gets clipped
+// with an "…". Two rather than one so a moderately long command still
+// reads, while a 600-char one-liner stays bounded.
+export const TOOL_ROW_MAX_WRAP_ROWS = 2;
+
 export function _buildToolsLines(args: {
   order: string[];
   states: Map<string, ToolLineState>;
@@ -1151,13 +1156,22 @@ export function _buildToolsLines(args: {
     const state = states.get(id);
     if (state) {
       const toolLines = formatToolLine(state, end);
-      for (const l of toolLines) l.hoverSubKey = id;
+      const toolExpanded = perToolExpanded?.has(id) ?? false;
+      for (const l of toolLines) {
+        l.hoverSubKey = id;
+        // Collapsed rows are capped so one agent that titles its tool
+        // calls with the entire bash command can't push everything else
+        // off screen. Click the row (or expand it) to read the rest.
+        if (!toolExpanded) {
+          l.maxWrapRows = TOOL_ROW_MAX_WRAP_ROWS;
+        }
+      }
       lines.push(...toolLines);
       // Every line emitted for this tool is owned by that tool's id.
       rowOwners.push(...toolLines.map(() => id));
       // When the tool is expanded and not an edit/write tool, render its
       // detail body inline below the summary row.
-      if (perToolExpanded?.has(id)) {
+      if (toolExpanded) {
         const bodyLines = renderToolDetail(state);
         for (const l of bodyLines) l.hoverSubKey = id;
         lines.push(...bodyLines);
@@ -2552,8 +2566,8 @@ async function runSession(
     // Click a collapsed/expanded scrollback block to toggle just that one
     // block (the ^O dialog toggles all blocks of a type session-wide).
     // Routes by key prefix to the matching per-block override.
-    onBlockClick: (_key: string, _rowOffset: number) => {
-      handleBlockClick(_key, _rowOffset);
+    onBlockClick: (key: string, rowOffset: number, subKey: string | null) => {
+      handleBlockClick(key, rowOffset, subKey);
     },
     // Double-click on a keyed block: try to open the file the block is
     // *about* (a tool's recorded path, an edit diff's target) via the
@@ -6783,7 +6797,11 @@ async function runSession(
     return null;
   };
 
-  const handleBlockClick = (key: string, rowOffset: number): void => {
+  const handleBlockClick = (
+    key: string,
+    rowOffset: number,
+    subKey: string | null = null,
+  ): void => {
     if (key.startsWith("editdiff:")) {
       const id = key.slice("editdiff:".length);
       const diff = renderedEditDiffs.get(id);
@@ -6814,9 +6832,12 @@ async function runSession(
       return;
     }
     if (key.startsWith("tools:")) {
-      // rowOffset === 0 → header click: flip the block-level cap via
-      // toolsOverrides. Does NOT touch perToolExpanded.
-      if (rowOffset === 0) {
+      // The header row carries no hoverSubKey; every tool row does. Fall
+      // back to rowOffset only for callers that don't supply a subKey
+      // (tests) — rowOffset counts wrapped rows, so it mis-resolves as
+      // soon as a tool row wraps.
+      const headerClick = subKey === null && rowOffset === 0;
+      if (headerClick) {
         const current = toolsOverrides.get(key) ?? viewPrefs.toolsExpanded;
         toolsOverrides.set(key, !current);
         if (key === currentToolsKey && toolsBlockStartedAt !== null) {
@@ -6827,17 +6848,21 @@ async function runSession(
         screen.repaintNow();
         return;
       }
-      // rowOffset > 0 → per-tool click: resolve toolCallId from rowOwners.
-      const owners = rowOwners.get(key);
-      if (!owners) {
-        return;
-      }
-      const toolCallId = owners[rowOffset];
+      // Per-tool click: the row's subKey IS the toolCallId; rowOwners is
+      // only consulted for the no-subKey fallback.
+      const toolCallId = subKey ?? rowOwners.get(key)?.[rowOffset];
       if (!toolCallId) {
         return;
       }
       toggleToolExpansion(toolCallId, perToolExpanded);
-      renderToolsBlockFor(key);
+      // Same live-vs-frozen split the header branch makes: the in-flight
+      // block has no renderedTools snapshot yet, so renderToolsBlockFor
+      // would silently no-op and the click would look dead.
+      if (key === currentToolsKey && toolsBlockStartedAt !== null) {
+        renderToolsBlock();
+      } else {
+        renderToolsBlockFor(key);
+      }
       screen.repaintNow();
       return;
     }
