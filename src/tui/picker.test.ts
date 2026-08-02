@@ -40,6 +40,7 @@ interface KeyDriver {
   // Simulate a bracketed-paste by sending the start/end markers + text
   // through the raw stdin handler that pickSession installs.
   paste(text: string): void;
+  mouse(name: string, x?: number, y?: number): void;
   // Every string the picker painted since the last clear. The fake
   // terminal has no grid, so this is a flat transcript of writes — good
   // enough to assert "this label was rendered", not layout.
@@ -54,8 +55,13 @@ function makePicker(opts: {
   currentSessionId?: string;
   prefs?: PickerPrefs;
   target?: RemoteTarget;
+  // Terminal size. Defaults to 80x24; tests that need content to
+  // overflow a box (e.g. the scrollable info overlay) shrink it.
+  width?: number;
+  height?: number;
 }): KeyDriver {
   let onKey: ((name: string, _matches: unknown, data?: { isCharacter?: boolean }) => void) | null = null;
+  let onMouse: ((name: string, data?: { x?: number; y?: number }) => void) | null = null;
   // Fake stdin: captures whatever rawStdinHandler is registered via
   // removeListener / on so the bracketed-paste interceptor can install
   // itself and we can drive it from the test.
@@ -81,14 +87,17 @@ function makePicker(opts: {
       return term;
     },
     get(_target, prop) {
-      if (prop === "width") return 80;
-      if (prop === "height") return 24;
+      if (prop === "width") return opts.width ?? 80;
+      if (prop === "height") return opts.height ?? 24;
       if (prop === "stdin") return fakeTkStdin;
       if (prop === "onStdin") return (): void => undefined;
       if (prop === "on") {
-        return (event: string, cb: typeof onKey): void => {
+        return (event: string, cb: unknown): void => {
           if (event === "key") {
-            onKey = cb;
+            onKey = cb as typeof onKey;
+          }
+          if (event === "mouse") {
+            onMouse = cb as typeof onMouse;
           }
         };
       }
@@ -141,6 +150,12 @@ function makePicker(opts: {
       // Send as a single chunk exactly as a terminal would for a paste.
       const payload = `\x1b[200~${text}\x1b[201~`;
       stdinDataHandler(Buffer.from(payload, "binary"));
+    },
+    mouse(name, x, y) {
+      if (!onMouse) {
+        throw new Error("onMouse not registered yet");
+      }
+      onMouse(name, { x: x ?? 1, y: y ?? 1 });
     },
     output: () => writes.join(""),
     clearOutput: () => {
@@ -846,7 +861,55 @@ describe("pickSession: ^F find mode", () => {
         },
       ],
     },
+    {
+      sessionId: "hydra_session_beta",
+      cwd: "/home/me/work/beta",
+      status: "cold" as const,
+      updatedAt: "2026-05-14T09:00:00Z",
+      title: "Beta session",
+      totalMatches: 1,
+      snippets: [
+        {
+          kind: "agent" as const,
+          text: "beta needle line",
+          recordedAt: 3,
+        },
+      ],
+    },
   ];
+
+  // A real bundle, long enough that the info overlay has to scroll in an
+  // 80x24 terminal. The history entries are what make it long — the
+  // summary lists per-tool counts.
+  const exportBundle = (): unknown => ({
+    version: 1,
+    exportedAt: "2026-05-14T10:00:00Z",
+    exportedFrom: { hydraVersion: "0.1.0", machine: "test-machine" },
+    session: {
+      sessionId: "hydra_session_alpha",
+      lineageId: "hydra_lineage_alpha",
+      agentId: "claude-code",
+      cwd: "/home/me/work/alpha",
+      title: "Alpha session",
+      createdAt: "2026-05-14T09:00:00Z",
+      updatedAt: "2026-05-14T10:00:00Z",
+      upstreamSessionId: "ses_upstream_alpha",
+      currentModel: "claude-sonnet-4",
+    },
+    history: Array.from({ length: 40 }, (_, i) => ({
+      method: "session/update",
+      recordedAt: 1000 + i,
+      params: {
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: `tc${i}`,
+          name: `Tool${i}`,
+          title: `Tool${i}`,
+          status: "completed",
+        },
+      },
+    })),
+  });
 
   const stubSearch = (): void => {
     globalThis.fetch = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
@@ -858,8 +921,9 @@ describe("pickSession: ^F find mode", () => {
         );
       }
       if (url.includes("/export")) {
-        return new Response(JSON.stringify({}), {
-          status: 500,
+        return new Response(JSON.stringify(exportBundle()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
         });
       }
       return new Response(JSON.stringify({ sessions: [alpha, beta] }), {
@@ -894,6 +958,7 @@ describe("pickSession: ^F find mode", () => {
     expect(prefs.lastFind?.query).toBe("needle");
     expect(prefs.lastFind?.results.map((r) => r.sessionId)).toEqual([
       "hydra_session_alpha",
+      "hydra_session_beta",
     ]);
     drv.press("CTRL_C");
     await drv.resolveOnce;
@@ -955,6 +1020,211 @@ describe("pickSession: ^F find mode", () => {
     expect(out).toContain("SESSION");
     expect(out).toContain("AGE");
     expect(out).toContain("claude-code");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  // Result rows start below the query box; each hit is two rows. With a
+  // one-line query box the first hit's identity row is row 6.
+  const FIRST_HIT_ROW = 6;
+  const click = (drv: ReturnType<typeof makePicker>, x: number, y: number): void => {
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", x, y);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", x, y);
+  };
+
+  it("selects a find hit on click and opens it on the second click", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    // Move focus back to the query box so the first click has to move it.
+    drv.press("CTRL_F");
+    drv.clearOutput();
+    click(drv, 10, FIRST_HIT_ROW);
+    // Focus moved into the list; the row is now selected, not opened.
+    expect(drv.output()).toContain("the needle is here");
+    drv.clearOutput();
+    // Second click on the same (already-selected) row opens it, which
+    // puts up the launch-or-view modal.
+    click(drv, 10, FIRST_HIT_ROW);
+    await flush();
+    expect(drv.output()).toContain("Open session");
+    drv.press("ESCAPE");
+    await flush();
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("a click on the snippet row hits the same result as its identity row", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.clearOutput();
+    // Row FIRST_HIT_ROW + 1 is the snippet line of the same hit, which is
+    // already selected — so this click should open it.
+    click(drv, 10, FIRST_HIT_ROW + 1);
+    await flush();
+    expect(drv.output()).toContain("Open session");
+    drv.press("ESCAPE");
+    await flush();
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("a click in the query box returns focus to it without opening anything", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.clearOutput();
+    click(drv, 10, 2);
+    const out = drv.output();
+    expect(out).not.toContain("Open session");
+    expect(out).toContain("Enter to search");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("a drag (press and release on different cells) is not a click", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.clearOutput();
+    drv.mouse("MOUSE_LEFT_BUTTON_PRESSED", 10, FIRST_HIT_ROW);
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 40, FIRST_HIT_ROW);
+    await flush();
+    expect(drv.output()).not.toContain("Open session");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("hover does not move the find selection while the query box is focused", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.press("CTRL_F");
+    drv.clearOutput();
+    drv.mouse("MOUSE_MOTION", 10, FIRST_HIT_ROW);
+    expect(drv.output()).toBe("");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("hover moves the find selection while the list is focused", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    // Hit 0 is selected on arrival. Hover the second hit's identity row.
+    drv.clearOutput();
+    drv.mouse("MOUSE_MOTION", 10, FIRST_HIT_ROW + 2);
+    const out = drv.output();
+    // The newly-hovered row picked up the focused-row marker and its
+    // counter; the previously-selected row lost them.
+    expect(out).toContain("beta needle line");
+    expect(out).toContain("❯ ");
+    // Hovering back up moves it again.
+    drv.clearOutput();
+    drv.mouse("MOUSE_MOTION", 10, FIRST_HIT_ROW);
+    expect(drv.output()).toContain("[1/2] the needle is here");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("the wheel scrolls the find results list", async () => {
+    stubSearch();
+    // Tall enough for the box but short enough that two hits (2 rows
+    // each) overflow the results viewport.
+    const drv = makePicker({ sessions: [alpha, beta], target, height: 9 });
+    await runSearch(drv);
+    drv.clearOutput();
+    drv.mouse("MOUSE_WHEEL_DOWN", 10, FIRST_HIT_ROW);
+    expect(drv.output()).toContain("beta needle line");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("closes the info overlay on a click outside the box", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.press("i", { isCharacter: true });
+    await flush();
+    drv.clearOutput();
+    // Top-left corner is outside any centred box in an 80x24 terminal.
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 1, 1);
+    // Back on the results, which the info box was covering.
+    expect(drv.output()).toContain("the needle is here");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("keeps the info overlay open on a click inside the box", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.press("i", { isCharacter: true });
+    await flush();
+    drv.clearOutput();
+    // Dead centre of an 80x24 terminal is inside the box.
+    drv.mouse("MOUSE_LEFT_BUTTON_RELEASED", 40, 12);
+    expect(drv.output()).toBe("");
+    drv.press("ESCAPE");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("scrolls the info overlay with the wheel", async () => {
+    stubSearch();
+    // Short terminal so the summary overflows the box and there is
+    // something to scroll.
+    const drv = makePicker({ sessions: [alpha, beta], target, height: 14 });
+    await runSearch(drv);
+    drv.press("i", { isCharacter: true });
+    await flush();
+    await flush();
+    const before = drv.output();
+    expect(before).toContain("Session info");
+    // Confirm the export actually landed — otherwise the body is the
+    // single "loading…" line and there is nothing to scroll.
+    expect(before).toContain("Last active:");
+    drv.clearOutput();
+    drv.mouse("MOUSE_WHEEL_DOWN", 40, 12);
+    const scrolled = drv.output();
+    // A repaint happened and the content moved.
+    expect(scrolled).not.toBe("");
+    expect(scrolled).not.toBe(before);
+    // Wheeling back up returns to the top and stops there — a further
+    // wheel-up is a no-op, not an unbounded scroll.
+    drv.mouse("MOUSE_WHEEL_UP", 40, 12);
+    drv.clearOutput();
+    drv.mouse("MOUSE_WHEEL_UP", 40, 12);
+    expect(drv.output()).toBe("");
+    drv.press("ESCAPE");
+    drv.press("ESCAPE");
+    drv.press("CTRL_C");
+    await drv.resolveOnce;
+  });
+
+  it("does not let a wheel event under a modal scroll the list behind it", async () => {
+    stubSearch();
+    const drv = makePicker({ sessions: [alpha, beta], target });
+    await runSearch(drv);
+    drv.press("i", { isCharacter: true });
+    await flush();
+    drv.clearOutput();
+    // The picker's own wheel handler would repaint the session viewport;
+    // the info layer consumes the event instead.
+    drv.mouse("MOUSE_WHEEL_DOWN", 40, 12);
+    expect(drv.output()).not.toContain("Alpha session  claude-code");
+    drv.press("ESCAPE");
     drv.press("ESCAPE");
     drv.press("CTRL_C");
     await drv.resolveOnce;

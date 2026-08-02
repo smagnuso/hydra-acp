@@ -317,6 +317,11 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
 export interface FocusLayer {
   onKey(name: string, _matches: unknown, data?: { isCharacter?: boolean }): void;
   onResize(): void;
+  // Optional mouse handling for the layer while it's on top. Layers that
+  // don't implement it swallow mouse events rather than letting them
+  // reach the picker underneath — a click meant for a modal must never
+  // act on the list behind it.
+  onMouse?(name: string, data?: { x?: number; y?: number }): void;
 }
 
 export async function pickSession(
@@ -2771,6 +2776,12 @@ export async function pickSession(
       let error: string | null = null;
       let loading = true;
       let infoScroll = 0;
+      // Box geometry from the last paint, so the mouse handler can tell
+      // an inside click from an outside one. Null until first render.
+      let infoBox: { x: number; y: number; w: number; h: number } | null = null;
+      // Rows of body actually painted last frame — the wheel scroll clamp
+      // needs the same number renderInfo used.
+      let infoBodyRows = 0;
 
       // Rendered as an overlay box (drawBox({overlay:true})) rather than
       // a full-screen wipe, so whatever you opened it from — the picker
@@ -2807,6 +2818,8 @@ export async function pickSession(
             title: `Session info — ${stripHydraSessionPrefix(session.sessionId)}`,
             overlay: true,
           });
+          infoBox = { x: layout.x, y: layout.y, w: layout.w, h: layout.h };
+          infoBodyRows = bodyRows;
           infoScroll = Math.max(
             0,
             Math.min(infoScroll, Math.max(0, body.length - bodyRows)),
@@ -2822,11 +2835,11 @@ export async function pickSession(
             }
             term.styleReset();
           }
-          const more = body.length - bodyRows;
+          const more = body.length - bodyRows - infoScroll;
           const hint =
-            more > 0
-              ? `↑/↓ scroll (${more} more) · Esc to return`
-              : "Esc to return";
+            body.length > bodyRows
+              ? `↑/↓/wheel scroll${more > 0 ? ` (${more} more)` : ""} · Esc or click outside to return`
+              : "Esc or click outside to return";
           term.moveTo(layout.contentX, layout.contentY + bodyRows + 1);
           term.dim.noFormat(` ${hint}`);
           term.styleReset();
@@ -2838,25 +2851,76 @@ export async function pickSession(
       // abort the in-flight export fetch so a stuck daemon doesn't keep
       // the picker pinned waiting for the response.
       const infoAbort = new AbortController();
+      const closeInfo = (): void => {
+        infoAbort.abort();
+        popLayer();
+      };
+      // Shared by the keyboard and the wheel. Clamped against the body
+      // length so the last line can't scroll past the bottom of the box.
+      const scrollInfo = (delta: number): void => {
+        const max = Math.max(0, infoBody().length - infoBodyRows);
+        const next = Math.max(0, Math.min(max, infoScroll + delta));
+        if (next === infoScroll) {
+          return;
+        }
+        infoScroll = next;
+        renderInfo();
+      };
       const infoLayer: FocusLayer = {
         onKey: (name) => {
           if (name === "ESCAPE" || name === "CTRL_C") {
-            infoAbort.abort();
-            popLayer();
+            closeInfo();
             return;
           }
-          if (name === "UP" || name === "PAGE_UP") {
-            if (infoScroll === 0) {
-              return;
-            }
-            infoScroll -= name === "UP" ? 1 : 5;
-            renderInfo();
+          if (name === "UP") {
+            scrollInfo(-1);
             return;
           }
-          if (name === "DOWN" || name === "PAGE_DOWN") {
-            infoScroll += name === "DOWN" ? 1 : 5;
-            renderInfo();
+          if (name === "DOWN") {
+            scrollInfo(1);
             return;
+          }
+          if (name === "PAGE_UP") {
+            scrollInfo(-Math.max(1, infoBodyRows - 1));
+            return;
+          }
+          if (name === "PAGE_DOWN") {
+            scrollInfo(Math.max(1, infoBodyRows - 1));
+            return;
+          }
+          if (name === "HOME") {
+            scrollInfo(-Number.MAX_SAFE_INTEGER);
+            return;
+          }
+          if (name === "END") {
+            scrollInfo(Number.MAX_SAFE_INTEGER);
+            return;
+          }
+        },
+        onMouse: (name, data) => {
+          if (name === "MOUSE_WHEEL_UP") {
+            scrollInfo(-3);
+            return;
+          }
+          if (name === "MOUSE_WHEEL_DOWN") {
+            scrollInfo(3);
+            return;
+          }
+          // Click-outside-to-dismiss. Fires on release so a press that
+          // drags into the box doesn't close it, and so the click that
+          // refocuses the terminal doesn't count.
+          if (name !== "MOUSE_LEFT_BUTTON_RELEASED" || infoBox === null) {
+            return;
+          }
+          const x = data?.x ?? -1;
+          const y = data?.y ?? -1;
+          const inside =
+            x >= infoBox.x &&
+            x < infoBox.x + infoBox.w &&
+            y >= infoBox.y &&
+            y < infoBox.y + infoBox.h;
+          if (!inside) {
+            closeInfo();
           }
         },
         onResize: () => renderInfo(),
@@ -2937,6 +3001,79 @@ export async function pickSession(
       computeFindBoxLayout();
       adjustFindScroll();
       renderFind();
+
+      // Open the currently-selected hit. Shared by Enter and by a click
+      // on an already-selected row, so the two can't drift apart.
+      const openFindHit = (): void => {
+        const hit = findResults[findSelectedIdx];
+        if (!hit) {
+          return;
+        }
+        const session = visible.find((s) => s.sessionId === hit.sessionId);
+        const isImportedPassive =
+          !!session?.importedFromMachine && !session.upstreamSessionId;
+        if (isImportedPassive) {
+          persistFind();
+          cleanup();
+          const result: PickerResult = {
+            kind: "attach",
+            sessionId: hit.sessionId,
+          };
+          if (session.agentId !== undefined) {
+            result.agentId = session.agentId;
+          }
+          resolve(result);
+          return;
+        }
+        void (async () => {
+          const action: LaunchOrViewResult = await promptForLaunchOrView(term, {
+            sessionId: hit.sessionId,
+            title: hit.title,
+            cwd: hit.cwd,
+          }, focus);
+          if (action === "cancel") {
+            persistFind();
+            cleanup();
+            resolve({ kind: "abort" });
+            return;
+          }
+          // No re-attach needed — focus.pop() inside promptForLaunchOrView restores the find layer
+          if (action === "back") return;
+          persistFind();
+          cleanup();
+          const result: PickerResult = {
+            kind: "attach",
+            sessionId: hit.sessionId,
+            readonly: action === "view",
+          };
+          if (session?.agentId !== undefined) {
+            result.agentId = session.agentId;
+          }
+          resolve(result);
+        })();
+      };
+
+      // Move the results cursor to `idx`, repainting only what changed.
+      // Shared by keyboard navigation and by mouse hover / click.
+      const selectFindIdx = (idx: number): void => {
+        if (idx < 0 || idx >= findResults.length || idx === findSelectedIdx) {
+          return;
+        }
+        const oldIdx = findSelectedIdx;
+        const oldScroll = findScrollOffset;
+        findSelectedIdx = idx;
+        findSnippetIdx = 0;
+        adjustFindScroll();
+        if (findScrollOffset !== oldScroll) {
+          repaintFindViewport();
+        } else {
+          withSync(() => {
+            repaintFindResult(oldIdx, false);
+            repaintFindResult(findSelectedIdx, true);
+          });
+        }
+        repaintFindIndicatorRow();
+      };
 
       const findOnKey = (
         name: string,
@@ -3029,52 +3166,7 @@ export async function pickSession(
             return;
           }
           if (name === "ENTER" || name === "KP_ENTER") {
-            const hit = findResults[findSelectedIdx];
-            if (!hit) {
-              return;
-            }
-            const session = visible.find((s) => s.sessionId === hit.sessionId);
-            const isImportedPassive =
-              !!session?.importedFromMachine && !session.upstreamSessionId;
-            if (isImportedPassive) {
-              persistFind();
-              cleanup();
-              const result: PickerResult = {
-                kind: "attach",
-                sessionId: hit.sessionId,
-              };
-              if (session.agentId !== undefined) {
-                result.agentId = session.agentId;
-              }
-              resolve(result);
-              return;
-            }
-            void (async () => {
-              const action: LaunchOrViewResult = await promptForLaunchOrView(term, {
-                sessionId: hit.sessionId,
-                title: hit.title,
-                cwd: hit.cwd,
-              }, focus);
-              if (action === "cancel") {
-                persistFind();
-                cleanup();
-                resolve({ kind: "abort" });
-                return;
-              }
-              // No re-attach needed — focus.pop() inside promptForLaunchOrView restores the find layer
-              if (action === "back") return;
-              persistFind();
-              cleanup();
-              const result: PickerResult = {
-                kind: "attach",
-                sessionId: hit.sessionId,
-                readonly: action === "view",
-              };
-              if (session?.agentId !== undefined) {
-                result.agentId = session.agentId;
-              }
-              resolve(result);
-            })();
+            openFindHit();
             return;
           }
           // `i` mirrors the main picker's info key. The find layer stays
@@ -3121,27 +3213,12 @@ export async function pickSession(
               });
               return;
             }
-            const next = Math.min(
-              findResults.length - 1,
-              Math.max(0, findSelectedIdx + delta),
+            selectFindIdx(
+              Math.min(
+                findResults.length - 1,
+                Math.max(0, findSelectedIdx + delta),
+              ),
             );
-            if (next === findSelectedIdx) {
-              return;
-            }
-            const oldIdx = findSelectedIdx;
-            const oldScroll = findScrollOffset;
-            findSelectedIdx = next;
-            findSnippetIdx = 0;
-            adjustFindScroll();
-            if (findScrollOffset !== oldScroll) {
-              repaintFindViewport();
-            } else {
-              withSync(() => {
-                repaintFindResult(oldIdx, false);
-                repaintFindResult(findSelectedIdx, true);
-              });
-              repaintFindIndicatorRow();
-            }
           };
           switch (name) {
             case "UP":
@@ -3171,7 +3248,133 @@ export async function pickSession(
         }
       };
 
-      pushLayer({ onKey: findOnKey, onResize: () => renderFind() });
+      // Each result occupies two screen rows (identity + snippet); both
+      // map to the same hit. Returns null for anything outside the list.
+      const findIdxAtRow = (y: number): number | null => {
+        const first = findResultsStartRow();
+        const last = first + findViewportSize() * 2 - 1;
+        if (y < first || y > last) {
+          return null;
+        }
+        const idx = findScrollOffset + Math.floor((y - first) / 2);
+        return idx >= 0 && idx < findResults.length ? idx : null;
+      };
+
+      // Press cell for the find layer, kept separate from the picker's
+      // own (the picker never sees these events). A click is a release
+      // on the same cell as the press.
+      let findPressCell: { x: number; y: number } | null = null;
+
+      const findOnMouse = (
+        name: string,
+        data?: { x?: number; y?: number },
+      ): void => {
+        if (findInFlight) {
+          return;
+        }
+        if (name === "MOUSE_WHEEL_UP" || name === "MOUSE_WHEEL_DOWN") {
+          if (findResults.length === 0) {
+            return;
+          }
+          const delta = name === "MOUSE_WHEEL_UP" ? -3 : 3;
+          const max = Math.max(0, findResults.length - findViewportSize());
+          const next = Math.min(max, Math.max(0, findScrollOffset + delta));
+          if (next === findScrollOffset) {
+            return;
+          }
+          findScrollOffset = next;
+          // Keep the cursor inside the window, matching the main list's
+          // wheel behavior — scrolling shouldn't strand the selection
+          // off-screen.
+          if (findSelectedIdx < findScrollOffset) {
+            findSelectedIdx = findScrollOffset;
+            findSnippetIdx = 0;
+          } else if (findSelectedIdx >= findScrollOffset + findViewportSize()) {
+            findSelectedIdx = findScrollOffset + findViewportSize() - 1;
+            findSnippetIdx = 0;
+          }
+          repaintFindViewport();
+          repaintFindIndicatorRow();
+          return;
+        }
+        if (name === "MOUSE_LEFT_BUTTON_PRESSED") {
+          findPressCell = { x: data?.x ?? -1, y: data?.y ?? -1 };
+          return;
+        }
+        const y = data?.y;
+        if (typeof y !== "number") {
+          return;
+        }
+        if (name === "MOUSE_MOTION") {
+          // Hover tracks the selection only while the list already has
+          // focus — same rule as the main picker, so a mouse trip across
+          // the results on the way somewhere else doesn't yank focus out
+          // of the query box.
+          if (findSubMode !== "results") {
+            return;
+          }
+          const idx = findIdxAtRow(y);
+          if (idx !== null) {
+            selectFindIdx(idx);
+          }
+          return;
+        }
+        if (name !== "MOUSE_LEFT_BUTTON_RELEASED") {
+          return;
+        }
+        const sameCell =
+          findPressCell !== null &&
+          data?.x === findPressCell.x &&
+          y === findPressCell.y;
+        findPressCell = null;
+        if (!sameCell) {
+          return;
+        }
+        // Click on the query box: focus it, don't touch the selection.
+        if (y <= findBoxRows + 2) {
+          if (findSubMode !== "input") {
+            findSubMode = "input";
+            repaintFindViewport();
+            repaintFindIndicatorRow();
+            repaintFindBoxChrome();
+            term.moveTo(findBoxCursorCol(), findBoxCursorScreenRow());
+            term.hideCursor(false);
+          }
+          return;
+        }
+        const idx = findIdxAtRow(y);
+        if (idx === null) {
+          return;
+        }
+        // First click moves focus/selection to the row; a second click on
+        // the already-selected row opens it. Mirrors the main list, and
+        // keeps a stray click from launching a session.
+        const wasInput = findSubMode === "input";
+        if (wasInput) {
+          findSubMode = "results";
+          findSelectedIdx = idx;
+          findSnippetIdx = 0;
+          adjustFindScroll();
+          withSync(() => {
+            repaintFindBoxChrome();
+            repaintFindViewport();
+            repaintFindIndicatorRow();
+            term.hideCursor();
+          });
+          return;
+        }
+        if (idx !== findSelectedIdx) {
+          selectFindIdx(idx);
+          return;
+        }
+        openFindHit();
+      };
+
+      pushLayer({
+        onKey: findOnKey,
+        onMouse: findOnMouse,
+        onResize: () => renderFind(),
+      });
     };
     const onKey = (
       name: string,
@@ -3791,7 +3994,13 @@ export async function pickSession(
     // dropped silently so a stray click doesn't dismiss the picker.
     const onMouse = (name: string, data?: { x?: number; y?: number }): void => {
       if (resolved) return;
-      if (focusStack.length !== 1) return;
+      // A layer is up: give it first refusal, then stop. Never fall
+      // through to the picker's own list handling — the list isn't what
+      // the user is looking at.
+      if (focusStack.length !== 1) {
+        focusStack[focusStack.length - 1]?.onMouse?.(name, data);
+        return;
+      }
       if (mode !== "normal") return;
       const isMotion = name === "MOUSE_MOTION";
       const isPress = name === "MOUSE_LEFT_BUTTON_PRESSED";
