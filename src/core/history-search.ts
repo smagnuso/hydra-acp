@@ -7,7 +7,10 @@
 // Out of scope for v1: tool *output* content blocks. A single Read of
 // a large file produces a content array that can dwarf the rest of the
 // session, so we skip it to keep scans bounded. Revisit if "find the
-// session that read a file containing X" becomes a real need.
+// session that read a file containing X" becomes a real need. Two
+// things enforce this and both matter: the status gate in
+// extractToolErrorText, and loading histories with tools:"references"
+// so externalized blobs are never inflated.
 //
 // The matcher is intentionally simple: case-insensitive substring,
 // no regex, no token weighting. It runs synchronously per session
@@ -227,9 +230,13 @@ export async function searchHistories(
       truncated = true;
       break;
     }
-    const entries = await manager.loadHistory(candidate.sessionId).catch(
-      () => [] as HistoryEntry[],
-    );
+    // tools: "references" — we never index tool output, so inflating the
+    // externalized blobs would be pure I/O for nothing (and, before the
+    // status gate in extractToolErrorText, was how megabytes of spilled
+    // Read output leaked into the index).
+    const entries = await manager
+      .loadHistory(candidate.sessionId, { tools: "references" })
+      .catch(() => [] as HistoryEntry[]);
     const found = scanSessionEntries(entries, parsed, maxPerSession);
     if (found.snippets.length === 0) {
       continue;
@@ -259,7 +266,8 @@ interface ScanResult {
 // For OR queries, any matching term contributes snippets and the session
 // qualifies. For AND queries, EVERY term must have at least one match;
 // if any term misses the function returns an empty result so the caller
-// skips the session.
+// skips the session. Snippets are budgeted per term (see below) so an
+// AND hit shows evidence for each term, not just the first.
 export function scanSessionEntries(
   entries: ReadonlyArray<HistoryEntry>,
   query: ParsedQuery,
@@ -270,16 +278,30 @@ export function scanSessionEntries(
   }
   let totalMatches = 0;
   const snippets: Snippet[] = [];
+  // Budget snippets per term rather than first-come-first-served. A
+  // high-frequency first term would otherwise eat the whole budget and
+  // the row would render evidence for only one term of an AND query,
+  // which reads as a false positive.
+  const perTerm = Math.max(1, Math.floor(maxSnippets / query.terms.length));
+  const spare: Snippet[] = [];
   for (const { scope, term } of query.terms) {
-    const result = scanForTerm(entries, term, scope, maxSnippets - snippets.length);
+    const result = scanForTerm(entries, term, scope, maxSnippets);
     if (query.operator === "AND" && result.totalMatches === 0) {
       // Short-circuit: this term has no matches, so the AND fails.
       return { totalMatches: 0, snippets: [] };
     }
     totalMatches += result.totalMatches;
-    snippets.push(...result.snippets);
+    snippets.push(...result.snippets.slice(0, perTerm));
+    spare.push(...result.snippets.slice(perTerm));
   }
-  return { totalMatches, snippets };
+  // Redistribute any budget the low-yield terms didn't use.
+  for (const s of spare) {
+    if (snippets.length >= maxSnippets) {
+      break;
+    }
+    snippets.push(s);
+  }
+  return { totalMatches, snippets: snippets.slice(0, maxSnippets) };
 }
 
 // Scan entries for a single term+scope pair, collecting up to
@@ -457,7 +479,16 @@ function extractToolFragments(u: Record<string, unknown>): Fragment[] {
 // render-update.ts:455 extractToolFailureText): content[].content.text
 // (ACP canonical) and rawOutput.error (fallback). Inlined here rather
 // than imported because that helper is private to render-update.
+//
+// The status gate is load-bearing: on a *successful* tool call the
+// content[] blocks hold the tool's normal output, which the header
+// comment says we deliberately don't index. Without the gate every
+// tool result in every session lands in the index mislabeled as error
+// text.
 function extractToolErrorText(u: Record<string, unknown>): string | null {
+  if (!isFailedToolStatus(u.status)) {
+    return null;
+  }
   const content = u.content;
   if (Array.isArray(content)) {
     for (const block of content) {
@@ -489,6 +520,14 @@ function extractToolErrorText(u: Record<string, unknown>): string | null {
     }
   }
   return null;
+}
+
+// Mirrors the failure-ish statuses render-update.ts:876 treats as
+// terminal-with-a-reason. "completed" is excluded on purpose.
+function isFailedToolStatus(status: unknown): boolean {
+  return (
+    status === "failed" || status === "rejected" || status === "cancelled"
+  );
 }
 
 function isCompatPromptReceived(u: Record<string, unknown>): boolean {

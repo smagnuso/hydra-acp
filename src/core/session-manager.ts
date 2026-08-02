@@ -1975,8 +1975,11 @@ export class SessionManager {
   // Session instance. Used by the daemon's read-only viewer attach path
   // (cli/src/daemon/acp-ws.ts) to stream replay events to a client for
   // a cold session without spawning an agent.
-  async loadHistory(sessionId: string): Promise<HistoryStoreEntry[]> {
-    return this.histories.load(sessionId);
+  async loadHistory(
+    sessionId: string,
+    opts: { tools?: "inline" | "references"; maxEntries?: number } = {},
+  ): Promise<HistoryStoreEntry[]> {
+    return this.histories.load(sessionId, opts);
   }
 
   // Read a single externalized tool-content blob by sha256 (the lean

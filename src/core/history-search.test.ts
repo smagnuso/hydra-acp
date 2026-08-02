@@ -94,6 +94,28 @@ function toolCallEntry(
   };
 }
 
+// tool_call_update carrying content blocks — the shape that holds tool
+// output on success and failure text on failure.
+function toolResultEntry(
+  status: string,
+  text: string,
+  recordedAt = 1,
+): HistoryEntry {
+  return {
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc1",
+        name: "Read",
+        status,
+        content: [{ type: "content", content: { type: "text", text } }],
+      },
+    },
+    recordedAt,
+  };
+}
+
 describe("parseQuery", () => {
   it("single term, no prefix → OR with scope all", () => {
     expect(parseQuery("banana")).toEqual({
@@ -578,5 +600,114 @@ describe("searchHistories", () => {
     ]);
     const out = await searchHistories(manager, "tool:");
     expect(out.results).toEqual([]);
+  });
+});
+
+describe("tool output is not indexed", () => {
+  it("successful tool_call_update content is invisible to search", () => {
+    const frags = extractSearchableFragments(
+      toolResultEntry("completed", "a file mentioning webgpu"),
+    );
+    expect(frags.map((f) => f.text)).not.toContain(
+      "a file mentioning webgpu",
+    );
+    expect(scanSessionEntries(
+      [toolResultEntry("completed", "a file mentioning webgpu")],
+      q("webgpu"),
+      5,
+    ).totalMatches).toBe(0);
+  });
+
+  it("failed tool_call_update error text is still indexed", () => {
+    const entry = toolResultEntry("failed", "ENOENT: no such file webgpu.h");
+    expect(scanSessionEntries([entry], q("webgpu"), 5).totalMatches).toBe(1);
+  });
+
+  it("rejected and cancelled also index their reason text", () => {
+    for (const status of ["rejected", "cancelled"]) {
+      const entry = toolResultEntry(status, "user declined webgpu build");
+      expect(scanSessionEntries([entry], q("webgpu"), 5).totalMatches).toBe(1);
+    }
+  });
+
+  it("rawOutput.error only counts on a failed status", () => {
+    const mk = (status: string): HistoryEntry => ({
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "tc1",
+          name: "Bash",
+          status,
+          rawOutput: { error: "webgpu link failed" },
+        },
+      },
+      recordedAt: 1,
+    });
+    expect(scanSessionEntries([mk("failed")], q("webgpu"), 5).totalMatches)
+      .toBe(1);
+    expect(scanSessionEntries([mk("completed")], q("webgpu"), 5).totalMatches)
+      .toBe(0);
+  });
+});
+
+describe("snippet budget is shared across terms", () => {
+  const entries: HistoryEntry[] = [
+    ...Array.from({ length: 20 }, (_, i) => agentEntry(`enqueue ${i}`, i + 1)),
+    agentEntry("webgpu once", 100),
+  ];
+  const parsed: ParsedQuery = {
+    operator: "AND",
+    terms: [
+      { scope: "all", term: "enqueue" },
+      { scope: "all", term: "webgpu" },
+    ],
+  };
+
+  it("an AND hit shows evidence for every term, not just the first", () => {
+    const out = scanSessionEntries(entries, parsed, 5);
+    expect(out.snippets.some((s) => s.text.includes("enqueue"))).toBe(true);
+    expect(out.snippets.some((s) => s.text.includes("webgpu"))).toBe(true);
+    expect(out.snippets.length).toBeLessThanOrEqual(5);
+  });
+
+  it("unused budget is redistributed to the high-yield term", () => {
+    const out = scanSessionEntries(entries, parsed, 5);
+    expect(out.snippets).toHaveLength(5);
+    expect(
+      out.snippets.filter((s) => s.text.includes("enqueue")).length,
+    ).toBe(4);
+  });
+});
+
+describe("quoting defeats the AND/OR operators", () => {
+  it("a quoted phrase is one literal term, 'and' included", () => {
+    expect(parseQuery('"enqueue and webgpu"')).toEqual({
+      operator: "OR",
+      terms: [{ scope: "all", term: "enqueue and webgpu" }],
+    });
+  });
+
+  it("the quoted phrase matches only a literal occurrence", async () => {
+    const manager = fakeManager([
+      {
+        sessionId: "hydra_session_literal",
+        cwd: "/a",
+        status: "cold",
+        updatedAt: "2026-05-20T00:00:00Z",
+        history: [agentEntry("searching for enqueue and webgpu here")],
+      },
+      {
+        sessionId: "hydra_session_split",
+        cwd: "/b",
+        status: "cold",
+        updatedAt: "2026-05-19T00:00:00Z",
+        history: [agentEntry("enqueue"), agentEntry("webgpu")],
+      },
+    ]);
+    const out = await searchHistories(manager, '"enqueue and webgpu"');
+    expect(out.results.map((r) => r.sessionId)).toEqual([
+      "hydra_session_literal",
+    ]);
   });
 });
