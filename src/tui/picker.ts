@@ -186,9 +186,11 @@ export interface PickOptions {
   // Reflects what a fresh session created from the composer would use
   // (default agent + its configured default model). Both are optional:
   // if agentId is undefined, the label is omitted entirely; if only
-  // model is undefined, we show just the agent id. Callers derive
-  // these from `opts.agentId ?? viewPrefs.lastChosenAgent ??
-  // config.defaultAgent` and `config.defaultModels[agentId]`.
+  // model is undefined, we show just the agent id. Callers derive these
+  // from `viewPrefs.lastChosenAgent ?? opts.agentId ??
+  // config.defaultAgent` and `viewPrefs.lastChosenModel ??
+  // config.defaultModels[agentId]` — viewPrefs first, because opts.agentId
+  // is rewritten to the attached session's agent on every switch.
   //
   // The label is also click-actionable: clicking on it opens an agent
   // picker (see availableAgents). A change here overrides the seed and
@@ -202,6 +204,13 @@ export interface PickOptions {
   // list through. When absent or empty, the click is a no-op — nothing
   // to switch to.
   availableAgents?: DiscoveredAgent[];
+  // Called the moment the user commits a different agent in the
+  // click-to-switch modal, with the agent and the model that now tracks
+  // it. Fires independently of how the picker eventually resolves, so a
+  // choice made just before attaching to an existing session (or Esc'ing
+  // out) is still remembered by the caller's session-wide prefs. Without
+  // this, the choice only reached the caller on the "new" result.
+  onComposerAgentChange?: (agentId: string, model: string | undefined) => void;
 }
 
 // Picker filter state. `filters` is its own nested bag so future
@@ -2289,6 +2298,7 @@ export async function pickSession(
         // still owns that persistence.
         const models = opts.config.defaultModels;
         composerModel = models ? models[result.agentId] : undefined;
+        opts.onComposerAgentChange?.(composerAgentId, composerModel);
         if (result.persist) {
           // Mirror ensureAgentForNew's persistence behavior: the `s`
           // affordance in promptForAgent records the user's choice as

@@ -152,6 +152,99 @@ describe("parseAgentMarkdown", () => {
     }
   });
 
+  it("renders a Cursor start:end:path citation fence as highlighted code", () => {
+    const lines = parseAgentMarkdown(
+      "```6689:6690:/abs/src/tui/app.ts\nconst x: number = 1;\nrows.push(x);\n```",
+    );
+    // Header row plus one row per source line — the fence lines themselves
+    // must not survive as prose.
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatchObject({
+      body: "/abs/src/tui/app.ts:6689-6690",
+      bodyStyle: "dim",
+    });
+    for (const line of lines.slice(1)) {
+      expect(line.bodyStyle).toBe("code");
+      expect(line.fillRow).toBe(true);
+    }
+    expect(lines.some((l) => l.ansi === true)).toBe(true);
+    expect(lines.every((l) => !l.body.includes("```"))).toBe(true);
+  });
+
+  it("closes a citation fence so following prose is prose again", () => {
+    const lines = parseAgentMarkdown(
+      "before\n```1:1:/a/b.ts\nconst x = 1;\n```\nafter",
+    );
+    expect(lines[0]).toMatchObject({ body: "before", bodyStyle: "agent" });
+    expect(lines[lines.length - 1]).toMatchObject({
+      body: "after",
+      bodyStyle: "agent",
+    });
+    expect(lines.every((l) => !l.body.includes("```"))).toBe(true);
+  });
+
+  it("renders a bare-path fence with a header and extension-derived lang", () => {
+    const lines = parseAgentMarkdown("```/a/b/c.py\nx = 1\n```");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ body: "/a/b/c.py", bodyStyle: "dim" });
+    expect(lines[1]?.bodyStyle).toBe("code");
+    expect(lines[1]?.ansi).toBe(true);
+  });
+
+  it("contracts a home-prefixed citation path to ~ in the header", () => {
+    const home = homedir();
+    const lines = parseAgentMarkdown(
+      `\`\`\`10:12:${home}/dev/proj/a.ts\nconst x = 1;\n\`\`\``,
+    );
+    expect(lines[0]?.body).toBe("~/dev/proj/a.ts:10-12");
+  });
+
+  it("gives the citation header a sidecar link over the whole header", () => {
+    const lines = parseAgentMarkdown(
+      "```10:12:/abs/proj/a.ts\nconst x = 1;\n```",
+    );
+    const header = lines[0]!;
+    // Scheme-less + #L<start>: screen.ts owns the file:// decision, and the
+    // span is what makes it double-clickable. No escapes emitted here.
+    expect(header.links).toEqual([
+      { start: 0, end: header.body.length, url: "/abs/proj/a.ts#L10" },
+    ]);
+    expect(header.body).not.toContain(ESC);
+  });
+
+  it("links a home-prefixed citation header with a ~ url", () => {
+    const home = homedir();
+    const lines = parseAgentMarkdown(
+      `\`\`\`10:12:${home}/dev/proj/a.ts\nconst x = 1;\n\`\`\``,
+    );
+    expect(lines[0]?.links?.[0]?.url).toBe("~/dev/proj/a.ts#L10");
+  });
+
+  it("links a bare-path fence header with no line fragment", () => {
+    const lines = parseAgentMarkdown("```/a/b/c.py\nx = 1\n```");
+    expect(lines[0]?.links).toEqual([
+      { start: 0, end: "/a/b/c.py".length, url: "/a/b/c.py" },
+    ]);
+  });
+
+  it("ignores trailing info-string attributes after the language", () => {
+    const lines = parseAgentMarkdown(
+      '```javascript title="x.js"\nconst x = 1;\n```',
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.bodyStyle).toBe("code");
+    expect(lines[0]?.ansi).toBe(true);
+  });
+
+  it("does not let an info string mid-block close the fence early", () => {
+    const lines = parseAgentMarkdown(
+      "```\nplain\n```js\nstill inside\n```",
+    );
+    // Only the final backticks-only line closes; everything between is code.
+    expect(lines.every((l) => l.bodyStyle === "code")).toBe(true);
+    expect(lines.some((l) => l.body === "```js")).toBe(true);
+  });
+
   it("does not apply ansi to interleaved prose, only to code-block lines", () => {
     const lines = parseAgentMarkdown(
       "prose line\n```diff\n- old\n```\nmore prose",

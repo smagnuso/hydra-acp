@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { homedir } from "node:os";
 import { thisMachine } from "../core/machine.js";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
@@ -2658,6 +2659,32 @@ describe("Screen block-click routing", () => {
     const all = writes.join("");
     spy.mockRestore();
     expect(all).toContain("/repo/proj/src/a.ts#L7");
+  });
+
+  it("expands a ~-prefixed prose link to an absolute file:// url", () => {
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    const screen = makeTallScreen({ width: 200, height: 24 });
+    (screen as unknown as { started: boolean }).started = true;
+    // Code-citation fence headers (```12:34:/abs/path) are displayed
+    // home-contracted, so their sidecar url is `~`-prefixed too.
+    screen.appendLine({
+      body: "~/dev/proj/a.ts:12-34",
+      bodyStyle: "dim",
+      links: [{ start: 0, end: 21, url: "~/dev/proj/a.ts#L12" }],
+    });
+    screen.repaintNow();
+    const all = writes.join("");
+    spy.mockRestore();
+    expect(all).toContain(
+      `file://${thisMachine()}${homedir()}/dev/proj/a.ts#L12`,
+    );
+    expect(all).not.toContain("~/dev/proj/a.ts#L12");
   });
 
   it("syntax-highlighted (CSI) bodies still skip the path scan", () => {

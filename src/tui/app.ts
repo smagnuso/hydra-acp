@@ -617,10 +617,20 @@ interface ViewPrefs {
   // silently undone by the next session switch.
   sidebarVisible: boolean;
   // In-process memory of the last agent the user picked in the new-session
-  // agent prompt. Used to highlight that row first on the next prompt so
-  // they don't have to scroll back. Not persisted: pressing `s` in the
-  // picker is still the explicit "save as default" path.
+  // agent prompt (including the picker composer's click-to-switch label).
+  // Used to highlight that row first on the next prompt so they don't have
+  // to scroll back, AND as the authoritative seed for the picker
+  // composer's "agent•model" label. It has to live here rather than being
+  // read back off opts.agentId, because every attach / alt+n cycle
+  // overwrites opts.agentId with the *attached session's* agent — so a
+  // choice made in the composer was silently undone by the next switch.
+  // Not persisted: pressing `s` in the agent prompt is still the explicit
+  // "save as config.defaultAgent" path.
   lastChosenAgent?: string;
+  // Model that goes with lastChosenAgent. Tracked separately (rather than
+  // re-derived from config.defaultModels on every picker open) for the
+  // same reason: the composer's choice has to survive session switches.
+  lastChosenModel?: string;
 }
 
 interface SessionContext {
@@ -4077,11 +4087,13 @@ async function runSession(
         // Match the initial-picker formula so the composer's top-right
         // "agent•model" reflects what a fresh session from this composer
         // would use — independent of which session the user is currently
-        // attached to.
+        // attached to. viewPrefs wins over opts.agentId precisely because
+        // opts.agentId is rewritten to the attached session's agent on
+        // every attach / cycle; see the ViewPrefs field docs.
         const composerAgentId =
-          opts.agentId ?? viewPrefs.lastChosenAgent ?? config.defaultAgent;
+          viewPrefs.lastChosenAgent ?? opts.agentId ?? config.defaultAgent;
         const composerModel = composerAgentId
-          ? config.defaultModels?.[composerAgentId]
+          ? (viewPrefs.lastChosenModel ?? config.defaultModels?.[composerAgentId])
           : undefined;
         let availableAgents: Awaited<ReturnType<typeof listAgents>> = [];
         try {
@@ -4099,6 +4111,9 @@ async function runSession(
           ...(composerAgentId ? { composerAgentId } : {}),
           ...(composerModel ? { composerModel } : {}),
           ...(availableAgents.length > 0 ? { availableAgents } : {}),
+          onComposerAgentChange: (agentId, model) => {
+            rememberComposerAgent(viewPrefs, agentId, model);
+          },
         });
         if (choice.kind === "abort") {
           // finally restarts the screen.
@@ -4269,7 +4284,7 @@ async function runSession(
         // would let ensureAgentForNew re-prompt.
         if (choice.agentId !== undefined) {
           nextOpts.agentId = choice.agentId;
-          viewPrefs.lastChosenAgent = choice.agentId;
+          rememberComposerAgent(viewPrefs, choice.agentId, choice.model);
         }
         if (choice.model !== undefined) {
           nextOpts.model = choice.model;
@@ -8051,9 +8066,9 @@ async function resolveSession(
     // Picker manages its own interactive-only filter; ask for everything.
     const sessions = await listSessions(target, { includeNonInteractive: true });
     const composerAgentId =
-      opts.agentId ?? viewPrefs.lastChosenAgent ?? config.defaultAgent;
+      viewPrefs.lastChosenAgent ?? opts.agentId ?? config.defaultAgent;
     const composerModel = composerAgentId
-      ? config.defaultModels?.[composerAgentId]
+      ? (viewPrefs.lastChosenModel ?? config.defaultModels?.[composerAgentId])
       : undefined;
     // Fetch the agent list once so the picker's click-to-switch-agent
     // modal has something to show. Best-effort: if the daemon is
@@ -8073,6 +8088,9 @@ async function resolveSession(
       ...(composerAgentId ? { composerAgentId } : {}),
       ...(composerModel ? { composerModel } : {}),
       ...(availableAgents.length > 0 ? { availableAgents } : {}),
+      onComposerAgentChange: (agentId, model) => {
+        rememberComposerAgent(viewPrefs, agentId, model);
+      },
       ...(opts.initialPrompt !== undefined
         ? { initialPrompt: opts.initialPrompt }
         : {}),
@@ -8089,7 +8107,7 @@ async function resolveSession(
       // (below) short-circuits, and downstream session/new uses it.
       if (choice.agentId !== undefined) {
         opts.agentId = choice.agentId;
-        viewPrefs.lastChosenAgent = choice.agentId;
+        rememberComposerAgent(viewPrefs, choice.agentId, choice.model);
       }
       if (choice.model !== undefined) {
         opts.model = choice.model;
@@ -8459,6 +8477,25 @@ function newCtx(
 // Esc, or "cancel" on ^C/^D. On a successful pick, `s` also persists the
 // choice as config.defaultAgent. A fetch failure is non-fatal: we leave
 // opts.agentId unset and let the daemon fall back to its schema default.
+// Record an agent/model choice made in the picker composer's
+// click-to-switch label into the session-wide prefs container, so it seeds
+// the next picker open (and the next agent prompt's highlighted row)
+// regardless of what the user does with the picker afterwards. Model is
+// cleared when the new agent has no configured default, otherwise a stale
+// model from the previous agent would keep painting in the label.
+function rememberComposerAgent(
+  viewPrefs: ViewPrefs,
+  agentId: string,
+  model: string | undefined,
+): void {
+  viewPrefs.lastChosenAgent = agentId;
+  if (model === undefined) {
+    delete viewPrefs.lastChosenModel;
+    return;
+  }
+  viewPrefs.lastChosenModel = model;
+}
+
 async function ensureAgentForNew(
   term: termkit.Terminal,
   target: RemoteTarget,
@@ -8502,7 +8539,11 @@ async function ensureAgentForNew(
     return "back";
   }
   opts.agentId = result.agentId;
-  viewPrefs.lastChosenAgent = result.agentId;
+  rememberComposerAgent(
+    viewPrefs,
+    result.agentId,
+    config.defaultModels?.[result.agentId],
+  );
   if (result.persist) {
     try {
       await setDefaultAgent(result.agentId);

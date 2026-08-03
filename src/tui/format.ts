@@ -705,6 +705,8 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
   const lines = text.replace(/^\s+/, "").split("\n");
   let inCode = false;
   let codeLang = "";
+  let codeHeader = "";
+  let codeHeaderLink: { start: number; end: number; url: string } | null = null;
   let codeBuffer: string[] = [];
   let firstNonBlank = firstPrefix !== "  ";
   const line = (
@@ -736,8 +738,24 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
     return firstPrefix;
   };
   const flushCode = (): void => {
-    if (codeBuffer.length === 0)
+    if (codeBuffer.length === 0) {
+      codeHeader = "";
+      codeHeaderLink = null;
       return;
+    }
+    if (codeHeader.length > 0) {
+      // Link offsets are clean coords, so they're computed on the
+      // unescaped header; escaping a literal `^` only changes the body.
+      const links = codeHeaderLink === null ? undefined : [codeHeaderLink];
+      line(
+        codeHeader.replace(/\^/g, "^^"),
+        highlightCode ? "dim" : proseStyle,
+        "  ",
+        links,
+      );
+      codeHeader = "";
+      codeHeaderLink = null;
+    }
     if (highlightCode) {
       const highlighted = highlightFencedBlock(codeLang, codeBuffer);
       for (const piece of highlighted) {
@@ -762,11 +780,22 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
   };
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!;
-    const fence = l.match(/^\s*```\s*(\w*)\s*$/);
+    // Opening fences take an arbitrary CommonMark info string, not just a
+    // bare language word: Cursor cites code as ```start:end:/path/to/file.
+    // A too-strict `\w*` here left the fence unmatched in both directions,
+    // so the body rendered as prose and every later line stayed broken.
+    // Closing fences must be backticks only, so an info string mid-block
+    // can't terminate early.
+    const fence = inCode
+      ? l.match(/^\s*`{3,}\s*$/)
+      : l.match(/^\s*`{3,}(.*)$/);
     if (fence) {
       if (!inCode) {
         inCode = true;
-        codeLang = fence[1] ?? "";
+        const info = parseFenceInfo(fence[1] ?? "");
+        codeLang = info.lang;
+        codeHeader = info.header;
+        codeHeaderLink = info.headerLink ?? null;
       } else {
         flushCode();
         inCode = false;
@@ -1574,6 +1603,51 @@ export function languageFromPath(p: string | undefined): string {
     return "";
   }
   return supportsLanguage(lang) ? lang : "";
+}
+
+// Cursor-style code citation: ```<startLine>:<endLine>:<path>.
+const CITATION_FENCE_RE = /^(\d+):(\d+):(.+)$/;
+
+// Classify a fence's info string into a highlight language plus an optional
+// header line rendered above the block. Handles three shapes:
+//   ```ts                     → lang "typescript", no header
+//   ```12:34:/path/to/f.ts    → lang from ext, header "~/to/f.ts:12-34"
+//   ```/path/to/f.ts          → lang from ext, header "~/to/f.ts"
+// Anything else falls back to the first token as a language id, which
+// highlightFencedBlock ignores when unsupported.
+//
+// Header paths are home-contracted for display and carry a sidecar link
+// span over the whole header (path plus line range reads as one target).
+// The url stays scheme-less and `~`-prefixed: screen.ts owns the
+// expand-to-absolute + file:// decision and makes the span
+// double-clickable. Nothing here emits escapes.
+export function parseFenceInfo(info: string): {
+  lang: string;
+  header: string;
+  headerLink?: { start: number; end: number; url: string };
+} {
+  const token = info.trim().split(/\s+/)[0] ?? "";
+  if (token.length === 0) {
+    return { lang: "", header: "" };
+  }
+  const citation = token.match(CITATION_FENCE_RE);
+  if (!citation && !token.includes("/") && !token.includes("\\")) {
+    return { lang: token.toLowerCase(), header: "" };
+  }
+  const path = citation ? citation[3]! : token;
+  const shortPath = shortenHomePath(path);
+  const header = citation
+    ? `${shortPath}:${citation[1]}-${citation[2]}`
+    : shortPath;
+  return {
+    lang: languageFromPath(path),
+    header,
+    headerLink: {
+      start: 0,
+      end: header.length,
+      url: citation ? `${shortPath}#L${citation[1]}` : shortPath,
+    },
+  };
 }
 
 function formatBlock(
