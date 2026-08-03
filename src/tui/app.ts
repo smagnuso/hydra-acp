@@ -150,6 +150,8 @@ import {
   type ReattachResponseFields,
 } from "./reconnect-state.js";
 import {
+  extractRawOutputResultValues,
+  extractToolResultSummary,
   mapUpdate,
   normalizeAdvertisedCommands,
   sanitizeSingleLine,
@@ -6024,9 +6026,6 @@ async function runSession(
     }
     const u = rawUpdate as Record<string, unknown>;
     const content = Array.isArray(u.content) ? u.content : undefined;
-    if (!content) {
-      return null;
-    }
     const parts: Array<{ text: string } | { hash: string }> = [];
     const pushFromText = (v: unknown): void => {
       if (typeof v === "string") {
@@ -6040,7 +6039,7 @@ async function runSession(
         }
       }
     };
-    for (const block of content) {
+    for (const block of content ?? []) {
       if (!block || typeof block !== "object") {
         continue;
       }
@@ -6062,6 +6061,17 @@ async function runSession(
       // Last-resort fallback: bare { text: "..." } with no type field.
       if (b.text !== undefined) {
         pushFromText(b.text);
+      }
+    }
+    // Non-ACP fallback: agents that never populate `content[]` put the tool
+    // body in `rawOutput` instead (Cursor: `content` for a file read,
+    // `stdout`/`stderr` for a shell call). Only consulted when the
+    // canonical carrier yielded nothing, so conforming agents are
+    // unaffected. Values may be blob refs — the same lean-references
+    // splice handles them.
+    if (parts.length === 0) {
+      for (const v of extractRawOutputResultValues(u)) {
+        pushFromText(v);
       }
     }
     return parts.length > 0 ? parts : null;
@@ -6239,6 +6249,16 @@ async function runSession(
     }
     if (editDiff !== undefined) {
       state.editDiff = editDiff;
+    }
+    // Outcome counts ride on rawOutput, which the mapped event doesn't
+    // carry for the initial tool_call — read it off the raw update so both
+    // paths behave the same. Latest-wins: the count only arrives on the
+    // completion update.
+    if (rawUpdate !== undefined) {
+      const summary = extractToolResultSummary(rawUpdate);
+      if (summary !== undefined) {
+        state.resultSummary = summary;
+      }
     }
     // Extract and store resultText from the raw update's content[].
     // Latest-replaces: every tool_call_update carries a snapshot of all

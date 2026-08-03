@@ -74,7 +74,7 @@ describe("applyToolContentMode", () => {
     expect(block.newText).toBe("");
   });
 
-  it("summary slims rawOutput to error + metadata and clips stdout", () => {
+  it("summary keeps rawOutput error + metadata and clips the body", () => {
     const big = "y".repeat(100_000);
     const out = applyToolContentMode(
       [
@@ -94,9 +94,32 @@ describe("applyToolContentMode", () => {
       };
     }).update;
     expect(u.content[0]!.content.text.length).toBeLessThan(big.length);
-    expect(u.rawOutput.content).toBeUndefined();
+    // rawOutput bodies are the only result carrier for agents that skip
+    // content[] (Cursor), so they're clipped like a content block rather
+    // than shed outright.
+    expect(typeof u.rawOutput.content).toBe("string");
+    expect((u.rawOutput.content as string).length).toBeLessThan(big.length);
     expect(u.rawOutput.error).toBe("boom");
     expect(u.rawOutput.metadata).toEqual({ interrupted: true });
+  });
+
+  it("summary keeps rawOutput outcome counts", () => {
+    const out = applyToolContentMode(
+      [
+        toolUpdate({
+          toolCallId: "t1",
+          status: "completed",
+          rawOutput: { totalMatches: 1113, truncated: true, junk: "x".repeat(5000) },
+        }),
+      ],
+      "summary",
+    );
+    const u = (out[0]!.params as { update: { rawOutput: Record<string, unknown> } })
+      .update;
+    expect(u.rawOutput.totalMatches).toBe(1113);
+    expect(u.rawOutput.truncated).toBe(true);
+    // Unrecognized heavy fields still get shed.
+    expect(u.rawOutput.junk).toBeUndefined();
   });
 
   it("summary leaves non-tool entries untouched", () => {

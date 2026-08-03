@@ -635,6 +635,36 @@ describe("formatToolLine", () => {
     ).toBe("edit · src/tui/format.ts");
   });
 
+  it("appends the result summary after the detail, before the duration", () => {
+    const body = formatToolLine(
+      {
+        initialTitle: "grep",
+        latestTitle: "grep",
+        resultSummary: "1113 matches, truncated",
+        status: "completed",
+        startedAt: 1_000,
+        endedAt: 3_000,
+      },
+      3_000,
+    )[0]?.body;
+    expect(body).toBe("grep · 1113 matches, truncated · 2s");
+  });
+
+  it("keeps the path link intact when a result summary is appended", () => {
+    const line = formatToolLine({
+      initialTitle: "Read",
+      latestTitle: "Read",
+      detail: "/repo/src/alpha.ts",
+      detailFull: "/repo/src/alpha.ts",
+      resultSummary: "1 match",
+      status: "completed",
+    })[0];
+    const link = line?.links?.[0];
+    expect((line?.body ?? "").slice(link!.start, link!.end)).toBe(
+      "/repo/src/alpha.ts",
+    );
+  });
+
   it("links the path when the title already carries it (Read/Edit shape)", () => {
     // This is the common filesystem-tool shape: the adapter normalized the
     // title to the full path, so the detail append is skipped as a

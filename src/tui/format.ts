@@ -1775,6 +1775,11 @@ export interface ToolLineState {
   // or 4096 characters. Used by the expansion renderer to append a
   // "… (truncated)" trailer after the last visible line.
   resultTruncated?: boolean;
+  // One-line outcome from `rawOutput` counts ("1113 matches, truncated").
+  // Appended to the collapsed row after the detail, before the duration —
+  // it's a number, so making the user expand the row to read it would be
+  // a poor trade.
+  resultSummary?: string;
 }
 
 // Truncate a result-text string to at most 40 lines or 4096 characters,
@@ -1864,6 +1869,12 @@ export function formatToolLine(
       title = `${title} · ${detail}`;
       appendedDetail = detail;
     }
+  }
+  // Append the outcome count, when the agent gave us one. Sits after the
+  // detail (what ran) and before the duration (how long), so a Cursor row
+  // reads "grep · 1113 matches, truncated · 2s" instead of a bare "grep".
+  if (state.resultSummary) {
+    title = `${title} · ${sanitizeSingleLine(state.resultSummary)}`;
   }
   // Append a duration: a live "running for Xs" counter while in flight,
   // frozen as the total once the call hits a terminal status. Inherits the

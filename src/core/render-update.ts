@@ -100,6 +100,13 @@ export type RenderEvent =
       // from the first text payload in `content[]`, falling back to a
       // string `rawOutput.error`. Surfaced inline under the tool row.
       errorText?: string;
+      // One-line outcome derived from a non-ACP `rawOutput` summary (match
+      // counts, file counts, reference counts, a non-zero exit code). Some
+      // agents — Cursor is the one that forced this — send no `rawInput`,
+      // no `locations[]` and no `content[]` for search/read tools, so the
+      // row would otherwise say nothing but the verb. Rendered as a suffix
+      // on the collapsed row since it's a number, not a body.
+      resultSummary?: string;
       // True when the failure carries an "upstream silently gave up"
       // signature — either `rawOutput.metadata.interrupted === true` or
       // the canonical "Tool execution aborted" text. Consumed by the
@@ -868,10 +875,12 @@ function mapToolCallUpdate(
   // initial tool_call's rawInput is empty), so a detail-bearing update is
   // meaningful — otherwise we'd suppress it and never learn what ran.
   const detail = extractToolDetail(u);
+  const resultSummary = extractToolResultSummary(u);
   const meaningful =
     title !== undefined ||
     diff !== null ||
     detail !== undefined ||
+    resultSummary !== undefined ||
     status === "completed" ||
     status === "failed" ||
     status === "rejected" ||
@@ -906,6 +915,9 @@ function mapToolCallUpdate(
   if (locations !== undefined) {
     event.locations = locations;
   }
+  if (resultSummary !== undefined) {
+    event.resultSummary = resultSummary;
+  }
   if (status !== undefined) {
     event.status = status;
   }
@@ -926,6 +938,84 @@ function mapToolCallUpdate(
     event.workerTaskId = wtid;
   }
   return event;
+}
+
+// Derive a one-line outcome from `rawOutput` count fields. ACP has no
+// canonical carrier for "how much did this tool find", so agents that skip
+// `content[]` leave the row with no outcome at all. These four shapes are
+// what Cursor emits (grep → totalMatches, glob → totalFiles, web search →
+// referenceCount, shell → exitCode); each is additive and any agent that
+// happens to use the same key gets the same treatment.
+//
+// Deliberately NOT folded into `detail`: detail is the path/command slot
+// and feeds the link span, the edited-files fold and the syntax-highlight
+// path hint, none of which want "1113 matches" in them.
+export function extractToolResultSummary(update: unknown): string | undefined {
+  if (!update || typeof update !== "object") {
+    return undefined;
+  }
+  const rawOutput = (update as UpdateLike).rawOutput;
+  if (!rawOutput || typeof rawOutput !== "object" || Array.isArray(rawOutput)) {
+    return undefined;
+  }
+  const ro = rawOutput as Record<string, unknown>;
+  const num = (key: string): number | undefined => {
+    const v = ro[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  };
+  const plural = (n: number, one: string, many = `${one}s`): string =>
+    `${n} ${n === 1 ? one : many}`;
+  const parts: string[] = [];
+  const matches = num("totalMatches");
+  if (matches !== undefined) {
+    parts.push(plural(matches, "match", "matches"));
+  }
+  const files = num("totalFiles");
+  if (files !== undefined) {
+    parts.push(plural(files, "file"));
+  }
+  const references = num("referenceCount");
+  if (references !== undefined) {
+    parts.push(plural(references, "reference"));
+  }
+  if (parts.length > 0 && ro.truncated === true) {
+    parts.push("truncated");
+  }
+  // Exit code only when it's a failure: "exit 0" is noise on every shell row.
+  const exitCode = num("exitCode");
+  if (exitCode !== undefined && exitCode !== 0) {
+    parts.push(`exit ${exitCode}`);
+  }
+  return parts.length > 0 ? parts.join(", ") : undefined;
+}
+
+// rawOutput fields that carry a tool's result BODY for agents that never
+// populate ACP `content[]` (Cursor puts a file read in `content` and a shell
+// call in `stdout`/`stderr`). Returned in display order; each value is either
+// a string or a `{__hydraBlob}` ref, so the caller's existing
+// text-or-ref handling applies unchanged. Callers must only consult this
+// when `content[]` yielded nothing — it's a fallback, not a second source.
+export function extractRawOutputResultValues(update: unknown): unknown[] {
+  if (!update || typeof update !== "object") {
+    return [];
+  }
+  const rawOutput = (update as UpdateLike).rawOutput;
+  if (!rawOutput || typeof rawOutput !== "object" || Array.isArray(rawOutput)) {
+    return [];
+  }
+  const ro = rawOutput as Record<string, unknown>;
+  const out: unknown[] = [];
+  for (const key of ["content", "stdout", "stderr"]) {
+    const v = ro[key];
+    if (typeof v === "string") {
+      if (v.length > 0) {
+        out.push(v);
+      }
+    } else if (v && typeof v === "object" && !Array.isArray(v)) {
+      out.push(v);
+    }
+  }
+  return out;
 }
 
 // Pull the human-readable failure text out of a tool_call_update. Two

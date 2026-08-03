@@ -8,10 +8,11 @@ import type { HistoryEntry } from "./history-store.js";
 //               load() for clients that opt out of inline content.
 //   "summary" — shed the heavy, never-rendered tool payload entirely: edit
 //               diffs keep their path (and stay recognizable as an Edited
-//               block) but drop old/new text; tool stdout in rawOutput is
-//               reduced to its error + metadata; over-long non-diff content
-//               is clipped. Used by export/archive to trim bundles; the
-//               shed content is not recoverable from the bundle.
+//               block) but drop old/new text; rawOutput is reduced to its
+//               error, metadata, outcome counts and a clipped body preview;
+//               over-long non-diff content is clipped. Used by
+//               export/archive to trim bundles; the shed content is not
+//               recoverable from the bundle.
 export type ToolContentMode = "inline" | "references" | "summary";
 
 // Parse the export `?tools=` query value. Only inline / summary are valid
@@ -24,6 +25,17 @@ export function parseToolContentMode(raw: unknown): "inline" | "summary" {
 // Tiny preview kept for non-diff tool content so a failed tool still carries
 // a hint of context, while the bulk (stdout, file reads) is shed.
 const SUMMARY_TEXT_CAP = 256;
+
+// rawOutput fields worth keeping in a summary export. Counts are cheap and
+// rendered on the collapsed tool row; bodies are clipped, not dropped.
+const RAW_OUTPUT_SUMMARY_KEYS = [
+  "totalMatches",
+  "totalFiles",
+  "referenceCount",
+  "truncated",
+  "exitCode",
+] as const;
+const RAW_OUTPUT_BODY_KEYS = ["content", "stdout", "stderr"] as const;
 
 // Apply a tool-content mode to an already-loaded (inline) history. Only
 // "summary" rewrites the entries (shedding heavy content);
@@ -69,6 +81,22 @@ function summarizeEntry(entry: HistoryEntry): HistoryEntry {
     }
     if (ro.metadata !== undefined) {
       slim.metadata = ro.metadata;
+    }
+    // Outcome counts are rendered (render-update.ts extractToolResultSummary)
+    // and cost a few bytes, so they survive a summary export even though the
+    // bodies they describe don't.
+    for (const key of RAW_OUTPUT_SUMMARY_KEYS) {
+      if (ro[key] !== undefined) {
+        slim[key] = ro[key];
+      }
+    }
+    // Body fields for agents that use rawOutput instead of content[]: keep a
+    // clipped preview on the same terms content blocks get, rather than
+    // shedding them entirely.
+    for (const key of RAW_OUTPUT_BODY_KEYS) {
+      if (typeof ro[key] === "string") {
+        slim[key] = clip(ro[key]);
+      }
     }
     newUpdate.rawOutput = slim;
   }

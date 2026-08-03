@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   extractEditDiff,
+  extractRawOutputResultValues,
   isExitPlanModeTool,
   mapUpdate,
   sanitizeSingleLine,
@@ -202,6 +203,126 @@ describe("tool-call detail (rawInput hint)", () => {
       rawInput: {},
     });
     expect((ev as { detail?: string }).detail).toBeUndefined();
+  });
+});
+
+describe("tool-call result summary (rawOutput counts)", () => {
+  // Cursor sends `rawInput: {}` and no `locations[]` for search/read tools,
+  // so the outcome count in rawOutput is the only signal the row can show.
+  it("summarizes a grep match count, flagging truncation", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "Grep_0",
+      status: "completed",
+      rawOutput: { totalMatches: 1113, truncated: true },
+    });
+    expect(ev).toMatchObject({
+      kind: "tool-call-update",
+      resultSummary: "1113 matches, truncated",
+    });
+  });
+
+  it("singularizes a one-match count and omits an untruncated flag", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "Grep_1",
+      status: "completed",
+      rawOutput: { totalMatches: 1, truncated: false },
+    });
+    expect((ev as { resultSummary?: string }).resultSummary).toBe("1 match");
+  });
+
+  it("summarizes glob file counts and web-search reference counts", () => {
+    const glob = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "Glob_3",
+      status: "completed",
+      rawOutput: { totalFiles: 12, truncated: false },
+    });
+    expect((glob as { resultSummary?: string }).resultSummary).toBe("12 files");
+    const search = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "WebSearch_24",
+      status: "completed",
+      rawOutput: { referenceCount: 1 },
+    });
+    expect((search as { resultSummary?: string }).resultSummary).toBe(
+      "1 reference",
+    );
+  });
+
+  it("reports a non-zero exit code and stays silent on a clean one", () => {
+    const failed = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "Shell_1",
+      status: "completed",
+      rawOutput: { exitCode: 2, stdout: "nope" },
+    });
+    expect((failed as { resultSummary?: string }).resultSummary).toBe("exit 2");
+    const ok = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "Shell_2",
+      status: "completed",
+      rawOutput: { exitCode: 0, stdout: "fine" },
+    });
+    expect((ok as { resultSummary?: string }).resultSummary).toBeUndefined();
+  });
+
+  it("leaves rawOutput without count fields alone", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      status: "completed",
+      rawOutput: { content: "some file text" },
+    });
+    expect((ev as { resultSummary?: string }).resultSummary).toBeUndefined();
+  });
+
+  it("does not leak the count into detail (the path/command slot)", () => {
+    const ev = mapUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "Grep_0",
+      status: "completed",
+      rawOutput: { totalMatches: 5 },
+    });
+    expect((ev as { detail?: string }).detail).toBeUndefined();
+    expect((ev as { detailFull?: string }).detailFull).toBeUndefined();
+  });
+});
+
+describe("extractRawOutputResultValues", () => {
+  it("returns content, stdout and stderr in display order", () => {
+    expect(
+      extractRawOutputResultValues({
+        sessionUpdate: "tool_call_update",
+        rawOutput: { stderr: "warn", stdout: "out", content: "file" },
+      }),
+    ).toEqual(["file", "out", "warn"]);
+  });
+
+  it("passes a blob ref through untouched for the caller to fetch", () => {
+    const ref = { __hydraBlob: "abc", bytes: 4778 };
+    expect(
+      extractRawOutputResultValues({
+        sessionUpdate: "tool_call_update",
+        rawOutput: { content: ref },
+      }),
+    ).toEqual([ref]);
+  });
+
+  it("skips empty strings and non-body fields", () => {
+    expect(
+      extractRawOutputResultValues({
+        sessionUpdate: "tool_call_update",
+        rawOutput: { content: "", totalMatches: 5, exitCode: 0 },
+      }),
+    ).toEqual([]);
+  });
+
+  it("returns nothing for a missing or non-object rawOutput", () => {
+    expect(extractRawOutputResultValues({ sessionUpdate: "tool_call" })).toEqual([]);
+    expect(extractRawOutputResultValues({ rawOutput: "text" })).toEqual([]);
+    expect(extractRawOutputResultValues(undefined)).toEqual([]);
   });
 });
 
