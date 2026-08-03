@@ -64,6 +64,10 @@ function blockRule(width: number, junction: FrameJunction): SidebarLine {
   };
 }
 
+// Marks a folded gadget. ASCII and single-width on purpose — it sits at
+// the right edge of a row whose left side is right-aligned against it.
+const COLLAPSED_MARK = "+";
+
 // Pager glyphs. Single characters so the control costs 7 body columns at
 // most ("‹ 9/9 ›"), which fits even a 20-column body beside a short title.
 const PAGE_PREV = "‹";
@@ -132,6 +136,14 @@ function paginate(
   const prevCol = cellWidth(body) - labelWidth + 1;
   const nextCol = cellWidth(body);
   const actions: SidebarAction[] = [];
+  // The title row already carries the collapse target across its full
+  // width; clip it to the left of the pager so the arrows stay clickable.
+  // Rebuilding the row from scratch here would silently drop it.
+  for (const existing of out[0]!.actions ?? []) {
+    if ("collapse" in existing && prevCol > 2) {
+      actions.push({ ...existing, start: 1, end: prevCol - 2 });
+    }
+  }
   if (page > 0) {
     actions.push({
       start: prevCol,
@@ -162,24 +174,42 @@ function titleRow(
   gadget: Gadget,
   snapshot: SidebarSnapshot,
   ctx: SidebarContext,
+  collapsed: boolean,
 ): SidebarLine {
   const title = gadget.title ?? "";
-  const note = gadget.titleNote?.(snapshot, ctx);
+  const base = gadget.titleNote?.(snapshot, ctx);
+  // A collapsed block is otherwise indistinguishable from one whose gadget
+  // has nothing to say, so it earns a marker. Trailing and ASCII: a leading
+  // glyph would shift the title, and an ambiguous-width one would shift it
+  // by an amount the terminal and we disagree about (see the git rows).
+  const note = collapsed
+    ? base === undefined || base.length === 0
+      ? COLLAPSED_MARK
+      : `${base} ${COLLAPSED_MARK}`
+    : base;
+  // Clicking anywhere on the title folds the gadget away. paginate() clips
+  // this span when it stamps its arrows onto the same row.
+  const action: SidebarAction = {
+    start: 1,
+    end: ctx.width,
+    collapse: { gadget: gadget.id },
+  };
   if (note === undefined || note.length === 0) {
-    return { body: title, bodyStyle: "dim" };
+    return { body: title, bodyStyle: "dim", actions: [action] };
   }
   const { cellWidth, truncate } = ctx.metrics;
   const noteWidth = cellWidth(note);
   const room = ctx.width - noteWidth - 1;
   if (room < 1) {
     // Too narrow for both. The title identifies the block, so it wins.
-    return { body: truncate(title, ctx.width), bodyStyle: "dim" };
+    return { body: truncate(title, ctx.width), bodyStyle: "dim", actions: [action] };
   }
   const clipped = truncate(title, room);
   const gap = ctx.width - cellWidth(clipped) - noteWidth;
   return {
     body: `${clipped}${" ".repeat(Math.max(1, gap))}${note}`,
     bodyStyle: "dim",
+    actions: [action],
   };
 }
 
@@ -300,13 +330,25 @@ export class SidebarRenderer {
       if (!gadget.relevant(snapshot)) {
         continue;
       }
+      // A folded gadget renders its title and nothing else. Note the
+      // gadget's own render() is never called: not paying for a body
+      // nobody is reading is half the point (the caller stops the
+      // gadget's polling for the other half). A gadget with no title has
+      // nothing to click and so can't be folded.
+      const collapsed =
+        gadget.title !== undefined && ctx.collapsed?.has(gadget.id) === true;
       // Border mode participates in the cache key: it decides the gutter
-      // glyph baked into every row of the block below.
-      const key = `${ctx.border}|${gadget.versionKey(snapshot, ctx)}`;
+      // glyph baked into every row of the block below. So does the folded
+      // state, which changes the row set outright.
+      const key = `${ctx.border}|${collapsed ? "c" : "e"}|${gadget.versionKey(snapshot, ctx)}`;
       const cached = this.cache.get(gadget.id);
       let block: SidebarLine[];
       if (cached !== undefined && cached.key === key) {
         block = cached.lines;
+      } else if (collapsed) {
+        const title = titleRow(gadget, snapshot, ctx, true);
+        block = [ctx.border === "none" ? title : { ...title, gutter: "│" }];
+        this.cache.set(gadget.id, { key, lines: block });
       } else {
         const lines = gadget.render(snapshot, ctx);
         // The title row is cached with the body rather than re-created
@@ -322,7 +364,7 @@ export class SidebarRenderer {
         const withTitle =
           gadget.title === undefined
             ? lines
-            : [titleRow(gadget, snapshot, ctx), ...lines];
+            : [titleRow(gadget, snapshot, ctx, false), ...lines];
         // Gutter glyphs are applied here, inside the cache, rather than at
         // assemble time: decorating on every frame would allocate a fresh
         // row object per frame and cost this layer its referential
@@ -343,7 +385,7 @@ export class SidebarRenderer {
       // cache key covers the gadget's data, not the user's page, so paging
       // through a list must not invalidate (and re-render) its rows.
       blocks.push(block);
-      pagedGadgets.push(gadget);
+      pagedGadgets.push(collapsed ? null : gadget);
     }
     if (blocks.length === 0) {
       return [];

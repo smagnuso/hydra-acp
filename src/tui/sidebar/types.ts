@@ -136,14 +136,24 @@ export function isFramedBorder(border: SidebarBorder): boolean {
 
 // Click target on a sidebar row, in columns relative to the row BODY
 // (1-based), so the screen layer only has to add the body's origin.
-export interface SidebarAction {
-  start: number;
-  end: number;
-  // Set the named gadget's page to this index. Absolute rather than a
-  // delta, so the renderer does the clamping once (it knows the page count)
-  // and the screen layer never has to reason about bounds.
-  page: { gadget: string; index: number };
-}
+// A clickable span within a row, in body-relative 1-based columns.
+export type SidebarAction =
+  | {
+      start: number;
+      end: number;
+      // Set the named gadget's page to this index. Absolute rather than a
+      // delta, so the renderer does the clamping once (it knows the page
+      // count) and the screen layer never has to reason about bounds.
+      page: { gadget: string; index: number };
+    }
+  | {
+      start: number;
+      end: number;
+      // Fold the named gadget down to its title row, or unfold it. The
+      // screen layer owns the set of collapsed ids, so this carries no
+      // desired state — it's a toggle.
+      collapse: { gadget: string };
+    };
 
 export interface SidebarContext {
   metrics: SidebarTextMetrics;
@@ -151,6 +161,10 @@ export interface SidebarContext {
   // Current page per gadget id, for gadgets that paginate. Missing means
   // page 0. Clamped by the renderer against the live item count.
   pages?: Readonly<Record<string, number>>;
+  // Gadgets folded down to their title row. Their bodies are not rendered
+  // at all — the point is to stop paying for a gadget you aren't reading,
+  // and the caller uses the same set to stop polling for it.
+  collapsed?: ReadonlySet<string>;
   // Body rows the column can show at once. The renderer paginates only as
   // much as it must: with room for every item it shows them all and emits no
   // pagers at all, and when it does have to window it grows the page as

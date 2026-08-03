@@ -21,6 +21,7 @@ import {
 import { SidebarRenderer } from "./registry.js";
 import { emptySnapshot } from "./types.js";
 import type {
+  SidebarAction,
   SidebarLine,
   SidebarBorder,
   SidebarContext,
@@ -716,6 +717,15 @@ describe("fitIdentifier", () => {
 // Bounding each list gadget keeps every gadget on screen at once. The column
 // scrolls too, but scrolling is a poor substitute here: one long list would
 // push the gadgets below it out of view even though nothing was truncated.
+// The title row carries a fold toggle alongside any pager arrows; these
+// assertions are about the arrows.
+const pageActions = (
+  line: { actions?: readonly SidebarAction[] },
+): Array<Extract<SidebarAction, { page: unknown }>> =>
+  (line.actions ?? []).filter(
+    (a): a is Extract<SidebarAction, { page: unknown }> => "page" in a,
+  );
+
 describe("pagination", () => {
   const files = (n: number): SidebarSnapshot =>
     snap({
@@ -737,7 +747,7 @@ describe("pagination", () => {
   it("leaves a list that fits alone — no pager, no window", () => {
     const lines = render(5);
     expect(lines.filter((l) => l.item).length).toBe(5);
-    expect(lines.some((l) => l.actions !== undefined)).toBe(false);
+    expect(pageActions(lines[0]!)).toHaveLength(0);
     expect(lines[0]!.body).toContain("edited");
     expect(lines[0]!.body).toContain("5 files");
   });
@@ -795,21 +805,21 @@ describe("pagination", () => {
   // Arrows carry absolute targets, so an arrow at the end of its range
   // simply records no action and renders inert.
   it("omits the back arrow on the first page and forward on the last", () => {
-    const first = render(12, { files: 0 })[0]!.actions!;
+    const first = pageActions(render(12, { files: 0 })[0]!);
     expect(first).toHaveLength(1);
     expect(first[0]!.page.index).toBe(1);
 
-    const middle = render(12, { files: 1 })[0]!.actions!;
+    const middle = pageActions(render(12, { files: 1 })[0]!);
     expect(middle.map((a) => a.page.index).sort()).toEqual([0, 2]);
 
-    const last = render(12, { files: 2 })[0]!.actions!;
+    const last = pageActions(render(12, { files: 2 })[0]!);
     expect(last).toHaveLength(1);
     expect(last[0]!.page.index).toBe(1);
   });
 
   it("targets the arrow glyphs' own columns", () => {
     const line = render(12, { files: 1 })[0]!;
-    for (const action of line.actions!) {
+    for (const action of pageActions(line)) {
       const glyph = line.body[action.start - 1];
       expect(["‹", "›"]).toContain(glyph);
       expect(action.end).toBe(action.start);
@@ -827,7 +837,7 @@ describe("pagination", () => {
     const lines = render(12, { files: 0 }, 7);
     // Still windowed, just without a control that wouldn't fit.
     expect(lines.filter((l) => l.item).length).toBe(5);
-    expect(lines.some((l) => l.actions !== undefined)).toBe(false);
+    expect(pageActions(lines[0]!)).toHaveLength(0);
   });
 
   it("paginates git and todo too", () => {
@@ -876,7 +886,7 @@ describe("pagination", () => {
       }),
       ctx(26),
     );
-    expect(lines.some((l) => l.actions !== undefined)).toBe(false);
+    expect(lines.every((l) => pageActions(l).length === 0)).toBe(true);
   });
 
   // Paging must not invalidate the gadget's memo entry: the cached block is
@@ -915,7 +925,7 @@ describe("pagination fits the available height", () => {
   it("shows every item and no pager when there is room", () => {
     const lines = render(12, 40);
     expect(lines.filter((l) => l.item).length).toBe(12);
-    expect(lines.some((l) => l.actions !== undefined)).toBe(false);
+    expect(lines.every((l) => pageActions(l).length === 0)).toBe(true);
     expect(lines[0]!.body).toContain("edited");
     expect(lines[0]!.body).toContain("12 files");
     expect(lines.length).toBeLessThanOrEqual(40);
@@ -987,8 +997,8 @@ describe("pagination fits the available height", () => {
     const s = files(12);
     const tight = r.render(s, { ...ctx(26), maxRows: 10 });
     const roomy = r.render(s, { ...ctx(26), maxRows: 40 });
-    expect(tight.some((l) => l.actions !== undefined)).toBe(true);
-    expect(roomy.some((l) => l.actions !== undefined)).toBe(false);
+    expect(tight.some((l) => pageActions(l).length > 0)).toBe(true);
+    expect(roomy.every((l) => pageActions(l).length === 0)).toBe(true);
     expect(roomy.filter((l) => l.item).length).toBe(12);
   });
 
@@ -1000,7 +1010,7 @@ describe("pagination fits the available height", () => {
     });
     // Nothing is elided, so the page index has nothing to select.
     expect(lines.filter((l) => l.item).length).toBe(12);
-    expect(lines.some((l) => l.actions !== undefined)).toBe(false);
+    expect(lines.every((l) => pageActions(l).length === 0)).toBe(true);
   });
 });
 

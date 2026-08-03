@@ -127,6 +127,11 @@ export interface ScreenOptions {
   // rows, so it desyncs from a block's logical row map as soon as any row
   // wraps.
   onBlockClick?: (key: string, rowOffset: number, subKey: string | null) => void;
+  // Fired when a sidebar gadget is folded or unfolded from a title click.
+  // `collapsed` is the NEW state. Lets the caller stop/start that gadget's
+  // polling immediately rather than leaving an unfolded gadget showing
+  // stale data until its next scheduled tick.
+  onSidebarCollapseChange?: (gadget: string, collapsed: boolean) => void;
   // Invoked on a double-click that lands on a row owned by a keyed
   // block, BEFORE the screen's own open-file scan of the row text.
   // Lets the app override the gesture with authoritative knowledge of
@@ -446,6 +451,7 @@ export class Screen {
   private term: Terminal;
   private dispatcher: InputDispatcher;
   private onKey: (events: KeyEvent[]) => void;
+  private onSidebarCollapseChange?: (gadget: string, collapsed: boolean) => void;
   private onBlockClick:
     | ((key: string, rowOffset: number, subKey: string | null) => void)
     | undefined;
@@ -548,17 +554,28 @@ export class Screen {
   // Keyed by terminal row; entries for rows the column no longer covers
   // are dropped when the map is rebuilt.
   private sidebarRowPaths = new Map<number, string>();
-  // Row → pager click regions, in absolute terminal columns. Rebuilt on
-  // every sidebar paint alongside sidebarRowPaths.
+  // Row → click regions, in absolute terminal columns. Rebuilt on every
+  // sidebar paint alongside sidebarRowPaths. Two kinds: a pager arrow
+  // (carries the target `index`) and a title row's fold toggle.
   private sidebarRowActions = new Map<
     number,
-    Array<{ start: number; end: number; gadget: string; index: number }>
+    Array<{
+      start: number;
+      end: number;
+      gadget: string;
+      index?: number;
+      collapse?: true;
+    }>
   >();
   // Per-gadget page index for the paginated list gadgets. Survives repaints
   // and gadget data changes; the renderer clamps it against the live item
   // count, so a list that shrinks under a high page just shows its last
   // page instead of going blank.
   private sidebarPages: Record<string, number> = {};
+  // Gadgets the user has folded to their title row. Not cleared when the
+  // column is hidden — it's a preference, not view state, and app.ts
+  // mirrors it into ViewPrefs so it survives a session switch.
+  private sidebarCollapsed = new Set<string>();
   // Independent double-click chain for the sidebar. The transcript's
   // chain (lastLeftClick) is bound to resolved source anchors, which the
   // sidebar has none of, and this also has to work with in-app selection
@@ -842,6 +859,7 @@ export class Screen {
       hostOnKey(events);
     };
     this.onBlockClick = opts.onBlockClick;
+    this.onSidebarCollapseChange = opts.onSidebarCollapseChange;
     this.onHydraLinkClick = opts.onHydraLinkClick;
     this.onMouse = opts.onMouse;
     this.onHoverRun = opts.onHoverRun;
@@ -1680,6 +1698,42 @@ export class Screen {
 
   isSidebarGadgetConfigured(id: string): boolean {
     return this.sidebarRenderer.isConfigured(id);
+  }
+
+  // Whether a gadget is both configured AND currently unfolded — i.e.
+  // whether its content is on screen. This is the gate app.ts polls
+  // against: a folded gadget shows nothing, so paying to keep it current
+  // (a git subprocess, a /proc walk) buys nothing.
+  isSidebarGadgetActive(id: string): boolean {
+    return (
+      this.sidebarRenderer.isConfigured(id) && !this.sidebarCollapsed.has(id)
+    );
+  }
+
+  // Fold or unfold a gadget. Returns the new state so the caller can act
+  // on the transition — app.ts restarts that gadget's polling on unfold
+  // rather than leaving it stale until the next slow tick.
+  toggleSidebarGadgetCollapsed(id: string): boolean {
+    const next = !this.sidebarCollapsed.has(id);
+    if (next) {
+      this.sidebarCollapsed.add(id);
+    } else {
+      this.sidebarCollapsed.delete(id);
+    }
+    // The block's row set changed, so its cached lines are stale and the
+    // column's height budget has to be recomputed.
+    this.sidebarRenderer.invalidate();
+    this.onSidebarCollapseChange?.(id, next);
+    return next;
+  }
+
+  setSidebarCollapsed(ids: Iterable<string>): void {
+    this.sidebarCollapsed = new Set(ids);
+    this.sidebarRenderer.invalidate();
+  }
+
+  sidebarCollapsedIds(): string[] {
+    return [...this.sidebarCollapsed];
   }
 
   setSidebarBorder(border: SidebarBorder): void {
@@ -5850,6 +5904,7 @@ export class Screen {
       width: bodyWidth,
       border: this.sidebarBorder,
       pages: this.sidebarPages,
+      collapsed: this.sidebarCollapsed,
       // Height available to the column. The renderer only elides items when
       // this forces it to, and grows pages to fill whatever room exists — so
       // a tall terminal shows complete lists with no pagers, and shrinking
@@ -5886,8 +5941,9 @@ export class Screen {
           line.actions.map((a) => ({
             start: bodyCol + a.start - 1,
             end: bodyCol + a.end - 1,
-            gadget: a.page.gadget,
-            index: a.page.index,
+            ...("page" in a
+              ? { gadget: a.page.gadget, index: a.page.index }
+              : { gadget: a.collapse.gadget, collapse: true as const }),
           })),
         );
       }
@@ -6030,17 +6086,22 @@ export class Screen {
     // the arrows are their own targets, so there's no ambiguity with the
     // row-level open gesture (title rows carry no path).
     for (const action of this.sidebarRowActions.get(cell.y) ?? []) {
-      if (cell.x >= action.start && cell.x <= action.end) {
+      if (cell.x < action.start || cell.x > action.end) {
+        continue;
+      }
+      if (action.collapse === true) {
+        this.toggleSidebarGadgetCollapsed(action.gadget);
+      } else {
         this.sidebarPages = {
           ...this.sidebarPages,
-          [action.gadget]: action.index,
+          [action.gadget]: action.index ?? 0,
         };
-        // Paging changes which rows the column shows, so the click chain
-        // is irrelevant afterwards.
-        this.lastSidebarClick = null;
-        this.repaintNow();
-        return true;
       }
+      // Either way the row set changed under the pointer, so the click
+      // chain is irrelevant afterwards.
+      this.lastSidebarClick = null;
+      this.repaintNow();
+      return true;
     }
     const now = Date.now();
     const last = this.lastSidebarClick;

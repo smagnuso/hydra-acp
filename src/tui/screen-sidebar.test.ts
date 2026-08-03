@@ -22,6 +22,7 @@ interface Op {
 function makeScreen(
   width = 100,
   height = 40,
+  extra: Partial<ConstructorParameters<typeof Screen>[0]> = {},
 ): { screen: Screen; ops: Op[]; setWidth: (w: number) => void } {
   const ops: Op[] = [];
   let w = width;
@@ -62,6 +63,7 @@ function makeScreen(
     repaintThrottleMs: 0,
     progressIndicator: false,
     mouse: false,
+    ...extra,
   });
   return { screen, ops, setWidth: (next) => (w = next) };
 }
@@ -1195,7 +1197,8 @@ describe("Screen sidebar pager clicks", () => {
     start: number;
     end: number;
     gadget: string;
-    index: number;
+    index?: number;
+    collapse?: true;
   };
 
   const rowActions = (screen: Screen): Map<number, PagerAction[]> =>
@@ -1258,9 +1261,14 @@ describe("Screen sidebar pager clicks", () => {
 
   it("offers no back arrow on the first page", () => {
     expect(arrowTo(paged(), -1)).toBeNull();
-    // Page 0 offers exactly one arrow: forward.
+    // Page 0 offers exactly one arrow: forward. (The title row also
+    // carries the fold toggle, which is not an arrow.)
     const screen = paged();
-    expect([...rowActions(screen).values()].flat()).toHaveLength(1);
+    expect(
+      [...rowActions(screen).values()]
+        .flat()
+        .filter((a) => a.collapse !== true),
+    ).toHaveLength(1);
   });
 
   it("stops at the last page, with no forward arrow there", () => {
@@ -1283,7 +1291,60 @@ describe("Screen sidebar pager clicks", () => {
   it("offers both arrows on a middle page", () => {
     const screen = paged();
     click(screen, arrowTo(screen, 1)!.x, arrowTo(screen, 1)!.y);
-    expect([...rowActions(screen).values()].flat()).toHaveLength(2);
+    expect(
+      [...rowActions(screen).values()]
+        .flat()
+        .filter((a) => a.collapse !== true),
+    ).toHaveLength(2);
+  });
+
+  // Clicking a gadget's title folds it to that one row. The point is not
+  // only screen space: app.ts gates the gadget's polling on
+  // isSidebarGadgetActive, so a folded git block stops spawning `git
+  // status` and a folded resources block stops walking /proc.
+  it("folds a gadget when its title row is clicked, and unfolds it again", () => {
+    const screen = paged();
+    const titleRow = [...rowActions(screen)]
+      .flatMap(([row, list]) => list.map((a) => ({ row, a })))
+      .find(({ a }) => a.collapse === true)!;
+    expect(titleRow).toBeDefined();
+    // File rows are the ones carrying open paths, so the map's size is a
+    // direct count of the list rows on screen.
+    const openable = (): number =>
+      (screen as unknown as { sidebarRowPaths: Map<number, string> })
+        .sidebarRowPaths.size;
+    expect(openable()).toBeGreaterThan(0);
+
+    click(screen, titleRow.a.start, titleRow.row);
+    expect(screen.sidebarCollapsedIds()).toEqual(["files"]);
+    expect(screen.isSidebarGadgetActive("files")).toBe(false);
+    // Still configured — folding is a view state, not a deconfiguration.
+    expect(screen.isSidebarGadgetConfigured("files")).toBe(true);
+    // Nothing of the list survives the fold.
+    expect(openable()).toBe(0);
+
+    click(screen, titleRow.a.start, titleRow.row);
+    expect(screen.sidebarCollapsedIds()).toEqual([]);
+    expect(screen.isSidebarGadgetActive("files")).toBe(true);
+    expect(openable()).toBeGreaterThan(0);
+  });
+
+  it("reports the fold through onSidebarCollapseChange", () => {
+    const seen: Array<[string, boolean]> = [];
+    const { screen } = makeScreen(100, 14, {
+      onSidebarCollapseChange: (g, c) => seen.push([g, c]),
+    });
+    (screen as unknown as { started: boolean }).started = true;
+    screen.setSidebarGadgets(["files"]);
+    screen.setSidebarSnapshot({ editedFiles: [{ path: "/repo/a.ts" }] });
+    screen.setSidebarVisible(true);
+    screen.fullRedraw();
+    screen.toggleSidebarGadgetCollapsed("files");
+    screen.toggleSidebarGadgetCollapsed("files");
+    expect(seen).toEqual([
+      ["files", true],
+      ["files", false],
+    ]);
   });
 
   it("ignores a click next to the arrow", () => {

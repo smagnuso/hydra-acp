@@ -604,6 +604,12 @@ interface ViewPrefs {
   // What unmodified Enter does in the composer. Mirrors
   // config.tui.defaultEnterAction; the options dialog flips it live.
   defaultEnterAction: "enqueue" | "amend";
+  // Gadget ids the user has folded to their title row. Session-spanning for
+  // the same reason sidebarVisible is: every session builds a new Screen,
+  // and a fold that silently undid itself on ^P would be a bug, not a
+  // feature. No config key — folding is a transient "not now", where the
+  // durable "never" is removing the gadget from tui.sidebar.gadgets.
+  sidebarCollapsed: string[];
   // Whether the sidebar column is open. Mirrors config.tui.sidebar.enabled.
   // Lives here rather than being read off the Screen at attach because
   // every session builds a NEW Screen — so the column's state has to be
@@ -907,6 +913,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     inAppSelectionEnabled: resolveInAppSelection(config),
     defaultEnterAction: config.tui.defaultEnterAction,
     sidebarVisible: config.tui.sidebar.enabled,
+    sidebarCollapsed: [],
     ...(opts.agentId ? { lastChosenAgent: opts.agentId } : {}),
   };
   // Picker filter toggles (cwd-only, host) are mutated in place by the
@@ -2557,6 +2564,24 @@ async function runSession(
     openFileCommand: resolveOpenFileCommand(config.tui.openFileCommand),
     progressIndicator: config.tui.progressIndicator,
     readonly: opts.readonly === true,
+    // Folding a gadget stops its polling; unfolding has to start it again
+    // and prime it, or the newly revealed block shows the state it had
+    // when it was folded until the next slow tick lands.
+    onSidebarCollapseChange: (gadget, collapsed) => {
+      viewPrefs.sidebarCollapsed = screenRef?.sidebarCollapsedIds() ?? [];
+      if (collapsed) {
+        return;
+      }
+      if (gadget === "git") {
+        pollGitOnce();
+      } else if (gadget === "resources") {
+        // Drop the CPU baseline: it was taken before the fold, so
+        // differencing against it would spread however long the gadget
+        // spent hidden across one interval.
+        startResourceSampling();
+      }
+      refreshSidebarSnapshot();
+    },
     onSuspend: process.platform !== "win32" ? onSuspend : undefined,
     // Content width changed (resize, or a sidebar toggle). Re-render the
     // blocks whose FormattedLines have the old width baked in.
@@ -6577,7 +6602,7 @@ async function runSession(
   };
 
   const startResourceSampling = (): void => {
-    if (!screen.isSidebarGadgetConfigured("resources")) {
+    if (!screen.isSidebarGadgetActive("resources")) {
       return;
     }
     // First sample establishes the CPU baselines; readings appear on the
@@ -6602,7 +6627,7 @@ async function runSession(
   // Prime the work-tree state once when the column opens; the recurring
   // poll rides the sidebar ticker's slow tick from then on.
   const startGitPoll = (): void => {
-    if (!screen.isSidebarGadgetConfigured("git")) {
+    if (!screen.isSidebarGadgetActive("git")) {
       return;
     }
     pollGitOnce();
@@ -6646,10 +6671,10 @@ async function runSession(
       // Work tree polling shares the slow tick. A dedicated 5s interval
       // bought nothing: both wake for the same reason and both end in one
       // coalesced repaint.
-      if (slowTick && screen.isSidebarGadgetConfigured("git")) {
+      if (slowTick && screen.isSidebarGadgetActive("git")) {
         pollGitOnce();
       }
-      if (slowTick && screen.isSidebarGadgetConfigured("resources")) {
+      if (slowTick && screen.isSidebarGadgetActive("resources")) {
         // The agent pid can change under us (agent swap, crash-restart), so
         // re-read it alongside the sample rather than caching it for the
         // session's life.
@@ -6677,7 +6702,7 @@ async function runSession(
       return;
     }
     refreshSidebarSnapshot();
-    if (screen.isSidebarGadgetConfigured("git")) {
+    if (screen.isSidebarGadgetActive("git")) {
       pollGitOnce();
     }
   };
@@ -7361,6 +7386,7 @@ async function runSession(
   // opening the column didn't survive a session switch, and closing it
   // didn't either when the config default was on. The prefs container is
   // how every other ^O toggle carries across sessions.
+  screen.setSidebarCollapsed(viewPrefs.sidebarCollapsed);
   if (viewPrefs.sidebarVisible) {
     setSidebarVisible(true);
   }
