@@ -669,6 +669,14 @@ interface SessionContext {
 // we've seen in practice.
 const STALL_THRESHOLD_MS = 120_000;
 
+// Poll cadence for the cold-session watch (see startColdWatch). Nobody is
+// watching a cold screen, so this only needs to be fast enough that the
+// session looks live by the time the user comes back to the desk. The poll
+// exists only while the banner reads cold and is unbounded in duration:
+// a TUI parked on a cold session for a week keeps watching, because that
+// is exactly the case the feature is for.
+const COLD_WATCH_POLL_MS = 12_000;
+
 // Hotkey cheatsheet rendered by the ^G modal. `null` is a visual
 // separator between groups. The Enter / Shift+Enter pair is built
 // dynamically per-session so the modal reflects which key enqueues
@@ -1270,7 +1278,9 @@ async function runSession(
   // Forward-declared so the resilient stream's onConnect/onDisconnect
   // hooks (which fire before the Screen is built on first connect) can
   // call into them safely. Real implementations are assigned later.
-  let onReconnect: (() => Promise<void>) | null = null;
+  let onReconnect:
+    | ((opts?: { skipInitialize?: boolean }) => Promise<void>)
+    | null = null;
   let onDisconnectHook: ((err?: Error) => void) | null = null;
   const stream = new ResilientWsStream({
     url: wsUrl,
@@ -1416,6 +1426,7 @@ async function runSession(
   // forkSynthesisState so the banner indicator stays in sync while
   // attached. Stopped when synthesis completes, fails, or on teardown.
   let synthesisPollTimer: NodeJS.Timeout | null = null;
+  let coldWatchTimer: NodeJS.Timeout | null = null;
   // Wall-clock moment of the most recent session/update we received from
   // the daemon. The 1Hz timer reads this to detect a stalled upstream
   // (silence past STALL_THRESHOLD_MS while busy) and flip the banner red.
@@ -1623,8 +1634,9 @@ async function runSession(
   // Daemon-side close (user typed /hydra kill, an idle-close fired, the
   // record was deleted out from under us, etc.). Drain in-flight turn
   // bookkeeping so the elapsed timer stops, then flip the banner to a
-  // terminal "closed" state. The WS itself stays up; a subsequent prompt
-  // will get rejected by the daemon and surface that error in scrollback.
+  // cold state. The WS itself stays up but is no longer bound to a live
+  // Session, so we also arm the cold watch to notice a revival driven by
+  // some other client.
   conn.onNotification("hydra-acp/session/closed", () => {
     if (teardownStarted) {
       return;
@@ -1636,6 +1648,10 @@ async function runSession(
     if (screenReady) {
       screenRef!.setBanner({ status: "cold", elapsedMs: undefined });
     }
+    // Start watching for somebody else bringing the session back. Safe to
+    // re-enter: a session that gets resurrected, reattached, and then
+    // idles out again lands here a second time and re-arms the poll.
+    startColdWatch();
   });
 
   // Hydra-owned prompt queue: maintain a local cache so the chip row
@@ -1941,6 +1957,90 @@ async function runSession(
       clearInterval(synthesisPollTimer);
       synthesisPollTimer = null;
     }
+  };
+
+  const stopColdWatch = (): void => {
+    if (coldWatchTimer !== null) {
+      clearInterval(coldWatchTimer);
+      coldWatchTimer = null;
+    }
+  };
+
+  // An idle-close leaves us orphaned, not merely idle: the daemon cleared
+  // the old Session's client map, so our socket is up but bound to
+  // nothing, and no daemon event will ever tell us the session came back.
+  // If another client (web, Slack, a second TUI) resurrects it, we'd sit
+  // on a stale "Cold" banner receiving zero updates until the user typed
+  // and that typed prompt auto-resurrects with historyPolicy:"none",
+  // silently dropping everything the other client did from scrollback.
+  //
+  // So while the banner reads cold, poll for the session going warm again
+  // and reattach when it does. Deliberately read-only: we never resurrect
+  // the session ourselves. Resurrection spawns a fresh agent process and
+  // (per session/load) loses the original agent's internal tool-chain
+  // state, so it stays the user's call: a typed prompt. We only ride a
+  // revival somebody else already paid for, which costs one attach on an
+  // already-open socket.
+  const startColdWatch = (): void => {
+    if (coldWatchTimer !== null) {
+      return;
+    }
+    let inFlight = false;
+    coldWatchTimer = setInterval(async () => {
+      if (inFlight || teardownStarted) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const res = await fetch(
+          `${target.baseUrl}/v1/sessions/${encodeURIComponent(resolvedSessionId)}`,
+          { headers: { Authorization: `Bearer ${target.token}` } },
+        );
+        if (!res.ok) {
+          // 404 means the record is gone for good (deleted, or an
+          // idle-close of a never-prompted session that tombstoned it).
+          // Nothing will ever go warm; stop burning a timer on it.
+          if (res.status === 404) {
+            stopColdWatch();
+          }
+          return;
+        }
+        const data = (await res.json()) as { status?: "warm" | "cold" };
+        if (data.status !== "warm") {
+          return;
+        }
+        stopColdWatch();
+        writeDebugLine({
+          src: "cold-watch",
+          step: "warm-detected",
+          sessionId: resolvedSessionId,
+        });
+        // Mark the seam before the replay lands. Without it the other
+        // client's turns drop into scrollback indistinguishable from our
+        // own, so the transcript reads as though the user said them.
+        if (screenRef !== null) {
+          screenRef.appendLines([
+            {
+              prefix: "  ",
+              body: "-- session resumed by another client, catching up --",
+              bodyStyle: "dim",
+            },
+          ]);
+        }
+        // Same handshake as a transport reconnect (after_message replay
+        // anchored on lastSeenMessageId, pendingTurns reconcile, banner
+        // repaint), minus the initialize: this socket never dropped and
+        // is already initialized.
+        if (onReconnect) {
+          await onReconnect({ skipInitialize: true });
+        }
+      } catch {
+        // Daemon down or unreachable, keep polling. If the WS is also
+        // down the transport-level reconnect owns recovery instead.
+      } finally {
+        inFlight = false;
+      }
+    }, COLD_WATCH_POLL_MS);
   };
 
   const handlePermissionResolved = (update: unknown): void => {
@@ -3865,6 +3965,10 @@ async function runSession(
       clearInterval(synthesisPollTimer);
       synthesisPollTimer = null;
     }
+    // Cold watch: unbounded by design, so teardown is the only thing that
+    // stops it short of the session going warm. Left running it would keep
+    // the event loop alive and reattach into a dead screen.
+    stopColdWatch();
     for (const timer of amendPendingPaintTimers.values()) {
       clearTimeout(timer);
     }
@@ -3923,6 +4027,9 @@ async function runSession(
     }
     // Tear down the synthesis poller when switching away from a session.
     stopSynthesisPoll();
+    // Likewise the cold watch: it targets the session we're leaving, and a
+    // survivor would reattach that one out from under the new session.
+    stopColdWatch();
     screen.setSynthesisIndicator(null);
     // If the user has half-typed text in the prompt, snapshot it into
     // history before opening the picker. Picking a different session
@@ -7615,8 +7722,17 @@ async function runSession(
   // notifications fired during the attach are parked in
   // reconnectReplayBuffer and only flushed when appliedPolicy confirms
   // an incremental replay.
-  onReconnect = async (): Promise<void> => {
-    writeDebugLine({ src: "reconnect", step: "begin", sessionId: resolvedSessionId });
+  // `skipInitialize` is set by the cold watch, which reuses this whole
+  // reattach path on a socket that never dropped and is therefore already
+  // initialized.
+  onReconnect = async (opts?: { skipInitialize?: boolean }): Promise<void> => {
+    const skipInitialize = opts?.skipInitialize === true;
+    writeDebugLine({
+      src: "reconnect",
+      step: "begin",
+      sessionId: resolvedSessionId,
+      skipInitialize,
+    });
     // Refresh target.baseUrl / target.wsUrl from the pidfile on every
     // reconnect for local daemons. The WS layer's ResilientWsUrl resolver
     // already re-reads the pidfile per attempt (wsUrl above), but
@@ -7667,16 +7783,18 @@ async function runSession(
         clientInfo: { name: "hydra-acp-tui", version: HYDRA_VERSION },
       },
     };
-    writeDebugLine({ src: "reconnect", step: "initialize-send" });
-    try {
-      await stream.request(initReq);
-      writeDebugLine({ src: "reconnect", step: "initialize-ok" });
-    } catch (err) {
-      writeDebugLine({
-        src: "reconnect",
-        step: "initialize-fail",
-        message: (err as Error).message,
-      });
+    if (!skipInitialize) {
+      writeDebugLine({ src: "reconnect", step: "initialize-send" });
+      try {
+        await stream.request(initReq);
+        writeDebugLine({ src: "reconnect", step: "initialize-ok" });
+      } catch (err) {
+        writeDebugLine({
+          src: "reconnect",
+          step: "initialize-fail",
+          message: (err as Error).message,
+        });
+      }
     }
     const useAfterMessage = lastSeenMessageId !== undefined;
     const attachReq: JsonRpcRequest = {
