@@ -18,6 +18,7 @@ import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
+import { syncHerdrBanner, syncHerdrPermission, syncHerdrSessionbar } from "./herdr.js";
 import { fileUrlForPath, formatElapsed } from "./format.js";
 import type { FormattedLine, Style } from "./format.js";
 
@@ -2045,6 +2046,18 @@ export class Screen {
   setSessionbar(sessionbar: Partial<SessionbarState>): void {
     this.sessionbar = { ...this.sessionbar, ...sessionbar };
     this.syncWindowTitle();
+    // Same idea as syncWindowTitle, different consumer: tell herdr which
+    // session this pane is showing. Inert outside herdr.
+    syncHerdrSessionbar({
+      sessionId: this.sessionbar.sessionId,
+      agent: this.sessionbar.agent,
+      title: this.sessionbar.title,
+      model: this.sessionbar.model,
+      costAmount: this.sessionbar.usage?.costAmount,
+      // The session's cwd, not the pane process's — herdr can only get
+      // the latter, and it never changes on a session switch.
+      cwd: this.sessionbar.cwd,
+    });
     this.repaint();
   }
 
@@ -2074,6 +2087,10 @@ export class Screen {
   setBanner(banner: Partial<BannerState>): void {
     this.banner = { ...this.banner, ...banner };
     this.writeProgressIndicator(this.banner.status === "busy" ? 3 : 0);
+    // Same idea as writeProgressIndicator, different consumer. This runs
+    // at 1Hz while a turn is in flight (the elapsed clock), so the herdr
+    // reporter dedupes on derived state rather than on being called.
+    syncHerdrBanner({ status: this.banner.status, queued: this.banner.queued });
     this.syncedPartialRepaint(() => this.drawBanner());
   }
 
@@ -2915,6 +2932,10 @@ export class Screen {
       this.clearSelection();
     }
     this.permissionPrompt = spec ? { ...spec } : null;
+    // The one signal neither the session bar nor the banner carries;
+    // herdr renders it as `blocked`, which is what drives its attention
+    // rollup and `herdr agent wait --until blocked`.
+    syncHerdrPermission(this.permissionPrompt !== null);
     this.repaint();
   }
 

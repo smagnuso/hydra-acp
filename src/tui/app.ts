@@ -136,6 +136,7 @@ import {
   publishActiveHydraSession,
   readStickyHydraSession,
 } from "./terminal-user-var.js";
+import { clearHerdrSession, initHerdrReporting } from "./herdr.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { computeTabCompletion } from "./completion.js";
@@ -869,6 +870,11 @@ function installCrashLogging(): void {
 
 export async function runTuiApp(opts: TuiOptions): Promise<void> {
   installCrashLogging();
+  // Opt in to herdr pane reporting for the real TUI only. The taps live
+  // in Screen, so without this gate anything constructing a Screen —
+  // notably the test suite — would report to a live herdr session.
+  // Paired with clearHerdrSession() in the finally below.
+  initHerdrReporting();
   // undici (Node's global fetch) records a PerformanceResourceTiming
   // entry for every HTTP request and retains them in the global
   // performance buffer forever. In a long-lived TUI that polls the
@@ -1009,6 +1015,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     // file is intentionally NOT touched — that's the pointer `hydra
     // --reattach` reads to prefer the last session on this terminal.
     clearActiveHydraSession();
+    // Withdraw the herdr agent report for this pane. Unlike the tmux
+    // pane option this is load-bearing: a hydra pane has no screen-scrape
+    // fallback in herdr, so a state left behind here would never be
+    // corrected.
+    await clearHerdrSession();
     leaveAltScreen();
     process.off("exit", altScreenCleanup);
   }
