@@ -270,8 +270,22 @@ describe("seq", () => {
     syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     const first = frames[0]!.params.seq as number;
-    expect(first).toBeGreaterThan(1_700_000_000_000);
-    expect(first).toBeLessThanOrEqual(Date.now() + 10);
+    // Microsecond scale, matching herdr's own integrations.
+    expect(first).toBeGreaterThan(1_700_000_000_000 * 1000);
+    expect(first).toBeLessThanOrEqual(Date.now() * 1000 + 1000);
+  });
+
+  // Plain epoch-ms would leave one unit of headroom per millisecond, so a
+  // process that emitted N frames reaches start+N, and a restart fewer than
+  // N ms later would begin below that watermark and be silently rejected.
+  // Microsecond scaling gives 1000 units per ms of clock advance; this pins
+  // the "one seq per frame" half of that arithmetic.
+  it("advances by exactly one per frame, so drift is bounded by frame count", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    await settle();
+    const seqs = frames.map((f) => f.params.seq as number);
+    expect(seqs.length).toBe(2);
+    expect(seqs[1]! - seqs[0]!).toBe(1);
   });
 
   it("is strictly increasing across every frame and never resets on switch", async () => {

@@ -144,18 +144,27 @@ const live: {
 let sent: { state: HerdrAgentState; title: string | null; tokens: string } | null = null;
 
 // Monotonic and — critically — seeded from the wall clock rather than
-// from zero.
+// from zero, scaled by 1000.
 //
 // herdr's `hook_report_sequences` lives on the pane's terminal state, not
 // on our connection, so it OUTLIVES this process. A TUI that restarted in
 // the same pane and began counting from 1 again would have every single
 // report rejected as stale (`seq <= last_seq`) for as long as that pane
 // existed, silently and with `{"type":"ok"}` responses throughout. Using
-// epoch-ms as the base makes any later process outrank any earlier one.
+// the epoch as the base makes any later process outrank any earlier one.
+//
+// The *1000 scaling matters. Plain epoch-ms leaves only one unit of
+// headroom per millisecond, so a process that emitted N frames reaches
+// `start + N`; a restart fewer than N milliseconds later would begin
+// *below* that high-water mark and be locked out. Scaling to microseconds
+// gives 1000 units per millisecond, which no realistic report rate can
+// outrun. This matches herdr's own integrations, which seed the same way
+// (`Date.now() * 1000` in its opencode plugin, `time.time_ns()` in its
+// claude hook) — for exactly this reason.
 //
 // Deliberately module-level and never reset within a process — see trap
 // (1) in the header.
-let seq = Date.now();
+let seq = Date.now() * 1000;
 function nextSeq(): number {
   seq += 1;
   return seq;
@@ -557,7 +566,7 @@ export function __resetHerdrForTests(): void {
   live.queued = undefined;
   live.permission = false;
   sent = null;
-  seq = Date.now();
+  seq = Date.now() * 1000;
   chain = Promise.resolve();
   target = null;
 }
