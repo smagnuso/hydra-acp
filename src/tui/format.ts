@@ -63,10 +63,10 @@ export function fileUrlForPath(absPath: string): string {
 //
 // Deliberately not fileUrlForPath: that one is for OSC 8 hyperlinks, so it
 // carries this machine's hostname and preserves a trailing `#L42` fragment
-// verbatim. Neither is right here. A real hostname is rejected outright by
-// some consumers (herdr accepts only an empty host or "localhost"), and a
-// directory legitimately named `foo#bar` must be encoded rather than
-// treated as a fragment or the path silently truncates.
+// verbatim. Neither is right here. Some OSC 7 consumers reject any host that
+// isn't empty or "localhost" outright, and a directory legitimately named
+// `foo#bar` must be encoded rather than treated as a fragment or the path
+// silently truncates.
 export function fileUriForCwd(absPath: string): string {
   const encoded = absPath
     .split("/")

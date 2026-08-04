@@ -1,34 +1,42 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Terminal } from "terminal-kit";
 
-// Observe the herdr hand-off without touching a socket. `herdrAvailable` is
-// a hook so specs can simulate running outside herdr.
-let herdrAvailable = true;
-const herdrOpenCalls: Array<{ sessionId: string; title?: string; cwd?: string }> = [];
-const herdrNewCalls: Array<{
+// Observe the terminal-host hand-off without touching a transport.
+// `hostAvailable` is a hook so specs can simulate having no host.
+let hostAvailable = true;
+interface OpenCall {
+  kind: string;
+  sessionId?: string;
+  title?: string;
   cwd?: string;
   agentId?: string;
   model?: string;
   prompt?: string;
-}> = [];
-let herdrNewOk = true;
-vi.mock("./herdr-open.js", () => ({
-  canOpenInHerdrTab: () => herdrAvailable,
-  openSessionInHerdrTab: async (req: { sessionId: string; title?: string; cwd?: string }) => {
-    herdrOpenCalls.push(req);
-    return { ok: true };
-  },
-  openNewSessionInHerdrTab: async (req: {
-    cwd?: string;
-    agentId?: string;
-    model?: string;
-    prompt?: string;
-  }) => {
-    herdrNewCalls.push(req);
-    return herdrNewOk ? { ok: true } : { ok: false, error: "no workspace" };
-  },
+}
+const openCalls: OpenCall[] = [];
+let openOk = true;
+vi.mock("./term-host/open.js", () => ({
+  canOpenTab: () => hostAvailable,
   labelForPrompt: (t?: string) => t ?? "new session",
+  openInNewTab: async (spec: OpenCall) => {
+    openCalls.push(spec);
+    return openOk ? { ok: true } : { ok: false, error: "no workspace" };
+  },
 }));
+vi.mock("./term-host/index.js", () => ({
+  terminalHost: () => (hostAvailable ? { id: "testhost" } : null),
+}));
+
+// Views over the recorded calls, so the existing specs keep reading the way
+// they did before the two entry points became one discriminated union.
+const attachCalls = {
+  get length() {
+    return openCalls.filter((c) => c.kind === "attach").length;
+  },
+  map<T>(fn: (c: OpenCall) => T): T[] {
+    return openCalls.filter((c) => c.kind === "attach").map(fn);
+  },
+};
 import {
   createPickerPrefs,
   filterByHost,
@@ -1304,22 +1312,21 @@ describe("pickSession: ^F find mode", () => {
 
 // The original ^T handler was placed inside the picker's `data.isCharacter`
 // block, where a control key can never reach it. Every unit test for the
-// herdr call itself passed while the key was silently dead, so the coverage
+// open call itself passed while the key was silently dead, so the coverage
 // that matters is here: dispatch the actual key through the picker.
-describe("^t opens the selected session in a herdr tab", () => {
+describe("^t opens the selected session in a new terminal-host tab", () => {
   const flush = async (): Promise<void> => {
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
   };
 
   afterEach(() => {
-    herdrOpenCalls.length = 0;
-    herdrNewCalls.length = 0;
-    herdrAvailable = true;
-    herdrNewOk = true;
+    openCalls.length = 0;
+    hostAvailable = true;
+    openOk = true;
   });
 
-  it("hands the selected session to herdr", async () => {
+  it("hands the selected session to the terminal host", async () => {
     const s = session({
       sessionId: "hydra_session_abc",
       title: "refactor auth",
@@ -1329,27 +1336,32 @@ describe("^t opens the selected session in a herdr tab", () => {
     drv.press("DOWN");
     drv.press("CTRL_T");
     await flush();
-    expect(herdrOpenCalls).toEqual([
-      { sessionId: "hydra_session_abc", title: "refactor auth", cwd: "/home/me/dev/proj" },
+    expect(openCalls).toEqual([
+      {
+        kind: "attach",
+        sessionId: "hydra_session_abc",
+        title: "refactor auth",
+        cwd: "/home/me/dev/proj",
+      },
     ]);
   });
 
-  it("starts a NEW session in a herdr tab while focus is in the composer", async () => {
+  it("starts a NEW session in a host tab while focus is in the composer", async () => {
     // Keyed on focus, mirroring Enter: on a row it acts on that session,
     // in the composer it starts a new one.
     const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
     drv.press("CTRL_T");
     await flush();
-    expect(herdrOpenCalls).toEqual([]);
-    expect(herdrNewCalls).toHaveLength(1);
+    expect(openCalls.filter((c) => c.kind === "attach")).toEqual([]);
+    expect(openCalls.filter((c) => c.kind === "new")).toHaveLength(1);
   });
 
-  it("does not start a new session in a herdr tab outside herdr", async () => {
-    herdrAvailable = false;
+  it("does not start a new session in a host tab when there is no host", async () => {
+    hostAvailable = false;
     const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
     drv.press("CTRL_T");
     await flush();
-    expect(herdrNewCalls).toEqual([]);
+    expect(openCalls.filter((c) => c.kind === "new")).toEqual([]);
   });
 
   it("sends the composer text along as the new session's first prompt", async () => {
@@ -1357,7 +1369,7 @@ describe("^t opens the selected session in a herdr tab", () => {
     drv.type("fix the parser");
     drv.press("CTRL_T");
     await flush();
-    expect(herdrNewCalls[0]?.prompt).toBe("fix the parser");
+    expect(openCalls[0]?.prompt).toBe("fix the parser");
   });
 
   it("clears the composer on success, so the text can't be sent twice", async () => {
@@ -1373,8 +1385,8 @@ describe("^t opens the selected session in a herdr tab", () => {
     expect((out as { prompt?: string }).prompt).toBeUndefined();
   });
 
-  it("keeps the composer text when the herdr tab fails", async () => {
-    herdrNewOk = false;
+  it("keeps the composer text when opening the tab fails", async () => {
+    openOk = false;
     const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
     drv.type("fix the parser");
     drv.press("CTRL_T");
@@ -1391,16 +1403,16 @@ describe("^t opens the selected session in a herdr tab", () => {
     drv.press("CTRL_T");
     await flush();
     // Two presses, two tabs — nothing resolved the picker in between.
-    expect(herdrNewCalls).toHaveLength(2);
+    expect(openCalls.filter((c) => c.kind === "new")).toHaveLength(2);
   });
 
-  it("does nothing when not running in herdr", async () => {
-    herdrAvailable = false;
+  it("does nothing when there is no terminal host", async () => {
+    hostAvailable = false;
     const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
     drv.press("DOWN");
     drv.press("CTRL_T");
     await flush();
-    expect(herdrOpenCalls).toEqual([]);
+    expect(openCalls.filter((c) => c.kind === "attach")).toEqual([]);
   });
 
   it("leaves the picker open so several sessions can be fanned out", async () => {
@@ -1413,7 +1425,7 @@ describe("^t opens the selected session in a herdr tab", () => {
     drv.press("DOWN");
     drv.press("CTRL_T");
     await flush();
-    expect(herdrOpenCalls.map((c) => c.sessionId)).toEqual([
+    expect(attachCalls.map((c) => c.sessionId)).toEqual([
       "hydra_session_a",
       "hydra_session_b",
     ]);

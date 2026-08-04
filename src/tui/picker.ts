@@ -26,11 +26,8 @@ import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { setDefaultAgent, type HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
-import {
-  canOpenInHerdrTab,
-  openNewSessionInHerdrTab,
-  openSessionInHerdrTab,
-} from "./herdr-open.js";
+import { terminalHost } from "./term-host/index.js";
+import { canOpenTab, openInNewTab } from "./term-host/open.js";
 import {
   deleteSession,
   fetchWithTimeout,
@@ -327,18 +324,26 @@ const HELP_ENTRIES: ReadonlyArray<HelpEntry> = [
 ];
 
 // Resolved per render rather than baked into HELP_ENTRIES, because the
-// herdr-only row depends on the environment. Computing it at module load
+// host-only row depends on the environment. Computing it at module load
 // would freeze the answer at import time and make the module's top level
 // depend on env — which also made it impossible to mock in tests.
+/**
+ * The active host's name, for status lines. Falls back to a neutral word so
+ * the message still reads if the host went away mid-flight.
+ */
+function hostName(): string {
+  return terminalHost()?.id ?? "terminal";
+}
+
 function helpEntries(): ReadonlyArray<HelpEntry> {
-  if (!canOpenInHerdrTab()) {
+  if (!canOpenTab()) {
     return HELP_ENTRIES;
   }
   const out: HelpEntry[] = [];
   for (const entry of HELP_ENTRIES) {
     out.push(entry);
     if (entry?.[0] === "*") {
-      out.push(["^t", "herdr tab: selected session, or send the composer to a new one"]);
+      out.push(["^t", "new tab: selected session, or send the composer to a new one"]);
     }
   }
   return out;
@@ -2704,43 +2709,44 @@ export async function pickSession(
         syncInFlight = false;
       }
     };
-    // Hand the selected session to herdr as a new tab, rather than
+    // Hand the selected session to the terminal host as a new tab, rather than
     // switching this pane to it. The daemon owns the session and
     // multi-client attach is the normal path, so both panes are first-class
     // views of the same session — nothing is "moved".
     //
     // Deliberately leaves the picker open so several sessions can be fanned
     // out in a row.
-    let herdrOpenInFlight = false;
-    const performOpenInHerdrTab = async (
+    let openTabInFlight = false;
+    const performOpenInNewTab = async (
       session: DiscoveredSession,
     ): Promise<void> => {
-      if (herdrOpenInFlight) {
+      if (openTabInFlight) {
         return;
       }
-      herdrOpenInFlight = true;
+      openTabInFlight = true;
       const label = session.title?.trim() || stripHydraSessionPrefix(session.sessionId);
-      transientStatus = `opening ${label} in a herdr tab…`;
+      transientStatus = `opening ${label} in a new ${hostName()} tab…`;
       paintIndicator();
       try {
-        const result = await openSessionInHerdrTab({
+        const result = await openInNewTab({
+          kind: "attach",
           sessionId: session.sessionId,
           title: session.title,
           cwd: session.cwd,
         });
         transientStatus = result.ok
-          ? `opened ${label} in a new herdr tab`
-          : `herdr tab failed: ${result.error ?? "unknown error"}`;
+          ? `opened ${label} in a new ${hostName()} tab`
+          : `new tab failed: ${result.error ?? "unknown error"}`;
       } catch (err) {
-        transientStatus = `herdr tab failed: ${(err as Error).message}`;
+        transientStatus = `new tab failed: ${(err as Error).message}`;
       } finally {
-        herdrOpenInFlight = false;
+        openTabInFlight = false;
         paintIndicator();
       }
     };
-    // ^t from the composer: a brand-new session in a new herdr tab.
+    // ^t from the composer: a brand-new session in a new tab.
     //
-    // Shares herdrOpenInFlight with the session path above — one ^t, one
+    // Shares openTabInFlight with the session path above — one ^t, one
     // tab, whichever flavour.
     //
     // Whatever is typed in the composer rides along as --prompt and fires
@@ -2756,20 +2762,21 @@ export async function pickSession(
     // But the text IS cleared on success, for the same reason Enter clears
     // it: it has been sent. Leaving it would invite sending it twice, once
     // per tab.
-    const performNewInHerdrTab = async (): Promise<void> => {
-      if (herdrOpenInFlight) {
+    const performNewInNewTab = async (): Promise<void> => {
+      if (openTabInFlight) {
         return;
       }
-      herdrOpenInFlight = true;
+      openTabInFlight = true;
       const text = composer.expandedText();
       // Snapshotted rather than read back after the await: state() aliases
       // the dispatcher's live array, and setBuffer below replaces it.
       const keptAttachments = [...composer.state().attachments];
       const dropped = keptAttachments.length;
-      transientStatus = "opening a new session in a herdr tab…";
+      transientStatus = `opening a new session in a new ${hostName()} tab…`;
       paintIndicator();
       try {
-        const result = await openNewSessionInHerdrTab({
+        const result = await openInNewTab({
+          kind: "new",
           cwd: currentCwd,
           agentId: composerAgentId,
           model: composerModel,
@@ -2781,15 +2788,15 @@ export async function pickSession(
           }
           transientStatus =
             dropped > 0
-              ? `opened a new herdr tab — ${dropped} attachment${dropped === 1 ? "" : "s"} stayed here`
-              : "opened a new session in a new herdr tab";
+              ? `opened a new ${hostName()} tab — ${dropped} attachment${dropped === 1 ? "" : "s"} stayed here`
+              : `opened a new session in a new ${hostName()} tab`;
         } else {
-          transientStatus = `herdr tab failed: ${result.error ?? "unknown error"}`;
+          transientStatus = `new tab failed: ${result.error ?? "unknown error"}`;
         }
       } catch (err) {
-        transientStatus = `herdr tab failed: ${(err as Error).message}`;
+        transientStatus = `new tab failed: ${(err as Error).message}`;
       } finally {
-        herdrOpenInFlight = false;
+        openTabInFlight = false;
         renderFromScratch();
       }
     };
@@ -3624,7 +3631,7 @@ export async function pickSession(
           resolve(out);
           return;
         }
-        // ^t from the composer: a new session in a new herdr tab.
+        // ^t from the composer: a new session in a new tab.
         //
         // Must be intercepted HERE, not in the switch below that handles
         // ^t for a selected row. Composer-focused keys are routed through
@@ -3633,10 +3640,10 @@ export async function pickSession(
         // and ^t would instead land on the dispatcher as a readline
         // transpose-chars.
         if (name === "CTRL_T") {
-          if (canOpenInHerdrTab()) {
-            void performNewInHerdrTab();
+          if (canOpenTab()) {
+            void performNewInNewTab();
           }
-          // Swallowed either way: outside herdr, ^t transposing the
+          // Swallowed either way: with no host, ^t transposing the
           // user's characters would be a surprising consolation prize.
           return;
         }
@@ -4041,28 +4048,28 @@ export async function pickSession(
         return;
       }
       switch (name) {
-        // ^t — open the selected session in a new herdr tab.
+        // ^t — open the selected session in a new tab.
         //
         // Must live in this switch rather than the isCharacter block above:
         // CTRL_T is a control key, so `data.isCharacter` is false and that
         // whole block is skipped. A handler placed there is silently
         // unreachable — no error, the key just does nothing.
         case "CTRL_T": {
-          if (!canOpenInHerdrTab()) {
+          if (!canOpenTab()) {
             return;
           }
           // Keyed on focus, mirroring what Enter already teaches here:
           // on a row it acts on that session, in the composer it starts a
           // new one. Same key, no new binding to learn.
           if (composerHover || selectedIdx === 0) {
-            void performNewInHerdrTab();
+            void performNewInNewTab();
             return;
           }
           const session = visible[selectedIdx - 1];
           if (!session) {
             return;
           }
-          void performOpenInHerdrTab(session);
+          void performOpenInNewTab(session);
           return;
         }
         case "UP":

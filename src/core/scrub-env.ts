@@ -21,49 +21,101 @@
 //      bystander's terminal.
 //
 // This is not theoretical. It was found because a hydra TUI, launched from
-// a shell that had inherited the daemon's environment, renamed a herdr tab
+// a shell that had inherited the daemon's environment, renamed a terminal tab
 // it had never been running in — and left a phantom "working" agent report
 // pinned on an unrelated pane, which nothing could clear because the
 // process that made the report had exited.
 //
 // WHAT IS NOT SCRUBBED, AND WHY
 //
-// Only *pane-scoped* variables. `HERDR_SOCKET_PATH` and `HERDR_ENV`
-// deliberately survive: the socket is a per-user singleton and stays valid
-// for the daemon's whole life, so an extension that wants to drive herdr
-// can still reach it. What it must not do is *assume a pane*. Removing the
-// ids while keeping the socket says exactly that — talk to the
-// multiplexer, but resolve your target explicitly instead of inheriting
-// someone else's.
+// Only *pane-scoped* variables. The "how do I reach the server" variables
+// deliberately survive: a control socket or session handle is a per-user
+// thing that stays valid for the daemon's whole life, so an extension that
+// wants to drive the multiplexer can still reach it. What it must not do is
+// *assume a pane*. Removing the ids while keeping the socket says exactly
+// that — talk to the multiplexer, but resolve your target explicitly instead
+// of inheriting someone else's.
 //
-// It also means hydra's own reporter (src/tui/herdr.ts) goes inert in a
-// daemon-spawned process without any extra check, since it gates on
-// HERDR_PANE_ID being present.
+// It also means hydra's own reporting (src/tui/term-host/) goes inert in a
+// daemon-spawned process without any extra check, since every adapter's
+// detection requires a pane id.
 //
 // EXPLICIT CONFIG ALWAYS WINS
 //
 // Scrubbing applies to the INHERITED environment only. A variable set
 // deliberately — in an agent's launch plan, or an extension's `env` block
 // in config.json — is layered on afterwards and is never removed. Someone
-// who writes `HERDR_PANE_ID` into their extension config means it.
+// who writes a pane id into their extension config means it.
 // ---------------------------------------------------------------------
 
 /**
- * Pane-scoped variables scrubbed by default.
+ * Pane-identity variables, grouped by the multiplexer that sets them.
  *
- * herdr today; the same reasoning applies to any multiplexer that
- * advertises a pane identity this way, which is why the config escape
- * hatch below exists rather than this list being the only answer.
+ * ---------------------------------------------------------------------
+ * WHY EVERY GROUP IS SCRUBBED, NOT JUST THE ONE WE DETECTED
+ *
+ * It is tempting to scrub only the multiplexer hydra is actually running
+ * under. That is wrong, because these things NEST — a multiplexer inside an
+ * emulator, or one inside another, are both ordinary setups. Detection
+ * deliberately
+ * resolves to the innermost one (it owns the pane you are really in), so
+ * scrubbing only the detected backend leaves the outer one's pane id
+ * sailing straight through.
+ *
+ * The two questions are not the same question:
+ *
+ *   detection — "who do I talk to?"        exactly one answer
+ *   scrubbing — "what must not outlive     everything pane-scoped,
+ *                this pane?"                unconditionally
+ *
+ * Stripping TMUX_PANE while running under something else costs nothing;
+ * leaving it costs a child process that believes it is in a pane it has
+ * never seen.
+ * So the effective list is the union of every group below, regardless of
+ * what we detected — and this table needs no detection to be correct.
+ *
+ * WHAT IS DELIBERATELY ABSENT
+ *
+ * The "how do I reach the server" variables — control sockets and session
+ * handles such as TMUX, ZELLIJ, WEZTERM_UNIX_SOCKET, KITTY_LISTEN_ON, and
+ * each host's own equivalent. Those stay valid for as long as the host is
+ * running, which outlasts the daemon, so a host-aware extension can still
+ * reach it. What it must not do is inherit a *pane*.
+ *
+ * GNU screen's `WINDOW` is also absent, on purpose: the name is generic
+ * enough that scrubbing it risks eating an unrelated variable, and the
+ * blast radius of that is worse than the leak it would prevent. `STY`
+ * (the session name) is specific and is scrubbed.
+ * ---------------------------------------------------------------------
  */
-export const DEFAULT_SCRUBBED_ENV = [
-  "HERDR_PANE_ID",
-  "HERDR_TAB_ID",
-  "HERDR_WORKSPACE_ID",
-  "HERDR_STARTUP_CWD",
-  // Written by hydra's own ^t hand-off to tell the child it owns the tab
-  // label. Names one specific tab, so it has exactly the same problem.
-  "HYDRA_HERDR_TAB_LABEL",
-] as const;
+export const PANE_SCOPED_ENV_BY_BACKEND: Readonly<Record<string, readonly string[]>> = {
+  // Each key mirrors what the matching adapter in tui/term-host/ declares as
+  // its pane-scoped env. Duplicated rather than imported on purpose: the
+  // daemon must not load terminal-host adapter modules (that's client-side
+  // plumbing, and loading user-supplied adapters into a long-lived daemon is
+  // a worse trust story), so it needs a static list of its own. Tests pin
+  // each group against its adapter so the copies can't drift.
+  //
+  // These are names, not integrations: nothing here imports an adapter, and
+  // a host with no adapter yet can still be listed.
+  herdr: ["HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_STARTUP_CWD"],
+  tmux: ["TMUX_PANE"],
+  zellij: ["ZELLIJ_PANE_ID", "ZELLIJ_SESSION_NAME"],
+  wezterm: ["WEZTERM_PANE"],
+  kitty: ["KITTY_WINDOW_ID"],
+  screen: ["STY"],
+  iterm2: ["ITERM_SESSION_ID"],
+  // hydra's own: written by the ^t hand-off to tell the child it owns the
+  // tab label. Names one specific tab, so it has the same problem. Host
+  // agnostic — it describes hydra's claim, not any host's tab. Must stay in
+  // step with TAB_LABEL_ENV in tui/term-host/label-sync.ts.
+  hydra: ["HYDRA_TAB_LABEL"],
+};
+
+/** Every pane-identity variable we know about, across all backends. */
+export const DEFAULT_SCRUBBED_ENV: readonly string[] = Object.values(
+  PANE_SCOPED_ENV_BY_BACKEND,
+).flat();
 
 // Set once at daemon startup from config. Module-level rather than
 // threaded through every spawn site because the two call sites

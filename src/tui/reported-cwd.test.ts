@@ -32,15 +32,15 @@ afterEach(() => {
 });
 
 describe("fileUriForCwd", () => {
-  // An empty host means "local". herdr's parse_file_uri_cwd accepts only an
-  // empty host or "localhost" and rejects anything else outright, so
-  // emitting this machine's real hostname would be silently dropped.
+  // An empty host means "local". Consumers commonly accept only an empty
+  // host or "localhost" and reject anything else outright, so emitting this
+  // machine's real hostname would be silently dropped.
   it("emits an empty host rather than a hostname", () => {
     expect(fileUriForCwd("/home/me/dev")).toBe("file:///home/me/dev");
   });
 
   it("percent-encodes spaces", () => {
-    expect(fileUriForCwd("/tmp/herdr repo")).toBe("file:///tmp/herdr%20repo");
+    expect(fileUriForCwd("/tmp/my repo")).toBe("file:///tmp/my%20repo");
   });
 
   // A directory named `foo#bar` must be encoded, not treated as a URI
@@ -88,9 +88,8 @@ describe("publishReportedCwd", () => {
     expect(out).toBe("\x1b]7;file:///home/me/dev\x1b\\");
   });
 
-  // herdr (and every other consumer) validates that the path is absolute
-  // and a real directory. A relative path would just be discarded, so don't
-  // put it on the wire.
+  // Consumers validate that the path is absolute and a real directory. A
+  // relative path would just be discarded, so don't put it on the wire.
   it("ignores a relative path", () => {
     const out = captureStdout(() => publishReportedCwd("relative/dir"));
     expect(out).toBe("");

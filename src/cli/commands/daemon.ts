@@ -88,7 +88,7 @@ export async function runDaemonStart(
     return;
   }
 
-  spawnDaemonDetached();
+  spawnDaemonDetached(config);
   await waitForDaemonReady(config);
   const info = await readPidFile();
   process.stdout.write(
@@ -135,7 +135,7 @@ export async function runDaemonRestart(): Promise<void> {
   } else {
     process.stdout.write("No running daemon found; starting a fresh one.\n");
   }
-  spawnDaemonDetached();
+  spawnDaemonDetached(config);
   await waitForDaemonReady(config);
   if (await pingHealth(config)) {
     const fresh = await readPidFile();

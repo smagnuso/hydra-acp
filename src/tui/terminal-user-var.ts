@@ -247,28 +247,28 @@ export function listLiveHydraTtys(): LiveTtyEntry[] {
 // Report a working directory to the host terminal via OSC 7.
 //
 // Deliberately unconditional, like the OSC 2 window title: OSC 7 is a
-// general convention consumed by VTE, kitty, WezTerm, Ghostty, iTerm2,
-// tmux and herdr, and ignored harmlessly elsewhere.
+// general convention consumed by VTE, kitty, WezTerm, Ghostty, iTerm2 and
+// tmux among others, and ignored harmlessly elsewhere.
 //
 // This matters because a host multiplexer can otherwise only observe the
 // cwd of the *hydra process* — wherever `hydra` was launched, which never
 // changes when the user switches sessions. The session's directory lives
 // in the daemon, so the only way the host can know it is for us to say so.
 //
-// In herdr specifically this feeds `terminal.cwd`, which drives the pane's
-// reported cwd, the Space label, the directory a split inherits, and the
-// directory the pane is restored into.
+// Hosts typically use it for more than display: the pane's reported cwd, the
+// directory a new split inherits, and the directory a restored pane opens
+// in. So this is worth keeping accurate, not just tidy.
 //
 // Emitted with an empty host (`file:///path`) rather than a real hostname:
-// it means "local", which is true, and it has the widest acceptance —
-// herdr rejects any host that isn't empty or "localhost".
+// it means "local", which is true, and it has the widest acceptance — some
+// consumers reject any host that isn't empty or "localhost".
 // Guarded on stdout being a TTY. Writing terminal escapes to a pipe is
 // meaningless, and it is actively harmful under a test runner: vitest pipes
 // stdout, but that pipe is still inside a real terminal session, so an
-// unguarded write reports the *test's* directory to the host multiplexer.
-// herdr happens to reject paths that fail `is_absolute() && is_dir()`, which
-// masks most of it, but a spec using a real temp dir would silently
-// repoint the developer's own pane — and herdr persists that cwd.
+// unguarded write reports the *test's* directory to the host. Hosts that
+// validate the path (absolute, and an existing directory) mask most of it,
+// but a spec using a real temp dir would silently repoint the developer's
+// own pane — and a host may persist that cwd.
 export function publishReportedCwd(cwd: string): void {
   if (!cwd.startsWith("/") || !process.stdout.isTTY) {
     return;

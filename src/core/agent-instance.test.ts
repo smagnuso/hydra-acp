@@ -214,27 +214,27 @@ describe("AgentInstance: inherited environment", () => {
   }
 
   it("strips pane-scoped variables from what the agent inherits", async () => {
-    process.env.HERDR_PANE_ID = "wB:p1";
-    process.env.HERDR_TAB_ID = "wB:t1";
+    process.env.TMUX_PANE = "%3";
+    process.env.ZELLIJ_PANE_ID = "1";
     try {
       const env = await envOfSpawnedAgent();
-      expect(env.HERDR_PANE_ID).toBeUndefined();
-      expect(env.HERDR_TAB_ID).toBeUndefined();
+      expect(env.TMUX_PANE).toBeUndefined();
+      expect(env.ZELLIJ_PANE_ID).toBeUndefined();
       // Sanity: inheritance still works at all.
       expect(env.PATH).toBeDefined();
     } finally {
-      delete process.env.HERDR_PANE_ID;
-      delete process.env.HERDR_TAB_ID;
+      delete process.env.TMUX_PANE;
+      delete process.env.ZELLIJ_PANE_ID;
     }
   }, 20_000);
 
   it("lets an explicit plan env win over the scrub", async () => {
-    process.env.HERDR_PANE_ID = "wB:p1";
+    process.env.TMUX_PANE = "%3";
     try {
-      const env = await envOfSpawnedAgent({ env: { HERDR_PANE_ID: "chosen:p9" } });
-      expect(env.HERDR_PANE_ID).toBe("chosen:p9");
+      const env = await envOfSpawnedAgent({ env: { TMUX_PANE: "%chosen" } });
+      expect(env.TMUX_PANE).toBe("%chosen");
     } finally {
-      delete process.env.HERDR_PANE_ID;
+      delete process.env.TMUX_PANE;
     }
   }, 20_000);
 });

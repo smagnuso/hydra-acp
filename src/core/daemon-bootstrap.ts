@@ -5,6 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { invokedBinName } from "./bin-name.js";
 import type { HydraConfig } from "./config.js";
 import { computeConfigDigest } from "./config-digest.js";
+import { scrubInheritedEnv, setExtraScrubbedEnv } from "./scrub-env.js";
 import { isProcessAlive, readDaemonPidFile } from "./daemon-pidfile.js";
 import type { RemoteTarget } from "./remote-target.js";
 
@@ -63,7 +64,7 @@ export async function ensureDaemonReachable(
   }
   if (probe === "missing") {
     process.stderr.write("hydra-acp: daemon not running; starting it...\n");
-    spawnDaemonDetached();
+    spawnDaemonDetached(config);
     await waitForDaemonReady(config);
   }
   // When TLS is configured, config.daemon.port hosts the TLS
@@ -141,7 +142,14 @@ export async function fetchDaemonHealth(
   }
 }
 
-export function spawnDaemonDetached(): void {
+/**
+ * Start a detached daemon.
+ *
+ * `config` is only used for its scrub list — see below. It's a parameter
+ * rather than a fresh `loadConfig()` because every caller already has one,
+ * and re-reading here could disagree with the config the caller validated.
+ */
+export function spawnDaemonDetached(config?: HydraConfig): void {
   // The daemon has its own bundle (`dist/daemon.js`) sitting next to
   // the CLI bundle (`dist/cli.js`). Resolve it relative to this module
   // so we don't depend on PATH containing the npm-installed bin dir.
@@ -151,10 +159,33 @@ export function spawnDaemonDetached(): void {
   // the complexity.
   const here = dirname(fileURLToPath(import.meta.url));
   const daemonBundle = resolve(here, "./daemon.js");
+  // Scrub HERE, in the process that is still inside the pane, rather than
+  // relying only on the daemon filtering its children.
+  //
+  // Two reasons this is worth doing in addition to the child-spawn scrub:
+  //
+  //  1. It cleans the DAEMON's own environment, not just what it hands on.
+  //     Anything reading process.env directly — a path not routed through
+  //     AgentInstance/ChildSupervisor, or code written later — is then
+  //     protected without having to remember this rule.
+  //  2. It makes "the daemon must not resolve a terminal host" true by
+  //     construction instead of by convention. A daemon with no pane
+  //     identity in its environment cannot detect one, so the invariant
+  //     can't quietly rot.
+  //
+  // It does NOT replace the child-spawn scrub, because hydra doesn't
+  // control how the daemon gets started in general: a systemd unit,
+  // `nohup hydra daemon start --foreground &`, a container, a wrapper
+  // script, or simply an older build all bypass this path. The scrub at
+  // the child-spawn seam is the load-bearing one precisely because it
+  // holds regardless of provenance.
+  if (config) {
+    setExtraScrubbedEnv(config.daemon.scrubEnv);
+  }
   const child = spawn(process.execPath, [daemonBundle], {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    env: scrubInheritedEnv(),
   });
   child.unref();
 }

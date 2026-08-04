@@ -17,27 +17,33 @@ vi.mock("node:net", async (importOriginal) => {
   };
 });
 
-// The tab-label side rides the same socket, so leaving it live would add
-// its tab.get/tab.rename round trips to every frame count below. It has
-// its own spec; here it just needs to be out of the way.
+// The tab-label side rides the same socket, so leaving it live would add its
+// readLabel/writeLabel round trips to every frame count below. It has its own
+// spec; here it just needs to be out of the way.
 const tabLabels: Array<{ label: string; transient: boolean }> = [];
-vi.mock("./herdr-tab-label.js", () => ({
-  syncHerdrTabLabel: (label: string, opts: { transient?: boolean } = {}) => {
+vi.mock("./label-sync.js", () => ({
+  TAB_LABEL_ENV: "HYDRA_TAB_LABEL",
+  syncTabLabel: (label: string, opts: { transient?: boolean } = {}) => {
     tabLabels.push({ label, transient: opts.transient === true });
   },
-  restoreHerdrTabLabel: () => Promise.resolve(),
+  restoreTabLabel: () => Promise.resolve(),
+  tabLabelOwnershipEnv: (label: string) => ({ HYDRA_TAB_LABEL: label }),
 }));
 
 import {
-  __resetHerdrForTests,
-  clearHerdrSession,
-  herdrActive,
-  initHerdrReporting,
-  setHerdrSuspended,
-  syncHerdrBanner,
-  syncHerdrPermission,
-  syncHerdrSessionbar,
-} from "./herdr.js";
+  __resetTerminalHostForTests,
+  initTerminalHost,
+  terminalHost,
+} from "./index.js";
+import {
+  __resetReportForTests,
+  releaseTerminalHost,
+  reportBanner,
+  reportPermission,
+  reportSessionbar,
+  setReportSuspended,
+} from "./report.js";
+import type { OpenTabSpec } from "./types.js";
 
 // Captured frames, in wire order across all connections.
 interface Frame {
@@ -79,6 +85,56 @@ function fakeSocket(): unknown {
   return sock;
 }
 
+// Replies with a JSON-RPC error body instead of ok, for the request/response
+// paths whose failure handling is part of the contract.
+function errorSocket(error: { code?: string; message?: string }): unknown {
+  let onData: ((d: string) => void) | undefined;
+  const sock = {
+    on(event: string, cb: (...a: unknown[]) => void) {
+      if (event === "connect") {
+        queueMicrotask(() => cb());
+      } else if (event === "data") {
+        onData = cb as (d: string) => void;
+      }
+      return sock;
+    },
+    write(payload: string) {
+      frames.push(JSON.parse(payload.trim()) as Frame);
+      queueMicrotask(() => onData?.(JSON.stringify({ error })));
+    },
+    setTimeout() {
+      return sock;
+    },
+    destroy() {},
+  };
+  return sock;
+}
+
+// Closes without replying — the "half-open socket" case, which must not read
+// as success.
+function closingSocket(): unknown {
+  let onClose: (() => void) | undefined;
+  const sock = {
+    on(event: string, cb: (...a: unknown[]) => void) {
+      if (event === "connect") {
+        queueMicrotask(() => cb());
+      } else if (event === "close") {
+        onClose = cb as () => void;
+      }
+      return sock;
+    },
+    write(payload: string) {
+      frames.push(JSON.parse(payload.trim()) as Frame);
+      queueMicrotask(() => onClose?.());
+    },
+    setTimeout() {
+      return sock;
+    },
+    destroy() {},
+  };
+  return sock;
+}
+
 // The transport is async now (one connection per frame, each awaiting its
 // reply), so specs settle the chain before asserting.
 async function settle(): Promise<void> {
@@ -100,44 +156,48 @@ beforeEach(() => {
   tabLabels.length = 0;
   connectCalls = 0;
   connectImpl = () => fakeSocket();
-  __resetHerdrForTests();
+  __resetReportForTests();
+  __resetTerminalHostForTests();
   process.env.HERDR_ENV = "1";
   process.env.HERDR_SOCKET_PATH = "/tmp/fake-herdr.sock";
   process.env.HERDR_PANE_ID = "w1:p1";
-  // Reporting is opt-in; the real TUI does this once from runTuiApp.
-  initHerdrReporting();
+  process.env.HERDR_TAB_ID = "w1:t1";
+  // Resolution is opt-in; the real TUI does this once from runTuiApp.
+  initTerminalHost();
 });
 
 afterEach(() => {
   delete process.env.HERDR_ENV;
   delete process.env.HERDR_SOCKET_PATH;
   delete process.env.HERDR_PANE_ID;
-  __resetHerdrForTests();
+  delete process.env.HERDR_TAB_ID;
+  __resetReportForTests();
+  __resetTerminalHostForTests();
 });
 
-describe("herdrActive", () => {
+describe("detection", () => {
   it("is inert without HERDR_ENV", async () => {
     delete process.env.HERDR_ENV;
-    initHerdrReporting();
-    expect(herdrActive()).toBe(false);
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    initTerminalHost();
+    expect(terminalHost()).toBeNull();
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(frames).toEqual([]);
   });
 
   it("is inert when the pane id is missing", async () => {
     delete process.env.HERDR_PANE_ID;
-    initHerdrReporting();
-    expect(herdrActive()).toBe(false);
-    syncHerdrSessionbar({ sessionId: "s1" });
+    initTerminalHost();
+    expect(terminalHost()).toBeNull();
+    reportSessionbar({ sessionId: "s1" });
     await settle();
     expect(frames).toEqual([]);
   });
 
   it("is active with the full env triple", async () => {
-    expect(herdrActive()).toBe(true);
+    expect(terminalHost()).not.toBeNull();
   });
 
   // Regression: the taps live in Screen, so anything that constructs a
@@ -146,15 +206,18 @@ describe("herdrActive", () => {
   // agent at `working` on the developer's own pane, with no teardown and
   // no screen-scrape fallback to correct it. Reporting must stay inert
   // until the real TUI opts in, even with the env fully present.
-  it("stays inert until reporting is explicitly initialised", async () => {
-    __resetHerdrForTests();
+  it("stays inert until resolution is explicitly initialised", async () => {
+    // The env is fully present; what's missing is the opt-in call. This is
+    // what keeps `pnpm test` from reporting to the developer's own pane.
+    __resetReportForTests();
+    __resetTerminalHostForTests();
     expect(process.env.HERDR_ENV).toBe("1");
     expect(process.env.HERDR_PANE_ID).toBe("w1:p1");
-    expect(herdrActive()).toBe(false);
+    expect(terminalHost()).toBeNull();
 
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "t" });
-    syncHerdrBanner({ status: "busy" });
-    syncHerdrPermission(true);
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "t" });
+    reportBanner({ status: "busy" });
+    reportPermission(true);
     await settle();
     expect(frames).toEqual([]);
     expect(connectCalls).toBe(0);
@@ -163,13 +226,13 @@ describe("herdrActive", () => {
 
 describe("reporting gate", () => {
   it("does not claim the pane before a session id is known", async () => {
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(frames).toEqual([]);
   });
 
   it("reports once a session id arrives", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     expect(methodsSent()).toContain("pane.report_agent");
     expect(lastOf("pane.report_agent")!.params).toMatchObject({
@@ -182,52 +245,52 @@ describe("reporting gate", () => {
 
 describe("state mapping", () => {
   beforeEach(async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
   });
 
   it("maps busy to working", async () => {
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("working");
   });
 
   it("maps ready to idle", async () => {
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
-    syncHerdrBanner({ status: "ready" });
+    reportBanner({ status: "ready" });
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("idle");
   });
 
   it("keeps cancelling as working since the turn has not settled", async () => {
-    syncHerdrBanner({ status: "cancelling" });
+    reportBanner({ status: "cancelling" });
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("working");
   });
 
   it("maps disconnected to unknown rather than idle", async () => {
-    syncHerdrBanner({ status: "ready" });
+    reportBanner({ status: "ready" });
     await settle();
-    syncHerdrBanner({ status: "disconnected" });
+    reportBanner({ status: "disconnected" });
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
   });
 
   it("lets a pending permission win over a running turn", async () => {
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
-    syncHerdrPermission(true);
+    reportPermission(true);
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("blocked");
   });
 
   it("falls back to the underlying banner state when the permission clears", async () => {
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
-    syncHerdrPermission(true);
+    reportPermission(true);
     await settle();
-    syncHerdrPermission(false);
+    reportPermission(false);
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("working");
   });
@@ -238,12 +301,12 @@ describe("state mapping", () => {
 // the started-guard that already stops the OSC 9;4 taskbar pulse.
 describe("suspended (picker up)", () => {
   it("reports unknown instead of the session's activity", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
-    syncHerdrBanner({ status: "busy" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("working");
     frames = [];
-    setHerdrSuspended(true);
+    setReportSuspended(true);
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
   });
@@ -251,44 +314,44 @@ describe("suspended (picker up)", () => {
   // Muting updates instead would freeze the last report, leaving a session
   // that went busy just before the picker opened stuck at `working`.
   it("overrides a busy state that arrives while suspended", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
-    setHerdrSuspended(true);
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    setReportSuspended(true);
     await settle();
     frames = [];
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(frames.filter((f) => f.method === "pane.report_agent")).toEqual([]);
   });
 
   it("outranks a pending permission too", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
-    syncHerdrPermission(true);
-    setHerdrSuspended(true);
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportPermission(true);
+    setReportSuspended(true);
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
   });
 
   it("renames the tab off the session, so the tab bar doesn't read as still-in-session", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
     await settle();
     expect(tabLabels.at(-1)).toEqual({ label: "Refactor auth", transient: false });
-    setHerdrSuspended(true);
+    setReportSuspended(true);
     await settle();
     expect(tabLabels.at(-1)).toEqual({ label: "hydra", transient: true });
   });
 
   it("puts the session title back on the tab when the picker closes", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
-    setHerdrSuspended(true);
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
+    setReportSuspended(true);
     await settle();
-    setHerdrSuspended(false);
+    setReportSuspended(false);
     await settle();
     expect(tabLabels.at(-1)).toEqual({ label: "Refactor auth", transient: false });
   });
 
   it("marks the picker label transient so it can never be left on the tab", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
-    setHerdrSuspended(true);
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
+    setReportSuspended(true);
     await settle();
     expect(tabLabels.filter((t) => t.transient).map((t) => t.label)).toEqual([
       "hydra",
@@ -296,19 +359,19 @@ describe("suspended (picker up)", () => {
   });
 
   it("restores the real state on resume", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
-    syncHerdrBanner({ status: "busy" });
-    setHerdrSuspended(true);
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportBanner({ status: "busy" });
+    setReportSuspended(true);
     await settle();
     frames = [];
-    setHerdrSuspended(false);
+    setReportSuspended(false);
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("working");
   });
 
   // Otherwise the pane loses its identity in herdr's sidebar while picking.
   it("leaves the title and tokens alone", async () => {
-    syncHerdrSessionbar({
+    reportSessionbar({
       sessionId: "s1",
       agent: "claude",
       title: "refactor auth",
@@ -316,18 +379,18 @@ describe("suspended (picker up)", () => {
     });
     await settle();
     frames = [];
-    setHerdrSuspended(true);
+    setReportSuspended(true);
     await settle();
     expect(frames.filter((f) => f.method === "pane.report_metadata")).toEqual([]);
   });
 
   it("is idempotent", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
-    setHerdrSuspended(true);
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    setReportSuspended(true);
     await settle();
     frames = [];
-    setHerdrSuspended(true);
-    setHerdrSuspended(true);
+    setReportSuspended(true);
+    setReportSuspended(true);
     await settle();
     expect(frames).toEqual([]);
   });
@@ -335,40 +398,40 @@ describe("suspended (picker up)", () => {
 
 describe("deduplication", () => {
   it("does not resend an unchanged report", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     const before = frames.length;
     // The banner funnel fires at 1Hz for the elapsed clock; none of these
     // change any derived value.
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(frames.length).toBe(before);
   });
 
   it("sends only the state frame when only state changed", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     frames = [];
-    syncHerdrBanner({ status: "ready" });
+    reportBanner({ status: "ready" });
     await settle();
     expect(methodsSent()).toEqual(["pane.report_agent"]);
   });
 
   it("sends only the metadata frame when only metadata changed", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     frames = [];
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", model: "opus-5" });
+    reportSessionbar({ sessionId: "s1", agent: "claude", model: "opus-5" });
     await settle();
     expect(methodsSent()).toEqual(["pane.report_metadata"]);
   });
@@ -380,7 +443,7 @@ describe("seq", () => {
   // as stale for the life of the pane — silently, since dropped reports
   // still answer `ok`.
   it("is seeded from the wall clock so a restart outranks the last process", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     const first = frames[0]!.params.seq as number;
     // Microsecond scale, matching herdr's own integrations.
@@ -394,7 +457,7 @@ describe("seq", () => {
   // Microsecond scaling gives 1000 units per ms of clock advance; this pins
   // the "one seq per frame" half of that arithmetic.
   it("advances by exactly one per frame, so drift is bounded by frame count", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     const seqs = frames.map((f) => f.params.seq as number);
     expect(seqs.length).toBe(2);
@@ -402,15 +465,15 @@ describe("seq", () => {
   });
 
   it("is strictly increasing across every frame and never resets on switch", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
-    syncHerdrSessionbar({ sessionId: "s2", agent: "codex", title: "other" });
+    reportSessionbar({ sessionId: "s2", agent: "codex", title: "other" });
     await settle();
-    syncHerdrBanner({ status: "ready" });
+    reportBanner({ status: "ready" });
     await settle();
-    await clearHerdrSession();
+    await releaseTerminalHost();
     await settle();
     const seqs = frames.map((f) => f.params.seq as number);
     expect(seqs.length).toBeGreaterThan(4);
@@ -422,13 +485,13 @@ describe("seq", () => {
 
 describe("tokens", () => {
   it("always emits the complete key set so a switch cannot leak values", async () => {
-    syncHerdrSessionbar({
+    reportSessionbar({
       sessionId: "s1",
       agent: "claude",
       model: "opus-5",
       costAmount: 1.239,
     });
-    syncHerdrBanner({ status: "busy", queued: 3 });
+    reportBanner({ status: "busy", queued: 3 });
     await settle();
     expect(lastOf("pane.report_metadata")!.params.tokens).toEqual({
       kind: "claude",
@@ -443,13 +506,13 @@ describe("tokens", () => {
     // The caller hands us its whole merged state, so an absent model here
     // means "this session has no model", not "unchanged".
     frames = [];
-    syncHerdrSessionbar({
+    reportSessionbar({
       sessionId: "s2",
       agent: "codex",
       model: undefined,
       costAmount: undefined,
     });
-    syncHerdrBanner({ status: "ready", queued: 0 });
+    reportBanner({ status: "ready", queued: 0 });
     await settle();
     expect(lastOf("pane.report_metadata")!.params.tokens).toEqual({
       kind: "codex",
@@ -461,7 +524,7 @@ describe("tokens", () => {
   });
 
   it("omits a zero cost rather than rendering $0.00", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", costAmount: 0 });
+    reportSessionbar({ sessionId: "s1", agent: "claude", costAmount: 0 });
     await settle();
     expect(
       (lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>).cost,
@@ -478,7 +541,7 @@ describe("agent identity", () => {
   // From herdr's point of view the agent in the pane is hydra; the
   // backing agent is a session detail, exposed as an opt-in token.
   it("never sets display_agent, so the row falls back to the hydra label", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     const p = lastOf("pane.report_metadata")!.params;
     expect(p.display_agent).toBeUndefined();
@@ -492,23 +555,23 @@ describe("agent identity", () => {
   // real kind, herdr will relaunch a second agent beside the
   // daemon-owned one on restart.
   it("keeps the semantic agent label as hydra so herdr cannot resume it", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     expect(lastOf("pane.report_agent")!.params.agent).toBe("hydra");
   });
 
   it("exposes the backing agent as the kind token instead", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     const tokens = lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>;
     expect(tokens.kind).toBe("claude");
   });
 
   it("follows the backing agent across a swap without touching the label", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     frames = [];
-    syncHerdrSessionbar({ sessionId: "s1", agent: "codex" });
+    reportSessionbar({ sessionId: "s1", agent: "codex" });
     await settle();
     const tokens = lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>;
     expect(tokens.kind).toBe("codex");
@@ -517,7 +580,7 @@ describe("agent identity", () => {
   });
 
   it("nulls the kind token when the agent is unknown", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", title: "t" });
+    reportSessionbar({ sessionId: "s1", title: "t" });
     await settle();
     const tokens = lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>;
     expect(tokens.kind).toBeNull();
@@ -526,7 +589,7 @@ describe("agent identity", () => {
 
 describe("session cwd", () => {
   it("surfaces the session directory as a token", async () => {
-    syncHerdrSessionbar({
+    reportSessionbar({
       sessionId: "s1",
       agent: "claude",
       cwd: "/home/me/dev/hydra-acp/cli",
@@ -537,10 +600,10 @@ describe("session cwd", () => {
   });
 
   it("follows a switch into a different directory", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", cwd: "/home/me/dev/hydra-acp/cli" });
+    reportSessionbar({ sessionId: "s1", agent: "claude", cwd: "/home/me/dev/hydra-acp/cli" });
     await settle();
     frames = [];
-    syncHerdrSessionbar({
+    reportSessionbar({
       sessionId: "s2",
       agent: "claude",
       cwd: "/home/me/netflix/git/nrdp/nrdjs",
@@ -554,7 +617,7 @@ describe("session cwd", () => {
     // Clearing would let herdr fall back to its own pane-cwd label, which
     // is the launch directory — so an untitled session in another repo
     // would still read as the launch dir.
-    syncHerdrSessionbar({
+    reportSessionbar({
       sessionId: "s2",
       agent: "claude",
       cwd: "/home/me/netflix/git/nrdp/nrdjs",
@@ -565,7 +628,7 @@ describe("session cwd", () => {
   });
 
   it("prefers an explicit session title over the directory", async () => {
-    syncHerdrSessionbar({
+    reportSessionbar({
       sessionId: "s2",
       agent: "claude",
       title: "port the codec shim",
@@ -578,34 +641,34 @@ describe("session cwd", () => {
 
 describe("title", () => {
   it("sets the pane title from the session title", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "refactor auth" });
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "refactor auth" });
     await settle();
     expect(lastOf("pane.report_metadata")!.params.title).toBe("refactor auth");
   });
 
   it("clears the title when the session has none", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     expect(lastOf("pane.report_metadata")!.params.clear_title).toBe(true);
     expect(lastOf("pane.report_metadata")!.params.title).toBeUndefined();
   });
 
   it("clears a stale title when switching to an untitled session", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "refactor auth" });
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "refactor auth" });
     await settle();
     frames = [];
-    syncHerdrSessionbar({ sessionId: "s2", agent: "claude", title: "" });
+    reportSessionbar({ sessionId: "s2", agent: "claude", title: "" });
     await settle();
     expect(lastOf("pane.report_metadata")!.params.clear_title).toBe(true);
   });
 });
 
-describe("clearHerdrSession", () => {
+describe("release", () => {
   it("clears metadata before releasing the agent", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "t" });
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "t" });
     await settle();
     frames = [];
-    await clearHerdrSession();
+    await releaseTerminalHost();
     await settle();
     expect(methodsSent()).toEqual(["pane.report_metadata", "pane.release_agent"]);
     expect(lastOf("pane.report_metadata")!.params).toMatchObject({
@@ -621,10 +684,10 @@ describe("clearHerdrSession", () => {
   });
 
   it("carries a seq on teardown, which herdr requires to accept it", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
     frames = [];
-    await clearHerdrSession();
+    await releaseTerminalHost();
     await settle();
     for (const f of frames) {
       expect(typeof f.params.seq).toBe("number");
@@ -632,18 +695,18 @@ describe("clearHerdrSession", () => {
   });
 
   it("is a no-op when nothing was ever reported", async () => {
-    await clearHerdrSession();
+    await releaseTerminalHost();
     await settle();
     expect(frames).toEqual([]);
   });
 
   it("does not report again after teardown until a new session arrives", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    await clearHerdrSession();
+    await releaseTerminalHost();
     await settle();
     frames = [];
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(frames).toEqual([]);
   });
@@ -655,7 +718,7 @@ describe("socket failure", () => {
       throw new Error("ECONNREFUSED");
     };
     expect(() => {
-      syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+      reportSessionbar({ sessionId: "s1", agent: "claude" });
     }).not.toThrow();
     await settle();
   });
@@ -665,7 +728,7 @@ describe("socket failure", () => {
   // how the initial metadata report and the teardown release both went
   // missing before this was fixed.
   it("uses exactly one connection per frame", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "t" });
+    reportSessionbar({ sessionId: "s1", agent: "claude", title: "t" });
     await settle();
     // First report emits both a state frame and a metadata frame.
     expect(frames.length).toBe(2);
@@ -673,15 +736,168 @@ describe("socket failure", () => {
   });
 
   it("opens no socket at all when a report is deduped away", async () => {
-    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     const before = connectCalls;
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
-    syncHerdrBanner({ status: "busy" });
+    reportBanner({ status: "busy" });
     await settle();
     expect(connectCalls).toBe(before);
+  });
+});
+
+// The wire shape of openTab. Core's argv/label assembly is open.test.ts's
+// job; what's herdr-specific is which method carries a command at all, and
+// the validation quirks that make a wrong call fail loudly instead of being
+// ignored.
+describe("openTab", () => {
+  const spec: OpenTabSpec = {
+    label: "refactor auth",
+    argv: ["hydra", "tui", "--session", "s"],
+    cwd: "/home/me/proj",
+    env: { HYDRA_TAB_LABEL: "refactor auth" },
+  };
+
+  async function openTab(over: Partial<OpenTabSpec> = {}) {
+    return terminalHost()!.openTab!({ ...spec, ...over });
+  }
+
+  function params(): Record<string, unknown> {
+    return frames[0]!.params;
+  }
+
+  function root(): Record<string, unknown> {
+    return params().root as Record<string, unknown>;
+  }
+
+  it("uses layout.apply, the only method that can launch a command", async () => {
+    // tab.create and pane.split take only cwd/env/focus/label — no argv — so
+    // neither can start hydra.
+    await openTab();
+    expect(frames.map((f) => f.method)).toEqual(["layout.apply"]);
+  });
+
+  it("omits tab_id so the current tab is never replaced", async () => {
+    // Passing the current tab_id rebuilds the tab and does not preserve live
+    // PTYs — it would kill the hydra the user is sitting in to make room.
+    await openTab();
+    expect(params().tab_id).toBeUndefined();
+  });
+
+  it("carries the argv and label onto the pane node", async () => {
+    await openTab();
+    expect(root().command).toEqual(["hydra", "tui", "--session", "s"]);
+    expect(root().label).toBe("refactor auth");
+    expect(params().tab_label).toBe("refactor auth");
+  });
+
+  it("passes the ownership env through to the new pane", async () => {
+    await openTab();
+    expect(root().env).toEqual({ HYDRA_TAB_LABEL: "refactor auth" });
+  });
+
+  it("omits env entirely when there is none, rather than sending {}", async () => {
+    await openTab({ env: {} });
+    expect(root().env).toBeUndefined();
+  });
+
+  it("drops a relative cwd rather than having herdr reject the whole call", async () => {
+    // herdr validates absolute + is_dir and fails the request, so an
+    // unusable cwd would cost the tab rather than just the directory.
+    await openTab({ cwd: "relative/path" });
+    expect(root().cwd).toBeUndefined();
+    expect(root().command).toBeDefined();
+  });
+
+  it("focuses the new tab", async () => {
+    await openTab();
+    expect(params().focus).toBe(true);
+  });
+
+  it("scopes the tab to this pane's workspace when herdr named one", async () => {
+    process.env.HERDR_WORKSPACE_ID = "wB";
+    try {
+      await openTab();
+      expect(params().workspace_id).toBe("wB");
+    } finally {
+      delete process.env.HERDR_WORKSPACE_ID;
+    }
+  });
+
+  it("lets herdr choose the workspace when it did not tell us one", async () => {
+    delete process.env.HERDR_WORKSPACE_ID;
+    await openTab();
+    expect(params().workspace_id).toBeUndefined();
+  });
+
+  it("uses exactly one connection, since herdr serves one request per socket", async () => {
+    await openTab();
+    expect(connectCalls).toBe(1);
+  });
+
+  it("surfaces a herdr error body as a failed result", async () => {
+    connectImpl = () => errorSocket({ code: "invalid_params", message: "no workspace" });
+    const r = await openTab();
+    expect(r).toEqual({ ok: false, error: "no workspace" });
+  });
+
+  it("falls back to the error code when there is no message", async () => {
+    connectImpl = () => errorSocket({ code: "invalid_params" });
+    const r = await openTab();
+    expect(r.error).toBe("invalid_params");
+  });
+
+  it("treats a closed connection as failure rather than false success", async () => {
+    connectImpl = () => closingSocket();
+    const r = await openTab();
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/closed/);
+  });
+
+  it("surfaces a connect failure", async () => {
+    connectImpl = () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const r = await openTab();
+    expect(r).toEqual({ ok: false, error: "ECONNREFUSED" });
+  });
+});
+
+describe("isAutoLabel", () => {
+  const isAuto = (l: string): boolean => terminalHost()!.isAutoLabel!(l);
+
+  it("treats the tab number as auto-generated", () => {
+    // herdr's default is `custom_name.unwrap_or_else(|| (tab_idx + 1))`.
+    expect(isAuto("1")).toBe(true);
+    expect(isAuto("12")).toBe(true);
+  });
+
+  it("treats an empty label as auto-generated", () => {
+    expect(isAuto("")).toBe(true);
+    expect(isAuto("   ")).toBe(true);
+  });
+
+  it("treats anything a human would type as owned", () => {
+    expect(isAuto("review")).toBe(false);
+    expect(isAuto("tab 2")).toBe(false);
+    // Not numeric-only: a session titled "2fa" is still a real name.
+    expect(isAuto("2fa")).toBe(false);
+  });
+});
+
+describe("capabilities", () => {
+  it("advertises label sync only when herdr told us the tab id", () => {
+    expect(terminalHost()!.caps.label).toBe(true);
+    delete process.env.HERDR_TAB_ID;
+    __resetTerminalHostForTests();
+    initTerminalHost();
+    expect(terminalHost()!.caps.label).toBe(false);
+  });
+
+  it("never advertises split, since herdr cannot split a live tab", () => {
+    expect(terminalHost()!.caps.split).toBe(false);
   });
 });
