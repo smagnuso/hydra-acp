@@ -59,6 +59,22 @@ export function fileUrlForPath(absPath: string): string {
   return `file://${OSC8_HOST}${encoded}${fragment}`;
 }
 
+// Build a file:// URI for an absolute directory, for OSC 7 cwd reporting.
+//
+// Deliberately not fileUrlForPath: that one is for OSC 8 hyperlinks, so it
+// carries this machine's hostname and preserves a trailing `#L42` fragment
+// verbatim. Neither is right here. A real hostname is rejected outright by
+// some consumers (herdr accepts only an empty host or "localhost"), and a
+// directory legitimately named `foo#bar` must be encoded rather than
+// treated as a fragment or the path silently truncates.
+export function fileUriForCwd(absPath: string): string {
+  const encoded = absPath
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  return `file://${encoded}`;
+}
+
 export type Style =
   | "user"
   | "agent"

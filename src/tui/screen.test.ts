@@ -3691,3 +3691,71 @@ describe("Screen selection-highlight rendering of ansi lines", () => {
     expect(joined).not.toContain("\x1b");
   });
 });
+
+describe("OSC 7 session cwd reporting", () => {
+  function captureStdout(fn: () => void): string {
+    const original = process.stdout.write.bind(process.stdout);
+    const originalIsTTY = process.stdout.isTTY;
+    process.stdout.isTTY = true;
+    const chunks: string[] = [];
+    process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+      chunks.push(typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8"));
+      void rest;
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      fn();
+    } finally {
+      process.stdout.write = original;
+      process.stdout.isTTY = originalIsTTY;
+    }
+    return chunks.join("");
+  }
+
+  // Only OSC 7; setSessionbar also emits an OSC 0 title, and the mocked
+  // term writes nothing here.
+  function osc7Of(out: string): string[] {
+    return [...out.matchAll(/\x1b\]7;([^\x1b\x07]*)(?:\x1b\\|\x07)/g)].map((m) => m[1]!);
+  }
+
+  it("reports the session cwd, not the process cwd", () => {
+    const screen = makeScreen();
+    screen.start();
+    const out = captureStdout(() => {
+      screen.setSessionbar({ sessionId: "s1", agent: "claude", cwd: "/home/me/dev/hydra-acp/cli" });
+    });
+    expect(osc7Of(out)).toEqual(["file:///home/me/dev/hydra-acp/cli"]);
+  });
+
+  // The whole point: a host multiplexer can only observe this process's cwd,
+  // which never changes on a session switch.
+  it("follows a switch into a different directory", () => {
+    const screen = makeScreen();
+    screen.start();
+    screen.setSessionbar({ sessionId: "s1", cwd: "/home/me/dev/hydra-acp/cli" });
+    const out = captureStdout(() => {
+      screen.setSessionbar({ sessionId: "s2", cwd: "/home/me/netflix/git/nrdp/nrdjs" });
+    });
+    expect(osc7Of(out)).toEqual(["file:///home/me/netflix/git/nrdp/nrdjs"]);
+  });
+
+  it("does not re-emit when an unrelated sessionbar field changes", () => {
+    const screen = makeScreen();
+    screen.start();
+    screen.setSessionbar({ sessionId: "s1", cwd: "/home/me/dev" });
+    const out = captureStdout(() => {
+      screen.setSessionbar({ model: "opus-5" });
+      screen.setSessionbar({ title: "refactor auth" });
+    });
+    expect(osc7Of(out)).toEqual([]);
+  });
+
+  it("emits nothing when the session has no cwd", () => {
+    const screen = makeScreen();
+    screen.start();
+    const out = captureStdout(() => {
+      screen.setSessionbar({ sessionId: "s1", title: "t" });
+    });
+    expect(osc7Of(out)).toEqual([]);
+  });
+});

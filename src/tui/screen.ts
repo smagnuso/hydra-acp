@@ -19,6 +19,7 @@ import { paths, shortenHomePath } from "../core/paths.js";
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
 import { syncHerdrBanner, syncHerdrPermission, syncHerdrSessionbar } from "./herdr.js";
+import { publishReportedCwd } from "./terminal-user-var.js";
 import { fileUrlForPath, formatElapsed } from "./format.js";
 import type { FormattedLine, Style } from "./format.js";
 
@@ -705,6 +706,9 @@ export class Screen {
   private hoveredRunKeys: Set<string> | null = null;
   private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
   private lastWindowTitle: string | null = null;
+  // Last cwd reported via OSC 7; suppresses redundant writes when
+  // setSessionbar fires for an unrelated field.
+  private lastReportedCwd: string | null = null;
   private resizeHandler: () => void;
   private keyHandler: (name: string, _matches: string[], data: { isCharacter?: boolean }) => void;
   private mouseHandler: (name: string, data: unknown) => void;
@@ -2046,6 +2050,7 @@ export class Screen {
   setSessionbar(sessionbar: Partial<SessionbarState>): void {
     this.sessionbar = { ...this.sessionbar, ...sessionbar };
     this.syncWindowTitle();
+    this.syncReportedCwd();
     // Same idea as syncWindowTitle, different consumer: tell herdr which
     // session this pane is showing. Inert outside herdr.
     syncHerdrSessionbar({
@@ -2082,6 +2087,21 @@ export class Screen {
   clearWindowTitle(): void {
     this.lastWindowTitle = null;
     process.stdout.write("\x1b]0;\x1b\\");
+  }
+
+  // Tell the host terminal which directory the *session* is in, via OSC 7.
+  // See publishReportedCwd for why this is unconditional and why the host
+  // can't work it out for itself.
+  private syncReportedCwd(): void {
+    const cwd = this.sessionbar.cwd?.trim();
+    if (!cwd) {
+      return;
+    }
+    if (cwd === this.lastReportedCwd) {
+      return;
+    }
+    this.lastReportedCwd = cwd;
+    publishReportedCwd(cwd);
   }
 
   setBanner(banner: Partial<BannerState>): void {

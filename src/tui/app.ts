@@ -135,6 +135,7 @@ import {
   clearActiveHydraSession,
   publishActiveHydraSession,
   readStickyHydraSession,
+  restoreReportedCwd,
 } from "./terminal-user-var.js";
 import { clearHerdrSession, initHerdrReporting } from "./herdr.js";
 import fs from "node:fs/promises";
@@ -1020,6 +1021,9 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     // fallback in herdr, so a state left behind here would never be
     // corrected.
     await clearHerdrSession();
+    // Stop advertising the last session's directory over OSC 7 — the pane
+    // is going back to a shell that lives in this process's real cwd.
+    restoreReportedCwd();
     leaveAltScreen();
     process.off("exit", altScreenCleanup);
   }

@@ -34,9 +34,11 @@ import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { paths } from "../core/paths.js";
+import { fileUriForCwd } from "./format.js";
 
 const OSC = "\x1b]";
 const BEL = "\x07";
+const ST = "\x1b\\";
 
 function writeOSC(name: string, value: string): void {
   const encoded = Buffer.from(value, "utf8").toString("base64");
@@ -240,6 +242,53 @@ export function listLiveHydraTtys(): LiveTtyEntry[] {
     });
   }
   return out;
+}
+
+// Report a working directory to the host terminal via OSC 7.
+//
+// Deliberately unconditional, like the OSC 2 window title: OSC 7 is a
+// general convention consumed by VTE, kitty, WezTerm, Ghostty, iTerm2,
+// tmux and herdr, and ignored harmlessly elsewhere.
+//
+// This matters because a host multiplexer can otherwise only observe the
+// cwd of the *hydra process* — wherever `hydra` was launched, which never
+// changes when the user switches sessions. The session's directory lives
+// in the daemon, so the only way the host can know it is for us to say so.
+//
+// In herdr specifically this feeds `terminal.cwd`, which drives the pane's
+// reported cwd, the Space label, the directory a split inherits, and the
+// directory the pane is restored into.
+//
+// Emitted with an empty host (`file:///path`) rather than a real hostname:
+// it means "local", which is true, and it has the widest acceptance —
+// herdr rejects any host that isn't empty or "localhost".
+// Guarded on stdout being a TTY. Writing terminal escapes to a pipe is
+// meaningless, and it is actively harmful under a test runner: vitest pipes
+// stdout, but that pipe is still inside a real terminal session, so an
+// unguarded write reports the *test's* directory to the host multiplexer.
+// herdr happens to reject paths that fail `is_absolute() && is_dir()`, which
+// masks most of it, but a spec using a real temp dir would silently
+// repoint the developer's own pane — and herdr persists that cwd.
+export function publishReportedCwd(cwd: string): void {
+  if (!cwd.startsWith("/") || !process.stdout.isTTY) {
+    return;
+  }
+  process.stdout.write(`${OSC}7;${fileUriForCwd(cwd)}${ST}`);
+}
+
+// Point the host back at this process's real directory on the way out, so a
+// pane left at a shell prompt doesn't keep advertising the last session's
+// cwd. Shells that emit OSC 7 themselves correct this at the next prompt,
+// but plenty don't.
+export function restoreReportedCwd(): void {
+  let cwd: string;
+  try {
+    cwd = process.cwd();
+  } catch {
+    // The cwd can be gone (deleted out from under us) — nothing to report.
+    return;
+  }
+  publishReportedCwd(cwd);
 }
 
 export function publishActiveHydraSession(sessionId: string): void {
