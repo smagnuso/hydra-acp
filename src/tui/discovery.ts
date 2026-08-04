@@ -139,6 +139,12 @@ export interface ListOptions {
   // filter and return every row (including `hydra cat` sessions and
   // editor-spawned empty sessions). Picker's `i` toggle sets this.
   includeNonInteractive?: boolean;
+  // Restrict to one side of the warm/cold split. "warm" is answered by the
+  // daemon from memory without touching the session store, which is the
+  // difference between ~200ms of daemon CPU and a rounding error on an
+  // install with a long history — so anything POLLING for live state must
+  // set it. Callers that display cold sessions (the picker) must not.
+  status?: "warm" | "cold";
   // Optional caller-cancellation signal. The picker passes one driven by
   // its layer lifetime so a stuck refresh aborts when the picker tears
   // down or when the user fires a fresh refresh.
@@ -160,6 +166,9 @@ export async function listSessions(
   }
   if (opts.includeNonInteractive) {
     url.searchParams.set("includeNonInteractive", "true");
+  }
+  if (opts.status) {
+    url.searchParams.set("status", opts.status);
   }
   const response = await fetchWithTimeout(
     url.toString(),

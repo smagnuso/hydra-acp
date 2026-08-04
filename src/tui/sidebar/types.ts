@@ -102,6 +102,10 @@ export interface SidebarSnapshot {
   // null when the cwd isn't a git repo, or when the git gadget isn't
   // configured (in which case app.ts never runs the poller at all).
   git: SidebarGitStatus | null;
+  // Other live sessions on the daemon, for the `sessions` gadget. Excludes
+  // THIS session, whose state the activity gadget already reports. Empty
+  // when the gadget is off, folded, or nothing else is live.
+  liveSessions: SidebarLiveSession[];
   // Resource readings, in display order. Empty when the resources gadget
   // isn't configured, when sampling isn't possible, or when the daemon is
   // remote — the agent's pid then belongs to another machine's process
@@ -212,6 +216,25 @@ export interface SidebarLine extends FormattedLine {
   gutter?: string;
 }
 
+// One other live session, as the `sessions` gadget shows it.
+export interface SidebarLiveSession {
+  // Full session id. Doubles as the double-click target: the row carries
+  // `hydra://sessions/<id>`, which routes through the same dispatch a
+  // session link in the transcript uses, so clicking one switches to it.
+  sessionId: string;
+  // Title if the session has one, else a short id — never empty.
+  label: string;
+  // Mid-turn. Independent of `waiting`, which is the whole reason these are
+  // two fields and not one enum: a session can be working AND blocked on a
+  // permission prompt, and collapsing that to a single value has to discard
+  // one of the two facts.
+  busy: boolean;
+  // Something is blocked on the user here — an outstanding permission
+  // request or agent question, or a flag raised by an extension. See
+  // Session.awaitingInput.
+  waiting: boolean;
+}
+
 export interface Gadget {
   // Max item rows to show at once. Undefined means "never paginate" —
   // the gadget's rows are all structural, or its list is inherently short.
@@ -227,9 +250,21 @@ export interface Gadget {
   // in a column where pagination is fighting for rows, a row that carries
   // one number is a poor trade.
   //
+  // `folded` says whether the body is hidden, because whether a count earns
+  // its place can depend on that: a gadget whose rows already state what
+  // the count would say (the sessions list sorts waiting first and labels
+  // each row) is duplicating itself when open and summarising itself when
+  // folded. Returning undefined for one state and a string for the other is
+  // the supported way to express that.
+  //
   // Dropped when the block is paginated: the pager owns the same slot, and
-  // "‹ 1/3 ›" is the more urgent of the two.
-  titleNote?(s: SidebarSnapshot, ctx: SidebarContext): string | undefined;
+  // "‹ 1/3 ›" is the more urgent of the two. A folded block never paginates,
+  // so a folded note is never displaced.
+  titleNote?(
+    s: SidebarSnapshot,
+    ctx: SidebarContext,
+    folded?: boolean,
+  ): string | undefined;
   // Cheap, allocation-free predicate. False means the gadget is skipped
   // entirely — no header, no blank separator, and (for git) no polling.
   relevant(s: SidebarSnapshot): boolean;
@@ -251,6 +286,7 @@ export function emptySnapshot(now = 0): SidebarSnapshot {
     editedFiles: [],
     running: [],
     git: null,
+    liveSessions: [],
     resources: [],
     sessionId: null,
     agent: null,

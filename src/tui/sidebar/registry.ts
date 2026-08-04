@@ -28,13 +28,27 @@ export const DEFAULT_GADGET_IDS = [
   "todo",
   "files",
   "git",
+  "sessions",
   "resources",
-  "session",
+  "info",
   "tools",
 ] as const;
 
+// Ids that used to name a gadget, mapped to its current id. An unknown id
+// is silently dropped (see setGadgets), so a rename would quietly delete
+// the block for anyone who had pinned the old name in
+// tui.sidebar.gadgets — which is exactly the config the rename was meant
+// to disambiguate.
+const GADGET_ID_ALIASES: Readonly<Record<string, string>> = {
+  // Renamed when the `sessions` gadget arrived: "session" (this session's
+  // agent/model/id) versus "sessions" (the other live ones) differed by a
+  // single character.
+  session: "info",
+};
+
 export function gadgetById(id: string): Gadget | undefined {
-  return BUILTIN_GADGETS.find((g) => g.id === id);
+  const canonical = GADGET_ID_ALIASES[id] ?? id;
+  return BUILTIN_GADGETS.find((g) => g.id === canonical);
 }
 
 export function knownGadgetIds(): string[] {
@@ -177,7 +191,7 @@ function titleRow(
   collapsed: boolean,
 ): SidebarLine {
   const title = gadget.title ?? "";
-  const base = gadget.titleNote?.(snapshot, ctx);
+  const base = gadget.titleNote?.(snapshot, ctx, collapsed);
   // A collapsed block is otherwise indistinguishable from one whose gadget
   // has nothing to say, so it earns a marker. Trailing and ASCII: a leading
   // glyph would shift the title, and an ambiguous-width one would shift it

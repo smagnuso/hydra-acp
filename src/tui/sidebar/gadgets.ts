@@ -14,6 +14,7 @@ import type {
   Gadget,
   SidebarContext,
   SidebarLine,
+  SidebarLiveSession,
   SidebarSnapshot,
 } from "./types.js";
 
@@ -565,9 +566,12 @@ export function fitIdentifier(
   return truncate(candidate, budget);
 }
 
-export const sessionGadget: Gadget = {
-  id: "session",
-  title: "session",
+export const sessionInfoGadget: Gadget = {
+  // Not "session": the `sessions` gadget above lists the OTHER live
+  // sessions, and two config ids one character apart is a typo waiting to
+  // silently drop a block. This one describes what you are attached to.
+  id: "info",
+  title: "info",
   relevant: (s) => s.agent !== null || s.model !== null || s.sessionId !== null,
   versionKey: (s, ctx) =>
     `${ctx.width}|${s.agent}|${s.model}|${s.mode}|${s.sessionId}`,
@@ -633,6 +637,92 @@ export function formatCpu(fraction: number | undefined): string {
   return text.padStart(CPU_FIELD_WIDTH);
 }
 
+// Other live sessions: whether each is working, and whether any of them is
+// blocked on you. Two independent axes, shown as a two-cell marker at the
+// right edge of the row.
+//
+//   ● working / ○ quiet — the same pair the activity gadget uses at the top
+//   of this very column ("● thinking" / "○ idle"), so the glyph means the
+//   same thing whether it describes this session or another.
+//
+//   ◦ in the cell to its left when something is waiting on you, blank
+//   otherwise. Matches the picker's and `hydra session list`'s "WARM◦",
+//   which likewise hangs the marker off the RIGHT of the text. A different
+//   shape from the busy/quiet pair, so the two axes can't be confused.
+//
+// Both markers sit on the right so the labels stay flush with every other
+// gadget's rows — an indent here and nowhere else read as a mistake. The
+// slot is two cells whether or not the ◦ is present, which keeps the
+// busy/quiet bubbles in one column.
+//
+// The label goes in `prefix` and the marker in `body` so the marker can
+// carry its own colour (yellow while working) without tinting the title.
+// That costs the OSC 8 link span, which the screen layer only paints for
+// filesystem paths anyway (see rowLinkSpans) — the row stays
+// double-clickable through openPath.
+const BUSY_MARK = "●";
+const IDLE_MARK = "○";
+const WAITING_MARK = "◦";
+
+export const sessionsGadget: Gadget = {
+  id: "sessions",
+  title: "sessions",
+  pageSize: SIDEBAR_PAGE_SIZE,
+  relevant: (s) => s.liveSessions.length > 0,
+  // Only when folded. Open, a "1 waiting" counter restates what the rows
+  // already say — waiting sorts to the top and each row carries its own
+  // marker — so it just competed with them for the eye. Folded, the rows are
+  // gone and this is the only thing left that can tell you something is
+  // blocked on you.
+  titleNote: (s, _ctx, folded) => {
+    if (!folded) {
+      return undefined;
+    }
+    const waiting = s.liveSessions.filter((p) => p.waiting).length;
+    return waiting > 0 ? `${waiting} waiting` : `${s.liveSessions.length} live`;
+  },
+  versionKey: (s, ctx) =>
+    `${ctx.width}|` +
+    s.liveSessions
+      .map((p) => `${p.waiting ? "w" : ""}${p.busy ? "b" : ""}:${p.sessionId}:${p.label}`)
+      .join("\u0000"),
+  render: (s, ctx) => {
+    const { truncate, cellWidth } = ctx.metrics;
+    // Anything blocked on the user first, then whatever is working. Stable
+    // within a group: the caller supplies them most-recently-used first, and
+    // a list that reshuffles under the pointer is worse than one that
+    // doesn't move.
+    const rank = (e: SidebarLiveSession): number =>
+      (e.waiting ? 0 : 2) + (e.busy ? 0 : 1);
+    const sorted = [...s.liveSessions].sort((a, b) => rank(a) - rank(b));
+    return sorted.map((entry) => {
+      const marker = `${entry.waiting ? WAITING_MARK : " "}${
+        entry.busy ? BUSY_MARK : IDLE_MARK
+      }`;
+      const markerWidth = cellWidth(marker);
+      const label = truncate(
+        entry.label,
+        Math.max(1, ctx.width - markerWidth - 1),
+      );
+      const gap = Math.max(1, ctx.width - cellWidth(label) - markerWidth);
+      return {
+        prefix: `${label}${" ".repeat(gap)}`,
+        // Quiet sessions dim away; anything working or wanting you stays at
+        // full brightness.
+        prefixStyle: entry.busy || entry.waiting ? undefined : "dim",
+        body: marker,
+        // The working accent, the same yellow the banner and the activity
+        // gadget use. Deliberately not red for waiting: red means failure
+        // everywhere else in the TUI, and a session sitting on a permission
+        // prompt hasn't failed.
+        bodyStyle: entry.busy ? "tool-status-running" : "dim",
+        openPath: `hydra://sessions/${entry.sessionId}`,
+        item: true,
+      } satisfies SidebarLine;
+    });
+  },
+};
+
 export const resourcesGadget: Gadget = {
   id: "resources",
   title: "resources",
@@ -674,7 +764,8 @@ export const BUILTIN_GADGETS: Gadget[] = [
   todoGadget,
   filesGadget,
   gitGadget,
+  sessionsGadget,
   resourcesGadget,
-  sessionGadget,
+  sessionInfoGadget,
   toolsGadget,
 ];

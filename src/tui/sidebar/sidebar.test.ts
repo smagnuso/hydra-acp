@@ -6,6 +6,7 @@ import {
   contextGadget,
   displayPaths,
   filesGadget,
+  sessionsGadget,
   gitGadget,
   meterBar,
   formatBytes,
@@ -14,15 +15,16 @@ import {
   resourcesGadget,
   shortDuration,
   fitIdentifier,
-  sessionGadget,
+  sessionInfoGadget,
   todoGadget,
   toolsGadget,
 } from "./gadgets.js";
-import { SidebarRenderer } from "./registry.js";
+import { gadgetById, SidebarRenderer } from "./registry.js";
 import { emptySnapshot } from "./types.js";
 import type {
   SidebarAction,
   SidebarLine,
+  SidebarLiveSession,
   SidebarBorder,
   SidebarContext,
   SidebarProcUsage,
@@ -419,6 +421,61 @@ describe("width safety", () => {
   });
 });
 
+// A gadget id that no longer exists must keep working: setGadgets drops
+// unknown ids silently, so a rename would delete the block outright for
+// anyone who had pinned the old name.
+// The folded/open distinction is the renderer's to pass through; a gadget
+// that ignores the flag (files, git) must behave identically either way.
+describe("folded title notes", () => {
+  const render = (ids: string[], collapsed: string[]) =>
+    new SidebarRenderer(ids).render(
+      snap({
+        liveSessions: [
+          { sessionId: "a", label: "alpha", busy: false, waiting: true },
+          { sessionId: "b", label: "beta", busy: false, waiting: false },
+        ],
+        editedFiles: [{ path: "/repo/a.ts" }, { path: "/repo/b.ts" }],
+      }),
+      { ...ctx(26), collapsed: new Set(collapsed) },
+    );
+
+  it("shows the sessions count on the folded title and not the open one", () => {
+    expect(rowText(render(["sessions"], [])[0]!)).not.toContain("waiting");
+    const folded = rowText(render(["sessions"], ["sessions"])[0]!);
+    expect(folded).toContain("1 waiting");
+    // The fold marker still rides at the end.
+    expect(folded.trimEnd().endsWith("+")).toBe(true);
+  });
+
+  it("leaves a gadget that ignores the flag unchanged", () => {
+    expect(rowText(render(["files"], [])[0]!)).toContain("2 files");
+    expect(rowText(render(["files"], ["files"])[0]!)).toContain("2 files");
+  });
+});
+
+describe("gadget id aliases", () => {
+  it("resolves the pre-rename 'session' id to the info gadget", () => {
+    expect(gadgetById("session")).toBe(sessionInfoGadget);
+    expect(gadgetById("info")).toBe(sessionInfoGadget);
+    // And it is NOT the list-of-other-sessions gadget, which is the
+    // confusion the rename existed to remove.
+    expect(gadgetById("sessions")).toBe(sessionsGadget);
+  });
+
+  it("still drops an id that never existed", () => {
+    expect(gadgetById("nonsense")).toBeUndefined();
+  });
+
+  it("renders the block for a config pinning the old id", () => {
+    const lines = new SidebarRenderer(["session"]).render(
+      snap({ agent: "opencode", model: "claude-opus-5", sessionId: "abc123" }),
+      ctx(26),
+    );
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.some((l) => rowText(l).includes("opencode"))).toBe(true);
+  });
+});
+
 describe("SidebarRenderer", () => {
   const dirty = snap({
     busySince: 999_000,
@@ -624,7 +681,7 @@ describe("borders", () => {
   });
 });
 
-describe("session gadget", () => {
+describe("info gadget", () => {
   const s = snap({
     agent: "hydra",
     model: "ncp-anthropic/claude-opus-5",
@@ -636,7 +693,7 @@ describe("session gadget", () => {
   // pile of identifiers: "hydra / ncp-anthropic/claude-opus-5 / build /
   // hydra_se".
   it("labels every row", () => {
-    const rows = sessionGadget.render(s, ctx(26)).map(rowText);
+    const rows = sessionInfoGadget.render(s, ctx(26)).map(rowText);
     expect(rows.some((b) => b.startsWith("agent"))).toBe(true);
     expect(rows.some((b) => b.startsWith("model"))).toBe(true);
     expect(rows.some((b) => b.startsWith("mode"))).toBe(true);
@@ -647,14 +704,14 @@ describe("session gadget", () => {
   // label is dim scaffolding and the value keeps the default foreground —
   // matching the sessionbar, which renders agent(model) unstyled too.
   it("dims the labels and leaves the values uncoloured", () => {
-    for (const line of sessionGadget.render(s, ctx(26))) {
+    for (const line of sessionInfoGadget.render(s, ctx(26))) {
       expect(line.prefixStyle).toBe("dim");
       expect(line.bodyStyle).toBeUndefined();
     }
   });
 
   it("drops the provider prefix from a model that doesn't fit", () => {
-    const body = sessionGadget
+    const body = sessionInfoGadget
       .render(s, ctx(26))
       .find((l) => rowText(l).startsWith("model"))!.body;
     expect(body).toContain("claude-opus-5");
@@ -662,20 +719,20 @@ describe("session gadget", () => {
   });
 
   it("keeps the full model when it fits", () => {
-    const body = sessionGadget
+    const body = sessionInfoGadget
       .render(s, ctx(40))
       .find((l) => rowText(l).startsWith("model"))!.body;
     expect(body).toContain("ncp-anthropic/claude-opus-5");
   });
 
   it("omits rows with no value", () => {
-    const lines = sessionGadget.render(snap({ agent: "hydra" }), ctx(26));
+    const lines = sessionInfoGadget.render(snap({ agent: "hydra" }), ctx(26));
     expect(lines).toHaveLength(1);
   });
 
   it("stays inside the column at every width", () => {
     for (const width of [10, 16, 26, 40]) {
-      for (const line of sessionGadget.render(s, ctx(width))) {
+      for (const line of sessionInfoGadget.render(s, ctx(width))) {
         expect(stringWidth(rowText(line))).toBeLessThanOrEqual(width);
       }
     }
@@ -1076,6 +1133,157 @@ describe("quantizeDuration", () => {
   it("clamps negatives and tolerates a zero step", () => {
     expect(quantizeDuration(-9, 5_000)).toBe(0);
     expect(quantizeDuration(1_234, 0)).toBe(1_234);
+  });
+});
+
+describe("sessions gadget", () => {
+  const live = (
+    label: string,
+    opts: { busy?: boolean; waiting?: boolean } = {},
+  ): SidebarLiveSession => ({
+    sessionId: `hydra_session_${label}`,
+    label,
+    busy: opts.busy === true,
+    waiting: opts.waiting === true,
+  });
+
+  it("hides itself when there are no other live sessions", () => {
+    expect(sessionsGadget.relevant(snap())).toBe(false);
+    expect(sessionsGadget.relevant(snap({ liveSessions: [live("a")] }))).toBe(true);
+  });
+
+  // The two axes are independent, which is the point of the layout: the
+  // right-hand bubble is busy/idle, the left-hand marker is waiting-or-not,
+  // and all four combinations have to be distinguishable.
+  it("shows busy and waiting independently", () => {
+    const lines = sessionsGadget.render(
+      snap({
+        liveSessions: [
+          live("both", { busy: true, waiting: true }),
+          live("justbusy", { busy: true }),
+          live("justwaiting", { waiting: true }),
+          live("quiet"),
+        ],
+      }),
+      ctx(26),
+    );
+    // The two-cell marker IS the body; the label rides in the prefix so the
+    // marker can be coloured on its own.
+    const marker = (name: string): string =>
+      lines.find((l) => (l.prefix ?? "").includes(name))!.body;
+    expect(marker("both")).toBe("◦●");
+    expect(marker("justbusy")).toBe(" ●");
+    expect(marker("justwaiting")).toBe("◦○");
+    expect(marker("quiet")).toBe(" ○");
+  });
+
+  it("sorts waiting first, then busy, then quiet", () => {
+    const lines = sessionsGadget.render(
+      snap({
+        liveSessions: [
+          live("quiet"),
+          live("justbusy", { busy: true }),
+          live("justwaiting", { waiting: true }),
+          live("both", { busy: true, waiting: true }),
+        ],
+      }),
+      ctx(26),
+    );
+    expect(lines.map((l) => l.openPath!.split("_").pop())).toEqual([
+      "both",
+      "justwaiting",
+      "justbusy",
+      "quiet",
+    ]);
+  });
+
+  // Labels stay flush left, like every other gadget's rows — the markers
+  // hang off the right instead of indenting the block. And the marker slot
+  // is two cells whether or not the ◦ is there, so the bubbles line up.
+  it("keeps labels flush left and bubbles in one column", () => {
+    const lines = sessionsGadget.render(
+      snap({ liveSessions: [live("aaa", { waiting: true }), live("bbb")] }),
+      ctx(26),
+    );
+    for (const line of lines) {
+      expect(line.prefix!.startsWith(" ")).toBe(false);
+      expect(stringWidth(line.body)).toBe(2);
+      expect(stringWidth(rowText(line))).toBe(26);
+    }
+  });
+
+  // Quiet labels dim away; anything working or wanting attention stays at
+  // full brightness.
+  it("dims only the quiet labels", () => {
+    const labelStyle = (e: SidebarLiveSession): string | undefined =>
+      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.prefixStyle;
+    expect(labelStyle(live("quiet"))).toBe("dim");
+    expect(labelStyle(live("b", { busy: true }))).toBeUndefined();
+    expect(labelStyle(live("w", { waiting: true }))).toBeUndefined();
+  });
+
+  // The working bubble carries the same yellow accent as the banner and the
+  // activity gadget. Nothing here is red: red means failure elsewhere in the
+  // TUI, and a session on a permission prompt hasn't failed.
+  it("paints the working bubble with the running accent, and nothing red", () => {
+    const bubbleStyle = (e: SidebarLiveSession): string | undefined =>
+      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.bodyStyle;
+    expect(bubbleStyle(live("b", { busy: true }))).toBe("tool-status-running");
+    expect(bubbleStyle(live("w", { waiting: true }))).toBe("dim");
+    expect(bubbleStyle(live("quiet"))).toBe("dim");
+    for (const e of [
+      live("b", { busy: true }),
+      live("w", { waiting: true }),
+      live("both", { busy: true, waiting: true }),
+    ]) {
+      const line = sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
+      expect([line.bodyStyle, line.prefixStyle]).not.toContain("tool-status-fail");
+    }
+  });
+
+  // Double-click routes through the same hydra:// dispatch a session link in
+  // the transcript uses, so a row is a way to GO to that session.
+  it("carries a hydra:// session URL, spanning only the label", () => {
+    const line = sessionsGadget.render(
+      snap({ liveSessions: [live("blocked", { waiting: true })] }),
+      ctx(26),
+    )[0]!;
+    expect(line.openPath).toBe("hydra://sessions/hydra_session_blocked");
+    // No openSpan: the screen layer only paints an OSC 8 link for
+    // filesystem paths, and the row is double-clickable through openPath
+    // regardless. See the gadget's header comment.
+    expect(line.openSpan).toBeUndefined();
+  });
+
+  // The counter is folded-only. Open, the rows already sort waiting first
+  // and carry their own markers; folded, it is the only thing left that can
+  // say something is blocked on you.
+  it("notes the waiting count only when folded", () => {
+    const s = snap({
+      liveSessions: [live("a", { waiting: true }), live("b", { busy: true })],
+    });
+    expect(sessionsGadget.titleNote!(s, ctx(26), false)).toBeUndefined();
+    expect(sessionsGadget.titleNote!(s, ctx(26), true)).toBe("1 waiting");
+  });
+
+  it("falls back to the live count when nothing is waiting, folded", () => {
+    const s = snap({
+      liveSessions: [live("a", { busy: true }), live("b")],
+    });
+    expect(sessionsGadget.titleNote!(s, ctx(26), true)).toBe("2 live");
+  });
+
+  it("keeps every session row inside the column", () => {
+    for (const width of [14, 20, 26]) {
+      for (const line of sessionsGadget.render(
+        snap({
+          liveSessions: [live("a-very-long-session-title-indeed", { waiting: true })],
+        }),
+        ctx(width),
+      )) {
+        expect(stringWidth(rowText(line))).toBeLessThanOrEqual(width);
+      }
+    }
   });
 });
 

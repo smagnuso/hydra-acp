@@ -349,26 +349,18 @@ const TuiConfig = z.object({
           "todo",
           "files",
           "git",
+          "sessions",
           "resources",
-          "session",
+          "info",
           "tools",
         ]),
     })
-    .default({
-      enabled: false,
-      border: "frame",
-      gadgets: [
-        "activity",
-        "context",
-        "queue",
-        "todo",
-        "files",
-        "git",
-        "resources",
-        "session",
-        "tools",
-      ],
-    }),
+    // `{}` rather than a restatement: every field above has its own
+    // default, so this defers to them. Spelling the object out again meant
+    // two lists to keep in step, and the copy went stale the moment a
+    // gadget was added — a user with no `tui.sidebar` key silently kept the
+    // older column.
+    .default({}),
   // How edit-style tool calls (Edit, Write, str_replace) render in
   // scrollback, *in addition to* the normal tool row inside the tools
   // block.
@@ -552,39 +544,10 @@ export const HydraConfig = z.object({
   // corporate .npmrc pointing at an internal registry doesn't break
   // public-package installs. Omit to let npm use its own defaults.
   npmRegistry: z.string().url().optional(),
-  tui: TuiConfig.default({
-    repaintThrottleMs: 1000,
-    maxScrollbackLines: 10_000,
-    mouse: true,
-    logMaxBytes: 5 * 1024 * 1024,
-    cwdColumnMaxWidth: 32,
-    progressIndicator: true,
-    defaultEnterAction: "amend",
-    showThoughts: true,
-    ambiguousWidth: "auto",
-    toolContent: "references",
-    diffContextLines: 3,
-    promptHistoryMaxEntries: 2_000,
-    maxToolItems: 5,
-    maxPlanItems: 5,
-    showFileUpdates: "edit",
-    selectionClipboard: "both",
-    sidebar: {
-      enabled: false,
-      border: "frame",
-      gadgets: [
-        "activity",
-        "context",
-        "queue",
-        "todo",
-        "files",
-        "git",
-        "resources",
-        "session",
-        "tools",
-      ],
-    },
-  }),
+  // Same reasoning as tui.sidebar's default: every field of TuiConfig has
+  // its own default, so restating them here only creates a second copy to
+  // forget to update.
+  tui: TuiConfig.default({}),
 });
 
 export type HydraConfig = z.infer<typeof HydraConfig>;

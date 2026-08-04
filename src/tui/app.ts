@@ -183,6 +183,7 @@ import {
 } from "./format.js";
 import type {
   SidebarEditedFile,
+  SidebarLiveSession,
   SidebarProcUsage,
 } from "./sidebar/types.js";
 import { parseGitPorcelainV2 } from "./sidebar/git-status.js";
@@ -2702,6 +2703,8 @@ async function runSession(
       }
       if (gadget === "git") {
         pollGitOnce();
+      } else if (gadget === "sessions") {
+        pollLiveSessionsOnce();
       } else if (gadget === "resources") {
         // Drop the CPU baseline: it was taken before the fold, so
         // differencing against it would spread however long the gadget
@@ -4369,8 +4372,9 @@ async function runSession(
   const cycleLiveSession = async (direction: "next" | "prev" = "next"): Promise<void> => {
     if (!finishSession)
       return;
-    const sessions = await listSessions(target);
-    const live = sessions.filter((s) => s.status === "warm");
+    // status=warm: this only ever looks at live sessions, so there's no
+    // reason to make the daemon walk the store for the cold ones.
+    const live = await listSessions(target, { status: "warm" });
     if (live.length <= 1)
       return;
     const idx = live.findIndex((s) => s.sessionId === resolvedSessionId);
@@ -6644,6 +6648,54 @@ async function runSession(
     );
   };
 
+  // ── live sessions ────────────────────────────────────────────────────
+  //
+  // Which OTHER live sessions exist and whether any is blocked on the user.
+  // Polled (status=warm, so the daemon answers from memory) rather than
+  // pushed:
+  // the daemon's cross-session lifecycle events go to transformers only,
+  // and an ordinary client has no subscription for them.
+  let liveSessionsPollInFlight = false;
+
+  const pollLiveSessionsOnce = (): void => {
+    if (liveSessionsPollInFlight) {
+      return;
+    }
+    liveSessionsPollInFlight = true;
+    void (async (): Promise<void> => {
+      try {
+        const live = await listSessions(target, { status: "warm" });
+        const entries: SidebarLiveSession[] = [];
+        for (const s of live) {
+          // This session is the activity gadget's job, one block up.
+          if (s.sessionId === resolvedSessionId) {
+            continue;
+          }
+          entries.push({
+            sessionId: s.sessionId,
+            // Titles are what the picker shows and what the user named the
+            // work; the short id is only a fallback for the untitled.
+            label:
+              s.title !== undefined && s.title.length > 0
+                ? s.title
+                : stripHydraSessionPrefix(s.sessionId),
+            // Two independent axes, forwarded as they come off the wire
+            // rather than collapsed: a session can be mid-turn AND blocked
+            // on a permission prompt at the same time.
+            busy: s.busy === true,
+            waiting: s.awaitingInput === true,
+          });
+        }
+        screen.setSidebarSnapshot({ liveSessions: entries });
+      } catch {
+        // Daemon unreachable or slow: keep the last known list rather than
+        // blanking the block, which would read as "no other sessions".
+      } finally {
+        liveSessionsPollInFlight = false;
+      }
+    })();
+  };
+
   // ── resource sampling ────────────────────────────────────────────────
   //
   // Two trees: this TUI process, and the agent's. The agent is a child of
@@ -6784,6 +6836,17 @@ async function runSession(
 
   // Prime the work-tree state once when the column opens; the recurring
   // poll rides the sidebar ticker's slow tick from then on.
+  const startLiveSessionsPoll = (): void => {
+    if (!screen.isSidebarGadgetActive("sessions")) {
+      return;
+    }
+    pollLiveSessionsOnce();
+  };
+
+  const stopLiveSessionsPoll = (): void => {
+    screen.setSidebarSnapshot({ liveSessions: [] });
+  };
+
   const startGitPoll = (): void => {
     if (!screen.isSidebarGadgetActive("git")) {
       return;
@@ -6831,6 +6894,9 @@ async function runSession(
       // coalesced repaint.
       if (slowTick && screen.isSidebarGadgetActive("git")) {
         pollGitOnce();
+      }
+      if (slowTick && screen.isSidebarGadgetActive("sessions")) {
+        pollLiveSessionsOnce();
       }
       if (slowTick && screen.isSidebarGadgetActive("resources")) {
         // The agent pid can change under us (agent swap, crash-restart), so
@@ -6886,10 +6952,12 @@ async function runSession(
     screen.fullRedraw();
     if (visible) {
       startGitPoll();
+      startLiveSessionsPoll();
       startResourceSampling();
       startSidebarTicker();
     } else {
       stopGitPoll();
+      stopLiveSessionsPoll();
       stopResourceSampling();
       stopSidebarTicker();
     }
