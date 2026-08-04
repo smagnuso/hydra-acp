@@ -327,3 +327,98 @@ describe("ownership adopted from the creating process", () => {
     expect(renames()).toEqual([]);
   });
 });
+
+// While the picker is up the pane isn't showing a session, so leaving the
+// session's name on the tab reads from the tab bar as "still in that
+// session". A transient label says what the pane actually holds — but must
+// never be what the tab is left holding.
+describe("transient labels", () => {
+  afterEach(() => {
+    delete process.env.HYDRA_HERDR_TAB_LABEL;
+  });
+
+  it("writes a transient label like any other", async () => {
+    syncHerdrTabLabel("session title");
+    await settle();
+    replies["tab.get"] = tabGet("session title");
+    syncHerdrTabLabel("hydra", { transient: true });
+    await settle();
+    expect(renames()).toEqual(["session title", "hydra"]);
+  });
+
+  it("goes back to the session title when the picker closes", async () => {
+    syncHerdrTabLabel("session title");
+    await settle();
+    replies["tab.get"] = tabGet("session title");
+    syncHerdrTabLabel("hydra", { transient: true });
+    await settle();
+    replies["tab.get"] = tabGet("hydra");
+    syncHerdrTabLabel("session title");
+    await settle();
+    expect(renames()).toEqual(["session title", "hydra", "session title"]);
+  });
+
+  it("restores the ORIGINAL label when quitting from the picker", async () => {
+    // Quitting straight out of the picker is the normal way to quit, so
+    // this is the common exit path, not an edge case.
+    syncHerdrTabLabel("session title");
+    await settle();
+    replies["tab.get"] = tabGet("session title");
+    syncHerdrTabLabel("hydra", { transient: true });
+    await settle();
+    sent = [];
+    replies["tab.get"] = tabGet("hydra");
+    await restoreHerdrTabLabel();
+    expect(renames()).toEqual(["1"]);
+  });
+
+  it("restores the last real session label on a hydra-created tab", async () => {
+    // An adopted tab has no sensible "original" to go back to, but it must
+    // still not be left named after the picker.
+    process.env.HYDRA_HERDR_TAB_LABEL = "created as";
+    replies["tab.get"] = tabGet("created as");
+    syncHerdrTabLabel("session title");
+    await settle();
+    replies["tab.get"] = tabGet("session title");
+    syncHerdrTabLabel("hydra", { transient: true });
+    await settle();
+    sent = [];
+    replies["tab.get"] = tabGet("hydra");
+    await restoreHerdrTabLabel();
+    expect(renames()).toEqual(["session title"]);
+  });
+
+  it("falls back to the adopted label when the picker was the only thing shown", async () => {
+    process.env.HYDRA_HERDR_TAB_LABEL = "created as";
+    replies["tab.get"] = tabGet("created as");
+    syncHerdrTabLabel("hydra", { transient: true });
+    await settle();
+    sent = [];
+    replies["tab.get"] = tabGet("hydra");
+    await restoreHerdrTabLabel();
+    expect(renames()).toEqual(["created as"]);
+  });
+
+  it("spends no round trip restoring an adopted tab that never went transient", async () => {
+    process.env.HYDRA_HERDR_TAB_LABEL = "created as";
+    replies["tab.get"] = tabGet("created as");
+    syncHerdrTabLabel("session title");
+    await settle();
+    sent = [];
+    replies["tab.get"] = tabGet("session title");
+    await restoreHerdrTabLabel();
+    expect(renames()).toEqual([]);
+  });
+
+  it("does not let a transient label become the restore target", async () => {
+    syncHerdrTabLabel("hydra", { transient: true });
+    await settle();
+    replies["tab.get"] = tabGet("hydra");
+    syncHerdrTabLabel("real title");
+    await settle();
+    sent = [];
+    replies["tab.get"] = tabGet("real title");
+    await restoreHerdrTabLabel();
+    expect(renames()).toEqual(["1"]);
+  });
+});

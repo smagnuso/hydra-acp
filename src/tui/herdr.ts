@@ -91,6 +91,13 @@ const SOURCE = "hydra";
 // See the header: intentionally not the underlying agent kind.
 const AGENT_LABEL = "hydra";
 
+// Tab label shown while the picker is up. Names the pane's actual contents
+// rather than the session it came from: what's in the tab is hydra, not
+// any particular session. Deliberately not "picker" — the tab bar wants
+// to say which tool the tab holds, and "picker" is an internal name for a
+// passing screen rather than something a user has to care about.
+const SUSPENDED_TAB_LABEL = "hydra";
+
 // The complete set of tokens this module owns. Every metadata report
 // sends all of them so a session switch can't leak stale values.
 const TOKEN_KEYS = ["kind", "cwd", "model", "cost", "queue"] as const;
@@ -469,7 +476,17 @@ function flush(): void {
   // inherits the opt-in gate above (see initHerdrReporting): the taps run
   // under the test suite, and renaming a developer's tab from `pnpm test`
   // is the same hazard as registering a phantom agent on their pane.
-  syncHerdrTabLabel(title);
+  //
+  // While the picker is up the pane isn't showing a session, so leaving
+  // the session's name on the tab reads as "still in that session" from
+  // the tab bar — the same misreading `deriveState` avoids by reporting
+  // `unknown` here, one layer up. Marked transient so it can never be
+  // what the tab is left holding on exit.
+  if (live.suspended) {
+    syncHerdrTabLabel(SUSPENDED_TAB_LABEL, { transient: true });
+  } else {
+    syncHerdrTabLabel(title);
+  }
   if (frames.length === 0) {
     return;
   }

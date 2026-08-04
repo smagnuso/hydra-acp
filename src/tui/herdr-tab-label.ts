@@ -61,15 +61,28 @@ function adoptEnvLabel(current: string): void {
   const fromEnv = process.env[TAB_LABEL_ENV];
   if (fromEnv && fromEnv === current) {
     applied = current;
+    // Adoption means the tab already holds a session-derived label, so it
+    // counts as the last real one — that's what a transient label has to
+    // be able to fall back to.
+    lastReal = current;
     adopted = true;
   }
 }
 
 // True when the label we own came from the environment rather than from a
-// rename of ours. Suppresses the exit-time restore: the "original" label of
+// rename of ours. Redirects the exit-time restore: the "original" label of
 // a tab hydra created for this session is a snapshot of an older session
-// title, which is a worse thing to leave behind than the current one.
+// title, so such a tab is restored to the last real session label instead.
 let adopted = false;
+
+// The last non-transient label we wrote (or adopted) — i.e. one derived
+// from a session rather than from a passing UI state like the picker.
+//
+// Exists because a transient label must never be what the tab is left
+// holding. Without it, quitting the TUI straight out of the picker (the
+// normal way to quit) would leave the tab named after the picker forever
+// on a ^t-created tab, since those skip the restore-to-original path.
+let lastReal: string | null = null;
 
 // The label the tab had before we first touched it, so exit can put it
 // back. Left null when we never renamed, which is also the "nothing to
@@ -78,7 +91,7 @@ let original: string | null = null;
 
 // Coalesce: while a round trip is in flight, later titles overwrite this
 // rather than queueing. Only the newest title is worth writing.
-let pending: string | null = null;
+let pending: { label: string; transient: boolean } | null = null;
 let inFlight = false;
 
 function tabTarget(): { tabId: string } | null {
@@ -137,7 +150,7 @@ async function drain(tabId: string): Promise<void> {
   while (pending !== null) {
     const want = pending;
     pending = null;
-    if (want === applied) {
+    if (want.label === applied) {
       continue;
     }
     let info: TabInfo | null;
@@ -157,7 +170,7 @@ async function drain(tabId: string): Promise<void> {
       continue;
     }
     try {
-      if (!(await writeLabel(tabId, want))) {
+      if (!(await writeLabel(tabId, want.label))) {
         return;
       }
     } catch {
@@ -166,7 +179,10 @@ async function drain(tabId: string): Promise<void> {
     if (original === null) {
       original = info.label;
     }
-    applied = want;
+    applied = want.label;
+    if (!want.transient) {
+      lastReal = want.label;
+    }
   }
 }
 
@@ -177,7 +193,10 @@ async function drain(tabId: string): Promise<void> {
  * Fire-and-forget by design — this is cosmetic, and the caller is a
  * synchronous render funnel.
  */
-export function syncHerdrTabLabel(title: string | null | undefined): void {
+export function syncHerdrTabLabel(
+  title: string | null | undefined,
+  opts: { transient?: boolean } = {},
+): void {
   const target = tabTarget();
   if (!target) {
     return;
@@ -186,7 +205,7 @@ export function syncHerdrTabLabel(title: string | null | undefined): void {
   if (!want) {
     return;
   }
-  pending = want;
+  pending = { label: want, transient: opts.transient === true };
   if (inFlight) {
     return;
   }
@@ -195,8 +214,9 @@ export function syncHerdrTabLabel(title: string | null | undefined): void {
     inFlight = false;
     // A title that arrived while the last drain was finishing would
     // otherwise sit unsent until the next change.
-    if (pending !== null && pending !== applied) {
-      syncHerdrTabLabel(pending);
+    const again = pending;
+    if (again !== null && again.label !== applied) {
+      syncHerdrTabLabel(again.label, { transient: again.transient });
     }
   });
 }
@@ -211,13 +231,23 @@ export function syncHerdrTabLabel(title: string | null | undefined): void {
 export async function restoreHerdrTabLabel(): Promise<void> {
   const target = tabTarget();
   pending = null;
-  if (!target || adopted || original === null || applied === null) {
+  // A tab hydra created for this session goes back to the last real
+  // session label, not to `original` (a stale title snapshot). Any other
+  // tab goes back to whatever it was called before we touched it. Either
+  // way the tab must not be left holding a transient label.
+  const back = adopted ? lastReal : original;
+  if (!target || back === null || applied === null) {
     return;
   }
-  const back = original;
+  // Already correct — the common exit-from-a-session case on an adopted
+  // tab. Nothing to undo, so don't spend a round trip saying so.
+  if (back === applied) {
+    return;
+  }
   const ours = applied;
   original = null;
   applied = null;
+  lastReal = null;
   try {
     const info = parseTabInfo(await herdrRequest("tab.get", { tab_id: target.tabId }));
     if (!info || info.label !== ours) {
@@ -236,4 +266,5 @@ export function __resetHerdrTabLabelForTests(): void {
   inFlight = false;
   adopted = false;
   adoptChecked = false;
+  lastReal = null;
 }

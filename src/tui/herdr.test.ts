@@ -20,8 +20,11 @@ vi.mock("node:net", async (importOriginal) => {
 // The tab-label side rides the same socket, so leaving it live would add
 // its tab.get/tab.rename round trips to every frame count below. It has
 // its own spec; here it just needs to be out of the way.
+const tabLabels: Array<{ label: string; transient: boolean }> = [];
 vi.mock("./herdr-tab-label.js", () => ({
-  syncHerdrTabLabel: () => {},
+  syncHerdrTabLabel: (label: string, opts: { transient?: boolean } = {}) => {
+    tabLabels.push({ label, transient: opts.transient === true });
+  },
   restoreHerdrTabLabel: () => Promise.resolve(),
 }));
 
@@ -94,6 +97,7 @@ function lastOf(method: string): Frame | undefined {
 
 beforeEach(() => {
   frames = [];
+  tabLabels.length = 0;
   connectCalls = 0;
   connectImpl = () => fakeSocket();
   __resetHerdrForTests();
@@ -262,6 +266,33 @@ describe("suspended (picker up)", () => {
     setHerdrSuspended(true);
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
+  });
+
+  it("renames the tab off the session, so the tab bar doesn't read as still-in-session", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
+    await settle();
+    expect(tabLabels.at(-1)).toEqual({ label: "Refactor auth", transient: false });
+    setHerdrSuspended(true);
+    await settle();
+    expect(tabLabels.at(-1)).toEqual({ label: "hydra", transient: true });
+  });
+
+  it("puts the session title back on the tab when the picker closes", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
+    setHerdrSuspended(true);
+    await settle();
+    setHerdrSuspended(false);
+    await settle();
+    expect(tabLabels.at(-1)).toEqual({ label: "Refactor auth", transient: false });
+  });
+
+  it("marks the picker label transient so it can never be left on the tab", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude", title: "Refactor auth" });
+    setHerdrSuspended(true);
+    await settle();
+    expect(tabLabels.filter((t) => t.transient).map((t) => t.label)).toEqual([
+      "hydra",
+    ]);
   });
 
   it("restores the real state on resume", async () => {
