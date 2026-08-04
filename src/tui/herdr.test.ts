@@ -22,6 +22,7 @@ import {
   clearHerdrSession,
   herdrActive,
   initHerdrReporting,
+  setHerdrSuspended,
   syncHerdrBanner,
   syncHerdrPermission,
   syncHerdrSessionbar,
@@ -217,6 +218,79 @@ describe("state mapping", () => {
     syncHerdrPermission(false);
     await settle();
     expect(lastOf("pane.report_agent")!.params.state).toBe("working");
+  });
+});
+
+// While the picker is up the pane isn't showing a session, so the session's
+// activity isn't the pane's state. Screen.stop()/start() drive this, mirroring
+// the started-guard that already stops the OSC 9;4 taskbar pulse.
+describe("suspended (picker up)", () => {
+  it("reports unknown instead of the session's activity", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    syncHerdrBanner({ status: "busy" });
+    await settle();
+    expect(lastOf("pane.report_agent")!.params.state).toBe("working");
+    frames = [];
+    setHerdrSuspended(true);
+    await settle();
+    expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
+  });
+
+  // Muting updates instead would freeze the last report, leaving a session
+  // that went busy just before the picker opened stuck at `working`.
+  it("overrides a busy state that arrives while suspended", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    setHerdrSuspended(true);
+    await settle();
+    frames = [];
+    syncHerdrBanner({ status: "busy" });
+    await settle();
+    expect(frames.filter((f) => f.method === "pane.report_agent")).toEqual([]);
+  });
+
+  it("outranks a pending permission too", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    syncHerdrPermission(true);
+    setHerdrSuspended(true);
+    await settle();
+    expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
+  });
+
+  it("restores the real state on resume", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    syncHerdrBanner({ status: "busy" });
+    setHerdrSuspended(true);
+    await settle();
+    frames = [];
+    setHerdrSuspended(false);
+    await settle();
+    expect(lastOf("pane.report_agent")!.params.state).toBe("working");
+  });
+
+  // Otherwise the pane loses its identity in herdr's sidebar while picking.
+  it("leaves the title and tokens alone", async () => {
+    syncHerdrSessionbar({
+      sessionId: "s1",
+      agent: "claude",
+      title: "refactor auth",
+      model: "opus-5",
+    });
+    await settle();
+    frames = [];
+    setHerdrSuspended(true);
+    await settle();
+    expect(frames.filter((f) => f.method === "pane.report_metadata")).toEqual([]);
+  });
+
+  it("is idempotent", async () => {
+    syncHerdrSessionbar({ sessionId: "s1", agent: "claude" });
+    setHerdrSuspended(true);
+    await settle();
+    frames = [];
+    setHerdrSuspended(true);
+    setHerdrSuspended(true);
+    await settle();
+    expect(frames).toEqual([]);
   });
 });
 

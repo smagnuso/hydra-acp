@@ -18,7 +18,12 @@ import { formatAgentWithModel, formatCost } from "../core/agent-display.js";
 import { paths, shortenHomePath } from "../core/paths.js";
 import { HYDRA_SESSION_PREFIX, stripHydraSessionPrefix } from "../core/session.js";
 import { formatSize, parseImageDropPaste } from "./attachments.js";
-import { syncHerdrBanner, syncHerdrPermission, syncHerdrSessionbar } from "./herdr.js";
+import {
+  setHerdrSuspended,
+  syncHerdrBanner,
+  syncHerdrPermission,
+  syncHerdrSessionbar,
+} from "./herdr.js";
 import { publishReportedCwd } from "./terminal-user-var.js";
 import { fileUrlForPath, formatElapsed } from "./format.js";
 import type { FormattedLine, Style } from "./format.js";
@@ -932,6 +937,8 @@ export class Screen {
       return;
     }
     this.started = true;
+    // Resume herdr reporting: this pane is presenting a session again.
+    setHerdrSuspended(false);
     if (!opts.skipFullscreen) {
       this.term.fullscreen(true);
     }
@@ -999,6 +1006,10 @@ export class Screen {
     if (!this.started) {
       return;
     }
+    // Stop attributing the session's activity to this pane — the picker is
+    // going up, or the TUI is exiting. Same reasoning as the started-guard
+    // in writeProgressIndicator just below.
+    setHerdrSuspended(true);
     if (this.bannerNotificationTimer) {
       clearTimeout(this.bannerNotificationTimer);
       this.bannerNotificationTimer = null;

@@ -136,7 +136,10 @@ const live: {
   status?: string | undefined;
   queued?: number | undefined;
   permission: boolean;
-} = { permission: false };
+  // True while the TUI isn't presenting a session — the picker is up, or
+  // the screen is otherwise stopped. See setHerdrSuspended.
+  suspended: boolean;
+} = { permission: false, suspended: false };
 
 // What we last actually put on the wire. The banner funnel fires at 1Hz
 // while a turn runs (the elapsed clock), so without this we would open a
@@ -334,6 +337,21 @@ function send(
  * daemon connection doesn't read as "ready for input".
  */
 function deriveState(): HerdrAgentState {
+  // While the picker is up this pane isn't showing any session, so the
+  // session's activity is not this pane's state. Reporting `working` here
+  // sends herdr's attention machinery after a pane that will just show a
+  // picker when you tab to it — and it makes `agent wait --until done`
+  // resolve against a session the user has navigated away from.
+  //
+  // `unknown` is herdr's own term for exactly this: "an agent is present
+  // but Herdr cannot classify its lifecycle confidently." It also sits
+  // below every other state in herdr's rollup, so it won't pull attention.
+  //
+  // This mirrors writeProgressIndicator, which already declines to touch
+  // the OSC 9;4 taskbar pulse while the screen is stopped.
+  if (live.suspended) {
+    return "unknown";
+  }
   if (live.permission) {
     return "blocked";
   }
@@ -492,6 +510,23 @@ export function syncHerdrBanner(view: HerdrBanner): void {
   flush();
 }
 
+/**
+ * Mark the reporter suspended (picker up / screen stopped) or live again.
+ *
+ * Suspending forces `unknown` rather than simply muting updates: muting
+ * would freeze whatever was last reported, so a session that went busy just
+ * before the picker opened would sit at `working` for as long as the user
+ * browsed. Title and tokens are deliberately left alone so the pane stays
+ * identifiable in herdr's sidebar while picking.
+ */
+export function setHerdrSuspended(suspended: boolean): void {
+  if (!herdrActive() || live.suspended === suspended) {
+    return;
+  }
+  live.suspended = suspended;
+  flush();
+}
+
 /** Tap for Screen.setPermissionPrompt — the blocked state. */
 export function syncHerdrPermission(active: boolean): void {
   if (!herdrActive()) {
@@ -565,6 +600,7 @@ export function __resetHerdrForTests(): void {
   live.status = undefined;
   live.queued = undefined;
   live.permission = false;
+  live.suspended = false;
   sent = null;
   seq = Date.now() * 1000;
   chain = Promise.resolve();
