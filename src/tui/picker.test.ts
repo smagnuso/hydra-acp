@@ -5,12 +5,29 @@ import type { Terminal } from "terminal-kit";
 // a hook so specs can simulate running outside herdr.
 let herdrAvailable = true;
 const herdrOpenCalls: Array<{ sessionId: string; title?: string; cwd?: string }> = [];
+const herdrNewCalls: Array<{
+  cwd?: string;
+  agentId?: string;
+  model?: string;
+  prompt?: string;
+}> = [];
+let herdrNewOk = true;
 vi.mock("./herdr-open.js", () => ({
   canOpenInHerdrTab: () => herdrAvailable,
   openSessionInHerdrTab: async (req: { sessionId: string; title?: string; cwd?: string }) => {
     herdrOpenCalls.push(req);
     return { ok: true };
   },
+  openNewSessionInHerdrTab: async (req: {
+    cwd?: string;
+    agentId?: string;
+    model?: string;
+    prompt?: string;
+  }) => {
+    herdrNewCalls.push(req);
+    return herdrNewOk ? { ok: true } : { ok: false, error: "no workspace" };
+  },
+  labelForPrompt: (t?: string) => t ?? "new session",
 }));
 import {
   createPickerPrefs,
@@ -1297,7 +1314,9 @@ describe("^t opens the selected session in a herdr tab", () => {
 
   afterEach(() => {
     herdrOpenCalls.length = 0;
+    herdrNewCalls.length = 0;
     herdrAvailable = true;
+    herdrNewOk = true;
   });
 
   it("hands the selected session to herdr", async () => {
@@ -1315,11 +1334,64 @@ describe("^t opens the selected session in a herdr tab", () => {
     ]);
   });
 
-  it("does nothing while focus is still in the composer", async () => {
+  it("starts a NEW session in a herdr tab while focus is in the composer", async () => {
+    // Keyed on focus, mirroring Enter: on a row it acts on that session,
+    // in the composer it starts a new one.
     const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
     drv.press("CTRL_T");
     await flush();
     expect(herdrOpenCalls).toEqual([]);
+    expect(herdrNewCalls).toHaveLength(1);
+  });
+
+  it("does not start a new session in a herdr tab outside herdr", async () => {
+    herdrAvailable = false;
+    const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
+    drv.press("CTRL_T");
+    await flush();
+    expect(herdrNewCalls).toEqual([]);
+  });
+
+  it("sends the composer text along as the new session's first prompt", async () => {
+    const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
+    drv.type("fix the parser");
+    drv.press("CTRL_T");
+    await flush();
+    expect(herdrNewCalls[0]?.prompt).toBe("fix the parser");
+  });
+
+  it("clears the composer on success, so the text can't be sent twice", async () => {
+    const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
+    drv.type("fix the parser");
+    drv.press("CTRL_T");
+    await flush();
+    // Enter now starts a local session with no seeded prompt: the text
+    // went to the other tab.
+    drv.press("ENTER");
+    const out = await drv.resolveOnce;
+    expect(out.kind).toBe("new");
+    expect((out as { prompt?: string }).prompt).toBeUndefined();
+  });
+
+  it("keeps the composer text when the herdr tab fails", async () => {
+    herdrNewOk = false;
+    const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
+    drv.type("fix the parser");
+    drv.press("CTRL_T");
+    await flush();
+    drv.press("ENTER");
+    const out = await drv.resolveOnce;
+    expect((out as { prompt?: string }).prompt).toBe("fix the parser");
+  });
+
+  it("leaves the composer text and the picker alone when starting a new tab", async () => {
+    const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
+    drv.press("CTRL_T");
+    await flush();
+    drv.press("CTRL_T");
+    await flush();
+    // Two presses, two tabs — nothing resolved the picker in between.
+    expect(herdrNewCalls).toHaveLength(2);
   });
 
   it("does nothing when not running in herdr", async () => {

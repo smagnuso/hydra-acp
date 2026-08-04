@@ -17,6 +17,14 @@ vi.mock("node:net", async (importOriginal) => {
   };
 });
 
+// The tab-label side rides the same socket, so leaving it live would add
+// its tab.get/tab.rename round trips to every frame count below. It has
+// its own spec; here it just needs to be out of the way.
+vi.mock("./herdr-tab-label.js", () => ({
+  syncHerdrTabLabel: () => {},
+  restoreHerdrTabLabel: () => Promise.resolve(),
+}));
+
 import {
   __resetHerdrForTests,
   clearHerdrSession,

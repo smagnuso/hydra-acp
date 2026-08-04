@@ -85,6 +85,7 @@
 
 import * as net from "node:net";
 import * as path from "node:path";
+import { restoreHerdrTabLabel, syncHerdrTabLabel } from "./herdr-tab-label.js";
 
 const SOURCE = "hydra";
 // See the header: intentionally not the underlying agent kind.
@@ -463,6 +464,12 @@ function flush(): void {
       },
     });
   }
+  // Tab label follows the same title, but on its own request/response
+  // path. Called from here rather than from the sessionbar tap so it
+  // inherits the opt-in gate above (see initHerdrReporting): the taps run
+  // under the test suite, and renaming a developer's tab from `pnpm test`
+  // is the same hazard as registering a phantom agent on their pane.
+  syncHerdrTabLabel(title);
   if (frames.length === 0) {
     return;
   }
@@ -555,6 +562,10 @@ export async function clearHerdrSession(): Promise<void> {
   if (!target || sent === null) {
     return;
   }
+  // Before the reports, and awaited for the same reason they are. A
+  // session title left on the tab bar after the TUI is gone names a tab
+  // that now holds a plain shell.
+  await restoreHerdrTabLabel();
   const cleared: Tokens = { kind: null, cwd: null, model: null, cost: null, queue: null };
   const flushed = send([
     {

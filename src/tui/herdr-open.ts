@@ -53,7 +53,7 @@ export function canOpenInHerdrTab(): boolean {
 // opens its own socket and reads the single reply. See the note in
 // herdr.ts: batching frames onto one connection silently drops everything
 // after the first.
-function request(method: string, params: unknown): Promise<unknown> {
+export function herdrRequest(method: string, params: unknown): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const socketPath = process.env.HERDR_SOCKET_PATH;
     if (!socketPath) {
@@ -143,10 +143,10 @@ function hydraEntryPoint(): string | null {
  * wrong, and `tui` is named explicitly rather than relying on the bare-verb
  * default.
  */
-function hydraArgv(sessionId: string): string[] {
+function hydraArgv(args: string[]): string[] {
   const entry = hydraEntryPoint();
   const base = entry ? [process.execPath, entry] : ["hydra"];
-  return [...base, "tui", "--session", sessionId];
+  return [...base, "tui", ...args];
 }
 
 export interface OpenInHerdrTabRequest {
@@ -172,19 +172,122 @@ export interface OpenInHerdrTabResult {
 export async function openSessionInHerdrTab(
   req: OpenInHerdrTabRequest,
 ): Promise<OpenInHerdrTabResult> {
+  return applyTab({
+    label: req.title?.trim() || req.sessionId,
+    argv: ["--session", req.sessionId],
+    cwd: req.cwd,
+  });
+}
+
+export interface NewSessionInHerdrTabRequest {
+  /** Working directory for the new session. */
+  cwd?: string | undefined;
+  /** Agent id, as picked in the composer. */
+  agentId?: string | undefined;
+  /** Model id, as picked in the composer. */
+  model?: string | undefined;
+  /** Composer text to fire as the new session's first turn. */
+  prompt?: string | undefined;
+}
+
+/**
+ * Create a new herdr tab running a fresh hydra session.
+ *
+ * `prompt` rides along as `--prompt`, which with `--new` fires as the first
+ * turn the moment the session attaches. herdr launches argv directly with
+ * no shell, so arbitrary text — newlines, quotes, backticks — needs no
+ * escaping and cannot be reinterpreted.
+ */
+export async function openNewSessionInHerdrTab(
+  req: NewSessionInHerdrTabRequest = {},
+): Promise<OpenInHerdrTabResult> {
+  // --new is what stops the new pane from re-entering the picker (or
+  // reattaching to a recent session for the cwd) and instead going straight
+  // to a fresh one.
+  const argv = ["--new"];
+  // --cwd as well as the pane cwd: the pane cwd is what herdr spawns in and
+  // is silently dropped when non-absolute, whereas --cwd is what hydra
+  // records on the session. Only one of them is load-bearing for the
+  // session identity, so pass it explicitly.
+  if (req.cwd) {
+    argv.push("--cwd", req.cwd);
+  }
+  if (req.agentId) {
+    argv.push("--agent", req.agentId);
+  }
+  if (req.model) {
+    argv.push("--model", req.model);
+  }
+  // Last, so the long free-text argument doesn't sit between flag pairs in
+  // a `ps` listing.
+  const prompt = req.prompt?.trim();
+  if (prompt) {
+    argv.push("--prompt", prompt);
+  }
+  // The prompt's first line makes a better tab label than "new session",
+  // and it's what the pane will be titled once the session gets a real
+  // title anyway.
+  return applyTab({ label: labelForPrompt(prompt), argv, cwd: req.cwd });
+}
+
+/**
+ * Env var carrying the tab label hydra itself assigned when it created the
+ * tab. Read by herdr-tab-label.ts to establish ownership across the process
+ * boundary. Only meaningful while it still matches the tab's actual label —
+ * a human renaming over it takes ownership straight back.
+ */
+export const TAB_LABEL_ENV = "HYDRA_HERDR_TAB_LABEL";
+
+const PROMPT_LABEL_MAX = 40;
+
+/**
+ * A tab label derived from the prompt: first line, truncated.
+ *
+ * Only the first line, because a pasted multi-line prompt would otherwise
+ * put newlines in a tab label. Truncated because the tab bar is narrow and
+ * herdr renders whatever it's given.
+ */
+export function labelForPrompt(prompt: string | undefined): string {
+  const first = prompt?.split("\n")[0]?.trim();
+  if (!first) {
+    return "new session";
+  }
+  return first.length > PROMPT_LABEL_MAX
+    ? `${first.slice(0, PROMPT_LABEL_MAX - 1)}…`
+    : first;
+}
+
+async function applyTab(spec: {
+  label: string;
+  argv: string[];
+  cwd?: string | undefined;
+}): Promise<OpenInHerdrTabResult> {
   if (!canOpenInHerdrTab()) {
     return { ok: false, error: "not running in herdr" };
   }
-  const label = req.title?.trim() || req.sessionId;
+  const label = spec.label;
   const pane: Record<string, unknown> = {
     type: "pane",
     label,
-    command: hydraArgv(req.sessionId),
+    command: hydraArgv(spec.argv),
+    // Hand the child the tab label we're about to set, so it knows the
+    // label is HYDRA's and not a human's and may keep it in sync with the
+    // session title.
+    //
+    // Without this the tab-label guard misfires exactly where the feature
+    // matters most: a ^t-created tab comes up already named after the
+    // session, and the hydra in it — a different process, with no memory
+    // of the layout.apply that named it — sees a non-numeric label it
+    // doesn't remember writing and correctly concludes "a human named
+    // this, leave it alone". Result: the one kind of tab we definitely own
+    // is the one kind that never follows the title. Ownership can't be
+    // inferred from the label, so it has to be passed.
+    env: { [TAB_LABEL_ENV]: label },
   };
   // Only send cwd when it's usable — herdr validates absolute + is_dir and
   // would otherwise reject the whole call rather than just ignoring it.
-  if (req.cwd && req.cwd.startsWith("/")) {
-    pane.cwd = req.cwd;
+  if (spec.cwd && spec.cwd.startsWith("/")) {
+    pane.cwd = spec.cwd;
   }
   const params: Record<string, unknown> = {
     // tab_id deliberately omitted — that's what makes this a new tab
@@ -200,7 +303,7 @@ export async function openSessionInHerdrTab(
   }
   let reply: unknown;
   try {
-    reply = await request("layout.apply", params);
+    reply = await herdrRequest("layout.apply", params);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

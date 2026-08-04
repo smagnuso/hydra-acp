@@ -26,7 +26,11 @@ import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { setDefaultAgent, type HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
-import { canOpenInHerdrTab, openSessionInHerdrTab } from "./herdr-open.js";
+import {
+  canOpenInHerdrTab,
+  openNewSessionInHerdrTab,
+  openSessionInHerdrTab,
+} from "./herdr-open.js";
 import {
   deleteSession,
   fetchWithTimeout,
@@ -334,7 +338,7 @@ function helpEntries(): ReadonlyArray<HelpEntry> {
   for (const entry of HELP_ENTRIES) {
     out.push(entry);
     if (entry?.[0] === "*") {
-      out.push(["^t", "open the selected session in a new herdr tab"]);
+      out.push(["^t", "herdr tab: selected session, or send the composer to a new one"]);
     }
   }
   return out;
@@ -2734,6 +2738,61 @@ export async function pickSession(
         paintIndicator();
       }
     };
+    // ^t from the composer: a brand-new session in a new herdr tab.
+    //
+    // Shares herdrOpenInFlight with the session path above — one ^t, one
+    // tab, whichever flavour.
+    //
+    // Whatever is typed in the composer rides along as --prompt and fires
+    // as the new session's first turn, so this really is "Enter, but in
+    // another tab". The cwd, agent and model the composer has selected go
+    // too.
+    //
+    // ATTACHMENTS DO NOT. They're in-memory image bytes with nowhere to go
+    // on an argv, so rather than dropping them silently the status line
+    // says so and they stay in this composer.
+    //
+    // The picker stays open either way — this pane is not going anywhere.
+    // But the text IS cleared on success, for the same reason Enter clears
+    // it: it has been sent. Leaving it would invite sending it twice, once
+    // per tab.
+    const performNewInHerdrTab = async (): Promise<void> => {
+      if (herdrOpenInFlight) {
+        return;
+      }
+      herdrOpenInFlight = true;
+      const text = composer.expandedText();
+      // Snapshotted rather than read back after the await: state() aliases
+      // the dispatcher's live array, and setBuffer below replaces it.
+      const keptAttachments = [...composer.state().attachments];
+      const dropped = keptAttachments.length;
+      transientStatus = "opening a new session in a herdr tab…";
+      paintIndicator();
+      try {
+        const result = await openNewSessionInHerdrTab({
+          cwd: currentCwd,
+          agentId: composerAgentId,
+          model: composerModel,
+          prompt: text,
+        });
+        if (result.ok) {
+          if (text.trim().length > 0) {
+            composer.setBuffer("", keptAttachments);
+          }
+          transientStatus =
+            dropped > 0
+              ? `opened a new herdr tab — ${dropped} attachment${dropped === 1 ? "" : "s"} stayed here`
+              : "opened a new session in a new herdr tab";
+        } else {
+          transientStatus = `herdr tab failed: ${result.error ?? "unknown error"}`;
+        }
+      } catch (err) {
+        transientStatus = `herdr tab failed: ${(err as Error).message}`;
+      } finally {
+        herdrOpenInFlight = false;
+        renderFromScratch();
+      }
+    };
     const performAction = async (kind: "kill" | "delete"): Promise<void> => {
       if (!pendingAction) {
         return;
@@ -3565,6 +3624,22 @@ export async function pickSession(
           resolve(out);
           return;
         }
+        // ^t from the composer: a new session in a new herdr tab.
+        //
+        // Must be intercepted HERE, not in the switch below that handles
+        // ^t for a selected row. Composer-focused keys are routed through
+        // the InputDispatcher a few lines down and never reach that
+        // switch, so a handler there is unreachable from the composer —
+        // and ^t would instead land on the dispatcher as a readline
+        // transpose-chars.
+        if (name === "CTRL_T") {
+          if (canOpenInHerdrTab()) {
+            void performNewInHerdrTab();
+          }
+          // Swallowed either way: outside herdr, ^t transposing the
+          // user's characters would be a surprising consolation prize.
+          return;
+        }
         // A held UP that just walked focus up into the composer keeps
         // auto-repeating. While the guard is armed, swallow each UP that
         // arrives within the auto-repeat cadence of the previous one
@@ -3973,7 +4048,14 @@ export async function pickSession(
         // whole block is skipped. A handler placed there is silently
         // unreachable — no error, the key just does nothing.
         case "CTRL_T": {
-          if (selectedIdx === 0 || !canOpenInHerdrTab()) {
+          if (!canOpenInHerdrTab()) {
+            return;
+          }
+          // Keyed on focus, mirroring what Enter already teaches here:
+          // on a row it acts on that session, in the composer it starts a
+          // new one. Same key, no new binding to learn.
+          if (composerHover || selectedIdx === 0) {
+            void performNewInHerdrTab();
             return;
           }
           const session = visible[selectedIdx - 1];

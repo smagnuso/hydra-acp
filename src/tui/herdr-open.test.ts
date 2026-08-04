@@ -59,7 +59,12 @@ vi.mock("node:net", async (importOriginal) => {
   };
 });
 
-import { canOpenInHerdrTab, openSessionInHerdrTab } from "./herdr-open.js";
+import {
+  canOpenInHerdrTab,
+  labelForPrompt,
+  openNewSessionInHerdrTab,
+  openSessionInHerdrTab,
+} from "./herdr-open.js";
 
 beforeEach(() => {
   sent = [];
@@ -253,5 +258,128 @@ describe("openSessionInHerdrTab", () => {
     const r = await openSessionInHerdrTab({ sessionId: "s" });
     expect(r.ok).toBe(false);
     expect(r.error).toBe("ECONNREFUSED");
+  });
+});
+
+describe("openNewSessionInHerdrTab", () => {
+  function argv(): string[] {
+    return (sent[0]?.params.root as { command: string[] }).command;
+  }
+
+  it("passes --new so the new pane doesn't re-enter the picker", async () => {
+    const r = await openNewSessionInHerdrTab({});
+    expect(r.ok).toBe(true);
+    expect(argv()).toContain("--new");
+    expect(argv()).not.toContain("--session");
+  });
+
+  it("forwards the composer's cwd, agent and model", async () => {
+    await openNewSessionInHerdrTab({ cwd: "/tmp", agentId: "claude", model: "opus" });
+    const a = argv();
+    expect(a.slice(a.indexOf("tui"))).toEqual([
+      "tui",
+      "--new",
+      "--cwd",
+      "/tmp",
+      "--agent",
+      "claude",
+      "--model",
+      "opus",
+    ]);
+  });
+
+  it("omits flags the composer hasn't set", async () => {
+    await openNewSessionInHerdrTab({ cwd: "/tmp" });
+    const a = argv();
+    expect(a).not.toContain("--agent");
+    expect(a).not.toContain("--model");
+  });
+
+  it("also sets the pane cwd, so a split off it starts in the right place", async () => {
+    await openNewSessionInHerdrTab({ cwd: "/tmp" });
+    expect((sent[0]?.params.root as { cwd?: string }).cwd).toBe("/tmp");
+  });
+
+  it("drops a relative cwd from the pane rather than letting herdr reject the call", async () => {
+    await openNewSessionInHerdrTab({ cwd: "relative/path" });
+    expect((sent[0]?.params.root as { cwd?: string }).cwd).toBeUndefined();
+  });
+
+  it("creates a new tab rather than replacing the current one", async () => {
+    await openNewSessionInHerdrTab({});
+    expect(sent[0]?.params.tab_id).toBeUndefined();
+    expect(sent[0]?.method).toBe("layout.apply");
+  });
+
+  it("is inert outside herdr", async () => {
+    delete process.env.HERDR_ENV;
+    const r = await openNewSessionInHerdrTab({});
+    expect(r.ok).toBe(false);
+    expect(connections).toBe(0);
+  });
+
+  it("surfaces a herdr error body", async () => {
+    replyWith = JSON.stringify({ id: "hydra-open", error: { code: "invalid_params" } });
+    const r = await openNewSessionInHerdrTab({});
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("invalid_params");
+  });
+});
+
+describe("openNewSessionInHerdrTab prompt forwarding", () => {
+  function argv(): string[] {
+    return (sent[0]?.params.root as { command: string[] }).command;
+  }
+  function label(): string {
+    return sent[0]?.params.tab_label as string;
+  }
+
+  it("sends the composer text as --prompt, last in the argv", async () => {
+    await openNewSessionInHerdrTab({ prompt: "fix the parser" });
+    const a = argv();
+    expect(a.slice(-2)).toEqual(["--prompt", "fix the parser"]);
+  });
+
+  it("passes text through verbatim — herdr runs argv with no shell", async () => {
+    const nasty = 'rm -rf $(pwd); `whoami` "quoted" \'single\'\nsecond line';
+    await openNewSessionInHerdrTab({ prompt: nasty });
+    expect(argv().slice(-1)).toEqual([nasty]);
+  });
+
+  it("omits --prompt for empty or whitespace-only text", async () => {
+    await openNewSessionInHerdrTab({ prompt: "   \n  " });
+    expect(argv()).not.toContain("--prompt");
+  });
+
+  it("labels the tab with the prompt's first line", async () => {
+    await openNewSessionInHerdrTab({ prompt: "fix the parser\nand the lexer" });
+    expect(label()).toBe("fix the parser");
+  });
+
+  it("falls back to a generic label with no prompt", async () => {
+    await openNewSessionInHerdrTab({});
+    expect(label()).toBe("new session");
+  });
+});
+
+describe("labelForPrompt", () => {
+  it("keeps a short single line as-is", () => {
+    expect(labelForPrompt("fix it")).toBe("fix it");
+  });
+
+  it("takes only the first line, so no newline reaches the tab bar", () => {
+    expect(labelForPrompt("first\nsecond")).toBe("first");
+    expect(labelForPrompt("\n\nsecond")).toBe("new session");
+  });
+
+  it("truncates a long line with an ellipsis", () => {
+    const out = labelForPrompt("x".repeat(200));
+    expect(out).toHaveLength(40);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("falls back for empty input", () => {
+    expect(labelForPrompt(undefined)).toBe("new session");
+    expect(labelForPrompt("  ")).toBe("new session");
   });
 });

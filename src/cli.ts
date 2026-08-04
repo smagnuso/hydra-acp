@@ -774,6 +774,21 @@ async function dispatchTui(
   // its own kernel comm name to "hydra-acp-daemon" in runDaemonStart;
   // setHydraProcessTitle keeps interactive procs anchored at "hydra".
   setHydraProcessTitle(buildTitleFromArgv(process.argv.slice(2)));
+  // --prompt seeds the first turn. Two behaviours, both useful and both
+  // already implemented downstream by initialPrompt: with --new it fires
+  // immediately once the fresh session attaches; without one it pre-fills
+  // the picker's composer so the user can edit before sending.
+  //
+  // Rejected outright alongside --session rather than silently ignored:
+  // app.ts guards initialPrompt on `sessionId === "__new__"`, so on an
+  // attach it would vanish with no diagnostic.
+  const initialPrompt = resolveOption(flags, "prompt");
+  if (initialPrompt !== undefined && base.sessionId !== undefined) {
+    process.stderr.write(
+      "hydra-acp: --prompt applies to a new session; it can't be combined with --session. Use `hydra cat --session <id> -p <prompt>` to prompt an existing session.\n",
+    );
+    process.exit(2);
+  }
   const { runTui } = await import("./tui/index.js");
   const tuiOpts: Parameters<typeof runTui>[0] = { resume, forceNew, readonly };
   if (base.sessionId !== undefined) {
@@ -790,6 +805,9 @@ async function dispatchTui(
   }
   if (base.model !== undefined) {
     tuiOpts.model = base.model;
+  }
+  if (initialPrompt !== undefined) {
+    tuiOpts.initialPrompt = initialPrompt;
   }
   if (base.target !== undefined) {
     tuiOpts.target = base.target;
@@ -1039,7 +1057,9 @@ function printHelp(subcommand?: string): void {
     [AUTH, "  hydra-acp auth password [--force]           Set the daemon's master password"],
     [AUTH, "  hydra-acp auth [list]                       List active session tokens"],
     [AUTH, "  hydra-acp auth revoke <id>                  Revoke a session token"],
-    [TUI, "  hydra-acp tui [--session <id-or-url>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>]"],
+    [TUI, "  hydra-acp tui [--session <id-or-url>] [--reattach] [--new] [--readonly] [--agent <id>] [--model <id>] [--cwd <path>] [--name <label>] [--prompt <text>]"],
+    [TUI, "                                     --prompt seeds a new session's first turn (fires immediately with --new,"],
+    [TUI, "                                     otherwise pre-fills the picker's composer). Not valid with --session."],
     [TUI, "                                     Interactive terminal UI. Smart default (no flags): shows a picker when sessions exist, else new."],
     { globalOnly: "  hydra-acp --version                Print version" },
     { globalOnly: "  hydra-acp --help                   Show this help" },
