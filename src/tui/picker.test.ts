@@ -1,5 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Terminal } from "terminal-kit";
+
+// Observe the herdr hand-off without touching a socket. `herdrAvailable` is
+// a hook so specs can simulate running outside herdr.
+let herdrAvailable = true;
+const herdrOpenCalls: Array<{ sessionId: string; title?: string; cwd?: string }> = [];
+vi.mock("./herdr-open.js", () => ({
+  canOpenInHerdrTab: () => herdrAvailable,
+  openSessionInHerdrTab: async (req: { sessionId: string; title?: string; cwd?: string }) => {
+    herdrOpenCalls.push(req);
+    return { ok: true };
+  },
+}));
 import {
   createPickerPrefs,
   filterByHost,
@@ -1270,5 +1282,68 @@ describe("pickSession: ^F find mode", () => {
     drv.press("ESCAPE");
     drv.press("CTRL_C");
     await drv.resolveOnce;
+  });
+});
+
+// The original ^T handler was placed inside the picker's `data.isCharacter`
+// block, where a control key can never reach it. Every unit test for the
+// herdr call itself passed while the key was silently dead, so the coverage
+// that matters is here: dispatch the actual key through the picker.
+describe("^t opens the selected session in a herdr tab", () => {
+  const flush = async (): Promise<void> => {
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  afterEach(() => {
+    herdrOpenCalls.length = 0;
+    herdrAvailable = true;
+  });
+
+  it("hands the selected session to herdr", async () => {
+    const s = session({
+      sessionId: "hydra_session_abc",
+      title: "refactor auth",
+      cwd: "/home/me/dev/proj",
+    });
+    const drv = makePicker({ sessions: [s] });
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    expect(herdrOpenCalls).toEqual([
+      { sessionId: "hydra_session_abc", title: "refactor auth", cwd: "/home/me/dev/proj" },
+    ]);
+  });
+
+  it("does nothing while focus is still in the composer", async () => {
+    const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
+    drv.press("CTRL_T");
+    await flush();
+    expect(herdrOpenCalls).toEqual([]);
+  });
+
+  it("does nothing when not running in herdr", async () => {
+    herdrAvailable = false;
+    const drv = makePicker({ sessions: [session({ sessionId: "hydra_session_abc" })] });
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    expect(herdrOpenCalls).toEqual([]);
+  });
+
+  it("leaves the picker open so several sessions can be fanned out", async () => {
+    const a = session({ sessionId: "hydra_session_a", title: "a" });
+    const b = session({ sessionId: "hydra_session_b", title: "b" });
+    const drv = makePicker({ sessions: [a, b] });
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    drv.press("DOWN");
+    drv.press("CTRL_T");
+    await flush();
+    expect(herdrOpenCalls.map((c) => c.sessionId)).toEqual([
+      "hydra_session_a",
+      "hydra_session_b",
+    ]);
   });
 });

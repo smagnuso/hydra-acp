@@ -26,6 +26,7 @@ import { paths, shortenHomePath } from "../core/paths.js";
 import { stripHydraSessionPrefix } from "../core/session.js";
 import { setDefaultAgent, type HydraConfig } from "../core/config.js";
 import type { RemoteTarget } from "../core/remote-target.js";
+import { canOpenInHerdrTab, openSessionInHerdrTab } from "./herdr-open.js";
 import {
   deleteSession,
   fetchWithTimeout,
@@ -286,7 +287,8 @@ const BOX_HORIZONTAL_PAD = 4;
 // keys column is left-aligned and padded to HELP_KEYS_WIDTH so the
 // descriptions stack into a clean second column.
 const HELP_KEYS_WIDTH = 20;
-const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
+type HelpEntry = readonly [string, string] | null;
+const HELP_ENTRIES: ReadonlyArray<HelpEntry> = [
   ["Composer", "type prompt for new session; Enter creates + submits"],
   ["↓ from composer", "drop focus into session list"],
   ["typing in list", "jumps focus back to composer with that key"],
@@ -319,6 +321,24 @@ const HELP_ENTRIES: ReadonlyArray<readonly [string, string] | null> = [
   ["?", "toggle this help"],
   ["q / Esc / ^C / ^D", "quit picker (detach)"],
 ];
+
+// Resolved per render rather than baked into HELP_ENTRIES, because the
+// herdr-only row depends on the environment. Computing it at module load
+// would freeze the answer at import time and make the module's top level
+// depend on env — which also made it impossible to mock in tests.
+function helpEntries(): ReadonlyArray<HelpEntry> {
+  if (!canOpenInHerdrTab()) {
+    return HELP_ENTRIES;
+  }
+  const out: HelpEntry[] = [];
+  for (const entry of HELP_ENTRIES) {
+    out.push(entry);
+    if (entry?.[0] === "*") {
+      out.push(["^t", "open the selected session in a new herdr tab"]);
+    }
+  }
+  return out;
+}
 
 // A unit of focused input. The focus stack in pickSession routes all
 // key/resize events to the topmost layer; push pushes a new one,
@@ -1302,7 +1322,7 @@ export async function pickSession(
       painter.clearCache();
       term.moveTo(1, 1).eraseDisplayBelow();
       term.brightWhite.bold.noFormat("  Picker hotkeys")("\n\n");
-      for (const entry of HELP_ENTRIES) {
+      for (const entry of helpEntries()) {
         if (entry === null) {
           term("\n");
           continue;
@@ -2680,6 +2700,40 @@ export async function pickSession(
         syncInFlight = false;
       }
     };
+    // Hand the selected session to herdr as a new tab, rather than
+    // switching this pane to it. The daemon owns the session and
+    // multi-client attach is the normal path, so both panes are first-class
+    // views of the same session — nothing is "moved".
+    //
+    // Deliberately leaves the picker open so several sessions can be fanned
+    // out in a row.
+    let herdrOpenInFlight = false;
+    const performOpenInHerdrTab = async (
+      session: DiscoveredSession,
+    ): Promise<void> => {
+      if (herdrOpenInFlight) {
+        return;
+      }
+      herdrOpenInFlight = true;
+      const label = session.title?.trim() || stripHydraSessionPrefix(session.sessionId);
+      transientStatus = `opening ${label} in a herdr tab…`;
+      paintIndicator();
+      try {
+        const result = await openSessionInHerdrTab({
+          sessionId: session.sessionId,
+          title: session.title,
+          cwd: session.cwd,
+        });
+        transientStatus = result.ok
+          ? `opened ${label} in a new herdr tab`
+          : `herdr tab failed: ${result.error ?? "unknown error"}`;
+      } catch (err) {
+        transientStatus = `herdr tab failed: ${(err as Error).message}`;
+      } finally {
+        herdrOpenInFlight = false;
+        paintIndicator();
+      }
+    };
     const performAction = async (kind: "kill" | "delete"): Promise<void> => {
       if (!pendingAction) {
         return;
@@ -3912,6 +3966,23 @@ export async function pickSession(
         return;
       }
       switch (name) {
+        // ^t — open the selected session in a new herdr tab.
+        //
+        // Must live in this switch rather than the isCharacter block above:
+        // CTRL_T is a control key, so `data.isCharacter` is false and that
+        // whole block is skipped. A handler placed there is silently
+        // unreachable — no error, the key just does nothing.
+        case "CTRL_T": {
+          if (selectedIdx === 0 || !canOpenInHerdrTab()) {
+            return;
+          }
+          const session = visible[selectedIdx - 1];
+          if (!session) {
+            return;
+          }
+          void performOpenInHerdrTab(session);
+          return;
+        }
         case "UP":
         case "SHIFT_TAB":
         case "CTRL_P":
