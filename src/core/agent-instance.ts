@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { ndjsonStreamFromStdio } from "../acp/framing.js";
 import { JsonRpcConnection } from "../acp/connection.js";
 import { paths } from "./paths.js";
+import { scrubInheritedEnv } from "./scrub-env.js";
 import type { SpawnPlan } from "./registry.js";
 import type { AuthMethod } from "../acp/types-capabilities.js";
 
@@ -163,8 +164,11 @@ export class AgentInstance {
   }
 
   static spawn(opts: AgentInstanceOptions): AgentInstance {
+    // Inherited env is scrubbed of pane-scoped variables (see
+    // scrub-env.ts); the plan's own env and extraEnv are layered on top
+    // and are never scrubbed, so an explicit setting always wins.
     const env = {
-      ...process.env,
+      ...scrubInheritedEnv(),
       ...opts.plan.env,
       ...(opts.extraEnv ?? {}),
     };

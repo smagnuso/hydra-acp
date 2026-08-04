@@ -7,6 +7,7 @@ import type { SonicBoom } from "sonic-boom";
 import type { ProcessTokenRegistry } from "../daemon/auth.js";
 import { RestartBreaker, type BreakerOptions } from "./restart-breaker.js";
 import { expandHome } from "./config.js";
+import { scrubInheritedEnv } from "./scrub-env.js";
 
 // Shared lifecycle for daemon-supervised child processes (extensions and
 // transformers). Each kind passes a SupervisorAdapter for the bits that
@@ -531,8 +532,11 @@ export class ChildSupervisor<TConfig extends BaseChildConfig> {
     // version while the process is starting up.
     entry.version = undefined;
 
+    // Pane-scoped variables stripped from the inherited env (see
+    // scrub-env.ts). cfg.env is layered on afterwards, so an extension
+    // that deliberately sets one keeps it.
     const env = {
-      ...process.env,
+      ...scrubInheritedEnv(),
       HYDRA_ACP_DAEMON_URL: ctx.daemonUrl,
       HYDRA_ACP_DAEMON_HOST: ctx.daemonHost,
       HYDRA_ACP_DAEMON_PORT: String(ctx.daemonPort),

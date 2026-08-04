@@ -181,3 +181,60 @@ describe("AgentInstance: spawn-level failures", () => {
     expect(agent.isAlive()).toBe(false);
   });
 });
+
+// The daemon inherits its environment from whatever shell started it and
+// then outlives that shell, so pane-scoped variables it passes on are
+// stale at best and — once the multiplexer reuses the id — name a
+// different, innocent pane. Verified end-to-end through a real spawn
+// rather than against the helper, because the bug this prevents was a
+// missing call at exactly this seam.
+describe("AgentInstance: inherited environment", () => {
+  async function envOfSpawnedAgent(
+    plan: Partial<SpawnPlan> = {},
+  ): Promise<Record<string, string>> {
+    const out = path.join(
+      await fs.mkdtemp(path.join(os.tmpdir(), "agent-env-")),
+      "env.json",
+    );
+    const script = `require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.env)); setTimeout(() => {}, 60000);`;
+    const agent = AgentInstance.spawn({
+      agentId: "env-probe",
+      cwd: process.cwd(),
+      plan: { ...nodeScript(script), ...plan },
+    });
+    for (let i = 0; i < 100; i += 1) {
+      try {
+        return JSON.parse(await fs.readFile(out, "utf8")) as Record<string, string>;
+      } catch {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+    agent.kill();
+    throw new Error("agent never wrote its environment");
+  }
+
+  it("strips pane-scoped variables from what the agent inherits", async () => {
+    process.env.HERDR_PANE_ID = "wB:p1";
+    process.env.HERDR_TAB_ID = "wB:t1";
+    try {
+      const env = await envOfSpawnedAgent();
+      expect(env.HERDR_PANE_ID).toBeUndefined();
+      expect(env.HERDR_TAB_ID).toBeUndefined();
+      // Sanity: inheritance still works at all.
+      expect(env.PATH).toBeDefined();
+    } finally {
+      delete process.env.HERDR_PANE_ID;
+      delete process.env.HERDR_TAB_ID;
+    }
+  }, 20_000);
+
+  it("lets an explicit plan env win over the scrub", async () => {
+    process.env.HERDR_PANE_ID = "wB:p1";
+    try {
+      const env = await envOfSpawnedAgent({ env: { HERDR_PANE_ID: "chosen:p9" } });
+      expect(env.HERDR_PANE_ID).toBe("chosen:p9");
+    } finally {
+      delete process.env.HERDR_PANE_ID;
+    }
+  }, 20_000);
+});

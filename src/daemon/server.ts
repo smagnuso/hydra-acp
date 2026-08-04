@@ -14,6 +14,7 @@ import {
   extensionList,
   transformerList,
 } from "../core/config.js";
+import { setExtraScrubbedEnv } from "../core/scrub-env.js";
 import { setToolBlobCompression } from "../core/tool-store.js";
 import { Registry } from "../core/registry.js";
 import { AgentInstance } from "../core/agent-instance.js";
@@ -81,6 +82,11 @@ export async function startDaemon(
   serviceToken: string,
 ): Promise<DaemonHandle> {
   ensureLoopbackOrTls(config);
+
+  // Install the user's extra scrub patterns before anything can be
+  // spawned. Done here rather than in the CLI verb so embedders that call
+  // startDaemon() directly get the same filtering.
+  setExtraScrubbedEnv(config.daemon.scrubEnv);
 
   // ~/.hydra-acp/tls/cert.pem etc. — expand leading ~ / $HOME so a
   // portable config.json works regardless of the user's home dir.

@@ -22,6 +22,12 @@ describe("defaultConfig", () => {
     expect(cfg.registry.url).toContain("agentclientprotocol.com");
   });
 
+  it("defaults daemon.scrubEnv to empty — the built-in list is not config", () => {
+    // Users add to the pane-scoped built-ins in core/scrub-env.ts; they
+    // don't restate them, so a fresh config carries nothing here.
+    expect(defaultConfig().daemon.scrubEnv).toEqual([]);
+  });
+
   it("defaults defaultCwd to the literal '~' (expanded at use time)", () => {
     expect(defaultConfig().defaultCwd).toBe("~");
   });

@@ -20,6 +20,7 @@ function testConfig(): HydraConfig {
       sessionHistoryArchiveTiers: 10,
       agentStderrTailBytes: 4096,
       agentSyncIntervalMinutes: 0,
+      scrubEnv: [],
       sessionGcIntervalMinutes: 0,
       sessionGcMaxAgeDays: 2,
     },

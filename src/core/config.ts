@@ -61,6 +61,20 @@ const DaemonConfig = z.object({
   // are staggered across the window — N agents on a 60-minute interval
   // mean one agent spawn every 60/N minutes. Set 0 to disable entirely.
   agentSyncIntervalMinutes: z.number().nonnegative().default(60),
+  // Extra environment variable names to strip from the environment the
+  // daemon passes to agents, extensions and transformers, on top of the
+  // built-in pane-scoped list in core/scrub-env.ts.
+  //
+  // For variables that describe the terminal the daemon happened to be
+  // started in rather than the machine or the user. The daemon outlives
+  // that terminal, so such a value is stale at best and — once the
+  // multiplexer reuses the id — points at someone else's pane at worst.
+  //
+  // A trailing `*` matches a prefix, so `["TMUX*", "WEZTERM_PANE"]` works.
+  // Matching is case-sensitive. Only the INHERITED environment is
+  // filtered: anything set explicitly in an agent's launch plan or an
+  // extension's own `env` block survives, since that was deliberate.
+  scrubEnv: z.array(z.string()).default([]),
   // How often (minutes) the daemon sweeps for non-interactive cold
   // session records (one-shot `hydra cat` runs, mostly) that haven't
   // been touched in `sessionGcMaxAgeDays`. Set 0 to disable. The sweep

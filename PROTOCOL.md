@@ -1452,6 +1452,16 @@ Once registered, four surfaces become available to that process:
 
 Registrations drop on disconnect — the daemon clears the entry and evicts any cached MCP transports.
 
+#### Inherited environment
+
+Extensions, transformers and agents inherit the daemon's environment, minus a scrub list. The daemon inherits its own environment from whatever shell started it and then outlives that shell, so any variable describing *one terminal pane* becomes wrong — first stale when the pane closes, then actively misleading once the multiplexer reuses the id and it names someone else's pane.
+
+Removed by default: `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, `HERDR_STARTUP_CWD`, `HYDRA_HERDR_TAB_LABEL`. Users can extend the list with `daemon.scrubEnv` in `config.json` (a trailing `*` matches a prefix, e.g. `"TMUX*"`).
+
+Deliberately **not** removed: `HERDR_SOCKET_PATH` and `HERDR_ENV`. The socket is a per-user singleton valid for the daemon's whole life, so a multiplexer-aware extension can still drive herdr — it just has to resolve its target explicitly rather than inheriting a pane it isn't in.
+
+Only the *inherited* environment is filtered. Anything set explicitly in an agent's launch plan or an extension's own `env` block in `config.json` is layered on afterwards and always survives.
+
 #### Request (process → daemon): `hydra-acp/commands/register`
 
 Advertise slash-command verbs.
