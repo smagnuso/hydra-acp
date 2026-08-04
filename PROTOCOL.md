@@ -209,6 +209,7 @@ List sessions known to the daemon.
 
 - `cwd=<path>` — filter to sessions opened against this working directory.
 - `includeNonInteractive=1` — include piped `hydra cat` sessions that are normally hidden.
+- `status=warm` | `status=cold` — return only one side of the warm/cold split, filtering on the entry's own `status` field. `warm` is answered from the daemon's in-memory session map without reading the session store, so it stays cheap on an install with a large history: a client watching live state (busy / awaiting-input) should poll this rather than the full list, which has to stat and serialize every cold record for a caller that will discard them. An unrecognised value is ignored and the full list returned, which is also how a daemon predating this parameter behaves — so a client that needs the guarantee should still check `status` on each row.
 
 **Response — `200 OK`**
 

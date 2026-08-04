@@ -81,14 +81,28 @@ export function registerSessionRoutes(
 ): void {
   app.get("/v1/sessions", async (request) => {
     const query = request.query as
-      | { cwd?: string; includeNonInteractive?: string }
+      | { cwd?: string; includeNonInteractive?: string; status?: string }
       | undefined;
     const includeNonInteractive =
       query?.includeNonInteractive === "1" ||
       query?.includeNonInteractive === "true";
+    // `status=warm` returns only live sessions, served without touching the
+    // session store. Cheap enough to poll: a machine with a thousand cold
+    // records answers it from the in-memory map instead of statting all of
+    // them and serializing half a megabyte the caller will discard.
+    //
+    // An unrecognised value is ignored rather than rejected, so a client
+    // asking for something this daemon doesn't know gets the full list and
+    // can filter for itself — the same way an older daemon behaves for a
+    // client that sends the param at all.
+    const status =
+      query?.status === "warm" || query?.status === "cold"
+        ? query.status
+        : undefined;
     const sessions = await manager.list({
       cwd: query?.cwd,
       includeNonInteractive,
+      ...(status ? { status } : {}),
     });
     return { sessions };
   });

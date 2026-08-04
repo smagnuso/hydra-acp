@@ -2279,9 +2279,23 @@ export class SessionManager {
   }
 
   async list(
-    filter: { cwd?: string; includeNonInteractive?: boolean } = {},
+    filter: {
+      cwd?: string;
+      includeNonInteractive?: boolean;
+      // Restrict to one side of the warm/cold split, named for the
+      // SessionListEntry field it filters on.
+      //
+      // "warm" is the one that earns its keep: it skips the cold-record
+      // walk, which is the entire cost of a list on a machine with a long
+      // history — a thousand records to stat and serialize so a caller can
+      // throw away all but the handful actually running. Anything POLLING
+      // for live state must pass it.
+      status?: "warm" | "cold";
+    } = {},
   ): Promise<SessionListEntry[]> {
-    const key = `${filter.cwd ?? ""}|${filter.includeNonInteractive ? "1" : "0"}`;
+    const key =
+      `${filter.cwd ?? ""}|${filter.includeNonInteractive ? "1" : "0"}` +
+      `|${filter.status ?? ""}`;
     const now = Date.now();
     const cached = this.listCache.get(key);
     if (cached && cached.expiresAt > now) {
@@ -2308,7 +2322,11 @@ export class SessionManager {
   }
 
   private async listUncached(
-    filter: { cwd?: string; includeNonInteractive?: boolean } = {},
+    filter: {
+      cwd?: string;
+      includeNonInteractive?: boolean;
+      status?: "warm" | "cold";
+    } = {},
   ): Promise<SessionListEntry[]> {
     const entries: SessionListEntry[] = [];
     const liveIds = new Set<string>();
@@ -2328,10 +2346,19 @@ export class SessionManager {
     const liveSessions = [...this.sessions.values()].filter(
       (s) => !filter.cwd || s.cwd === filter.cwd,
     );
-    const liveStats = await Promise.all(
-      liveSessions.map((s) => historyStatus(s.sessionId)),
-    );
-    for (let i = 0; i < liveSessions.length; i += 1) {
+    // status=cold still needs the live IDS — they're what excludes a live
+    // session's record from the cold set — but none of the per-session
+    // stats or entry building below.
+    if (filter.status === "cold") {
+      for (const session of liveSessions) {
+        liveIds.add(session.sessionId);
+      }
+    }
+    const liveStats =
+      filter.status === "cold"
+        ? []
+        : await Promise.all(liveSessions.map((s) => historyStatus(s.sessionId)));
+    for (let i = 0; i < liveStats.length; i += 1) {
       const session = liveSessions[i]!;
       const hist = liveStats[i]!;
       liveIds.add(session.sessionId);
@@ -2371,6 +2398,9 @@ export class SessionManager {
         compactionState: session.compactionState,
         forkSynthesisState: session.forkSynthesisState,
       });
+    }
+    if (filter.status === "warm") {
+      return entries;
     }
     // Propagate disk errors so list()'s cache entry evicts and the next
     // caller retries instead of seeing an empty cold-record set wedged

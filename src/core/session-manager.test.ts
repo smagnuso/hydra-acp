@@ -3341,6 +3341,67 @@ describe("SessionManager: parentSessionId", () => {
     expect(entries[0]!.parentSessionId).toBe("hydra_session_parent");
   });
 
+  // The reason status=warm exists: three extensions poll this every 2s to
+  // find the handful of live sessions, and answering it from the store cost
+  // ~200ms of daemon CPU per uncached call on an install with a thousand
+  // records. status=warm is answered from the in-memory map — so the
+  // assertion that matters is that the store is never touched.
+  it("answers list({status:'warm'}) without reading the session store", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_live" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    const store = (manager as unknown as { store: { list: () => unknown } }).store;
+    const listSpy = vi.spyOn(store, "list");
+
+    const warm = await manager.list({
+      includeNonInteractive: true,
+      status: "warm",
+    });
+    expect(warm).toHaveLength(1);
+    expect(warm[0]!.status).toBe("warm");
+    expect(listSpy).not.toHaveBeenCalled();
+
+    // The unfiltered call still does, so the two share no cache entry.
+    await manager.list({ includeNonInteractive: true });
+    expect(listSpy).toHaveBeenCalled();
+  });
+
+  // A `status` param that only honoured one of its two values would be a
+  // trap. cold=only still has to consult the live map — live ids are what
+  // exclude a running session's record from the cold set — but it skips the
+  // per-live-session stats and entry building.
+  it("answers list({status:'cold'}) without the live session", async () => {
+    const mock = makeMockAgent({ agentId: "claude-code", cwd: WORK_CWD });
+    const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+    requestMock
+      .mockResolvedValueOnce({ protocolVersion: 1 })
+      .mockResolvedValueOnce({ sessionId: "u_live" });
+
+    const manager = new SessionManager(
+      fakeRegistry([fakeRegistryAgent("claude-code")]),
+      () => mock.agent,
+    );
+    const live = await manager.create({ agentId: "claude-code", cwd: WORK_CWD });
+
+    const cold = await manager.list({
+      includeNonInteractive: true,
+      status: "cold",
+    });
+    // The live session has a record on disk, but it is live, so it must not
+    // show up as cold.
+    expect(cold.map((e) => e.sessionId)).not.toContain(live.sessionId);
+    expect(cold.every((e) => e.status === "cold")).toBe(true);
+  });
+
   it("surfaces parentSessionId for a cold session in list()", async () => {
     const { SessionStore } = await import("./session-store.js");
     const store = new SessionStore();
