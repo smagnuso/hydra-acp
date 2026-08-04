@@ -4269,7 +4269,10 @@ export class Session {
       }
     }
     for (const c of this.agentAdvertisedCommands) {
-      const w = firstWord(c.name);
+      // Agents may advertise with or without the leading slash; reserve
+      // the bare form either way or the alias check silently misses.
+      const raw = firstWord(c.name);
+      const w = raw.startsWith("/") ? raw.slice(1) : raw;
       if (w) {
         reserved.add(w);
       }
@@ -4316,6 +4319,22 @@ export class Session {
   // can re-deliver via the attach response _meta.
   agentOnlyAdvertisedCommands(): AdvertisedCommand[] {
     return [...this.agentAdvertisedCommands];
+  }
+
+  // True when the agent advertised a slash command with this first word.
+  // Accepts the word with or without its leading slash.
+  private agentKnowsSlashCommand(word: string): boolean {
+    const strip = (s: string): string => (s.startsWith("/") ? s.slice(1) : s);
+    const bare = strip(word);
+    if (!bare) {
+      return false;
+    }
+    for (const c of this.agentAdvertisedCommands) {
+      if (strip(c.name.split(/\s+/)[0] ?? "") === bare) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // The agent's advertised modes list, for callers that need a snapshot.
@@ -6828,6 +6847,28 @@ export class Session {
         void 0;
       }
     }
+    // Unknown-slash escape. A single-line prompt starting with a slash
+    // word the agent never advertised (`/etc/passwd`, `/usr/bin/foo`, a
+    // typo'd command) is silently swallowed by agents like opencode,
+    // which parse it as an unknown slash command and then no-op the whole
+    // turn (opencode: acp/service.ts detectSlashCommand → unknown name →
+    // end_turn with no work). Forward a copy prefixed with U+200B so the
+    // text no longer starts with a slash. A leading *space* does not work:
+    // detectSlashCommand trims first. ZERO WIDTH SPACE is not JS
+    // whitespace, so it survives .trim() while staying invisible in the
+    // rendered prompt. Only the copy sent upstream is escaped — the echo,
+    // transcript and queue entry keep the user's original text. Gated on
+    // the agent having advertised at least one command: agents that never
+    // send available_commands_update may still implement commands, and we
+    // must not escape those.
+    let outboundPrompt = entry.prompt;
+    if (
+      slashFirstWord &&
+      this.agentAdvertisedCommands.length > 0 &&
+      !this.agentKnowsSlashCommand(slashFirstWord)
+    ) {
+      outboundPrompt = prefixPromptText(entry.prompt, SLASH_ESCAPE_PREFIX);
+    }
     let response: unknown;
     try {
       // Route through the transformer chain so transformers that register
@@ -6837,7 +6878,7 @@ export class Session {
       // (sessionId → upstreamSessionId) and tail-forwards to the agent.
       response = await this.forwardRequest(
         "session/prompt",
-        { sessionId: this.sessionId, prompt: entry.prompt },
+        { sessionId: this.sessionId, prompt: outboundPrompt },
         entry.emitterName ? new Set([entry.emitterName]) : new Set(),
         entry.chainStartIdx ?? 0,
       );
@@ -7318,6 +7359,28 @@ export function extractPromptText(prompt: unknown): string {
       return "";
     })
     .join("");
+}
+
+// ZERO WIDTH SPACE. Prefixed to a prompt that would otherwise be parsed
+// as an unknown slash command by the agent. Invisible when rendered and,
+// unlike a space or newline, not stripped by String.prototype.trim().
+export const SLASH_ESCAPE_PREFIX = "\u200B";
+
+// Return a copy of a prompt with `prefix` prepended to its first text
+// block. Non-text blocks (resource links, images) and the rest of the
+// blocks are left untouched. Returns the input unchanged when there is no
+// text block to prefix.
+export function prefixPromptText(prompt: unknown[], prefix: string): unknown[] {
+  const idx = prompt.findIndex(
+    (b) => b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string",
+  );
+  if (idx < 0) {
+    return prompt;
+  }
+  const block = prompt[idx] as { text: string };
+  const copy: unknown[] = [...prompt];
+  copy[idx] = { ...block, text: `${prefix}${block.text}` };
+  return copy;
 }
 
 // Default response when a transformer returns { action: "stop" } on a

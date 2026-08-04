@@ -1209,6 +1209,83 @@ describe("Session", () => {
     });
   });
 
+  describe("unknown-slash escape", () => {
+    const advertise = (
+      mock: ReturnType<typeof makeSession>["mock"],
+      upstreamId: string,
+      names: string[],
+    ): void => {
+      mock.triggerNotification("session/update", {
+        sessionId: upstreamId,
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: names.map((name) => ({ name })),
+        },
+      });
+    };
+
+    const forwardedText = (mock: ReturnType<typeof makeSession>["mock"]): string => {
+      const requestMock = mock.agent.connection.request as ReturnType<typeof vi.fn>;
+      const call = requestMock.mock.calls.find(([method]) => method === "session/prompt");
+      return (
+        (call?.[1] as { prompt: Array<{ text: string }> } | undefined)?.prompt[0]?.text ?? ""
+      );
+    };
+
+    it("prefixes U+200B when the slash word is not an advertised agent command", async () => {
+      const { session, mock } = makeSession("sess_sl1", "u_sl1");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      advertise(mock, "u_sl1", ["compact"]);
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_sl1",
+        prompt: [{ type: "text", text: "/etc/passwd" }],
+      });
+
+      // Must survive the agent's .trim() (opencode trims before its
+      // startsWith("/") check), hence U+200B rather than a space.
+      expect(forwardedText(mock)).toBe("\u200B/etc/passwd");
+      expect(forwardedText(mock).trim().startsWith("/")).toBe(false);
+    });
+
+    it("leaves an advertised agent command untouched", async () => {
+      const { session, mock } = makeSession("sess_sl2", "u_sl2");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      advertise(mock, "u_sl2", ["/compact"]);
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_sl2",
+        prompt: [{ type: "text", text: "/compact now" }],
+      });
+
+      expect(forwardedText(mock)).toBe("/compact now");
+    });
+
+    it("does not escape when the agent advertised nothing", async () => {
+      const { session, mock } = makeSession("sess_sl3", "u_sl3");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+      (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        stopReason: "end_turn",
+      });
+
+      await session.prompt(a.client.clientId, {
+        sessionId: "sess_sl3",
+        prompt: [{ type: "text", text: "/etc/passwd" }],
+      });
+
+      expect(forwardedText(mock)).toBe("/etc/passwd");
+    });
+  });
+
   describe("interactive promotion", () => {
     const endTurn = (mock: ReturnType<typeof makeSession>["mock"]): void => {
       (mock.agent.connection.request as ReturnType<typeof vi.fn>).mockResolvedValue({
