@@ -48,6 +48,7 @@ import {
   SGR_RESET,
   styleCarriesInlineSgr,
 } from "./theme/index.js";
+import { SCHEME_REPORTS_OFF } from "./theme/sense.js";
 import { depthForTerminal } from "./theme/capability.js";
 
 // An SGR sequence, i.e. a CSI ending in "m". Deliberately not any escape:
@@ -8810,6 +8811,7 @@ export function emergencyTerminalReset(): void {
     AUTOWRAP_ON, // auto-wrap on
     SHOW_CURSOR, // show cursor
     POINTER_SHAPE_DEFAULT, // reset OS pointer-shape (OSC 22)
+    SCHEME_REPORTS_OFF, // stop light/dark change notifications (mode 2031)
     "\x1b]9;4;0\x07", // clear OSC 9;4 progress indicator
     ALT_SCREEN_LEAVE, // leave alternate screen
   ].join("");

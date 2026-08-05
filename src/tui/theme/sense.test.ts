@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { rgb } from "./color.js";
 import {
   hasOsc11,
-  installOsc11Scrub,
+  parseSchemeReport,
+  schemeBackground,
+  installReplyFilter,
   parseOsc11,
   scrubOsc11,
   senseBackground,
@@ -182,7 +184,7 @@ describe("senseBackground", () => {
   });
 });
 
-describe("installOsc11Scrub", () => {
+describe("installReplyFilter", () => {
   const reply = "\u001b]11;rgb:0000/0000/0000\u0007";
   const fakeTerm = () => {
     const seen: string[] = [];
@@ -198,21 +200,21 @@ describe("installOsc11Scrub", () => {
 
   it("drops a reply that arrives on its own", () => {
     const f = fakeTerm();
-    installOsc11Scrub(f.term);
+    installReplyFilter(f.term);
     f.term.onStdin(Buffer.from(reply, "latin1"));
     expect(f.seen).toEqual([]);
   });
 
   it("keeps real keystrokes in the same chunk", () => {
     const f = fakeTerm();
-    installOsc11Scrub(f.term);
+    installReplyFilter(f.term);
     f.term.onStdin(Buffer.from(`ab${reply}cd`, "latin1"));
     expect(f.seen).toEqual(["abcd"]);
   });
 
   it("passes unrelated input through untouched, bytes and all", () => {
     const f = fakeTerm();
-    installOsc11Scrub(f.term);
+    installReplyFilter(f.term);
     // Multi-byte UTF-8 must survive the latin1 round trip byte-for-byte.
     const bytes = Buffer.from("héllo→\u001b[A", "utf8");
     f.term.onStdin(bytes);
@@ -220,7 +222,92 @@ describe("installOsc11Scrub", () => {
   });
 
   it("is a no-op on something without onStdin", () => {
-    expect(() => installOsc11Scrub({})).not.toThrow();
-    expect(() => installOsc11Scrub(undefined)).not.toThrow();
+    expect(() => installReplyFilter({})).not.toThrow();
+    expect(() => installReplyFilter(undefined)).not.toThrow();
+  });
+});
+
+describe("parseSchemeReport", () => {
+  it("reads both values", () => {
+    expect(parseSchemeReport("\u001b[?997;1n")).toBe("dark");
+    expect(parseSchemeReport("\u001b[?997;2n")).toBe("light");
+  });
+
+  it("finds one among other input", () => {
+    expect(parseSchemeReport("a\u001b[?997;2nb")).toBe("light");
+  });
+
+  // Two values are defined. A third means this is not the sequence we think.
+  it("ignores anything else", () => {
+    expect(parseSchemeReport("\u001b[?997;3n")).toBeUndefined();
+    expect(parseSchemeReport("\u001b[?996;1n")).toBeUndefined();
+    expect(parseSchemeReport("")).toBeUndefined();
+  });
+
+  it("stands in for a colour when OSC 11 will not answer", () => {
+    expect(schemeBackground("dark")).toEqual(rgb(0, 0, 0));
+    expect(schemeBackground("light")).toEqual(rgb(255, 255, 255));
+  });
+});
+
+describe("installReplyFilter routes what it strips", () => {
+  const fakeTerm = () => {
+    const seen: string[] = [];
+    return {
+      seen,
+      term: {
+        onStdin(chunk: Buffer) {
+          seen.push(chunk.toString("latin1"));
+        },
+      },
+    };
+  };
+
+  it("delivers a scheme change and keeps it out of the input", () => {
+    const f = fakeTerm();
+    const schemes: string[] = [];
+    installReplyFilter(f.term, { onScheme: (s) => schemes.push(s) });
+    f.term.onStdin(Buffer.from("x\u001b[?997;2ny", "latin1"));
+    expect(schemes).toEqual(["light"]);
+    expect(f.seen).toEqual(["xy"]);
+  });
+
+  // The delivery path for the live re-query: after grabInput, terminal-kit owns
+  // stdin, so senseBackground's raw-mode probe cannot be used a second time.
+  it("delivers a background reply", () => {
+    const f = fakeTerm();
+    const colors: unknown[] = [];
+    installReplyFilter(f.term, { onBackground: (c) => colors.push(c) });
+    f.term.onStdin(Buffer.from("\u001b]11;rgb:ffff/ffff/ffff\u0007", "latin1"));
+    expect(colors).toEqual([rgb(255, 255, 255)]);
+    expect(f.seen).toEqual([]);
+  });
+
+  it("handles both arriving in one chunk", () => {
+    const f = fakeTerm();
+    const events: string[] = [];
+    installReplyFilter(f.term, {
+      onBackground: () => events.push("bg"),
+      onScheme: () => events.push("scheme"),
+    });
+    f.term.onStdin(
+      Buffer.from("\u001b[?997;1n\u001b]11;rgb:0/0/0\u0007k", "latin1"),
+    );
+    expect(events).toEqual(["bg", "scheme"]);
+    // Keystrokes are forwarded BEFORE the handlers run, so a redraw triggered by
+    // a scheme change cannot land between a keypress and its handler.
+    expect(f.seen).toEqual(["k"]);
+  });
+
+  it("does not call handlers for ordinary input", () => {
+    const f = fakeTerm();
+    const events: string[] = [];
+    installReplyFilter(f.term, {
+      onBackground: () => events.push("bg"),
+      onScheme: () => events.push("scheme"),
+    });
+    f.term.onStdin(Buffer.from("\u001b[Ahello", "latin1"));
+    expect(events).toEqual([]);
+    expect(f.seen).toEqual(["\u001b[Ahello"]);
   });
 });

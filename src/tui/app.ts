@@ -211,8 +211,20 @@ let themeChoices: Array<{
 let activeThemeName = "terminal";
 // The band reference, carried alongside the theme so cycling keeps it.
 let themeBackground: Color | undefined;
+// Set by the session closure, called by the stdin reply filter. The filter is
+// installed before that closure exists (grabInput captures onStdin by reference),
+// so the two are joined here rather than by passing a callback down.
+let schemeChangeHook: ((scheme: ColorScheme) => void) | null = null;
+let backgroundReplyHook: ((color: Color) => void) | null = null;
 import { depthForStream, depthForTerminal } from "./theme/capability.js";
-import { installOsc11Scrub, senseBackground } from "./theme/sense.js";
+import {
+  installReplyFilter,
+  schemeBackground,
+  senseBackground,
+  SCHEME_REPORTS_OFF,
+  SCHEME_REPORTS_ON,
+  type ColorScheme,
+} from "./theme/sense.js";
 import type {
   SidebarEditedFile,
   SidebarLiveSession,
@@ -984,10 +996,22 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     }
   }
   const term = termkit.terminal;
-  // Before anything grabs the keyboard: a background query that answers late
-  // would otherwise be typed into the composer as literal text.
-  if (sensedBackground !== undefined || config.tui.themeBackground === undefined) {
-    installOsc11Scrub(term);
+  // Before anything grabs the keyboard. Two reasons, and the first applies even if
+  // nobody wants the answers: terminal-kit does not recognise either sequence, so
+  // an unfiltered reply is typed into the composer as literal text.
+  //
+  // Handlers are dispatched through module-scope hooks because this has to be
+  // installed here — grabInput captures onStdin by reference — while the code that
+  // reacts (repaint, re-theme) lives in the session closure built further down.
+  installReplyFilter(term, {
+    onBackground: (color) => backgroundReplyHook?.(color),
+    onScheme: (scheme) => schemeChangeHook?.(scheme),
+  });
+  // Ask to be told when the terminal's light/dark setting changes. Ignored by
+  // terminals that do not implement mode 2031, which is most of them today.
+  // Turned off in the teardown path alongside the other terminal modes.
+  if (config.tui.themeBackground === undefined) {
+    process.stdout.write(SCHEME_REPORTS_ON);
   }
   // Inline spans and syntax colours are baked into text at parse time, where no
   // terminal is in scope. Tell the theme what this one can do so those match
@@ -3826,16 +3850,16 @@ async function runSession(
   //
   // Tool blocks and diffs re-render too: their bodies carry cli-highlight's
   // syntax colours, baked the same way.
-  const cycleTheme = (): void => {
-    if (themeChoices.length === 0) {
-      screen.notify("no themes available");
+  // Re-apply the active theme in place. Shared by the picker's cycling and by a
+  // terminal-driven background change, which differ only in what they changed
+  // first.
+  const reapplyTheme = (): void => {
+    const active = themeChoices.find((t) => t.name === activeThemeName);
+    if (active === undefined) {
       return;
     }
-    const at = themeChoices.findIndex((t) => t.name === activeThemeName);
-    const next = themeChoices[(at + 1) % themeChoices.length]!;
-    activeThemeName = next.name;
-    setTheme(next.palette, {
-      ...next.overrides,
+    setTheme(active.palette, {
+      ...active.overrides,
       background: themeBackground,
     });
     reparseScrollbackBlocks();
@@ -3846,6 +3870,69 @@ async function runSession(
     // row cache, so this has to be a full redraw rather than a repaint.
     screen.fullRedraw();
   };
+
+  const cycleTheme = (): void => {
+    if (themeChoices.length === 0) {
+      screen.notify("no themes available");
+      return;
+    }
+    const at = themeChoices.findIndex((t) => t.name === activeThemeName);
+    activeThemeName = themeChoices[(at + 1) % themeChoices.length]!.name;
+    reapplyTheme();
+  };
+
+  // The terminal told us its light/dark setting changed (mode 2031).
+  //
+  // The notification carries a bit; OSC 11 carries the colour the bands are
+  // actually derived from. So this asks, and applies whichever arrives first: the
+  // reply, or a timeout falling back to the bit. Applying the bit immediately and
+  // refining on reply would be two redraws for one event.
+  //
+  // Config outranks all of this — a user who set tui.themeBackground has said what
+  // their terminal is, and a terminal changing its mind does not overrule them. The
+  // mode is not even enabled in that case, so this is belt and braces.
+  let schemePending: ReturnType<typeof setTimeout> | null = null;
+  const applyBackground = (color: Color): void => {
+    if (schemePending !== null) {
+      clearTimeout(schemePending);
+      schemePending = null;
+    }
+    if (config.tui.themeBackground !== undefined) {
+      return;
+    }
+    // Same colour: nothing derived from it would change, and a full redraw on
+    // every spurious notification would be visible for no reason.
+    if (
+      themeBackground !== undefined &&
+      themeBackground.kind === "rgb" &&
+      color.kind === "rgb" &&
+      themeBackground.r === color.r &&
+      themeBackground.g === color.g &&
+      themeBackground.b === color.b
+    ) {
+      return;
+    }
+    themeBackground = color;
+    reapplyTheme();
+  };
+  const onSchemeChange = (scheme: ColorScheme): void => {
+    if (config.tui.themeBackground !== undefined) {
+      return;
+    }
+    if (schemePending !== null) {
+      clearTimeout(schemePending);
+    }
+    schemePending = setTimeout(() => {
+      schemePending = null;
+      applyBackground(schemeBackground(scheme));
+    }, 200);
+    schemePending.unref?.();
+    // The reply comes back through the stdin filter, which calls applyBackground
+    // and cancels the timer above.
+    process.stdout.write("\u001b]11;?\u0007");
+  };
+  schemeChangeHook = onSchemeChange;
+  backgroundReplyHook = applyBackground;
 
   const applyOptionToggle = (id: OptionId): void => {
     switch (id) {
