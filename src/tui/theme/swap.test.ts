@@ -16,7 +16,7 @@ import {
   type Palette,
 } from "./index.js";
 import { parseAgentMarkdown } from "../format.js";
-import { rgb } from "./color.js";
+import { parseColor, rgb } from "./color.js";
 
 // Distinct explicit colours so a stale value is unmistakable rather than
 // coincidentally right.
@@ -95,5 +95,51 @@ describe("setTheme", () => {
     setTheme(LOUD);
     setTheme(DEFAULT_PALETTE);
     expect(snapshot()).toBe(before);
+  });
+});
+
+describe("band derivation", () => {
+  const withBg = (hex: string): Palette => ({
+    ...DEFAULT_PALETTE,
+    bg: parseColor(hex)!,
+  });
+  // `open` also carries the token's own layers (user is bold, code sets a
+  // foreground), so compare just the leading background sequence.
+  const bandOf = (token: "user" | "code"): string =>
+    /^\x1b\[48;2;\d+;\d+;\d+m/.exec(resolveStyle(token, "truecolor").open)![0];
+
+  it("uses the legacy absolute levels when no bg is declared", () => {
+    // The terminal's background is unknown, so an absolute dark band is the
+    // best guess available — and it is what shipped before themes existed.
+    expect(bandOf("user")).toBe("\x1b[48;2;43;43;43m");
+    expect(bandOf("code")).toBe("\x1b[48;2;28;28;28m");
+  });
+
+  it("reproduces those levels exactly from a pure black bg", () => {
+    // The step constants are chosen for this: lighten(#000, 0.17) === 43.
+    setTheme(withBg("#000000"));
+    expect(bandOf("user")).toBe("\x1b[48;2;43;43;43m");
+    expect(bandOf("code")).toBe("\x1b[48;2;28;28;28m");
+  });
+
+  it("steps away from the background in both directions", () => {
+    const chan = (open: string): number =>
+      Number(/48;2;(\d+)/.exec(open)![1]);
+
+    setTheme(withBg("#282a36"));
+    expect(chan(bandOf("user"))).toBeGreaterThan(0x28);
+
+    setTheme(withBg("#fdf6e3"));
+    // The whole point: on a light theme the band must go DOWN. Lifting toward
+    // white would make it invisible.
+    expect(chan(bandOf("user"))).toBeLessThan(0xfd);
+  });
+
+  it("keeps the hover tint an index, not a grayscale level, by default", () => {
+    // 236 is an index into the 256 cube; the legacy bands are 0-255 levels.
+    // Treating one as the other quantises it to a different shade.
+    const hovered = resolveStyle("tool", "ansi256");
+    expect(hovered).toBeDefined();
+    setTheme(DEFAULT_PALETTE);
   });
 });

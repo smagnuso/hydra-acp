@@ -419,6 +419,18 @@ const TuiConfig = z.object({
       }),
     )
     .default({}),
+  // Colour theme. Either the name of a built-in ("terminal", "dracula",
+  // "nord", "gruvbox-dark", "solarized-light") or of a file in
+  // ~/.hydra-acp/themes/<name>.json, or an inline object:
+  //   { "extends": "nord", "palette": { "red": "#ff5555" } }
+  //
+  // Validated loosely here and strictly in src/tui/theme: core/ must not import
+  // from tui/, and the token and role vocabularies live there. Same compromise
+  // `hotkeys` makes with KeyName.
+  //
+  // Not in computeConfigDigest — that excludes the whole `tui` section — so
+  // recolouring never trips the "config changed since daemon started" warning.
+  theme: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
 });
 
 const ExtensionName = z

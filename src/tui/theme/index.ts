@@ -18,6 +18,7 @@
 import type { Style } from "../format.js";
 import {
   ansi,
+  band,
   bgOpen,
   bgReset,
   fgOpen,
@@ -110,7 +111,24 @@ interface Layer {
 // own slot alongside `blue`, which meant the same colour was written twice.
 
 /** A full set of palette slots. A theme supplies some or all of these. */
-export type Palette = Record<PaletteSlot, Color>;
+export type Palette = Record<PaletteSlot, Color> & PaletteExtras;
+
+/**
+ * Optional slots a theme may declare beyond the 16 colours.
+ *
+ * `bg` is a DECLARATION, not an instruction: hydra does not paint a
+ * full-screen background (that would fight terminal transparency and per-pane
+ * tmux colour). It is the reference point the background bands are derived
+ * from, so declaring it is what makes a light theme's bands step the right way.
+ *
+ * `fg` makes otherwise-unstyled text explicit. Left unset, unstyled text keeps
+ * inheriting the terminal's foreground, which is why an unthemed hydra adapts
+ * to a light terminal for free.
+ */
+export interface PaletteExtras {
+  bg?: Color;
+  fg?: Color;
+}
 
 export type PaletteSlot =
   | "black" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white"
@@ -145,11 +163,57 @@ let palette: Palette = DEFAULT_PALETTE;
 // against the terminal's depth. Once a theme can set `bg`, these become
 // derived — band(bg, step) — and the direction of the lift follows bg's
 // luminance so a light theme works from one key.
-const bands = {
+/**
+ * Background bands: the user-turn stripe, the code block, and the hover tints.
+ *
+ * Derived from `bg` when a theme declares one, so the lift follows its
+ * luminance — lighter on a dark background, darker on a light one. Without that
+ * flip a light theme's bands head toward white and vanish.
+ *
+ * The steps are chosen so a theme declaring pure black reproduces the legacy
+ * absolute levels exactly (lighten(#000, 0.17) === 43). With no `bg` at all
+ * those levels are used directly, which is both the previous behaviour and the
+ * right answer: with the terminal's own background unknown, an absolute dark
+ * band is the best guess available.
+ */
+const BAND_STEPS = {
+  user: 0.17,
+  code: 0.11,
+  hoverThought: 0.1,
+  hoverRow: 0.19,
+} as const;
+
+const LEGACY_BANDS = {
   user: 43,
   code: 28,
   hoverThought: 25,
 } as const;
+
+/** A band is either a derived colour or a legacy absolute grayscale level. */
+type Band = Color | number;
+
+function buildBands(): Record<"user" | "code" | "hoverThought", Band> {
+  const bg = palette.bg;
+  if (bg === undefined) {
+    return LEGACY_BANDS;
+  }
+  return {
+    user: band(bg, BAND_STEPS.user),
+    code: band(bg, BAND_STEPS.code),
+    hoverThought: band(bg, BAND_STEPS.hoverThought),
+  };
+}
+
+// The hover tint with no `bg` declared: 256-colour index 236, a step off most
+// default backgrounds. Deliberately NOT part of `bands`, because a number there
+// means a grayscale LEVEL (0-255) fed through bgGrayscale, and 236 is an index
+// into the cube. Conflating the two quantises it to a different shade.
+const HOVER_ROW_LITERAL: SgrPair = {
+  open: `${CSI}48;5;236m`,
+  close: bgReset,
+};
+
+let bands = buildBands();
 
 /** A palette colour used as a foreground. */
 const fgL = (c: Color): Layer => ({
@@ -209,7 +273,7 @@ function buildRoles() {
   // used where the normal case should not draw the eye (a Ready status), where
   // removing emphasis IS the signal (a hovered hint chunk), and by the
   // highlight.js scopes that carry no colour of their own.
-  fg: [] as Layer[],
+  fg: palette.fg === undefined ? ([] as Layer[]) : [fgL(palette.fg)],
   fgStrong: [fgL(palette.brightWhite)],
   muted: [dim],
   // The gray a thought sits in: quieter than muted, still legible.
@@ -425,12 +489,13 @@ function flatten(layers: Layer[], depth: ColorDepth): SgrPair {
 // ---------------------------------------------------------------------------
 
 /**
- * A style's layers. `grayBg` is separate from `layers` because its bytes
- * depend on colour depth and so can't be a constant.
+ * A style's layers. The background band is separate from `layers` because its
+ * bytes depend on colour depth, and because it may be a derived colour or a
+ * legacy absolute grayscale level.
  */
 interface StyleSpec {
   layers?: Layer[];
-  grayBg?: number;
+  band?: Band;
   /** Body carries inline SGR spans from format.ts. */
   inlineSgr?: boolean;
 }
@@ -570,7 +635,7 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // Quiet full-width band marking the start of a user turn. Bold on a
   // grayscale lift rather than a colour, so it reads as a boundary rather
   // than a highlight stripe.
-  user: { grayBg: bands.user, layers: [...roles.emphasis] },
+  user: { band: bands.user, layers: [...roles.emphasis] },
 
   // Agent prose takes the terminal's default foreground: it's the bulk of
   // the transcript, and anything else fights the user's theme.
@@ -883,7 +948,7 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // `diff` fence can let context lines sit neutral while cli-highlight's
   // red/green +/- overlay on top. A different shade from the user band so
   // the two are never confused.
-  code: { grayBg: bands.code, layers: [...roles.codeText] },
+  code: { band: bands.code, layers: [...roles.codeText] },
 
   "heading-1": { layers: [...roles.emphasis, ...roles.active], inlineSgr: true },
   "heading-2": { layers: [...roles.emphasis, ...roles.accent], inlineSgr: true },
@@ -949,6 +1014,7 @@ let syntaxCache: Record<string, (code: string) => string> | undefined;
  */
 export function setTheme(next: Palette): void {
   palette = next;
+  bands = buildBands();
   roles = buildRoles();
   spans = buildSpans();
   STYLES = buildStyles();
@@ -971,6 +1037,18 @@ export function syntaxTheme(): Record<string, (code: string) => string> {
   return syntaxCache;
 }
 
+/** A band as a Layer, whichever of the two forms it takes. */
+function bandLayer(b: Band): Layer {
+  if (typeof b === "number") {
+    // Legacy absolute grayscale, quantised by bgGrayscale against the depth.
+    return {
+      open: (depth) => bgGrayscale(b, depth).open,
+      close: bgReset,
+    };
+  }
+  return bgL(b);
+}
+
 const EMPTY: StyleRender = { open: "", close: "", inlineSgr: false };
 
 /** Resolve a style to the bytes that wrap its text. */
@@ -988,10 +1066,8 @@ export function resolveStyle(
     return EMPTY;
   }
   const layers: Layer[] = [];
-  if (spec.grayBg !== undefined) {
-    // Already depth-resolved by bgGrayscale, so its open ignores the argument.
-    const gray = bgGrayscale(spec.grayBg, depth);
-    layers.push({ open: () => gray.open, close: gray.close });
+  if (spec.band !== undefined) {
+    layers.push(bandLayer(spec.band));
   }
   if (spec.layers) {
     layers.push(...spec.layers);
@@ -1219,7 +1295,14 @@ const HOVER_BANDED = new Set<Style>([
  * doesn't drift with colour depth; hover needs to be the same weight
  * everywhere.
  */
-const HOVER_BAND: SgrPair = { open: `${CSI}48;5;236m`, close: `${CSI}49m` };
+function hoverBand(depth: ColorDepth): SgrPair {
+  const bg = palette.bg;
+  if (bg === undefined) {
+    return HOVER_ROW_LITERAL;
+  }
+  const layer = bgL(band(bg, BAND_STEPS.hoverRow));
+  return { open: layer.open(depth), close: layer.close };
+}
 
 /**
  * Resolve a style as it renders on a hovered row.
@@ -1249,7 +1332,7 @@ export function resolveHovered(
   }
 
   if (style === "thought") {
-    const band = bgGrayscale(bands.hoverThought, depth).open;
+    const bandOpen = bandLayer(bands.hoverThought).open(depth);
     // Lift the dim brightBlack baseline to the default foreground so the
     // thought stays readable on the band. Every place the body restores
     // brightBlack (a span closing back to the row's base) becomes SGR 39 —
@@ -1260,13 +1343,13 @@ export function resolveHovered(
     // across the empty columns is unaffected and the row no longer depends on
     // the painter's styleReset to stop the background smearing.
     return {
-      open: band,
-      close: `${CSI}49m`,
+      open: bandOpen,
+      close: bgReset,
       inlineSgr: true,
       transform: (text) =>
         restoreBandAfterResets(
           text.split(spans.thoughtBase).join(`${CSI}39m`),
-          band,
+          bandOpen,
         ),
     };
   }
@@ -1289,15 +1372,16 @@ export function resolveHovered(
     return undefined;
   }
   const base = resolveStyle(style, depth);
+  const hb = hoverBand(depth);
   return {
-    open: HOVER_BAND.open + base.open,
-    close: base.close + HOVER_BAND.close,
+    open: hb.open + base.open,
+    close: base.close + hb.close,
     inlineSgr: base.inlineSgr,
     // A span inside the body closes with a full reset, which would drop the
     // band for the rest of the row. Only span-bearing styles need this;
     // plan-pending is the one that reaches it today.
     transform: base.inlineSgr
-      ? (text) => restoreBandAfterResets(text, HOVER_BAND.open)
+      ? (text) => restoreBandAfterResets(text, hb.open)
       : undefined,
   };
 }

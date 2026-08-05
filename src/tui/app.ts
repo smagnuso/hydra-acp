@@ -183,7 +183,12 @@ import {
   type Style,
   type ToolLineState,
 } from "./format.js";
-import { paint, styled } from "./theme/index.js";
+import { paint, setTheme, styled } from "./theme/index.js";
+import { loadTheme } from "./theme/load.js";
+
+// Theme-load problems, carried from config load to the first paint. Module
+// scope because the two happen in different functions.
+let pendingThemeProblems: string[] = [];
 import { depthForStream } from "./theme/capability.js";
 import type {
   SidebarEditedFile,
@@ -895,6 +900,14 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // local TUI invocation falls through to resolveLocalTarget here.
   const target = opts.target ?? (await resolveLocalTarget(config));
   setLogMaxBytes(config.tui.logMaxBytes);
+  // Apply the colour theme before anything draws. Problems are collected rather
+  // than thrown: a typo in a hand-edited theme should show up as a message in
+  // the transcript, not stop the TUI from starting.
+  const loadedTheme = await loadTheme(config.tui.theme, paths.themesDir());
+  setTheme(loadedTheme.palette);
+  // Stashed rather than reported here: the transcript does not exist yet, and
+  // stderr would be wiped by the alt-screen switch.
+  pendingThemeProblems = loadedTheme.problems;
   // Only autostart the daemon when it's on this machine. Remote
   // targets get a connection error from the WS layer if the daemon
   // isn't up, which is the right behavior (we can't reach across the
@@ -8140,6 +8153,20 @@ async function runSession(
   });
 
   process.on("SIGINT", sigintHandler);
+
+  // Anything wrong with the theme, reported once the transcript exists. Held
+  // until here rather than written to stderr at load time, which the alt-screen
+  // switch would have wiped.
+  if (pendingThemeProblems.length > 0) {
+    screen.appendLines(
+      pendingThemeProblems.map((problem): FormattedLine => ({
+        prefix: "  ",
+        body: `theme: ${problem}`,
+        bodyStyle: "notice-error",
+      })),
+    );
+    pendingThemeProblems = [];
+  }
 
   // Composer prompt typed in the picker before the session existed.
   // Fire it once, now that screen.start() and the dispatcher are wired

@@ -82,6 +82,10 @@ export const paths = {
   logFile: () => path.join(hydraHome(), "daemon.log"),
   currentLogFile: () => path.join(hydraHome(), "current.log"),
   registryCache: () => path.join(hydraHome(), "registry.json"),
+  // User-authored colour themes, one JSON file per theme. A file here shadows a
+  // built-in of the same name, so a shipped theme can be replaced without
+  // renaming it in config.
+  themesDir: () => path.join(hydraHome(), "themes"),
   // Per-TTY sticky pointer to the last hydra session that lived on
   // this controlling terminal. Written on every TUI attach / session
   // switch; NEVER cleared on exit. `hydra --reattach` reads this to
