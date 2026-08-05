@@ -13,15 +13,25 @@
 // sequences directly should land on identical bytes. If a snapshot moves,
 // the migration changed what the user sees.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   parseAgentMarkdown,
   parseThoughtMarkdown,
   type FormattedLine,
 } from "../format.js";
 import { writeBodyWithHighlight, writeStyled } from "../screen.js";
-import { createCapturingTerminal, visible } from "./capture.js";
+import { createCapturingTerminal, visible, isolateColorEnv } from "./capture.js";
 import { buildSyntaxTheme } from "./index.js";
+
+// The `generic` passed below is meant to pin colour depth; ambient COLORTERM
+// would otherwise override it. See isolateColorEnv.
+let restoreColorEnv: () => void;
+beforeEach(() => {
+  restoreColorEnv = isolateColorEnv();
+});
+afterEach(() => {
+  restoreColorEnv();
+});
 
 // Constructs chosen to hit every inline emission point in
 // applyInlineMarkupWithLinks, plus the per-style closer tables

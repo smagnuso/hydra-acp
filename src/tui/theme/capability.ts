@@ -125,6 +125,45 @@ export function colorEnabled(
   return depthForStream(stream, env) !== "none";
 }
 
+/**
+ * Whether a multiplexer sits in the way and will not forward 24-bit colour.
+ *
+ * COLORTERM inside tmux describes the OUTER terminal — tmux passes the variable
+ * through whether or not it will pass the escapes through. An unconfigured tmux
+ * advertises 256 colours and no RGB:
+ *
+ *     $ tmux info | grep -E 'RGB|Tc'
+ *       RGB: [missing]
+ *       Tc:  [missing]
+ *
+ * Emitting 24-bit at it means tmux re-maps the sequences itself, which is how a
+ * carefully derived slate band arrives as something else entirely. So the
+ * COLORTERM upgrade is withheld for the default `screen*` TERM that tmux sets
+ * when nobody has configured it otherwise.
+ *
+ * A user who HAS configured truecolor passthrough sets `default-terminal` to
+ * something else (`tmux-256color` conventionally) alongside the RGB terminal
+ * feature, and that case is allowed through — the changed TERM is the signal
+ * that someone made a decision.
+ */
+function multiplexerBlocks24Bit(env: Env): boolean {
+  if (!inTmux(env)) {
+    return false;
+  }
+  return (env.TERM ?? "").toLowerCase().startsWith("screen");
+}
+
+/**
+ * Whether tmux is in the way.
+ *
+ * Also a 256-colour floor: tmux has done 256 colours for its entire history,
+ * and the `screen` TERM it sets by default advertises 8. Believing that TERM
+ * costs a tmux user every themed colour.
+ */
+function inTmux(env: Env): boolean {
+  return env.TMUX !== undefined && env.TMUX !== "";
+}
+
 /** The shape of terminal-kit's own capability answer that we read. */
 interface TerminalCaps {
   esc?: {
@@ -134,13 +173,26 @@ interface TerminalCaps {
 }
 
 /**
- * Depth for the TUI, taken from terminal-kit's detection rather than redone.
+ * Depth for the TUI.
  *
- * The TUI is an alt-screen app on a TTY, so the only environment question left
- * is NO_COLOR. Everything else defers to terminal-kit: it has already resolved
- * a termconfig, its answer is what governs anything it draws on its own, and
- * matching it is what keeps the grayscale bands on the bytes they have always
- * emitted.
+ * terminal-kit's own answer is the starting point — it has resolved a termconfig
+ * and its answer governs anything it draws itself — but it is not sufficient. It
+ * predates COLORTERM and decides 24-bit purely from TERM, which in practice means
+ * it says NO to almost every terminal that can actually do it:
+ *
+ *     xterm-256color   24bit usable: false   <- gnome-terminal, most others
+ *     screen           24bit usable: false   <- tmux
+ *     xterm-direct     24bit usable: false   <- terminfo's own direct-colour entry
+ *     xterm-truecolor  24bit usable: true    <- essentially only this
+ *
+ * Deferring to it alone meant every theme rendered as a 256-colour
+ * approximation: dracula's #6272a4 comment quantised to #5f5faf, its #8be9fd
+ * cyan to #87d7ff. Close enough to look deliberate and wrong enough to look off.
+ *
+ * So COLORTERM is honoured on top, which is the signal terminals actually set
+ * today. Only ever an UPGRADE, and only from 256 — a terminal terminal-kit
+ * believes cannot do 256 is not told to emit 24-bit on the strength of an
+ * environment variable.
  */
 export function depthForTerminal(
   term: unknown,
@@ -154,13 +206,43 @@ export function depthForTerminal(
   const esc = (term as TerminalCaps | null | undefined)?.esc;
   const usable = (c?: { na?: boolean; fb?: boolean }): boolean =>
     c !== undefined && !c.na && !c.fb;
-  if (usable(esc?.color24bits)) {
-    return "truecolor";
-  }
-  if (usable(esc?.color256)) {
-    return "ansi256";
-  }
-  return "ansi16";
+
+  // terminal-kit's own answer, which is the FLOOR.
+  const own: ColorDepth = usable(esc?.color24bits)
+    ? "truecolor"
+    : usable(esc?.color256)
+      ? "ansi256"
+      : "ansi16";
+
+  // ...and its CEILING, which is a different question and reads a different
+  // field. `na` is terminal-kit saying the capability is absent; `fb` is it
+  // saying it will fall back, which is not the same claim and must not be read
+  // as one. Conflating them dropped the whole TUI to 4-bit inside tmux, where
+  // TERM=screen reports `color256: { fb: true }`: every themed colour went
+  // through quantize16, and dracula's grey code band came out as ansi slot 6,
+  // a cyan stripe across every fenced block.
+  // Only the 256 field caps us. A `na` on color24bits is not a ceiling: that is
+  // the field terminal-kit fills in from TERM alone, and TERM is exactly what
+  // understates 24-bit support — respecting it here would undo the COLORTERM
+  // upgrade for every terminal that needs it.
+  const ceiling: ColorDepth =
+    esc?.color256?.na === true ? "ansi16" : "truecolor";
+
+  // What the environment claims, with the 24-bit claim withheld behind an
+  // unconfigured multiplexer and a 256 floor applied inside one.
+  const fromEnv = depthFromEnv(env);
+  const claimed: ColorDepth =
+    fromEnv === "truecolor" && multiplexerBlocks24Bit(env)
+      ? "ansi256"
+      : inTmux(env) && fromEnv === "ansi16"
+        ? "ansi256"
+        : fromEnv;
+
+  const order: ColorDepth[] = ["none", "ansi16", "ansi256", "truecolor"];
+  const rank = (d: ColorDepth): number => order.indexOf(d);
+  return order[
+    Math.min(Math.max(rank(own), rank(claimed)), rank(ceiling))
+  ] as ColorDepth;
 }
 
 /**

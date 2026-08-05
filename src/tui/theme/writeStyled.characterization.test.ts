@@ -9,11 +9,21 @@
 // Recorded against the pre-refactor implementation. Do not re-record to make
 // a failure go away without understanding which style changed and why.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { writeStyled } from "../screen.js";
 import type { Style } from "../format.js";
-import { createCapturingTerminal, visible } from "./capture.js";
+import { createCapturingTerminal, visible, isolateColorEnv } from "./capture.js";
 import { bgGrayscale, styleCarriesInlineSgr } from "./index.js";
+
+// The `generic` passed below is meant to pin colour depth; ambient COLORTERM
+// would otherwise override it. See isolateColorEnv.
+let restoreColorEnv: () => void;
+beforeEach(() => {
+  restoreColorEnv = isolateColorEnv();
+});
+afterEach(() => {
+  restoreColorEnv();
+});
 
 // Every member of the Style union, plus `undefined` for the default arm.
 const ALL_STYLES: (Style | undefined)[] = [

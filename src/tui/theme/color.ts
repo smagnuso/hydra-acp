@@ -124,6 +124,26 @@ export function quantize256(c: RgbColor): number {
 }
 
 /**
+ * `c` on the 256-colour grayscale ramp, whatever its hue.
+ *
+ * quantize256 picks the ramp only when the ramp is the closer match, which is
+ * right for a colour. For a band it is not: a tinted slate lands in the cube and
+ * gains a visible cast at 256 colours, and there is no need for one — the ramp's
+ * 10-unit steps are finer than the step a band is.
+ */
+export function quantize256Grey(c: RgbColor): number {
+  const level = (c.r + c.g + c.b) / 3;
+  if (level <= 4) {
+    return 16;
+  }
+  if (level >= 247) {
+    return 231;
+  }
+  const step = Math.max(0, Math.min(23, Math.round((level - 8) / 10)));
+  return 232 + step;
+}
+
+/**
  * How much colour a terminal can show.
  *
  * "none" is a real depth rather than a separate enabled flag, so switching
@@ -155,11 +175,32 @@ const ANSI16_RGB: Array<[number, number, number]> = [
   [255, 255, 255],
 ];
 
-/** Nearest of the 16 ansi slots to `c`, by squared RGB distance. */
-export function quantize16(c: RgbColor): number {
+// The four slots that carry no hue. A near-grey colour is matched against only
+// these, because nearest-RGB alone does not protect it: the greys in the table
+// sit at 128 and 192, so a dark grey is equidistant from mid grey and from any
+// of the dark hues at 128. `#40414c` — the dracula code band — tied exactly
+// between bright black and dark cyan, and index order handed it to cyan. A
+// grey band arrived as a saturated teal stripe.
+const ANSI16_GREYS = [0, 8, 7, 15];
+
+// How close the channels have to be for a colour to count as grey. Generous on
+// purpose: the colours that reach here are bands and dark chrome derived from a
+// background, which carry a slight tint from it (dracula's band is 64/65/76,
+// a spread of 12) and are meant to read as neutral.
+const GREY_CHROMA = 24;
+
+// Above this, a slot's bright counterpart is the better match.
+const ANSI16_BRIGHT = 170;
+
+/**
+ * The nearest of the four grey ansi slots to `c`, ignoring its hue.
+ *
+ * Used for near-greys, and for any background marked neutral — see bgParams.
+ */
+export function quantizeGrey16(c: RgbColor): number {
   let best = 0;
   let bestErr = Infinity;
-  for (let i = 0; i < ANSI16_RGB.length; i++) {
+  for (const i of ANSI16_GREYS) {
     const [r, g, b] = ANSI16_RGB[i]!;
     const err = (r - c.r) ** 2 + (g - c.g) ** 2 + (b - c.b) ** 2;
     if (err < bestErr) {
@@ -168,6 +209,38 @@ export function quantize16(c: RgbColor): number {
     }
   }
   return best;
+}
+
+/**
+ * The nearest of the 16 ansi slots to `c`.
+ *
+ * Two paths, because one metric cannot serve both. A near-grey is matched
+ * against the four grey slots by distance — see ANSI16_GREYS. Anything with a
+ * hue keeps its hue, by thresholding each channel against the MIDPOINT of the
+ * colour's own range rather than against a fixed 128.
+ *
+ * Nearest-RGB across all sixteen slots, which this used to be, is wrong for
+ * both. It sent dracula's `#40414c` code band to dark cyan on an exact tie with
+ * bright black, so every fenced block wore a cyan stripe. And it collapsed the
+ * palette on the way past: `#50fa7b` green landed on grey 8, `#ff79c6` pink and
+ * `#f1fa8c` yellow both on white 7. Hand-tuned pastels sit near the middle of
+ * the cube, where the nearest of sixteen corners is usually a grey — so the
+ * theme arrived as no theme at all. Preserving the hue and letting brightness be
+ * approximate is the right trade at 4 bits: hue is what carries the meaning.
+ */
+export function quantize16(c: RgbColor): number {
+  const max = Math.max(c.r, c.g, c.b);
+  const min = Math.min(c.r, c.g, c.b);
+  if (max - min <= GREY_CHROMA) {
+    return quantizeGrey16(c);
+  }
+  // Which channels are "on" for this colour, relative to its own range. The
+  // bits are the ansi slot order: red 1, green 2, blue 4, so red+green is
+  // yellow (3) and green+blue is cyan (6).
+  const mid = (max + min) / 2;
+  const hue =
+    (c.r >= mid ? 1 : 0) | (c.g >= mid ? 2 : 0) | (c.b >= mid ? 4 : 0);
+  return max >= ANSI16_BRIGHT ? hue + 8 : hue;
 }
 
 /** SGR parameters that set `c` as the foreground. */
@@ -188,8 +261,23 @@ export function fgParams(c: Color, depth: ColorDepth): string {
   return slot(quantize16(c));
 }
 
-/** SGR parameters that set `c` as the background. */
-export function bgParams(c: Color, depth: ColorDepth): string {
+/**
+ * SGR parameters that set `c` as the background.
+ *
+ * `neutral` marks a background that is furniture rather than a colour: a band,
+ * derived as a step off the theme's own background. Such a colour may inherit a
+ * cast from what it was derived from — solarized's is `#002b36`, so its band is
+ * a teal-tinted slate — and at 24 bits that reads as intended. At 4 bits there
+ * is no tinted slate to be had, and quantising by hue turns the cast into ansi
+ * cyan: a vivid stripe where a subtle one was asked for. So a neutral
+ * background resolves to a grey slot there, which is the closest thing 4 bits
+ * has to "a step off the background".
+ */
+export function bgParams(
+  c: Color,
+  depth: ColorDepth,
+  neutral: boolean = false,
+): string {
   const slot = (index: number): string =>
     String(index < 8 ? 40 + index : 100 + (index - 8));
   if (c.kind === "ansi") {
@@ -199,9 +287,9 @@ export function bgParams(c: Color, depth: ColorDepth): string {
     return `48;2;${c.r};${c.g};${c.b}`;
   }
   if (depth === "ansi256") {
-    return `48;5;${quantize256(c)}`;
+    return `48;5;${neutral ? quantize256Grey(c) : quantize256(c)}`;
   }
-  return slot(quantize16(c));
+  return slot(neutral ? quantizeGrey16(c) : quantize16(c));
 }
 
 export const fgReset = `${CSI}39m`;
@@ -209,8 +297,11 @@ export const bgReset = `${CSI}49m`;
 
 export const fgOpen = (c: Color, depth: ColorDepth): string =>
   `${CSI}${fgParams(c, depth)}m`;
-export const bgOpen = (c: Color, depth: ColorDepth): string =>
-  `${CSI}${bgParams(c, depth)}m`;
+export const bgOpen = (
+  c: Color,
+  depth: ColorDepth,
+  neutral: boolean = false,
+): string => `${CSI}${bgParams(c, depth, neutral)}m`;
 
 // ---------------------------------------------------------------------------
 // Derivation

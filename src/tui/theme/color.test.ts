@@ -11,6 +11,7 @@ import {
   luminance,
   mix,
   parseColor,
+  quantize16,
   quantize256,
   rgb,
 } from "./color.js";
@@ -189,5 +190,52 @@ describe("a sparse theme fills itself in", () => {
     const bright = brighten(red);
     expect(fgOpen(bright, "truecolor")).not.toBe(fgOpen(red, "truecolor"));
     expect(quantize256(bright as never)).not.toBe(quantize256(red as never));
+  });
+});
+
+describe("quantize16", () => {
+  // The bug this exists for: dracula's code band, #40414c, is a grey with a
+  // faint blue cast. Nearest-RGB across all sixteen slots ties it exactly
+  // between bright black (128,128,128) and dark cyan (0,128,128) — both at
+  // squared error 10769 — and index order handed it to cyan. A grey band
+  // rendered as a saturated cyan stripe across every fenced code block.
+  it("keeps a near-grey grey instead of finding a hue", () => {
+    for (const c of [
+      rgb(0x40, 0x41, 0x4c), // the dracula code band
+      rgb(0x4d, 0x4e, 0x58), // the dracula user band
+      rgb(0x2e, 0x34, 0x40), // nord's background
+      rgb(0x28, 0x2a, 0x36), // dracula's background
+      rgb(0x3b, 0x42, 0x52),
+    ]) {
+      expect([0, 8, 7, 15]).toContain(quantize16(c));
+    }
+  });
+
+  it("still finds the hue when there is one", () => {
+    expect(quantize16(rgb(255, 0, 0))).toBe(9);
+    expect(quantize16(rgb(0, 255, 255))).toBe(14);
+    expect(quantize16(rgb(0, 128, 128))).toBe(6);
+    expect(quantize16(rgb(128, 0, 0))).toBe(1);
+  });
+
+  // Nearest-RGB sent all five of these to a grey or a white, because a pastel
+  // sits nearer the middle of the cube than any of its corners. The palette
+  // survived as luminance and nothing else.
+  it("keeps a pastel palette distinguishable", () => {
+    expect(quantize16(rgb(0x8b, 0xe9, 0xfd))).toBe(14); // dracula cyan
+    // Bright blue, not magenta: dracula's own ANSI mapping puts this purple in
+    // the blue slot too.
+    expect(quantize16(rgb(0xbd, 0x93, 0xf9))).toBe(12);
+    expect(quantize16(rgb(0x50, 0xfa, 0x7b))).toBe(10); // dracula green
+    expect(quantize16(rgb(0xf1, 0xfa, 0x8c))).toBe(11); // dracula yellow
+    expect(quantize16(rgb(0xff, 0x79, 0xc6))).toBe(13); // dracula pink
+    expect(quantize16(rgb(0xff, 0x55, 0x55))).toBe(9); // dracula red
+  });
+
+  it("maps the greys across the range", () => {
+    expect(quantize16(rgb(0, 0, 0))).toBe(0);
+    expect(quantize16(rgb(255, 255, 255))).toBe(15);
+    expect(quantize16(rgb(130, 130, 130))).toBe(8);
+    expect(quantize16(rgb(195, 195, 195))).toBe(7);
   });
 });

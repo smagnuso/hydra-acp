@@ -85,3 +85,35 @@ function buildCapturingTerminal(generic: string): CapturingTerminal {
 export function visible(s: string): string {
   return s.replace(/\x1b/g, "ESC");
 }
+
+/**
+ * Neutralise the environment variables that influence colour depth.
+ *
+ * The characterization suites pass an explicit `generic` so the termconfig — and
+ * therefore the depth — is pinned. That only works if the environment cannot
+ * also vote: depthForTerminal honours COLORTERM on top of terminal-kit's answer,
+ * so a developer running with COLORTERM=truecolor turned every "xterm-256color"
+ * snapshot into a truecolor one.
+ *
+ * Restores rather than deletes, since the values belong to whoever is running
+ * the suite. Same shape as the fix in term-host/herdr.test.ts, for the same
+ * reason: a test that reads ambient env is a test that passes on one machine.
+ */
+export function isolateColorEnv(): () => void {
+  const keys = ["COLORTERM", "NO_COLOR", "FORCE_COLOR", "TERM"] as const;
+  const saved: Record<string, string | undefined> = {};
+  for (const key of keys) {
+    saved[key] = process.env[key];
+    delete process.env[key];
+  }
+  return () => {
+    for (const key of keys) {
+      const prior = saved[key];
+      if (prior === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = prior;
+      }
+    }
+  };
+}

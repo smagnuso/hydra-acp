@@ -16,10 +16,20 @@
 // bgGrayscale was: its close sequences are LIFO and its bold-off is SGR 22,
 // neither of which is guessable.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Terminal } from "terminal-kit";
 import { paint, type ChromeToken } from "./index.js";
-import { createCapturingTerminal, visible } from "./capture.js";
+import { createCapturingTerminal, visible, isolateColorEnv } from "./capture.js";
+
+// The `generic` passed below is meant to pin colour depth; ambient COLORTERM
+// would otherwise override it. See isolateColorEnv.
+let restoreColorEnv: () => void;
+beforeEach(() => {
+  restoreColorEnv = isolateColorEnv();
+});
+afterEach(() => {
+  restoreColorEnv();
+});
 
 // token -> the chain it replaced. Keyed so a renamed token fails to compile.
 const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {

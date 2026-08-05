@@ -128,3 +128,97 @@ describe("depthForTerminal", () => {
     expect(depthForTerminal(undefined, {})).toBe("ansi16");
   });
 });
+
+describe("depthForTerminal honours COLORTERM on top of terminal-kit", () => {
+  // terminal-kit decides 24-bit from TERM alone and predates COLORTERM, so it
+  // says no to almost every terminal that can actually do it:
+  //   xterm-256color false, screen false, xterm-direct false, xterm-truecolor true
+  // Deferring to it alone meant every theme rendered as a 256-colour
+  // approximation on gnome-terminal, kitty, wezterm, iTerm2 — dracula's #6272a4
+  // arriving as #5f5faf. Close enough to look deliberate, wrong enough to look off.
+  const with256 = { esc: { color256: {}, color24bits: { na: true } } };
+  const with24 = { esc: { color24bits: {} } };
+  const only16 = { esc: { color256: { na: true }, color24bits: { na: true } } };
+
+  it("upgrades a 256-colour terminal that advertises truecolor", () => {
+    expect(depthForTerminal(with256, { COLORTERM: "truecolor" })).toBe("truecolor");
+    expect(depthForTerminal(with256, { COLORTERM: "24bit" })).toBe("truecolor");
+  });
+
+  it("leaves it at 256 with no COLORTERM", () => {
+    expect(depthForTerminal(with256, {})).toBe("ansi256");
+  });
+
+  it("never upgrades a terminal that cannot even do 256", () => {
+    // An env var is not grounds for emitting 24-bit at something terminal-kit
+    // says has neither capability.
+    expect(depthForTerminal(only16, { COLORTERM: "truecolor" })).toBe("ansi16");
+  });
+
+  it("still trusts terminal-kit when it says yes", () => {
+    expect(depthForTerminal(with24, {})).toBe("truecolor");
+  });
+
+  describe("inside tmux", () => {
+    // COLORTERM there describes the OUTER terminal. tmux forwards the variable
+    // whether or not it forwards the escapes, and an unconfigured tmux reports
+    // `RGB: [missing]` / `Tc: [missing]`.
+    it("withholds the upgrade for the default screen* TERM", () => {
+      expect(
+        depthForTerminal(with256, {
+          COLORTERM: "truecolor",
+          TMUX: "/tmp/tmux-1000/default,123,0",
+          TERM: "screen",
+        }),
+      ).toBe("ansi256");
+    });
+
+    it("allows it once TERM says someone configured passthrough", () => {
+      expect(
+        depthForTerminal(with256, {
+          COLORTERM: "truecolor",
+          TMUX: "/tmp/tmux-1000/default,123,0",
+          TERM: "tmux-256color",
+        }),
+      ).toBe("truecolor");
+    });
+
+    // The bug: terminal-kit reports `color256: { fb: true }` for TERM=screen,
+    // and `fb` was being read as "cannot", which sent the whole TUI to 4-bit
+    // inside tmux. Every themed colour then went through quantize16, where
+    // dracula's grey code band tied with dark cyan and lost — a cyan stripe
+    // across every fenced block, which is what put us here.
+    it("floors at 256 for a screen TERM, which understates tmux", () => {
+      const screenLike = {
+        esc: { color256: { fb: true }, color24bits: { na: true } },
+      };
+      expect(
+        depthForTerminal(screenLike, {
+          TMUX: "/tmp/tmux-1000/default,123,0",
+          TERM: "screen",
+        }),
+      ).toBe("ansi256");
+      // ...and with COLORTERM forwarded from the outer terminal it stays at
+      // 256 rather than being upgraded, since this tmux will not pass 24-bit.
+      expect(
+        depthForTerminal(screenLike, {
+          TMUX: "/tmp/tmux-1000/default,123,0",
+          TERM: "screen",
+          COLORTERM: "truecolor",
+        }),
+      ).toBe("ansi256");
+    });
+
+    it("is unaffected outside tmux even with a screen TERM", () => {
+      expect(
+        depthForTerminal(with256, { COLORTERM: "truecolor", TERM: "screen" }),
+      ).toBe("truecolor");
+    });
+  });
+
+  it("NO_COLOR still wins over everything", () => {
+    expect(
+      depthForTerminal(with24, { NO_COLOR: "1", COLORTERM: "truecolor" }),
+    ).toBe("none");
+  });
+});

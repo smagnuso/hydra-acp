@@ -47,9 +47,9 @@ describe("loadTheme", () => {
   it("applies a built-in through the whole token table", async () => {
     const t = await loadTheme("dracula", await dir());
     apply(t);
-    // dracula's brightYellow, i.e. roles.active, i.e. the busy indicator.
+    // dracula's yellow #f1fa8c, i.e. roles.active, i.e. the busy indicator.
     expect(resolveStyle("status-active", "truecolor").open).toBe(
-      "\x1b[38;2;255;255;165m",
+      "\x1b[38;2;241;250;140m",
     );
   });
 
@@ -761,4 +761,58 @@ describe("themeBackground", () => {
       "\x1b[38;2;101;123;131m",
     );
   });
+});
+
+describe("a theme's accent slots are not near-white washes", () => {
+  // Reported as "dracula renders near-monochrome". Its published bright ANSI
+  // variants are pale washes — #a4ffff, #d6acff, #ffffa5 — and most roles read
+  // from the bright slots, so accent, active, reference and every heading landed
+  // within a hair of the #f8f8f2 foreground.
+  //
+  // I first tried to guard this as "an accent must be far from the foreground",
+  // which produced false positives: solarized's violet #6c71c4 is close to its fg
+  // in RGB distance but obviously distinct to the eye, and nord is deliberately
+  // muted. RGB euclidean is not a perceptual measure and "is this
+  // distinguishable" is a design judgement that needs eyes.
+  //
+  // So this guards the mistake actually made, which is mechanical: an accent slot
+  // that is nearly white. Those variants sit ~90 from #ffffff; every real accent
+  // across the five themes is 116 or further.
+  const MIN_FROM_WHITE = 100;
+
+  const ACCENT_SLOTS = [
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "brightRed",
+    "brightGreen",
+    "brightYellow",
+    "brightBlue",
+    "brightMagenta",
+    "brightCyan",
+  ] as const;
+
+  it.each(["dracula", "nord", "gruvbox-dark", "solarized-dark", "solarized-light"])(
+    "%s",
+    async (name) => {
+      const t = await loadTheme(name, await dir());
+      const washed: string[] = [];
+      for (const slot of ACCENT_SLOTS) {
+        const c = t.palette[slot];
+        if (c.kind !== "rgb") {
+          continue;
+        }
+        const d = Math.sqrt(
+          (255 - c.r) ** 2 + (255 - c.g) ** 2 + (255 - c.b) ** 2,
+        );
+        if (d < MIN_FROM_WHITE) {
+          washed.push(`${slot} (${d.toFixed(0)} from white)`);
+        }
+      }
+      expect(washed).toEqual([]);
+    },
+  );
 });

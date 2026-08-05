@@ -72,7 +72,7 @@ sidebar-rule [hover]             ESC[2maESC[96mbESC[0mcESC[22m
 sidebar-title                    ESC[2maESC[96mbESC[0mcESC[22m
 sidebar-title [hover]            ESC[2maESC[96mbESC[0mcESC[22m
 code                             ESC[48;5;234mESC[37maESC[96mbESC[0mcESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36maESC[96mbESC[0mcESC[49m
+code [hover]                     ESC[48;5;236maESC[96mbESC[0mcESC[49m
 heading-1                        ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
 heading-2                        ESC[1mESC[96maESC[96mbESC[0mcESC[0mESC[39mESC[22m
@@ -161,7 +161,7 @@ sidebar-rule [hover]             ESC[2ma^Cb^:cESC[22m
 sidebar-title                    ESC[2ma^Cb^:cESC[22m
 sidebar-title [hover]            ESC[2ma^Cb^:cESC[22m
 code                             ESC[48;5;234mESC[37ma^Cb^:cESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36ma^Cb^:cESC[49m
+code [hover]                     ESC[48;5;236ma^Cb^:cESC[49m
 heading-1                        ESC[1mESC[93ma^Cb^:cESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93ma^Cb^:cESC[39mESC[22m
 heading-2                        ESC[1mESC[96ma^Cb^:cESC[39mESC[22m
@@ -250,7 +250,7 @@ sidebar-rule [hover]             ESC[2ma^^KESC[22m
 sidebar-title                    ESC[2ma^^KESC[22m
 sidebar-title [hover]            ESC[2ma^^KESC[22m
 code                             ESC[48;5;234mESC[37ma^^KESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36ma^^KESC[49m
+code [hover]                     ESC[48;5;236ma^^KESC[49m
 heading-1                        ESC[1mESC[93ma^^KESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93ma^^KESC[39mESC[22m
 heading-2                        ESC[1mESC[96ma^^KESC[39mESC[22m
@@ -339,7 +339,7 @@ sidebar-rule [hover]             ESC[2mXyESC[22m
 sidebar-title                    ESC[2mXyESC[22m
 sidebar-title [hover]            ESC[2mXyESC[22m
 code                             ESC[48;5;234mESC[37mXyESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36mXyESC[49m
+code [hover]                     ESC[48;5;236mXyESC[49m
 heading-1                        ESC[1mESC[93mXyESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93mXyESC[39mESC[22m
 heading-2                        ESC[1mESC[96mXyESC[39mESC[22m
@@ -428,7 +428,7 @@ sidebar-rule [hover]             ESC[2maESC[96mbESC[0mcESC[22m
 sidebar-title                    ESC[2maESC[96mbESC[0mcESC[22m
 sidebar-title [hover]            ESC[2maESC[96mbESC[0mcESC[22m
 code                             ESC[48;2;28;28;28mESC[37maESC[96mbESC[0mcESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36maESC[96mbESC[0mcESC[49m
+code [hover]                     ESC[48;2;48;48;48maESC[96mbESC[0mcESC[49m
 heading-1                        ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
 heading-2                        ESC[1mESC[96maESC[96mbESC[0mcESC[0mESC[39mESC[22m
@@ -517,7 +517,7 @@ sidebar-rule [hover]             ESC[2ma^Cb^:cESC[22m
 sidebar-title                    ESC[2ma^Cb^:cESC[22m
 sidebar-title [hover]            ESC[2ma^Cb^:cESC[22m
 code                             ESC[48;2;28;28;28mESC[37ma^Cb^:cESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36ma^Cb^:cESC[49m
+code [hover]                     ESC[48;2;48;48;48ma^Cb^:cESC[49m
 heading-1                        ESC[1mESC[93ma^Cb^:cESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93ma^Cb^:cESC[39mESC[22m
 heading-2                        ESC[1mESC[96ma^Cb^:cESC[39mESC[22m
@@ -606,7 +606,7 @@ sidebar-rule [hover]             ESC[2ma^^KESC[22m
 sidebar-title                    ESC[2ma^^KESC[22m
 sidebar-title [hover]            ESC[2ma^^KESC[22m
 code                             ESC[48;2;28;28;28mESC[37ma^^KESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36ma^^KESC[49m
+code [hover]                     ESC[48;2;48;48;48ma^^KESC[49m
 heading-1                        ESC[1mESC[93ma^^KESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93ma^^KESC[39mESC[22m
 heading-2                        ESC[1mESC[96ma^^KESC[39mESC[22m
@@ -695,7 +695,7 @@ sidebar-rule [hover]             ESC[2mXyESC[22m
 sidebar-title                    ESC[2mXyESC[22m
 sidebar-title [hover]            ESC[2mXyESC[22m
 code                             ESC[48;2;28;28;28mESC[37mXyESC[39mESC[49m
-code [hover]                     ESC[48;2;22;25;36mXyESC[49m
+code [hover]                     ESC[48;2;48;48;48mXyESC[49m
 heading-1                        ESC[1mESC[93mXyESC[39mESC[22m
 heading-1 [hover]                ESC[1mESC[93mXyESC[39mESC[22m
 heading-2                        ESC[1mESC[96mXyESC[39mESC[22m

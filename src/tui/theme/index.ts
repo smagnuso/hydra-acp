@@ -187,12 +187,22 @@ const BAND_STEPS = {
   code: 0.11,
   hoverThought: 0.1,
   hoverRow: 0.19,
+  // A step further off the background than `code`, so hovering a fenced block
+  // brightens it. This used to be a hardcoded 24-bit #161924 — chosen to be a
+  // hue shift rather than a brightness one, because the 256-colour ramp rounded
+  // any subtle lift back onto the baseline. That made it the one band the theme
+  // could not reach: fixed on every palette, near-black under a light one, and
+  // carrying a cast of its own, which is the thing bands must not do.
+  hoverCode: 0.2,
 } as const;
 
 const LEGACY_BANDS = {
   user: 43,
   code: 28,
   hoverThought: 25,
+  // Two ramp steps above `code` (28 rounds to index 234, this to 236), so the
+  // lift survives quantisation with no background to derive from.
+  hoverCode: 48,
 } as const;
 
 /** A band is either a derived colour or a legacy absolute grayscale level. */
@@ -216,7 +226,10 @@ function bandBase(): Color | undefined {
   return bandReference ?? palette.bg;
 }
 
-function buildBands(): Record<"user" | "code" | "hoverThought", Band> {
+function buildBands(): Record<
+  "user" | "code" | "hoverThought" | "hoverCode",
+  Band
+> {
   const bg = bandBase();
   if (bg === undefined) {
     return LEGACY_BANDS;
@@ -225,6 +238,7 @@ function buildBands(): Record<"user" | "code" | "hoverThought", Band> {
     user: band(bg, BAND_STEPS.user),
     code: band(bg, BAND_STEPS.code),
     hoverThought: band(bg, BAND_STEPS.hoverThought),
+    hoverCode: band(bg, BAND_STEPS.hoverCode),
   };
 }
 
@@ -248,6 +262,15 @@ const fgL = (c: Color): Layer => ({
 /** A palette colour used as a background. */
 const bgL = (c: Color): Layer => ({
   open: (depth) => bgOpen(c, depth),
+  close: bgReset,
+  kind: "bg",
+});
+/**
+ * A background band. Same as bgL but quantises onto grey rather than by hue —
+ * see bgParams's `neutral`, and bandLayer for why a band is not a colour.
+ */
+const bandBgL = (c: Color): Layer => ({
+  open: (depth) => bgOpen(c, depth, true),
   close: bgReset,
   kind: "bg",
 });
@@ -1262,7 +1285,11 @@ function bandLayer(b: Band): Layer {
       kind: "bg",
     };
   }
-  return bgL(b);
+  // Neutral: a band is a step off the background, so it quantises onto the grey
+  // ramp rather than by hue. Without that, a theme whose background carries a
+  // cast has that cast amplified on the way down — solarized's #002b36 derives a
+  // teal-tinted slate, which is right at 24 bits and arrives as ansi cyan at 4.
+  return bandBgL(b);
 }
 
 const EMPTY: StyleRender = { open: "", close: "", inlineSgr: false };
@@ -1615,15 +1642,15 @@ export function resolveHovered(
   }
 
   if (style === "code") {
-    // Grayscale hover snapped against the 256-colour ramp: any lift subtle
-    // enough rounded back to the baseline, any lift the ramp could resolve
-    // read as a full highlight. So this is a 24-bit value the ramp can't
-    // approximate away — the same luminance as the baseline band but cooler,
-    // so hover reads as a hue shift rather than a brightness one. Emitted
-    // unconditionally, including on terminals that only do 256 colours.
+    // A brightness step off the code band, derived from the theme's background
+    // like every other band. The lift is large enough to survive the 256-colour
+    // ramp's 10-unit rounding, which is what the hardcoded 24-bit value it
+    // replaced was working around — at the cost of being the one band a theme
+    // could not reach. Note it does NOT restate the code band's foreground:
+    // hover paints over a row that already opened with it.
     return {
-      open: `${CSI}48;2;22;25;36m`,
-      close: `${CSI}49m`,
+      open: bandLayer(bands.hoverCode).open(depth),
+      close: bgReset,
       inlineSgr: false,
     };
   }

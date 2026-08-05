@@ -74,6 +74,18 @@ export interface BuiltinTheme {
 }
 
 // dracula: draculatheme.com
+//
+// The bright slots carry dracula's ICONIC colours, not its published bright ANSI
+// variants. Those variants (#a4ffff, #d6acff, #ffffa5) are pale washes with a
+// minimum channel around 170 — they exist to be "more visible on a dark
+// background", which for a hand-crafted pastel palette means closer to white.
+//
+// Most roles read from the bright slots, so copying the variants verbatim put
+// accent, active, reference and every heading within a hair of the #f8f8f2
+// foreground and rendered dracula near-monochrome. Same trap as solarized's grey
+// brightYellow, one layer along: there the variants were greys, here they are
+// near-whites, and both times the fix is that OUR bright slots exist to feed
+// roles rather than to reproduce a terminal's ANSI table.
 const DRACULA = palette(
   {
     black: "#21222c",
@@ -84,13 +96,15 @@ const DRACULA = palette(
     magenta: "#ff79c6",
     cyan: "#8be9fd",
     white: "#f8f8f2",
+    // The one variant worth keeping: dracula's comment colour, which is exactly
+    // what `subtle` and `muted` want.
     brightBlack: "#6272a4",
-    brightRed: "#ff6e6e",
-    brightGreen: "#69ff94",
-    brightYellow: "#ffffa5",
-    brightBlue: "#d6acff",
-    brightMagenta: "#ff92df",
-    brightCyan: "#a4ffff",
+    brightRed: "#ff5555",
+    brightGreen: "#50fa7b",
+    brightYellow: "#f1fa8c",
+    brightBlue: "#bd93f9",
+    brightMagenta: "#ff79c6",
+    brightCyan: "#8be9fd",
     brightWhite: "#ffffff",
   },
   { bg: "#282a36", fg: "#f8f8f2" },
