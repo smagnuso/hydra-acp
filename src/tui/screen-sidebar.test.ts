@@ -852,17 +852,11 @@ describe("Screen sidebar column edges", () => {
 // scrollback stopped calling eraseLineAfter and started padding its own
 // region instead.
 // Columns a string actually occupies on screen. terminal-kit caret markup
-// ("^+bold^:", "^Ccode^:") is a zero-width style command — "^^" is the
-// escape for a literal caret — so counting the raw bytes overstates the
-// width by exactly the markup, which is the mistake the code under test
-// used to make.
+// (ESC[1m ... ESC[0m) is zero-width once rendered, so counting the raw
+// bytes overstates the width by exactly the escapes, which is the mistake
+// the code under test used to make.
 const visibleWidth = (text: string): number =>
-  stringWidth(
-    text
-      .replace(/\^\^/g, "\u0000")
-      .replace(/\^[a-zA-Z+\-:_!#/]/g, "")
-      .replace(/\u0000/g, "^"),
-  );
+  stringWidth(text.replace(/\x1b\[[0-9;]*m/g, ""));
 
 describe("Screen region isolation", () => {
   beforeEach(() => {
@@ -917,14 +911,17 @@ describe("Screen region isolation", () => {
     return { content, sidebarRows };
   };
 
-  // Caret markup is zero-width once rendered, so measuring the body
-  // WITHOUT stripping it understated the pad and left the tail of the row
+  // Inline SGR spans are zero-width once rendered, so measuring the body
+  // WITHOUT stripping them understated the pad and left the tail of the row
   // holding the previous frame's glyphs.
-  it("pads a markup-bearing row out to the full content width", () => {
+  it("pads a span-bearing row out to the full content width", () => {
     const { screen, ops } = prepared();
     screen.appendLines([
       { body: "plain text here", bodyStyle: "agent" },
-      { body: "with ^+bold^: and ^Ccode^: spans", bodyStyle: "agent" },
+      {
+        body: "with \x1b[1mbold\x1b[0m and \x1b[96mcode\x1b[0m spans",
+        bodyStyle: "agent",
+      },
     ]);
     ops.length = 0;
     screen.fullRedraw();

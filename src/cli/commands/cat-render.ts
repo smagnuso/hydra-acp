@@ -43,52 +43,14 @@ export function renderMarkdownForCat(
 }
 
 function renderLine(line: FormattedLine, mode: CatRenderMode): string {
-  let body = translateMarkup(line.body, mode);
   if (mode === "ansi") {
-    body = applyStyle(body, line.bodyStyle);
-  } else {
-    // Strip any ANSI that parseAgentMarkdown's cli-highlight pass embedded
-    // into a fenced code line. translateMarkup only deals with terminal-kit
-    // ^X markers; SGR escapes in the body need a separate strip.
-    body = stripAnsi(body);
+    // Inline spans (`code`, **bold**, links) are already SGR in the body,
+    // emitted by format.ts. Only the per-line base style has to be added.
+    return applyStyle(line.body, line.bodyStyle);
   }
-  return body;
-}
-
-// Convert terminal-kit caret markup emitted by applyInlineMarkup into
-// either ANSI escapes (ansi mode) or nothing (plain mode). Order matters:
-// `^^` is the escape for a literal `^`, so we stash it under a sentinel
-// first; without that, `^^C` would mis-parse as `^` + `^C` after the next
-// step. The thought-mode variants (`^c`, `^-`, `^K`) shouldn't appear here
-// — parseAgentMarkdown only emits agent-style markup — but the fallback
-// regex strips them defensively if a stray one ever leaks through.
-//
-// Heading inline-markup (headingInlineOptsFor in format.ts) closes spans
-// with `^+^Y` / `^+^C` / `^:^+` to restore the heading's outer bold + color
-// inline; ANSI mode translates each of these so the restoration survives
-// the pipe. Otherwise an inner `^:` reset (heading-3) would leave the
-// rest of the heading body unstyled.
-const ANSI_BOLD = "\x1b[1m";
-const ANSI_CODE = "\x1b[96m";
-const ANSI_BRIGHT_YELLOW = "\x1b[93m";
-const ANSI_RESET = "\x1b[0m";
-// NUL as a sentinel for stashed literal carets. sanitizeWireText in
-// core/render-update.ts strips C0 controls (NUL included) from incoming
-// agent text, so it can never collide with content the buffer holds.
-const CARET_SENTINEL = "\x00";
-
-function translateMarkup(text: string, mode: CatRenderMode): string {
-  let s = text.replace(/\^\^/g, CARET_SENTINEL);
-  if (mode === "ansi") {
-    s = s
-      .replace(/\^\+/g, ANSI_BOLD)
-      .replace(/\^C/g, ANSI_CODE)
-      .replace(/\^Y/g, ANSI_BRIGHT_YELLOW)
-      .replace(/\^:/g, ANSI_RESET);
-  }
-  s = s.replace(/\^[+\-:CcKY]/g, "");
-  s = s.replace(/\x00/g, "^");
-  return s;
+  // Plain mode: drop the inline spans along with anything cli-highlight
+  // embedded into a fenced code line.
+  return stripAnsi(line.body);
 }
 
 // Map FormattedLine.bodyStyle to a chalk wrapper for ansi mode. Mirrors

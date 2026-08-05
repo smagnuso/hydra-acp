@@ -19,9 +19,26 @@ export interface CapturingTerminal {
   take: () => string;
 }
 
+// terminal-kit registers process exit listeners per instance, so a test that
+// builds one per case trips MaxListenersExceededWarning. Instances are
+// stateless for our purposes (we only ever ask them to write styled text), so
+// share one per termconfig.
+const cache = new Map<string, CapturingTerminal>();
+
 export function createCapturingTerminal(
   generic: string = "xterm-256color",
 ): CapturingTerminal {
+  const hit = cache.get(generic);
+  if (hit) {
+    hit.take();
+    return hit;
+  }
+  const made = buildCapturingTerminal(generic);
+  cache.set(generic, made);
+  return made;
+}
+
+function buildCapturingTerminal(generic: string): CapturingTerminal {
   let buf = "";
   const stdout = {
     write: (s: string) => {

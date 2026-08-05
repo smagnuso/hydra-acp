@@ -328,7 +328,7 @@ describe("BtwOverlayBuffer", () => {
   });
 
   describe("agent-text markdown parsing", () => {
-    it("renders **bold** via parseAgentMarkdown (asterisks consumed, ^+ markup emitted)", () => {
+    it("renders **bold** via parseAgentMarkdown (asterisks consumed, bold SGR emitted)", () => {
       const buf = new BtwOverlayBuffer();
       buf.append({
         sessionUpdate: "agent_message_chunk",
@@ -336,7 +336,7 @@ describe("BtwOverlayBuffer", () => {
       });
       const body = buf.getLines()[0]!.body;
       expect(body).not.toContain("**");
-      expect(body).toContain("^+world");
+      expect(body).toContain("\x1b[1mworld");
     });
 
     it("renders fenced code as bodyStyle 'code' (parseAgentMarkdown ran, not plain formatBlock)", () => {
@@ -361,7 +361,7 @@ describe("BtwOverlayBuffer", () => {
       });
       const body = buf.getLines()[0]!.body;
       expect(body).not.toContain("**");
-      expect(body).toContain("^+world");
+      expect(body).toContain("\x1b[1mworld");
     });
   });
 

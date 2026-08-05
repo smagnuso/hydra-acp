@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { writeStyled } from "../screen.js";
 import type { Style } from "../format.js";
 import { createCapturingTerminal, visible } from "./capture.js";
-import { bgGrayscale, styleUsesMarkup } from "./index.js";
+import { bgGrayscale, styleCarriesInlineSgr } from "./index.js";
 
 // Every member of the Style union, plus `undefined` for the default arm.
 const ALL_STYLES: (Style | undefined)[] = [
@@ -42,13 +42,20 @@ const ALL_STYLES: (Style | undefined)[] = [
   undefined,
 ];
 
-// Plain text, plus text carrying caret markup. The markup case matters
-// because a subset of styles deliberately route through terminal-kit's
-// markup interpreter; the rest must emit the carets literally.
+// Plain text, text carrying an inline SGR span, and text carrying literal
+// carets.
+//
+// The caret cases are the interesting ones. They used to be markup: a subset
+// of styles routed through terminal-kit's interpreter, which turned "^C" into
+// a colour and collapsed "^^" to one caret. format.ts now emits SGR directly
+// and nothing interprets carets, so a caret is ordinary text — including the
+// doubled form, which no longer means anything. An agent discussing "^C" or
+// "^^" gets those characters rendered verbatim.
 const SAMPLES: { name: string; text: string }[] = [
   { name: "plain", text: "Xy" },
-  { name: "markup", text: "a^Cb^:c" },
-  { name: "escaped-caret", text: "a^^K" },
+  { name: "inline-sgr-span", text: "a\x1b[96mb\x1b[0mc" },
+  { name: "literal-caret", text: "a^Cb^:c" },
+  { name: "literal-doubled-caret", text: "a^^K" },
 ];
 
 for (const generic of ["xterm-256color", "xterm-truecolor"]) {
@@ -80,13 +87,13 @@ describe("writeStyled invariants", () => {
   });
 });
 
-describe("styleUsesMarkup", () => {
+describe("styleCarriesInlineSgr", () => {
   // Locked to the set the width-measuring code used before the theme table
   // existed. Adding a style here without teaching format.ts to emit markup
   // for it makes wrap subtract carets that aren't there; removing one makes
   // rows wrap early. Change deliberately, not incidentally.
   it("matches the markup-bearing styles exactly", () => {
-    const markup = ALL_STYLES.filter((s) => styleUsesMarkup(s));
+    const markup = ALL_STYLES.filter((s) => styleCarriesInlineSgr(s));
     expect(markup).toEqual([
       "agent",
       "thought",

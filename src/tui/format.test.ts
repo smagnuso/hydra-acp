@@ -21,17 +21,19 @@ import type { PlanEntry } from "../core/render-update.js";
 
 // Measure the on-screen width of a rendered table line. Mirrors what
 // the screen layer eventually writes: prefix + body, with terminal-kit
-// caret-markup tokens (^X, ^+, ^C, ^:, doubled ^^) removed because
+// inline SGR span escapes removed because
 // they're zero-width style commands when the agent bodyStyle is
 // interpreted via term(text). The escape `^^` -> `^` is unwound first
 // so a literal caret survives the strip.
 function visibleWidth(line: FormattedLine): number {
-  const text = (line.prefix ?? "") + line.body;
-  const stripped = text
-    .replace(/\^\^/g, "\u0000")
-    .replace(/\^[+_CRGBMYWcrgbmyw:]/g, "")
-    .replace(/\u0000/g, "^");
-  return stringWidth(stripped);
+  return stringWidth(stripSgr((line.prefix ?? "") + line.body));
+}
+
+// Drop inline SGR spans, leaving any other escape (notably OSC 8) in place.
+// Link and emphasis styling is emitted into the body as SGR, so assertions
+// about stray control codes have to look past it.
+function stripSgr(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 const ESC = "";
@@ -362,41 +364,43 @@ describe("parseAgentMarkdown", () => {
     );
     const widths = lines.map(visibleWidth);
     expect(new Set(widths).size).toBe(1);
-    // Bold body cell renders via applyInlineMarkup (^+...^:).
-    expect(lines[2]?.body).toContain("^+bold cell^:");
-    // Code body cell renders via applyInlineMarkup (^C...^:).
-    expect(lines[3]?.body).toContain("^Ccode cell^:");
+    // Bold body cell renders via applyInlineMarkup: bold on, full reset.
+    expect(lines[2]?.body).toContain("\x1b[1mbold cell\x1b[0m");
+    // Code body cell renders via applyInlineMarkup: bright cyan, reset.
+    expect(lines[3]?.body).toContain("\x1b[96mcode cell\x1b[0m");
   });
 
   it("applies inline markup inside headings with level-specific restore closers", () => {
-    // heading-1: bold + brightYellow, code opens with ^C and closes with
-    // ^+^Y so bold + brightYellow restore after the span. heading-2 swaps
-    // the code opener to ^Y (the default ^C would clash with brightCyan)
-    // and restores via ^+^C. heading-3 has no outer color, so closers
-    // fully reset and re-bold via ^:^+.
+    // heading-1 is bold + brightYellow: a code span opens bright cyan and
+    // closes by re-emitting bold + brightYellow so the rest of the heading
+    // keeps its style. heading-2 swaps the code opener to bright yellow (the
+    // default bright cyan would vanish into the heading's own brightCyan) and
+    // restores bold + brightCyan. heading-3 has no colour of its own, so its
+    // closer fully resets and re-bolds.
     const h1 = parseAgentMarkdown("# pre `cli/` post");
     expect(h1[0]?.bodyStyle).toBe("heading-1");
-    expect(h1[0]?.body).toBe("pre ^Ccli/^+^Y post");
+    expect(h1[0]?.body).toBe("pre \x1b[96mcli/\x1b[1m\x1b[93m post");
 
     const h2 = parseAgentMarkdown("## **bold** mid");
     expect(h2[0]?.bodyStyle).toBe("heading-2");
-    expect(h2[0]?.body).toBe("^+bold^+^C mid");
+    expect(h2[0]?.body).toBe("\x1b[1mbold\x1b[1m\x1b[96m mid");
 
     const h3 = parseAgentMarkdown("### `x` y");
     expect(h3[0]?.bodyStyle).toBe("heading-3");
-    expect(h3[0]?.body).toBe("^Cx^:^+ y");
+    expect(h3[0]?.body).toBe("\x1b[96mx\x1b[0m\x1b[1m y");
   });
 
   it("applies inline markup to header cells using heading-3 closers", () => {
     // heading-3 cells now route through the markup-interpreting writer
     // (term.bold without .noFormat), so applyInlineMarkup is run on the
-    // header. heading-3 has no outer color, so the closer is `^:^+`:
+    // header. heading-3 has no outer colour, so the closer resets and
+    // re-bolds:
     // reset everything then re-bold for the rest of the header.
     const lines = parseAgentMarkdown(
       "| **bold header** | b |\n|---|---|\n| x | y |",
     );
     expect(lines[0]?.bodyStyle).toBe("heading-3");
-    expect(lines[0]?.body).toContain("^+bold header^:^+");
+    expect(lines[0]?.body).toContain("\x1b[1mbold header\x1b[0m\x1b[1m");
     expect(lines[0]?.body).not.toContain("**bold header**");
     const widths = lines.map(visibleWidth);
     expect(new Set(widths).size).toBe(1);
@@ -404,14 +408,14 @@ describe("parseAgentMarkdown", () => {
 
   it("italicizes *foo* in prose", () => {
     const lines = parseAgentMarkdown("emphasis *matters* here");
-    expect(lines[0]?.body).toContain("^_matters^:");
+    expect(lines[0]?.body).toContain("\x1b[4mmatters\x1b[0m");
   });
 
   it("does not italicize globs, pointers, or multiplication", () => {
     const cases = ["run ls src/*.ts", "int *p = &x", "area = w * h"];
     for (const src of cases) {
       const lines = parseAgentMarkdown(src);
-      expect(lines[0]?.body, `case: ${src}`).not.toContain("^_");
+      expect(lines[0]?.body, `case: ${src}`).not.toContain("\x1b[4m");
     }
   });
 
@@ -419,18 +423,18 @@ describe("parseAgentMarkdown", () => {
     const lines = parseAgentMarkdown("run ls \\*foo\\* to see them");
     expect(lines[0]?.body).toContain("*foo*");
     expect(lines[0]?.body).not.toContain("\\*");
-    expect(lines[0]?.body).not.toContain("^_");
+    expect(lines[0]?.body).not.toContain("\x1b[4m");
   });
 
   it("honors backslash-escaped double asterisks (\\**) to suppress bold", () => {
     const lines = parseAgentMarkdown("literal \\**foo\\** here");
     expect(lines[0]?.body).toContain("**foo**");
     expect(lines[0]?.body).not.toContain("\\*");
-    expect(lines[0]?.body).not.toContain("^+");
+    expect(lines[0]?.body).not.toContain("\x1b[1m");
   });
 
   it("aligns columns when cells contain *italic* markers", () => {
-    // applyInlineMarkup rewrites *…* to ^_…^: caret markup (underline;
+    // applyInlineMarkup rewrites *…* to an underline span (
     // zero-width at render time), so the asterisks contribute nothing
     // to visible width and cellVisibleWidth strips them before the
     // column-width math.
@@ -439,7 +443,7 @@ describe("parseAgentMarkdown", () => {
     );
     const widths = lines.map(visibleWidth);
     expect(new Set(widths).size).toBe(1);
-    expect(lines[2]?.body).toContain("^_italic cell^:");
+    expect(lines[2]?.body).toContain("\x1b[4mitalic cell\x1b[0m");
     expect(lines[2]?.body).not.toContain("*italic cell*");
   });
 
@@ -541,9 +545,9 @@ describe("parseAgentMarkdown", () => {
     ].join("\n");
     const lines = parseAgentMarkdown(table, { maxWidth: 28 });
     // Find the line that holds the bold span; it should carry the converted
-    // `^+Resource creation^:` markup, not a half-broken `**Resource` literal.
+    // a single styled span, not a half-broken `**Resource` literal.
     const boldLine = lines.find((l) => l.body.includes("Resource creation"));
-    expect(boldLine?.body).toContain("^+Resource creation^:");
+    expect(boldLine?.body).toContain("\x1b[1mResource creation\x1b[0m");
     expect(boldLine?.body).not.toContain("**Resource");
     expect(boldLine?.body).not.toContain("creation**");
   });
@@ -1657,7 +1661,7 @@ describe("renderToolDetail", () => {
     const lines = parseAgentMarkdown("[open](https://example.com/page)");
     expect(lines).toHaveLength(1);
     expect(lines[0]?.links?.[0]?.url).toBe("https://example.com/page");
-    expect(lines[0]?.body).not.toContain("\x1b");
+    expect(stripSgr(lines[0]?.body ?? "")).not.toContain("\x1b");
   });
 
   it("scheme-less path links (file-links skill #L) go in the sidecar, not OSC 8", () => {
@@ -1689,10 +1693,11 @@ describe("renderToolDetail", () => {
   it("absolute path links become a sidecar span with no escapes in body", () => {
     const lines = parseAgentMarkdown("[foo.ts:42](/abs/src/foo.ts#L42)");
     expect(lines).toHaveLength(1);
-    // No escape bytes and not ansi-flagged: the screen layer brackets the
-    // span at paint time, so width accounting and the path scanner stay
-    // on the simple path.
-    expect(lines[0]?.body).not.toContain("\x1b");
+    // No OSC 8 in the body and not ansi-flagged: the screen layer brackets
+    // the span at paint time, so width accounting and the path scanner stay
+    // on the simple path. SGR is stripped first because the link's own
+    // cyan-underline styling is emitted inline and is expected here.
+    expect(stripSgr(lines[0]?.body ?? "")).not.toContain("\x1b");
     expect(lines[0]?.ansi).toBeFalsy();
     const link = lines[0]?.links?.[0];
     expect(link?.url).toBe("/abs/src/foo.ts#L42");
@@ -1706,7 +1711,7 @@ describe("renderToolDetail", () => {
   it("file:// links keep their scheme verbatim in the sidecar", () => {
     const lines = parseAgentMarkdown("[bar.ts](file:///abs/src/bar.ts)");
     expect(lines[0]?.links?.[0]?.url).toBe("file:///abs/src/bar.ts");
-    expect(lines[0]?.body).not.toContain("\x1b");
+    expect(stripSgr(lines[0]?.body ?? "")).not.toContain("\x1b");
   });
 
   it("relative path links are sidecar spans too (screen resolves the cwd)", () => {

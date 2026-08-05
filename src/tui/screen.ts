@@ -44,9 +44,15 @@ import { withSync } from "./sync.js";
 import {
   resolveHovered,
   resolveStyle,
-  styleUsesMarkup,
+  styleCarriesInlineSgr,
   supports24Bit,
 } from "./theme/index.js";
+
+// An SGR sequence, i.e. a CSI ending in "m". Deliberately not any escape:
+// OSC 8 hyperlinks are also escapes but never carried a style command, so
+// they must not trigger the trailing reset.
+const SGR_PATTERN = /\x1b\[[0-9;]*m/;
+const SGR_RESET = "\x1b[0m";
 import { writeDebugLine } from "./debug-log.js";
 import {
   ALT_SCREEN_LEAVE,
@@ -7621,13 +7627,13 @@ export class Screen {
       }
     }
     // Defensive reset: if the body contained terminal-kit markup
-    // (`^+bold^:` etc.) and our char-counting wrap/truncate split it
+    // (an SGR span opener) and our char-counting wrap/truncate split it
     // mid-span, the dangling open would otherwise leak bold/color into
     // every subsequent row's eraseLineAfter + writes. Emitting an SGR
     // reset here costs ~4 bytes per row and bounds the damage to the
     // affected row. ANSI-bearing lines always get a reset since
     // highlighter output may end mid-token after wrap-ansi splits it.
-    if (line.ansi || line.body.includes("^")) {
+    if (line.ansi || line.body.includes("\x1b")) {
       this.term.styleReset();
     }
     // iTerm2 inline thumbnail (only emitted on iTerm2 — host terminals
@@ -7898,15 +7904,15 @@ function writeBodyWithHighlight(
   }
 }
 
-// Body styles whose text carries caret markup. Wrap/truncate must subtract
-// the caret markers when computing visible width, or `^Cfoo^:` (7 JS chars,
-// 3 columns) inflates the budget by 4 and a long span near the right edge
-// wraps too early.
+// Body styles whose text carries inline SGR spans. Wrap/truncate must treat
+// the escape sequences as zero-width, or `ESC[96mfoo ESC[0m` (14 JS chars,
+// 3 columns) inflates the budget and a long span near the right edge wraps
+// too early.
 //
 // Delegates to the theme table so this and writeStyled's writer choice can
 // never disagree.
 function bodyStyleUsesMarkup(style: Style | undefined): boolean {
-  return styleUsesMarkup(style);
+  return styleCarriesInlineSgr(style);
 }
 
 // Exported for the characterization test in
@@ -7927,26 +7933,25 @@ export function writeStyled(
     resolveStyle(style, trueColor);
   const body = render.transform ? render.transform(text) : text;
 
-  // Two writers, and the choice is not cosmetic. Styles carrying caret
-  // markup from format.ts must go through the callable form so terminal-kit
-  // turns `^Ccode^:` into SGR; everything else goes through .noFormat so a
+  // Everything goes through .noFormat: inline spans arrive as real SGR from
+  // format.ts, so nothing needs terminal-kit's markup interpreter, and a
   // caret the user typed or a tool emitted stays a literal caret instead of
-  // being eaten as a markup command.
-  //
-  // The style's own colour is emitted around the writer rather than through
-  // terminal-kit's style chain, so the same bytes can be reused for the
-  // hover band and (later) to restore a row's base colour after an inline
-  // span.
+  // being eaten as a style command.
   const raw = (s: string): void => {
     if (s.length > 0) {
       (term as unknown as { noFormat: (t: string) => void }).noFormat(s);
     }
   };
   raw(render.open);
-  if (render.markup) {
-    term(body);
-  } else {
-    term.noFormat(body);
+  term.noFormat(body);
+  // terminal-kit used to append a reset to any string it found a style
+  // command in, and that reset was load-bearing: a plan entry's span closer
+  // re-asserts dim, and something has to switch it back off at end of row.
+  // It fired per write, so a truncated body and each piece of a split
+  // selection got their own — hence replicating it here rather than baking
+  // it into the line in format.ts.
+  if (render.inlineSgr && SGR_PATTERN.test(body)) {
+    raw(SGR_RESET);
   }
   raw(render.close);
 }
@@ -8016,12 +8021,6 @@ function cellWidth(text: string): number {
 //   ^^         literal "^"            (1 visible col -- one caret renders)
 //   ^X         single-char SGR style  (0 visible cols)
 //   ^[#color]  extended color/style   (0 visible cols)
-// At render time these are zero-width style commands. Width-budgeting
-// routines (wrap/truncate) must skip them when stripMarkup is on, or
-// long bullet bodies wrap/truncate too early and can split mid-markup,
-// producing visible-text corruption near code/bold spans.
-const TK_MARKUP_STYLE_CHAR = /[a-zA-Z+\-:_!#/]/;
-
 interface MarkupMatch {
   text: string;
   width: number;
@@ -8083,25 +8082,11 @@ export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
     if (csi !== null) return { text: csi, width: 0 };
     return null;
   }
-  if (text.charCodeAt(i) !== 0x5e /* ^ */) {
-    return null;
-  }
-  const c = text[i + 1];
-  if (c === undefined) {
-    return null;
-  }
-  if (c === "^") {
-    return { text: "^^", width: 1 };
-  }
-  if (c === "[") {
-    const end = text.indexOf("]", i + 2);
-    if (end !== -1) {
-      return { text: text.slice(i, end + 1), width: 0 };
-    }
-  }
-  if (TK_MARKUP_STYLE_CHAR.test(c)) {
-    return { text: text.slice(i, i + 2), width: 0 };
-  }
+  // A caret is ordinary text. It used to introduce a terminal-kit style
+  // command, which meant "^C" measured zero-width and "^^" collapsed to one
+  // column; inline spans are real SGR now, so treating carets as markup
+  // would mis-measure any prose that mentions one (an agent writing
+  // "press ^C to quit" is common) and strip it out of copied text.
   return null;
 }
 
@@ -8223,8 +8208,7 @@ export function skipVisibleChars(
 }
 
 export function stripTkMarkup(text: string): string {
-  if (!text.includes("^") && !text.includes("\x1b"))
-    return text;
+  if (!text.includes("\x1b")) return text;
   let out = "";
   let i = 0;
   while (i < text.length) {
@@ -8253,7 +8237,7 @@ export function stripTkMarkup(text: string): string {
 // style. Re-emitting a bare OSC 8 opener would start an unwanted hyperlink
 // on the trailing text and leak its escape bytes into the row.
 function tkMarkupTokensOnly(text: string): string {
-  if (!text.includes("^") && !text.includes("\x1b")) {
+  if (!text.includes("\x1b")) {
     return "";
   }
   let out = "";
@@ -8282,7 +8266,7 @@ function tkMarkupTokensOnly(text: string): string {
 }
 
 function hasTkMarkup(text: string): boolean {
-  if (!text.includes("^") && !text.includes("\x1b")) {
+  if (!text.includes("\x1b")) {
     return false;
   }
   for (let i = 0; i < text.length; i++) {
@@ -8303,15 +8287,7 @@ interface WidthSegment {
 // remain. Lets the grapheme walk in segmentForWidth stop at either kind of
 // boundary without a separate scan per marker.
 function nextMarkupBoundary(text: string, from: number): number {
-  const caret = text.indexOf("^", from);
-  const esc = text.indexOf("\x1b", from);
-  if (caret === -1) {
-    return esc;
-  }
-  if (esc === -1) {
-    return caret;
-  }
-  return Math.min(caret, esc);
+  return text.indexOf("\x1b", from);
 }
 
 // Walk `text` yielding either a markup span (emitted as one indivisible

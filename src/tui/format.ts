@@ -5,6 +5,13 @@
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
 import stringWidth from "string-width";
+import {
+  inlineOptsFor,
+  PROSE_INLINE_OPTS,
+  SGR_BOLD,
+  SGR_UNDERLINE,
+  THOUGHT_INLINE_OPTS,
+} from "./theme/index.js";
 import { thisMachine } from "../core/machine.js";
 import { shortenHomePath } from "../core/paths.js";
 import {
@@ -257,16 +264,17 @@ export function formatEvent(
 }
 
 // Inline-mark pass — converts a subset of markdown's inline syntax into
-// terminal-kit's `^X…^:` markup, which `term(text)` processes inside the
-// formatter so a single line can mix styles. Order matters: we escape
-// literal carets FIRST so user-typed `^` doesn't get mistaken for our own
-// markup, then apply each pattern.
+// SGR escape sequences, so a single line can mix styles.
 //
 // Supported:
-//   **bold**         → ^+bold^:
-//   *italic*         → ^_italic^:         (rendered as underline, see below)
-//   _italic_         → ^_italic^:         (strict word-boundary flanking)
-//   `inline code`    → ^Cinline code^:    (bright-cyan tint)
+//   **bold**         → bold
+//   *italic*         → underline (see below)
+//   _italic_         → underline (strict word-boundary flanking)
+//   `inline code`    → bright-cyan tint
+//   [text](url)      → bright-cyan + underline, plus a links[] entry
+//
+// The sequences come from theme/index.ts rather than being written here, so
+// what a span looks like is decided in one place.
 //
 // Italic maps to underline, not SGR italic (`\x1b[3m`). Real italic is
 // unreliable in practice: tmux mangles SGR 3 unless the outer TERM's
@@ -288,11 +296,10 @@ export function formatEvent(
 //          outer side is non-alphanumeric-and-non-`_`. This stops
 //          `some_snake_case` from italicizing `snake`.
 //
-// boldReset/codeReset allow callers to substitute a non-full-reset sequence.
-// codeOpen defaults to "^C" (bright cyan); thoughts pass "^c" (dim cyan) so
-// inline code reads as a muted tint that fits the gray thought aesthetic.
-// Thoughts also pass boldReset "^-" and codeReset "^K" so neither resets the
-// foreground to default — the brightBlack base color holds throughout.
+// The *Reset opts let a caller substitute something other than a full reset,
+// which rows with their own base colour need: a full reset would strand the
+// remainder of the row in the terminal's default foreground. See
+// PROSE_INLINE_OPTS / THOUGHT_INLINE_OPTS / inlineOptsFor in theme/index.ts.
 function applyInlineMarkup(
   text: string,
   opts?: {
@@ -306,8 +313,8 @@ function applyInlineMarkup(
 }
 
 // Single-pass inline markdown processor: walks `text` and emits two
-// parallel views — `styled`, the terminal-kit caret-markup string that
-// the renderer paints, and the `clean` string (implicit; never returned
+// parallel views — `styled`, the SGR-bearing string that the renderer
+// paints, and the `clean` string (implicit; never returned
 // directly) that is what stripTkMarkup would recover from `styled`. The
 // `links` sidecar records each `[text](url)` span with start/end
 // indices into the `clean` view so a click can resolve back to its
@@ -316,7 +323,8 @@ function applyInlineMarkup(
 // One-pass keeps clean-coord arithmetic honest: the regex-cascade
 // version of this function shifted indices unpredictably when bold/
 // code spans appeared before a link, because `**word**` shortens to
-// `word` in clean while `^+word^:` keeps its full length in styled.
+// `word` in clean while the bold-wrapped form keeps its full length in
+// styled.
 function applyInlineMarkupWithLinks(
   text: string,
   opts?: {
@@ -338,14 +346,15 @@ function applyInlineMarkupWithLinks(
   // way, but column accounting needs the awareness.
   ansi: boolean;
 } {
-  const codeOpen = opts?.codeOpen ?? "^C";
-  const codeReset = opts?.codeReset ?? "^:";
-  const boldReset = opts?.boldReset ?? "^:";
-  const italicReset = opts?.italicReset ?? "^:";
-  // Links render bright-cyan-underline by default — same visual register
-  // as inline `code` since the link text is usually a path/identifier.
-  const linkOpen = opts?.linkOpen ?? "^C^_";
-  const linkReset = opts?.linkReset ?? "^:";
+  // Defaults suit agent prose, whose base is the terminal's default
+  // foreground. Rows that carry their own colour (plan entries, headings,
+  // thoughts) pass opts so a span's closer restores that colour.
+  const codeOpen = opts?.codeOpen ?? PROSE_INLINE_OPTS.codeOpen;
+  const codeReset = opts?.codeReset ?? PROSE_INLINE_OPTS.codeReset;
+  const boldReset = opts?.boldReset ?? PROSE_INLINE_OPTS.boldReset;
+  const italicReset = opts?.italicReset ?? PROSE_INLINE_OPTS.italicReset;
+  const linkOpen = opts?.linkOpen ?? PROSE_INLINE_OPTS.linkOpen;
+  const linkReset = opts?.linkReset ?? PROSE_INLINE_OPTS.linkReset;
   let styled = "";
   let cleanLen = 0;
   let ansi = false;
@@ -377,8 +386,11 @@ function applyInlineMarkupWithLinks(
         continue;
       }
     }
+    // A literal caret used to need doubling, because the writer read "^X"
+    // as a style command. Spans are explicit SGR now, so a caret is just a
+    // caret and passes through untouched.
     if (c === "^") {
-      styled += "^^";
+      styled += "^";
       cleanLen += 1;
       i += 1;
       continue;
@@ -396,7 +408,7 @@ function applyInlineMarkupWithLinks(
         const innerText = text.slice(i + 2, close);
         const inner = applyInlineMarkupWithLinks(innerText, opts);
         const start = cleanLen;
-        styled += `^+${inner.styled}${boldReset}`;
+        styled += `${SGR_BOLD}${inner.styled}${boldReset}`;
         for (const nested of inner.links) {
           links.push({
             start: start + nested.start,
@@ -450,7 +462,7 @@ function applyInlineMarkupWithLinks(
           const innerText = text.slice(i + 1, close);
           const inner = applyInlineMarkupWithLinks(innerText, opts);
           const start = cleanLen;
-          styled += `^_${inner.styled}${italicReset}`;
+          styled += `${SGR_UNDERLINE}${inner.styled}${italicReset}`;
           for (const nested of inner.links) {
             links.push({
               start: start + nested.start,
@@ -500,7 +512,7 @@ function applyInlineMarkupWithLinks(
           const innerText = text.slice(i + 1, close);
           const inner = applyInlineMarkupWithLinks(innerText, opts);
           const start = cleanLen;
-          styled += `^_${inner.styled}${italicReset}`;
+          styled += `${SGR_UNDERLINE}${inner.styled}${italicReset}`;
           for (const nested of inner.links) {
             links.push({
               start: start + nested.start,
@@ -523,11 +535,7 @@ function applyInlineMarkupWithLinks(
       const close = text.indexOf("`", i + 1);
       if (close !== -1 && close > i + 1) {
         const inner = text.slice(i + 1, close);
-        // Escape `^` → `^^` so a literal caret inside backticks (e.g.
-        // an agent quoting `^:` while discussing terminal-kit markup)
-        // isn't interpreted as an SGR reset by the writer downstream.
-        const safe = inner.replace(/\^/g, "^^");
-        styled += `${codeOpen}${safe}${codeReset}`;
+        styled += `${codeOpen}${inner}${codeReset}`;
         cleanLen += inner.length;
         i = close + 1;
         continue;
@@ -621,50 +629,6 @@ function applyInlineMarkupWithLinks(
     i += 1;
   }
   return { styled, links, cleanLength: cleanLen, ansi };
-}
-
-// Per-heading inline-markup opts. Headings render via the markup-interpreting
-// writer (no .noFormat) so inline code / bold inside them gets styled, but
-// `^:` reset would drop the outer bold+color too; each closer re-emits the
-// heading's base attrs so the rest of the heading keeps its style. heading-2
-// uses `^Y` (bright yellow) as the code opener because the default `^C`
-// would match the heading's brightCyan and disappear visually.
-// Per-plan-style reset opts so inline `code`/**bold** spans restore the
-// row's base color/attr after `^:` (full SGR reset). plan rows render as
-// brightYellow, plan-done as brightGreen, plan-pending as dim — each
-// boldReset/codeReset re-asserts that base.
-function planInlineOptsFor(style: Style): {
-  codeOpen: string;
-  boldReset: string;
-  italicReset: string;
-  codeReset: string;
-} {
-  switch (style) {
-    case "plan-done":
-      return { codeOpen: "^C", boldReset: "^:^g", italicReset: "^:^g", codeReset: "^:^g" };
-    case "plan-pending":
-      return { codeOpen: "^C", boldReset: "^:^-", italicReset: "^:^-", codeReset: "^:^-" };
-    case "plan":
-    default:
-      return { codeOpen: "^C", boldReset: "^:^Y", italicReset: "^:^Y", codeReset: "^:^Y" };
-  }
-}
-
-function headingInlineOptsFor(style: Style): {
-  codeOpen: string;
-  boldReset: string;
-  italicReset: string;
-  codeReset: string;
-} {
-  switch (style) {
-    case "heading-1":
-      return { codeOpen: "^C", boldReset: "^+^Y", italicReset: "^+^Y", codeReset: "^+^Y" };
-    case "heading-2":
-      return { codeOpen: "^Y", boldReset: "^+^C", italicReset: "^+^C", codeReset: "^+^C" };
-    case "heading-3":
-    default:
-      return { codeOpen: "^C", boldReset: "^:^+", italicReset: "^:^+", codeReset: "^:^+" };
-  }
 }
 
 interface ParseMarkdownOpts {
@@ -764,7 +728,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
       // unescaped header; escaping a literal `^` only changes the body.
       const links = codeHeaderLink === null ? undefined : [codeHeaderLink];
       line(
-        codeHeader.replace(/\^/g, "^^"),
+        codeHeader,
         highlightCode ? "dim" : proseStyle,
         "  ",
         links,
@@ -789,7 +753,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
       }
     } else {
       for (const cl of codeBuffer)
-        line(cl.replace(/\^/g, "^^"), proseStyle);
+        line(cl, proseStyle);
     }
     codeBuffer = [];
     codeLang = "";
@@ -838,7 +802,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
       // style (bold + color) — `^:` would also kill the outer chain, so
       // each level emits its own restore sequence after the inline span.
       const headingInlineOpts = highlightCode
-        ? headingInlineOptsFor(headingStyle)
+        ? inlineOptsFor(headingStyle)
         : inlineOpts;
       line(
         applyInlineMarkup(headingText, headingInlineOpts),
@@ -953,15 +917,15 @@ export function parseAgentMarkdown(
 // (which keys on bodyStyle) catches every line. There is no marker glyph:
 // the dim gray "thought" color plus the indent set thoughts apart, and a
 // blank gutter keeps copy/paste clean (no leading "*"/"·" to strip). Both
-// inline resets use "^-" (bold-off only) so bold and code spans stay in the
-// same gray register without a hue shift.
+// inline resets keep spans in the same gray register without a hue shift
+// (see THOUGHT_INLINE_OPTS).
 export function parseThoughtMarkdown(text: string): FormattedLine[] {
   return parseMarkdown(text, {
     proseStyle: "thought",
     highlightCode: false,
     prefixStyle: "thought",
     firstPrefix: "  ",
-    inlineOpts: { codeOpen: "^c", boldReset: "^-", codeReset: "^K" },
+    inlineOpts: THOUGHT_INLINE_OPTS,
   });
 }
 
@@ -1395,7 +1359,7 @@ function formatTable(
   };
   const out: FormattedLine[] = [];
   out.push(
-    ...renderRow(header, "heading-3", headingInlineOptsFor("heading-3")),
+    ...renderRow(header, "heading-3", inlineOptsFor("heading-3")),
   );
   const rules: string[] = [];
   for (let c = 0; c < cols; c++) {
@@ -2689,7 +2653,7 @@ function formatPlan(
     // writeStyled and then expects spans to restore that color after
     // closing — pass per-style reset opts so a `code` or **bold** span
     // doesn't strand the rest of the row in default-foreground.
-    const styledContent = applyInlineMarkup(content, planInlineOptsFor(style));
+    const styledContent = applyInlineMarkup(content, inlineOptsFor(style));
     lines.push({
       prefix: "  ",
       body: `${marker} ${styledContent}`,

@@ -1,10 +1,10 @@
-// Coverage for selection mapping on bodies that carry terminal-kit
-// caret-style markup (the "agent" / heading / thought scrollback styles
-// in format.ts). Two properties must hold:
+// Coverage for selection mapping on bodies that carry inline SGR spans
+// (the "agent" / heading / thought scrollback styles in format.ts). Two
+// properties must hold:
 //   1. Click-to-offset maps a visible column to a code-unit offset that
-//      never lands inside a `^X` / `^^` / `^[#...]` span — the
-//      column→offset and offset→column round-trip recovers the original
-//      visible column for every visible cell.
+//      never lands inside an escape sequence — the column→offset and
+//      offset→column round-trip recovers the original visible column for
+//      every visible cell.
 //   2. The clipboard payload that getSelectionText would produce for a
 //      slice carries the visible characters only (markup stripped),
 //      regardless of whether the markup sits at the start, in the
@@ -22,15 +22,14 @@ import {
 } from "./column-mapping.js";
 import { segmentForWidth, stripTkMarkup } from "./screen.js";
 
-describe("terminal-kit markup — click-to-offset round trips", () => {
-  it("leading bold span: click on the visible chars maps past the markup", () => {
-    // "^+hello^:" — ^+ opens bold, ^: resets; both are 0 cols.
-    const body = "^+hello^:";
+describe("inline SGR spans — click-to-offset round trips", () => {
+  it("leading bold span: click on the visible chars maps past the escape", () => {
+    const body = "\x1b[1mhello\x1b[0m";
     const segs = [...segmentForWidth(body)];
     // Visible cells are [h, e, l, l, o] at columns 0..4.
     expect(columnToOffsetFromSegments(segs, 0)).toBe(0);
-    expect(columnToOffsetFromSegments(segs, 1)).toBe("^+h".length);
-    expect(columnToOffsetFromSegments(segs, 5)).toBe("^+hello".length);
+    expect(columnToOffsetFromSegments(segs, 1)).toBe("\x1b[1mh".length);
+    expect(columnToOffsetFromSegments(segs, 5)).toBe("\x1b[1mhello".length);
     // Full sweep round-trips.
     for (let c = 0; c <= 5; c++) {
       const off = columnToOffsetFromSegments(segs, c);
@@ -39,8 +38,7 @@ describe("terminal-kit markup — click-to-offset round trips", () => {
   });
 
   it("interior code span: offsets never split the markup sequence", () => {
-    // "see ^Cfoo^: now" — body with markup mid-line.
-    const body = "see ^Cfoo^: now";
+    const body = "see \x1b[96mfoo\x1b[0m now";
     const segs = [...segmentForWidth(body)];
     const visible = "see foo now"; // 11 cells
     expect(visible.length).toBe(11);
@@ -64,33 +62,39 @@ describe("terminal-kit markup — click-to-offset round trips", () => {
     }
   });
 
-  it("escaped caret renders as one visible cell", () => {
-    // "a^^b" — ^^ is a literal '^' (width 1).
+  it("a caret is an ordinary visible character", () => {
+    // Carets used to be markup: "^C" measured zero-width and "^^" was an
+    // escape for one literal caret. Neither is true now, so an agent writing
+    // "press ^C to quit" measures and copies as typed.
+    const body = "press ^C to quit";
+    const segs = [...segmentForWidth(body)];
+    expect(segs.reduce((n, x) => n + x.width, 0)).toBe(body.length);
+    for (let c = 0; c <= body.length; c++) {
+      expect(columnToOffsetFromSegments(segs, c)).toBe(c);
+    }
+  });
+
+  it("a doubled caret is two visible characters", () => {
     const body = "a^^b";
     const segs = [...segmentForWidth(body)];
-    // Visible: 'a', '^', 'b' — 3 cells.
-    expect(columnToOffsetFromSegments(segs, 0)).toBe(0);
-    expect(columnToOffsetFromSegments(segs, 1)).toBe(1);
-    expect(columnToOffsetFromSegments(segs, 2)).toBe("a^^".length);
-    expect(columnToOffsetFromSegments(segs, 3)).toBe(body.length);
+    expect(segs.reduce((n, x) => n + x.width, 0)).toBe(4);
+    expect(columnToOffsetFromSegments(segs, 3)).toBe(3);
   });
 });
 
-describe("stripTkMarkup — clipboard text is markup-free", () => {
+describe("stripTkMarkup — clipboard text is escape-free", () => {
   it("leading and trailing style spans are removed", () => {
-    expect(stripTkMarkup("^+hello^:")).toBe("hello");
+    expect(stripTkMarkup("\x1b[1mhello\x1b[0m")).toBe("hello");
   });
 
   it("interior style spans are removed", () => {
-    expect(stripTkMarkup("see ^Cfoo^: now")).toBe("see foo now");
+    expect(stripTkMarkup("see \x1b[96mfoo\x1b[0m now")).toBe("see foo now");
   });
 
-  it("escaped caret ^^ collapses to a single '^'", () => {
-    expect(stripTkMarkup("a^^b")).toBe("a^b");
-  });
-
-  it("bracketed extended markup is removed", () => {
-    expect(stripTkMarkup("a^[#ff0]bright^:b")).toBe("abrightb");
+  it("carets are content, not markup, and survive the strip", () => {
+    expect(stripTkMarkup("a^^b")).toBe("a^^b");
+    expect(stripTkMarkup("press ^C to quit")).toBe("press ^C to quit");
+    expect(stripTkMarkup("\x1b[1mpress ^C\x1b[0m")).toBe("press ^C");
   });
 
   it("plain ASCII passes through unchanged", () => {
@@ -98,15 +102,15 @@ describe("stripTkMarkup — clipboard text is markup-free", () => {
   });
 
   it("OSC 8 hyperlink framing is removed, leaving the visible link text", () => {
-    // ESC ] 8 ; ; URI ESC \ … ESC ] 8 ; ; ESC \ wraps the caret-styled
-    // link text. Both halves plus the caret markup collapse to the text.
+    // ESC ] 8 ; ; URI ESC \ … ESC ] 8 ; ; ESC \ wraps the styled link
+    // text. Both halves plus the SGR spans collapse to the text.
     const body =
-      "see \x1b]8;;https://example.com\x1b\\^C^_link text^:\x1b]8;;\x1b\\ end";
+      "see \x1b]8;;https://example.com\x1b\\\x1b[96m\x1b[4mlink text\x1b[0m\x1b]8;;\x1b\\ end";
     expect(stripTkMarkup(body)).toBe("see link text end");
   });
 
   it("BEL-terminated OSC 8 is also removed", () => {
-    const body = "\x1b]8;;https://x\x07^C^_x^:\x1b]8;;\x07";
+    const body = "\x1b]8;;https://x\x07\x1b[96m\x1b[4mx\x1b[0m\x1b]8;;\x07";
     expect(stripTkMarkup(body)).toBe("x");
   });
 });
@@ -176,7 +180,7 @@ describe("segmentForWidth — OSC 8 is zero-width", () => {
     // Simulate the screen.ts pipeline: pick visible columns, ask the
     // segment-aware mapper for the corresponding code-unit slice,
     // strip markup -> visible substring.
-    const body = "^+bold^: middle ^Ccode^: tail";
+    const body = "\x1b[1mbold\x1b[0m middle \x1b[96mcode\x1b[0m tail";
     const visible = "bold middle code tail";
     const segs = [...segmentForWidth(body)];
     // Select columns [5, 11) -> "middle"
