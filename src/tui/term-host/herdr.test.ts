@@ -151,7 +151,29 @@ function lastOf(method: string): Frame | undefined {
   return [...frames].reverse().find((f) => f.method === method);
 }
 
+// Host detection walks CANDIDATES in order and the first match wins, so the
+// tmux candidate is reached whenever the herdr env is incomplete. Running the
+// suite INSIDE tmux therefore made the "is inert" cases resolve a real TmuxHost
+// — pane and socket and all — and fail. Neutralise every candidate's env up
+// front so these tests assert "no host", which is what they mean, rather than
+// "no herdr host on a machine that happens not to run tmux".
+const HOST_ENV = [
+  "HERDR_ENV",
+  "HERDR_SOCKET_PATH",
+  "HERDR_PANE_ID",
+  "HERDR_TAB_ID",
+  "TMUX",
+  "TMUX_PANE",
+] as const;
+
+let savedHostEnv: Record<string, string | undefined> = {};
+
 beforeEach(() => {
+  savedHostEnv = {};
+  for (const key of HOST_ENV) {
+    savedHostEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   frames = [];
   tabLabels.length = 0;
   connectCalls = 0;
@@ -167,10 +189,16 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.HERDR_ENV;
-  delete process.env.HERDR_SOCKET_PATH;
-  delete process.env.HERDR_PANE_ID;
-  delete process.env.HERDR_TAB_ID;
+  // Restore rather than delete: the ambient values belong to whoever is running
+  // the suite, and a later test file may legitimately care about them.
+  for (const key of HOST_ENV) {
+    const prior = savedHostEnv[key];
+    if (prior === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = prior;
+    }
+  }
   __resetReportForTests();
   __resetTerminalHostForTests();
 });
