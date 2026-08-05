@@ -982,6 +982,22 @@ Standard ACP requests and responses carry an optional `_meta: Record<string, unk
 |---|---|---|
 | `queuePosition` | `"head" \| "tail" \| { afterMessageId: string }` | Where in the per-session prompt queue this entry lands. Default `"tail"` matches historical behavior (push to the end). `"head"` splices it onto the front of the waiting queue — runs next, right after the in-flight `currentEntry`. `{ afterMessageId }` splices immediately after the named entry; if the id isn't in the queue (already completed, never existed), falls back to `"tail"`. Useful for extensions submitting follow-up prompts that should run before any other queued user prompts (e.g. the planner injecting `/hydra planner status` after an amend to re-acquire its live view), and for future UI features like drag-to-reorder queue chips. Honors are session-local — multiple entries inserted at `"head"` in quick succession are processed FIFO. |
 
+#### On `session/update` params (`_meta.hydra-acp`)
+
+| Field | Type | Semantics |
+|---|---|---|
+| `recordedAt` | `number` | Epoch millis at which the daemon recorded this entry in `history.jsonl`. Present on every **recordable** `session/update`, both live and replayed, and carrying the same value in each case — a client that saw an event live and one that replays it hours later date it identically. Absent on the snapshot-shaped state kinds, which are broadcast live but never recorded (`session_info_update`, `current_model_update`, `current_mode_update`, `available_commands_update`, `available_modes_update`, `usage_update`, `config_option_update`, `hydra_compaction`), and on ephemeral pushes such as `client_disconnected`. Also absent on entries written by daemons predating this field; clients must fall back to time-of-receipt. |
+
+**Why it exists.** Replay is otherwise undatable. A client that attaches to an existing session receives the whole history through the same notification channel as live traffic (by design — see [`session/attach`](#request-sessionattach)), with nothing distinguishing the two. Without `recordedAt`, the only clock available is time-of-receipt, so every replayed `tool_call` appears to have started the instant the client attached, and elapsed-time rendering reads `0s` for work that ran hours ago. `_meta["hydra-acp"].turnStartedAt` on the attach response fixes this at *turn* granularity only; `recordedAt` generalizes it to every event.
+
+**Entry-scoped, not tool-scoped.** The field dates the history entry, so it is meaningful for any `sessionUpdate` kind. Deriving a tool call's duration is one application: take `recordedAt` from the `tool_call` for the start, and from the call's terminal `tool_call_update` for the end. Replay coalescing preserves both — the initial `tool_call` survives intact, and per `toolCallId` only the **last** `tool_call_update` is emitted, so its `recordedAt` is the completion time.
+
+**Clock domain.** `recordedAt` is the *daemon's* wall clock, while a client's own receipt timestamps are local. Differencing the two across a remote daemon will show clock skew (and can go negative). Prefer differencing two `recordedAt` values against each other. This matches the existing exposure of `turnStartedAt` and `enqueuedAt`.
+
+**Relationship to REST.** The same underlying value is served as `ts` by [`GET /v1/sessions/:id/events`](#get-v1sessionsidevents) and [`GET /v1/sessions/events`](#get-v1sessionsevents), where it is rendered as an ISO-8601 string. On the wire it is epoch millis, consistent with `turnStartedAt` and `enqueuedAt`.
+
+> Transformers observing a `response:session/update` intercept see the payload **before** this stamp is applied, and a transformer that supplies its own `recordedAt` has it preserved rather than overwritten.
+
 #### On `session/new` params (`_meta.hydra-acp`)
 
 The ACP spec `NewSessionRequest` carries only `cwd` and `mcpServers`. Everything hydra-specific — including **agent selection** — rides under `_meta["hydra-acp"]`; hydra emits **no** non-spec fields at the top level of `session/new`.

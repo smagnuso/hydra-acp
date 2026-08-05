@@ -24,6 +24,7 @@ import {
   extractHydraMeta,
   HYDRA_META_KEY,
   mergeMeta,
+  withRecordedAt,
   sessionListEntryToWire,
   buildHydraSessionMeta,
   type WarmSessionMetaExtras,
@@ -1469,7 +1470,7 @@ export function registerAcpWsEndpoint(
               break;
             }
             await connection
-              .notify(note.method, note.params)
+              .notify(note.method, withRecordedAt(note.params, note.recordedAt))
               .catch(() => undefined);
           }
         })();
@@ -1550,7 +1551,7 @@ export function registerAcpWsEndpoint(
         );
         for (const entry of history) {
           await connection
-            .notify(entry.method, entry.params)
+            .notify(entry.method, withRecordedAt(entry.params, entry.recordedAt))
             .catch(() => undefined);
         }
         return {
@@ -1698,7 +1699,7 @@ export function registerAcpWsEndpoint(
               prev = at;
             }
             try {
-              await connection.notify(note.method, note.params);
+              await connection.notify(note.method, withRecordedAt(note.params, at ?? undefined));
             } catch {
               // Client detached mid-drip — stop quietly.
               return;
@@ -1722,7 +1723,7 @@ export function registerAcpWsEndpoint(
           }
           const note = replay[i]!;
           const pending = connection
-            .notify(note.method, note.params)
+            .notify(note.method, withRecordedAt(note.params, note.recordedAt))
             .catch(() => undefined);
           if ((i + 1) % REPLAY_FLUSH_EVERY === 0) {
             await pending;
@@ -2051,7 +2052,7 @@ export function registerAcpWsEndpoint(
           break;
         }
         await connection
-          .notify(note.method, note.params)
+          .notify(note.method, withRecordedAt(note.params, note.recordedAt))
           .catch(() => undefined);
       }
       session.replayPendingPermissions(client);

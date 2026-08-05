@@ -1057,6 +1057,20 @@ describe("startDaemon", () => {
             ?.update?.sessionUpdate,
         ).toBe("agent_message_chunk");
 
+        // Each replayed notification carries the entry's original
+        // recordedAt (1000 / 2000 from the imported bundle) under
+        // _meta["hydra-acp"], so a client can date history it never saw
+        // live instead of counting elapsed time from time-of-attach.
+        const recordedAts = notifications.map(
+          (n) =>
+            (
+              n.params as {
+                _meta?: { "hydra-acp"?: { recordedAt?: number } };
+              }
+            )?._meta?.["hydra-acp"]?.recordedAt,
+        );
+        expect(recordedAts).toEqual([1000, 2000]);
+
         ws.close();
       });
 

@@ -3,6 +3,7 @@ import {
   HYDRA_META_KEY,
   extractHydraMeta,
   mergeMeta,
+  withRecordedAt,
   SessionAttachParams,
   sessionListEntryToWire,
   buildHydraSessionMeta,
@@ -336,5 +337,58 @@ describe("SessionAttachParams schema", () => {
     const parsed = SessionAttachParams.parse({ sessionId: "sess" });
     expect(parsed.historyPolicy).toBe("full");
     expect(parsed._meta).toBeUndefined();
+  });
+});
+
+describe("withRecordedAt", () => {
+  const meta = (params: unknown) =>
+    ((params as Record<string, unknown>)._meta as Record<string, unknown>)[
+      HYDRA_META_KEY
+    ] as Record<string, unknown>;
+
+  it("stamps recordedAt under the hydra meta namespace", () => {
+    const out = withRecordedAt({ sessionId: "s", update: { a: 1 } }, 1234);
+    expect(meta(out).recordedAt).toBe(1234);
+    expect((out as Record<string, unknown>).update).toEqual({ a: 1 });
+  });
+
+  it("preserves sibling hydra meta fields", () => {
+    const out = withRecordedAt(
+      { sessionId: "s", _meta: { [HYDRA_META_KEY]: { amending: true } } },
+      99,
+    );
+    expect(meta(out)).toEqual({ amending: true, recordedAt: 99 });
+  });
+
+  it("preserves foreign meta namespaces", () => {
+    const out = withRecordedAt({ _meta: { "other-vendor": { x: 1 } } }, 5);
+    const m = (out as Record<string, unknown>)._meta as Record<string, unknown>;
+    expect(m["other-vendor"]).toEqual({ x: 1 });
+    expect(meta(out).recordedAt).toBe(5);
+  });
+
+  it("does not overwrite an existing recordedAt", () => {
+    const out = withRecordedAt(
+      { _meta: { [HYDRA_META_KEY]: { recordedAt: 1 } } },
+      2,
+    );
+    expect(meta(out).recordedAt).toBe(1);
+  });
+
+  it("returns params untouched when recordedAt is absent or non-finite", () => {
+    const params = { sessionId: "s" };
+    expect(withRecordedAt(params, undefined)).toBe(params);
+    expect(withRecordedAt(params, NaN)).toBe(params);
+  });
+
+  it("does not mutate the input", () => {
+    const params = { sessionId: "s" };
+    withRecordedAt(params, 7);
+    expect(params).toEqual({ sessionId: "s" });
+  });
+
+  it("passes through non-object params", () => {
+    expect(withRecordedAt(undefined, 1)).toBeUndefined();
+    expect(withRecordedAt([1], 1)).toEqual([1]);
   });
 });

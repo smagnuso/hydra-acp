@@ -80,7 +80,7 @@ import type {
   PromptQueueEntry as PromptQueueSnapshotEntry,
   UpdatePromptResult,
 } from "../acp/types.js";
-import { JsonRpcErrorCodes, extractHydraMeta } from "../acp/types.js";
+import { JsonRpcErrorCodes, extractHydraMeta, withRecordedAt } from "../acp/types.js";
 import * as fsp from "node:fs/promises";
 
 export interface AttachedClient {
@@ -6356,11 +6356,19 @@ export class Session {
     const broadcast = recordable
       ? ensureMessageIdOnUpdate(method, rewritten)
       : rewritten;
+    // Recorded entries carry their record time to clients under
+    // _meta["hydra-acp"].recordedAt so a live listener and a replaying
+    // listener date the same event identically. Only the wire payload is
+    // stamped; `entry.params` (disk, transformer chain) stays clean, since
+    // recordedAt is already a first-class column on CachedNotification and
+    // the replay path re-derives the _meta from it.
+    const recordedAt = Date.now();
+    const wire = recordable ? withRecordedAt(broadcast, recordedAt) : broadcast;
     if (recordable) {
       const entry: CachedNotification = {
         method,
         params: broadcast,
-        recordedAt: Date.now(),
+        recordedAt,
       };
       this.lastRecordedAt = entry.recordedAt;
       this.appendCount += 1;
@@ -6397,7 +6405,7 @@ export class Session {
       if (excludeClientId && client.clientId === excludeClientId) {
         continue;
       }
-      void client.connection.notify(method, broadcast).catch(() => undefined);
+      void client.connection.notify(method, wire).catch(() => undefined);
     }
   }
 

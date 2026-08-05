@@ -496,6 +496,48 @@ export function redactHydraMetaForLog(
   };
 }
 
+// Stamp notification params with the daemon-side wall clock at which the
+// entry was recorded, under `_meta["hydra-acp"].recordedAt` (epoch millis).
+// Without it a client has no way to date a replayed event and must fall back
+// to time-of-receipt, which makes every replayed tool call look like it
+// started the instant the client attached. Entry-scoped, not tool-scoped: it
+// applies to any session/update kind.
+//
+// Preserves any existing `_meta` and any sibling hydra-namespaced fields, and
+// never overwrites a recordedAt already present (a transformer-injected or
+// re-stamped value wins over ours).
+export function withRecordedAt(
+  params: unknown,
+  recordedAt: number | undefined,
+): unknown {
+  if (
+    typeof recordedAt !== "number" ||
+    !Number.isFinite(recordedAt) ||
+    !params ||
+    typeof params !== "object" ||
+    Array.isArray(params)
+  ) {
+    return params;
+  }
+  const p = params as Record<string, unknown>;
+  const meta =
+    p._meta && typeof p._meta === "object" && !Array.isArray(p._meta)
+      ? (p._meta as Record<string, unknown>)
+      : {};
+  const raw = meta[HYDRA_META_KEY];
+  const inner =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  if (typeof inner.recordedAt === "number") {
+    return params;
+  }
+  return {
+    ...p,
+    _meta: { ...meta, [HYDRA_META_KEY]: { ...inner, recordedAt } },
+  };
+}
+
 export function mergeMeta(
   passthrough: Record<string, unknown> | undefined,
   ours: Record<string, unknown>,

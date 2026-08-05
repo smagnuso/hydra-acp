@@ -1119,6 +1119,76 @@ describe("Session", () => {
     });
   });
 
+  describe("recordedAt on recorded session/update events", () => {
+    const hydraMeta = (m: unknown): { recordedAt?: number } | undefined =>
+      (
+        (m as { params?: { _meta?: Record<string, unknown> } }).params?._meta as
+          | Record<string, { recordedAt?: number }>
+          | undefined
+      )?.["hydra-acp"];
+
+    it("stamps recordedAt on live broadcasts so clients can date events without guessing", async () => {
+      const { session, mock } = makeSession("sess_rec", "u_rec");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+
+      const before = Date.now();
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rec",
+        update: { sessionUpdate: "tool_call", toolCallId: "tc_1", title: "x" },
+      });
+      const after = Date.now();
+
+      const note = findSessionUpdate(a.stream.sent, "tool_call");
+      const at = hydraMeta(note)?.recordedAt;
+      expect(typeof at).toBe("number");
+      expect(at).toBeGreaterThanOrEqual(before);
+      expect(at).toBeLessThanOrEqual(after);
+    });
+
+    it("does not stamp recordedAt on filtered state updates", async () => {
+      const { session, mock } = makeSession("sess_rec_state", "u_rec_state");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rec_state",
+        update: { sessionUpdate: "current_model_update", currentModel: "opus" },
+      });
+
+      const note = findSessionUpdate(a.stream.sent, "current_model_update");
+      expect(note).toBeDefined();
+      expect(hydraMeta(note)?.recordedAt).toBeUndefined();
+    });
+
+    it("keeps the persisted history entry free of the wire-only _meta stamp", async () => {
+      const { session, mock } = makeSession("sess_rec_disk", "u_rec_disk");
+      const a = makeClient();
+      await session.attach(a.client, "none");
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_rec_disk",
+        update: { sessionUpdate: "tool_call", toolCallId: "tc_d", title: "x" },
+      });
+      await flushHistoryWrites();
+
+      const b = makeClient();
+      const { entries } = await session.attach(b.client, "full");
+      const entry = entries.find(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } })?.update
+            ?.sessionUpdate === "tool_call",
+      );
+      expect(entry).toBeDefined();
+      // recordedAt is a first-class column on the entry; the replay path
+      // re-derives the _meta from it, so the stored params stay clean.
+      expect(typeof entry?.recordedAt).toBe("number");
+      expect(
+        (entry?.params as { _meta?: unknown })._meta,
+      ).toBeUndefined();
+    });
+  });
+
   describe("messageId on recorded session/update events", () => {
     it("stamps messageId on tool_call and plan broadcasts so after_message can anchor mid-turn", async () => {
       const { session, mock } = makeSession("sess_mid", "u_mid");
