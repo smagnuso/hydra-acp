@@ -2449,17 +2449,17 @@ export class Screen {
       }
       const rawBody = line.body ?? "";
       let piece = rawBody.slice(bounds.start, bounds.end);
-      // Styled bodies route through the markup-interpreting writer, so
+      // Styled bodies carry inline SGR spans, so
       // `^X` / `^[...]` spans and OSC 8 hyperlink framing are visually
       // zero-width but sit in the source as code units. Offsets land on
-      // markup boundaries (segment-aware, OSC-8-aware), so the slice
-      // contains whole markup / OSC 8 sequences only; strip them so the
+      // escape boundaries (segment-aware, OSC-8-aware), so the slice
+      // contains whole SGR / OSC 8 sequences only; strip them so the
       // clipboard carries the visible characters alone. Ansi-flagged
       // bodies (syntax-highlighted code fences) get the same treatment:
-      // matchTkMarkupAt now recognizes CSI SGR spans as zero-width, so
+      // matchEscapeAt now recognizes CSI SGR spans as zero-width, so
       // segment-aware offsets land on visible-cell boundaries here too.
-      if (bodyStyleUsesMarkup(line.bodyStyle) || line.ansi) {
-        piece = stripTkMarkup(piece);
+      if (bodyStyleCarriesEscapes(line.bodyStyle) || line.ansi) {
+        piece = stripEscapes(piece);
       }
       out.push(piece);
     }
@@ -4023,13 +4023,13 @@ export class Screen {
       return null;
     }
     // Styled bodies (agent / heading / thought) carry zero-width
-    // terminal-kit markup spans like `^Ccode^:`; ansi-flagged code rows
-    // carry zero-width CSI SGR spans (both recognized by matchTkMarkupAt).
+    // inline SGR spans; ansi-flagged code rows
+    // carry zero-width CSI SGR spans (both recognized by matchEscapeAt).
     // Scanning the raw body directly lets stray style bytes count as
     // word characters, dragging escape junk into the snapped range.
-    // Mirror the markup-strip pattern from pathTokenAt — scan boundaries
+    // Mirror the escape-strip pattern from pathTokenAt — scan boundaries
     // on the visible-only view, then project them back onto raw offsets.
-    const { clean, rawToClean } = stripTkMarkupWithMap(body);
+    const { clean, rawToClean } = stripEscapesWithMap(body);
     if (clean.length === 0) {
       return null;
     }
@@ -4093,7 +4093,7 @@ export class Screen {
   // visible char's position in the raw body; for cleanEnd we want the
   // position past the last visible char (i.e. the first raw index mapping
   // to cleanEnd, which sits at the boundary after the run and before any
-  // trailing markup).
+  // trailing escapes).
   private projectCleanRangeToRaw(
     rawToClean: number[],
     bodyLen: number,
@@ -4140,14 +4140,14 @@ export class Screen {
       return null;
     }
     // Styled bodies (agent/thought/etc.) carry zero-width terminal-kit
-    // markup spans like `^Csrc/foo.ts^:` for inline `code`. Scanning
+    // inline SGR spans around a `code` path. Scanning
     // the raw body directly lets the `C` in `^C` slip into the path
     // token (it matches [A-Z]), and the result resolves to a bogus
-    // path. Strip markup to a clean view and project the click offset
+    // path. Strip escapes to a clean view and project the click offset
     // through, then scan there. For plain bodies this is a no-op
-    // (stripTkMarkup returns the input unchanged when no `^` is
+    // (stripEscapes returns the input unchanged when no `^` is
     // present).
-    const { clean, rawToClean } = stripTkMarkupWithMap(rawBody);
+    const { clean, rawToClean } = stripEscapesWithMap(rawBody);
     if (clean.length === 0) {
       return null;
     }
@@ -4238,13 +4238,13 @@ export class Screen {
     if (line.ansi) {
       return null;
     }
-    // Strip terminal-kit markup to get the clean view, then project the
+    // Strip escapes to get the clean view, then project the
     // click offset through the same raw→clean map used by pathTokenAt.
     const rawBody = line.body ?? "";
     if (rawBody.length === 0) {
       return null;
     }
-    const { clean, rawToClean } = stripTkMarkupWithMap(rawBody);
+    const { clean, rawToClean } = stripEscapesWithMap(rawBody);
     if (clean.length === 0) {
       return null;
     }
@@ -4913,19 +4913,19 @@ export class Screen {
     }
     const colInBody = rawColInBody;
     // Styled bodies (agent / thoughts / headings) carry zero-width
-    // caret-markup spans. The pure column→offset helper has no notion
-    // of markup, so feed it a pre-segmented stream where `^X` / `^[...]`
+    // escape spans. The pure column→offset helper has no notion
+    // of escapes, so feed it a pre-segmented stream where each sequence
     // spans are tagged as zero-width — the offset then lands at a
     // segment boundary and never inside a styling sequence. Plain
     // bodies stay on the grapheme-only fast path.
-    // Both bodyStyleUsesMarkup styles (agent / heading / thought / plan —
-    // caret markup + OSC 8) AND ansi-flagged bodies (syntax-highlighted
+    // Both bodyStyleCarriesEscapes styles (agent / heading / thought / plan —
+    // inline SGR + OSC 8) AND ansi-flagged bodies (syntax-highlighted
     // code fences carrying real CSI SGR spans) need the segment-aware
-    // offset walk: matchTkMarkupAt treats both kinds of styling bytes as
+    // offset walk: matchEscapeAt treats both kinds of styling bytes as
     // zero-width segments, so the click column lands on a visible-cell
     // boundary instead of somewhere inside an escape sequence.
     const needsSegments =
-      bodyStyleUsesMarkup(chunk.bodyStyle) || chunk.ansi === true;
+      bodyStyleCarriesEscapes(chunk.bodyStyle) || chunk.ansi === true;
     const localOffset = needsSegments
       ? columnToOffsetFromSegments(segmentForWidth(chunk.body), colInBody)
       : columnToOffset(chunk.body, colInBody);
@@ -5054,10 +5054,10 @@ export class Screen {
         // ANSI lines stay excluded — their escape bytes inflate col
         // positions and substring math against the raw body would
         // point at locations that don't line up with what's rendered.
-        // Agent lines (caret markup) are included: most chat content
+        // Agent lines (inline SGR) are included: most chat content
         // is agent-styled, and split-around-match still renders
         // sensibly because the search-highlight span overrides the
-        // surrounding markup styling for its few chars.
+        // surrounding span styling for its few chars.
         if (line.ansi) {
           continue;
         }
@@ -6438,7 +6438,7 @@ export class Screen {
           this.term.bgBlue(" ");
         }
         // noFormat: the queued summary contains user-typed prompt text, so
-        // literal `^X` should not be interpreted as terminal-kit markup.
+        // literal text, never interpreted as a style command.
         this.term.bgBlue.brightWhite.noFormat(padded);
       });
     }
@@ -6523,7 +6523,7 @@ export class Screen {
           this.term("  ");
         }
         // noFormat so literal `^X` typed by the user is rendered verbatim
-        // and not interpreted as terminal-kit's color/style markup.
+        // and never interpreted as a color/style command.
         if (overlayFocused) {
           this.term.dim(slice);
         } else {
@@ -7228,14 +7228,14 @@ export class Screen {
     const hang = Math.max(0, Math.min(line.hangingIndent ?? 0, room - 1));
     const wrapWidth = Math.max(1, room - hang);
     // The "agent", "thought", and "heading-*" bodyStyles are routed through
-    // term-kit's markup-interpreting writer (see writeStyled); every other
-    // style emits text via .noFormat, so caret sequences are literal there
-    // and the wrap budget must include them. Keeping stripMarkup off by
+    // bodies carrying inline SGR spans (see writeStyled); every other
+    // style emits text via .noFormat, so escapes are the only zero-width
+    // and the wrap budget must include them. Keeping escapeAware off by
     // default preserves existing cwd/title/spec behavior.
-    const stripMarkup = bodyStyleUsesMarkup(line.bodyStyle);
+    const escapeAware = bodyStyleCarriesEscapes(line.bodyStyle);
     const chunks = line.ansi
       ? wrapAnsiBody(line.body, hang > 0 ? wrapWidth : room)
-      : wrap(line.body, hang > 0 ? wrapWidth : room, { stripMarkup });
+      : wrap(line.body, hang > 0 ? wrapWidth : room, { escapeAware });
     // Row cap: drop the overflow chunks and mark the last kept one with
     // an ellipsis. Skipped for ansi bodies since the clip below isn't
     // escape-aware. The dropped text is still in the source line, so
@@ -7257,7 +7257,7 @@ export class Screen {
     // that byte position in the source. Instead, compute the per-chunk
     // source window by counting visible characters in each chunk and
     // consuming the same number of visible chars from source (skipping
-    // zero-width SGR / OSC 8 spans on both sides via matchTkMarkupAt).
+    // zero-width SGR / OSC 8 spans on both sides via matchEscapeAt).
     // Both endpoints go into wrapOrigin so selectionRangeForChunk can
     // intersect against the true source window, not the drifted one.
     let ansiSrcCursor = 0;
@@ -7271,7 +7271,7 @@ export class Screen {
       let displayBody =
         i === 0 || hang === 0 ? chunk : " ".repeat(hang) + chunk;
       if (clamped && i === chunks.length - 1) {
-        displayBody = truncate(`${displayBody}…`, room, { stripMarkup });
+        displayBody = truncate(`${displayBody}…`, room, { escapeAware });
       }
       const wrappedLine: FormattedLine = {
         prefix: i === 0 ? line.prefix : " ".repeat(prefixCols),
@@ -7308,7 +7308,7 @@ export class Screen {
           const srcStart = ansiSrcCursor;
           let visible = 0;
           for (let ci = 0; ci < chunk.length; ) {
-            const m = matchTkMarkupAt(chunk, ci);
+            const m = matchEscapeAt(chunk, ci);
             if (m) {
               ci += m.text.length;
               if (m.width > 0) {
@@ -7321,7 +7321,7 @@ export class Screen {
           }
           let toConsume = visible;
           while (toConsume > 0 && ansiSrcCursor < line.body.length) {
-            const m = matchTkMarkupAt(line.body, ansiSrcCursor);
+            const m = matchEscapeAt(line.body, ansiSrcCursor);
             if (m) {
               ansiSrcCursor += m.text.length;
               if (m.width > 0) {
@@ -7334,11 +7334,11 @@ export class Screen {
           }
           let srcEnd = ansiSrcCursor;
           if (i === chunks.length - 1) {
-            // Absorb any trailing zero-width markup on the last chunk so
+            // Absorb any trailing zero-width escape on the last chunk so
             // selection-end at bodyLen lands on the same boundary
             // getSelectionText's slice ends on.
             while (srcEnd < line.body.length) {
-              const m = matchTkMarkupAt(line.body, srcEnd);
+              const m = matchEscapeAt(line.body, srcEnd);
               if (!m) {
                 break;
               }
@@ -7443,22 +7443,22 @@ export class Screen {
     // wrap-ansi, so we don't truncate further — that would re-introduce
     // the char-counting bug the ansi path exists to avoid. Width for
     // fillRow padding is measured with string-width so escape bytes
-    // don't shrink the apparent line. For bodyStyles that emit caret
-    // markup ("agent", "heading-*"), opt into markup-aware truncate so a
+    // don't shrink the apparent line. For bodyStyles that emit inline
+    // inline SGR ("agent", "heading-*"), opt into escape-aware truncate so a
     // `^Cfoo^:` span isn't counted as 5 cols and isn't cut between '^'
     // and the style char.
-    const stripMarkup = bodyStyleUsesMarkup(line.bodyStyle);
+    const escapeAware = bodyStyleCarriesEscapes(line.bodyStyle);
     const bodyText = line.ansi
       ? line.body
-      : truncate(line.body, remaining, { stripMarkup });
+      : truncate(line.body, remaining, { escapeAware });
     // Scrollback search active: split the visible body around case-
     // insensitive matches of the search term so each match renders
     // with the search-highlight style while the rest keeps the base
     // bodyStyle. ANSI bodies skip the split (escape bytes would
-    // confuse substring math). Agent / caret-markup bodies do
-    // participate — the highlight overrides surrounding markup for
+    // confuse substring math). Agent / span-bearing bodies do
+    // participate — the highlight overrides surrounding spans for
     // the matched chars, which produces sensible output for the
-    // common case (matches landing in plain prose, not inside markup
+    // common case (matches landing in plain prose, not inside a span
     // spans). When activeMatchCol is set, the occurrence at that
     // exact col renders with the louder "search-highlight-active"
     // style so the user knows which match ^r/^s is pointing at.
@@ -7542,30 +7542,30 @@ export class Screen {
     if (selectionRange !== null) {
       const selStart = Math.max(0, Math.min(bodyText.length, selectionRange.start));
       const selEnd = Math.max(selStart, Math.min(bodyText.length, selectionRange.end));
-      // Both markup-bearing bodies (caret spans) and ansi-flagged bodies
+      // Both span-bearing bodies and ansi-flagged bodies
       // (syntax-highlighted code with CSI SGR spans) need strip-and-prime
       // treatment: the selection band must be a uniform inverse-video
       // color (no striping across syntax tokens), and the trailing piece
       // needs its style stack replayed after the band's SGR reset.
-      const usesMarkup =
-        bodyStyleUsesMarkup(line.bodyStyle) || line.ansi === true;
+      const carriesEscapes =
+        bodyStyleCarriesEscapes(line.bodyStyle) || line.ansi === true;
       renderPiece(bodyText.slice(0, selStart), 0);
       if (selEnd > selStart) {
         let selText = bodyText.slice(selStart, selEnd);
-        if (usesMarkup) {
-          // Body carries caret-markup spans (^+bold^:, ^Ccode^:, etc.)
+        if (carriesEscapes) {
+          // Body carries inline SGR spans
           // or CSI SGR spans from cli-highlight. Strip them so the
           // inverse band reads as one uniform color regardless of which
-          // span the selection happens to cross — leaving the markup in
-          // would either print carets literally (noFormat) or invert
+          // span the selection happens to cross — leaving the escapes in
+          // would either print the escapes literally or invert
           // each span's own fg color, making the selection look striped.
-          selText = stripTkMarkup(selText);
+          selText = stripEscapes(selText);
         }
         // The band renders as one uniform inverse run; subdivide only to
         // emit the link brackets so a selected path stays clickable.
-        // Offsets are the pre-strip ones when usesMarkup, so skip
+        // Offsets are the pre-strip ones when carriesEscapes, so skip
         // subdivision there rather than mis-slice.
-        if (usesMarkup) {
+        if (carriesEscapes) {
           writeStyled(this.term, selText, "selection-highlight", hovered);
         } else {
           withLinks(selText, selStart, (chunk) => {
@@ -7574,15 +7574,15 @@ export class Screen {
         }
       }
       let after = bodyText.slice(selEnd);
-      if (usesMarkup && selEnd > selStart) {
+      if (carriesEscapes && selEnd > selStart) {
         // The inverse writer ends with a full SGR reset, dropping any
-        // markup span (e.g. `^Ccode^:`) that opened before the
+        // SGR span that opened before the
         // selection and closes after it — the trailing piece would
         // render without its original color. Prepend the cumulative
-        // caret-markup tokens from text[0..selEnd] so the same writer
+        // SGR tokens from text[0..selEnd] so the same writer
         // call replays the style stack right before printing the
         // visible tail. Tokens are zero-width so this adds no chars.
-        const prime = tkMarkupTokensOnly(bodyText.slice(0, selEnd));
+        const prime = sgrTokensOnly(bodyText.slice(0, selEnd));
         if (prime.length > 0) {
           after = prime + after;
         }
@@ -7592,16 +7592,16 @@ export class Screen {
       renderPiece(bodyText, 0);
     }
     if (line.fillRow || hovered || padToWidth) {
-      // Measure what the terminal will actually SHOW. Caret markup
+      // Measure what the terminal will actually SHOW. Escape sequences
       // (`^+bold^:`, `^Ccode^:`) is zero-width once terminal-kit renders
-      // it, so a markup-bearing body must be measured stripped — counting
-      // the markup as visible columns understates the pad and leaves the
+      // them, so a span-bearing body must be measured stripped — counting
+      // the escapes as visible columns understates the pad and leaves the
       // tail of the row un-cleared, which surfaced as leftover glyphs at
       // the end of agent/thought/heading lines. (Harmless before this row
       // had to clear its own tail: eraseLineAfter mopped it up.)
       const visible = line.ansi
         ? stringWidth(bodyText)
-        : cellWidth(stripMarkup ? stripTkMarkup(bodyText) : bodyText);
+        : cellWidth(escapeAware ? stripEscapes(bodyText) : bodyText);
       const pad = remaining - visible;
       if (pad > 0) {
         // When the selection extends past this chunk's body (multi-
@@ -7626,7 +7626,7 @@ export class Screen {
         writeStyled(this.term, " ".repeat(pad), fillStyle, hovered);
       }
     }
-    // Defensive reset: if the body contained terminal-kit markup
+    // Defensive reset: if the body contained an escape sequence
     // (an SGR span opener) and our char-counting wrap/truncate split it
     // mid-span, the dangling open would otherwise leak bold/color into
     // every subsequent row's eraseLineAfter + writes. Emitting an SGR
@@ -7909,9 +7909,9 @@ function writeBodyWithHighlight(
 // 3 columns) inflates the budget and a long span near the right edge wraps
 // too early.
 //
-// Delegates to the theme table so this and writeStyled's writer choice can
-// never disagree.
-function bodyStyleUsesMarkup(style: Style | undefined): boolean {
+// Delegates to the theme table so this and writeStyled's trailing-reset
+// decision can never disagree.
+function bodyStyleCarriesEscapes(style: Style | undefined): boolean {
   return styleCarriesInlineSgr(style);
 }
 
@@ -8015,13 +8015,12 @@ function cellWidth(text: string): number {
   return stringWidth(text, { ambiguousIsNarrow: !ambiguousWide });
 }
 
-// terminal-kit caret-markup recognizer. applyInlineMarkup() in format.ts
-// rewrites markdown for the "agent" bodyStyle into terminal-kit's `^X`
-// markup so term(text) can render styled spans inline:
-//   ^^         literal "^"            (1 visible col -- one caret renders)
-//   ^X         single-char SGR style  (0 visible cols)
-//   ^[#color]  extended color/style   (0 visible cols)
-interface MarkupMatch {
+// Escape-sequence recognizer. Bodies carry two kinds of zero-width escape:
+// SGR spans emitted by applyInlineMarkup() in format.ts (and by
+// cli-highlight for fenced code), and OSC 8 hyperlink framing added at
+// paint time. Both occupy 0 visible columns, so every width, wrap, offset
+// and strip routine has to agree on where they start and end.
+interface EscapeMatch {
   text: string;
   width: number;
 }
@@ -8030,7 +8029,7 @@ interface MarkupMatch {
 // URI (ST | BEL), where ST is ESC '\'. Returns the matched substring, or
 // null when `i` isn't the start of a (terminated) OSC 8 sequence. These
 // are zero visible columns — the link text lives between the opening and
-// closing halves — so matchTkMarkupAt reports them like caret markup so
+// closing halves — so matchEscapeAt reports them alongside SGR spans and
 // the width / wrap / offset / strip machinery treats them uniformly.
 function matchOsc8At(text: string, i: number): string | null {
   if (!text.startsWith("\x1b]8;", i)) {
@@ -8051,8 +8050,9 @@ function matchOsc8At(text: string, i: number): string | null {
 // Covers SGR (…m) plus any other CSI form; all are zero visible columns
 // once emitted. Returning them as zero-width segments lets the offset /
 // wrap / strip machinery slice syntax-highlighted code lines the same way
-// it slices caret-markup lines — click-drag selection lands on visible-
-// character boundaries instead of getting rounded up to the whole row.
+// it slices any other escape-bearing line — click-drag selection lands on
+// visible-character boundaries instead of getting rounded up to the whole
+// row.
 function matchCsiAt(text: string, i: number): string | null {
   if (!text.startsWith("\x1b[", i)) {
     return null;
@@ -8074,7 +8074,7 @@ function matchCsiAt(text: string, i: number): string | null {
   return text.slice(i, j + 1);
 }
 
-export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
+export function matchEscapeAt(text: string, i: number): EscapeMatch | null {
   if (text.charCodeAt(i) === 0x1b /* ESC */) {
     const osc8 = matchOsc8At(text, i);
     if (osc8 !== null) return { text: osc8, width: 0 };
@@ -8090,19 +8090,14 @@ export function matchTkMarkupAt(text: string, i: number): MarkupMatch | null {
   return null;
 }
 
-// Drop every terminal-kit caret-markup span from `text`, leaving only the
-// visible characters. Escaped carets (`^^`) collapse back to a single `^`.
-// Used when copying a styled scrollback line to the clipboard so the
-// payload is plain text — the same grammar that wrap/truncate already
-// recognize, with no parallel definition.
-// Like stripTkMarkup but also returns a raw→clean offset map so callers
-// that started with an index into the raw (markup-bearing) text can
+// Like stripEscapes but also returns a raw→clean offset map so callers
+// that started with an index into the raw (escape-bearing) text can
 // project it onto the cleaned view. rawToClean[i] is the index in the
 // clean string of the visible char at raw position i (or, for raw
-// positions inside a zero-width markup span, the clean index where the
+// positions inside a zero-width escape span, the clean index where the
 // next visible char will appear). Length is text.length + 1 so the
 // past-the-end raw index also maps cleanly.
-export function stripTkMarkupWithMap(text: string): {
+export function stripEscapesWithMap(text: string): {
   clean: string;
   rawToClean: number[];
 } {
@@ -8111,12 +8106,12 @@ export function stripTkMarkupWithMap(text: string): {
   let i = 0;
   while (i < text.length) {
     rawToClean[i] = clean.length;
-    const m = matchTkMarkupAt(text, i);
+    const m = matchEscapeAt(text, i);
     if (m) {
       if (m.width > 0) {
         clean += "^";
       }
-      // Every raw byte inside the markup span maps to the same clean
+      // Every raw byte inside the escape span maps to the same clean
       // index — its trailing edge (where the next visible char lands).
       for (let k = 1; k < m.text.length; k++) {
         rawToClean[i + k] = clean.length;
@@ -8131,19 +8126,19 @@ export function stripTkMarkupWithMap(text: string): {
   return { clean, rawToClean };
 }
 
-// Inverse of stripTkMarkupWithMap's rawToClean: cleanToRaw[cleanOffset] is
+// Inverse of stripEscapesWithMap's rawToClean: cleanToRaw[cleanOffset] is
 // the raw index where that clean offset begins. FormattedLine.links carries
-// clean-body offsets (so it survives the zero-width caret markup a styled
+// clean-body offsets (so it survives the zero-width escapes a styled
 // body wears), but the paint layer slices the RAW body, so link spans have
 // to be projected before they can be used.
 //
 // Maps the leading edge: for a run of raw bytes collapsing to one clean
-// index (a markup span), the earliest raw index wins, so an opener sitting
+// index (an escape span), the earliest raw index wins, so an opener sitting
 // immediately before a link's first visible char lands inside the span
 // rather than outside it. That's the behavior we want — the style token
 // belongs to the text it styles.
 export function cleanToRawOffsets(rawBody: string): number[] {
-  const { clean, rawToClean } = stripTkMarkupWithMap(rawBody);
+  const { clean, rawToClean } = stripEscapesWithMap(rawBody);
   const cleanToRaw = new Array<number>(clean.length + 1).fill(rawBody.length);
   for (let raw = rawBody.length; raw >= 0; raw--) {
     const c = rawToClean[raw];
@@ -8155,7 +8150,7 @@ export function cleanToRawOffsets(rawBody: string): number[] {
 }
 
 // Count visible characters in text[from..to), treating CSI SGR / OSC 8 /
-// caret-markup spans as zero-width (per matchTkMarkupAt). Used to
+// escape spans as zero-width (per matchEscapeAt). Used to
 // translate between source-body code-unit offsets and wrap-chunk-body
 // code-unit offsets for ansi-flagged (syntax-highlighted) lines whose
 // continuation chunks carry injected SGR prefixes that don't line up
@@ -8168,7 +8163,7 @@ export function countVisibleChars(
   let n = 0;
   let i = from;
   while (i < to) {
-    const m = matchTkMarkupAt(text, i);
+    const m = matchEscapeAt(text, i);
     if (m) {
       i += m.text.length;
       if (m.width > 0) {
@@ -8183,7 +8178,7 @@ export function countVisibleChars(
 }
 
 // Advance from `from` in `text` past `n` visible characters, skipping
-// zero-width markup spans; return the resulting code-unit offset. Used
+// zero-width escape spans; return the resulting code-unit offset. Used
 // with countVisibleChars to translate visible-char counts into chunk-
 // body code-unit offsets.
 export function skipVisibleChars(
@@ -8193,7 +8188,7 @@ export function skipVisibleChars(
 ): number {
   let i = from;
   while (n > 0 && i < text.length) {
-    const m = matchTkMarkupAt(text, i);
+    const m = matchEscapeAt(text, i);
     if (m) {
       i += m.text.length;
       if (m.width > 0) {
@@ -8207,12 +8202,12 @@ export function skipVisibleChars(
   return i;
 }
 
-export function stripTkMarkup(text: string): string {
+export function stripEscapes(text: string): string {
   if (!text.includes("\x1b")) return text;
   let out = "";
   let i = 0;
   while (i < text.length) {
-    const m = matchTkMarkupAt(text, i);
+    const m = matchEscapeAt(text, i);
     if (m) {
       if (m.width > 0)
         out += "^";
@@ -8225,25 +8220,26 @@ export function stripTkMarkup(text: string): string {
   return out;
 }
 
-// Extract only the zero-width caret-markup tokens from `text`, preserving
+// Extract only the zero-width SGR tokens from `text`, preserving
 // order. Used to "prime" terminal-kit's style state after a selection band
-// stripped the visible text: feeding the markup-only string back through
-// the markup writer re-applies the toggle/color spans that were active at
+// stripped the visible text: re-emitting the tokens alone re-applies the
+// toggle/color spans that were active at
 // the splice point so the trailing piece keeps its original styling.
-// Literal `^^` (a visible caret) is dropped since it has no styling effect.
+// OSC 8 is excluded: hyperlink framing is not styling and must not be
+// reopened here.
 //
-// OSC 8 hyperlink spans (also zero-width per matchTkMarkupAt) are
+// OSC 8 hyperlink spans (also zero-width per matchEscapeAt) are
 // deliberately NOT replayed: they're a link WRAPPER, not a persistent SGR
 // style. Re-emitting a bare OSC 8 opener would start an unwanted hyperlink
 // on the trailing text and leak its escape bytes into the row.
-function tkMarkupTokensOnly(text: string): string {
+function sgrTokensOnly(text: string): string {
   if (!text.includes("\x1b")) {
     return "";
   }
   let out = "";
   let i = 0;
   while (i < text.length) {
-    const m = matchTkMarkupAt(text, i);
+    const m = matchEscapeAt(text, i);
     if (m) {
       if (m.width === 0) {
         const head = m.text.charCodeAt(0);
@@ -8265,12 +8261,12 @@ function tkMarkupTokensOnly(text: string): string {
   return out;
 }
 
-function hasTkMarkup(text: string): boolean {
+function hasEscapes(text: string): boolean {
   if (!text.includes("\x1b")) {
     return false;
   }
   for (let i = 0; i < text.length; i++) {
-    if (matchTkMarkupAt(text, i)) {
+    if (matchEscapeAt(text, i)) {
       return true;
     }
   }
@@ -8282,42 +8278,42 @@ interface WidthSegment {
   width: number;
 }
 
-// Index of the next byte that could START a markup span (caret `^` or an
+// Index of the next byte that could START an escape span (an
 // ESC that may open an OSC 8 sequence), at or after `from`. -1 when none
 // remain. Lets the grapheme walk in segmentForWidth stop at either kind of
 // boundary without a separate scan per marker.
-function nextMarkupBoundary(text: string, from: number): number {
+function nextEscapeBoundary(text: string, from: number): number {
   return text.indexOf("\x1b", from);
 }
 
-// Walk `text` yielding either a markup span (emitted as one indivisible
+// Walk `text` yielding either an escape span (emitted as one indivisible
 // segment of width 0 or 1) or a single grapheme cluster (width measured
-// via string-width). Used by the markup-aware wrap/truncate paths so a
+// via string-width). Used by the escape-aware wrap/truncate paths so a
 // `^Cfoo^:` span is never split across rows and is excluded from the
 // visible-column budget.
 export function* segmentForWidth(text: string): IterableIterator<WidthSegment> {
   let i = 0;
   while (i < text.length) {
-    const m = matchTkMarkupAt(text, i);
+    const m = matchEscapeAt(text, i);
     if (m) {
       yield { text: m.text, width: m.width };
       i += m.text.length;
       continue;
     }
-    // Walk graphemes only up to the next markup boundary so the
+    // Walk graphemes only up to the next escape boundary so the
     // segmenter doesn't fuse a stray '^' (or an OSC 8 escape) with
     // adjacent text. Probe for the nearest of '^' or ESC.
     let runEnd = text.length;
-    let probe = nextMarkupBoundary(text, i);
+    let probe = nextEscapeBoundary(text, i);
     while (probe !== -1 && probe < text.length) {
-      if (matchTkMarkupAt(text, probe)) {
+      if (matchEscapeAt(text, probe)) {
         runEnd = probe;
         break;
       }
-      probe = nextMarkupBoundary(text, probe + 1);
+      probe = nextEscapeBoundary(text, probe + 1);
     }
     if (runEnd === i) {
-      // Bare '^' that isn't valid markup; render as 1 visible col.
+      // Not the start of a complete escape; render as 1 visible col.
       yield { text: "^", width: 1 };
       i += 1;
       continue;
@@ -8330,13 +8326,13 @@ export function* segmentForWidth(text: string): IterableIterator<WidthSegment> {
 }
 
 export interface WrapOptions {
-  // When true, treat terminal-kit caret markup (`^X`, `^^`, `^[#...]`)
-  // as zero-width style commands -- only "agent" bodyStyle text needs
-  // this since it's the only style routed through term(text)'s markup-
-  // interpreting writer. Default false preserves the historical
-  // char-count behavior for cwd/title/spec call sites that render
-  // through .noFormat (markup shows literally there).
-  stripMarkup?: boolean;
+  // When true, treat escape sequences (inline SGR spans, OSC 8 framing) as
+  // zero-width when budgeting width, and never split one across a boundary.
+  // Needed by the bodyStyles that carry inline spans — see
+  // bodyStyleCarriesEscapes. Default false keeps the plain char-count
+  // behaviour for the cwd/title/spec call sites, whose text never contains
+  // an escape.
+  escapeAware?: boolean;
 }
 
 // Build the iTerm2 OSC 1337 inline-image escape, optionally wrapped in
@@ -8370,11 +8366,11 @@ export function wrap(
   if (text.length === 0) {
     return [""];
   }
-  const stripMarkup = opts.stripMarkup === true && hasTkMarkup(text);
-  if (!stripMarkup && !NON_ASCII.test(text)) {
+  const escapeAware = opts.escapeAware === true && hasEscapes(text);
+  if (!escapeAware && !NON_ASCII.test(text)) {
     return wrapAscii(text, width);
   }
-  return wrapVisible(text, width, stripMarkup);
+  return wrapVisible(text, width, escapeAware);
 }
 
 function wrapAscii(text: string, width: number): string[] {
@@ -8406,20 +8402,20 @@ function wrapAscii(text: string, width: number): string[] {
   return out;
 }
 
-// Visible-width-aware wrap. Walks graphemes (and optionally caret-markup
+// Visible-width-aware wrap. Walks graphemes (and optionally escape
 // spans) budgeting by string-width so a CJK char counts as 2 cols, a
 // regional-indicator flag as 2, and a `^Cfoo^:` span as just the visible
 // "foo" (3 cols). Without this, a body of 80 CJK chars (160 visible
 // cols) would render past the right margin and paintRow's sig-based
-// skip would never erase that bleed; with markup, the same effect
+// skip would never erase that bleed; with escapes, the same effect
 // happens around inline code/bold spans in agent bullets.
 function wrapVisible(
   text: string,
   width: number,
-  stripMarkup: boolean,
+  escapeAware: boolean,
 ): string[] {
   const out: string[] = [];
-  const segments: WidthSegment[] = stripMarkup
+  const segments: WidthSegment[] = escapeAware
     ? [...segmentForWidth(text)]
     : graphemeSegments(text);
   let i = 0;
@@ -8478,8 +8474,8 @@ function graphemeSegments(text: string): WidthSegment[] {
 }
 
 export interface TruncateOptions {
-  // See WrapOptions.stripMarkup -- same semantics for truncate.
-  stripMarkup?: boolean;
+  // See WrapOptions.escapeAware -- same semantics for truncate.
+  escapeAware?: boolean;
 }
 
 export function truncate(
@@ -8490,11 +8486,11 @@ export function truncate(
   if (max <= 0) {
     return "";
   }
-  const stripMarkup = opts.stripMarkup === true && hasTkMarkup(text);
-  if (!stripMarkup && text.length <= max && !NON_ASCII.test(text)) {
+  const escapeAware = opts.escapeAware === true && hasEscapes(text);
+  if (!escapeAware && text.length <= max && !NON_ASCII.test(text)) {
     return text;
   }
-  if (!stripMarkup) {
+  if (!escapeAware) {
     const visible = cellWidth(text);
     if (visible <= max) {
       return text;

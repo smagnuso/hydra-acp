@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { thisMachine } from "../core/machine.js";
-import { stripTkMarkupWithMap } from "./screen.js";
+import { stripEscapesWithMap } from "./screen.js";
 import stringWidth from "string-width";
 import {
   buildUnifiedDiff,
@@ -21,10 +21,7 @@ import type { PlanEntry } from "../core/render-update.js";
 
 // Measure the on-screen width of a rendered table line. Mirrors what
 // the screen layer eventually writes: prefix + body, with terminal-kit
-// inline SGR span escapes removed because
-// they're zero-width style commands when the agent bodyStyle is
-// interpreted via term(text). The escape `^^` -> `^` is unwound first
-// so a literal caret survives the strip.
+// inline SGR span escapes removed, since they occupy no columns on screen.
 function visibleWidth(line: FormattedLine): number {
   return stringWidth(stripSgr((line.prefix ?? "") + line.body));
 }
@@ -1702,9 +1699,9 @@ describe("renderToolDetail", () => {
     const link = lines[0]?.links?.[0];
     expect(link?.url).toBe("/abs/src/foo.ts#L42");
     // Span covers exactly the visible label. Offsets are CLEAN-body
-    // coords (they have to survive the zero-width caret markup the link
+    // coords (they have to survive the zero-width escapes the link
     // styling wears), so compare against the stripped view.
-    const clean = stripTkMarkupWithMap(lines[0]?.body ?? "").clean;
+    const clean = stripEscapesWithMap(lines[0]?.body ?? "").clean;
     expect(clean.slice(link!.start, link!.end)).toBe("foo.ts:42");
   });
 

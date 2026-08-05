@@ -851,7 +851,7 @@ describe("Screen sidebar column edges", () => {
 // Two ways the column and the transcript leaked into each other once the
 // scrollback stopped calling eraseLineAfter and started padding its own
 // region instead.
-// Columns a string actually occupies on screen. terminal-kit caret markup
+// Columns a string actually occupies on screen. An inline SGR span
 // (ESC[1m ... ESC[0m) is zero-width once rendered, so counting the raw
 // bytes overstates the width by exactly the escapes, which is the mistake
 // the code under test used to make.

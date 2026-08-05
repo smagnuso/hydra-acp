@@ -330,7 +330,7 @@ describe("Screen wrapTail bounded walk", () => {
     expect(exhausted).toBe(true);
   });
 
-  it("wraps thought lines flush to a 2-column gutter, ignoring caret markup in the width budget", () => {
+  it("wraps thought lines flush to a 2-column gutter, ignoring inline SGR in the width budget", () => {
     const screen = makeScreen();
     // `^c…^K` (inline code) and `^+…^-` (bold) are zero-width on screen —
     // the wrap budget must skip them so the line fills to the margin, the
@@ -348,7 +348,7 @@ describe("Screen wrapTail bounded walk", () => {
     for (const row of rows.slice(1)) {
       expect(row.prefix).toBe("  ");
     }
-    // No row overflows the terminal once caret markup is discounted.
+    // No row overflows the terminal once the escapes are discounted.
     const visibleWidth = (s: string): number =>
       s.replace(/\^(?:\^|[+\-:CcKY])/g, (m) => (m === "^^" ? "^" : "")).length;
     for (const row of rows) {
@@ -528,7 +528,7 @@ describe("truncate (visible-width aware)", () => {
 });
 
 // Visible width counting that mirrors what the terminal actually renders
-// for a body carrying inline SGR spans. Mirrors the production stripMarkup
+// for a body carrying inline SGR spans. Mirrors the production escapeAware
 // helper used by wrap/truncate.
 function visibleCols(text: string): number {
   return stringWidth(text.replace(/\x1b\[[0-9;]*m/g, ""));
@@ -539,41 +539,41 @@ function visibleCols(text: string): number {
 // styled spans. Those ^X sequences are zero-width SGR commands at render
 // time but currently get counted as 1 col each by wrap/truncate via
 // .length and string-width. Result: bullet bodies wrap or truncate too
-// early and can split mid-markup, producing visible-text corruption
+// early and can split mid-escape, producing visible-text corruption
 // ("Gupdated)", trailing stray backticks, dropped chars near code spans).
 //
-// The fix opts the "agent" bodyStyle into a markup-aware width path:
-//   wrap(text, width, { stripMarkup: true })
-//   truncate(text, max, { stripMarkup: true })
+// The fix opts the "agent" bodyStyle into an escape-aware width path:
+//   wrap(text, width, { escapeAware: true })
+//   truncate(text, max, { escapeAware: true })
 // Without the flag, behavior is unchanged (cwd/title/spec rendering
-// already goes through .noFormat, so markup there should be counted as
+// already goes through .noFormat, so any escape there is counted as
 // literal characters).
-describe("wrap with inline SGR spans (stripMarkup)", () => {
+describe("wrap with inline SGR spans (escapeAware)", () => {
   it("does not count a code span's escapes toward visible width", () => {
     // applyInlineMarkup turns `foo` into ESC[96mfoo ESC[0m -- 17 JS chars
     // but 3 visible cols. So the whole body is 26 JS chars / 12 visible
-    // cols and must fit in width=12 with stripMarkup=true.
+    // cols and must fit in width=12 with escapeAware=true.
     const body = "text \x1b[96mfoo\x1b[0m bar";
     expect(visibleCols(body)).toBe(12);
-    expect(wrap(body, 12, { stripMarkup: true })).toEqual([body]);
+    expect(wrap(body, 12, { escapeAware: true })).toEqual([body]);
   });
 
   it("does not count a bold span's escapes toward visible width", () => {
     const body = "a \x1b[1mb\x1b[0m c";
     expect(visibleCols(body)).toBe(5);
-    expect(wrap(body, 5, { stripMarkup: true })).toEqual([body]);
+    expect(wrap(body, 5, { escapeAware: true })).toEqual([body]);
   });
 
   it("counts a literal caret as one visible column", () => {
-    // Carets are no longer markup, so "x ^ y" is 5 JS chars / 5 cols and
+    // Carets are not markup, so "x ^ y" is 5 JS chars / 5 cols and
     // the doubled form is two columns, not one.
-    expect(wrap("x ^ y", 5, { stripMarkup: true })).toEqual(["x ^ y"]);
+    expect(wrap("x ^ y", 5, { escapeAware: true })).toEqual(["x ^ y"]);
     expect(visibleCols("x ^^ y")).toBe(6);
   });
 
-  it("budgets each wrapped chunk by visible width when markup is interspersed", () => {
+  it("budgets each wrapped chunk by visible width when spans are interspersed", () => {
     const wrapped = wrap("aaaa \x1b[96mbbbb\x1b[0m cccc dddd", 10, {
-      stripMarkup: true,
+      escapeAware: true,
     });
     for (const chunk of wrapped) {
       expect(visibleCols(chunk)).toBeLessThanOrEqual(10);
@@ -591,7 +591,7 @@ describe("wrap with inline SGR spans (stripMarkup)", () => {
     // row and orphan bytes on the next -- the corruption pattern that used
     // to show up in long bullet bodies.
     const wrapped = wrap("aaaa \x1b[96mbbbbcccc\x1b[0m dddd eeee ffff", 8, {
-      stripMarkup: true,
+      escapeAware: true,
     });
     for (const chunk of wrapped) {
       // Every ESC in a chunk is followed by a complete CSI sequence.
@@ -603,7 +603,7 @@ describe("wrap with inline SGR spans (stripMarkup)", () => {
     }
   });
 
-  it("falls back to char-count behavior when stripMarkup is omitted", () => {
+  it("falls back to char-count behavior when escapeAware is omitted", () => {
     // Without the flag the body gets the old length-based wrap: it wraps
     // because its JS length exceeds 12. This is the backward-compatible
     // path for cwd/title/spec call sites, which never carry spans.
@@ -612,24 +612,24 @@ describe("wrap with inline SGR spans (stripMarkup)", () => {
   });
 });
 
-describe("truncate with inline SGR spans (stripMarkup)", () => {
+describe("truncate with inline SGR spans (escapeAware)", () => {
   it("returns the body unchanged when visible width already fits", () => {
     const body = "text \x1b[96mfoo\x1b[0m bar";
-    expect(truncate(body, 12, { stripMarkup: true })).toBe(body);
+    expect(truncate(body, 12, { escapeAware: true })).toBe(body);
   });
 
   it("truncates by visible width, not by JS char count", () => {
     const out = truncate("text \x1b[96mfoo\x1b[0m bar", 6, {
-      stripMarkup: true,
+      escapeAware: true,
     });
     expect(visibleCols(out)).toBeLessThanOrEqual(6);
   });
 
   it("counts a literal caret as one visible column in the budget", () => {
-    expect(truncate("x ^ y", 5, { stripMarkup: true })).toBe("x ^ y");
+    expect(truncate("x ^ y", 5, { escapeAware: true })).toBe("x ^ y");
   });
 
-  it("falls back to char-count behavior when stripMarkup is omitted", () => {
+  it("falls back to char-count behavior when escapeAware is omitted", () => {
     // Without the flag the body is truncated on visible width with no
     // escape awareness. This is the cwd/title/spec path, which never
     // carries spans, so a plain body is the representative case.
@@ -2984,7 +2984,7 @@ describe("Screen block-click routing", () => {
 
   it("getSelectionText copies the full clean text of an OSC 8 agent line", () => {
     // Real http/https links render via OSC 8 (ansi:true) with the link
-    // text carried as terminal-kit caret markup. A whole-line selection
+    // text carried as inline SGR spans. A whole-line selection
     // must yield plain visible text — no OSC 8 escape bytes, no `^C…^:`.
     const screen = makeTallScreen({ width: 120, height: 24 });
     const body =
@@ -3019,7 +3019,7 @@ describe("Screen block-click routing", () => {
 
   it("getSelectionText slices an OSC 8 agent line per-character (not whole-line)", () => {
     // The line is ansi only because of the OSC 8 link; its offsets are
-    // still per-char selectable via the markup-aware machinery. Selecting
+    // still per-char selectable via the escape-aware machinery. Selecting
     // just the leading word must copy only that word.
     const screen = makeTallScreen({ width: 120, height: 24 });
     const body =
@@ -3648,10 +3648,10 @@ describe("Screen selection-highlight rendering of ansi lines", () => {
     return { screen, writes };
   }
 
-  it("strips OSC 8 + caret markup from the highlight band (no funky control codes)", () => {
+  it("strips OSC 8 + inline SGR from the highlight band (no funky control codes)", () => {
     const { screen, writes } = makeRecordingScreen();
     // A real http link renders via OSC 8 (ansi:true) with the link text
-    // carried as terminal-kit caret markup — the "Agent Extensions via
+    // carried as inline SGR spans — the "Agent Extensions via
     // ACP Proxies RFD" shape the user hit.
     screen.start();
     const body =
@@ -3681,7 +3681,7 @@ describe("Screen selection-highlight rendering of ansi lines", () => {
     // contiguous plain-text run (rendered via the inverse .noFormat
     // writer)…
     expect(joined).toContain("see Agent Extensions via ACP Proxies RFD end");
-    // …and no OSC 8 escape leaks into the row. (Caret markup on the
+    // …and no OSC 8 escape leaks into the row. (Inline spans on the
     // non-selected agent pieces is consumed by term(text); the escape-free
     // assertion is the meaningful one — it's exactly what the user saw as
     // "funky control codes".)

@@ -146,7 +146,7 @@ export interface FormattedLine {
   collapsed?: boolean;
   // Inline link ranges parsed out of markdown `[text](url)` spans.
   // start/end are byte indices in the CLEAN body (i.e. the result of
-  // running stripTkMarkup over `body`) so they survive the zero-width
+  // running stripEscapes over `body`) so they survive the zero-width
   // styling markup the body carries. Consumed by the open-on-double-
   // click gesture: a click whose resolved offset falls inside a link
   // range opens the URL directly, skipping the path-token scan.
@@ -315,7 +315,7 @@ function applyInlineMarkup(
 // Single-pass inline markdown processor: walks `text` and emits two
 // parallel views — `styled`, the SGR-bearing string that the renderer
 // paints, and the `clean` string (implicit; never returned
-// directly) that is what stripTkMarkup would recover from `styled`. The
+// directly) that is what stripEscapes would recover from `styled`. The
 // `links` sidecar records each `[text](url)` span with start/end
 // indices into the `clean` view so a click can resolve back to its
 // URL even though the visible text only shows `text`.
@@ -985,10 +985,10 @@ function isTableSeparatorLine(line: string): boolean {
   return cells.every((c) => /^:?-+:?$/.test(c));
 }
 
-// Visible terminal width of a cell after applyInlineMarkup runs against it
-// — both header and body cells go through term(text) with markup
-// interpretation, so **bold** -> ^+bold^…, *italic* / _italic_ -> ^_…^:,
-// and `code` -> ^Ccode^… are all zero-width markers. Uses string-width
+// Visible terminal width of a cell after applyInlineMarkup runs against it.
+// It measures the markdown SOURCE, stripping `**bold**` / `*italic*` /
+// `` `code` `` syntax, because the SGR those become is zero-width on screen
+// and the column math has to match what the reader sees. Uses string-width
 // so wide glyphs (CJK, emoji) count as 2 cols and code-point oddities
 // (combining marks, ZWJ sequences) reflect their on-screen footprint
 // rather than .length. The italic strippers use conservative flanking

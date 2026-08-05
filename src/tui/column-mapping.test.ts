@@ -9,10 +9,11 @@ import {
   type WidthSegment,
 } from "./column-mapping.js";
 
-// Fake "caret-style" inline markup: every "<X>" span is a zero-width
-// style command. Mirrors how the screen layer tags terminal-kit markup
-// spans before handing them to the segment-aware mappers — the
-// column-mapping module itself stays free of any markup grammar.
+// Fake inline markup: every "<X>" span is a zero-width style command. The
+// shape is deliberately not real SGR — this module is agnostic to what
+// defines a segment, and the screen layer is what tags escape spans before
+// handing them to the segment-aware mappers. Using a fake keeps that
+// separation honest.
 function fakeSegment(str: string): WidthSegment[] {
   const out: WidthSegment[] = [];
   let i = 0;

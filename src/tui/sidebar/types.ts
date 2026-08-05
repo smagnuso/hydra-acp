@@ -119,7 +119,7 @@ export interface SidebarSnapshot {
 
 export interface SidebarTextMetrics {
   cellWidth(s: string): number;
-  truncate(s: string, max: number, opts?: { stripMarkup?: boolean }): string;
+  truncate(s: string, max: number, opts?: { escapeAware?: boolean }): string;
 }
 
 // How the column is framed.

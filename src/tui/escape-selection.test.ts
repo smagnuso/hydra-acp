@@ -6,21 +6,26 @@
 //      offset→column round-trip recovers the original visible column for
 //      every visible cell.
 //   2. The clipboard payload that getSelectionText would produce for a
-//      slice carries the visible characters only (markup stripped),
-//      regardless of whether the markup sits at the start, in the
+//      slice carries the visible characters only (escapes stripped),
+//      regardless of whether an escape sits at the start, in the
 //      middle, or at the end of the slice.
 //
-// The grammar definition lives in screen.ts (`matchTkMarkupAt`,
-// `segmentForWidth`, `stripTkMarkup`). This test exercises those at
+// The grammar definition lives in screen.ts (`matchEscapeAt`,
+// `segmentForWidth`, `stripEscapes`). This test exercises those at
 // the public boundary so any drift between the two consumers
 // (column math vs. clipboard extraction) shows up.
+//
+// Carets get explicit coverage because they used to be markup: `^C` measured
+// zero-width and `^^` was the escape for one literal caret. Both are
+// ordinary text now, and a regression would silently corrupt any prose that
+// mentions a control-key shortcut.
 
 import { describe, it, expect } from "vitest";
 import {
   columnToOffsetFromSegments,
   offsetToColumnFromSegments,
 } from "./column-mapping.js";
-import { segmentForWidth, stripTkMarkup } from "./screen.js";
+import { segmentForWidth, stripEscapes } from "./screen.js";
 
 describe("inline SGR spans — click-to-offset round trips", () => {
   it("leading bold span: click on the visible chars maps past the escape", () => {
@@ -37,7 +42,7 @@ describe("inline SGR spans — click-to-offset round trips", () => {
     }
   });
 
-  it("interior code span: offsets never split the markup sequence", () => {
+  it("interior code span: offsets never split the escape sequence", () => {
     const body = "see \x1b[96mfoo\x1b[0m now";
     const segs = [...segmentForWidth(body)];
     const visible = "see foo now"; // 11 cells
@@ -82,23 +87,23 @@ describe("inline SGR spans — click-to-offset round trips", () => {
   });
 });
 
-describe("stripTkMarkup — clipboard text is escape-free", () => {
+describe("stripEscapes — clipboard text is escape-free", () => {
   it("leading and trailing style spans are removed", () => {
-    expect(stripTkMarkup("\x1b[1mhello\x1b[0m")).toBe("hello");
+    expect(stripEscapes("\x1b[1mhello\x1b[0m")).toBe("hello");
   });
 
   it("interior style spans are removed", () => {
-    expect(stripTkMarkup("see \x1b[96mfoo\x1b[0m now")).toBe("see foo now");
+    expect(stripEscapes("see \x1b[96mfoo\x1b[0m now")).toBe("see foo now");
   });
 
   it("carets are content, not markup, and survive the strip", () => {
-    expect(stripTkMarkup("a^^b")).toBe("a^^b");
-    expect(stripTkMarkup("press ^C to quit")).toBe("press ^C to quit");
-    expect(stripTkMarkup("\x1b[1mpress ^C\x1b[0m")).toBe("press ^C");
+    expect(stripEscapes("a^^b")).toBe("a^^b");
+    expect(stripEscapes("press ^C to quit")).toBe("press ^C to quit");
+    expect(stripEscapes("\x1b[1mpress ^C\x1b[0m")).toBe("press ^C");
   });
 
   it("plain ASCII passes through unchanged", () => {
-    expect(stripTkMarkup("hello, world!")).toBe("hello, world!");
+    expect(stripEscapes("hello, world!")).toBe("hello, world!");
   });
 
   it("OSC 8 hyperlink framing is removed, leaving the visible link text", () => {
@@ -106,12 +111,12 @@ describe("stripTkMarkup — clipboard text is escape-free", () => {
     // text. Both halves plus the SGR spans collapse to the text.
     const body =
       "see \x1b]8;;https://example.com\x1b\\\x1b[96m\x1b[4mlink text\x1b[0m\x1b]8;;\x1b\\ end";
-    expect(stripTkMarkup(body)).toBe("see link text end");
+    expect(stripEscapes(body)).toBe("see link text end");
   });
 
   it("BEL-terminated OSC 8 is also removed", () => {
     const body = "\x1b]8;;https://x\x07\x1b[96m\x1b[4mx\x1b[0m\x1b]8;;\x07";
-    expect(stripTkMarkup(body)).toBe("x");
+    expect(stripEscapes(body)).toBe("x");
   });
 });
 
@@ -146,9 +151,9 @@ describe("CSI SGR — click-to-offset lands on visible-cell boundaries", () => {
     }
   });
 
-  it("stripTkMarkup removes CSI SGR spans from a syntax-highlighted line", () => {
+  it("stripEscapes removes CSI SGR spans from a syntax-highlighted line", () => {
     const body = "\x1b[31mconst\x1b[0m x = \x1b[32m1\x1b[0m;";
-    expect(stripTkMarkup(body)).toBe("const x = 1;");
+    expect(stripEscapes(body)).toBe("const x = 1;");
   });
 
   it("a mid-line diff-style green span selects to the visible-char slice", () => {
@@ -160,7 +165,7 @@ describe("CSI SGR — click-to-offset lands on visible-cell boundaries", () => {
     // Selecting "HOST_UID=" (visible cols 12..21).
     const startOff = columnToOffsetFromSegments(segs, 12);
     const endOff = columnToOffsetFromSegments(segs, 21);
-    expect(stripTkMarkup(body.slice(startOff, endOff))).toBe("HOST_UID=");
+    expect(stripEscapes(body.slice(startOff, endOff))).toBe("HOST_UID=");
     // The total visible width matches the stripped length.
     const totalWidth = segs.reduce((n, s) => n + s.width, 0);
     expect(totalWidth).toBe(visible.length);
@@ -179,17 +184,17 @@ describe("segmentForWidth — OSC 8 is zero-width", () => {
   it("slice-then-strip produces exactly the visible chars under the selection", () => {
     // Simulate the screen.ts pipeline: pick visible columns, ask the
     // segment-aware mapper for the corresponding code-unit slice,
-    // strip markup -> visible substring.
+    // strip escapes -> visible substring.
     const body = "\x1b[1mbold\x1b[0m middle \x1b[96mcode\x1b[0m tail";
     const visible = "bold middle code tail";
     const segs = [...segmentForWidth(body)];
     // Select columns [5, 11) -> "middle"
     const start = columnToOffsetFromSegments(segs, 5);
     const end = columnToOffsetFromSegments(segs, 11);
-    expect(stripTkMarkup(body.slice(start, end))).toBe(visible.slice(5, 11));
-    // Selection that spans across a markup boundary stays clean.
+    expect(stripEscapes(body.slice(start, end))).toBe(visible.slice(5, 11));
+    // Selection that spans across an escape boundary stays clean.
     const start2 = columnToOffsetFromSegments(segs, 0);
     const end2 = columnToOffsetFromSegments(segs, visible.length);
-    expect(stripTkMarkup(body.slice(start2, end2))).toBe(visible);
+    expect(stripEscapes(body.slice(start2, end2))).toBe(visible);
   });
 });
