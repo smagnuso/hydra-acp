@@ -201,7 +201,9 @@ const brightYellow = fg(93);
 const brightCyan = fg(96);
 const brightWhite = fg(97);
 
+const yellow = fg(33);
 const brightRed = fg(91);
+const brightMagenta = fg(95);
 
 const bgRed = bg(41);
 const bgBlue = bg(44);
@@ -277,8 +279,41 @@ export type ChromeToken =
   | "list-selected"
   | "list-description"
   | "list-header"
+  // A selectable option in an in-prompt modal, where selection is marked by
+  // colour rather than a background band.
+  | "modal-option"
+  | "modal-option-selected"
+  // The sessionbar and the rules above and below the prompt.
+  | "bar-text"
+  | "bar-indicator"
+  | "rule"
+  | "rule-pad"
+  | "rule-meta"
+  | "hint-hover"
+  // Session status, shared by the separator's label, its elapsed timer, and
+  // the "by the way" overlay header.
+  | "status-ready"
+  | "status-busy"
+  | "status-alert"
+  | "status-cold"
+  // Slash-command / file completion popup.
+  | "completion-name"
+  | "completion-desc"
+  // An attached-file chip on the prompt row.
+  | "attachment"
+  // Queued prompts waiting to be sent.
+  | "queue-row"
+  | "queue-cursor"
+  | "queue-blank"
+  // The prompt composer.
+  | "composer-gutter"
+  | "composer-inactive"
+  | "composer-continuation"
   // In-place progress line (binary download, install).
-  | "status-progress";
+  | "status-progress"
+  // Messages written straight to the terminal outside any frame: before the
+  // TUI starts, or while tearing it down.
+  | "cli-warn";
 
 /** Anything the theme can resolve: a scrollback style or a piece of chrome. */
 export type ThemeToken = Style | ChromeToken;
@@ -439,8 +474,72 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // Column-header row above a list. role: muted
   "list-header": { layers: [dim] },
 
+  // Unselected and selected rows of an in-prompt modal. These mark selection
+  // with colour instead of list-selected's background band, because the modal
+  // is drawn inline over the prompt rather than in a box of its own.
+  // role: muted / warn
+  "modal-option": { layers: [dim] },
+  "modal-option-selected": { layers: [brightYellow] },
+
+  // Identity strings in the sessionbar: cwd and session title. Bold rather
+  // than coloured, matching the sidebar policy that identity reads the same
+  // whatever it says and so should not compete with state. role: emphasis
+  "bar-text": { layers: [bold] },
+  // "you are not looking at the live tail": the scrollback offset and the
+  // search indicator. role: accent
+  "bar-indicator": { layers: [brightCyan] },
+  // The ── glyphs of a rule. role: emphasis
+  rule: { layers: [bold] },
+  // Padding either side of a rule. Separate from rule-meta because it carries
+  // no information at all. role: muted
+  "rule-pad": { layers: [dim] },
+  // Subordinate data sitting in a rule: the short session id and its
+  // separators. role: muted
+  "rule-meta": { layers: [dim] },
+  // A hint chunk in the bottom rule under the pointer. Full brightness rather
+  // than a colour: the surrounding chunks are dim, so removing the dimming is
+  // itself the hover signal. role: fg
+  "hint-hover": { layers: [] },
+
+  // Session status. One enum, three surfaces: the separator's label, its
+  // elapsed timer, and the btw overlay header. `status-alert` covers stalled,
+  // disconnected, cancelled and errored — all "something is wrong", all the
+  // same signal. `status-ready` is deliberately the terminal's own foreground:
+  // the normal case should not draw the eye. role: fg / busy / error / cold
+  "status-ready": { layers: [] },
+  "status-busy": { layers: [brightYellow] },
+  "status-alert": { layers: [brightRed] },
+  "status-cold": { layers: [brightMagenta] },
+
+  // Completion popup: the candidate and its description. role: accent / muted
+  "completion-name": { layers: [brightCyan] },
+  "completion-desc": { layers: [dim] },
+
+  // An attached-file chip. Plain yellow, not the bright yellow the busy accent
+  // uses, so a pending attachment does not read as work in flight. role: warn
+  attachment: { layers: [yellow] },
+
+  // Queued prompts, painted as a full-width blue band so a stack of them reads
+  // as one block. The cursor marks which row an edit would land on.
+  // role: selection
+  "queue-row": { layers: [bgBlue, brightWhite] },
+  "queue-cursor": { layers: [bgBlue, brightYellow] },
+  "queue-blank": { layers: [bgBlue] },
+
+  // The composer's "> " gutter when it holds focus, and everything about it
+  // when an overlay has taken focus away. role: fg / muted
+  "composer-gutter": { layers: [brightWhite] },
+  "composer-inactive": { layers: [dim] },
+  // The "· " marker starting a logical newline. role: muted
+  "composer-continuation": { layers: [dim] },
+
   // In-place progress, which is a busy state. role: busy
   "status-progress": { layers: [brightYellow] },
+
+  // A bare warning printed outside any frame ("no sessions found", a daemon
+  // version mismatch on stderr). Plain yellow, not the bright yellow of the
+  // busy accent — nothing is in flight. role: warn
+  "cli-warn": { layers: [yellow] },
 
   // Editor-like block: dark band with an explicit white foreground, so a
   // `diff` fence can let context lines sit neutral while cli-highlight's
@@ -533,8 +632,26 @@ export function paint(
   if (text.length === 0) {
     return;
   }
-  const r = resolveStyle(token, supports24Bit(term));
-  term.noFormat(r.open + text + r.close);
+  term.noFormat(styled(token, text, supports24Bit(term)));
+}
+
+/**
+ * The same thing as a string, for callers with no terminal-kit instance to
+ * ask — notably the pre-TUI stderr warnings, which run before a terminal is
+ * constructed.
+ *
+ * `trueColor` defaults to false, so a token carrying a grayscale background
+ * quantises to the 256-colour ramp. None of the tokens used on this path do,
+ * but the conservative default is the one that renders somewhere rather than
+ * emitting 24-bit escapes at a terminal that cannot read them.
+ */
+export function styled(
+  token: ThemeToken,
+  text: string,
+  trueColor: boolean = false,
+): string {
+  const r = resolveStyle(token, trueColor);
+  return r.open + text + r.close;
 }
 
 /**

@@ -42,8 +42,10 @@ import {
 import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
 import { withSync } from "./sync.js";
 import {
+  paint,
   resolveHovered,
   resolveStyle,
+  SGR_RESET,
   styleCarriesInlineSgr,
   supports24Bit,
 } from "./theme/index.js";
@@ -52,7 +54,6 @@ import {
 // OSC 8 hyperlinks are also escapes but never carried a style command, so
 // they must not trigger the trailing reset.
 const SGR_PATTERN = /\x1b\[[0-9;]*m/;
-const SGR_RESET = "\x1b[0m";
 import { writeDebugLine } from "./debug-log.js";
 import {
   ALT_SCREEN_LEAVE,
@@ -5420,9 +5421,10 @@ export class Screen {
       const leftWidth =
         stringWidth(cwdText) + (title ? titleSepWidth + stringWidth(titleText) : 0);
       const gap = Math.max(minGap, w - leftWidth - agentWidth);
-      this.term.bold.noFormat(cwdText);
+      paint(this.term, "bar-text", cwdText);
       if (title) {
-        this.term(titleSep).bold.noFormat(titleText);
+        this.term.noFormat(titleSep);
+        paint(this.term, "bar-text", titleText);
       }
       this.term(" ".repeat(gap));
       this.term.noFormat(agentCell);
@@ -5437,12 +5439,12 @@ export class Screen {
   //
   // The right slot is either the transient bannerRightContent text
   // (active scrollback search, compaction toast, etc.) painted in its
-  // kind colour, or — when nothing transient is active — the dim hint
-  // chunks (mode / pick / guide / detach), with click-hit regions
-  // recomputed so the same mouse targets still work. Status label
-  // colour mirrors the btw header's convention: idle (Ready) paints in
-  // the default colour, Busy yellow, Stalled / Disconnected red, Cold
-  // magenta. The sid block is omitted when no session id is known.
+  // kind token, or — when nothing transient is active — the hint chunks
+  // (mode / pick / guide / detach), with click-hit regions recomputed so the
+  // same mouse targets still work. The status label uses the same status-*
+  // tokens as the btw header, so the two surfaces cannot drift apart: Ready
+  // takes the terminal's own foreground, and only busy / alert / cold carry
+  // colour. The sid block is omitted when no session id is known.
   private drawSeparator(row: number): void {
     const w = this.term.width;
     const sid = shortId(this.sessionbar.sessionId);
@@ -5469,7 +5471,7 @@ export class Screen {
       auxChunks.push({
         text,
         paint: () => {
-          this.term.brightYellow(text);
+          paint(this.term, "status-busy", text);
         },
       });
     }
@@ -5478,7 +5480,7 @@ export class Screen {
       auxChunks.push({
         text,
         paint: () => {
-          this.term.brightCyan(text);
+          paint(this.term, "bar-indicator", text);
         },
       });
     }
@@ -5518,40 +5520,40 @@ export class Screen {
       `${this.banner.queued}|${this.scrollOffset}|${usageStr}`;
 
     this.paintRow(row, sig, () => {
-      this.term.bold(left);
+      paint(this.term, "rule", left);
       if (stalled || status === "disconnected") {
-        this.term.brightRed(label);
+        paint(this.term, "status-alert", label);
       } else if (status === "busy") {
-        this.term.brightYellow(label);
+        paint(this.term, "status-busy", label);
       } else if (status === "cold") {
-        this.term.brightMagenta(label);
+        paint(this.term, "status-cold", label);
       } else {
-        this.term(label);
+        paint(this.term, "status-ready", label);
       }
       if (elapsedInline) {
         if (stalled) {
-          this.term.brightRed.noFormat(elapsedInline);
+          paint(this.term, "status-alert", elapsedInline);
         } else if (status === "busy") {
-          this.term.brightYellow.noFormat(elapsedInline);
+          paint(this.term, "status-busy", elapsedInline);
         } else {
-          this.term.dim.noFormat(elapsedInline);
+          paint(this.term, "status-idle", elapsedInline);
         }
       }
       if (sid) {
-        this.term.dim(sidSep);
-        this.term.dim(sid);
+        paint(this.term, "rule-meta", sidSep);
+        paint(this.term, "rule-meta", sid);
       }
       for (const c of auxChunks) {
-        this.term.dim(" · ");
+        paint(this.term, "rule-meta", " · ");
         c.paint();
       }
-      this.term.dim(padBeforeMiddle);
-      this.term.bold(middle);
+      paint(this.term, "rule-pad", padBeforeMiddle);
+      paint(this.term, "rule", middle);
       if (usageStr) {
-        this.term.dim(padAfterMiddle);
+        paint(this.term, "rule-pad", padAfterMiddle);
         this.term.noFormat(usageStr);
       }
-      this.term.bold(tail);
+      paint(this.term, "rule", tail);
     });
   }
 
@@ -5587,19 +5589,19 @@ export class Screen {
       `bsep|${w}|${this.banner.currentMode ?? ""}|${this.banner.hint}|${transientSig}|${hoverSig}`;
 
     this.paintRow(row, sig, () => {
-      this.term.bold(middle);
-      this.term.dim(padAfterMiddle);
+      paint(this.term, "rule", middle);
+      paint(this.term, "rule-pad", padAfterMiddle);
       if (transient) {
         if (transient.kind === "search") {
-          this.term.brightCyan.noFormat(transient.text);
+          paint(this.term, "bar-indicator", transient.text);
         } else {
-          this.term.brightYellow.noFormat(transient.text);
+          paint(this.term, "modal-note", transient.text);
         }
       } else {
         const chunks = hintBase.split(" · ");
         const hovered = this.terminalFocused ? this.hoveredBannerHit : null;
         for (let i = 0; i < chunks.length; i++) {
-          if (i > 0) this.term.dim(" · ");
+          paint(this.term, "rule-meta", " · ");
           const c = chunks[i];
           if (c === undefined) continue;
           let kind: "mode" | "pick" | "guide" | "detach" | null = null;
@@ -5608,13 +5610,13 @@ export class Screen {
           else if (c.includes("guide")) kind = "guide";
           else if (c.includes("detach")) kind = "detach";
           if (kind !== null && kind === hovered) {
-            this.term.noFormat(c);
+            paint(this.term, "hint-hover", c);
           } else {
-            this.term.dim(c);
+            paint(this.term, "modal-hint", c);
           }
         }
       }
-      this.term.bold(tail);
+      paint(this.term, "rule", tail);
 
       const hits: {
         mode: [number, number] | null;
@@ -5644,10 +5646,10 @@ export class Screen {
     });
   }
 
-  // Compose the header segments so paintBtwHeader can paint the dashes
-  // dim, "By the way" status-coloured, the sid yellow, and the usage dim
-  // — same colour conventions as the bottom sessionbar. A single
-  // signature string is derived from all parts for repaint coalescing.
+  // Compose the header segments so paintBtwHeader can paint the dashes as
+  // `rule`, "By the way" with a status-* token, and the sid as `rule-meta` —
+  // the same tokens the bottom sessionbar uses. A single signature string is
+  // derived from all parts for repaint coalescing.
   //
   // Layout (left → right):
   //   "── "  "By the way"  " · "  <sid>  <middle dashes>  " <usage> "  "──"
@@ -5739,35 +5741,34 @@ export class Screen {
     usage: string;
     right: string;
   }): void {
-    // Dashes always dim — they're the separator. The "By the way" label
-    // carries the status colour so an at-a-glance scan of the screen
-    // shows colour ONLY where there's actual state: yellow while
-    // running, regular (default) when done, red on cancel/error.
-    this.term.bold(segments.left);
+    // The "By the way" label carries the status token so an at-a-glance scan
+    // shows colour ONLY where there is actual state: busy while running,
+    // the terminal's own foreground when done, alert on cancel/error.
+    paint(this.term, "rule", segments.left);
     switch (this.btwOverlayStatus) {
       case "busy":
-        this.term.brightYellow(segments.label);
+        paint(this.term, "status-busy", segments.label);
         break;
       case "done":
-        this.term(segments.label);
+        paint(this.term, "status-ready", segments.label);
         break;
       case "cancelled":
       case "errored":
-        this.term.brightRed(segments.label);
+        paint(this.term, "status-alert", segments.label);
         break;
       default:
-        this.term(segments.label);
+        paint(this.term, "status-ready", segments.label);
     }
-    this.term.dim(segments.sidSep);
+    paint(this.term, "rule-meta", segments.sidSep);
     if (segments.sid) {
-      this.term.dim(segments.sid);
-      this.term.dim(segments.sidTrail);
+      paint(this.term, "rule-meta", segments.sid);
+      paint(this.term, "rule-meta", segments.sidTrail);
     }
-    this.term.bold(segments.middle);
+    paint(this.term, "rule", segments.middle);
     if (segments.usage) {
       this.term.noFormat(segments.usage);
     }
-    this.term.bold(segments.right);
+    paint(this.term, "rule", segments.right);
   }
 
   private drawScrollback(): void {
@@ -6291,16 +6292,18 @@ export class Screen {
           return;
         }
         if (isLast) {
-          this.term.dim(`  + ${overflow} more match(es)`);
+          paint(this.term, "modal-hint", `  + ${overflow} more match(es)`);
           return;
         }
         const namePadded = item.name.padEnd(nameWidth);
         const desc = item.description ?? "";
         const remaining = w - namePadded.length - 4;
         const truncated = remaining > 0 ? truncate(desc, remaining) : "";
-        this.term("  ").brightCyan(namePadded);
+        this.term.noFormat("  ");
+        paint(this.term, "completion-name", namePadded);
         if (truncated.length > 0) {
-          this.term("  ").dim(truncated);
+          this.term.noFormat("  ");
+          paint(this.term, "completion-desc", truncated);
         }
       });
     }
@@ -6344,13 +6347,14 @@ export class Screen {
           : `chip|${w}|empty`;
       this.paintRow(row, sig, () => {
         if (isLast) {
-          this.term.dim(`  📎 + ${overflow + 1} more attached`);
+          paint(this.term, "modal-hint", `  📎 + ${overflow + 1} more attached`);
           return;
         }
         if (!att) {
           return;
         }
-        this.term("  ").yellow(`📎 ${label}`);
+        this.term.noFormat("  ");
+        paint(this.term, "attachment", `📎 ${label}`);
         if (iterm) {
           // Trailing space keeps a visible gap between the label and
           // the thumbnail in terminals where the image renders at the
@@ -6424,13 +6428,13 @@ export class Screen {
         const rest = `⏳ ${summary}`;
         const padded = rest + " ".repeat(Math.max(0, w - 1 - rest.length));
         if (editing) {
-          this.term.bgBlue.brightYellow("▸");
+          paint(this.term, "queue-cursor", "▸");
         } else {
-          this.term.bgBlue(" ");
+          paint(this.term, "queue-blank", " ");
         }
         // noFormat: the queued summary contains user-typed prompt text, so
         // literal text, never interpreted as a style command.
-        this.term.bgBlue.brightWhite.noFormat(padded);
+        paint(this.term, "queue-row", padded);
       });
     }
   }
@@ -6504,19 +6508,22 @@ export class Screen {
         // logical newline, blank on a soft-wrap continuation.
         if (gutter === "first") {
           if (overlayFocused) {
-            this.term.dim("> ");
+            paint(this.term, "composer-inactive", "> ");
           } else {
-            this.term.brightWhite("> ");
+            paint(this.term, "composer-gutter", "> ");
           }
         } else if (gutter === "newline") {
-          this.term.dim("· ");
+          paint(this.term, "composer-continuation", "· ");
         } else {
           this.term("  ");
         }
-        // noFormat so literal `^X` typed by the user is rendered verbatim
-        // and never interpreted as a color/style command.
+        // paint() always writes via .noFormat, so a literal `^X` typed by the
+        // user renders verbatim instead of being read as a style command.
+        // The focused branch used to go through the markup-interpreting
+        // writer, which meant a caret in the composer corrupted the row
+        // whenever an overlay held focus.
         if (overlayFocused) {
-          this.term.dim(slice);
+          paint(this.term, "composer-inactive", slice);
         } else {
           this.term.noFormat(slice);
         }
@@ -6538,10 +6545,10 @@ export class Screen {
       SESSIONBAR_ROWS +
       1;
     this.paintRow(top, `confirm|q|${w}|${spec.question}`, () => {
-      this.term.brightYellow(` ? ${truncate(spec.question, w - 4)}`);
+      paint(this.term, "prompt-text", ` ? ${truncate(spec.question, w - 4)}`);
     });
     this.paintRow(top + 1, `confirm|h|${w}|${spec.hint}`, () => {
-      this.term.dim(` ${truncate(spec.hint, w - 2)}`);
+      paint(this.term, "modal-hint", ` ${truncate(spec.hint, w - 2)}`);
     });
   }
 
@@ -6567,11 +6574,10 @@ export class Screen {
       this.paintRow(row, sig, paint);
       row += 1;
     };
-    // Yellow header matches the "active background work" convention
-    // and the permission prompt's brightYellow title — both interrupt
-    // the user for a decision.
+    // Shares `prompt-text` with the permission prompt's title — both
+    // interrupt the user for a decision.
     writeRow(`cpct|msg|${w}|${spec.message}`, () => {
-      this.term.brightYellow(` ${truncate(spec.message, w - 2)}`);
+      paint(this.term, "prompt-text", ` ${truncate(spec.message, w - 2)}`);
     });
     writeRow(`cpct|q|${w}`, () => {
       this.term(" Compact now to reduce future per-turn token cost?");
@@ -6589,14 +6595,14 @@ export class Screen {
       const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
       writeRow(`cpct|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
         if (isSel) {
-          this.term.brightYellow(body);
+          paint(this.term, "modal-option-selected", body);
         } else {
-          this.term.dim(body);
+          paint(this.term, "modal-option", body);
         }
       });
     }
     writeRow(`cpct|hint|${w}`, () => {
-      this.term.dim(" \u2191/\u2193 choose \u00b7 Enter submit \u00b7 Esc cancel \u00b7 y/n quick-pick");
+      paint(this.term, "modal-hint", " \u2191/\u2193 choose \u00b7 Enter submit \u00b7 Esc cancel \u00b7 y/n quick-pick");
     });
   }
 
@@ -6631,7 +6637,7 @@ export class Screen {
       row += 1;
     };
     writeRow(`help|t|${w}|${spec.title}`, () => {
-      this.term.brightYellow(` ❓ ${truncate(spec.title, w - 5)}`);
+      paint(this.term, "prompt-text", ` ❓ ${truncate(spec.title, w - 5)}`);
     });
     const keysWidth = Math.min(
       24,
@@ -6652,12 +6658,12 @@ export class Screen {
       const paddedKeys = keys.padEnd(keysWidth);
       writeRow(`help|e|${w}|${keys}|${desc}`, () => {
         this.term(" ");
-        this.term.brightCyan.noFormat(paddedKeys);
+        paint(this.term, "modal-key", paddedKeys);
         this.term.noFormat(` ${truncate(desc, w - 2 - keysWidth - 1)}`);
       });
     }
     writeRow(`help|hint|${w}|${spec.hint}`, () => {
-      this.term.dim(` ${truncate(spec.hint, w - 2)}`);
+      paint(this.term, "modal-hint", ` ${truncate(spec.hint, w - 2)}`);
     });
   }
 
@@ -6692,13 +6698,13 @@ export class Screen {
       row += 1;
     };
     writeRow(`perm|t|${w}|${spec.title}`, () => {
-      this.term.brightYellow(` 🔒 ${truncate(spec.title, w - 5)}`);
+      paint(this.term, "prompt-text", ` 🔒 ${truncate(spec.title, w - 5)}`);
     });
     const sub = spec.detail && spec.detail.length > 0
       ? spec.detail
       : "This action requires approval";
     writeRow(`perm|sub|${w}|${sub}`, () => {
-      this.term.dim(` ${truncate(sub, w - 2)}`);
+      paint(this.term, "modal-hint", ` ${truncate(sub, w - 2)}`);
     });
     writeRow(`perm|q|${w}`, () => {
       this.term(" Do you want to proceed?");
@@ -6716,14 +6722,14 @@ export class Screen {
       const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
       writeRow(`perm|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
         if (isSel) {
-          this.term.brightYellow(body);
+          paint(this.term, "modal-option-selected", body);
         } else {
-          this.term.dim(body);
+          paint(this.term, "modal-option", body);
         }
       });
     }
     writeRow(`perm|hint|${w}`, () => {
-      this.term.dim(" ↑/↓ choose · Enter submit · Esc cancel · 1–9 quick-pick");
+      paint(this.term, "modal-hint", " ↑/↓ choose · Enter submit · Esc cancel · 1–9 quick-pick");
     });
   }
 
@@ -6974,7 +6980,7 @@ export class Screen {
       row += 1;
     };
     writeRow(`opts|t|${w}|${spec.title}`, () => {
-      this.term.brightYellow(` ⚙ ${truncate(spec.title, w - 5)}`);
+      paint(this.term, "prompt-text", ` ⚙ ${truncate(spec.title, w - 5)}`);
     });
     // Align the value column just past the longest label so values line
     // up in a tidy right-hand column.
@@ -7000,9 +7006,9 @@ export class Screen {
         `opts|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.value}|${opt.label}`,
         () => {
           if (isSel) {
-            this.term.brightYellow(body);
+            paint(this.term, "modal-option-selected", body);
           } else {
-            this.term.dim(body);
+            paint(this.term, "modal-option", body);
           }
         },
       );
@@ -7011,7 +7017,7 @@ export class Screen {
       spec.hint ??
       "↑/↓ choose · Enter this session · s save default · Esc close";
     writeRow(`opts|hint|${w}|${hint}`, () => {
-      this.term.dim(` ${hint}`);
+      paint(this.term, "modal-hint", ` ${hint}`);
     });
   }
 

@@ -182,6 +182,7 @@ import {
   type Style,
   type ToolLineState,
 } from "./format.js";
+import { paint, styled } from "./theme/index.js";
 import type {
   SidebarEditedFile,
   SidebarLiveSession,
@@ -1057,9 +1058,13 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
         const reason = versionMismatch
           ? `daemon ${health.version} ≠ cli ${HYDRA_VERSION}`
           : "config changed since daemon started";
-        const yellow = (s: string): string => `\x1b[33m${s}\x1b[0m`;
+        // Runs before the TUI (and its terminal-kit instance) exists, so this
+        // takes the string-returning path rather than paint(). Note the close
+        // sequence changed from a full reset to a targeted colour reset when
+        // this moved onto the theme; visually identical for a one-line write.
         process.stderr.write(
-          yellow(
+          styled(
+            "cli-warn",
             `! ${reason} — run \`${invokedBinName()} daemon restart\` to apply.`,
           ) + "\n",
         );
@@ -8086,7 +8091,7 @@ async function runSession(
   // via onDisconnect/onConnect; only here is the connection truly dead.
   conn.onClose((err) => {
     if (err) {
-      term.red(`\nconnection lost: ${err.message}\n`);
+      paint(term, "notice-error", `\nconnection lost: ${err.message}\n`);
     }
     stop(err ? 1 : 0);
   });
@@ -8163,7 +8168,7 @@ async function resolveSession(
     const sessions = await listSessions(target, { cwd, all: true });
     const recent = pickMostRecent(sessions, cwd);
     if (!recent) {
-      term.yellow(`No sessions found for ${cwd}.\n`);
+      paint(term, "cli-warn", `No sessions found for ${cwd}.\n`);
       return null;
     }
     return {
@@ -8548,7 +8553,7 @@ async function runForkFlow(
       ...(chosenAgentId ? { agentId: chosenAgentId } : {}),
     });
   } catch (err) {
-    term.red(`\nfork failed: ${(err as Error).message}\n`);
+    paint(term, "notice-error", `\nfork failed: ${(err as Error).message}\n`);
     return { kind: "cancel" };
   }
   return {

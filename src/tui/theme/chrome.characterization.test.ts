@@ -45,6 +45,30 @@ const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   "list-description": (t, s) => t.dim.noFormat(s),
   "list-header": (t, s) => t.dim.noFormat(s),
   "status-progress": (t, s) => t.brightYellow.noFormat(s),
+  "modal-option": (t, s) => t.dim.noFormat(s),
+  "modal-option-selected": (t, s) => t.brightYellow.noFormat(s),
+  "bar-text": (t, s) => t.bold.noFormat(s),
+  "bar-indicator": (t, s) => t.brightCyan.noFormat(s),
+  rule: (t, s) => t.bold.noFormat(s),
+  "rule-pad": (t, s) => t.dim.noFormat(s),
+  "rule-meta": (t, s) => t.dim.noFormat(s),
+  // Unstyled by design — the surrounding chunks are dim, so full brightness
+  // is the hover signal.
+  "hint-hover": (t, s) => t.noFormat(s),
+  "status-ready": (t, s) => t.noFormat(s),
+  "status-busy": (t, s) => t.brightYellow.noFormat(s),
+  "status-alert": (t, s) => t.brightRed.noFormat(s),
+  "status-cold": (t, s) => t.brightMagenta.noFormat(s),
+  "completion-name": (t, s) => t.brightCyan.noFormat(s),
+  "completion-desc": (t, s) => t.dim.noFormat(s),
+  attachment: (t, s) => t.yellow.noFormat(s),
+  "queue-row": (t, s) => t.bgBlue.brightWhite.noFormat(s),
+  "queue-cursor": (t, s) => t.bgBlue.brightYellow.noFormat(s),
+  "queue-blank": (t, s) => t.bgBlue.noFormat(s),
+  "composer-gutter": (t, s) => t.brightWhite.noFormat(s),
+  "composer-inactive": (t, s) => t.dim.noFormat(s),
+  "composer-continuation": (t, s) => t.dim.noFormat(s),
+  "cli-warn": (t, s) => t.yellow.noFormat(s),
 };
 
 for (const generic of ["xterm-256color", "xterm-truecolor"]) {
