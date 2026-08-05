@@ -41,6 +41,12 @@ import {
 } from "./column-mapping.js";
 import { type ClipboardTarget, writeClipboard } from "./clipboard.js";
 import { withSync } from "./sync.js";
+import {
+  resolveHovered,
+  resolveStyle,
+  styleUsesMarkup,
+  supports24Bit,
+} from "./theme/index.js";
 import { writeDebugLine } from "./debug-log.js";
 import {
   ALT_SCREEN_LEAVE,
@@ -7892,32 +7898,21 @@ function writeBodyWithHighlight(
   }
 }
 
-// Body styles that route through terminal-kit's markup-interpreting writer
-// in writeStyled. Wrap/truncate must subtract their caret markers when
-// computing visible width, or `^Cfoo^:` (7 JS chars) inflates the budget
-// by 4 and a long span near the right edge wraps too early.
+// Body styles whose text carries caret markup. Wrap/truncate must subtract
+// the caret markers when computing visible width, or `^Cfoo^:` (7 JS chars,
+// 3 columns) inflates the budget by 4 and a long span near the right edge
+// wraps too early.
+//
+// Delegates to the theme table so this and writeStyled's writer choice can
+// never disagree.
 function bodyStyleUsesMarkup(style: Style | undefined): boolean {
-  return (
-    style === "agent" ||
-    // Thoughts switched to the markup-interpreting writer (writeStyled's
-    // "thought" case uses term.brightBlack without .noFormat), so their
-    // caret spans (^ccode^K, ^+bold^-) are zero-width on screen. wrap/
-    // truncate must strip them too or thought lines wrap several columns
-    // short of the margin whenever they contain inline code/bold.
-    style === "thought" ||
-    style === "heading-1" ||
-    style === "heading-2" ||
-    style === "heading-3" ||
-    // Plan entries route through applyInlineMarkup in formatPlan so inline
-    // `code`/**bold** in entry content renders styled instead of as literal
-    // backticks/asterisks. Width-budgeting must strip these carets too.
-    style === "plan" ||
-    style === "plan-done" ||
-    style === "plan-pending"
-  );
+  return styleUsesMarkup(style);
 }
 
-function writeStyled(
+// Exported for the characterization test in
+// theme/writeStyled.characterization.test.ts, which pins the exact bytes
+// emitted for every Style. Not part of the module's real surface.
+export function writeStyled(
   term: Terminal,
   text: string,
   style: Style | undefined,
@@ -7926,220 +7921,34 @@ function writeStyled(
   if (text.length === 0) {
     return;
   }
-  if (hovered) {
-    // Wrap the styled fg text in a subtle grayscale bg band so the whole
-    // row visibly changes on hover. Terminal-kit's fg calls close only the
-    // fg SGR (e.g. \x1b[39m) rather than a full reset, so the bg SGR we
-    // emit up front survives through the styled text and is closed by the
-    // trailing \x1b[49m. Same tint as "thought"'s hover band (grayscale
-    // 236) for a consistent hover language across styles.
-    const hoverBandOpen = "\x1b[48;5;236m";
-    const hoverBandClose = "\x1b[49m";
-    const rawWrite = (t: string): void => {
-      (term as unknown as { noFormat: (s: string) => void }).noFormat(t);
-    };
-    switch (style) {
-      case "dim":
-      case "tool-status-ok":
-      case "tool-status-pending":
-      case "tool-status-cancelled":
-        rawWrite(hoverBandOpen);
-        term.dim.noFormat(text);
-        rawWrite(hoverBandClose);
-        return;
-      case "tool-status-fail":
-        rawWrite(hoverBandOpen);
-        term.bold.red.noFormat(text);
-        rawWrite(hoverBandClose);
-        return;
-      case "tool-status-running":
-        rawWrite(hoverBandOpen);
-        term.brightYellow.noFormat(text);
-        rawWrite(hoverBandClose);
-        return;
-      case "tool":
-        rawWrite(hoverBandOpen);
-        term.brightBlue.noFormat(text);
-        rawWrite(hoverBandClose);
-        return;
-      case "plan-pending":
-        rawWrite(hoverBandOpen);
-        term.dim(text);
-        rawWrite(hoverBandClose);
-        return;
-      case "thought": {
-        // Paint a subtle dark-grayscale band so the hovered thought reads
-        // as a distinct block from an adjacent agent_message, and lift
-        // the dim brightBlack baseline to default fg for readability on
-        // top of the band. The markdown bakes "^K" (set fg → brightBlack)
-        // after every inline code span as its codeReset; swap each "^K"
-        // for raw "\x1b[39m" (SGR 39 — default fg only, no bg touch) so
-        // post-code prose returns to default fg without dropping the
-        // band the way "^:" (full reset) would.
-        // Match either an escaped caret pair (which must be preserved
-        // verbatim so terminal-kit emits a single literal "^") or a real
-        // "^K" codeReset token. Alternation order matters: consuming
-        // "^^" first prevents the "K" in "^^K" from being mis-read as
-        // part of a codeReset.
-        const lifted = text.replace(/\^\^|\^K/g, (m) =>
-          m === "^K" ? "\x1b[39m" : m,
-        );
-        (term as unknown as {
-          bgColorGrayscale: (g: number) => (t: string) => void;
-        }).bgColorGrayscale(25)(lifted);
-        return;
-      }
-      case "code": {
-        // Grayscale hover snapped hard against the terminal's palette
-        // ramp — any lift small enough to feel "subtle" rounded back to
-        // baseline, any lift the ramp could resolve read as a full
-        // highlight. Emit a raw 24-bit bg SGR so we can pick a colour the
-        // ramp can't approximate away: same luminance ballpark as the
-        // baseline (grayscale 28 ≈ #1c1c1c) but a touch cooler so hover
-        // reads via hue rather than brightness.
-        (term as unknown as { noFormat: (t: string) => void }).noFormat(
-          `\x1b[48;2;22;25;36m${text}\x1b[49m`,
-        );
-        return;
-      }
+  const trueColor = supports24Bit(term);
+  const render =
+    (hovered ? resolveHovered(style, trueColor) : undefined) ??
+    resolveStyle(style, trueColor);
+  const body = render.transform ? render.transform(text) : text;
+
+  // Two writers, and the choice is not cosmetic. Styles carrying caret
+  // markup from format.ts must go through the callable form so terminal-kit
+  // turns `^Ccode^:` into SGR; everything else goes through .noFormat so a
+  // caret the user typed or a tool emitted stays a literal caret instead of
+  // being eaten as a markup command.
+  //
+  // The style's own colour is emitted around the writer rather than through
+  // terminal-kit's style chain, so the same bytes can be reused for the
+  // hover band and (later) to restore a row's base colour after an inline
+  // span.
+  const raw = (s: string): void => {
+    if (s.length > 0) {
+      (term as unknown as { noFormat: (t: string) => void }).noFormat(s);
     }
+  };
+  raw(render.open);
+  if (render.markup) {
+    term(body);
+  } else {
+    term.noFormat(body);
   }
-  // "agent" and "heading-1/2/3" opt INTO terminal-kit's format processing —
-  // parseAgentMarkdown produces `^+bold^:` / `^Cinline^:` markup that
-  // should be interpreted (headings emit per-level closers via
-  // headingInlineOptsFor so the outer bold + color restore after each
-  // inline span). Every other style renders literal text (user input,
-  // code blocks, tool labels, etc.), so we route through `.noFormat` to
-  // keep stray carets typed/emitted by the user from being eaten as
-  // markup commands.
-  switch (style) {
-    case "user":
-      // Subtle dim-gray band — bold + default foreground (white on dark
-      // themes) on a soft #303030-ish background. Earlier attempts at
-      // "lighter" gray pushed contrast in the wrong direction or made
-      // the band feel like a highlight stripe rather than a quiet
-      // boundary marker. 256-color index 236 is a touch lighter than
-      // most terminals' default bg, enough to read as a row of its own
-      // without screaming.
-      //
-      // Param/text order matters: terminal-kit's chain consumes param-
-      // taking methods immediately when invoked early (emitting `on`
-      // without `off`), turning the screen gray. Passing all params +
-      // the text to the FINAL call keeps the chain intact so the off
-      // sequence fires after the text.
-      // bgColorGrayscale(g) takes 0–255 (24-bit grayscale if the terminal
-      // supports it, otherwise rounds to the nearest 256-color step).
-      // Gives finer steps than the fixed 256-color grayscale ramp where
-      // 235 → 236 was a perceptible jump.
-      (term as unknown as {
-        bgColorGrayscale: {
-          bold: { noFormat: (g: number, t: string) => void };
-        };
-      }).bgColorGrayscale.bold.noFormat(43, text);
-      return;
-    case "agent":
-      term(text);
-      return;
-    case "thought":
-      // Bright-black (gray). noFormat removed so caret markup (^+bold^-,
-      // ^Ccode^K) is interpreted; applyInlineMarkup escapes literal ^ → ^^.
-      term.brightBlack(text);
-      return;
-    case "tool":
-      term.brightBlue.noFormat(text);
-      return;
-    case "tool-status-ok":
-      term.dim.noFormat(text);
-      return;
-    case "tool-status-fail":
-      term.bold.red.noFormat(text);
-      return;
-    case "tool-status-pending":
-      // "queued" — work hasn't started yet; subdued so running calls
-      // stand out next to it.
-      term.dim.noFormat(text);
-      return;
-    case "tool-status-running":
-      // Bright yellow so an in-flight tool call jumps out of a column of
-      // queued and completed siblings, and matches the banner's busy hue.
-      term.brightYellow.noFormat(text);
-      return;
-    case "tool-status-cancelled":
-      term.dim.noFormat(text);
-      return;
-    case "plan":
-      // noFormat dropped so caret markup emitted by applyInlineMarkup
-      // (planInlineOptsFor in format.ts closes inline spans with the row's
-      // base color so brightYellow/green/dim is restored after the span)
-      // is interpreted.
-      term.brightYellow(text);
-      return;
-    case "plan-done":
-      term.green(text);
-      return;
-    case "plan-pending":
-      term.dim(text);
-      return;
-    case "system":
-      term.brightYellow.noFormat(text);
-      return;
-    case "info":
-      term.cyan.noFormat(text);
-      return;
-    case "dim":
-      term.dim.noFormat(text);
-      return;
-    case "code":
-      // Dark grayscale band with a plain-white default foreground so
-      // code reads like an editor block (and `diff` fences let context
-      // lines stand neutral while +/- pick up cli-highlight's red/green
-      // overlay). Different hue from the user-text band so the two never
-      // get confused at a glance.
-      (term as unknown as {
-        bgColorGrayscale: {
-          white: { noFormat: (g: number, t: string) => void };
-        };
-      }).bgColorGrayscale.white.noFormat(28, text);
-      return;
-    case "heading-1":
-      // noFormat dropped so caret markup emitted by applyInlineMarkup is
-      // interpreted; each heading level's headingInlineOptsFor (format.ts)
-      // closes inline spans with the heading's base attrs so bold + color
-      // are restored after the span.
-      term.bold.brightYellow(text);
-      return;
-    case "heading-2":
-      term.bold.brightCyan(text);
-      return;
-    case "heading-3":
-      term.bold(text);
-      return;
-    case "search-highlight":
-      // Bright yellow background with black foreground. The combination
-      // is loud enough to spot inside any base style (dim, info, agent)
-      // without being unreadable on light terminal themes.
-      term.bgBrightYellow.black.noFormat(text);
-      return;
-    case "selection-highlight":
-      // Classic inverse-video band for the active text selection.
-      // Reads as a selection across every base style (agent markup,
-      // code blocks, dim, thoughts) and stays distinct from the
-      // yellow-bg search-highlight / red-bg search-highlight-active
-      // treatments so the two layers don't collide visually when both
-      // are active on the same row.
-      term.inverse.noFormat(text);
-      return;
-    case "search-highlight-active":
-      // The single "current" match — visually distinct from the
-      // generic yellow-bg highlight so the user can spot which match
-      // ^r/^s is pointing at without scanning the whole row. Red bg
-      // with bright white fg jumps out against both light and dark
-      // terminal themes.
-      term.bgRed.brightWhite.noFormat(text);
-      return;
-    default:
-      term.noFormat(text);
-  }
+  raw(render.close);
 }
 
 // ANSI-aware wrap. Delegates to wrap-ansi which counts visible width

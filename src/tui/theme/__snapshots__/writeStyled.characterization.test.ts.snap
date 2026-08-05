@@ -1,0 +1,295 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`writeStyled bytes (xterm-256color) > emits stable bytes for every style — escaped-caret 1`] = `
+"user                             ESC[48;5;235mESC[1ma^^KESC[22mESC[49m
+user [hover]                     ESC[48;5;235mESC[1ma^^KESC[22mESC[49m
+agent                            a^K
+agent [hover]                    a^K
+thought                          ESC[90ma^KESC[39m
+thought [hover]                  ESC[48;5;233ma^K
+tool                             ESC[94ma^^KESC[39m
+tool [hover]                     ESC[48;5;236mESC[94ma^^KESC[39mESC[49m
+tool-status-ok                   ESC[2ma^^KESC[22m
+tool-status-ok [hover]           ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+tool-status-fail                 ESC[1mESC[31ma^^KESC[39mESC[22m
+tool-status-fail [hover]         ESC[48;5;236mESC[1mESC[31ma^^KESC[39mESC[22mESC[49m
+tool-status-pending              ESC[2ma^^KESC[22m
+tool-status-pending [hover]      ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+tool-status-running              ESC[93ma^^KESC[39m
+tool-status-running [hover]      ESC[48;5;236mESC[93ma^^KESC[39mESC[49m
+tool-status-cancelled            ESC[2ma^^KESC[22m
+tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+plan                             ESC[93ma^KESC[39m
+plan [hover]                     ESC[93ma^KESC[39m
+plan-done                        ESC[32ma^KESC[39m
+plan-done [hover]                ESC[32ma^KESC[39m
+plan-pending                     ESC[2ma^KESC[22m
+plan-pending [hover]             ESC[48;5;236mESC[2ma^KESC[22mESC[49m
+system                           ESC[93ma^^KESC[39m
+system [hover]                   ESC[93ma^^KESC[39m
+info                             ESC[36ma^^KESC[39m
+info [hover]                     ESC[36ma^^KESC[39m
+dim                              ESC[2ma^^KESC[22m
+dim [hover]                      ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+code                             ESC[48;5;234mESC[37ma^^KESC[39mESC[49m
+code [hover]                     ESC[48;2;22;25;36ma^^KESC[49m
+heading-1                        ESC[1mESC[93ma^KESC[39mESC[22m
+heading-1 [hover]                ESC[1mESC[93ma^KESC[39mESC[22m
+heading-2                        ESC[1mESC[96ma^KESC[39mESC[22m
+heading-2 [hover]                ESC[1mESC[96ma^KESC[39mESC[22m
+heading-3                        ESC[1ma^KESC[22m
+heading-3 [hover]                ESC[1ma^KESC[22m
+search-highlight                 ESC[103mESC[30ma^^KESC[39mESC[49m
+search-highlight [hover]         ESC[103mESC[30ma^^KESC[39mESC[49m
+search-highlight-active          ESC[41mESC[97ma^^KESC[39mESC[49m
+search-highlight-active [hover]  ESC[41mESC[97ma^^KESC[39mESC[49m
+selection-highlight              ESC[7ma^^KESC[27m
+selection-highlight [hover]      ESC[7ma^^KESC[27m
+(undefined)                      a^^K
+(undefined) [hover]              a^^K"
+`;
+
+exports[`writeStyled bytes (xterm-256color) > emits stable bytes for every style — markup 1`] = `
+"user                             ESC[48;5;235mESC[1ma^Cb^:cESC[22mESC[49m
+user [hover]                     ESC[48;5;235mESC[1ma^Cb^:cESC[22mESC[49m
+agent                            aESC[96mbESC[0mcESC[0m
+agent [hover]                    aESC[96mbESC[0mcESC[0m
+thought                          ESC[90maESC[96mbESC[0mcESC[0mESC[39m
+thought [hover]                  ESC[48;5;233maESC[96mbESC[0mcESC[0m
+tool                             ESC[94ma^Cb^:cESC[39m
+tool [hover]                     ESC[48;5;236mESC[94ma^Cb^:cESC[39mESC[49m
+tool-status-ok                   ESC[2ma^Cb^:cESC[22m
+tool-status-ok [hover]           ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+tool-status-fail                 ESC[1mESC[31ma^Cb^:cESC[39mESC[22m
+tool-status-fail [hover]         ESC[48;5;236mESC[1mESC[31ma^Cb^:cESC[39mESC[22mESC[49m
+tool-status-pending              ESC[2ma^Cb^:cESC[22m
+tool-status-pending [hover]      ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+tool-status-running              ESC[93ma^Cb^:cESC[39m
+tool-status-running [hover]      ESC[48;5;236mESC[93ma^Cb^:cESC[39mESC[49m
+tool-status-cancelled            ESC[2ma^Cb^:cESC[22m
+tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+plan                             ESC[93maESC[96mbESC[0mcESC[0mESC[39m
+plan [hover]                     ESC[93maESC[96mbESC[0mcESC[0mESC[39m
+plan-done                        ESC[32maESC[96mbESC[0mcESC[0mESC[39m
+plan-done [hover]                ESC[32maESC[96mbESC[0mcESC[0mESC[39m
+plan-pending                     ESC[2maESC[96mbESC[0mcESC[0mESC[22m
+plan-pending [hover]             ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[0mESC[22mESC[49m
+system                           ESC[93ma^Cb^:cESC[39m
+system [hover]                   ESC[93ma^Cb^:cESC[39m
+info                             ESC[36ma^Cb^:cESC[39m
+info [hover]                     ESC[36ma^Cb^:cESC[39m
+dim                              ESC[2ma^Cb^:cESC[22m
+dim [hover]                      ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+code                             ESC[48;5;234mESC[37ma^Cb^:cESC[39mESC[49m
+code [hover]                     ESC[48;2;22;25;36ma^Cb^:cESC[49m
+heading-1                        ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-1 [hover]                ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-2                        ESC[1mESC[96maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-2 [hover]                ESC[1mESC[96maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-3                        ESC[1maESC[96mbESC[0mcESC[0mESC[22m
+heading-3 [hover]                ESC[1maESC[96mbESC[0mcESC[0mESC[22m
+search-highlight                 ESC[103mESC[30ma^Cb^:cESC[39mESC[49m
+search-highlight [hover]         ESC[103mESC[30ma^Cb^:cESC[39mESC[49m
+search-highlight-active          ESC[41mESC[97ma^Cb^:cESC[39mESC[49m
+search-highlight-active [hover]  ESC[41mESC[97ma^Cb^:cESC[39mESC[49m
+selection-highlight              ESC[7ma^Cb^:cESC[27m
+selection-highlight [hover]      ESC[7ma^Cb^:cESC[27m
+(undefined)                      a^Cb^:c
+(undefined) [hover]              a^Cb^:c"
+`;
+
+exports[`writeStyled bytes (xterm-256color) > emits stable bytes for every style — plain 1`] = `
+"user                             ESC[48;5;235mESC[1mXyESC[22mESC[49m
+user [hover]                     ESC[48;5;235mESC[1mXyESC[22mESC[49m
+agent                            Xy
+agent [hover]                    Xy
+thought                          ESC[90mXyESC[39m
+thought [hover]                  ESC[48;5;233mXy
+tool                             ESC[94mXyESC[39m
+tool [hover]                     ESC[48;5;236mESC[94mXyESC[39mESC[49m
+tool-status-ok                   ESC[2mXyESC[22m
+tool-status-ok [hover]           ESC[48;5;236mESC[2mXyESC[22mESC[49m
+tool-status-fail                 ESC[1mESC[31mXyESC[39mESC[22m
+tool-status-fail [hover]         ESC[48;5;236mESC[1mESC[31mXyESC[39mESC[22mESC[49m
+tool-status-pending              ESC[2mXyESC[22m
+tool-status-pending [hover]      ESC[48;5;236mESC[2mXyESC[22mESC[49m
+tool-status-running              ESC[93mXyESC[39m
+tool-status-running [hover]      ESC[48;5;236mESC[93mXyESC[39mESC[49m
+tool-status-cancelled            ESC[2mXyESC[22m
+tool-status-cancelled [hover]    ESC[48;5;236mESC[2mXyESC[22mESC[49m
+plan                             ESC[93mXyESC[39m
+plan [hover]                     ESC[93mXyESC[39m
+plan-done                        ESC[32mXyESC[39m
+plan-done [hover]                ESC[32mXyESC[39m
+plan-pending                     ESC[2mXyESC[22m
+plan-pending [hover]             ESC[48;5;236mESC[2mXyESC[22mESC[49m
+system                           ESC[93mXyESC[39m
+system [hover]                   ESC[93mXyESC[39m
+info                             ESC[36mXyESC[39m
+info [hover]                     ESC[36mXyESC[39m
+dim                              ESC[2mXyESC[22m
+dim [hover]                      ESC[48;5;236mESC[2mXyESC[22mESC[49m
+code                             ESC[48;5;234mESC[37mXyESC[39mESC[49m
+code [hover]                     ESC[48;2;22;25;36mXyESC[49m
+heading-1                        ESC[1mESC[93mXyESC[39mESC[22m
+heading-1 [hover]                ESC[1mESC[93mXyESC[39mESC[22m
+heading-2                        ESC[1mESC[96mXyESC[39mESC[22m
+heading-2 [hover]                ESC[1mESC[96mXyESC[39mESC[22m
+heading-3                        ESC[1mXyESC[22m
+heading-3 [hover]                ESC[1mXyESC[22m
+search-highlight                 ESC[103mESC[30mXyESC[39mESC[49m
+search-highlight [hover]         ESC[103mESC[30mXyESC[39mESC[49m
+search-highlight-active          ESC[41mESC[97mXyESC[39mESC[49m
+search-highlight-active [hover]  ESC[41mESC[97mXyESC[39mESC[49m
+selection-highlight              ESC[7mXyESC[27m
+selection-highlight [hover]      ESC[7mXyESC[27m
+(undefined)                      Xy
+(undefined) [hover]              Xy"
+`;
+
+exports[`writeStyled bytes (xterm-truecolor) > emits stable bytes for every style — escaped-caret 1`] = `
+"user                             ESC[48;2;43;43;43mESC[1ma^^KESC[22mESC[49m
+user [hover]                     ESC[48;2;43;43;43mESC[1ma^^KESC[22mESC[49m
+agent                            a^K
+agent [hover]                    a^K
+thought                          ESC[90ma^KESC[39m
+thought [hover]                  ESC[48;2;25;25;25ma^K
+tool                             ESC[94ma^^KESC[39m
+tool [hover]                     ESC[48;5;236mESC[94ma^^KESC[39mESC[49m
+tool-status-ok                   ESC[2ma^^KESC[22m
+tool-status-ok [hover]           ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+tool-status-fail                 ESC[1mESC[31ma^^KESC[39mESC[22m
+tool-status-fail [hover]         ESC[48;5;236mESC[1mESC[31ma^^KESC[39mESC[22mESC[49m
+tool-status-pending              ESC[2ma^^KESC[22m
+tool-status-pending [hover]      ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+tool-status-running              ESC[93ma^^KESC[39m
+tool-status-running [hover]      ESC[48;5;236mESC[93ma^^KESC[39mESC[49m
+tool-status-cancelled            ESC[2ma^^KESC[22m
+tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+plan                             ESC[93ma^KESC[39m
+plan [hover]                     ESC[93ma^KESC[39m
+plan-done                        ESC[32ma^KESC[39m
+plan-done [hover]                ESC[32ma^KESC[39m
+plan-pending                     ESC[2ma^KESC[22m
+plan-pending [hover]             ESC[48;5;236mESC[2ma^KESC[22mESC[49m
+system                           ESC[93ma^^KESC[39m
+system [hover]                   ESC[93ma^^KESC[39m
+info                             ESC[36ma^^KESC[39m
+info [hover]                     ESC[36ma^^KESC[39m
+dim                              ESC[2ma^^KESC[22m
+dim [hover]                      ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+code                             ESC[48;2;28;28;28mESC[37ma^^KESC[39mESC[49m
+code [hover]                     ESC[48;2;22;25;36ma^^KESC[49m
+heading-1                        ESC[1mESC[93ma^KESC[39mESC[22m
+heading-1 [hover]                ESC[1mESC[93ma^KESC[39mESC[22m
+heading-2                        ESC[1mESC[96ma^KESC[39mESC[22m
+heading-2 [hover]                ESC[1mESC[96ma^KESC[39mESC[22m
+heading-3                        ESC[1ma^KESC[22m
+heading-3 [hover]                ESC[1ma^KESC[22m
+search-highlight                 ESC[103mESC[30ma^^KESC[39mESC[49m
+search-highlight [hover]         ESC[103mESC[30ma^^KESC[39mESC[49m
+search-highlight-active          ESC[41mESC[97ma^^KESC[39mESC[49m
+search-highlight-active [hover]  ESC[41mESC[97ma^^KESC[39mESC[49m
+selection-highlight              ESC[7ma^^KESC[27m
+selection-highlight [hover]      ESC[7ma^^KESC[27m
+(undefined)                      a^^K
+(undefined) [hover]              a^^K"
+`;
+
+exports[`writeStyled bytes (xterm-truecolor) > emits stable bytes for every style — markup 1`] = `
+"user                             ESC[48;2;43;43;43mESC[1ma^Cb^:cESC[22mESC[49m
+user [hover]                     ESC[48;2;43;43;43mESC[1ma^Cb^:cESC[22mESC[49m
+agent                            aESC[96mbESC[0mcESC[0m
+agent [hover]                    aESC[96mbESC[0mcESC[0m
+thought                          ESC[90maESC[96mbESC[0mcESC[0mESC[39m
+thought [hover]                  ESC[48;2;25;25;25maESC[96mbESC[0mcESC[0m
+tool                             ESC[94ma^Cb^:cESC[39m
+tool [hover]                     ESC[48;5;236mESC[94ma^Cb^:cESC[39mESC[49m
+tool-status-ok                   ESC[2ma^Cb^:cESC[22m
+tool-status-ok [hover]           ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+tool-status-fail                 ESC[1mESC[31ma^Cb^:cESC[39mESC[22m
+tool-status-fail [hover]         ESC[48;5;236mESC[1mESC[31ma^Cb^:cESC[39mESC[22mESC[49m
+tool-status-pending              ESC[2ma^Cb^:cESC[22m
+tool-status-pending [hover]      ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+tool-status-running              ESC[93ma^Cb^:cESC[39m
+tool-status-running [hover]      ESC[48;5;236mESC[93ma^Cb^:cESC[39mESC[49m
+tool-status-cancelled            ESC[2ma^Cb^:cESC[22m
+tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+plan                             ESC[93maESC[96mbESC[0mcESC[0mESC[39m
+plan [hover]                     ESC[93maESC[96mbESC[0mcESC[0mESC[39m
+plan-done                        ESC[32maESC[96mbESC[0mcESC[0mESC[39m
+plan-done [hover]                ESC[32maESC[96mbESC[0mcESC[0mESC[39m
+plan-pending                     ESC[2maESC[96mbESC[0mcESC[0mESC[22m
+plan-pending [hover]             ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[0mESC[22mESC[49m
+system                           ESC[93ma^Cb^:cESC[39m
+system [hover]                   ESC[93ma^Cb^:cESC[39m
+info                             ESC[36ma^Cb^:cESC[39m
+info [hover]                     ESC[36ma^Cb^:cESC[39m
+dim                              ESC[2ma^Cb^:cESC[22m
+dim [hover]                      ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+code                             ESC[48;2;28;28;28mESC[37ma^Cb^:cESC[39mESC[49m
+code [hover]                     ESC[48;2;22;25;36ma^Cb^:cESC[49m
+heading-1                        ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-1 [hover]                ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-2                        ESC[1mESC[96maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-2 [hover]                ESC[1mESC[96maESC[96mbESC[0mcESC[0mESC[39mESC[22m
+heading-3                        ESC[1maESC[96mbESC[0mcESC[0mESC[22m
+heading-3 [hover]                ESC[1maESC[96mbESC[0mcESC[0mESC[22m
+search-highlight                 ESC[103mESC[30ma^Cb^:cESC[39mESC[49m
+search-highlight [hover]         ESC[103mESC[30ma^Cb^:cESC[39mESC[49m
+search-highlight-active          ESC[41mESC[97ma^Cb^:cESC[39mESC[49m
+search-highlight-active [hover]  ESC[41mESC[97ma^Cb^:cESC[39mESC[49m
+selection-highlight              ESC[7ma^Cb^:cESC[27m
+selection-highlight [hover]      ESC[7ma^Cb^:cESC[27m
+(undefined)                      a^Cb^:c
+(undefined) [hover]              a^Cb^:c"
+`;
+
+exports[`writeStyled bytes (xterm-truecolor) > emits stable bytes for every style — plain 1`] = `
+"user                             ESC[48;2;43;43;43mESC[1mXyESC[22mESC[49m
+user [hover]                     ESC[48;2;43;43;43mESC[1mXyESC[22mESC[49m
+agent                            Xy
+agent [hover]                    Xy
+thought                          ESC[90mXyESC[39m
+thought [hover]                  ESC[48;2;25;25;25mXy
+tool                             ESC[94mXyESC[39m
+tool [hover]                     ESC[48;5;236mESC[94mXyESC[39mESC[49m
+tool-status-ok                   ESC[2mXyESC[22m
+tool-status-ok [hover]           ESC[48;5;236mESC[2mXyESC[22mESC[49m
+tool-status-fail                 ESC[1mESC[31mXyESC[39mESC[22m
+tool-status-fail [hover]         ESC[48;5;236mESC[1mESC[31mXyESC[39mESC[22mESC[49m
+tool-status-pending              ESC[2mXyESC[22m
+tool-status-pending [hover]      ESC[48;5;236mESC[2mXyESC[22mESC[49m
+tool-status-running              ESC[93mXyESC[39m
+tool-status-running [hover]      ESC[48;5;236mESC[93mXyESC[39mESC[49m
+tool-status-cancelled            ESC[2mXyESC[22m
+tool-status-cancelled [hover]    ESC[48;5;236mESC[2mXyESC[22mESC[49m
+plan                             ESC[93mXyESC[39m
+plan [hover]                     ESC[93mXyESC[39m
+plan-done                        ESC[32mXyESC[39m
+plan-done [hover]                ESC[32mXyESC[39m
+plan-pending                     ESC[2mXyESC[22m
+plan-pending [hover]             ESC[48;5;236mESC[2mXyESC[22mESC[49m
+system                           ESC[93mXyESC[39m
+system [hover]                   ESC[93mXyESC[39m
+info                             ESC[36mXyESC[39m
+info [hover]                     ESC[36mXyESC[39m
+dim                              ESC[2mXyESC[22m
+dim [hover]                      ESC[48;5;236mESC[2mXyESC[22mESC[49m
+code                             ESC[48;2;28;28;28mESC[37mXyESC[39mESC[49m
+code [hover]                     ESC[48;2;22;25;36mXyESC[49m
+heading-1                        ESC[1mESC[93mXyESC[39mESC[22m
+heading-1 [hover]                ESC[1mESC[93mXyESC[39mESC[22m
+heading-2                        ESC[1mESC[96mXyESC[39mESC[22m
+heading-2 [hover]                ESC[1mESC[96mXyESC[39mESC[22m
+heading-3                        ESC[1mXyESC[22m
+heading-3 [hover]                ESC[1mXyESC[22m
+search-highlight                 ESC[103mESC[30mXyESC[39mESC[49m
+search-highlight [hover]         ESC[103mESC[30mXyESC[39mESC[49m
+search-highlight-active          ESC[41mESC[97mXyESC[39mESC[49m
+search-highlight-active [hover]  ESC[41mESC[97mXyESC[39mESC[49m
+selection-highlight              ESC[7mXyESC[27m
+selection-highlight [hover]      ESC[7mXyESC[27m
+(undefined)                      Xy
+(undefined) [hover]              Xy"
+`;

@@ -3684,11 +3684,19 @@ describe("Screen selection-highlight rendering of ansi lines", () => {
     // contiguous plain-text run (rendered via the inverse .noFormat
     // writer)…
     expect(joined).toContain("see Agent Extensions via ACP Proxies RFD end");
-    // …and no OSC 8 / escape control codes leak into the row at all.
-    // (Caret markup on the non-selected agent pieces is consumed by
-    // term(text); the escape-free assertion is the meaningful one — it's
-    // exactly what the user saw as "funky control codes".)
-    expect(joined).not.toContain("\x1b");
+    // …and no OSC 8 escape leaks into the row. (Caret markup on the
+    // non-selected agent pieces is consumed by term(text); the escape-free
+    // assertion is the meaningful one — it's exactly what the user saw as
+    // "funky control codes".)
+    //
+    // SGR colour sequences are stripped first because they are legitimately
+    // present as write arguments: writeStyled emits a style's colour itself
+    // rather than going through terminal-kit's style chain, so the inverse
+    // band around the selection shows up here as "\x1b[7m" / "\x1b[27m".
+    // Those are the styling we asked for; anything else surviving the strip
+    // is a leak.
+    const withoutSgr = joined.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(withoutSgr).not.toContain("\x1b");
   });
 });
 
