@@ -538,6 +538,25 @@ export function withRecordedAt(
   };
 }
 
+// Read side of withRecordedAt. Returns undefined when the stamp is absent
+// (state-kind update, ephemeral push, or a daemon predating the field), in
+// which case callers should fall back to their local clock.
+export function extractRecordedAt(params: unknown): number | undefined {
+  if (!params || typeof params !== "object") {
+    return undefined;
+  }
+  const meta = (params as { _meta?: unknown })._meta;
+  if (!meta || typeof meta !== "object") {
+    return undefined;
+  }
+  const inner = (meta as Record<string, unknown>)[HYDRA_META_KEY];
+  if (!inner || typeof inner !== "object") {
+    return undefined;
+  }
+  const at = (inner as { recordedAt?: unknown }).recordedAt;
+  return typeof at === "number" && Number.isFinite(at) ? at : undefined;
+}
+
 export function mergeMeta(
   passthrough: Record<string, unknown> | undefined,
   ours: Record<string, unknown>,

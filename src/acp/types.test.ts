@@ -4,6 +4,7 @@ import {
   extractHydraMeta,
   mergeMeta,
   withRecordedAt,
+  extractRecordedAt,
   SessionAttachParams,
   sessionListEntryToWire,
   buildHydraSessionMeta,
@@ -390,5 +391,49 @@ describe("withRecordedAt", () => {
   it("passes through non-object params", () => {
     expect(withRecordedAt(undefined, 1)).toBeUndefined();
     expect(withRecordedAt([1], 1)).toEqual([1]);
+  });
+});
+
+describe("extractRecordedAt", () => {
+  it("round-trips a value written by withRecordedAt", () => {
+    const stamped = withRecordedAt({ sessionId: "s", update: {} }, 1782587063587);
+    expect(extractRecordedAt(stamped)).toBe(1782587063587);
+  });
+
+  it("reads through sibling hydra meta fields", () => {
+    const stamped = withRecordedAt(
+      { _meta: { [HYDRA_META_KEY]: { amending: true } } },
+      42,
+    );
+    expect(extractRecordedAt(stamped)).toBe(42);
+  });
+
+  it("returns undefined for an unstamped payload", () => {
+    expect(extractRecordedAt({ sessionId: "s", update: {} })).toBeUndefined();
+    expect(extractRecordedAt({ _meta: {} })).toBeUndefined();
+    expect(extractRecordedAt({ _meta: { [HYDRA_META_KEY]: {} } })).toBeUndefined();
+  });
+
+  it("returns undefined for a foreign-only meta namespace", () => {
+    expect(
+      extractRecordedAt({ _meta: { "other-vendor": { recordedAt: 5 } } }),
+    ).toBeUndefined();
+  });
+
+  it("rejects non-numeric and non-finite stamps", () => {
+    expect(
+      extractRecordedAt({ _meta: { [HYDRA_META_KEY]: { recordedAt: "123" } } }),
+    ).toBeUndefined();
+    expect(
+      extractRecordedAt({ _meta: { [HYDRA_META_KEY]: { recordedAt: NaN } } }),
+    ).toBeUndefined();
+  });
+
+  it("tolerates junk input", () => {
+    expect(extractRecordedAt(undefined)).toBeUndefined();
+    expect(extractRecordedAt(null)).toBeUndefined();
+    expect(extractRecordedAt("nope")).toBeUndefined();
+    expect(extractRecordedAt({ _meta: "nope" })).toBeUndefined();
+    expect(extractRecordedAt({ _meta: { [HYDRA_META_KEY]: 7 } })).toBeUndefined();
   });
 });

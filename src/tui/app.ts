@@ -10,6 +10,7 @@ import { JsonRpcConnection } from "../acp/connection.js";
 import {
   HYDRA_META_KEY,
   extractHydraMeta,
+  extractRecordedAt,
   type CancelPromptResult,
   type JsonRpcRequest,
   type PromptQueueEntry,
@@ -1363,8 +1364,14 @@ async function runSession(
   // Buffer rendered events that arrive before the screen is wired up — most
   // importantly, the history replay during session/attach. Once
   // applyRenderEvent is bound we drain the buffer through it.
-  let bufferedEvents: Array<{ event: RenderEvent; rawUpdate?: unknown }> = [];
-  let applyRenderEvent: ((event: RenderEvent, rawUpdate?: unknown) => void) | null = null;
+  let bufferedEvents: Array<{
+    event: RenderEvent;
+    rawUpdate?: unknown;
+    recordedAt?: number;
+  }> = [];
+  let applyRenderEvent:
+    | ((event: RenderEvent, rawUpdate?: unknown, recordedAt?: number) => void)
+    | null = null;
   // Flips true the moment teardown starts. Notification/request handlers
   // check this and bail before touching the screen — otherwise updates
   // streaming in during a long turn keep painting after we've left the
@@ -1377,14 +1384,18 @@ async function runSession(
   // above 0 represents the still-open turn at the head of history, not
   // local drift. See shouldDriftSnap in reconnect-state.ts.
   let replayDraining = false;
-  const appendRender = (event: RenderEvent | null, rawUpdate?: unknown): void => {
+  const appendRender = (
+    event: RenderEvent | null,
+    rawUpdate?: unknown,
+    recordedAt?: number,
+  ): void => {
     if (!event) {
       return;
     }
     if (applyRenderEvent) {
-      applyRenderEvent(event, rawUpdate);
+      applyRenderEvent(event, rawUpdate, recordedAt);
     } else {
-      bufferedEvents.push({ event, rawUpdate });
+      bufferedEvents.push({ event, rawUpdate, recordedAt });
     }
   };
 
@@ -1603,6 +1614,12 @@ async function runSession(
   ]);
   const handleSessionUpdate = (params: unknown): void => {
     const { update } = (params ?? {}) as { update?: unknown };
+    // Daemon-stamped record time (PROTOCOL.md, _meta["hydra-acp"].recordedAt).
+    // Present on recorded kinds, live and replayed alike, and absent on state
+    // kinds and pre-field daemons — callers fall back to Date.now(). This is
+    // what lets replayed tool calls show their real duration instead of
+    // counting from the moment we attached.
+    const recordedAt = extractRecordedAt(params);
     const event = mapUpdate(update, { cwd: resolvedCwd });
     debugLogUpdate(update, event);
     // Any wire activity counts as "upstream alive" for the stall
@@ -1660,7 +1677,7 @@ async function runSession(
       // Future: tick a counter for the picker badge.
       return;
     }
-    appendRender(event, update);
+    appendRender(event, update, recordedAt);
     maybeDismissPermissionByToolUpdate(update);
   };
   conn.onNotification("session/update", (params) => {
@@ -6045,10 +6062,14 @@ async function runSession(
   // starts — even if no tool calls fire for a while. Called from the
   // user-text handler so it fires for both our own prompts (synthesized
   // via runPrompt) and peers' prompts (broadcast by the daemon).
-  const startToolsBlock = (): void => {
+  // `anchor` is the daemon recordedAt of the prompt_received that opened
+  // this turn. Supplying it makes a replayed turn's header report the real
+  // duration; without it a historical turn reads "took 0s" because the
+  // block was anchored at replay time.
+  const startToolsBlock = (anchor?: number): void => {
     toolsBlockSeq += 1;
     currentToolsKey = `tools:${toolsBlockSeq}`;
-    toolsBlockStartedAt = Date.now();
+    toolsBlockStartedAt = anchor ?? Date.now();
     toolsBlockEndedAt = null;
     toolsBlockStopReason = null;
     renderToolsBlock();
@@ -6237,6 +6258,7 @@ async function runSession(
     workerTaskId?: string,
     rawUpdate?: unknown,
     rawKind?: string,
+    recordedAt?: number,
   ): void => {
     const wasNew = !toolStates.has(id);
     const existing = toolStates.get(id);
@@ -6244,7 +6266,10 @@ async function runSession(
       initialTitle: title ?? "tool",
       latestTitle: title ?? "tool",
       status: status ?? "pending",
-      startedAt: Date.now(),
+      // Prefer the daemon's record time so a replayed call reports the
+      // duration it actually took. Falls back to now for state-kind
+      // updates and daemons predating _meta.recordedAt.
+      startedAt: recordedAt ?? Date.now(),
     };
     if (!existing && workerTaskId !== undefined) {
       state.workerTaskId = workerTaskId;
@@ -6281,7 +6306,13 @@ async function runSession(
     // Freeze the duration the first time the call reaches a terminal
     // status; a started-but-not-yet-ended call keeps ticking live.
     if (state.endedAt === undefined && isTerminalToolStatus(state.status)) {
-      state.endedAt = Date.now();
+      state.endedAt = recordedAt ?? Date.now();
+      // A replayed call can arrive already-terminal, in which case the
+      // synthesized start (above) and end land in the same tick. Trust
+      // the stamps but never render a negative duration.
+      if (state.startedAt !== undefined && state.endedAt < state.startedAt) {
+        state.endedAt = state.startedAt;
+      }
       // A tool just finished: the edited-files list may have grown and the
       // work tree may have moved. Refresh rather than wait out the poll.
       onSidebarRelevantChange();
@@ -7168,7 +7199,11 @@ async function runSession(
     }
   };
 
-  applyRenderEvent = (event: RenderEvent, rawUpdate?: unknown): void => {
+  applyRenderEvent = (
+    event: RenderEvent,
+    rawUpdate?: unknown,
+    recordedAt?: number,
+  ): void => {
     if (event.kind === "available-commands") {
       agentCommands = event.commands;
       refreshCompletions();
@@ -7296,7 +7331,7 @@ async function runSession(
       // header transitions to a frozen "thought · Xs" / "took Xs" trace
       // before this new turn replaces it.
       if (toolsBlockStartedAt !== null) {
-        toolsBlockEndedAt = Date.now();
+        toolsBlockEndedAt = recordedAt ?? Date.now();
         renderToolsBlock();
       }
       // Any pending ownership belongs to the prior turn; clear it so
@@ -7331,7 +7366,7 @@ async function runSession(
       exitPlanStates.clear();
       toolCallOrder.length = 0;
       toolsBlockEndedAt = null;
-      startToolsBlock();
+      startToolsBlock(recordedAt);
       // Force an immediate paint past the content-repaint throttle. The
       // user-text event is the user's "I just sent this" signal — they
       // need to see their prompt + the thinking indicator without
@@ -7401,6 +7436,7 @@ async function runSession(
         event.workerTaskId,
         rawUpdate,
         event.rawKind,
+        recordedAt,
       );
       renderToolsBlock();
       maybeRenderEditDiff(event.toolCallId);
@@ -7431,6 +7467,8 @@ async function runSession(
         event.locations,
         event.workerTaskId,
         rawUpdate,
+        undefined,
+        recordedAt,
       );
       if (event.upstreamInterrupted) {
         upstreamInterruptedSeen = true;
@@ -7527,7 +7565,7 @@ async function runSession(
         // trace. Removing the placeholder for tool-less turns made the
         // turn look indistinguishable from one where the TUI silently
         // dropped events.
-        toolsBlockEndedAt = Date.now();
+        toolsBlockEndedAt = recordedAt ?? Date.now();
         toolsBlockStopReason = effectiveStopReason ?? null;
         renderToolsBlock();
         snapshotToolsBlock();
@@ -7602,8 +7640,8 @@ async function runSession(
   screen.pauseRepaint();
   replayDraining = true;
   try {
-    for (const { event, rawUpdate } of buffered) {
-      applyRenderEvent(event, rawUpdate);
+    for (const { event, rawUpdate, recordedAt } of buffered) {
+      applyRenderEvent(event, rawUpdate, recordedAt);
     }
   } finally {
     replayDraining = false;
@@ -7774,14 +7812,16 @@ async function runSession(
     // before per-turn keys, when both calls shared the constant "tools"
     // key and the second just re-anchored the same block in place.)
     if (toolsBlockStartedAt === null) {
-      startToolsBlock();
+      startToolsBlock(initialTurnStartedAt);
     }
     // Anchor the tools header's elapsed clock to the daemon's authoritative
-    // turn start, not the reattach moment. Whether the block was anchored
-    // by replay or by startToolsBlock above, its startedAt is Date.now()
-    // (time-of-reattach), which would make the header read "thinking · 0s"
-    // for a turn that's actually been running a while. Override it so the
-    // tools "Xs" matches the banner elapsed.
+    // turn start rather than the reattach moment, so the tools "Xs" matches
+    // the banner elapsed. Normally redundant now: a replayed prompt_received
+    // carries the same value as _meta recordedAt and startToolsBlock already
+    // used it. Kept as the backstop for the cases where no prompt_received
+    // reaches us — historyPolicy "none"/"pending_only", or a turn we
+    // originated ourselves (the daemon excludes the originator from that
+    // broadcast).
     toolsBlockStartedAt = initialTurnStartedAt;
     renderToolsBlock();
   } else if (initialTurnStartedAt === undefined && pendingTurns > 0) {
