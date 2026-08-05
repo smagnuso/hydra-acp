@@ -16,6 +16,14 @@
 // why the old code had to transcribe each style's colour into several places.
 
 import type { Style } from "../format.js";
+import {
+  ansi,
+  bgOpen,
+  bgReset,
+  fgOpen,
+  fgReset,
+  type Color,
+} from "./color.js";
 
 const ESC = "\x1b";
 const CSI = `${ESC}[`;
@@ -96,58 +104,80 @@ export function bgGrayscale(g: number, trueColor: boolean): SgrPair {
 // 31 and closed 39 then 22. Keeping the order means the emitted bytes are
 // unchanged, not merely equivalent.
 
-type Layer = SgrPair;
+// `open` is a function of colour depth because a palette colour may be an
+// explicit RGB value, which emits 24-bit on terminals that take it and
+// quantises otherwise. Attributes and the 16 ansi slots ignore the argument.
+interface Layer {
+  open: (trueColor: boolean) => string;
+  close: string;
+}
 
 // ---------------------------------------------------------------------------
 // Tier 0: palette
 // ---------------------------------------------------------------------------
 
-// The raw colours available, and nothing about what they mean. Currently the
-// 16 ANSI slots plus a grayscale ramp, so a theme inherits whatever the user's
-// terminal has configured; a future palette can substitute hex values here
-// without anything below this line changing.
-
-const fg = (code: number): Layer => ({
-  open: `${CSI}${code}m`,
-  close: `${CSI}39m`,
-});
-const bg = (code: number): Layer => ({
-  open: `${CSI}${code}m`,
-  close: `${CSI}49m`,
-});
+// The colours available, and nothing about what they mean.
+//
+// Sixteen slots, defaulting to the terminal's own ansi palette rather than to
+// hex, so an unthemed hydra inherits whatever the user has already configured —
+// including on a light terminal. A theme substitutes explicit colours here and
+// nothing below this line changes.
+//
+// fg-vs-bg is a usage decision, not a palette entry: `bgBlue` used to be its
+// own slot alongside `blue`, which meant the same colour was written twice.
 
 const palette = {
-  black: fg(30),
-  red: fg(31),
-  green: fg(32),
-  yellow: fg(33),
-  cyan: fg(36),
-  white: fg(37),
-  brightBlack: fg(90),
-  brightRed: fg(91),
-  brightYellow: fg(93),
-  brightBlue: fg(94),
-  brightMagenta: fg(95),
-  brightCyan: fg(96),
-  brightWhite: fg(97),
-  bgRed: bg(41),
-  bgBlue: bg(44),
-  bgWhite: bg(47),
-  bgBrightYellow: bg(103),
-  // Grayscale levels (0-255) for background bands, resolved against the
-  // terminal's colour depth at paint time — see bgGrayscale.
-  bandUser: 43,
-  bandCode: 28,
-  bandHoverThought: 25,
+  black: ansi(0),
+  red: ansi(1),
+  green: ansi(2),
+  yellow: ansi(3),
+  blue: ansi(4),
+  magenta: ansi(5),
+  cyan: ansi(6),
+  white: ansi(7),
+  brightBlack: ansi(8),
+  brightRed: ansi(9),
+  brightGreen: ansi(10),
+  brightYellow: ansi(11),
+  brightBlue: ansi(12),
+  brightMagenta: ansi(13),
+  brightCyan: ansi(14),
+  brightWhite: ansi(15),
 } as const;
+
+// Grayscale levels (0-255) for the background bands. Not palette colours:
+// these feed terminal-kit's grayscale quantisation, which resolveStyle applies
+// against the terminal's depth. Once a theme can set `bg`, these become
+// derived — band(bg, step) — and the direction of the lift follows bg's
+// luminance so a light theme works from one key.
+const bands = {
+  user: 43,
+  code: 28,
+  hoverThought: 25,
+} as const;
+
+/** A palette colour used as a foreground. */
+const fgL = (c: Color): Layer => ({
+  open: (trueColor) => fgOpen(c, trueColor),
+  close: fgReset,
+});
+/** A palette colour used as a background. */
+const bgL = (c: Color): Layer => ({
+  open: (trueColor) => bgOpen(c, trueColor),
+  close: bgReset,
+});
 
 // Attributes are not colours and are not themeable: bold/dim/inverse carry
 // structure (a heading is bold, secondary text recedes) and letting a theme
 // unbold the rules would produce garbage for no gain. They compose with roles
 // at the token level.
-const bold: Layer = { open: `${CSI}1m`, close: `${CSI}22m` };
-const dim: Layer = { open: `${CSI}2m`, close: `${CSI}22m` };
-const inverse: Layer = { open: `${CSI}7m`, close: `${CSI}27m` };
+const attr = (on: number, off: number): Layer => ({
+  open: () => `${CSI}${on}m`,
+  close: `${CSI}${off}m`,
+});
+const bold = attr(1, 22);
+const dim = attr(2, 22);
+const inverse = attr(7, 27);
 
 // ---------------------------------------------------------------------------
 // Tier 1: roles
@@ -174,44 +204,54 @@ const inverse: Layer = { open: `${CSI}7m`, close: `${CSI}27m` };
 const roles = {
   // Text.
   fg: [] as Layer[],
-  fgStrong: [palette.brightWhite],
+  fgStrong: [fgL(palette.brightWhite)],
   muted: [dim],
   // The gray a thought sits in: quieter than muted, still legible.
-  subtle: [palette.brightBlack],
+  subtle: [fgL(palette.brightBlack)],
   emphasis: [bold],
 
   // State.
-  active: [palette.brightYellow],
-  warn: [palette.yellow],
-  ok: [palette.green],
-  error: [palette.brightRed],
-  errorSoft: [palette.red],
-  cold: [palette.brightMagenta],
+  active: [fgL(palette.brightYellow)],
+  warn: [fgL(palette.yellow)],
+  ok: [fgL(palette.green)],
+  error: [fgL(palette.brightRed)],
+  errorSoft: [fgL(palette.red)],
+  cold: [fgL(palette.brightMagenta)],
 
   // Reference and navigation.
-  accent: [palette.brightCyan],
-  info: [palette.cyan],
-  reference: [palette.brightBlue],
-  focus: [palette.brightBlue],
+  accent: [fgL(palette.brightCyan)],
+  info: [fgL(palette.cyan)],
+  reference: [fgL(palette.brightBlue)],
+  focus: [fgL(palette.brightBlue)],
 
   // Bands and highlights. Composites, because a band is a background and the
   // foreground that stays legible on it.
-  selectionBand: [palette.bgBlue],
-  selection: [palette.bgBlue, palette.brightWhite],
-  cursor: [palette.bgWhite],
-  promptCursor: [palette.bgBrightYellow],
-  match: [palette.bgBrightYellow, palette.black],
-  matchActive: [palette.bgRed, palette.brightWhite],
+  selectionBand: [bgL(palette.blue)],
+  selection: [bgL(palette.blue), fgL(palette.brightWhite)],
+  cursor: [bgL(palette.white)],
+  promptCursor: [bgL(palette.brightYellow)],
+  match: [bgL(palette.brightYellow), fgL(palette.black)],
+  matchActive: [bgL(palette.red), fgL(palette.brightWhite)],
   invert: [inverse],
   // The base text colour inside a code band. Explicit rather than the
   // terminal default because cli-highlight's spans close to it — see the
   // SGR-39 rewrite in format.ts.
-  codeText: [palette.white],
+  codeText: [fgL(palette.white)],
 } satisfies Record<string, Layer[]>;
 
 /** The opening bytes of a role, for callers that splice colour into a string. */
+/**
+ * The opening bytes of a role, for callers that splice colour into a string
+ * rather than bracketing text with it — the inline-span openers below.
+ *
+ * Fixed at 256-colour depth. Inline spans are baked into a FormattedLine's
+ * body once, at parse time, where the terminal is not in scope; quantising is
+ * the choice that renders somewhere on every terminal rather than emitting
+ * 24-bit at one that cannot read it. Only matters for an explicitly-themed
+ * palette, since ansi slots are depth-independent.
+ */
 function openOf(role: Layer[]): string {
-  return role.map((l) => l.open).join("");
+  return role.map((l) => l.open(false)).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -302,9 +342,9 @@ export function inlineOptsFor(style: Style): InlineOpts {
 // Tier 2: tokens (the table below)
 // ---------------------------------------------------------------------------
 
-function flatten(layers: Layer[]): SgrPair {
+function flatten(layers: Layer[], trueColor: boolean): SgrPair {
   return {
-    open: layers.map((l) => l.open).join(""),
+    open: layers.map((l) => l.open(trueColor)).join(""),
     close: layers
       .slice()
       .reverse()
@@ -409,7 +449,7 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // Quiet full-width band marking the start of a user turn. Bold on a
   // grayscale lift rather than a colour, so it reads as a boundary rather
   // than a highlight stripe.
-  user: { grayBg: palette.bandUser, layers: [...roles.emphasis] },
+  user: { grayBg: bands.user, layers: [...roles.emphasis] },
 
   // Agent prose takes the terminal's default foreground: it's the bulk of
   // the transcript, and anything else fights the user's theme.
@@ -674,7 +714,7 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // `diff` fence can let context lines sit neutral while cli-highlight's
   // red/green +/- overlay on top. A different shade from the user band so
   // the two are never confused.
-  code: { grayBg: palette.bandCode, layers: [...roles.codeText] },
+  code: { grayBg: bands.code, layers: [...roles.codeText] },
 
   "heading-1": { layers: [...roles.emphasis, ...roles.active], inlineSgr: true },
   "heading-2": { layers: [...roles.emphasis, ...roles.accent], inlineSgr: true },
@@ -706,12 +746,17 @@ export function resolveStyle(
   }
   const layers: Layer[] = [];
   if (spec.grayBg !== undefined) {
-    layers.push(bgGrayscale(spec.grayBg, trueColor));
+    // Already depth-resolved by bgGrayscale, so its open ignores the argument.
+    const gray = bgGrayscale(spec.grayBg, trueColor);
+    layers.push({ open: () => gray.open, close: gray.close });
   }
   if (spec.layers) {
     layers.push(...spec.layers);
   }
-  return { ...flatten(layers), inlineSgr: spec.inlineSgr === true };
+  return {
+    ...flatten(layers, trueColor),
+    inlineSgr: spec.inlineSgr === true,
+  };
 }
 
 /**
@@ -865,7 +910,7 @@ export function resolveHovered(
   }
 
   if (style === "thought") {
-    const band = bgGrayscale(palette.bandHoverThought, trueColor).open;
+    const band = bgGrayscale(bands.hoverThought, trueColor).open;
     // Lift the dim brightBlack baseline to the default foreground so the
     // thought stays readable on the band. Every place the body restores
     // brightBlack (a span closing back to the row's base) becomes SGR 39 —
