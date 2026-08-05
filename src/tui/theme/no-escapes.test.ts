@@ -116,6 +116,26 @@ describe("colour lives only in the theme", () => {
     });
   }
 
+  it("every token is expressed through a role, not a raw colour", () => {
+    // The point of the role tier: a token says what it MEANS
+    // (`roles.error`), never what colour that is. A token reaching straight
+    // for the palette would be invisible to a theme that sets roles.
+    //
+    // The band levels are the deliberate exception: palette.bandUser and
+    // friends are grayscale LEVELS (0-255) fed to bgGrayscale, not Layers, so
+    // there is no role for them to come from.
+    const theme = files.find((f) => f.rel === "tui/theme/index.ts")!.text;
+    const entries = theme
+      .split("\n")
+      .filter((l) => /^\s+"?[a-z][a-z0-9-]*"?: \{ (?:grayBg: [^,]+, )?layers: \[/.test(l));
+    expect(entries.length).toBeGreaterThan(75);
+    const offenders = entries.filter((l) => {
+      const layers = l.slice(l.indexOf("layers: ["));
+      return !layers.includes("roles.");
+    });
+    expect(offenders).toEqual([]);
+  });
+
   it("every allowance is still needed", () => {
     // Stops the list rotting into a permanent exemption after the underlying
     // reason is gone.

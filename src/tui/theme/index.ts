@@ -88,6 +88,133 @@ export function bgGrayscale(g: number, trueColor: boolean): SgrPair {
 }
 
 // ---------------------------------------------------------------------------
+// Layers
+// ---------------------------------------------------------------------------
+
+// A style is a stack of layers. Opens are emitted in order and closes in
+// reverse, which is what terminal-kit's chain did: `bold.red` opened 1 then
+// 31 and closed 39 then 22. Keeping the order means the emitted bytes are
+// unchanged, not merely equivalent.
+
+type Layer = SgrPair;
+
+// ---------------------------------------------------------------------------
+// Tier 0: palette
+// ---------------------------------------------------------------------------
+
+// The raw colours available, and nothing about what they mean. Currently the
+// 16 ANSI slots plus a grayscale ramp, so a theme inherits whatever the user's
+// terminal has configured; a future palette can substitute hex values here
+// without anything below this line changing.
+
+const fg = (code: number): Layer => ({
+  open: `${CSI}${code}m`,
+  close: `${CSI}39m`,
+});
+const bg = (code: number): Layer => ({
+  open: `${CSI}${code}m`,
+  close: `${CSI}49m`,
+});
+
+const palette = {
+  black: fg(30),
+  red: fg(31),
+  green: fg(32),
+  yellow: fg(33),
+  cyan: fg(36),
+  white: fg(37),
+  brightBlack: fg(90),
+  brightRed: fg(91),
+  brightYellow: fg(93),
+  brightBlue: fg(94),
+  brightMagenta: fg(95),
+  brightCyan: fg(96),
+  brightWhite: fg(97),
+  bgRed: bg(41),
+  bgBlue: bg(44),
+  bgWhite: bg(47),
+  bgBrightYellow: bg(103),
+  // Grayscale levels (0-255) for background bands, resolved against the
+  // terminal's colour depth at paint time — see bgGrayscale.
+  bandUser: 43,
+  bandCode: 28,
+  bandHoverThought: 25,
+} as const;
+
+// Attributes are not colours and are not themeable: bold/dim/inverse carry
+// structure (a heading is bold, secondary text recedes) and letting a theme
+// unbold the rules would produce garbage for no gain. They compose with roles
+// at the token level.
+const bold: Layer = { open: `${CSI}1m`, close: `${CSI}22m` };
+const dim: Layer = { open: `${CSI}2m`, close: `${CSI}22m` };
+const inverse: Layer = { open: `${CSI}7m`, close: `${CSI}27m` };
+
+// ---------------------------------------------------------------------------
+// Tier 1: roles
+// ---------------------------------------------------------------------------
+
+// What a colour MEANS, independent of which token is using it. This is the
+// layer a theme is expected to set: "make errors orange" is one edit here
+// rather than seven in the token table below.
+//
+// Roles are arrays so a token can compose them (`[...roles.emphasis,
+// ...roles.active]` for a bold yellow heading) rather than needing a role per
+// combination.
+//
+// Two sets of near-duplicates are preserved deliberately, because collapsing
+// them would change rendering and that is a separate decision:
+//
+//   error / errorSoft  — bright red vs plain red. Seven tokens mean "something
+//     is wrong" and inherited three different renderings from their original
+//     call sites. Whether that is a real hierarchy (a failed command is milder
+//     than a broken tool call) or an accident is an open question.
+//   reference / focus  — both bright blue. One names a thing (a tool, a file
+//     path), the other marks which box has keyboard focus. Unrelated meanings
+//     that happen to share a colour.
+const roles = {
+  // Text.
+  fg: [] as Layer[],
+  fgStrong: [palette.brightWhite],
+  muted: [dim],
+  // The gray a thought sits in: quieter than muted, still legible.
+  subtle: [palette.brightBlack],
+  emphasis: [bold],
+
+  // State.
+  active: [palette.brightYellow],
+  warn: [palette.yellow],
+  ok: [palette.green],
+  error: [palette.brightRed],
+  errorSoft: [palette.red],
+  cold: [palette.brightMagenta],
+
+  // Reference and navigation.
+  accent: [palette.brightCyan],
+  info: [palette.cyan],
+  reference: [palette.brightBlue],
+  focus: [palette.brightBlue],
+
+  // Bands and highlights. Composites, because a band is a background and the
+  // foreground that stays legible on it.
+  selectionBand: [palette.bgBlue],
+  selection: [palette.bgBlue, palette.brightWhite],
+  cursor: [palette.bgWhite],
+  promptCursor: [palette.bgBrightYellow],
+  match: [palette.bgBrightYellow, palette.black],
+  matchActive: [palette.bgRed, palette.brightWhite],
+  invert: [inverse],
+  // The base text colour inside a code band. Explicit rather than the
+  // terminal default because cli-highlight's spans close to it — see the
+  // SGR-39 rewrite in format.ts.
+  codeText: [palette.white],
+} satisfies Record<string, Layer[]>;
+
+/** The opening bytes of a role, for callers that splice colour into a string. */
+function openOf(role: Layer[]): string {
+  return role.map((l) => l.open).join("");
+}
+
+// ---------------------------------------------------------------------------
 // Inline spans
 // ---------------------------------------------------------------------------
 
@@ -102,11 +229,15 @@ export function bgGrayscale(g: number, trueColor: boolean): SgrPair {
 // full reset (SGR 0), not a targeted close.
 export const SGR_RESET = `${CSI}0m`;
 export const SGR_BOLD = `${CSI}1m`;
-const SGR_DIM = `${CSI}2m`;
 export const SGR_UNDERLINE = `${CSI}4m`;
-const SGR_CYAN = `${CSI}36m`;
-const SGR_BRIGHT_BLACK = `${CSI}90m`;
-const SGR_BRIGHT_CYAN = `${CSI}96m`;
+
+// Inline spans take their colour from roles like everything else: `accent` for
+// a code span or a link, `info` for the quieter code span inside a thought,
+// and `subtle` for the gray a thought's prose returns to.
+const SPAN_CODE = openOf(roles.accent);
+const SPAN_CODE_QUIET = openOf(roles.info);
+const SPAN_LINK = SPAN_CODE + SGR_UNDERLINE;
+const THOUGHT_BASE = openOf(roles.subtle);
 
 /**
  * How a row styles the inline spans inside it.
@@ -130,9 +261,9 @@ export interface InlineOpts {
  * restoring.
  */
 export const PROSE_INLINE_OPTS: InlineOpts = {
-  codeOpen: SGR_BRIGHT_CYAN,
+  codeOpen: SPAN_CODE,
   // Links are cyan + underlined.
-  linkOpen: SGR_BRIGHT_CYAN + SGR_UNDERLINE,
+  linkOpen: SPAN_LINK,
   base: "",
 };
 
@@ -141,9 +272,9 @@ export const PROSE_INLINE_OPTS: InlineOpts = {
  * spans stay in the thought's gray register instead of punching out of it.
  */
 export const THOUGHT_INLINE_OPTS: InlineOpts = {
-  codeOpen: SGR_CYAN,
-  linkOpen: SGR_BRIGHT_CYAN + SGR_UNDERLINE,
-  base: SGR_BRIGHT_BLACK,
+  codeOpen: SPAN_CODE_QUIET,
+  linkOpen: SPAN_LINK,
+  base: THOUGHT_BASE,
 };
 
 /**
@@ -159,56 +290,17 @@ export const THOUGHT_INLINE_OPTS: InlineOpts = {
  */
 export function inlineOptsFor(style: Style): InlineOpts {
   return {
-    codeOpen: style === "heading-2" ? brightYellow.open : SGR_BRIGHT_CYAN,
-    linkOpen: SGR_BRIGHT_CYAN + SGR_UNDERLINE,
+    // heading-2 is itself `accent`, so a code span inside it would vanish;
+    // `active` is the one other colour already in the heading vocabulary.
+    codeOpen: style === "heading-2" ? openOf(roles.active) : SPAN_CODE,
+    linkOpen: SPAN_LINK,
     base: resolveStyle(style, false).open,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Layers
+// Tier 2: tokens (the table below)
 // ---------------------------------------------------------------------------
-
-// A style is a stack of layers. Opens are emitted in order and closes in
-// reverse, which is what terminal-kit's chain did: `bold.red` opened 1 then
-// 31 and closed 39 then 22. Keeping the order means the emitted bytes are
-// unchanged, not merely equivalent.
-
-type Layer = SgrPair;
-
-const bold: Layer = { open: `${CSI}1m`, close: `${CSI}22m` };
-const dim: Layer = { open: `${CSI}2m`, close: `${CSI}22m` };
-const inverse: Layer = { open: `${CSI}7m`, close: `${CSI}27m` };
-
-const fg = (code: number): Layer => ({
-  open: `${CSI}${code}m`,
-  close: `${CSI}39m`,
-});
-const bg = (code: number): Layer => ({
-  open: `${CSI}${code}m`,
-  close: `${CSI}49m`,
-});
-
-// Named so the table below reads as colour, not as numbers.
-const black = fg(30);
-const red = fg(31);
-const green = fg(32);
-const cyan = fg(36);
-const white = fg(37);
-const brightBlack = fg(90);
-const brightBlue = fg(94);
-const brightYellow = fg(93);
-const brightCyan = fg(96);
-const brightWhite = fg(97);
-
-const yellow = fg(33);
-const brightRed = fg(91);
-const brightMagenta = fg(95);
-
-const bgRed = bg(41);
-const bgBlue = bg(44);
-const bgWhite = bg(47);
-const bgBrightYellow = bg(103);
 
 function flatten(layers: Layer[]): SgrPair {
   return {
@@ -317,27 +409,27 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // Quiet full-width band marking the start of a user turn. Bold on a
   // grayscale lift rather than a colour, so it reads as a boundary rather
   // than a highlight stripe.
-  user: { grayBg: 43, layers: [bold] },
+  user: { grayBg: palette.bandUser, layers: [...roles.emphasis] },
 
   // Agent prose takes the terminal's default foreground: it's the bulk of
   // the transcript, and anything else fights the user's theme.
   agent: { inlineSgr: true },
 
-  thought: { layers: [brightBlack], inlineSgr: true },
+  thought: { layers: [...roles.subtle], inlineSgr: true },
 
-  tool: { layers: [brightBlue] },
+  tool: { layers: [...roles.reference] },
 
   // Completed, queued and cancelled all read as "not the thing to look at",
   // so they share dim; running is the only tool state that gets colour.
-  "tool-status-ok": { layers: [dim] },
-  "tool-status-pending": { layers: [dim] },
-  "tool-status-cancelled": { layers: [dim] },
-  "tool-status-running": { layers: [brightYellow] },
-  "tool-status-fail": { layers: [bold, red] },
+  "tool-status-ok": { layers: [...roles.muted] },
+  "tool-status-pending": { layers: [...roles.muted] },
+  "tool-status-cancelled": { layers: [...roles.muted] },
+  "tool-status-running": { layers: [...roles.active] },
+  "tool-status-fail": { layers: [...roles.emphasis, ...roles.errorSoft] },
 
-  plan: { layers: [brightYellow], inlineSgr: true },
-  "plan-done": { layers: [green], inlineSgr: true },
-  "plan-pending": { layers: [dim], inlineSgr: true },
+  plan: { layers: [...roles.active], inlineSgr: true },
+  "plan-done": { layers: [...roles.ok], inlineSgr: true },
+  "plan-pending": { layers: [...roles.muted], inlineSgr: true },
 
   // Lines the TUI itself emits, as opposed to anything relayed from the
   // agent. Split out of the former `system` / `info` / `dim` tokens, which
@@ -356,17 +448,17 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // status label, the queue counter), so a static list heading was wearing
   // "something is happening". Bold is what heading-3 does and competes with
   // no state colour, and it reads as a heading above the cyan rows.
-  "local-heading": { layers: [bold] },
-  "local-item": { layers: [cyan] },
+  "local-heading": { layers: [...roles.emphasis] },
+  "local-item": { layers: [...roles.info] },
 
   // Outcome of a slash command, or a passive state change the user did not ask
   // about.
-  notice: { layers: [cyan] },
+  notice: { layers: [...roles.info] },
 
   // Green, matching plan-done, which is the success colour everywhere else.
   // This was brightYellow, i.e. the busy accent, for a line that reports a
   // finished write.
-  "notice-ok": { layers: [green] },
+  "notice-ok": { layers: [...roles.ok] },
 
   // Things the user has to act on: a usage error, a missing precondition, a
   // failed export. These used to be cyan — identical to the `/help` listing —
@@ -378,22 +470,22 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // the agent's work failing: a tool broke, a turn stopped. This is the
   // milder "your command did not run", which covers both hard failures and
   // usage mistakes, so it should not shout as loudly as a broken tool call.
-  "notice-error": { layers: [red] },
+  "notice-error": { layers: [...roles.errorSoft] },
 
   // A live number the user reads rather than acts on. Its own token because
   // the context gadget flips it to tool-status-fail past 90%, making it the
   // calm arm of a two-state health indicator rather than decoration.
-  metric: { layers: [cyan] },
+  metric: { layers: [...roles.info] },
 
   // De-emphasised: rules and separators, scaffolding labels, provenance tags,
   // overflow counters, and a block's own recessed caption. "Not the point",
   // whatever the row happens to contain.
-  muted: { layers: [dim] },
+  muted: { layers: [...roles.muted] },
 
   // Verbatim tool input and output. Content the user expanded on purpose, so
   // not de-emphasis: this is the unhighlighted sibling of `code`, chosen when
   // no language could be inferred for the payload.
-  "tool-output": { layers: [dim] },
+  "tool-output": { layers: [...roles.muted] },
 
   // Session state, one enum across every surface that reports it: the
   // separator's headline, the btw overlay header, and the sidebar's activity
@@ -417,185 +509,185 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // brightness because the normal case should not draw the eye; idle is one
   // sidebar row among many, so it recedes. A wart, kept knowingly.
   // role: fg / muted / active / muted / active / error / cold
-  "status-ready": { layers: [] },
-  "status-active": { layers: [brightYellow] },
+  "status-ready": { layers: [...roles.fg] },
+  "status-active": { layers: [...roles.active] },
   // Blocked on the user, e.g. sitting on a permission prompt. Deliberately
   // not red: red means failure everywhere else and a waiting session has not
   // failed. Renders like idle today but is a distinct state and now tunable.
-  "status-waiting": { layers: [dim] },
+  "status-waiting": { layers: [...roles.muted] },
   // Prompts typed but not yet sent. Not active — pending — but it earns the
   // accent because it is outstanding work the user should notice.
-  "status-queued": { layers: [brightYellow] },
-  "status-alert": { layers: [brightRed] },
-  "status-cold": { layers: [brightMagenta] },
+  "status-queued": { layers: [...roles.active] },
+  "status-alert": { layers: [...roles.error] },
+  "status-cold": { layers: [...roles.cold] },
 
   // Working-tree state. Previously borrowed plan-done / tool / plan-pending,
   // which meant retinting plan entries also recoloured git status.
   // role: ok / accent / muted
-  "git-staged": { layers: [green] },
-  "git-dirty": { layers: [brightBlue] },
-  "git-untracked": { layers: [dim] },
+  "git-staged": { layers: [...roles.ok] },
+  "git-dirty": { layers: [...roles.reference] },
+  "git-untracked": { layers: [...roles.muted] },
 
   // A path in a list of touched files. Previously borrowed `tool`.
   // role: accent
-  "file-path": { layers: [brightBlue] },
+  "file-path": { layers: [...roles.reference] },
 
   // The context-window gauge, and the same gauge past 90% where it becomes
   // the warning that a compaction is imminent. Previously borrowed plan-done
   // and tool-status-fail. role: ok / error
-  "meter-fill": { layers: [green] },
-  "meter-warn": { layers: [bold, red] },
+  "meter-fill": { layers: [...roles.ok] },
+  "meter-warn": { layers: [...roles.emphasis, ...roles.errorSoft] },
 
   // Sidebar furniture: the rule between gadget blocks, the gutter glyph, and
   // a block's title row. Split from `muted` so the sidebar frame can be tinted
   // without touching table rules and provenance tags in the transcript.
   // role: muted
-  "sidebar-rule": { layers: [dim] },
-  "sidebar-title": { layers: [dim] },
+  "sidebar-rule": { layers: [...roles.muted] },
+  "sidebar-title": { layers: [...roles.muted] },
 
   // The quiescent arm of a state enum whose other arms are
   // tool-status-running / -fail / -cancelled: idle, ready, awaiting approval,
   // fetching, a turn that finished cleanly, a peer session with nothing to
   // say. Separate because restyling it changes a signal, not a decoration.
-  "status-idle": { layers: [dim] },
+  "status-idle": { layers: [...roles.muted] },
 
   // --- chrome -------------------------------------------------------------
 
   // Box edges recede so the content inside them reads first. role: muted
-  "box-border": { layers: [dim] },
+  "box-border": { layers: [...roles.muted] },
   // The box holding keyboard focus, so a stack of them is readable at a
   // glance. role: focus
-  "box-border-focused": { layers: [brightBlue] },
+  "box-border-focused": { layers: [...roles.focus] },
   // A clickable label inside a border, under the pointer. Bold rather than a
   // colour so it reads as "this bit is a target" without a second hue in the
   // frame. role: muted + emphasis
-  "box-border-hover": { layers: [dim, bold] },
+  "box-border-hover": { layers: [...roles.muted, ...roles.emphasis] },
   // role: focus + emphasis
-  "box-border-focused-hover": { layers: [brightBlue, bold] },
+  "box-border-focused-hover": { layers: [...roles.focus, ...roles.emphasis] },
   // The one coloured part of the frame, so a stack of overlays stays legible.
   // role: accent
-  "box-title": { layers: [brightCyan] },
+  "box-title": { layers: [...roles.accent] },
 
   // A banner or modal's headline. role: emphasis
-  "modal-title": { layers: [brightWhite, bold] },
+  "modal-title": { layers: [...roles.fgStrong, ...roles.emphasis] },
   // Label half of a label/value pair; the value is left unstyled, the same
   // scaffolding-vs-data split the sidebar uses. role: muted
-  "modal-label": { layers: [dim] },
+  "modal-label": { layers: [...roles.muted] },
   // Value half, where it needs to stand out (a command to run, a URL).
   // role: emphasis
-  "modal-value": { layers: [brightWhite] },
+  "modal-value": { layers: [...roles.fgStrong] },
   // Attention without failure: "authentication required". role: warn
-  "modal-note": { layers: [brightYellow] },
+  "modal-note": { layers: [...roles.active] },
   // A banner reporting something that already went wrong. role: error
-  "modal-error": { layers: [brightRed] },
+  "modal-error": { layers: [...roles.error] },
   // Keybinding hints, footers, elision notes. role: muted
-  "modal-hint": { layers: [dim] },
+  "modal-hint": { layers: [...roles.muted] },
   // Transient status: an action in flight, "searching…", "no matches". Reads
   // the same as a hint today but it reports state rather than offering
   // guidance. role: muted
-  "modal-status": { layers: [dim] },
+  "modal-status": { layers: [...roles.muted] },
   // The key column of a hotkey table. role: accent
-  "modal-key": { layers: [brightCyan] },
+  "modal-key": { layers: [...roles.accent] },
 
   // Validation failure on an input field. Renders plain red where
   // modal-error is bright red: an inconsistency inherited from the two files,
   // now at least visible and separately tunable. role: error
-  "input-error": { layers: [red] },
+  "input-error": { layers: [...roles.errorSoft] },
   // Block cursor in a text field. role: cursor
-  "input-cursor": { layers: [bgWhite] },
+  "input-cursor": { layers: [...roles.cursor] },
   // An inline prompt the picker overlays on its own status row: the `/` search
   // filter, a kill confirmation, a rename. Yellow because it is asking for
   // something. role: warn
-  "prompt-text": { layers: [brightYellow] },
+  "prompt-text": { layers: [...roles.active] },
   // Its block cursor, on the same hue as the text. Note this is a different
   // colour from input-cursor (bgWhite) — two surfaces picked differently, now
   // visible in one place rather than buried in two files. role: warn
-  "prompt-cursor": { layers: [bgBrightYellow] },
+  "prompt-cursor": { layers: [...roles.promptCursor] },
   // Confirming something irreversible ("kill + delete abc123? [y/N]"). Shares
   // bright red with modal-error but means the opposite thing: this is a
   // question about to be answered, not a report of something already broken.
   // Separated so the two can diverge. role: error
-  "prompt-destructive": { layers: [brightRed] },
+  "prompt-destructive": { layers: [...roles.error] },
 
   // Selected row of a modal list. role: selection
-  "list-selected": { layers: [brightWhite, bgBlue] },
+  "list-selected": { layers: [...roles.selection] },
   // Secondary text under a row. role: muted
-  "list-description": { layers: [dim] },
+  "list-description": { layers: [...roles.muted] },
   // Column-header row above a list. role: muted
-  "list-header": { layers: [dim] },
+  "list-header": { layers: [...roles.muted] },
 
   // Unselected and selected rows of an in-prompt modal. These mark selection
   // with colour instead of list-selected's background band, because the modal
   // is drawn inline over the prompt rather than in a box of its own.
   // role: muted / warn
-  "modal-option": { layers: [dim] },
-  "modal-option-selected": { layers: [brightYellow] },
+  "modal-option": { layers: [...roles.muted] },
+  "modal-option-selected": { layers: [...roles.active] },
 
   // Identity strings in the sessionbar: cwd and session title. Bold rather
   // than coloured, matching the sidebar policy that identity reads the same
   // whatever it says and so should not compete with state. role: emphasis
-  "bar-text": { layers: [bold] },
+  "bar-text": { layers: [...roles.emphasis] },
   // "you are not looking at the live tail": the scrollback offset and the
   // search indicator. role: accent
-  "bar-indicator": { layers: [brightCyan] },
+  "bar-indicator": { layers: [...roles.accent] },
   // The ── glyphs of a rule. role: emphasis
-  rule: { layers: [bold] },
+  rule: { layers: [...roles.emphasis] },
   // Padding either side of a rule. Separate from rule-meta because it carries
   // no information at all. role: muted
-  "rule-pad": { layers: [dim] },
+  "rule-pad": { layers: [...roles.muted] },
   // Subordinate data sitting in a rule: the short session id and its
   // separators. role: muted
-  "rule-meta": { layers: [dim] },
+  "rule-meta": { layers: [...roles.muted] },
   // A hint chunk in the bottom rule under the pointer. Full brightness rather
   // than a colour: the surrounding chunks are dim, so removing the dimming is
   // itself the hover signal. role: fg
-  "hint-hover": { layers: [] },
+  "hint-hover": { layers: [...roles.fg] },
 
   // Completion popup: the candidate and its description. role: accent / muted
-  "completion-name": { layers: [brightCyan] },
-  "completion-desc": { layers: [dim] },
+  "completion-name": { layers: [...roles.accent] },
+  "completion-desc": { layers: [...roles.muted] },
 
   // An attached-file chip. Plain yellow, not the bright yellow the busy accent
   // uses, so a pending attachment does not read as work in flight. role: warn
-  attachment: { layers: [yellow] },
+  attachment: { layers: [...roles.warn] },
 
   // Queued prompts, painted as a full-width blue band so a stack of them reads
   // as one block. The cursor marks which row an edit would land on.
   // role: selection
-  "queue-row": { layers: [bgBlue, brightWhite] },
-  "queue-cursor": { layers: [bgBlue, brightYellow] },
-  "queue-blank": { layers: [bgBlue] },
+  "queue-row": { layers: [...roles.selection] },
+  "queue-cursor": { layers: [...roles.selectionBand, ...roles.active] },
+  "queue-blank": { layers: [...roles.selectionBand] },
 
   // The composer's "> " gutter when it holds focus, and everything about it
   // when an overlay has taken focus away. role: fg / muted
-  "composer-gutter": { layers: [brightWhite] },
-  "composer-inactive": { layers: [dim] },
+  "composer-gutter": { layers: [...roles.fgStrong] },
+  "composer-inactive": { layers: [...roles.muted] },
   // The "· " marker starting a logical newline. role: muted
-  "composer-continuation": { layers: [dim] },
+  "composer-continuation": { layers: [...roles.muted] },
 
   // A bare warning printed outside any frame ("no sessions found", a daemon
   // version mismatch on stderr). Plain yellow, not the bright yellow of the
   // busy accent — nothing is in flight. role: warn
-  "cli-warn": { layers: [yellow] },
+  "cli-warn": { layers: [...roles.warn] },
 
   // Editor-like block: dark band with an explicit white foreground, so a
   // `diff` fence can let context lines sit neutral while cli-highlight's
   // red/green +/- overlay on top. A different shade from the user band so
   // the two are never confused.
-  code: { grayBg: 28, layers: [white] },
+  code: { grayBg: palette.bandCode, layers: [...roles.codeText] },
 
-  "heading-1": { layers: [bold, brightYellow], inlineSgr: true },
-  "heading-2": { layers: [bold, brightCyan], inlineSgr: true },
-  "heading-3": { layers: [bold], inlineSgr: true },
+  "heading-1": { layers: [...roles.emphasis, ...roles.active], inlineSgr: true },
+  "heading-2": { layers: [...roles.emphasis, ...roles.accent], inlineSgr: true },
+  "heading-3": { layers: [...roles.emphasis], inlineSgr: true },
 
   // Loud enough to find inside any base style without being unreadable on a
   // light terminal.
-  "search-highlight": { layers: [bgBrightYellow, black] },
+  "search-highlight": { layers: [...roles.match] },
   // The one match the search cursor is on, distinct from its siblings.
-  "search-highlight-active": { layers: [bgRed, brightWhite] },
+  "search-highlight-active": { layers: [...roles.matchActive] },
   // Inverse video stays legible over every base style and can't collide with
   // the two search treatments when both land on one row.
-  "selection-highlight": { layers: [inverse] },
+  "selection-highlight": { layers: [...roles.invert] },
 };
 
 const EMPTY: StyleRender = { open: "", close: "", inlineSgr: false };
@@ -773,7 +865,7 @@ export function resolveHovered(
   }
 
   if (style === "thought") {
-    const band = bgGrayscale(25, trueColor).open;
+    const band = bgGrayscale(palette.bandHoverThought, trueColor).open;
     // Lift the dim brightBlack baseline to the default foreground so the
     // thought stays readable on the band. Every place the body restores
     // brightBlack (a span closing back to the row's base) becomes SGR 39 —
@@ -789,7 +881,7 @@ export function resolveHovered(
       inlineSgr: true,
       transform: (text) =>
         restoreBandAfterResets(
-          text.split(SGR_BRIGHT_BLACK).join(`${CSI}39m`),
+          text.split(THOUGHT_BASE).join(`${CSI}39m`),
           band,
         ),
     };

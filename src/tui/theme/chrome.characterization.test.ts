@@ -41,7 +41,11 @@ const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   "prompt-text": (t, s) => t.brightYellow.noFormat(s),
   "prompt-cursor": (t, s) => t.bgBrightYellow.noFormat(s),
   "prompt-destructive": (t, s) => t.brightRed.noFormat(s),
-  "list-selected": (t, s) => t.brightWhite.bgBlue.noFormat(s),
+  // Normalised to bg-then-fg when this and queue-row were unified onto
+  // roles.selection — they were written in opposite orders for no reason. SGR
+  // 44 and 97 are independent attributes, so the order they are set in does
+  // not affect rendering; only the byte sequence moved.
+  "list-selected": (t, s) => t.bgBlue.brightWhite.noFormat(s),
   "list-description": (t, s) => t.dim.noFormat(s),
   "list-header": (t, s) => t.dim.noFormat(s),
   "modal-option": (t, s) => t.dim.noFormat(s),
