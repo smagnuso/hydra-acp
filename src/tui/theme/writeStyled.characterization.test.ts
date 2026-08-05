@@ -130,3 +130,62 @@ describe("bgGrayscale", () => {
     expect(bgGrayscale(43, false).close).toBe("\x1b[49m");
   });
 });
+
+describe("hover banding", () => {
+  const hoverOf = (style: Style): string => {
+    const { term, take } = createCapturingTerminal("xterm-256color");
+    take();
+    writeStyled(term, "Xy", style, true);
+    return take();
+  };
+
+  it("bands all three plan states identically", () => {
+    // Only plan-pending used to band, so hovering a checklist lit up the
+    // not-yet-started entries and left in-progress and completed ones flat.
+    const band = "\x1b[48;5;236m";
+    for (const style of ["plan", "plan-done", "plan-pending"] as const) {
+      expect(hoverOf(style).startsWith(band), style).toBe(true);
+    }
+  });
+
+  it("closes the band it opens", () => {
+    // A hovered row used to leak its background to end of row and rely on the
+    // painter's styleReset. The trailing padding is a separate hovered write
+    // that re-bands itself, so closing here costs no coverage.
+    for (const style of [
+      "plan",
+      "plan-done",
+      "plan-pending",
+      "thought",
+      "tool",
+      "dim",
+      "code",
+    ] as const) {
+      expect(hoverOf(style).endsWith("\x1b[49m"), style).toBe(true);
+    }
+  });
+
+  it("leaves styles that cannot be hovered unbanded", () => {
+    // Hover marks a clickable block. agent/heading rows live in agent:
+    // blocks, which the pointer handler skips; user/system/info are appended
+    // unkeyed and never hovered at all.
+    for (const style of [
+      "agent",
+      "heading-1",
+      "heading-2",
+      "heading-3",
+      "user",
+      "system",
+      "info",
+    ] as const) {
+      expect(hoverOf(style), style).toBe(
+        (() => {
+          const { term, take } = createCapturingTerminal("xterm-256color");
+          take();
+          writeStyled(term, "Xy", style, false);
+          return take();
+        })(),
+      );
+    }
+  });
+});

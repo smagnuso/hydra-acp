@@ -324,13 +324,19 @@ export function styleCarriesInlineSgr(style: Style | undefined): boolean {
 /**
  * Styles that gain a background band when the row is hovered.
  *
- * This list is deliberately partial, matching what the old hover switch
- * happened to cover. Notably `plan` and `plan-done` are absent while
- * `plan-pending` is present, and `user`, `system`, `info` and the headings
- * are absent too — so hovering a row of plan entries today highlights only
- * the pending ones. That looks like an oversight rather than a decision, but
- * widening it is a visible change, so it is preserved here and left for a
- * follow-up.
+ * Partial on purpose. Hover marks a *clickable* block — it is driven by
+ * blockKey and it also sets the pointer cursor — so only styles that appear
+ * inside a keyed, clickable block belong here:
+ *
+ *  - tool rows and plan entries live in keyed blocks, so they band.
+ *  - `agent` and the headings live in `agent:`-prefixed blocks, which the
+ *    pointer handler skips outright ("no click or hover affordance"), so a
+ *    band would advertise something that does not exist.
+ *  - `user`, `system` and `info` are appended unkeyed and can never be
+ *    hovered at all.
+ *  - `thought` and `code` are hoverable but get their own treatment above.
+ *  - the search and selection styles are applied to slices of a row rather
+ *    than being a row's base style; their band comes from the base.
  */
 const HOVER_BANDED = new Set<Style>([
   "dim",
@@ -340,6 +346,11 @@ const HOVER_BANDED = new Set<Style>([
   "tool-status-cancelled",
   "tool-status-running",
   "tool-status-fail",
+  // All three plan states, so hovering a checklist highlights the whole
+  // thing. Previously only plan-pending banded, which lit up the not-yet-
+  // started entries and left the in-progress and completed ones flat.
+  "plan",
+  "plan-done",
   "plan-pending",
 ]);
 
@@ -386,13 +397,13 @@ export function resolveHovered(
     // brightBlack (a span closing back to the row's base) becomes SGR 39 —
     // default foreground, leaving the background alone.
     //
-    // No close sequence — this leaks the band to end of row and depends on
-    // the painter's styleReset to stop it smearing. Faithful to the previous
-    // behaviour; a band that closed here would be the correct fix but is a
-    // visible change.
+    // Closing the band here does not shrink it: the trailing padding is a
+    // separate hovered write that re-emits the band for itself, so coverage
+    // across the empty columns is unaffected and the row no longer depends on
+    // the painter's styleReset to stop the background smearing.
     return {
       open: band,
-      close: "",
+      close: `${CSI}49m`,
       inlineSgr: true,
       transform: (text) =>
         restoreBandAfterResets(

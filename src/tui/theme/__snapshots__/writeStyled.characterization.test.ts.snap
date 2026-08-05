@@ -6,7 +6,7 @@ user [hover]                     ESC[48;5;235mESC[1maESC[96mbESC[0mcESC[22mESC[4
 agent                            aESC[96mbESC[0mcESC[0m
 agent [hover]                    aESC[96mbESC[0mcESC[0m
 thought                          ESC[90maESC[96mbESC[0mcESC[0mESC[39m
-thought [hover]                  ESC[48;5;233maESC[96mbESC[0mESC[48;5;233mcESC[0m
+thought [hover]                  ESC[48;5;233maESC[96mbESC[0mESC[48;5;233mcESC[0mESC[49m
 tool                             ESC[94maESC[96mbESC[0mcESC[39m
 tool [hover]                     ESC[48;5;236mESC[94maESC[96mbESC[0mcESC[39mESC[49m
 tool-status-ok                   ESC[2maESC[96mbESC[0mcESC[22m
@@ -20,9 +20,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93maESC[96mbESC[0mcESC[39mESC[
 tool-status-cancelled            ESC[2maESC[96mbESC[0mcESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
 plan                             ESC[93maESC[96mbESC[0mcESC[0mESC[39m
-plan [hover]                     ESC[93maESC[96mbESC[0mcESC[0mESC[39m
+plan [hover]                     ESC[48;5;236mESC[93maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[39mESC[49m
 plan-done                        ESC[32maESC[96mbESC[0mcESC[0mESC[39m
-plan-done [hover]                ESC[32maESC[96mbESC[0mcESC[0mESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[39mESC[49m
 plan-pending                     ESC[2maESC[96mbESC[0mcESC[0mESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[22mESC[49m
 system                           ESC[93maESC[96mbESC[0mcESC[39m
@@ -55,7 +55,7 @@ user [hover]                     ESC[48;5;235mESC[1ma^Cb^:cESC[22mESC[49m
 agent                            a^Cb^:c
 agent [hover]                    a^Cb^:c
 thought                          ESC[90ma^Cb^:cESC[39m
-thought [hover]                  ESC[48;5;233ma^Cb^:c
+thought [hover]                  ESC[48;5;233ma^Cb^:cESC[49m
 tool                             ESC[94ma^Cb^:cESC[39m
 tool [hover]                     ESC[48;5;236mESC[94ma^Cb^:cESC[39mESC[49m
 tool-status-ok                   ESC[2ma^Cb^:cESC[22m
@@ -69,9 +69,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93ma^Cb^:cESC[39mESC[49m
 tool-status-cancelled            ESC[2ma^Cb^:cESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 plan                             ESC[93ma^Cb^:cESC[39m
-plan [hover]                     ESC[93ma^Cb^:cESC[39m
+plan [hover]                     ESC[48;5;236mESC[93ma^Cb^:cESC[39mESC[49m
 plan-done                        ESC[32ma^Cb^:cESC[39m
-plan-done [hover]                ESC[32ma^Cb^:cESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32ma^Cb^:cESC[39mESC[49m
 plan-pending                     ESC[2ma^Cb^:cESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 system                           ESC[93ma^Cb^:cESC[39m
@@ -104,7 +104,7 @@ user [hover]                     ESC[48;5;235mESC[1ma^^KESC[22mESC[49m
 agent                            a^^K
 agent [hover]                    a^^K
 thought                          ESC[90ma^^KESC[39m
-thought [hover]                  ESC[48;5;233ma^^K
+thought [hover]                  ESC[48;5;233ma^^KESC[49m
 tool                             ESC[94ma^^KESC[39m
 tool [hover]                     ESC[48;5;236mESC[94ma^^KESC[39mESC[49m
 tool-status-ok                   ESC[2ma^^KESC[22m
@@ -118,9 +118,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93ma^^KESC[39mESC[49m
 tool-status-cancelled            ESC[2ma^^KESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 plan                             ESC[93ma^^KESC[39m
-plan [hover]                     ESC[93ma^^KESC[39m
+plan [hover]                     ESC[48;5;236mESC[93ma^^KESC[39mESC[49m
 plan-done                        ESC[32ma^^KESC[39m
-plan-done [hover]                ESC[32ma^^KESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32ma^^KESC[39mESC[49m
 plan-pending                     ESC[2ma^^KESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 system                           ESC[93ma^^KESC[39m
@@ -153,7 +153,7 @@ user [hover]                     ESC[48;5;235mESC[1mXyESC[22mESC[49m
 agent                            Xy
 agent [hover]                    Xy
 thought                          ESC[90mXyESC[39m
-thought [hover]                  ESC[48;5;233mXy
+thought [hover]                  ESC[48;5;233mXyESC[49m
 tool                             ESC[94mXyESC[39m
 tool [hover]                     ESC[48;5;236mESC[94mXyESC[39mESC[49m
 tool-status-ok                   ESC[2mXyESC[22m
@@ -167,9 +167,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93mXyESC[39mESC[49m
 tool-status-cancelled            ESC[2mXyESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2mXyESC[22mESC[49m
 plan                             ESC[93mXyESC[39m
-plan [hover]                     ESC[93mXyESC[39m
+plan [hover]                     ESC[48;5;236mESC[93mXyESC[39mESC[49m
 plan-done                        ESC[32mXyESC[39m
-plan-done [hover]                ESC[32mXyESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32mXyESC[39mESC[49m
 plan-pending                     ESC[2mXyESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2mXyESC[22mESC[49m
 system                           ESC[93mXyESC[39m
@@ -202,7 +202,7 @@ user [hover]                     ESC[48;2;43;43;43mESC[1maESC[96mbESC[0mcESC[22m
 agent                            aESC[96mbESC[0mcESC[0m
 agent [hover]                    aESC[96mbESC[0mcESC[0m
 thought                          ESC[90maESC[96mbESC[0mcESC[0mESC[39m
-thought [hover]                  ESC[48;2;25;25;25maESC[96mbESC[0mESC[48;2;25;25;25mcESC[0m
+thought [hover]                  ESC[48;2;25;25;25maESC[96mbESC[0mESC[48;2;25;25;25mcESC[0mESC[49m
 tool                             ESC[94maESC[96mbESC[0mcESC[39m
 tool [hover]                     ESC[48;5;236mESC[94maESC[96mbESC[0mcESC[39mESC[49m
 tool-status-ok                   ESC[2maESC[96mbESC[0mcESC[22m
@@ -216,9 +216,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93maESC[96mbESC[0mcESC[39mESC[
 tool-status-cancelled            ESC[2maESC[96mbESC[0mcESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
 plan                             ESC[93maESC[96mbESC[0mcESC[0mESC[39m
-plan [hover]                     ESC[93maESC[96mbESC[0mcESC[0mESC[39m
+plan [hover]                     ESC[48;5;236mESC[93maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[39mESC[49m
 plan-done                        ESC[32maESC[96mbESC[0mcESC[0mESC[39m
-plan-done [hover]                ESC[32maESC[96mbESC[0mcESC[0mESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[39mESC[49m
 plan-pending                     ESC[2maESC[96mbESC[0mcESC[0mESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[22mESC[49m
 system                           ESC[93maESC[96mbESC[0mcESC[39m
@@ -251,7 +251,7 @@ user [hover]                     ESC[48;2;43;43;43mESC[1ma^Cb^:cESC[22mESC[49m
 agent                            a^Cb^:c
 agent [hover]                    a^Cb^:c
 thought                          ESC[90ma^Cb^:cESC[39m
-thought [hover]                  ESC[48;2;25;25;25ma^Cb^:c
+thought [hover]                  ESC[48;2;25;25;25ma^Cb^:cESC[49m
 tool                             ESC[94ma^Cb^:cESC[39m
 tool [hover]                     ESC[48;5;236mESC[94ma^Cb^:cESC[39mESC[49m
 tool-status-ok                   ESC[2ma^Cb^:cESC[22m
@@ -265,9 +265,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93ma^Cb^:cESC[39mESC[49m
 tool-status-cancelled            ESC[2ma^Cb^:cESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 plan                             ESC[93ma^Cb^:cESC[39m
-plan [hover]                     ESC[93ma^Cb^:cESC[39m
+plan [hover]                     ESC[48;5;236mESC[93ma^Cb^:cESC[39mESC[49m
 plan-done                        ESC[32ma^Cb^:cESC[39m
-plan-done [hover]                ESC[32ma^Cb^:cESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32ma^Cb^:cESC[39mESC[49m
 plan-pending                     ESC[2ma^Cb^:cESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 system                           ESC[93ma^Cb^:cESC[39m
@@ -300,7 +300,7 @@ user [hover]                     ESC[48;2;43;43;43mESC[1ma^^KESC[22mESC[49m
 agent                            a^^K
 agent [hover]                    a^^K
 thought                          ESC[90ma^^KESC[39m
-thought [hover]                  ESC[48;2;25;25;25ma^^K
+thought [hover]                  ESC[48;2;25;25;25ma^^KESC[49m
 tool                             ESC[94ma^^KESC[39m
 tool [hover]                     ESC[48;5;236mESC[94ma^^KESC[39mESC[49m
 tool-status-ok                   ESC[2ma^^KESC[22m
@@ -314,9 +314,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93ma^^KESC[39mESC[49m
 tool-status-cancelled            ESC[2ma^^KESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 plan                             ESC[93ma^^KESC[39m
-plan [hover]                     ESC[93ma^^KESC[39m
+plan [hover]                     ESC[48;5;236mESC[93ma^^KESC[39mESC[49m
 plan-done                        ESC[32ma^^KESC[39m
-plan-done [hover]                ESC[32ma^^KESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32ma^^KESC[39mESC[49m
 plan-pending                     ESC[2ma^^KESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 system                           ESC[93ma^^KESC[39m
@@ -349,7 +349,7 @@ user [hover]                     ESC[48;2;43;43;43mESC[1mXyESC[22mESC[49m
 agent                            Xy
 agent [hover]                    Xy
 thought                          ESC[90mXyESC[39m
-thought [hover]                  ESC[48;2;25;25;25mXy
+thought [hover]                  ESC[48;2;25;25;25mXyESC[49m
 tool                             ESC[94mXyESC[39m
 tool [hover]                     ESC[48;5;236mESC[94mXyESC[39mESC[49m
 tool-status-ok                   ESC[2mXyESC[22m
@@ -363,9 +363,9 @@ tool-status-running [hover]      ESC[48;5;236mESC[93mXyESC[39mESC[49m
 tool-status-cancelled            ESC[2mXyESC[22m
 tool-status-cancelled [hover]    ESC[48;5;236mESC[2mXyESC[22mESC[49m
 plan                             ESC[93mXyESC[39m
-plan [hover]                     ESC[93mXyESC[39m
+plan [hover]                     ESC[48;5;236mESC[93mXyESC[39mESC[49m
 plan-done                        ESC[32mXyESC[39m
-plan-done [hover]                ESC[32mXyESC[39m
+plan-done [hover]                ESC[48;5;236mESC[32mXyESC[39mESC[49m
 plan-pending                     ESC[2mXyESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2mXyESC[22mESC[49m
 system                           ESC[93mXyESC[39m
