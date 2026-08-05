@@ -203,34 +203,27 @@ describe("hover banding", () => {
 });
 
 describe("tokens split out of dim / system / info", () => {
-  // The split was deliberately a no-op: nine roles were separated so they can
-  // be themed apart, but each kept the colour it already had. These groups
-  // record which tokens still share a rendering, so divergence has to be a
-  // deliberate edit to this list rather than something that drifts in.
-  //
-  // This is the same shape the tool-status tokens have always had: distinct
-  // meanings, shared default.
-  const SHARED: Array<{ why: string; styles: Style[] }> = [
-    {
-      why: "former `dim`: chrome, tool output, and idle state",
-      styles: ["muted", "tool-output", "status-idle"],
-    },
-    {
-      why: "former `system`: local headings and success confirmations",
-      styles: ["local-heading", "notice-ok"],
-    },
-    {
-      why: "former `info`: list rows, notices, failures, metrics",
-      styles: ["local-item", "notice", "notice-error", "metric"],
-    },
-  ];
-
   const render = (style: Style): string => {
     const { term, take } = createCapturingTerminal("xterm-256color");
     take();
     writeStyled(term, "Xy", style);
     return take();
   };
+
+  // Tokens that were separated so they could be themed apart but still share a
+  // rendering. Recorded so divergence has to be a deliberate edit here rather
+  // than something that drifts in. Same shape the tool-status tokens have
+  // always had: distinct meanings, shared default.
+  const SHARED: Array<{ why: string; styles: Style[] }> = [
+    {
+      why: "former `dim`: chrome, tool output, and idle state",
+      styles: ["muted", "tool-output", "status-idle"],
+    },
+    {
+      why: "former `info`: list rows, passive notices, and metrics",
+      styles: ["local-item", "notice", "metric"],
+    },
+  ];
 
   for (const group of SHARED) {
     it(`renders identically today — ${group.why}`, () => {
@@ -241,8 +234,45 @@ describe("tokens split out of dim / system / info", () => {
     });
   }
 
-  it("still distinguishes the three groups from each other", () => {
-    const reps = SHARED.map((g) => render(g.styles[0]!));
-    expect(new Set(reps).size).toBe(SHARED.length);
+  // Tokens deliberately pulled apart after the split, with what they must no
+  // longer look like. Each of these was a real misreading before: a failed
+  // command that looked like a help listing, a finished write and a static
+  // heading both wearing the busy accent.
+  const DIVERGED: Array<{ why: string; style: Style; notLike: Style }> = [
+    {
+      why: "a failed command must not look like a list row",
+      style: "notice-error",
+      notLike: "local-item",
+    },
+    {
+      why: "a failed command is milder than a broken tool call",
+      style: "notice-error",
+      notLike: "tool-status-fail",
+    },
+    {
+      why: "a success confirmation must not wear the busy accent",
+      style: "notice-ok",
+      notLike: "tool-status-running",
+    },
+    {
+      why: "a local heading must not wear the busy accent",
+      style: "local-heading",
+      notLike: "plan",
+    },
+  ];
+
+  for (const c of DIVERGED) {
+    it(`${c.style} differs from ${c.notLike} — ${c.why}`, () => {
+      expect(render(c.style)).not.toBe(render(c.notLike));
+    });
+  }
+
+  it("keeps notice-error unmistakably an error", () => {
+    // Red foreground, matching the family tool-status-fail belongs to.
+    expect(render("notice-error")).toContain("\x1b[31m");
+  });
+
+  it("keeps notice-ok in the success colour plan-done uses", () => {
+    expect(render("notice-ok")).toBe(render("plan-done"));
   });
 });

@@ -25,16 +25,16 @@ plan-done                        ESC[32maESC[96mbESC[0mcESC[0mESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[39mESC[49m
 plan-pending                     ESC[2maESC[96mbESC[0mcESC[0mESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[22mESC[49m
-local-heading                    ESC[93maESC[96mbESC[0mcESC[39m
-local-heading [hover]            ESC[93maESC[96mbESC[0mcESC[39m
+local-heading                    ESC[1maESC[96mbESC[0mcESC[22m
+local-heading [hover]            ESC[1maESC[96mbESC[0mcESC[22m
 local-item                       ESC[36maESC[96mbESC[0mcESC[39m
 local-item [hover]               ESC[36maESC[96mbESC[0mcESC[39m
 notice                           ESC[36maESC[96mbESC[0mcESC[39m
 notice [hover]                   ESC[36maESC[96mbESC[0mcESC[39m
-notice-ok                        ESC[93maESC[96mbESC[0mcESC[39m
-notice-ok [hover]                ESC[93maESC[96mbESC[0mcESC[39m
-notice-error                     ESC[36maESC[96mbESC[0mcESC[39m
-notice-error [hover]             ESC[36maESC[96mbESC[0mcESC[39m
+notice-ok                        ESC[32maESC[96mbESC[0mcESC[39m
+notice-ok [hover]                ESC[32maESC[96mbESC[0mcESC[39m
+notice-error                     ESC[31maESC[96mbESC[0mcESC[39m
+notice-error [hover]             ESC[31maESC[96mbESC[0mcESC[39m
 metric                           ESC[36maESC[96mbESC[0mcESC[39m
 metric [hover]                   ESC[36maESC[96mbESC[0mcESC[39m
 muted                            ESC[2maESC[96mbESC[0mcESC[22m
@@ -86,16 +86,16 @@ plan-done                        ESC[32ma^Cb^:cESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32ma^Cb^:cESC[39mESC[49m
 plan-pending                     ESC[2ma^Cb^:cESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
-local-heading                    ESC[93ma^Cb^:cESC[39m
-local-heading [hover]            ESC[93ma^Cb^:cESC[39m
+local-heading                    ESC[1ma^Cb^:cESC[22m
+local-heading [hover]            ESC[1ma^Cb^:cESC[22m
 local-item                       ESC[36ma^Cb^:cESC[39m
 local-item [hover]               ESC[36ma^Cb^:cESC[39m
 notice                           ESC[36ma^Cb^:cESC[39m
 notice [hover]                   ESC[36ma^Cb^:cESC[39m
-notice-ok                        ESC[93ma^Cb^:cESC[39m
-notice-ok [hover]                ESC[93ma^Cb^:cESC[39m
-notice-error                     ESC[36ma^Cb^:cESC[39m
-notice-error [hover]             ESC[36ma^Cb^:cESC[39m
+notice-ok                        ESC[32ma^Cb^:cESC[39m
+notice-ok [hover]                ESC[32ma^Cb^:cESC[39m
+notice-error                     ESC[31ma^Cb^:cESC[39m
+notice-error [hover]             ESC[31ma^Cb^:cESC[39m
 metric                           ESC[36ma^Cb^:cESC[39m
 metric [hover]                   ESC[36ma^Cb^:cESC[39m
 muted                            ESC[2ma^Cb^:cESC[22m
@@ -147,16 +147,16 @@ plan-done                        ESC[32ma^^KESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32ma^^KESC[39mESC[49m
 plan-pending                     ESC[2ma^^KESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
-local-heading                    ESC[93ma^^KESC[39m
-local-heading [hover]            ESC[93ma^^KESC[39m
+local-heading                    ESC[1ma^^KESC[22m
+local-heading [hover]            ESC[1ma^^KESC[22m
 local-item                       ESC[36ma^^KESC[39m
 local-item [hover]               ESC[36ma^^KESC[39m
 notice                           ESC[36ma^^KESC[39m
 notice [hover]                   ESC[36ma^^KESC[39m
-notice-ok                        ESC[93ma^^KESC[39m
-notice-ok [hover]                ESC[93ma^^KESC[39m
-notice-error                     ESC[36ma^^KESC[39m
-notice-error [hover]             ESC[36ma^^KESC[39m
+notice-ok                        ESC[32ma^^KESC[39m
+notice-ok [hover]                ESC[32ma^^KESC[39m
+notice-error                     ESC[31ma^^KESC[39m
+notice-error [hover]             ESC[31ma^^KESC[39m
 metric                           ESC[36ma^^KESC[39m
 metric [hover]                   ESC[36ma^^KESC[39m
 muted                            ESC[2ma^^KESC[22m
@@ -208,16 +208,16 @@ plan-done                        ESC[32mXyESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32mXyESC[39mESC[49m
 plan-pending                     ESC[2mXyESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2mXyESC[22mESC[49m
-local-heading                    ESC[93mXyESC[39m
-local-heading [hover]            ESC[93mXyESC[39m
+local-heading                    ESC[1mXyESC[22m
+local-heading [hover]            ESC[1mXyESC[22m
 local-item                       ESC[36mXyESC[39m
 local-item [hover]               ESC[36mXyESC[39m
 notice                           ESC[36mXyESC[39m
 notice [hover]                   ESC[36mXyESC[39m
-notice-ok                        ESC[93mXyESC[39m
-notice-ok [hover]                ESC[93mXyESC[39m
-notice-error                     ESC[36mXyESC[39m
-notice-error [hover]             ESC[36mXyESC[39m
+notice-ok                        ESC[32mXyESC[39m
+notice-ok [hover]                ESC[32mXyESC[39m
+notice-error                     ESC[31mXyESC[39m
+notice-error [hover]             ESC[31mXyESC[39m
 metric                           ESC[36mXyESC[39m
 metric [hover]                   ESC[36mXyESC[39m
 muted                            ESC[2mXyESC[22m
@@ -269,16 +269,16 @@ plan-done                        ESC[32maESC[96mbESC[0mcESC[0mESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[39mESC[49m
 plan-pending                     ESC[2maESC[96mbESC[0mcESC[0mESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2maESC[96mbESC[0mESC[48;5;236mcESC[0mESC[22mESC[49m
-local-heading                    ESC[93maESC[96mbESC[0mcESC[39m
-local-heading [hover]            ESC[93maESC[96mbESC[0mcESC[39m
+local-heading                    ESC[1maESC[96mbESC[0mcESC[22m
+local-heading [hover]            ESC[1maESC[96mbESC[0mcESC[22m
 local-item                       ESC[36maESC[96mbESC[0mcESC[39m
 local-item [hover]               ESC[36maESC[96mbESC[0mcESC[39m
 notice                           ESC[36maESC[96mbESC[0mcESC[39m
 notice [hover]                   ESC[36maESC[96mbESC[0mcESC[39m
-notice-ok                        ESC[93maESC[96mbESC[0mcESC[39m
-notice-ok [hover]                ESC[93maESC[96mbESC[0mcESC[39m
-notice-error                     ESC[36maESC[96mbESC[0mcESC[39m
-notice-error [hover]             ESC[36maESC[96mbESC[0mcESC[39m
+notice-ok                        ESC[32maESC[96mbESC[0mcESC[39m
+notice-ok [hover]                ESC[32maESC[96mbESC[0mcESC[39m
+notice-error                     ESC[31maESC[96mbESC[0mcESC[39m
+notice-error [hover]             ESC[31maESC[96mbESC[0mcESC[39m
 metric                           ESC[36maESC[96mbESC[0mcESC[39m
 metric [hover]                   ESC[36maESC[96mbESC[0mcESC[39m
 muted                            ESC[2maESC[96mbESC[0mcESC[22m
@@ -330,16 +330,16 @@ plan-done                        ESC[32ma^Cb^:cESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32ma^Cb^:cESC[39mESC[49m
 plan-pending                     ESC[2ma^Cb^:cESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
-local-heading                    ESC[93ma^Cb^:cESC[39m
-local-heading [hover]            ESC[93ma^Cb^:cESC[39m
+local-heading                    ESC[1ma^Cb^:cESC[22m
+local-heading [hover]            ESC[1ma^Cb^:cESC[22m
 local-item                       ESC[36ma^Cb^:cESC[39m
 local-item [hover]               ESC[36ma^Cb^:cESC[39m
 notice                           ESC[36ma^Cb^:cESC[39m
 notice [hover]                   ESC[36ma^Cb^:cESC[39m
-notice-ok                        ESC[93ma^Cb^:cESC[39m
-notice-ok [hover]                ESC[93ma^Cb^:cESC[39m
-notice-error                     ESC[36ma^Cb^:cESC[39m
-notice-error [hover]             ESC[36ma^Cb^:cESC[39m
+notice-ok                        ESC[32ma^Cb^:cESC[39m
+notice-ok [hover]                ESC[32ma^Cb^:cESC[39m
+notice-error                     ESC[31ma^Cb^:cESC[39m
+notice-error [hover]             ESC[31ma^Cb^:cESC[39m
 metric                           ESC[36ma^Cb^:cESC[39m
 metric [hover]                   ESC[36ma^Cb^:cESC[39m
 muted                            ESC[2ma^Cb^:cESC[22m
@@ -391,16 +391,16 @@ plan-done                        ESC[32ma^^KESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32ma^^KESC[39mESC[49m
 plan-pending                     ESC[2ma^^KESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
-local-heading                    ESC[93ma^^KESC[39m
-local-heading [hover]            ESC[93ma^^KESC[39m
+local-heading                    ESC[1ma^^KESC[22m
+local-heading [hover]            ESC[1ma^^KESC[22m
 local-item                       ESC[36ma^^KESC[39m
 local-item [hover]               ESC[36ma^^KESC[39m
 notice                           ESC[36ma^^KESC[39m
 notice [hover]                   ESC[36ma^^KESC[39m
-notice-ok                        ESC[93ma^^KESC[39m
-notice-ok [hover]                ESC[93ma^^KESC[39m
-notice-error                     ESC[36ma^^KESC[39m
-notice-error [hover]             ESC[36ma^^KESC[39m
+notice-ok                        ESC[32ma^^KESC[39m
+notice-ok [hover]                ESC[32ma^^KESC[39m
+notice-error                     ESC[31ma^^KESC[39m
+notice-error [hover]             ESC[31ma^^KESC[39m
 metric                           ESC[36ma^^KESC[39m
 metric [hover]                   ESC[36ma^^KESC[39m
 muted                            ESC[2ma^^KESC[22m
@@ -452,16 +452,16 @@ plan-done                        ESC[32mXyESC[39m
 plan-done [hover]                ESC[48;5;236mESC[32mXyESC[39mESC[49m
 plan-pending                     ESC[2mXyESC[22m
 plan-pending [hover]             ESC[48;5;236mESC[2mXyESC[22mESC[49m
-local-heading                    ESC[93mXyESC[39m
-local-heading [hover]            ESC[93mXyESC[39m
+local-heading                    ESC[1mXyESC[22m
+local-heading [hover]            ESC[1mXyESC[22m
 local-item                       ESC[36mXyESC[39m
 local-item [hover]               ESC[36mXyESC[39m
 notice                           ESC[36mXyESC[39m
 notice [hover]                   ESC[36mXyESC[39m
-notice-ok                        ESC[93mXyESC[39m
-notice-ok [hover]                ESC[93mXyESC[39m
-notice-error                     ESC[36mXyESC[39m
-notice-error [hover]             ESC[36mXyESC[39m
+notice-ok                        ESC[32mXyESC[39m
+notice-ok [hover]                ESC[32mXyESC[39m
+notice-error                     ESC[31mXyESC[39m
+notice-error [hover]             ESC[31mXyESC[39m
 metric                           ESC[36mXyESC[39m
 metric [hover]                   ESC[36mXyESC[39m
 muted                            ESC[2mXyESC[22m

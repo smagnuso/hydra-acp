@@ -267,15 +267,35 @@ const STYLES: Record<string, StyleSpec> = {
   // tool-status tokens already have: distinct meanings, shared default.
 
   // `/help`-style section heading and the rows beneath it.
-  "local-heading": { layers: [brightYellow] },
+  //
+  // Bold rather than coloured. It used to be brightYellow, which is the busy
+  // accent this TUI uses everywhere else (plan, tool-status-running, the busy
+  // status label, the queue counter), so a static list heading was wearing
+  // "something is happening". Bold is what heading-3 does and competes with
+  // no state colour, and it reads as a heading above the cyan rows.
+  "local-heading": { layers: [bold] },
   "local-item": { layers: [cyan] },
 
-  // Outcome of a slash command or a passive state change the user did not ask
-  // about. notice-error covers things the user has to act on: a usage error, a
-  // missing precondition, a failed export.
+  // Outcome of a slash command, or a passive state change the user did not ask
+  // about.
   notice: { layers: [cyan] },
-  "notice-ok": { layers: [brightYellow] },
-  "notice-error": { layers: [cyan] },
+
+  // Green, matching plan-done, which is the success colour everywhere else.
+  // This was brightYellow, i.e. the busy accent, for a line that reports a
+  // finished write.
+  "notice-ok": { layers: [green] },
+
+  // Things the user has to act on: a usage error, a missing precondition, a
+  // failed export. These used to be cyan — identical to the `/help` listing —
+  // so "/export failed: HTTP 500" was indistinguishable from a table of
+  // commands, while `btw startup failed` a few lines away in the same file
+  // was correctly red.
+  //
+  // Plain red, not the bold red of tool-status-fail. Bold red is reserved for
+  // the agent's work failing: a tool broke, a turn stopped. This is the
+  // milder "your command did not run", which covers both hard failures and
+  // usage mistakes, so it should not shout as loudly as a broken tool call.
+  "notice-error": { layers: [red] },
 
   // A live number the user reads rather than acts on. Its own token because
   // the context gadget flips it to tool-status-fail past 90%, making it the
