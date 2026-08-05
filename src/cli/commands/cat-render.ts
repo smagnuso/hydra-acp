@@ -53,27 +53,33 @@ function renderLine(line: FormattedLine, mode: CatRenderMode): string {
   return stripAnsi(line.body);
 }
 
-// Map FormattedLine.bodyStyle to a chalk wrapper for ansi mode. Mirrors
-// the TUI's styleFor (cli/src/tui/screen.ts) for the subset that matters
-// when parseAgentMarkdown is the source: headings, table separator
-// (`dim`), and the default unstyled prose (`agent`). Fenced-code lines
-// carry their syntax-highlighted ANSI inside `body` already; we pass
-// them through unmodified rather than overlaying a bg color the TUI
-// applies, which would clash with a piped consumer's terminal width.
+// Map FormattedLine.bodyStyle to a chalk wrapper for ansi mode. Only covers
+// what parseAgentMarkdown actually emits, which is the sole source here:
+// headings, the table separator rule, and default unstyled prose (`agent`).
+// Fenced-code lines carry their syntax-highlighted ANSI inside `body`
+// already; they pass through unmodified rather than having the TUI's
+// background colour overlaid, which would clash with a piped consumer.
+//
+// Keyed as a Partial<Record<Style, …>> rather than a switch with a default
+// arm so a renamed token fails to compile here instead of silently losing
+// its colour in piped output. Note the gap that remains: *adding* a Style
+// still compiles, and anything absent falls through unstyled. That is
+// intentional for the tokens the app/sidebar layers own (notices, metrics,
+// sidebar chrome) since none of them can reach `cat` today, but it does mean
+// routing slash-command output through `cat` would need entries here.
+const CAT_ANSI_STYLES: Partial<
+  Record<Style, (text: string) => string>
+> = {
+  "heading-1": (t) => ansiChalk.bold.yellowBright(t),
+  "heading-2": (t) => ansiChalk.bold.cyanBright(t),
+  "heading-3": (t) => ansiChalk.bold(t),
+  // The markdown table's ───┼─── rule. parseAgentMarkdown's only muted line.
+  muted: (t) => ansiChalk.dim(t),
+};
+
 function applyStyle(text: string, style: Style | undefined): string {
   if (text.length === 0 || style === undefined) {
     return text;
   }
-  switch (style) {
-    case "heading-1":
-      return ansiChalk.bold.yellowBright(text);
-    case "heading-2":
-      return ansiChalk.bold.cyanBright(text);
-    case "heading-3":
-      return ansiChalk.bold(text);
-    case "dim":
-      return ansiChalk.dim(text);
-    default:
-      return text;
-  }
+  return CAT_ANSI_STYLES[style]?.(text) ?? text;
 }

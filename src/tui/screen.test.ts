@@ -826,9 +826,9 @@ describe("Screen scrollback search", () => {
 
   it("ansi lines are skipped but agent lines participate (chat output is agent-styled)", () => {
     const screen = makeScreen();
-    screen.appendLine({ body: "this is plain text with foo", bodyStyle: "info" });
+    screen.appendLine({ body: "this is plain text with foo", bodyStyle: "notice" });
     screen.appendLine({ body: "^Cfoo^:", bodyStyle: "agent" });
-    screen.appendLine({ body: "\x1b[31mfoo\x1b[0m", bodyStyle: "info", ansi: true });
+    screen.appendLine({ body: "\x1b[31mfoo\x1b[0m", bodyStyle: "notice", ansi: true });
     screen.enterScrollbackSearch();
     screen.updateScrollbackSearchTerm("foo");
     const state = (screen as unknown as {
@@ -2720,7 +2720,7 @@ describe("Screen block-click routing", () => {
     // home-contracted, so their sidecar url is `~`-prefixed too.
     screen.appendLine({
       body: "~/dev/proj/a.ts:12-34",
-      bodyStyle: "dim",
+      bodyStyle: "muted",
       links: [{ start: 0, end: 21, url: "~/dev/proj/a.ts#L12" }],
     });
     screen.repaintNow();

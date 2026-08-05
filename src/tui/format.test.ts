@@ -160,7 +160,7 @@ describe("parseAgentMarkdown", () => {
     expect(lines).toHaveLength(3);
     expect(lines[0]).toMatchObject({
       body: "/abs/src/tui/app.ts:6689-6690",
-      bodyStyle: "dim",
+      bodyStyle: "muted",
     });
     for (const line of lines.slice(1)) {
       expect(line.bodyStyle).toBe("code");
@@ -185,7 +185,7 @@ describe("parseAgentMarkdown", () => {
   it("renders a bare-path fence with a header and extension-derived lang", () => {
     const lines = parseAgentMarkdown("```/a/b/c.py\nx = 1\n```");
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatchObject({ body: "/a/b/c.py", bodyStyle: "dim" });
+    expect(lines[0]).toMatchObject({ body: "/a/b/c.py", bodyStyle: "muted" });
     expect(lines[1]?.bodyStyle).toBe("code");
     expect(lines[1]?.ansi).toBe(true);
   });
@@ -267,7 +267,7 @@ describe("parseAgentMarkdown", () => {
     expect(lines).toHaveLength(4);
     expect(lines[0]?.bodyStyle).toBe("heading-3");
     expect(lines[0]?.body).toBe("Subscriber concern   │ Subscribes to     ");
-    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.bodyStyle).toBe("muted");
     expect(lines[1]?.body).toBe("─────────────────────┼───────────────────");
     expect(lines[2]?.bodyStyle).toBe("agent");
     expect(lines[2]?.body).toBe("Queue chip rendering │ prompt_queue_added");
@@ -311,7 +311,7 @@ describe("parseAgentMarkdown", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]?.bodyStyle).toBe("heading-3");
     expect(lines[0]?.body).toBe("a │ b");
-    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.bodyStyle).toBe("muted");
     expect(lines[1]?.body).toBe("──┼──");
   });
 
@@ -479,7 +479,7 @@ describe("parseAgentMarkdown", () => {
     // header + separator + 11 body rows = 13.
     expect(lines).toHaveLength(13);
     expect(lines[0]?.bodyStyle).toBe("heading-3");
-    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.bodyStyle).toBe("muted");
     for (let i = 2; i < lines.length; i++) {
       expect(lines[i]?.bodyStyle).toBe("agent");
     }
@@ -513,7 +513,7 @@ describe("parseAgentMarkdown", () => {
     ].join("\n");
     const lines = parseAgentMarkdown(table, { maxWidth: 40 });
     expect(lines[0]?.bodyStyle).toBe("heading-3");
-    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.bodyStyle).toBe("muted");
     // Body has multiple physical rows for the single source row.
     const bodyLines = lines.slice(2);
     expect(bodyLines.length).toBeGreaterThan(1);
@@ -575,7 +575,7 @@ describe("parseAgentMarkdown", () => {
     // multiple physical rows.
     expect(lines.length).toBeGreaterThan(5);
     expect(lines[0]?.bodyStyle).toBe("heading-3");
-    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.bodyStyle).toBe("muted");
   });
 });
 
@@ -910,14 +910,14 @@ describe("formatElapsed", () => {
 
 
 describe("formatEditDiffBlock", () => {
-  it("in 'edit' mode emits just the dim path header", () => {
+  it("in 'edit' mode emits just the muted path header", () => {
     const lines = formatEditDiffBlock(
       { path: "/repo/src/foo.ts", oldText: "x", newText: "y" },
       "edit",
     );
     expect(lines).toHaveLength(1);
     expect(lines[0]?.body).toBe("▸ Edited /repo/src/foo.ts (+1 -1)");
-    expect(lines[0]?.bodyStyle).toBe("dim");
+    expect(lines[0]?.bodyStyle).toBe("muted");
   });
 
   it("in 'diff' mode emits the header followed by a highlighted diff body", () => {
@@ -934,7 +934,7 @@ describe("formatEditDiffBlock", () => {
     expect(lines[0]?.body).toBe("");
     expect(lines[1]?.body).toBe("▾ Edited /repo/src/foo.ts (+1 -1)");
     expect(lines[1]).toMatchObject({
-      bodyStyle: "dim",
+      bodyStyle: "muted",
     });
     expect(lines[2]?.bodyStyle).toBe("code");
     expect(lines[2]?.ansi).toBe(true);
@@ -1161,7 +1161,7 @@ describe("formatExitPlanMode", () => {
     const lines = formatExitPlanMode({ plan: "body", status: "pending" });
     expect(lines.at(-1)).toMatchObject({
       body: "awaiting approval…",
-      bodyStyle: "dim",
+      bodyStyle: "status-idle",
     });
   });
 
@@ -1528,7 +1528,7 @@ describe("renderToolDetail", () => {
     expect(lines[0]).toMatchObject({
       prefix: "     ",
       body: "grep -n foo src/x.ts",
-      bodyStyle: "dim",
+      bodyStyle: "tool-output",
     });
   });
 
@@ -1567,7 +1567,7 @@ describe("renderToolDetail", () => {
     expect(lines).toHaveLength(3);
     for (const line of lines) {
       expect(line.prefix).toBe("     ");
-      expect(line.bodyStyle).toBe("dim");
+      expect(line.bodyStyle).toBe("tool-output");
     }
     expect(lines[0]?.body).toBe("line one");
     expect(lines[1]?.body).toBe("line two");
@@ -1584,7 +1584,7 @@ describe("renderToolDetail", () => {
     });
     expect(lines).toHaveLength(2);
     expect(lines[1]?.body).toBe("\u2026 (truncated)");
-    expect(lines[1]?.bodyStyle).toBe("dim");
+    expect(lines[1]?.bodyStyle).toBe("muted");
   });
 
   it("includes detail + errorText when both present and failed", () => {
@@ -1596,7 +1596,7 @@ describe("renderToolDetail", () => {
       errorText: "No such file",
     });
     expect(lines).toHaveLength(2);
-    expect(lines[0]?.bodyStyle).toBe("dim");
+    expect(lines[0]?.bodyStyle).toBe("tool-output");
     expect(lines[1]?.bodyStyle).toBe("tool-status-fail");
   });
 

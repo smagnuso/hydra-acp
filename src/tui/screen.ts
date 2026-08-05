@@ -6049,7 +6049,7 @@ export class Screen {
           if (marker === " ") {
             this.term(" ");
           } else {
-            writeStyled(this.term, marker, "dim", false);
+            writeStyled(this.term, marker, "muted", false);
           }
           if (line) {
             this.writeFormattedLine(

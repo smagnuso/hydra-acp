@@ -87,7 +87,7 @@ exports[`inline markup end-to-end (xterm-256color) > renders the agent-markdown 
 
 ### table with spans
   heading-3      ESC[1mh ESC[1mbESC[0mESC[1m │ h2ESC[0mESC[22m
-  dim            ESC[2m────┼───ESC[22m
+  muted          ESC[2m────┼───ESC[22m
   agent          ESC[96mcESC[0m   │ ESC[4miESC[0m ESC[0m
 
 ### fenced code
@@ -163,7 +163,7 @@ exports[`inline markup end-to-end (xterm-256color) > renders the thought-markdow
 
 ### table with spans
   heading-3    ESC[90m  ESC[39mESC[1mh ESC[1mbESC[0mESC[1m │ h2ESC[0mESC[22m
-  dim          ESC[90m  ESC[39mESC[2m────┼───ESC[22m
+  muted        ESC[90m  ESC[39mESC[2m────┼───ESC[22m
   agent        ESC[90m  ESC[39mESC[96mcESC[0m   │ ESC[4miESC[0m ESC[0m
 
 ### fenced code
@@ -270,7 +270,7 @@ exports[`inline markup end-to-end (xterm-truecolor) > renders the agent-markdown
 
 ### table with spans
   heading-3      ESC[1mh ESC[1mbESC[0mESC[1m │ h2ESC[0mESC[22m
-  dim            ESC[2m────┼───ESC[22m
+  muted          ESC[2m────┼───ESC[22m
   agent          ESC[96mcESC[0m   │ ESC[4miESC[0m ESC[0m
 
 ### fenced code
@@ -346,7 +346,7 @@ exports[`inline markup end-to-end (xterm-truecolor) > renders the thought-markdo
 
 ### table with spans
   heading-3    ESC[90m  ESC[39mESC[1mh ESC[1mbESC[0mESC[1m │ h2ESC[0mESC[22m
-  dim          ESC[90m  ESC[39mESC[2m────┼───ESC[22m
+  muted        ESC[90m  ESC[39mESC[2m────┼───ESC[22m
   agent        ESC[90m  ESC[39mESC[96mcESC[0m   │ ESC[4miESC[0m ESC[0m
 
 ### fenced code

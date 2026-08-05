@@ -179,6 +179,7 @@ import {
   truncateResultText,
   type ExitPlanState,
   type FormattedLine,
+  type Style,
   type ToolLineState,
 } from "./format.js";
 import type {
@@ -1177,14 +1178,17 @@ export function _buildToolsLines(args: {
   // header dims so completed turns stop pulling the eye. A non-success
   // stopReason overrides the frozen dim and goes bold-red so the user
   // can spot a cancelled / refused / truncated turn at a glance.
-  // Amended is the exception: stays dim since it's a user action.
+  // Amended is the exception: stays quiet since it's a user action.
   const pureThinking = total === 0 && inProgress;
   const stoppedHeaderStyle: "tool-status-fail" | "tool-status-cancelled" =
     isAmended ? "tool-status-cancelled" : "tool-status-fail";
   const frozenStyle: "tool-status-fail" | "tool-status-cancelled" | "tool" =
     stoppedReason !== null ? stoppedHeaderStyle : "tool";
-  const frozenBodyStyle: "tool-status-fail" | "tool-status-cancelled" | "dim" =
-    stoppedReason !== null ? stoppedHeaderStyle : "dim";
+  const frozenBodyStyle:
+    | "tool-status-fail"
+    | "tool-status-cancelled"
+    | "status-idle" =
+    stoppedReason !== null ? stoppedHeaderStyle : "status-idle";
   const lines: FormattedLine[] = [
     {
       prefix: "⚙ ",
@@ -1390,7 +1394,9 @@ async function runSession(
     if (workerTaskId === undefined) {
       return;
     }
-    screen.appendLines([{ prefix: "  ", body: `── T${workerTaskId} ──`, bodyStyle: "dim" }]);
+    screen.appendLines([
+      { prefix: "  ", body: `── T${workerTaskId} ──`, bodyStyle: "muted" },
+    ]);
   };
 
   // Holds the currently-active sidechain emitter so /btw can be cancelled
@@ -2052,7 +2058,7 @@ async function runSession(
             {
               prefix: "  ",
               body: "-- session resumed by another client, catching up --",
-              bodyStyle: "dim",
+              bodyStyle: "muted",
             },
           ]);
         }
@@ -3274,22 +3280,26 @@ async function runSession(
         emitLines: (out) => {
           screen.appendLines(
             out.map((line) => {
-              let bodyStyle: string;
+              // Typed as Style rather than string: this mapper used to be
+              // cast through `as never`, so a token that no longer existed
+              // would have rendered unstyled instead of failing to compile.
+              let bodyStyle: Style;
               switch (line.style) {
                 case "meta":
-                  bodyStyle = "dim";
+                  // The command echo and exit status, not its output.
+                  bodyStyle = "muted";
                   break;
                 case "stderr":
                 case "error":
                   bodyStyle = "tool-status-fail";
                   break;
                 default:
-                  bodyStyle = "info";
+                  bodyStyle = "notice";
               }
               return {
                 prefix: "  ",
                 body: line.text,
-                bodyStyle: bodyStyle as never,
+                bodyStyle,
               };
             }),
           );
@@ -5078,22 +5088,26 @@ async function runSession(
         return true;
       case "/help": {
         const lines: FormattedLine[] = [
-          { prefix: "  ", body: "Built-in commands:", bodyStyle: "system" },
+          { prefix: "  ", body: "Built-in commands:", bodyStyle: "local-heading" },
         ];
         for (const c of builtinCommands) {
           lines.push({
             prefix: "  ",
             body: `  ${c.name.padEnd(12)} ${c.description ?? ""}`,
-            bodyStyle: "info",
+            bodyStyle: "local-item",
           });
         }
         if (agentCommands.length > 0) {
-          lines.push({ prefix: "  ", body: "Agent commands:", bodyStyle: "system" });
+          lines.push({
+        prefix: "  ",
+        body: "Agent commands:",
+        bodyStyle: "local-heading",
+      });
           for (const c of agentCommands) {
             lines.push({
               prefix: "  ",
               body: `  ${c.name.padEnd(12)} ${c.description ?? ""}`,
-              bodyStyle: "info",
+              bodyStyle: "local-item",
             });
           }
         }
@@ -5113,21 +5127,21 @@ async function runSession(
             {
               prefix: "  ",
               body: "no agent config option advertised for this session",
-              bodyStyle: "info",
+              bodyStyle: "notice-error",
             },
           ]);
           return true;
         }
         if (!arg) {
           const lines: FormattedLine[] = [
-            { prefix: "  ", body: "Available agents:", bodyStyle: "system" },
+            { prefix: "  ", body: "Available agents:", bodyStyle: "local-heading" },
           ];
           for (const v of opt.options) {
             const marker = v.value === opt.currentValue ? "* " : "  ";
             lines.push({
               prefix: "  ",
               body: `${marker}${v.value.padEnd(16)} ${v.name}`,
-              bodyStyle: "info",
+              bodyStyle: "local-item",
             });
           }
           screen.appendLines(lines);
@@ -5173,7 +5187,7 @@ async function runSession(
           {
             prefix: "  ",
             body: "Run `hydra-acp sessions` (or `hydra sessions`) for the full list.",
-            bodyStyle: "info",
+            bodyStyle: "notice",
           },
         ]);
         return true;
@@ -5244,14 +5258,14 @@ async function runSession(
             return true;
           }
           screen.appendLines([
-            { prefix: "  ", body: "/btw requires a prompt", bodyStyle: "info" },
+            { prefix: "  ", body: "/btw requires a prompt", bodyStyle: "notice-error" },
           ]);
           return true;
         }
         // Must have an active session to fork from.
         if (resolvedSessionId === "__new__") {
           screen.appendLines([
-            { prefix: "  ", body: "no active session to fork", bodyStyle: "info" },
+            { prefix: "  ", body: "no active session to fork", bodyStyle: "notice-error" },
           ]);
           return true;
        }
@@ -5419,7 +5433,7 @@ async function runSession(
         // filename in the current working directory.
         if (resolvedSessionId === "__new__") {
           screen.appendLines([
-            { prefix: "  ", body: "no active session to export", bodyStyle: "info" },
+            { prefix: "  ", body: "no active session to export", bodyStyle: "notice-error" },
           ]);
           return true;
         }
@@ -5437,7 +5451,7 @@ async function runSession(
                 {
                   prefix: "  ",
                   body: `/export failed: HTTP ${resp.status} ${text}`.trim(),
-                  bodyStyle: "info",
+                  bodyStyle: "notice-error",
                 },
               ]);
               return;
@@ -5450,14 +5464,14 @@ async function runSession(
             await fs.mkdir(path.dirname(resolved), { recursive: true });
             await fs.writeFile(resolved, body, { encoding: "utf8", mode: 0o600 });
             screen.appendLines([
-              { prefix: "  ", body: `Wrote ${resolved}`, bodyStyle: "system" },
+              { prefix: "  ", body: `Wrote ${resolved}`, bodyStyle: "notice-ok" },
             ]);
           } catch (err) {
             screen.appendLines([
               {
                 prefix: "  ",
                 body: `/export failed: ${(err as Error).message}`,
-                bodyStyle: "info",
+                bodyStyle: "notice-error",
               },
             ]);
           }
@@ -5913,7 +5927,7 @@ async function runSession(
       lines.unshift({
         prefix: "  ",
         body: `[T${entry.workerTaskId}] `,
-        bodyStyle: "dim",
+        bodyStyle: "muted",
       });
     }
     return lines;

@@ -705,7 +705,7 @@ describe("info gadget", () => {
   // matching the sessionbar, which renders agent(model) unstyled too.
   it("dims the labels and leaves the values uncoloured", () => {
     for (const line of sessionInfoGadget.render(s, ctx(26))) {
-      expect(line.prefixStyle).toBe("dim");
+      expect(line.prefixStyle).toBe("muted");
       expect(line.bodyStyle).toBeUndefined();
     }
   });
@@ -1217,7 +1217,7 @@ describe("sessions gadget", () => {
   it("dims only the quiet labels", () => {
     const labelStyle = (e: SidebarLiveSession): string | undefined =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.prefixStyle;
-    expect(labelStyle(live("quiet"))).toBe("dim");
+    expect(labelStyle(live("quiet"))).toBe("status-idle");
     expect(labelStyle(live("b", { busy: true }))).toBeUndefined();
     expect(labelStyle(live("w", { waiting: true }))).toBeUndefined();
   });
@@ -1229,8 +1229,8 @@ describe("sessions gadget", () => {
     const bubbleStyle = (e: SidebarLiveSession): string | undefined =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.bodyStyle;
     expect(bubbleStyle(live("b", { busy: true }))).toBe("tool-status-running");
-    expect(bubbleStyle(live("w", { waiting: true }))).toBe("dim");
-    expect(bubbleStyle(live("quiet"))).toBe("dim");
+    expect(bubbleStyle(live("w", { waiting: true }))).toBe("status-idle");
+    expect(bubbleStyle(live("quiet"))).toBe("status-idle");
     for (const e of [
       live("b", { busy: true }),
       live("w", { waiting: true }),

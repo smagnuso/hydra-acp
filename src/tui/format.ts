@@ -97,9 +97,15 @@ export type Style =
   | "plan"
   | "plan-done"
   | "plan-pending"
-  | "system"
-  | "info"
-  | "dim"
+  | "local-heading"
+  | "local-item"
+  | "notice"
+  | "notice-ok"
+  | "notice-error"
+  | "metric"
+  | "muted"
+  | "tool-output"
+  | "status-idle"
   | "code"
   | "heading-1"
   | "heading-2"
@@ -231,9 +237,9 @@ export function formatEvent(
       return [
         {
           prefix: "» ",
-          prefixStyle: "info",
+          prefixStyle: "notice",
           body: `mode: ${event.mode}`,
-          bodyStyle: "info",
+          bodyStyle: "notice",
         },
       ];
     case "model-changed":
@@ -735,7 +741,7 @@ function parseMarkdown(text: string, opts: ParseMarkdownOpts): FormattedLine[] {
       const links = codeHeaderLink === null ? undefined : [codeHeaderLink];
       line(
         codeHeader,
-        highlightCode ? "dim" : proseStyle,
+        highlightCode ? "muted" : proseStyle,
         "  ",
         links,
       );
@@ -1290,7 +1296,7 @@ function distributeColumnWidths(
   return widths;
 }
 
-// Emit a header row (heading-3), a dim `─┼─` rule, then one row per body
+// Emit a header row (heading-3), a muted `─┼─` rule, then one row per body
 // entry. Column widths come from cellVisibleWidth (markdown markers stripped,
 // wide glyphs counted via string-width). When maxWidth is set and the
 // natural table exceeds it, columns shrink (down to TABLE_MIN_COL) and cells
@@ -1369,7 +1375,7 @@ function formatTable(
   out.push({
     prefix: "  ",
     body: rules.join("─┼─"),
-    bodyStyle: "dim",
+    bodyStyle: "muted",
   });
   for (const row of body) {
     out.push(...renderRow(row, "agent"));
@@ -1647,9 +1653,9 @@ function formatBlock(
   if (sentBy) {
     out.push({
       prefix: "↳ ",
-      prefixStyle: "dim",
+      prefixStyle: "muted",
       body: `from ${sentBy}`,
-      bodyStyle: "dim",
+      bodyStyle: "muted",
     });
   }
   for (const line of lines) {
@@ -1964,7 +1970,7 @@ export function renderToolDetail(state: ToolLineState): FormattedLine[] {
   const lines: FormattedLine[] = [];
   // Full detail text from the initial tool_call (command, file path,
   // etc.) — un-clipped when available, falling back to the truncated
-  // summary form. Multi-line: each line gets its own dim row so a long
+  // summary form. Multi-line: each line gets its own tool-output row so a long
   // bash command wraps naturally instead of being squashed onto one row.
   const fullDetail = state.detailFull ?? state.detail;
   if (fullDetail) {
@@ -1972,7 +1978,7 @@ export function renderToolDetail(state: ToolLineState): FormattedLine[] {
       lines.push({
         prefix: "     ",
         body: sanitizeSingleLine(line),
-        bodyStyle: "dim",
+        bodyStyle: "tool-output",
       });
     }
   }
@@ -1985,12 +1991,13 @@ export function renderToolDetail(state: ToolLineState): FormattedLine[] {
     });
   }
   // Captured result text from content[] blocks, split into individual
-  // dim lines. If truncated, append a trailer after the last visible line.
+  // tool-output lines. If truncated, append a trailer after the last visible
+  // line.
   if (state.resultText) {
     const resultLines = state.resultText.split("\n");
     // If the tool reports a file location (or the detail text is a bare
     // path), try to syntax-highlight the body as that file's language.
-    // Falls through to the plain dim rendering when no language matches.
+    // Falls through to plain tool-output rendering when no language matches.
     const pathHint =
       state.locations?.[0]?.path ?? state.detailFull ?? state.detail;
     const lang = languageFromPath(pathHint);
@@ -2016,7 +2023,7 @@ export function renderToolDetail(state: ToolLineState): FormattedLine[] {
         lines.push({
           prefix: "     ",
           body: sanitizeSingleLine(line),
-          bodyStyle: "dim",
+          bodyStyle: "tool-output",
         });
       }
     }
@@ -2024,7 +2031,7 @@ export function renderToolDetail(state: ToolLineState): FormattedLine[] {
       lines.push({
         prefix: "     ",
         body: "\u2026 (truncated)",
-        bodyStyle: "dim",
+        bodyStyle: "muted",
       });
     }
   }
@@ -2097,7 +2104,7 @@ export function formatEditDiffBlock(
     const line: FormattedLine = {
       prefix: "  ",
       body: `${lead}${shown}${summary}`,
-      bodyStyle: "dim",
+      bodyStyle: "muted",
     };
     // Link the path run only — not the marker, not the (+n -m) summary.
     // The URL stays the raw path; the screen layer resolves it (including
@@ -2132,7 +2139,7 @@ export function formatEditDiffBlock(
           : {
               prefix: "  ",
               body: "⋯ fetching diff…",
-              bodyStyle: "dim",
+              bodyStyle: "status-idle",
             },
       );
       lines.unshift({ body: "" });
@@ -2505,7 +2512,7 @@ function exitPlanFooter(status: string): FormattedLine | null {
       return {
         prefix: "  ",
         body: "awaiting approval…",
-        bodyStyle: "dim",
+        bodyStyle: "status-idle",
       };
     default:
       return null;

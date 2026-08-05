@@ -29,9 +29,15 @@ const ALL_STYLES: (Style | undefined)[] = [
   "plan",
   "plan-done",
   "plan-pending",
-  "system",
-  "info",
-  "dim",
+  "local-heading",
+  "local-item",
+  "notice",
+  "notice-ok",
+  "notice-error",
+  "metric",
+  "muted",
+  "tool-output",
+  "status-idle",
   "code",
   "heading-1",
   "heading-2",
@@ -158,7 +164,9 @@ describe("hover banding", () => {
       "plan-pending",
       "thought",
       "tool",
-      "dim",
+      "muted",
+      "tool-output",
+      "status-idle",
       "code",
     ] as const) {
       expect(hoverOf(style).endsWith("\x1b[49m"), style).toBe(true);
@@ -167,16 +175,20 @@ describe("hover banding", () => {
 
   it("leaves styles that cannot be hovered unbanded", () => {
     // Hover marks a clickable block. agent/heading rows live in agent:
-    // blocks, which the pointer handler skips; user/system/info are appended
-    // unkeyed and never hovered at all.
+    // blocks, which the pointer handler skips; user and the local-/notice-/
+    // metric- tokens are appended unkeyed and never hovered at all.
     for (const style of [
       "agent",
       "heading-1",
       "heading-2",
       "heading-3",
       "user",
-      "system",
-      "info",
+      "local-heading",
+      "local-item",
+      "notice",
+      "notice-ok",
+      "notice-error",
+      "metric",
     ] as const) {
       expect(hoverOf(style), style).toBe(
         (() => {
@@ -187,5 +199,50 @@ describe("hover banding", () => {
         })(),
       );
     }
+  });
+});
+
+describe("tokens split out of dim / system / info", () => {
+  // The split was deliberately a no-op: nine roles were separated so they can
+  // be themed apart, but each kept the colour it already had. These groups
+  // record which tokens still share a rendering, so divergence has to be a
+  // deliberate edit to this list rather than something that drifts in.
+  //
+  // This is the same shape the tool-status tokens have always had: distinct
+  // meanings, shared default.
+  const SHARED: Array<{ why: string; styles: Style[] }> = [
+    {
+      why: "former `dim`: chrome, tool output, and idle state",
+      styles: ["muted", "tool-output", "status-idle"],
+    },
+    {
+      why: "former `system`: local headings and success confirmations",
+      styles: ["local-heading", "notice-ok"],
+    },
+    {
+      why: "former `info`: list rows, notices, failures, metrics",
+      styles: ["local-item", "notice", "notice-error", "metric"],
+    },
+  ];
+
+  const render = (style: Style): string => {
+    const { term, take } = createCapturingTerminal("xterm-256color");
+    take();
+    writeStyled(term, "Xy", style);
+    return take();
+  };
+
+  for (const group of SHARED) {
+    it(`renders identically today — ${group.why}`, () => {
+      const first = render(group.styles[0]!);
+      for (const style of group.styles.slice(1)) {
+        expect(render(style), style).toBe(first);
+      }
+    });
+  }
+
+  it("still distinguishes the three groups from each other", () => {
+    const reps = SHARED.map((g) => render(g.styles[0]!));
+    expect(new Set(reps).size).toBe(SHARED.length);
   });
 });

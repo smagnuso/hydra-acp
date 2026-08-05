@@ -85,7 +85,7 @@ function row(body: string, bodyStyle?: FormattedLine["bodyStyle"]): SidebarLine 
 }
 
 // A label/value row where the two halves are styled independently: the
-// label is dim (it's scaffolding) and the value keeps the terminal's
+// label is `muted` (it's scaffolding) and the value keeps the terminal's
 // default foreground.
 //
 // COLOUR POLICY for the sidebar: colour marks STATE, not structure. A
@@ -96,6 +96,13 @@ function row(body: string, bodyStyle?: FormattedLine["bodyStyle"]): SidebarLine 
 // colouring them only competes for attention with the rows that matter.
 // The sessionbar already renders agent(model) unstyled for the same
 // reason; this keeps the two surfaces consistent.
+//
+// The policy used to have a hole: idle / quiet / ready rows carried STATE
+// but were painted with the same `dim` token as the scaffolding labels, so
+// "nothing is happening" and "this is structure" were indistinguishable and
+// retinting either moved both. Those rows now use `status-idle`, which sits
+// with the other status tokens — it renders the same today, but it is the
+// quiescent arm of a state enum and can be tuned as one.
 //
 // Uses FormattedLine's prefix/body split so the screen layer styles each
 // half on its own. The label carries the alignment padding, since
@@ -108,11 +115,16 @@ function fieldRow(
   const { cellWidth, truncate } = ctx.metrics;
   const gap = ctx.width - cellWidth(label) - cellWidth(value);
   if (gap < 1) {
-    return { body: truncate(`${label} ${value}`, ctx.width), bodyStyle: "dim" };
+    // The merged row loses the label/value distinction the wide path relies
+    // on, so it all reads as scaffolding.
+    return {
+      body: truncate(`${label} ${value}`, ctx.width),
+      bodyStyle: "muted",
+    };
   }
   return {
     prefix: `${label}${" ".repeat(gap)}`,
-    prefixStyle: "dim",
+    prefixStyle: "muted",
     body: value,
   };
 }
@@ -202,11 +214,11 @@ export const activityGadget: Gadget = {
             ),
             ctx,
           ),
-          "dim",
+          "status-idle",
         ),
       ];
     }
-    return [row("○ ready", "dim")];
+    return [row("○ ready", "status-idle")];
   },
 };
 
@@ -292,7 +304,7 @@ export const toolsGadget: Gadget = {
       lines.push(toolLine);
     }
     if (s.running.length > shown.length) {
-      lines.push(row(`  +${s.running.length - shown.length} more`, "dim"));
+      lines.push(row(`  +${s.running.length - shown.length} more`, "muted"));
     }
     return lines;
   },
@@ -319,18 +331,22 @@ export const contextGadget: Gadget = {
           // Kept coloured, and deliberately: this figure is the state the
           // meter below it visualises, and it turns into the warning that a
           // compaction is imminent.
-          pct >= 0.9 ? "tool-status-fail" : "info",
+          pct >= 0.9 ? "tool-status-fail" : "metric",
         ),
       );
       // Over 90% of the window the bar turns into a warning — this is the
       // cue that a compaction is imminent.
       lines.push(row(meterBar(pct, ctx.width), pct >= 0.9 ? "tool-status-fail" : "plan-done"));
     } else if (used !== undefined) {
-      lines.push(row(labelValue("tokens", compactCount(used), ctx), "info"));
+      lines.push(row(labelValue("tokens", compactCount(used), ctx), "metric"));
     }
     if (costAmount !== undefined) {
       const cur = costCurrency === "USD" || costCurrency === undefined ? "$" : `${costCurrency} `;
-      lines.push(row(labelValue("cost", `${cur}${costAmount.toFixed(2)}`, ctx), "dim"));
+      // A metric by shape, but muted by intent: unlike context usage it never
+      // becomes something to act on, so it stays scaffolding-coloured.
+      lines.push(
+        row(labelValue("cost", `${cur}${costAmount.toFixed(2)}`, ctx), "muted"),
+      );
     }
     return lines;
   },
@@ -709,13 +725,13 @@ export const sessionsGadget: Gadget = {
         prefix: `${label}${" ".repeat(gap)}`,
         // Quiet sessions dim away; anything working or wanting you stays at
         // full brightness.
-        prefixStyle: entry.busy || entry.waiting ? undefined : "dim",
+        prefixStyle: entry.busy || entry.waiting ? undefined : "status-idle",
         body: marker,
         // The working accent, the same yellow the banner and the activity
         // gadget use. Deliberately not red for waiting: red means failure
         // everywhere else in the TUI, and a session sitting on a permission
         // prompt hasn't failed.
-        bodyStyle: entry.busy ? "tool-status-running" : "dim",
+        bodyStyle: entry.busy ? "tool-status-running" : "status-idle",
         openPath: `hydra://sessions/${entry.sessionId}`,
         item: true,
       } satisfies SidebarLine;

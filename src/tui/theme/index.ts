@@ -256,9 +256,47 @@ const STYLES: Record<string, StyleSpec> = {
   "plan-done": { layers: [green], inlineSgr: true },
   "plan-pending": { layers: [dim], inlineSgr: true },
 
-  system: { layers: [brightYellow] },
-  info: { layers: [cyan] },
-  dim: { layers: [dim] },
+  // Lines the TUI itself emits, as opposed to anything relayed from the
+  // agent. Split out of the former `system` / `info` / `dim` tokens, which
+  // between them covered section headings, list rows, passive notices, hard
+  // failures, live metrics, chrome, tool output and idle state. Nine roles
+  // sharing three colours meant none of them could be retinted without
+  // dragging the others along.
+  //
+  // Several still render identically, which is fine and is the same shape the
+  // tool-status tokens already have: distinct meanings, shared default.
+
+  // `/help`-style section heading and the rows beneath it.
+  "local-heading": { layers: [brightYellow] },
+  "local-item": { layers: [cyan] },
+
+  // Outcome of a slash command or a passive state change the user did not ask
+  // about. notice-error covers things the user has to act on: a usage error, a
+  // missing precondition, a failed export.
+  notice: { layers: [cyan] },
+  "notice-ok": { layers: [brightYellow] },
+  "notice-error": { layers: [cyan] },
+
+  // A live number the user reads rather than acts on. Its own token because
+  // the context gadget flips it to tool-status-fail past 90%, making it the
+  // calm arm of a two-state health indicator rather than decoration.
+  metric: { layers: [cyan] },
+
+  // De-emphasised: rules and separators, scaffolding labels, provenance tags,
+  // overflow counters, and a block's own recessed caption. "Not the point",
+  // whatever the row happens to contain.
+  muted: { layers: [dim] },
+
+  // Verbatim tool input and output. Content the user expanded on purpose, so
+  // not de-emphasis: this is the unhighlighted sibling of `code`, chosen when
+  // no language could be inferred for the payload.
+  "tool-output": { layers: [dim] },
+
+  // The quiescent arm of a state enum whose other arms are
+  // tool-status-running / -fail / -cancelled: idle, ready, awaiting approval,
+  // fetching, a turn that finished cleanly, a peer session with nothing to
+  // say. Separate because restyling it changes a signal, not a decoration.
+  "status-idle": { layers: [dim] },
 
   // Editor-like block: dark band with an explicit white foreground, so a
   // `diff` fence can let context lines sit neutral while cli-highlight's
@@ -332,14 +370,20 @@ export function styleCarriesInlineSgr(style: Style | undefined): boolean {
  *  - `agent` and the headings live in `agent:`-prefixed blocks, which the
  *    pointer handler skips outright ("no click or hover affordance"), so a
  *    band would advertise something that does not exist.
- *  - `user`, `system` and `info` are appended unkeyed and can never be
- *    hovered at all.
+ *  - `user` and the local-/notice-/metric- tokens are appended unkeyed and
+ *    can never be hovered at all.
  *  - `thought` and `code` are hoverable but get their own treatment above.
  *  - the search and selection styles are applied to slices of a row rather
  *    than being a row's base style; their band comes from the base.
  */
 const HOVER_BANDED = new Set<Style>([
-  "dim",
+  // All three successors of the old `dim` token: each appears inside a keyed
+  // block (a tool block's truncation trailer, its output rows, a diff header
+  // waiting on a fetch), so all three have to band or a hovered tool block
+  // would highlight in stripes.
+  "muted",
+  "tool-output",
+  "status-idle",
   "tool",
   "tool-status-ok",
   "tool-status-pending",
