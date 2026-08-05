@@ -1,10 +1,10 @@
-import chalk from "chalk";
 import stripAnsi from "strip-ansi";
 import {
   parseAgentMarkdown,
   type FormattedLine,
   type Style,
 } from "../../tui/format.js";
+import { styled } from "../../tui/theme/index.js";
 
 // `hydra-acp cat` markdown post-processor. Sits between agent-text events
 // and stdout: turns the same FormattedLine[] the TUI renders into a single
@@ -13,12 +13,6 @@ import {
 // in both modes. --raw bypasses this entirely.
 
 export type CatRenderMode = "ansi" | "plain";
-
-// Force-level-3 chalk so escapes appear even when stdout isn't a TTY at
-// the chalk-detection layer (vitest, the cli being piped through `cat`,
-// etc.). The cat-render mode flag — not chalk's autodetection — decides
-// whether to emit them.
-const ansiChalk = new chalk.Instance({ level: 3 });
 
 export function renderMarkdownForCat(
   text: string,
@@ -60,26 +54,30 @@ function renderLine(line: FormattedLine, mode: CatRenderMode): string {
 // already; they pass through unmodified rather than having the TUI's
 // background colour overlaid, which would clash with a piped consumer.
 //
-// Keyed as a Partial<Record<Style, …>> rather than a switch with a default
-// arm so a renamed token fails to compile here instead of silently losing
-// its colour in piped output. Note the gap that remains: *adding* a Style
-// still compiles, and anything absent falls through unstyled. That is
-// intentional for the tokens the app/sidebar layers own (notices, metrics,
-// sidebar chrome) since none of them can reach `cat` today, but it does mean
-// routing slash-command output through `cat` would need entries here.
-const CAT_ANSI_STYLES: Partial<
-  Record<Style, (text: string) => string>
-> = {
-  "heading-1": (t) => ansiChalk.bold.yellowBright(t),
-  "heading-2": (t) => ansiChalk.bold.cyanBright(t),
-  "heading-3": (t) => ansiChalk.bold(t),
+// An allowlist rather than a mapping: the bytes come from the theme, so a
+// heading recoloured there is recoloured here too. This file used to restate
+// each colour in chalk, which meant `hydra cat` quietly ignored the theme.
+//
+// It stays an allowlist because "style every token" would be wrong for `code`:
+// fenced lines already carry cli-highlight's ANSI in `body`, and overlaying the
+// TUI's background band would fight a piped consumer's terminal.
+//
+// Typed as ReadonlySet<Style> so a renamed token fails to compile. The gap that
+// remains: *adding* a Style still compiles and falls through unstyled. That is
+// fine for the tokens the app and sidebar own (notices, metrics, sidebar
+// chrome) since none of them can reach `cat`, but routing slash-command output
+// through `cat` would need entries here.
+const CAT_STYLED: ReadonlySet<Style> = new Set<Style>([
+  "heading-1",
+  "heading-2",
+  "heading-3",
   // The markdown table's ───┼─── rule. parseAgentMarkdown's only muted line.
-  muted: (t) => ansiChalk.dim(t),
-};
+  "muted",
+]);
 
 function applyStyle(text: string, style: Style | undefined): string {
-  if (text.length === 0 || style === undefined) {
+  if (text.length === 0 || style === undefined || !CAT_STYLED.has(style)) {
     return text;
   }
-  return CAT_ANSI_STYLES[style]?.(text) ?? text;
+  return styled(style, text);
 }
