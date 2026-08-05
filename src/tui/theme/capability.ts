@@ -162,3 +162,37 @@ export function depthForTerminal(
   }
   return "ansi16";
 }
+
+/**
+ * Whether the terminal's background is dark or light, per COLORFGBG.
+ *
+ * Several terminals (rxvt, konsole, some others) export `fg;bg` as ANSI slot
+ * indices, which vim and friends have long used for exactly this question. It is
+ * absent more often than present, so it is a hint and not an answer — but it is
+ * free, and it is the only signal available without asking the terminal
+ * directly.
+ *
+ * Returns undefined when unset or unparseable rather than guessing: a wrong
+ * guess here paints a light band on a dark terminal, which is the thing this
+ * exists to prevent.
+ */
+export function backgroundHint(
+  env: Env = process.env,
+): "dark" | "light" | undefined {
+  const raw = env.COLORFGBG;
+  if (raw === undefined || raw === "") {
+    return undefined;
+  }
+  // "fg;bg" or "fg;default;bg" — the background is always the last field.
+  const last = raw.split(";").pop()?.trim() ?? "";
+  if (!/^\d+$/.test(last)) {
+    return undefined;
+  }
+  const slot = Number(last);
+  if (slot > 15) {
+    return undefined;
+  }
+  // 0-6 are the dark half of the ansi block; 8 is bright black, still dark.
+  // 7 (white) and 9-15 (the bright colours) read as light.
+  return slot <= 6 || slot === 8 ? "dark" : "light";
+}

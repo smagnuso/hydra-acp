@@ -130,7 +130,7 @@ export async function promptForAgent(
       const room = innerW - idPart.length - 2;
       const descPart =
         room > 1 ? `  ${truncate(desc, room)}` : "";
-      term.noFormat(idPart);
+      paint(term, "content", idPart);
       if (descPart.length > 0) {
         paint(term, "list-description", descPart);
       }
@@ -178,7 +178,11 @@ export async function promptForAgent(
     listFirstScreenRow = layout.contentY + 2;
     // Intro row.
     term.moveTo(layout.contentX, layout.contentY);
-    term.noFormat(` ${opts?.intro ?? "Which agent should this session use?"}`);
+    paint(
+      term,
+      "content",
+      ` ${opts?.intro ?? "Which agent should this session use?"}`,
+    );
     const end = Math.min(agents.length, windowStart + rows);
     for (let i = windowStart; i < end; i++) {
       paintListRow(i, layout);

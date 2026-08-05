@@ -17,8 +17,12 @@
 // would render grey and be indistinguishable from idle. So the accents go in
 // the bright slots instead.
 
-import { parseColor, type Color } from "./color.js";
-import { DEFAULT_PALETTE, type Palette } from "./index.js";
+import { ansi, parseColor, type Color } from "./color.js";
+import {
+  DEFAULT_PALETTE,
+  type ColorOverride,
+  type Palette,
+} from "./index.js";
 
 /** Parse a hex literal that is known-good, i.e. one written in this file. */
 function hex(value: string): Color {
@@ -65,6 +69,8 @@ export interface BuiltinTheme {
   /** Whether the palette expects a light terminal background. */
   light: boolean;
   palette: Palette;
+  /** Role overrides, for a theme that needs more than a palette. */
+  roles?: Record<string, ColorOverride>;
 }
 
 // dracula: draculatheme.com
@@ -166,6 +172,51 @@ const SOLARIZED_LIGHT = palette(
   { bg: "#fdf6e3", fg: "#657b83" },
 );
 
+// mono: no hue at all. Every slot is the terminal's own foreground, so the
+// distinctions that survive are the ones attributes already carry — bold for
+// emphasis and failure, dim for anything receding — plus the glyphs (● ○ ✓ ⚠).
+//
+// This is why role overrides had to exist before mono could: a palette alone
+// makes error, ok and active the same colour and therefore indistinguishable.
+// NO_COLOR is the stronger option (no escapes at all); mono keeps the weight.
+const MONO_PALETTE: Palette = (() => {
+  const out: Record<string, Color> = {};
+  for (const key of Object.keys(DEFAULT_PALETTE)) {
+    out[key] = ansi(7);
+  }
+  return out as unknown as Palette;
+})();
+
+// solarized dark: the same accents on the dark base ramp. Same departure from
+// the published ANSI mapping as the light variant — accents in the bright slots
+// so the busy indicator is not a grey.
+//
+// Shipped because `themeBackground` can only fix the BANDS. A light theme's
+// foregrounds are chosen for a light background, so solarized-light on a dark
+// terminal stays hard to read however the bands are derived. The answer to
+// "solarized on my black terminal" is this, not a knob.
+const SOLARIZED_DARK = palette(
+  {
+    black: "#073642",
+    red: "#dc322f",
+    green: "#859900",
+    yellow: "#b58900",
+    blue: "#268bd2",
+    magenta: "#d33682",
+    cyan: "#2aa198",
+    white: "#93a1a1",
+    brightBlack: "#586e75",
+    brightRed: "#cb4b16",
+    brightGreen: "#859900",
+    brightYellow: "#b58900",
+    brightBlue: "#268bd2",
+    brightMagenta: "#6c71c4",
+    brightCyan: "#2aa198",
+    brightWhite: "#fdf6e3",
+  },
+  { bg: "#002b36", fg: "#839496" },
+);
+
 export const BUILTIN_THEMES: BuiltinTheme[] = [
   {
     name: "terminal",
@@ -192,12 +243,60 @@ export const BUILTIN_THEMES: BuiltinTheme[] = [
     palette: GRUVBOX_DARK,
   },
   {
+    name: "solarized-dark",
+    description: "dark, low contrast",
+    light: false,
+    palette: SOLARIZED_DARK,
+  },
+  {
     name: "solarized-light",
     description: "light",
     light: true,
     palette: SOLARIZED_LIGHT,
   },
+  {
+    name: "mono",
+    description: "no colour; weight and glyphs only",
+    light: false,
+    palette: MONO_PALETTE,
+    roles: {
+      // Nothing here adds a hue. These lift the states that must stand out to
+      // the brightest slot, and push the quiet ones down, so the hierarchy
+      // survives without colour.
+      subtle: ansiRole(8),
+      muted: ansiRole(8),
+      fg: ansiRole(7),
+      fgStrong: ansiRole(15),
+      active: ansiRole(15),
+      error: ansiRole(15),
+      warn: ansiRole(15),
+      ok: ansiRole(7),
+      cold: ansiRole(7),
+      accent: ansiRole(15),
+      info: ansiRole(7),
+      reference: ansiRole(15),
+      focus: ansiRole(15),
+      // The roles that pair a foreground WITH a background have to be set as
+      // pairs. A uniform palette collapses them — every slot being the same
+      // colour makes "white text on blue" into white on white — and no single
+      // slot assignment fixes it, because `red` is a foreground for errorSoft
+      // and a background for matchActive at the same time.
+      selection: { bg: ansi(8), fg: ansi(15) },
+      selectionBand: { bg: ansi(8) },
+      cursor: { bg: ansi(15), fg: ansi(0) },
+      promptCursor: { bg: ansi(15), fg: ansi(0) },
+      match: { bg: ansi(15), fg: ansi(0) },
+      // Distinguishable from `match`, which is the whole point of the active
+      // one: mid grey rather than white.
+      matchActive: { bg: ansi(7), fg: ansi(0) },
+    },
+  },
 ];
+
+/** A role override pinned to one of the terminal's own slots. */
+function ansiRole(index: number): ColorOverride {
+  return { fg: ansi(index) };
+}
 
 export function builtinTheme(name: string): BuiltinTheme | undefined {
   return BUILTIN_THEMES.find((t) => t.name === name);

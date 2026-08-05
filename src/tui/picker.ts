@@ -998,11 +998,11 @@ export async function pickSession(
     const pad = " ".repeat(padWidth);
     if ((selectedIdx === 0 || composerHover) && terminalFocused) {
       paint(term, "box-border-focused", "│");
-      term.noFormat(` ${slice}${pad}`);
+      paint(term, "content", ` ${slice}${pad}`);
       paint(term, "box-border-focused", "│");
     } else {
       paint(term, "box-border", "│");
-      term.noFormat(` ${slice}${pad}`);
+      paint(term, "content", ` ${slice}${pad}`);
       paint(term, "box-border", "│");
     }
   };
@@ -1017,7 +1017,7 @@ export async function pickSession(
     if (selectedIdx === sessionIdx + 1 && !composerHover && terminalFocused) {
       paint(term, "list-selected", `${prefix}${label}`);
     } else {
-      term.noFormat(`${prefix}${label}`);
+      paint(term, "content", `${prefix}${label}`);
     }
   };
 
@@ -1169,7 +1169,7 @@ export async function pickSession(
               if (p.kind === "host") {
                 hostHitCols = { start: col, end: col + p.text.length - 1 };
                 if (hostHintHovered) {
-                  term.noFormat(p.text);
+                  paint(term, "content", p.text);
                 } else {
                   paint(term, "modal-hint", p.text);
                 }
@@ -1181,7 +1181,7 @@ export async function pickSession(
           }
           paint(term, "modal-hint", " ".repeat(gap));
           if (escHintHovered) {
-            term.noFormat(escHint);
+            paint(term, "content", escHint);
           } else {
             paint(term, "modal-hint", escHint);
           }
@@ -1347,7 +1347,8 @@ export async function pickSession(
         }
         const [keys, desc] = entry;
         paint(term, "modal-key", `  ${keys.padEnd(HELP_KEYS_WIDTH)}`);
-        term.noFormat(desc)("\n");
+        paint(term, "content", desc);
+        term.noFormat("\n");
       }
       term("\n");
       paint(term, "modal-hint", "  press any key to dismiss");
@@ -1441,11 +1442,11 @@ export async function pickSession(
     const pad = " ".repeat(padWidth);
     if (focused) {
       paint(term, "box-border-focused", "│");
-      term.noFormat(` ${slice}${pad}`);
+      paint(term, "content", ` ${slice}${pad}`);
       paint(term, "box-border-focused", "│");
     } else {
       paint(term, "box-border", "│");
-      term.noFormat(` ${slice}${pad}`);
+      paint(term, "content", ` ${slice}${pad}`);
       paint(term, "box-border", "│");
     }
     term.styleReset();
@@ -1606,7 +1607,7 @@ export async function pickSession(
     if (focusedRow) {
       paint(term, "list-selected", `❯ ${line1}`);
     } else {
-      term.noFormat(`  ${line1}`);
+      paint(term, "content", `  ${line1}`);
     }
     term.styleReset();
   };
@@ -2973,7 +2974,7 @@ export async function pickSession(
             if (error !== null) {
               paint(term, "modal-error", ` ${slice}`);
             } else {
-              term.noFormat(` ${slice}`);
+              paint(term, "content", ` ${slice}`);
             }
             term.styleReset();
           }

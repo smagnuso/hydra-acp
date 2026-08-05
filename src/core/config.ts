@@ -431,6 +431,14 @@ const TuiConfig = z.object({
   // Not in computeConfigDigest — that excludes the whole `tui` section — so
   // recolouring never trips the "config changed since daemon started" warning.
   theme: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
+  // Your terminal's actual background: "dark", "light", or a colour.
+  //
+  // Only affects the background bands (the user-turn stripe, code blocks, hover
+  // tints) — nothing paints a full-screen background. A theme's own `bg` states
+  // what it was DESIGNED for, so a light theme on a dark terminal derives pale
+  // bands that read as white blocks. This is how you say which you actually
+  // have. Unset, COLORFGBG is consulted, then the theme's own claim.
+  themeBackground: z.string().optional(),
 });
 
 const ExtensionName = z

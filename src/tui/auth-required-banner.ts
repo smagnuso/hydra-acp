@@ -464,7 +464,7 @@ export async function promptAuthRequiredBanner(
     paint(term, "modal-title", truncate(` ${lines.title}`, innerW));
     row += 2;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.noFormat(truncate(` ${lines.description}`, innerW));
+    paint(term, "content", truncate(` ${lines.description}`, innerW));
     row++;
     if (lines.command) {
       term.moveTo(layout.contentX, layout.contentY + row);
@@ -485,7 +485,7 @@ export async function promptAuthRequiredBanner(
       for (const ml of lines.methodLines) {
         term.moveTo(layout.contentX, layout.contentY + row);
         paint(term, "modal-label", "   ");
-        term.noFormat(truncate(ml.label, innerW - 3));
+        paint(term, "content", truncate(ml.label, innerW - 3));
         row++;
       }
     }

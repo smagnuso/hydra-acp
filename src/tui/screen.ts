@@ -5424,11 +5424,11 @@ export class Screen {
       const gap = Math.max(minGap, w - leftWidth - agentWidth);
       paint(this.term, "bar-text", cwdText);
       if (title) {
-        this.term.noFormat(titleSep);
+        paint(this.term, "content", titleSep);
         paint(this.term, "bar-text", titleText);
       }
       this.term(" ".repeat(gap));
-      this.term.noFormat(agentCell);
+      paint(this.term, "content", agentCell);
     });
   }
 
@@ -5552,7 +5552,7 @@ export class Screen {
       paint(this.term, "rule", middle);
       if (usageStr) {
         paint(this.term, "rule-pad", padAfterMiddle);
-        this.term.noFormat(usageStr);
+        paint(this.term, "content", usageStr);
       }
       paint(this.term, "rule", tail);
     });
@@ -5767,7 +5767,7 @@ export class Screen {
     }
     paint(this.term, "rule", segments.middle);
     if (segments.usage) {
-      this.term.noFormat(segments.usage);
+      paint(this.term, "content", segments.usage);
     }
     paint(this.term, "rule", segments.right);
   }
@@ -6526,7 +6526,7 @@ export class Screen {
         if (overlayFocused) {
           paint(this.term, "composer-inactive", slice);
         } else {
-          this.term.noFormat(slice);
+          paint(this.term, "content", slice);
         }
       });
     }
@@ -6581,7 +6581,11 @@ export class Screen {
       paint(this.term, "prompt-text", ` ${truncate(spec.message, w - 2)}`);
     });
     writeRow(`cpct|q|${w}`, () => {
-      this.term(" Compact now to reduce future per-turn token cost?");
+      paint(
+        this.term,
+        "content",
+        " Compact now to reduce future per-turn token cost?",
+      );
     });
     for (let i = 0; i < spec.options.length; i++) {
       if (row >= top + rows - 1) {
@@ -6660,7 +6664,7 @@ export class Screen {
       writeRow(`help|e|${w}|${keys}|${desc}`, () => {
         this.term(" ");
         paint(this.term, "modal-key", paddedKeys);
-        this.term.noFormat(` ${truncate(desc, w - 2 - keysWidth - 1)}`);
+        paint(this.term, "content", ` ${truncate(desc, w - 2 - keysWidth - 1)}`);
       });
     }
     writeRow(`help|hint|${w}|${spec.hint}`, () => {
@@ -6708,7 +6712,7 @@ export class Screen {
       paint(this.term, "modal-hint", ` ${truncate(sub, w - 2)}`);
     });
     writeRow(`perm|q|${w}`, () => {
-      this.term(" Do you want to proceed?");
+      paint(this.term, "content", " Do you want to proceed?");
     });
     for (let i = 0; i < spec.options.length; i++) {
       if (row >= top + rows - 1) {

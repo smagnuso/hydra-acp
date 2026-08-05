@@ -169,7 +169,7 @@ export async function promptForImportAction(
     for (const hr of headerRows) {
       term.moveTo(layout.contentX, layout.contentY + row);
       paint(term, "modal-label", ` ${hr.label}`);
-      term.noFormat(truncate(hr.value, innerW - hr.label.length - 2));
+      paint(term, "content", truncate(hr.value, innerW - hr.label.length - 2));
       row++;
     }
     row++;
@@ -229,7 +229,7 @@ function paintActionBody(
   const innerW = layout.contentW;
   let row = startRow;
   term.moveTo(layout.contentX, layout.contentY + row);
-  term.noFormat(` ${opts.intro}`);
+  paint(term, "content", ` ${opts.intro}`);
   row += 2;
   for (let i = 0; i < opts.choices.length; i++) {
     const choice = opts.choices[i];
@@ -242,7 +242,7 @@ function paintActionBody(
     if (i === opts.selected) {
       paint(term, "list-selected", padRight(label, innerW));
     } else {
-      term.noFormat(label);
+      paint(term, "content", label);
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
@@ -313,10 +313,10 @@ export async function promptForLaunchOrView(
     let row = 0;
     term.moveTo(layout.contentX, layout.contentY + row);
     paint(term, "modal-label", " session: ");
-    term.noFormat(truncate(shortId, innerW - 10));
+    paint(term, "content", truncate(shortId, innerW - 10));
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.noFormat(" " + truncate(titleOrCwd, innerW - 2));
+    paint(term, "content", " " + truncate(titleOrCwd, innerW - 2));
     row++;
     row++;
     paintActionBody(term, layout, row, {

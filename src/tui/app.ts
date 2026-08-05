@@ -183,13 +183,35 @@ import {
   type Style,
   type ToolLineState,
 } from "./format.js";
-import { paint, setTheme, styled } from "./theme/index.js";
-import { loadTheme } from "./theme/load.js";
+import {
+  paint,
+  setInlineDepth,
+  setTheme,
+  styled,
+  type ColorOverride,
+  type Palette,
+} from "./theme/index.js";
+import type { Color } from "./theme/color.js";
+import {
+  listThemes,
+  loadTheme,
+  resolveThemeBackground,
+} from "./theme/load.js";
 
 // Theme-load problems, carried from config load to the first paint. Module
 // scope because the two happen in different functions.
 let pendingThemeProblems: string[] = [];
-import { depthForStream } from "./theme/capability.js";
+// Selectable themes and which one is live, for the ^O picker. Same reason for
+// module scope: loaded during startup, read by the modal.
+let themeChoices: Array<{
+  name: string;
+  palette: Palette;
+  overrides: { roles: Record<string, ColorOverride>; elements: Record<string, ColorOverride> };
+}> = [];
+let activeThemeName = "terminal";
+// The band reference, carried alongside the theme so cycling keeps it.
+let themeBackground: Color | undefined;
+import { depthForStream, depthForTerminal } from "./theme/capability.js";
 import type {
   SidebarEditedFile,
   SidebarLiveSession,
@@ -904,7 +926,19 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // than thrown: a typo in a hand-edited theme should show up as a message in
   // the transcript, not stop the TUI from starting.
   const loadedTheme = await loadTheme(config.tui.theme, paths.themesDir());
-  setTheme(loadedTheme.palette);
+  // Band derivation needs to know the real terminal background, which the theme
+  // cannot tell us — see resolveThemeBackground.
+  themeBackground = resolveThemeBackground(
+    config.tui.themeBackground,
+    loadedTheme.problems,
+  );
+  setTheme(loadedTheme.palette, {
+    ...loadedTheme.overrides,
+    background: themeBackground,
+  });
+  // Resolved up front so the ^O picker can cycle synchronously.
+  themeChoices = await listThemes(paths.themesDir());
+  activeThemeName = loadedTheme.name;
   // Stashed rather than reported here: the transcript does not exist yet, and
   // stderr would be wiped by the alt-screen switch.
   pendingThemeProblems = loadedTheme.problems;
@@ -936,6 +970,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     }
   }
   const term = termkit.terminal;
+  // Inline spans and syntax colours are baked into text at parse time, where no
+  // terminal is in scope. Tell the theme what this one can do so those match
+  // what paint-time resolution emits — otherwise text after an inline span
+  // renders in a quantised approximation of the row's colour.
+  setInlineDepth(depthForTerminal(term));
   // terminal-kit hands back Infinity for width/height when stdout isn't a
   // detectable TTY; left unclamped that overflows the render math into a
   // `RangeError: Invalid string length`. Clamp once, at the source.
@@ -3603,6 +3642,7 @@ async function runSession(
     "mouse",
     "enter",
     "sidebar",
+    "theme",
   ] as const;
   type OptionId = (typeof OPTION_IDS)[number];
   let optionsSelectedIndex = 0;
@@ -3636,6 +3676,8 @@ async function runSession(
         return viewPrefs.defaultEnterAction;
       case "sidebar":
         return screen.isSidebarVisible() ? "shown" : "hidden";
+      case "theme":
+        return activeThemeName;
     }
   };
 
@@ -3655,6 +3697,8 @@ async function runSession(
         return "Enter key";
       case "sidebar":
         return "Sidebar";
+      case "theme":
+        return "Theme";
     }
   };
 
@@ -3750,6 +3794,31 @@ async function runSession(
     }
   };
 
+  // Step to the next theme and apply it immediately.
+  //
+  // What updates and what does not: every token resolves at paint time, so all
+  // row styles and all chrome change on the redraw below. Inline `code` spans,
+  // link colours and syntax highlighting are baked into a FormattedLine's body
+  // when it is parsed, so scrollback already on screen keeps its old span
+  // colours — new content is correct. Re-parsing is not available: agent block
+  // sources are not retained after their block is flushed.
+  const cycleTheme = (): void => {
+    if (themeChoices.length === 0) {
+      screen.notify("no themes available");
+      return;
+    }
+    const at = themeChoices.findIndex((t) => t.name === activeThemeName);
+    const next = themeChoices[(at + 1) % themeChoices.length]!;
+    activeThemeName = next.name;
+    setTheme(next.palette, {
+      ...next.overrides,
+      background: themeBackground,
+    });
+    // Everything on screen was painted with the old palette, including the
+    // row cache, so this has to be a full redraw rather than a repaint.
+    screen.fullRedraw();
+  };
+
   const applyOptionToggle = (id: OptionId): void => {
     switch (id) {
       case "tools":
@@ -3791,6 +3860,9 @@ async function runSession(
       case "sidebar":
         setSidebarVisible(!screen.isSidebarVisible());
         break;
+      case "theme":
+        cycleTheme();
+        break;
     }
     refreshOptionsPrompt();
   };
@@ -3829,6 +3901,9 @@ async function runSession(
             // Only the `enabled` key: see setTuiSidebarEnabled for why the
             // resolved object must not be written back wholesale.
             await setTuiSidebarEnabled(screen.isSidebarVisible());
+            break;
+          case "theme":
+            await setTuiConfigValue("theme", activeThemeName);
             break;
         }
         screen.notify(`saved default: ${optionLabel(id)} ${optionValue(id)}`);

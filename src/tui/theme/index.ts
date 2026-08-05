@@ -94,6 +94,12 @@ export function bgGrayscale(g: number, depth: ColorDepth): SgrPair {
 interface Layer {
   open: (depth: ColorDepth) => string;
   close: string;
+  /**
+   * What this layer sets. An override needs to know: giving a role a new colour
+   * has to replace its foreground layer and leave its attributes alone, since
+   * attributes carry structure (a heading is bold) rather than colour.
+   */
+  kind: "fg" | "bg" | "attr";
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +198,26 @@ const LEGACY_BANDS = {
 /** A band is either a derived colour or a legacy absolute grayscale level. */
 type Band = Color | number;
 
+/**
+ * What the bands are derived from.
+ *
+ * A theme's `bg` is its statement about the background it was DESIGNED for, not
+ * a description of the terminal in front of you. Deriving bands from it means a
+ * light theme paints pale bands, which is right on a cream terminal and reads as
+ * a white block on a black one — and nothing in here knows which you have.
+ *
+ * So an explicit reference wins: `tui.themeBackground`, or the COLORFGBG hint.
+ * Both describe reality. The theme's claim is the fallback, and the legacy
+ * absolute levels are the fallback to that, for when nothing is known.
+ */
+let bandReference: Color | undefined;
+
+function bandBase(): Color | undefined {
+  return bandReference ?? palette.bg;
+}
+
 function buildBands(): Record<"user" | "code" | "hoverThought", Band> {
-  const bg = palette.bg;
+  const bg = bandBase();
   if (bg === undefined) {
     return LEGACY_BANDS;
   }
@@ -219,11 +243,13 @@ let bands = buildBands();
 const fgL = (c: Color): Layer => ({
   open: (depth) => fgOpen(c, depth),
   close: fgReset,
+  kind: "fg",
 });
 /** A palette colour used as a background. */
 const bgL = (c: Color): Layer => ({
   open: (depth) => bgOpen(c, depth),
   close: bgReset,
+  kind: "bg",
 });
 
 // Attributes are not colours and are not themeable: bold/dim/inverse carry
@@ -233,6 +259,7 @@ const bgL = (c: Color): Layer => ({
 const attr = (on: number, off: number): Layer => ({
   open: () => `${CSI}${on}m`,
   close: `${CSI}${off}m`,
+  kind: "attr",
 });
 const bold = attr(1, 22);
 const dim = attr(2, 22);
@@ -275,8 +302,23 @@ function buildRoles() {
   // highlight.js scopes that carry no colour of their own.
   fg: palette.fg === undefined ? ([] as Layer[]) : [fgL(palette.fg)],
   fgStrong: [fgL(palette.brightWhite)],
-  muted: [dim],
-  // The gray a thought sits in: quieter than muted, still legible.
+  // Scaffolding: labels, rules, hints. Two dozen tokens use this.
+  //
+  // A theme that names its own colours gets its grey here rather than `dim` over
+  // the body colour. Dim alone is a weak signal — some terminals ignore SGR 2
+  // and most render it inconsistently — so a sidebar label and its value ended
+  // up differing by an attribute the terminal might drop, which read as flat.
+  // Every real theme already carries a purpose-made secondary colour in
+  // brightBlack (dracula's #6272a4, nord3, gruvbox's #928374, solarized base1),
+  // so labels now differ from values by hue and not just by weight.
+  //
+  // `dim` stays on top so the three tiers remain distinct: a value in the body
+  // colour, a thought in the grey, scaffolding in the dimmed grey. And `dim`
+  // alone is still the answer for the terminal palette, where there is no grey
+  // to name — which keeps that theme byte-identical.
+  muted:
+    palette.fg === undefined ? [dim] : [dim, fgL(palette.brightBlack)],
+  // The gray a thought sits in: quieter than a value, louder than scaffolding.
   subtle: [fgL(palette.brightBlack)],
   emphasis: [bold],
 
@@ -344,25 +386,126 @@ function buildRoles() {
   };
 }
 
+/**
+ * A colour override for a role or an element.
+ *
+ * Replaces colour, never attributes: a bold heading given a new colour stays
+ * bold, because bold is structure. That is the same reason attributes are not
+ * in the palette.
+ *
+ * A bare colour string means `fg`, except on a target that has no foreground of
+ * its own (the cursor and band roles), where it means `bg` — that is the only
+ * thing it could sensibly mean there. Targets with both, like `selection`, take
+ * the object form to reach the background.
+ */
+export interface ColorOverride {
+  fg?: Color;
+  bg?: Color;
+}
+
+/**
+ * Apply an override to a layer stack.
+ *
+ * Rewrites the layers of the matching kind in place, so ordering — which
+ * decides the emitted byte order — is preserved. A colour the stack does not
+ * already have is appended.
+ */
+function withOverride(layers: Layer[], o: ColorOverride): Layer[] {
+  let sawFg = false;
+  let sawBg = false;
+  const out = layers.map((l) => {
+    if (l.kind === "fg" && o.fg !== undefined) {
+      sawFg = true;
+      return fgL(o.fg);
+    }
+    if (l.kind === "bg" && o.bg !== undefined) {
+      sawBg = true;
+      return bgL(o.bg);
+    }
+    if (l.kind === "fg") sawFg = true;
+    if (l.kind === "bg") sawBg = true;
+    return l;
+  });
+  if (o.fg !== undefined && !sawFg) {
+    out.push(fgL(o.fg));
+  }
+  if (o.bg !== undefined && !sawBg) {
+    out.unshift(bgL(o.bg));
+  }
+  return out;
+}
+
+/** True when a stack has a foreground layer, i.e. a bare string means `fg`. */
+export function stackTakesFg(layers: Layer[]): boolean {
+  return layers.some((l) => l.kind === "fg") || !layers.some((l) => l.kind === "bg");
+}
+
 /** Every role name, inferred from the builder so the two cannot drift. */
 type Roles = ReturnType<typeof buildRoles>;
 export type RoleName = keyof Roles;
 
-let roles: Roles = buildRoles();
+let roleOverrides: Partial<Record<string, ColorOverride>> = {};
+let elementOverrides: Partial<Record<string, ColorOverride>> = {};
+
+function applyRoleOverrides(base: Roles): Roles {
+  if (Object.keys(roleOverrides).length === 0) {
+    return base;
+  }
+  const out = { ...base } as Record<string, Layer[]>;
+  for (const [name, o] of Object.entries(roleOverrides)) {
+    if (o === undefined || out[name] === undefined) {
+      continue;
+    }
+    out[name] = withOverride(out[name]!, o);
+  }
+  return out as Roles;
+}
+
+let roles: Roles = applyRoleOverrides(buildRoles());
 
 /** The opening bytes of a role, for callers that splice colour into a string. */
 /**
- * The opening bytes of a role, for callers that splice colour into a string
- * rather than bracketing text with it — the inline-span openers below.
+ * Colour depth for sequences baked into text at parse time: the inline-span
+ * openers and the syntax theme.
  *
- * Fixed at 256-colour depth. Inline spans are baked into a FormattedLine's
- * body once, at parse time, where the terminal is not in scope; quantising is
- * the choice that renders somewhere on every terminal rather than emitting
- * 24-bit at one that cannot read it. Only matters for an explicitly-themed
- * palette, since ansi slots are depth-independent.
+ * Those are emitted where no terminal is in scope, so the depth has to come
+ * from somewhere else. It is a property of the one terminal this process draws
+ * to, so it lives here and is set once at startup.
+ *
+ * 256-colour is the safe default — it renders somewhere on every terminal,
+ * whereas 24-bit at a terminal that cannot read it renders as garbage.
+ *
+ * Getting this wrong is visible: a row's base colour is resolved at PAINT time
+ * with the real depth, while a span's closer re-asserts that base from here. If
+ * the two disagree, text after an inline span shifts colour — an exact
+ * `#657b83` before it and a quantised `rgb(95,135,135)` after, which reads as a
+ * blue tinge for the rest of the line.
  */
+let inlineDepth: ColorDepth = "ansi256";
+
+/**
+ * Tell the theme what the terminal can actually do, so parse-time sequences
+ * match paint-time ones. Call once, before anything is parsed.
+ */
+export function setInlineDepth(depth: ColorDepth): void {
+  if (depth === inlineDepth) {
+    return;
+  }
+  inlineDepth = depth;
+  // Everything baked from a role has to be rebuilt, and the highlight cache
+  // holds already-coloured output, so bump the revision to miss it.
+  spans = buildSpans();
+  syntaxCache = undefined;
+  active = {
+    prose: buildProseInlineOpts(),
+    thought: buildThoughtInlineOpts(),
+    revision: active.revision + 1,
+  };
+}
+
+/** The opening bytes of a role, for callers that splice colour into a string. */
 function openOf(role: Layer[]): string {
-  return role.map((l) => l.open("ansi256")).join("");
+  return role.map((l) => l.open(inlineDepth)).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -419,10 +562,19 @@ export interface InlineOpts {
  */
 function buildProseInlineOpts(): InlineOpts {
   return {
-  codeOpen: spans.code,
-  // Links are cyan + underlined.
-  linkOpen: spans.link,
-  base: "",
+    codeOpen: spans.code,
+    // Links are cyan + underlined.
+    linkOpen: spans.link,
+    // The agent token's own colour, which a span has to close back to. Empty on
+    // the default palette, so prose keeps inheriting the terminal — but a theme
+    // that declares `fg` must not have its prose fall back to the terminal's
+    // foreground after every **bold** or `code` span.
+    //
+    // This was hardcoded to "" while `agent` had no colour of its own. Giving it
+    // one without fixing this left prose reverting to the terminal default after
+    // the first span and recovering on the next wrapped row, because that row
+    // re-emits the token's open: green to end of line, correct on the next.
+    base: openOf(roles.fg),
   };
 }
 
@@ -465,7 +617,7 @@ export function inlineOptsFor(style: Style): InlineOpts {
     // `active` is the one other colour already in the heading vocabulary.
     codeOpen: style === "heading-2" ? openOf(roles.active) : spans.code,
     linkOpen: spans.link,
-    base: resolveStyle(style, "ansi256").open,
+    base: resolveStyle(style, inlineDepth).open,
   };
 }
 
@@ -569,7 +721,10 @@ export type ChromeToken =
   | "composer-continuation"
   // Messages written straight to the terminal outside any frame: before the
   // TUI starts, or while tearing it down.
-  | "cli-warn";
+  | "cli-warn"
+  // Text with no styling of its own: the value half of a label/value pair, the
+  // agent cell in the sessionbar, a session row, composer text.
+  | "content";
 
 /**
  * Syntax-highlighting scopes, named after highlight.js's own so they map 1:1
@@ -639,7 +794,12 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
 
   // Agent prose takes the terminal's default foreground: it's the bulk of
   // the transcript, and anything else fights the user's theme.
-  agent: { inlineSgr: true },
+  // `roles.fg`, not "no layers": with the default palette that role is empty,
+  // so prose keeps taking the terminal's own foreground — which is what should
+  // happen, since it is the bulk of the transcript and adapts to a light
+  // terminal for free. But a theme that declares `fg` means it, and prose is
+  // the main thing it means it about.
+  agent: { layers: [...roles.fg], inlineSgr: true },
 
   thought: { layers: [...roles.subtle], inlineSgr: true },
 
@@ -939,6 +1099,16 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   "syntax-type": { layers: [...roles.syntaxType] },
   "syntax-variable": { layers: [...roles.syntaxVariable] },
 
+  // Text with no styling of its own.
+  //
+  // Not the same as writing it unstyled. On the default palette this resolves to
+  // nothing and the text inherits the terminal, which is what should happen. But
+  // a theme that declares `fg` means it about this text too, and an unstyled
+  // write ignores it — the visible symptom being a themed transcript with an
+  // unthemed sessionbar, wearing whatever foreground the terminal happens to
+  // have. role: fg
+  content: { layers: [...roles.fg] },
+
   // A bare warning printed outside any frame ("no sessions found", a daemon
   // version mismatch on stderr). Plain yellow, not the bright yellow of the
   // busy accent — nothing is in flight. role: warn
@@ -1012,10 +1182,24 @@ let syntaxCache: Record<string, (code: string) => string> | undefined;
  * keeps its old span colours until those lines are re-parsed. Everything
  * resolved at paint time — every token, all chrome — updates on the next draw.
  */
-export function setTheme(next: Palette): void {
+export function setTheme(
+  next: Palette,
+  overrides: {
+    roles?: Partial<Record<string, ColorOverride>>;
+    elements?: Partial<Record<string, ColorOverride>>;
+    /**
+     * The terminal's actual background, when it is known. Overrides the theme's
+     * own `bg` for band derivation only — nothing paints it.
+     */
+    background?: Color;
+  } = {},
+): void {
   palette = next;
+  roleOverrides = overrides.roles ?? {};
+  elementOverrides = overrides.elements ?? {};
+  bandReference = overrides.background;
   bands = buildBands();
-  roles = buildRoles();
+  roles = applyRoleOverrides(buildRoles());
   spans = buildSpans();
   STYLES = buildStyles();
   syntaxCache = undefined;
@@ -1024,6 +1208,37 @@ export function setTheme(next: Palette): void {
     thought: buildThoughtInlineOpts(),
     revision: active.revision + 1,
   };
+}
+
+/** Every role name a theme may override. */
+export function roleNames(): string[] {
+  return Object.keys(buildRoles()).sort();
+}
+
+/** Every element (token) name a theme may override. */
+export function elementNames(): string[] {
+  return Object.keys(STYLES).sort();
+}
+
+/** Whether a bare colour string on this role means `fg` rather than `bg`. */
+export function roleTakesFg(name: string): boolean {
+  const r = buildRoles() as Record<string, Layer[]>;
+  const layers = r[name];
+  return layers === undefined ? true : stackTakesFg(layers);
+}
+
+/** Whether a bare colour string on this element means `fg` rather than `bg`. */
+export function elementTakesFg(name: string): boolean {
+  const spec = STYLES[name as ThemeToken];
+  if (spec === undefined) {
+    return true;
+  }
+  if (spec.band !== undefined) {
+    // A band-bearing element (a user turn, a code block) has a background
+    // already, but a bare string should still recolour its text.
+    return true;
+  }
+  return stackTakesFg(spec.layers ?? []);
 }
 
 /** Bumped on every setTheme, for consumers caching derived output. */
@@ -1044,6 +1259,7 @@ function bandLayer(b: Band): Layer {
     return {
       open: (depth) => bgGrayscale(b, depth).open,
       close: bgReset,
+      kind: "bg",
     };
   }
   return bgL(b);
@@ -1058,19 +1274,63 @@ export function resolveStyle(
 ): StyleRender {
   // "none" is a depth like any other: every token resolves to nothing, so
   // NO_COLOR needs no branch anywhere downstream.
-  if (style === undefined || depth === "none") {
+  if (depth === "none") {
     return EMPTY;
+  }
+  if (style === undefined) {
+    // No style at all is not the same as no colour. A FormattedLine may leave
+    // bodyStyle unset on purpose — the sidebar's field values do, following its
+    // policy that identity strings earn no colour — and on the default palette
+    // that correctly means "inherit the terminal". A theme that declares `fg`
+    // means it about this text too, so it gets the same treatment as a token
+    // that names no foreground of its own.
+    return roles.fg.length === 0
+      ? EMPTY
+      : { ...flatten(roles.fg, depth), inlineSgr: false };
   }
   const spec = STYLES[style];
   if (spec === undefined) {
     return EMPTY;
   }
-  const layers: Layer[] = [];
+  let layers: Layer[] = [];
+  const override = elementOverrides[style];
   if (spec.band !== undefined) {
-    layers.push(bandLayer(spec.band));
+    // An element override's `bg` replaces the band outright rather than sitting
+    // beside it — two backgrounds on one run is not a thing.
+    layers.push(
+      override?.bg !== undefined ? bgL(override.bg) : bandLayer(spec.band),
+    );
   }
   if (spec.layers) {
     layers.push(...spec.layers);
+  }
+  if (override !== undefined) {
+    // The band already consumed `bg` above, if there was one.
+    layers = withOverride(
+      layers,
+      spec.band !== undefined ? { fg: override.fg } : override,
+    );
+  }
+  // A token that names no foreground of its own takes the theme's.
+  //
+  // Without this, every attribute-only token — `rule` and `bar-text` and
+  // `heading-3` are just bold, the two dozen muted ones are just dim, `user` is
+  // a band plus bold — renders at whatever foreground the TERMINAL has. On the
+  // default palette that is exactly right and this is a no-op, since roles.fg is
+  // empty. On a theme that declares `fg` it is the difference between a themed
+  // TUI and a half-themed one.
+  //
+  // Skipped when the token sets a background through a role rather than a band:
+  // a block cursor or a selection stripe has already decided its own contrast,
+  // and forcing the theme's foreground onto it would paint white on white. A
+  // band is different — it is a subtle boundary whose text should stay in the
+  // normal reading colour, which is why `user` wants this and `input-cursor`
+  // does not.
+  if (roles.fg.length > 0 && !layers.some((l) => l.kind === "fg")) {
+    const setsOwnBackground = (spec.layers ?? []).some((l) => l.kind === "bg");
+    if (!setsOwnBackground) {
+      layers.push(...roles.fg);
+    }
   }
   return {
     ...flatten(layers, depth),
@@ -1224,7 +1484,7 @@ export function buildSyntaxTheme(): Record<string, (code: string) => string> {
   const base = openOf(roles.codeText);
   const theme: Record<string, (code: string) => string> = {};
   for (const token of SYNTAX_TOKENS) {
-    const { open, close } = resolveStyle(token, "ansi256");
+    const { open, close } = resolveStyle(token, inlineDepth);
     const scope = token.slice("syntax-".length);
     if (open === "") {
       // No colour of its own: pass text through rather than bracketing it in
@@ -1296,7 +1556,7 @@ const HOVER_BANDED = new Set<Style>([
  * everywhere.
  */
 function hoverBand(depth: ColorDepth): SgrPair {
-  const bg = palette.bg;
+  const bg = bandBase();
   if (bg === undefined) {
     return HOVER_ROW_LITERAL;
   }

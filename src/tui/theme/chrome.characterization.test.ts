@@ -68,6 +68,9 @@ const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   "composer-inactive": (t, s) => t.dim.noFormat(s),
   "composer-continuation": (t, s) => t.dim.noFormat(s),
   "cli-warn": (t, s) => t.yellow.noFormat(s),
+  // Unstyled on the default palette, by design — the equivalence being asserted
+  // is against a bare write, not against a colour.
+  content: (t, s) => t.noFormat(s),
 };
 
 for (const generic of ["xterm-256color", "xterm-truecolor"]) {

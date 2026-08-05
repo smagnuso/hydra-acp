@@ -112,12 +112,12 @@ export async function promptForImportCwd(
     for (const hr of headerRows) {
       term.moveTo(layout.contentX, layout.contentY + row);
       paint(term, "modal-label", ` ${hr.label}`);
-      term.noFormat(truncate(hr.value, innerW - hr.label.length - 2));
+      paint(term, "content", truncate(hr.value, innerW - hr.label.length - 2));
       row++;
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.noFormat(` ${intro}`);
+    paint(term, "content", ` ${intro}`);
     row += 2;
     paintInputRow(row);
     row += 2;
@@ -183,16 +183,16 @@ export async function promptForImportCwd(
     }
     const rel = cur - scrollOffset;
     if (busy) {
-      term.noFormat(visible);
+      paint(term, "content", visible);
       return;
     }
     if (rel >= visible.length) {
-      term.noFormat(visible);
+      paint(term, "content", visible);
       paint(term, "input-cursor", " ");
     } else {
-      term.noFormat(visible.slice(0, rel));
+      paint(term, "content", visible.slice(0, rel));
       paint(term, "input-cursor", visible[rel] ?? " ");
-      term.noFormat(visible.slice(rel + 1));
+      paint(term, "content", visible.slice(rel + 1));
     }
   };
 
