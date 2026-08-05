@@ -290,12 +290,6 @@ export type ChromeToken =
   | "rule-pad"
   | "rule-meta"
   | "hint-hover"
-  // Session status, shared by the separator's label, its elapsed timer, and
-  // the "by the way" overlay header.
-  | "status-ready"
-  | "status-busy"
-  | "status-alert"
-  | "status-cold"
   // Slash-command / file completion popup.
   | "completion-name"
   | "completion-desc"
@@ -309,8 +303,6 @@ export type ChromeToken =
   | "composer-gutter"
   | "composer-inactive"
   | "composer-continuation"
-  // In-place progress line (binary download, install).
-  | "status-progress"
   // Messages written straight to the terminal outside any frame: before the
   // TUI starts, or while tearing it down.
   | "cli-warn";
@@ -402,6 +394,64 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // not de-emphasis: this is the unhighlighted sibling of `code`, chosen when
   // no language could be inferred for the payload.
   "tool-output": { layers: [dim] },
+
+  // Session state, one enum across every surface that reports it: the
+  // separator's headline, the btw overlay header, and the sidebar's activity
+  // and live-session rows.
+  //
+  // `status-active` means a turn is in flight — which spans reasoning, text
+  // streaming AND tool execution, since it is driven by pendingTurns going
+  // 0->1. It is deliberately not called "thinking": that is only the label
+  // the activity gadget prints, and naming the token after it would invite
+  // using it for reasoning alone. It is also not "busy", which implies load
+  // rather than something happening.
+  //
+  // `tool-status-running` stays separate and keeps its name: it is scoped to a
+  // single tool call, and ACP itself says in_progress/running for tool state.
+  //
+  // `status-alert` covers stalled, disconnected, cancelled and errored — all
+  // "something is wrong", all one signal.
+  //
+  // `status-ready` and `status-idle` are both "nothing is happening" and
+  // differ only by surface: ready is the separator's headline, at full
+  // brightness because the normal case should not draw the eye; idle is one
+  // sidebar row among many, so it recedes. A wart, kept knowingly.
+  // role: fg / muted / active / muted / active / error / cold
+  "status-ready": { layers: [] },
+  "status-active": { layers: [brightYellow] },
+  // Blocked on the user, e.g. sitting on a permission prompt. Deliberately
+  // not red: red means failure everywhere else and a waiting session has not
+  // failed. Renders like idle today but is a distinct state and now tunable.
+  "status-waiting": { layers: [dim] },
+  // Prompts typed but not yet sent. Not active — pending — but it earns the
+  // accent because it is outstanding work the user should notice.
+  "status-queued": { layers: [brightYellow] },
+  "status-alert": { layers: [brightRed] },
+  "status-cold": { layers: [brightMagenta] },
+
+  // Working-tree state. Previously borrowed plan-done / tool / plan-pending,
+  // which meant retinting plan entries also recoloured git status.
+  // role: ok / accent / muted
+  "git-staged": { layers: [green] },
+  "git-dirty": { layers: [brightBlue] },
+  "git-untracked": { layers: [dim] },
+
+  // A path in a list of touched files. Previously borrowed `tool`.
+  // role: accent
+  "file-path": { layers: [brightBlue] },
+
+  // The context-window gauge, and the same gauge past 90% where it becomes
+  // the warning that a compaction is imminent. Previously borrowed plan-done
+  // and tool-status-fail. role: ok / error
+  "meter-fill": { layers: [green] },
+  "meter-warn": { layers: [bold, red] },
+
+  // Sidebar furniture: the rule between gadget blocks, the gutter glyph, and
+  // a block's title row. Split from `muted` so the sidebar frame can be tinted
+  // without touching table rules and provenance tags in the transcript.
+  // role: muted
+  "sidebar-rule": { layers: [dim] },
+  "sidebar-title": { layers: [dim] },
 
   // The quiescent arm of a state enum whose other arms are
   // tool-status-running / -fail / -cancelled: idle, ready, awaiting approval,
@@ -501,16 +551,6 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // itself the hover signal. role: fg
   "hint-hover": { layers: [] },
 
-  // Session status. One enum, three surfaces: the separator's label, its
-  // elapsed timer, and the btw overlay header. `status-alert` covers stalled,
-  // disconnected, cancelled and errored — all "something is wrong", all the
-  // same signal. `status-ready` is deliberately the terminal's own foreground:
-  // the normal case should not draw the eye. role: fg / busy / error / cold
-  "status-ready": { layers: [] },
-  "status-busy": { layers: [brightYellow] },
-  "status-alert": { layers: [brightRed] },
-  "status-cold": { layers: [brightMagenta] },
-
   // Completion popup: the candidate and its description. role: accent / muted
   "completion-name": { layers: [brightCyan] },
   "completion-desc": { layers: [dim] },
@@ -532,9 +572,6 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   "composer-inactive": { layers: [dim] },
   // The "· " marker starting a logical newline. role: muted
   "composer-continuation": { layers: [dim] },
-
-  // In-place progress, which is a busy state. role: busy
-  "status-progress": { layers: [brightYellow] },
 
   // A bare warning printed outside any frame ("no sessions found", a daemon
   // version mismatch on stderr). Plain yellow, not the bright yellow of the
@@ -670,6 +707,12 @@ export function styled(
  *  - `thought` and `code` are hoverable but get their own treatment above.
  *  - the search and selection styles are applied to slices of a row rather
  *    than being a row's base style; their band comes from the base.
+ *  - the sidebar-only tokens (git-*, meter-*, file-path, sidebar-*, and the
+ *    status-* family) are absent because the sidebar painter passes
+ *    hovered: false. They were split out of tokens that ARE banded
+ *    (plan-done, tool, muted, tool-status-running), and dropping the band
+ *    with them is deliberate: those predecessors needed it for their
+ *    transcript duty, which these successors do not have.
  */
 const HOVER_BANDED = new Set<Style>([
   // All three successors of the old `dim` token: each appears inside a keyed

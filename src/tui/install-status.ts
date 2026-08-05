@@ -150,7 +150,7 @@ export function createStdoutInstallStatusSink(
       }
       process.stdout.write("\r");
       term.eraseLineAfter();
-      paint(term, "status-progress", text);
+      paint(term, "status-active", text);
     },
     finalize() {
       if (finalized) {

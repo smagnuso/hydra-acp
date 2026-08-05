@@ -73,7 +73,7 @@ type FrameJunction = "┌" | "├" | "└";
 function blockRule(width: number, junction: FrameJunction): SidebarLine {
   return {
     body: "─".repeat(Math.max(0, width)),
-    bodyStyle: "muted",
+    bodyStyle: "sidebar-rule",
     gutter: junction,
   };
 }
@@ -209,20 +209,20 @@ function titleRow(
     collapse: { gadget: gadget.id },
   };
   if (note === undefined || note.length === 0) {
-    return { body: title, bodyStyle: "muted", actions: [action] };
+    return { body: title, bodyStyle: "sidebar-title", actions: [action] };
   }
   const { cellWidth, truncate } = ctx.metrics;
   const noteWidth = cellWidth(note);
   const room = ctx.width - noteWidth - 1;
   if (room < 1) {
     // Too narrow for both. The title identifies the block, so it wins.
-    return { body: truncate(title, ctx.width), bodyStyle: "muted", actions: [action] };
+    return { body: truncate(title, ctx.width), bodyStyle: "sidebar-title", actions: [action] };
   }
   const clipped = truncate(title, room);
   const gap = ctx.width - cellWidth(clipped) - noteWidth;
   return {
     body: `${clipped}${" ".repeat(Math.max(1, gap))}${note}`,
-    bodyStyle: "muted",
+    bodyStyle: "sidebar-title",
     actions: [action],
   };
 }

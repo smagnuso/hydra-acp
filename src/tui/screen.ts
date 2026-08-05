@@ -5471,7 +5471,7 @@ export class Screen {
       auxChunks.push({
         text,
         paint: () => {
-          paint(this.term, "status-busy", text);
+          paint(this.term, "status-queued", text);
         },
       });
     }
@@ -5524,7 +5524,7 @@ export class Screen {
       if (stalled || status === "disconnected") {
         paint(this.term, "status-alert", label);
       } else if (status === "busy") {
-        paint(this.term, "status-busy", label);
+        paint(this.term, "status-active", label);
       } else if (status === "cold") {
         paint(this.term, "status-cold", label);
       } else {
@@ -5534,7 +5534,7 @@ export class Screen {
         if (stalled) {
           paint(this.term, "status-alert", elapsedInline);
         } else if (status === "busy") {
-          paint(this.term, "status-busy", elapsedInline);
+          paint(this.term, "status-active", elapsedInline);
         } else {
           paint(this.term, "status-idle", elapsedInline);
         }
@@ -5747,7 +5747,7 @@ export class Screen {
     paint(this.term, "rule", segments.left);
     switch (this.btwOverlayStatus) {
       case "busy":
-        paint(this.term, "status-busy", segments.label);
+        paint(this.term, "status-active", segments.label);
         break;
       case "done":
         paint(this.term, "status-ready", segments.label);
@@ -6050,7 +6050,7 @@ export class Screen {
           if (marker === " ") {
             this.term(" ");
           } else {
-            writeStyled(this.term, marker, "muted", false);
+            writeStyled(this.term, marker, "sidebar-rule", false);
           }
           if (line) {
             this.writeFormattedLine(

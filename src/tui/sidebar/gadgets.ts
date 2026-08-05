@@ -200,7 +200,9 @@ export const activityGadget: Gadget = {
       return [
         row(
           labelValue("● thinking", shortDuration(s.now - s.busySince), ctx),
-          "tool-status-running",
+          // The session is in a turn. "thinking" is the label; the state
+          // covers tool execution and streaming too.
+          "status-active",
         ),
       ];
     }
@@ -331,12 +333,14 @@ export const contextGadget: Gadget = {
           // Kept coloured, and deliberately: this figure is the state the
           // meter below it visualises, and it turns into the warning that a
           // compaction is imminent.
-          pct >= 0.9 ? "tool-status-fail" : "metric",
+          pct >= 0.9 ? "meter-warn" : "metric",
         ),
       );
       // Over 90% of the window the bar turns into a warning — this is the
       // cue that a compaction is imminent.
-      lines.push(row(meterBar(pct, ctx.width), pct >= 0.9 ? "tool-status-fail" : "plan-done"));
+      lines.push(
+        row(meterBar(pct, ctx.width), pct >= 0.9 ? "meter-warn" : "meter-fill"),
+      );
     } else if (used !== undefined) {
       lines.push(row(labelValue("tokens", compactCount(used), ctx), "metric"));
     }
@@ -359,7 +363,9 @@ export const queueGadget: Gadget = {
   render: (s, ctx) => [
     row(
       labelValue("queued", String(s.queued), ctx),
-      "tool-status-pending",
+      // Matches the separator's counter. This row used to be dim while the
+      // separator showed the same fact in the accent colour.
+      "status-queued",
     ),
   ],
 };
@@ -450,7 +456,7 @@ export const filesGadget: Gadget = {
         fileRow(
           delta ? labelValue(name, delta, ctx) : name,
           file.path,
-          "tool",
+          "file-path",
           name,
         ),
       );
@@ -531,10 +537,10 @@ export const gitGadget: Gadget = {
       //     right-alignment puts the ragged edge where names already differ.
       const style =
         file.state === "staged"
-          ? "plan-done"
+          ? "git-staged"
           : file.state === "dirty"
-            ? "tool"
-            : "plan-pending";
+            ? "git-dirty"
+            : "git-untracked";
       const budget = ctx.width - cellWidth(file.state) - 1;
       const name = truncate(names[i]!, Math.max(1, budget));
       lines.push(
@@ -727,11 +733,16 @@ export const sessionsGadget: Gadget = {
         // full brightness.
         prefixStyle: entry.busy || entry.waiting ? undefined : "status-idle",
         body: marker,
-        // The working accent, the same yellow the banner and the activity
-        // gadget use. Deliberately not red for waiting: red means failure
-        // everywhere else in the TUI, and a session sitting on a permission
-        // prompt hasn't failed.
-        bodyStyle: entry.busy ? "tool-status-running" : "status-idle",
+        // Shares status-active with the banner and the activity gadget, so the
+        // three surfaces cannot drift apart. Waiting has its own token rather
+        // than falling through to idle: it renders the same today, but it is a
+        // distinct state. Deliberately not red — red means failure everywhere
+        // else, and a session on a permission prompt hasn't failed.
+        bodyStyle: entry.busy
+          ? "status-active"
+          : entry.waiting
+            ? "status-waiting"
+            : "status-idle",
         openPath: `hydra://sessions/${entry.sessionId}`,
         item: true,
       } satisfies SidebarLine;

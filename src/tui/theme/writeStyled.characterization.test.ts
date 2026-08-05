@@ -37,7 +37,21 @@ const ALL_STYLES: (Style | undefined)[] = [
   "metric",
   "muted",
   "tool-output",
+  "status-ready",
   "status-idle",
+  "status-active",
+  "status-waiting",
+  "status-queued",
+  "status-alert",
+  "status-cold",
+  "git-staged",
+  "git-dirty",
+  "git-untracked",
+  "file-path",
+  "meter-fill",
+  "meter-warn",
+  "sidebar-rule",
+  "sidebar-title",
   "code",
   "heading-1",
   "heading-2",
@@ -173,6 +187,34 @@ describe("hover banding", () => {
     }
   });
 
+  it("leaves sidebar-only tokens unbanded", () => {
+    // These were split out of banded tokens (plan-done, tool, muted,
+    // tool-status-running). They lose the band on purpose: the predecessors
+    // needed it because they also appear in transcript tool/plan blocks,
+    // whereas these only reach the sidebar, whose painter passes
+    // hovered: false.
+    for (const style of [
+      "git-staged",
+      "git-dirty",
+      "git-untracked",
+      "file-path",
+      "meter-fill",
+      "meter-warn",
+      "sidebar-rule",
+      "sidebar-title",
+      "status-active",
+      "status-waiting",
+      "status-queued",
+    ] as const) {
+      const { term, take } = createCapturingTerminal("xterm-256color");
+      take();
+      writeStyled(term, "Xy", style, true);
+      const hovered = take();
+      writeStyled(term, "Xy", style, false);
+      expect(hovered, style).toBe(take());
+    }
+  });
+
   it("leaves styles that cannot be hovered unbanded", () => {
     // Hover marks a clickable block. agent/heading rows live in agent:
     // blocks, which the pointer handler skips; user and the local-/notice-/
@@ -216,8 +258,27 @@ describe("tokens split out of dim / system / info", () => {
   // always had: distinct meanings, shared default.
   const SHARED: Array<{ why: string; styles: Style[] }> = [
     {
-      why: "former `dim`: chrome, tool output, and idle state",
-      styles: ["muted", "tool-output", "status-idle"],
+      why: "former `dim`: chrome, tool output, and quiescent state",
+      styles: [
+        "muted",
+        "tool-output",
+        "status-idle",
+        // Renders like idle today; a distinct state, split so it can diverge.
+        "status-waiting",
+        "git-untracked",
+        // Split out of `muted` so the sidebar frame can be tinted without
+        // touching transcript rules and provenance tags.
+        "sidebar-rule",
+        "sidebar-title",
+      ],
+    },
+    {
+      why: "the active accent: a turn in flight, and outstanding queued work",
+      styles: ["status-active", "status-queued", "tool-status-running"],
+    },
+    {
+      why: "tokens split out of borrowed plan/tool roles in the sidebar",
+      styles: ["git-dirty", "file-path", "tool"],
     },
     {
       why: "former `info`: list rows, passive notices, and metrics",

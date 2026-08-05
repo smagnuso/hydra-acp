@@ -1225,11 +1225,14 @@ describe("sessions gadget", () => {
   // The working bubble carries the same yellow accent as the banner and the
   // activity gadget. Nothing here is red: red means failure elsewhere in the
   // TUI, and a session on a permission prompt hasn't failed.
-  it("paints the working bubble with the running accent, and nothing red", () => {
+  it("paints the working bubble with the active accent, and nothing red", () => {
     const bubbleStyle = (e: SidebarLiveSession): string | undefined =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.bodyStyle;
-    expect(bubbleStyle(live("b", { busy: true }))).toBe("tool-status-running");
-    expect(bubbleStyle(live("w", { waiting: true }))).toBe("status-idle");
+    // status-active, shared with the banner and the activity gadget, rather
+    // than tool-status-running — a peer session being in a turn is not a tool
+    // call. Waiting has its own token even though it renders like idle.
+    expect(bubbleStyle(live("b", { busy: true }))).toBe("status-active");
+    expect(bubbleStyle(live("w", { waiting: true }))).toBe("status-waiting");
     expect(bubbleStyle(live("quiet"))).toBe("status-idle");
     for (const e of [
       live("b", { busy: true }),

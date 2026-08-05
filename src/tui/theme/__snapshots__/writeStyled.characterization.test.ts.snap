@@ -41,8 +41,36 @@ muted                            ESC[2maESC[96mbESC[0mcESC[22m
 muted [hover]                    ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
 tool-output                      ESC[2maESC[96mbESC[0mcESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
+status-ready                     aESC[96mbESC[0mc
+status-ready [hover]             aESC[96mbESC[0mc
 status-idle                      ESC[2maESC[96mbESC[0mcESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
+status-active                    ESC[93maESC[96mbESC[0mcESC[39m
+status-active [hover]            ESC[93maESC[96mbESC[0mcESC[39m
+status-waiting                   ESC[2maESC[96mbESC[0mcESC[22m
+status-waiting [hover]           ESC[2maESC[96mbESC[0mcESC[22m
+status-queued                    ESC[93maESC[96mbESC[0mcESC[39m
+status-queued [hover]            ESC[93maESC[96mbESC[0mcESC[39m
+status-alert                     ESC[91maESC[96mbESC[0mcESC[39m
+status-alert [hover]             ESC[91maESC[96mbESC[0mcESC[39m
+status-cold                      ESC[95maESC[96mbESC[0mcESC[39m
+status-cold [hover]              ESC[95maESC[96mbESC[0mcESC[39m
+git-staged                       ESC[32maESC[96mbESC[0mcESC[39m
+git-staged [hover]               ESC[32maESC[96mbESC[0mcESC[39m
+git-dirty                        ESC[94maESC[96mbESC[0mcESC[39m
+git-dirty [hover]                ESC[94maESC[96mbESC[0mcESC[39m
+git-untracked                    ESC[2maESC[96mbESC[0mcESC[22m
+git-untracked [hover]            ESC[2maESC[96mbESC[0mcESC[22m
+file-path                        ESC[94maESC[96mbESC[0mcESC[39m
+file-path [hover]                ESC[94maESC[96mbESC[0mcESC[39m
+meter-fill                       ESC[32maESC[96mbESC[0mcESC[39m
+meter-fill [hover]               ESC[32maESC[96mbESC[0mcESC[39m
+meter-warn                       ESC[1mESC[31maESC[96mbESC[0mcESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31maESC[96mbESC[0mcESC[39mESC[22m
+sidebar-rule                     ESC[2maESC[96mbESC[0mcESC[22m
+sidebar-rule [hover]             ESC[2maESC[96mbESC[0mcESC[22m
+sidebar-title                    ESC[2maESC[96mbESC[0mcESC[22m
+sidebar-title [hover]            ESC[2maESC[96mbESC[0mcESC[22m
 code                             ESC[48;5;234mESC[37maESC[96mbESC[0mcESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36maESC[96mbESC[0mcESC[49m
 heading-1                        ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
@@ -102,8 +130,36 @@ muted                            ESC[2ma^Cb^:cESC[22m
 muted [hover]                    ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 tool-output                      ESC[2ma^Cb^:cESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+status-ready                     a^Cb^:c
+status-ready [hover]             a^Cb^:c
 status-idle                      ESC[2ma^Cb^:cESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+status-active                    ESC[93ma^Cb^:cESC[39m
+status-active [hover]            ESC[93ma^Cb^:cESC[39m
+status-waiting                   ESC[2ma^Cb^:cESC[22m
+status-waiting [hover]           ESC[2ma^Cb^:cESC[22m
+status-queued                    ESC[93ma^Cb^:cESC[39m
+status-queued [hover]            ESC[93ma^Cb^:cESC[39m
+status-alert                     ESC[91ma^Cb^:cESC[39m
+status-alert [hover]             ESC[91ma^Cb^:cESC[39m
+status-cold                      ESC[95ma^Cb^:cESC[39m
+status-cold [hover]              ESC[95ma^Cb^:cESC[39m
+git-staged                       ESC[32ma^Cb^:cESC[39m
+git-staged [hover]               ESC[32ma^Cb^:cESC[39m
+git-dirty                        ESC[94ma^Cb^:cESC[39m
+git-dirty [hover]                ESC[94ma^Cb^:cESC[39m
+git-untracked                    ESC[2ma^Cb^:cESC[22m
+git-untracked [hover]            ESC[2ma^Cb^:cESC[22m
+file-path                        ESC[94ma^Cb^:cESC[39m
+file-path [hover]                ESC[94ma^Cb^:cESC[39m
+meter-fill                       ESC[32ma^Cb^:cESC[39m
+meter-fill [hover]               ESC[32ma^Cb^:cESC[39m
+meter-warn                       ESC[1mESC[31ma^Cb^:cESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31ma^Cb^:cESC[39mESC[22m
+sidebar-rule                     ESC[2ma^Cb^:cESC[22m
+sidebar-rule [hover]             ESC[2ma^Cb^:cESC[22m
+sidebar-title                    ESC[2ma^Cb^:cESC[22m
+sidebar-title [hover]            ESC[2ma^Cb^:cESC[22m
 code                             ESC[48;5;234mESC[37ma^Cb^:cESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36ma^Cb^:cESC[49m
 heading-1                        ESC[1mESC[93ma^Cb^:cESC[39mESC[22m
@@ -163,8 +219,36 @@ muted                            ESC[2ma^^KESC[22m
 muted [hover]                    ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 tool-output                      ESC[2ma^^KESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+status-ready                     a^^K
+status-ready [hover]             a^^K
 status-idle                      ESC[2ma^^KESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+status-active                    ESC[93ma^^KESC[39m
+status-active [hover]            ESC[93ma^^KESC[39m
+status-waiting                   ESC[2ma^^KESC[22m
+status-waiting [hover]           ESC[2ma^^KESC[22m
+status-queued                    ESC[93ma^^KESC[39m
+status-queued [hover]            ESC[93ma^^KESC[39m
+status-alert                     ESC[91ma^^KESC[39m
+status-alert [hover]             ESC[91ma^^KESC[39m
+status-cold                      ESC[95ma^^KESC[39m
+status-cold [hover]              ESC[95ma^^KESC[39m
+git-staged                       ESC[32ma^^KESC[39m
+git-staged [hover]               ESC[32ma^^KESC[39m
+git-dirty                        ESC[94ma^^KESC[39m
+git-dirty [hover]                ESC[94ma^^KESC[39m
+git-untracked                    ESC[2ma^^KESC[22m
+git-untracked [hover]            ESC[2ma^^KESC[22m
+file-path                        ESC[94ma^^KESC[39m
+file-path [hover]                ESC[94ma^^KESC[39m
+meter-fill                       ESC[32ma^^KESC[39m
+meter-fill [hover]               ESC[32ma^^KESC[39m
+meter-warn                       ESC[1mESC[31ma^^KESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31ma^^KESC[39mESC[22m
+sidebar-rule                     ESC[2ma^^KESC[22m
+sidebar-rule [hover]             ESC[2ma^^KESC[22m
+sidebar-title                    ESC[2ma^^KESC[22m
+sidebar-title [hover]            ESC[2ma^^KESC[22m
 code                             ESC[48;5;234mESC[37ma^^KESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36ma^^KESC[49m
 heading-1                        ESC[1mESC[93ma^^KESC[39mESC[22m
@@ -224,8 +308,36 @@ muted                            ESC[2mXyESC[22m
 muted [hover]                    ESC[48;5;236mESC[2mXyESC[22mESC[49m
 tool-output                      ESC[2mXyESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2mXyESC[22mESC[49m
+status-ready                     Xy
+status-ready [hover]             Xy
 status-idle                      ESC[2mXyESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2mXyESC[22mESC[49m
+status-active                    ESC[93mXyESC[39m
+status-active [hover]            ESC[93mXyESC[39m
+status-waiting                   ESC[2mXyESC[22m
+status-waiting [hover]           ESC[2mXyESC[22m
+status-queued                    ESC[93mXyESC[39m
+status-queued [hover]            ESC[93mXyESC[39m
+status-alert                     ESC[91mXyESC[39m
+status-alert [hover]             ESC[91mXyESC[39m
+status-cold                      ESC[95mXyESC[39m
+status-cold [hover]              ESC[95mXyESC[39m
+git-staged                       ESC[32mXyESC[39m
+git-staged [hover]               ESC[32mXyESC[39m
+git-dirty                        ESC[94mXyESC[39m
+git-dirty [hover]                ESC[94mXyESC[39m
+git-untracked                    ESC[2mXyESC[22m
+git-untracked [hover]            ESC[2mXyESC[22m
+file-path                        ESC[94mXyESC[39m
+file-path [hover]                ESC[94mXyESC[39m
+meter-fill                       ESC[32mXyESC[39m
+meter-fill [hover]               ESC[32mXyESC[39m
+meter-warn                       ESC[1mESC[31mXyESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31mXyESC[39mESC[22m
+sidebar-rule                     ESC[2mXyESC[22m
+sidebar-rule [hover]             ESC[2mXyESC[22m
+sidebar-title                    ESC[2mXyESC[22m
+sidebar-title [hover]            ESC[2mXyESC[22m
 code                             ESC[48;5;234mESC[37mXyESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36mXyESC[49m
 heading-1                        ESC[1mESC[93mXyESC[39mESC[22m
@@ -285,8 +397,36 @@ muted                            ESC[2maESC[96mbESC[0mcESC[22m
 muted [hover]                    ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
 tool-output                      ESC[2maESC[96mbESC[0mcESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
+status-ready                     aESC[96mbESC[0mc
+status-ready [hover]             aESC[96mbESC[0mc
 status-idle                      ESC[2maESC[96mbESC[0mcESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2maESC[96mbESC[0mcESC[22mESC[49m
+status-active                    ESC[93maESC[96mbESC[0mcESC[39m
+status-active [hover]            ESC[93maESC[96mbESC[0mcESC[39m
+status-waiting                   ESC[2maESC[96mbESC[0mcESC[22m
+status-waiting [hover]           ESC[2maESC[96mbESC[0mcESC[22m
+status-queued                    ESC[93maESC[96mbESC[0mcESC[39m
+status-queued [hover]            ESC[93maESC[96mbESC[0mcESC[39m
+status-alert                     ESC[91maESC[96mbESC[0mcESC[39m
+status-alert [hover]             ESC[91maESC[96mbESC[0mcESC[39m
+status-cold                      ESC[95maESC[96mbESC[0mcESC[39m
+status-cold [hover]              ESC[95maESC[96mbESC[0mcESC[39m
+git-staged                       ESC[32maESC[96mbESC[0mcESC[39m
+git-staged [hover]               ESC[32maESC[96mbESC[0mcESC[39m
+git-dirty                        ESC[94maESC[96mbESC[0mcESC[39m
+git-dirty [hover]                ESC[94maESC[96mbESC[0mcESC[39m
+git-untracked                    ESC[2maESC[96mbESC[0mcESC[22m
+git-untracked [hover]            ESC[2maESC[96mbESC[0mcESC[22m
+file-path                        ESC[94maESC[96mbESC[0mcESC[39m
+file-path [hover]                ESC[94maESC[96mbESC[0mcESC[39m
+meter-fill                       ESC[32maESC[96mbESC[0mcESC[39m
+meter-fill [hover]               ESC[32maESC[96mbESC[0mcESC[39m
+meter-warn                       ESC[1mESC[31maESC[96mbESC[0mcESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31maESC[96mbESC[0mcESC[39mESC[22m
+sidebar-rule                     ESC[2maESC[96mbESC[0mcESC[22m
+sidebar-rule [hover]             ESC[2maESC[96mbESC[0mcESC[22m
+sidebar-title                    ESC[2maESC[96mbESC[0mcESC[22m
+sidebar-title [hover]            ESC[2maESC[96mbESC[0mcESC[22m
 code                             ESC[48;2;28;28;28mESC[37maESC[96mbESC[0mcESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36maESC[96mbESC[0mcESC[49m
 heading-1                        ESC[1mESC[93maESC[96mbESC[0mcESC[0mESC[39mESC[22m
@@ -346,8 +486,36 @@ muted                            ESC[2ma^Cb^:cESC[22m
 muted [hover]                    ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
 tool-output                      ESC[2ma^Cb^:cESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+status-ready                     a^Cb^:c
+status-ready [hover]             a^Cb^:c
 status-idle                      ESC[2ma^Cb^:cESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^Cb^:cESC[22mESC[49m
+status-active                    ESC[93ma^Cb^:cESC[39m
+status-active [hover]            ESC[93ma^Cb^:cESC[39m
+status-waiting                   ESC[2ma^Cb^:cESC[22m
+status-waiting [hover]           ESC[2ma^Cb^:cESC[22m
+status-queued                    ESC[93ma^Cb^:cESC[39m
+status-queued [hover]            ESC[93ma^Cb^:cESC[39m
+status-alert                     ESC[91ma^Cb^:cESC[39m
+status-alert [hover]             ESC[91ma^Cb^:cESC[39m
+status-cold                      ESC[95ma^Cb^:cESC[39m
+status-cold [hover]              ESC[95ma^Cb^:cESC[39m
+git-staged                       ESC[32ma^Cb^:cESC[39m
+git-staged [hover]               ESC[32ma^Cb^:cESC[39m
+git-dirty                        ESC[94ma^Cb^:cESC[39m
+git-dirty [hover]                ESC[94ma^Cb^:cESC[39m
+git-untracked                    ESC[2ma^Cb^:cESC[22m
+git-untracked [hover]            ESC[2ma^Cb^:cESC[22m
+file-path                        ESC[94ma^Cb^:cESC[39m
+file-path [hover]                ESC[94ma^Cb^:cESC[39m
+meter-fill                       ESC[32ma^Cb^:cESC[39m
+meter-fill [hover]               ESC[32ma^Cb^:cESC[39m
+meter-warn                       ESC[1mESC[31ma^Cb^:cESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31ma^Cb^:cESC[39mESC[22m
+sidebar-rule                     ESC[2ma^Cb^:cESC[22m
+sidebar-rule [hover]             ESC[2ma^Cb^:cESC[22m
+sidebar-title                    ESC[2ma^Cb^:cESC[22m
+sidebar-title [hover]            ESC[2ma^Cb^:cESC[22m
 code                             ESC[48;2;28;28;28mESC[37ma^Cb^:cESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36ma^Cb^:cESC[49m
 heading-1                        ESC[1mESC[93ma^Cb^:cESC[39mESC[22m
@@ -407,8 +575,36 @@ muted                            ESC[2ma^^KESC[22m
 muted [hover]                    ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
 tool-output                      ESC[2ma^^KESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+status-ready                     a^^K
+status-ready [hover]             a^^K
 status-idle                      ESC[2ma^^KESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2ma^^KESC[22mESC[49m
+status-active                    ESC[93ma^^KESC[39m
+status-active [hover]            ESC[93ma^^KESC[39m
+status-waiting                   ESC[2ma^^KESC[22m
+status-waiting [hover]           ESC[2ma^^KESC[22m
+status-queued                    ESC[93ma^^KESC[39m
+status-queued [hover]            ESC[93ma^^KESC[39m
+status-alert                     ESC[91ma^^KESC[39m
+status-alert [hover]             ESC[91ma^^KESC[39m
+status-cold                      ESC[95ma^^KESC[39m
+status-cold [hover]              ESC[95ma^^KESC[39m
+git-staged                       ESC[32ma^^KESC[39m
+git-staged [hover]               ESC[32ma^^KESC[39m
+git-dirty                        ESC[94ma^^KESC[39m
+git-dirty [hover]                ESC[94ma^^KESC[39m
+git-untracked                    ESC[2ma^^KESC[22m
+git-untracked [hover]            ESC[2ma^^KESC[22m
+file-path                        ESC[94ma^^KESC[39m
+file-path [hover]                ESC[94ma^^KESC[39m
+meter-fill                       ESC[32ma^^KESC[39m
+meter-fill [hover]               ESC[32ma^^KESC[39m
+meter-warn                       ESC[1mESC[31ma^^KESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31ma^^KESC[39mESC[22m
+sidebar-rule                     ESC[2ma^^KESC[22m
+sidebar-rule [hover]             ESC[2ma^^KESC[22m
+sidebar-title                    ESC[2ma^^KESC[22m
+sidebar-title [hover]            ESC[2ma^^KESC[22m
 code                             ESC[48;2;28;28;28mESC[37ma^^KESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36ma^^KESC[49m
 heading-1                        ESC[1mESC[93ma^^KESC[39mESC[22m
@@ -468,8 +664,36 @@ muted                            ESC[2mXyESC[22m
 muted [hover]                    ESC[48;5;236mESC[2mXyESC[22mESC[49m
 tool-output                      ESC[2mXyESC[22m
 tool-output [hover]              ESC[48;5;236mESC[2mXyESC[22mESC[49m
+status-ready                     Xy
+status-ready [hover]             Xy
 status-idle                      ESC[2mXyESC[22m
 status-idle [hover]              ESC[48;5;236mESC[2mXyESC[22mESC[49m
+status-active                    ESC[93mXyESC[39m
+status-active [hover]            ESC[93mXyESC[39m
+status-waiting                   ESC[2mXyESC[22m
+status-waiting [hover]           ESC[2mXyESC[22m
+status-queued                    ESC[93mXyESC[39m
+status-queued [hover]            ESC[93mXyESC[39m
+status-alert                     ESC[91mXyESC[39m
+status-alert [hover]             ESC[91mXyESC[39m
+status-cold                      ESC[95mXyESC[39m
+status-cold [hover]              ESC[95mXyESC[39m
+git-staged                       ESC[32mXyESC[39m
+git-staged [hover]               ESC[32mXyESC[39m
+git-dirty                        ESC[94mXyESC[39m
+git-dirty [hover]                ESC[94mXyESC[39m
+git-untracked                    ESC[2mXyESC[22m
+git-untracked [hover]            ESC[2mXyESC[22m
+file-path                        ESC[94mXyESC[39m
+file-path [hover]                ESC[94mXyESC[39m
+meter-fill                       ESC[32mXyESC[39m
+meter-fill [hover]               ESC[32mXyESC[39m
+meter-warn                       ESC[1mESC[31mXyESC[39mESC[22m
+meter-warn [hover]               ESC[1mESC[31mXyESC[39mESC[22m
+sidebar-rule                     ESC[2mXyESC[22m
+sidebar-rule [hover]             ESC[2mXyESC[22m
+sidebar-title                    ESC[2mXyESC[22m
+sidebar-title [hover]            ESC[2mXyESC[22m
 code                             ESC[48;2;28;28;28mESC[37mXyESC[39mESC[49m
 code [hover]                     ESC[48;2;22;25;36mXyESC[49m
 heading-1                        ESC[1mESC[93mXyESC[39mESC[22m

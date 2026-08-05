@@ -105,7 +105,28 @@ export type Style =
   | "metric"
   | "muted"
   | "tool-output"
+  // Session state. One enum across every surface that reports it: the
+  // separator's headline, the btw overlay header, and the sidebar's activity
+  // and live-session rows.
+  | "status-ready"
   | "status-idle"
+  | "status-active"
+  | "status-waiting"
+  | "status-queued"
+  | "status-alert"
+  | "status-cold"
+  // Working-tree state in the git gadget.
+  | "git-staged"
+  | "git-dirty"
+  | "git-untracked"
+  // A file path in a list of touched files.
+  | "file-path"
+  // The context-window gauge.
+  | "meter-fill"
+  | "meter-warn"
+  // Sidebar furniture.
+  | "sidebar-rule"
+  | "sidebar-title"
   | "code"
   | "heading-1"
   | "heading-2"

@@ -593,7 +593,7 @@ export async function pickSession(
       return {
         plain: text,
         render: () => {
-          paint(term, "status-progress", `  ${text}`);
+          paint(term, "status-active", `  ${text}`);
         },
       };
     }

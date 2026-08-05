@@ -44,7 +44,6 @@ const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   "list-selected": (t, s) => t.brightWhite.bgBlue.noFormat(s),
   "list-description": (t, s) => t.dim.noFormat(s),
   "list-header": (t, s) => t.dim.noFormat(s),
-  "status-progress": (t, s) => t.brightYellow.noFormat(s),
   "modal-option": (t, s) => t.dim.noFormat(s),
   "modal-option-selected": (t, s) => t.brightYellow.noFormat(s),
   "bar-text": (t, s) => t.bold.noFormat(s),
@@ -55,10 +54,6 @@ const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   // Unstyled by design — the surrounding chunks are dim, so full brightness
   // is the hover signal.
   "hint-hover": (t, s) => t.noFormat(s),
-  "status-ready": (t, s) => t.noFormat(s),
-  "status-busy": (t, s) => t.brightYellow.noFormat(s),
-  "status-alert": (t, s) => t.brightRed.noFormat(s),
-  "status-cold": (t, s) => t.brightMagenta.noFormat(s),
   "completion-name": (t, s) => t.brightCyan.noFormat(s),
   "completion-desc": (t, s) => t.dim.noFormat(s),
   attachment: (t, s) => t.yellow.noFormat(s),
@@ -103,7 +98,7 @@ describe("paint", () => {
     // caret in an install progress line would have been eaten.
     const { term, take } = createCapturingTerminal();
     take();
-    paint(term, "status-progress", "press ^C to cancel");
+    paint(term, "status-active", "press ^C to cancel");
     expect(take()).toContain("press ^C to cancel");
   });
 });
