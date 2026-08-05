@@ -13,7 +13,7 @@ import {
 } from "./index.js";
 import { builtinNames } from "./builtins.js";
 import { parseAgentMarkdown } from "../format.js";
-import { parseColor } from "./color.js";
+import { parseColor, rgb, type Color } from "./color.js";
 
 const dir = async (): Promise<string> =>
   await mkdtemp(join(tmpdir(), "hydra-theme-"));
@@ -694,13 +694,36 @@ describe("themeBackground", () => {
   const bandOf = (): string =>
     /^\x1b\[48;2;\d+;\d+;\d+m/.exec(resolveStyle("user", "truecolor").open)![0];
 
-  const withBg = async (cfg: unknown, env: NodeJS.ProcessEnv = {}) => {
+  const withBg = async (
+    cfg: unknown,
+    env: NodeJS.ProcessEnv = {},
+    sensed?: Color,
+  ) => {
     const t = await loadTheme("solarized-light", await dir());
     const problems: string[] = [];
-    const bg = resolveThemeBackground(cfg, problems, env);
+    const bg = resolveThemeBackground(cfg, problems, env, sensed);
     setTheme(t.palette, { ...t.overrides, background: bg });
     return problems;
   };
+
+  // What OSC 11 supplies: the terminal's real background, so bands derive from a
+  // measurement instead of from "dark" standing in for pure black.
+  it("uses a sensed background over COLORFGBG and the theme's own", async () => {
+    await withBg(undefined, { COLORFGBG: "15;0" }, rgb(24, 26, 32));
+    expect(bandOf()).toBe("\x1b[48;2;63;65;70m");
+  });
+
+  it("lets config outrank a sensed background", async () => {
+    // tui.themeBackground exists for the case where the terminal answers wrong,
+    // so it has to win — otherwise the override is unreachable.
+    await withBg("dark", {}, rgb(255, 255, 255));
+    expect(bandOf()).toBe("\x1b[48;2;43;43;43m");
+  });
+
+  it("falls back to COLORFGBG when nothing was sensed", async () => {
+    await withBg(undefined, { COLORFGBG: "15;0" }, undefined);
+    expect(bandOf()).toBe("\x1b[48;2;43;43;43m");
+  });
 
   it("falls back to the theme's own bg when nothing is known", async () => {
     await withBg(undefined);

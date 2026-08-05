@@ -454,12 +454,17 @@ export async function listThemes(
  *
  * Precedence, most to least authoritative:
  *   1. the config value — the user telling us directly
- *   2. COLORFGBG — the terminal telling us, when it does
- *   3. undefined, meaning fall back to the theme's own `bg`
+ *   2. an OSC 11 answer — the terminal telling us its actual background
+ *   3. COLORFGBG — the terminal telling us dark-or-light, when it does
+ *   4. undefined, meaning fall back to the theme's own `bg`
  *
- * The first two describe the terminal in front of you; a theme's `bg` only
+ * The first three describe the terminal in front of you; a theme's `bg` only
  * describes what it was designed for. That is the whole distinction: a light
- * theme on a dark terminal needs dark bands, and only (1) and (2) know that.
+ * theme on a dark terminal needs dark bands, and only (1)-(3) know that.
+ *
+ * Config outranks the sensed value deliberately. Sensing is right almost always,
+ * and `tui.themeBackground` exists for the almost — a terminal that answers with
+ * the wrong colour, or a user who wants bands derived from something else.
  *
  * "dark" resolves to pure black and "light" to pure white, chosen so the derived
  * bands land on the same values the pre-theme code used — band(#000, 0.17) is 43,
@@ -469,6 +474,7 @@ export function resolveThemeBackground(
   value: unknown,
   problems: string[],
   env: NodeJS.ProcessEnv = process.env,
+  sensed?: Color,
 ): Color | undefined {
   if (value !== undefined && value !== null) {
     if (typeof value !== "string") {
@@ -488,6 +494,9 @@ export function resolveThemeBackground(
         `tui.themeBackground is not "dark", "light", or a colour ("${value}")`,
       );
     }
+  }
+  if (sensed !== undefined) {
+    return sensed;
   }
   const hint = backgroundHint(env);
   return hint === undefined ? undefined : namedBackground(hint);

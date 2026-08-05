@@ -437,7 +437,12 @@ const TuiConfig = z.object({
   // tints) — nothing paints a full-screen background. A theme's own `bg` states
   // what it was DESIGNED for, so a light theme on a dark terminal derives pale
   // bands that read as white blocks. This is how you say which you actually
-  // have. Unset, COLORFGBG is consulted, then the theme's own claim.
+  // have.
+  //
+  // Usually unnecessary now: unset, the terminal is asked directly with OSC 11 at
+  // startup, and most terminals answer (including through tmux). Set this only to
+  // override an answer that is wrong — doing so also skips the query. Behind both:
+  // COLORFGBG, then the theme's own claim.
   themeBackground: z.string().optional(),
 });
 

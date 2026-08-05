@@ -212,6 +212,7 @@ let activeThemeName = "terminal";
 // The band reference, carried alongside the theme so cycling keeps it.
 let themeBackground: Color | undefined;
 import { depthForStream, depthForTerminal } from "./theme/capability.js";
+import { installOsc11Scrub, senseBackground } from "./theme/sense.js";
 import type {
   SidebarEditedFile,
   SidebarLiveSession,
@@ -928,9 +929,22 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   const loadedTheme = await loadTheme(config.tui.theme, paths.themesDir());
   // Band derivation needs to know the real terminal background, which the theme
   // cannot tell us — see resolveThemeBackground.
+  //
+  // Asked of the terminal directly with OSC 11, before anything grabs the
+  // keyboard, since the answer arrives as input. Bounded by senseBackground's own
+  // timeout and never fatal: a terminal that does not answer leaves this
+  // undefined and the config/COLORFGBG chain takes over, which is what shipped
+  // before. Skipped when the user has already said, so nobody pays the round trip
+  // for an answer that would be outranked anyway.
+  const sensedBackground =
+    config.tui.themeBackground === undefined
+      ? await senseBackground()
+      : undefined;
   themeBackground = resolveThemeBackground(
     config.tui.themeBackground,
     loadedTheme.problems,
+    process.env,
+    sensedBackground,
   );
   setTheme(loadedTheme.palette, {
     ...loadedTheme.overrides,
@@ -970,6 +984,11 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     }
   }
   const term = termkit.terminal;
+  // Before anything grabs the keyboard: a background query that answers late
+  // would otherwise be typed into the composer as literal text.
+  if (sensedBackground !== undefined || config.tui.themeBackground === undefined) {
+    installOsc11Scrub(term);
+  }
   // Inline spans and syntax colours are baked into text at parse time, where no
   // terminal is in scope. Tell the theme what this one can do so those match
   // what paint-time resolution emits — otherwise text after an inline span
