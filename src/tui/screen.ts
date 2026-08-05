@@ -5051,34 +5051,25 @@ export class Screen {
         if (!line || line.body.length === 0) {
           continue;
         }
-        // ANSI lines stay excluded — their escape bytes inflate col
-        // positions and substring math against the raw body would
-        // point at locations that don't line up with what's rendered.
-        // Agent lines (inline SGR) are included: most chat content
-        // is agent-styled, and split-around-match still renders
-        // sensibly because the search-highlight span overrides the
-        // surrounding span styling for its few chars.
+        // ANSI lines stay excluded. findMatchSpans would now give correct
+        // offsets for them, so the original reason (escape bytes inflating
+        // col) is gone — but ansi lines wrap through a different path that
+        // injects synthetic SGR prefixes, and the highlight painter skips
+        // them separately. Including them is a follow-up, not a freebie.
+        // Agent lines (inline SGR) are included: most chat content is
+        // agent-styled, and split-around-match renders sensibly because the
+        // highlight overrides the surrounding span styling for its few chars.
         if (line.ansi) {
           continue;
         }
-        const hay = line.body.toLowerCase();
-        // Collect occurrences left-to-right (non-overlapping step),
-        // then push to the global match list in reverse so within a
-        // single line we walk right-to-left. Rightmost is "newest" by
-        // reading order, so as ^r steps backward through scrollback
-        // we visit it first before going further back on the same line.
-        const lineCols: number[] = [];
-        let pos = 0;
-        while (pos < hay.length) {
-          const found = hay.indexOf(lowered, pos);
-          if (found === -1) {
-            break;
-          }
-          lineCols.push(found);
-          pos = found + lowered.length;
-        }
-        for (let j = lineCols.length - 1; j >= 0; j--) {
-          matches.push({ lineIdx: i, col: lineCols[j]! });
+        // Collect occurrences left-to-right, then push to the global match
+        // list in reverse so within a single line we walk right-to-left.
+        // Rightmost is "newest" by reading order, so as ^r steps backward
+        // through scrollback we visit it first before going further back on
+        // the same line.
+        const lineSpans = findMatchSpans(line.body, lowered);
+        for (let j = lineSpans.length - 1; j >= 0; j--) {
+          matches.push({ lineIdx: i, col: lineSpans[j]!.start });
         }
       }
     }
@@ -7858,6 +7849,74 @@ export function computePromptLayout(
   return { cursorVisualRow, cursorVisualCol, windowStart, rendered };
 }
 
+// Locate case-insensitive occurrences of `lowered` in `text`, skipping escape
+// sequences, and return them as spans of RAW offsets into `text`.
+//
+// Searching the raw body directly finds matches inside the escapes themselves:
+// once inline spans became real SGR, a search for "m" hit the "m" that
+// terminates every sequence, and "1" / ";" / "[" were poisoned the same way.
+// So the scan runs over the clean view and each hit is projected back.
+//
+// Both ends are projected, rather than the end being computed as
+// start + length, because a span boundary can fall inside a match ("fo" +
+// reset + "o" rendering as "foo") which makes the raw match longer than the
+// term. The projection targets the visible characters themselves, so a span
+// opener immediately before a match and a closer immediately after it stay
+// outside the highlighted slice — unlike cleanToRawOffsets, which maps to the
+// leading edge on purpose so a link's range swallows its opener.
+function findMatchSpans(
+  text: string,
+  lowered: string,
+): Array<{ start: number; end: number }> {
+  if (lowered.length === 0) {
+    return [];
+  }
+  if (!text.includes("\x1b")) {
+    const spans: Array<{ start: number; end: number }> = [];
+    const hay = text.toLowerCase();
+    let pos = 0;
+    while (pos < hay.length) {
+      const found = hay.indexOf(lowered, pos);
+      if (found === -1) {
+        break;
+      }
+      spans.push({ start: found, end: found + lowered.length });
+      pos = found + lowered.length;
+    }
+    return spans;
+  }
+  // rawAt[k] is where clean character k starts in the raw text; rawAfter[k] is
+  // where it ends.
+  let clean = "";
+  const rawAt: number[] = [];
+  const rawAfter: number[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const m = matchEscapeAt(text, i);
+    if (m !== null && m.width === 0) {
+      i += m.text.length;
+      continue;
+    }
+    clean += text[i];
+    rawAt.push(i);
+    rawAfter.push(i + 1);
+    i += 1;
+  }
+  const spans: Array<{ start: number; end: number }> = [];
+  const hay = clean.toLowerCase();
+  let pos = 0;
+  while (pos < hay.length) {
+    const found = hay.indexOf(lowered, pos);
+    if (found === -1) {
+      break;
+    }
+    const last = found + lowered.length - 1;
+    spans.push({ start: rawAt[found]!, end: rawAfter[last]! });
+    pos = found + lowered.length;
+  }
+  return spans;
+}
+
 // Splits `text` around case-insensitive occurrences of `term` and emits
 // each piece via writeStyled — base `style` for surrounding text,
 // "search-highlight" for matches. When activeCol is non-null, the
@@ -7866,7 +7925,7 @@ export function computePromptLayout(
 // match the ^r/^s cursor is currently pointing at. When `term` is empty
 // or absent the function degrades to a single writeStyled call. Matches
 // do not overlap (we advance past each match's full length).
-function writeBodyWithHighlight(
+export function writeBodyWithHighlight(
   termObj: Terminal,
   text: string,
   style: Style | undefined,
@@ -7882,25 +7941,28 @@ function writeBodyWithHighlight(
     writeStyled(termObj, text, style, hovered);
     return;
   }
-  const haystack = text.toLowerCase();
   let i = 0;
-  while (i < text.length) {
-    const next = haystack.indexOf(term, i);
-    if (next === -1) {
-      writeStyled(termObj, text.slice(i), style, hovered);
-      return;
+  for (const span of findMatchSpans(text, term)) {
+    if (span.start < i) {
+      continue;
     }
-    if (next > i) {
-      writeStyled(termObj, text.slice(i, next), style, hovered);
+    if (span.start > i) {
+      writeStyled(termObj, text.slice(i, span.start), style, hovered);
     }
-    const isActive = activeCol !== null && next === activeCol;
+    const isActive = activeCol !== null && span.start === activeCol;
+    // Strip escapes inside the match so the highlight band is one uniform
+    // colour. A span boundary can fall mid-match, and an interior reset would
+    // punch a hole in the band — the same reason the selection band strips.
     writeStyled(
       termObj,
-      text.slice(next, next + term.length),
+      stripEscapes(text.slice(span.start, span.end)),
       isActive ? "search-highlight-active" : "search-highlight",
       hovered,
     );
-    i = next + term.length;
+    i = span.end;
+  }
+  if (i < text.length) {
+    writeStyled(termObj, text.slice(i), style, hovered);
   }
 }
 
@@ -7915,9 +7977,9 @@ function bodyStyleCarriesEscapes(style: Style | undefined): boolean {
   return styleCarriesInlineSgr(style);
 }
 
-// Exported for the characterization test in
-// theme/writeStyled.characterization.test.ts, which pins the exact bytes
-// emitted for every Style. Not part of the module's real surface.
+// Exported, with writeBodyWithHighlight, for the characterization tests in
+// theme/ that pin the exact bytes emitted for every Style. Not part of this
+// module's real surface.
 export function writeStyled(
   term: Terminal,
   text: string,

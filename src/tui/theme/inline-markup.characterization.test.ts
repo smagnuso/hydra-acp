@@ -19,7 +19,7 @@ import {
   parseThoughtMarkdown,
   type FormattedLine,
 } from "../format.js";
-import { writeStyled } from "../screen.js";
+import { writeBodyWithHighlight, writeStyled } from "../screen.js";
 import { createCapturingTerminal, visible } from "./capture.js";
 
 // Constructs chosen to hit every inline emission point in
@@ -110,3 +110,96 @@ for (const generic of ["xterm-256color", "xterm-truecolor"]) {
     });
   });
 }
+
+// Explicit regression coverage for span nesting and per-row restore. The
+// snapshots above would catch a change here too, but only as an opaque byte
+// diff; these say what the property is.
+describe("span closers restore the enclosing state", () => {
+  const lastSgrBefore = (body: string, marker: string): string => {
+    const upto = body.slice(0, body.indexOf(marker));
+    const all: string[] = upto.match(/\x1b\[[0-9;]*m/g) ?? [];
+    // Everything since the last full reset is the state in force.
+    const afterReset = all.lastIndexOf("\x1b[0m");
+    return all.slice(afterReset + 1).join("");
+  };
+
+  it("restores bold after a code span nested inside bold", () => {
+    // "**a `b` c**" — the code span's closer must put bold back, or " c"
+    // renders unbolded.
+    const body = parseAgentMarkdown("**a `b` c**")[0]!.body;
+    expect(lastSgrBefore(body, " c")).toBe("\x1b[1m");
+  });
+
+  it("restores a heading's bold and colour after a link", () => {
+    // A link's closer used to be a bare reset regardless of row, so
+    // everything after a link in a heading lost the heading's style.
+    const body = parseAgentMarkdown("# see [docs](https://e.com) x")[0]!.body;
+    expect(lastSgrBefore(body, " x")).toBe("\x1b[1m\x1b[93m");
+  });
+
+  it("restores a heading's bold and colour after a code span", () => {
+    const body = parseAgentMarkdown("# pre `cli/` post")[0]!.body;
+    expect(lastSgrBefore(body, " post")).toBe("\x1b[1m\x1b[93m");
+  });
+
+  it("restores a thought's gray after every span kind", () => {
+    for (const md of ["a **b** c", "a `b` c", "a [b](https://e.com) c"]) {
+      const body = parseThoughtMarkdown(md)[0]!.body;
+      expect(lastSgrBefore(body, " c"), md).toBe("\x1b[90m");
+    }
+  });
+
+  it("keeps the hover band alive across a span", () => {
+    // A span closes with a full reset, which clears the background. The
+    // hovered row re-asserts its band afterwards or the band stops at the
+    // first span.
+    const { term, take } = createCapturingTerminal("xterm-256color");
+    const line = parseThoughtMarkdown("call `foo()` now")[0]!;
+    take();
+    writeStyled(term, line.body, line.bodyStyle, true);
+    const out = take();
+    const band = "\x1b[48;5;233m";
+    const resets = out.split("\x1b[0m");
+    // Every reset except the final one is followed by the band again.
+    for (const tail of resets.slice(1, -1)) {
+      expect(tail.startsWith(band)).toBe(true);
+    }
+    expect(out).toContain(`\x1b[0m${band}`);
+  });
+});
+
+describe("search highlight over a span-bearing body", () => {
+  const paint = (body: string, term: string, activeCol?: number): string => {
+    const { term: t, take } = createCapturingTerminal("xterm-256color");
+    take();
+    writeBodyWithHighlight(t, body, "agent", term, activeCol ?? null);
+    return take();
+  };
+  const HL = "\x1b[103m\x1b[30m";
+
+  it("highlights visible text, not the escape bytes around it", () => {
+    const body = "call \x1b[96mfoo\x1b[0m now";
+    expect(paint(body, "foo")).toContain(`${HL}foo`);
+  });
+
+  it("finds nothing when the term only occurs inside escapes", () => {
+    // "m" terminates every SGR sequence; "[" and ";" appear in them too.
+    const body = "call \x1b[96mfoo\x1b[0m now";
+    for (const noise of ["m", "[", ";", "96"]) {
+      expect(paint(body, noise), `term: ${noise}`).not.toContain(HL);
+    }
+  });
+
+  it("keeps the band unbroken when a span boundary splits the match", () => {
+    // "fo" + reset + "o" renders as "foo". Highlighting the raw slice would
+    // let the interior reset punch a hole in the band, so the match is
+    // stripped before painting.
+    expect(paint("a fo\x1b[0mo b", "foo")).toContain(`${HL}foo`);
+  });
+
+  it("uses the louder style for the match the cursor is on", () => {
+    const body = "call \x1b[96mfoo\x1b[0m now";
+    const painted = paint(body, "foo", "call \x1b[96m".length);
+    expect(painted).toContain("\x1b[41m\x1b[97mfoo");
+  });
+});

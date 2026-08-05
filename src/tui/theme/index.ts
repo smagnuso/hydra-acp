@@ -100,7 +100,7 @@ export function bgGrayscale(g: number, trueColor: boolean): SgrPair {
 // so the migration off carets did not change a single byte. Two are easy to
 // get wrong: "^-" was dim ON (SGR 2), not bold off (SGR 22); and "^:" was a
 // full reset (SGR 0), not a targeted close.
-const SGR_RESET = `${CSI}0m`;
+export const SGR_RESET = `${CSI}0m`;
 export const SGR_BOLD = `${CSI}1m`;
 const SGR_DIM = `${CSI}2m`;
 export const SGR_UNDERLINE = `${CSI}4m`;
@@ -111,18 +111,17 @@ const SGR_BRIGHT_CYAN = `${CSI}96m`;
 /**
  * How a row styles the inline spans inside it.
  *
- * A span's closer has to put the row's own colour back, because a span ends
- * with a full reset and the row's base colour was emitted once, before the
- * text. Without that, prose after an inline code span in a plan entry or a
- * heading would strand in the terminal's default foreground.
+ * Only the openers vary per row. Closers are computed rather than configured:
+ * a span ends with a full reset followed by whatever state enclosed it, which
+ * is the row's `base` plus any spans still open around it. That composition is
+ * why closers cannot be fixed strings — the correct one for a code span
+ * depends on whether it sits inside a bold span, which the row cannot know.
  */
 export interface InlineOpts {
   codeOpen: string;
-  codeReset: string;
-  boldReset: string;
-  italicReset: string;
   linkOpen: string;
-  linkReset: string;
+  /** SGR that re-establishes the row's own style, absent any span. */
+  base: string;
 }
 
 /**
@@ -132,66 +131,37 @@ export interface InlineOpts {
  */
 export const PROSE_INLINE_OPTS: InlineOpts = {
   codeOpen: SGR_BRIGHT_CYAN,
-  codeReset: SGR_RESET,
-  boldReset: SGR_RESET,
-  italicReset: SGR_RESET,
   // Links are cyan + underlined.
   linkOpen: SGR_BRIGHT_CYAN + SGR_UNDERLINE,
-  linkReset: SGR_RESET,
+  base: "",
 };
 
 /**
- * Inline spans inside a thought. Code goes plain cyan rather than bright and
- * bold closes to dim, so spans stay in the thought's gray register instead of
- * punching out of it; the code closer restores brightBlack rather than
- * resetting, which is the thought's base colour.
+ * Inline spans inside a thought. Code goes plain cyan rather than bright so
+ * spans stay in the thought's gray register instead of punching out of it.
  */
 export const THOUGHT_INLINE_OPTS: InlineOpts = {
   codeOpen: SGR_CYAN,
-  codeReset: SGR_BRIGHT_BLACK,
-  boldReset: SGR_DIM,
-  // No italic or link override: both fall back to a full reset, which drops
-  // the gray for the rest of the row. Pre-existing; see the notes on
-  // inlineOptsFor.
-  italicReset: SGR_RESET,
   linkOpen: SGR_BRIGHT_CYAN + SGR_UNDERLINE,
-  linkReset: SGR_RESET,
+  base: SGR_BRIGHT_BLACK,
 };
 
 /**
  * Inline spans for a row whose base style carries its own colour: plan
  * entries and headings.
  *
- * Mostly "reset, then re-open the row's base", which falls straight out of
- * the style table. Two deliberate deviations, both preserved from the caret
- * tables they replace:
+ * The base comes straight from the style table, so a span's closer restores
+ * whatever that style opened with and nothing has to be restated here.
  *
- *  - heading-1 and heading-2 re-open without resetting first, where heading-3
- *    and every plan style reset first. Harmless in practice (the re-open
- *    overwrites what matters) but not symmetric.
- *  - heading-2 opens inline code in bright yellow instead of bright cyan,
- *    because the heading itself is bright cyan and the span would otherwise
- *    be invisible.
- *
- * `linkReset` is *not* specialised, so a link inside a heading or plan entry
- * still closes with a bare reset and strands the rest of the row in the
- * default foreground. That is a live bug, kept here only because fixing it
- * would change rendering; it wants its own change.
+ * One deviation: heading-2 opens inline code in bright yellow instead of
+ * bright cyan, because the heading itself is bright cyan and a bright-cyan
+ * span inside it would be invisible.
  */
 export function inlineOptsFor(style: Style): InlineOpts {
-  const base = resolveStyle(style, false).open;
-  const restore =
-    style === "heading-1" || style === "heading-2"
-      ? base
-      : SGR_RESET + base;
-  const codeOpen = style === "heading-2" ? brightYellow.open : SGR_BRIGHT_CYAN;
   return {
-    codeOpen,
-    codeReset: restore,
-    boldReset: restore,
-    italicReset: restore,
+    codeOpen: style === "heading-2" ? brightYellow.open : SGR_BRIGHT_CYAN,
     linkOpen: SGR_BRIGHT_CYAN + SGR_UNDERLINE,
-    linkReset: SGR_RESET,
+    base: resolveStyle(style, false).open,
   };
 }
 
@@ -388,6 +358,19 @@ const HOVER_BAND: SgrPair = { open: `${CSI}48;5;236m`, close: `${CSI}49m` };
  * Returns undefined when the style has no hover treatment, in which case the
  * caller renders it exactly as an unhovered row.
  */
+/**
+ * Re-assert a background band after every full reset in `text`.
+ *
+ * Inline spans close with SGR 0, which clears the background along with
+ * everything else. On an unhovered row that is exactly right. On a hovered
+ * one the band was emitted once, before the body, so each reset would strip
+ * it from that point to the end of the row — a hovered thought or plan entry
+ * containing any inline span would show the band only up to its first span.
+ */
+function restoreBandAfterResets(text: string, band: string): string {
+  return text.split(SGR_RESET).join(SGR_RESET + band);
+}
+
 export function resolveHovered(
   style: Style | undefined,
   trueColor: boolean,
@@ -397,21 +380,25 @@ export function resolveHovered(
   }
 
   if (style === "thought") {
+    const band = bgGrayscale(25, trueColor).open;
     // Lift the dim brightBlack baseline to the default foreground so the
-    // thought stays readable on the band, and swap each baked brightBlack
-    // (the codeReset that ends an inline code span) for SGR 39 — default
-    // foreground, leaving the background alone — so prose after a span
-    // returns to default fg without a full reset dropping the band.
+    // thought stays readable on the band. Every place the body restores
+    // brightBlack (a span closing back to the row's base) becomes SGR 39 —
+    // default foreground, leaving the background alone.
     //
     // No close sequence — this leaks the band to end of row and depends on
     // the painter's styleReset to stop it smearing. Faithful to the previous
     // behaviour; a band that closed here would be the correct fix but is a
     // visible change.
     return {
-      open: bgGrayscale(25, trueColor).open,
+      open: band,
       close: "",
       inlineSgr: true,
-      transform: (text) => text.split(SGR_BRIGHT_BLACK).join(`${CSI}39m`),
+      transform: (text) =>
+        restoreBandAfterResets(
+          text.split(SGR_BRIGHT_BLACK).join(`${CSI}39m`),
+          band,
+        ),
     };
   }
 
@@ -437,5 +424,11 @@ export function resolveHovered(
     open: HOVER_BAND.open + base.open,
     close: base.close + HOVER_BAND.close,
     inlineSgr: base.inlineSgr,
+    // A span inside the body closes with a full reset, which would drop the
+    // band for the rest of the row. Only span-bearing styles need this;
+    // plan-pending is the one that reaches it today.
+    transform: base.inlineSgr
+      ? (text) => restoreBandAfterResets(text, HOVER_BAND.open)
+      : undefined,
   };
 }

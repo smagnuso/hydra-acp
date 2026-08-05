@@ -82,7 +82,7 @@ describe("renderMarkdownForCat — ansi mode", () => {
     // bold + bright yellow, so the rest of the heading body keeps its
     // style instead of stranding in the default foreground.
     const out = renderMarkdownForCat("# pre `cli/` post", "ansi");
-    expect(out).toContain("\x1b[96mcli/\x1b[1m\x1b[93m");
+    expect(out).toContain("\x1b[96mcli/\x1b[0m\x1b[1m\x1b[93m");
     expect(out).toContain("pre ");
     expect(out).toContain(" post");
   });

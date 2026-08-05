@@ -7,8 +7,10 @@ import { highlight, supportsLanguage } from "cli-highlight";
 import stringWidth from "string-width";
 import {
   inlineOptsFor,
+  type InlineOpts,
   PROSE_INLINE_OPTS,
   SGR_BOLD,
+  SGR_RESET,
   SGR_UNDERLINE,
   THOUGHT_INLINE_OPTS,
 } from "./theme/index.js";
@@ -296,19 +298,10 @@ export function formatEvent(
 //          outer side is non-alphanumeric-and-non-`_`. This stops
 //          `some_snake_case` from italicizing `snake`.
 //
-// The *Reset opts let a caller substitute something other than a full reset,
-// which rows with their own base colour need: a full reset would strand the
-// remainder of the row in the terminal's default foreground. See
-// PROSE_INLINE_OPTS / THOUGHT_INLINE_OPTS / inlineOptsFor in theme/index.ts.
-function applyInlineMarkup(
-  text: string,
-  opts?: {
-    codeOpen?: string;
-    boldReset?: string;
-    italicReset?: string;
-    codeReset?: string;
-  },
-): string {
+// Openers come from the caller (see PROSE_INLINE_OPTS / THOUGHT_INLINE_OPTS /
+// inlineOptsFor in theme/index.ts). Closers are computed — see `enclosing`
+// below.
+function applyInlineMarkup(text: string, opts?: InlineOpts): string {
   return applyInlineMarkupWithLinks(text, opts).styled;
 }
 
@@ -325,16 +318,19 @@ function applyInlineMarkup(
 // code spans appeared before a link, because `**word**` shortens to
 // `word` in clean while the bold-wrapped form keeps its full length in
 // styled.
+//
+// Every span closes with a full reset followed by `enclosing`: the SGR that
+// re-establishes the state this span sits inside. At the top level that is
+// just the row's base style; inside a **bold** span it is the base plus bold,
+// and so on down. Computing it rather than configuring it is what makes
+// nesting work — a fixed "close" string can restore the row but cannot know
+// it is inside a bold span, which is how "**a `b` c**" used to lose the bold
+// on " c", and how a link inside a heading used to strip the heading's style
+// off everything after it.
 function applyInlineMarkupWithLinks(
   text: string,
-  opts?: {
-    codeOpen?: string;
-    boldReset?: string;
-    italicReset?: string;
-    codeReset?: string;
-    linkOpen?: string;
-    linkReset?: string;
-  },
+  opts?: InlineOpts,
+  enclosing?: string,
 ): {
   styled: string;
   links: Array<{ start: number; end: number; url: string }>;
@@ -348,13 +344,12 @@ function applyInlineMarkupWithLinks(
 } {
   // Defaults suit agent prose, whose base is the terminal's default
   // foreground. Rows that carry their own colour (plan entries, headings,
-  // thoughts) pass opts so a span's closer restores that colour.
-  const codeOpen = opts?.codeOpen ?? PROSE_INLINE_OPTS.codeOpen;
-  const codeReset = opts?.codeReset ?? PROSE_INLINE_OPTS.codeReset;
-  const boldReset = opts?.boldReset ?? PROSE_INLINE_OPTS.boldReset;
-  const italicReset = opts?.italicReset ?? PROSE_INLINE_OPTS.italicReset;
-  const linkOpen = opts?.linkOpen ?? PROSE_INLINE_OPTS.linkOpen;
-  const linkReset = opts?.linkReset ?? PROSE_INLINE_OPTS.linkReset;
+  // thoughts) pass opts.
+  const resolved = opts ?? PROSE_INLINE_OPTS;
+  const { codeOpen, linkOpen } = resolved;
+  // Top-level spans close back to the row's own style.
+  const outer = enclosing ?? resolved.base;
+  const closeTo = (state: string): string => SGR_RESET + state;
   let styled = "";
   let cleanLen = 0;
   let ansi = false;
@@ -406,9 +401,13 @@ function applyInlineMarkupWithLinks(
       const close = text.indexOf("**", i + 2);
       if (close !== -1 && close > i + 2) {
         const innerText = text.slice(i + 2, close);
-        const inner = applyInlineMarkupWithLinks(innerText, opts);
+        const inner = applyInlineMarkupWithLinks(
+          innerText,
+          resolved,
+          outer + SGR_BOLD,
+        );
         const start = cleanLen;
-        styled += `${SGR_BOLD}${inner.styled}${boldReset}`;
+        styled += `${SGR_BOLD}${inner.styled}${closeTo(outer)}`;
         for (const nested of inner.links) {
           links.push({
             start: start + nested.start,
@@ -460,9 +459,13 @@ function applyInlineMarkupWithLinks(
         }
         if (close !== -1 && close > i + 1) {
           const innerText = text.slice(i + 1, close);
-          const inner = applyInlineMarkupWithLinks(innerText, opts);
+          const inner = applyInlineMarkupWithLinks(
+            innerText,
+            resolved,
+            outer + SGR_UNDERLINE,
+          );
           const start = cleanLen;
-          styled += `${SGR_UNDERLINE}${inner.styled}${italicReset}`;
+          styled += `${SGR_UNDERLINE}${inner.styled}${closeTo(outer)}`;
           for (const nested of inner.links) {
             links.push({
               start: start + nested.start,
@@ -510,9 +513,13 @@ function applyInlineMarkupWithLinks(
         }
         if (close !== -1 && close > i + 1) {
           const innerText = text.slice(i + 1, close);
-          const inner = applyInlineMarkupWithLinks(innerText, opts);
+          const inner = applyInlineMarkupWithLinks(
+            innerText,
+            resolved,
+            outer + SGR_UNDERLINE,
+          );
           const start = cleanLen;
-          styled += `${SGR_UNDERLINE}${inner.styled}${italicReset}`;
+          styled += `${SGR_UNDERLINE}${inner.styled}${closeTo(outer)}`;
           for (const nested of inner.links) {
             links.push({
               start: start + nested.start,
@@ -535,7 +542,7 @@ function applyInlineMarkupWithLinks(
       const close = text.indexOf("`", i + 1);
       if (close !== -1 && close > i + 1) {
         const inner = text.slice(i + 1, close);
-        styled += `${codeOpen}${inner}${codeReset}`;
+        styled += `${codeOpen}${inner}${closeTo(outer)}`;
         cleanLen += inner.length;
         i = close + 1;
         continue;
@@ -586,7 +593,11 @@ function applyInlineMarkupWithLinks(
         if (closeParen !== -1 && closeParen > closeBracket + 2) {
           const linkText = text.slice(i + 1, closeBracket);
           const url = text.slice(closeBracket + 2, closeParen);
-          const inner = applyInlineMarkupWithLinks(linkText, opts);
+          const inner = applyInlineMarkupWithLinks(
+            linkText,
+            resolved,
+            outer + linkOpen,
+          );
           const start = cleanLen;
           // Three dispositions here, and the key thing is that OSC 8
           // wrapping and the sidecar are NOT mutually exclusive:
@@ -608,7 +619,7 @@ function applyInlineMarkupWithLinks(
           //
           // Keeping `body` free of escapes is what lets the path-token
           // scanner, selection-copy and width accounting stay simple.
-          styled += `${linkOpen}${inner.styled}${linkReset}`;
+          styled += `${linkOpen}${inner.styled}${closeTo(outer)}`;
           // Shift any nested link ranges (links inside links — rare).
           for (const nested of inner.links) {
             links.push({
@@ -644,12 +655,7 @@ interface ParseMarkdownOpts {
   // Prefix for the first non-blank line. All other lines use "  ".
   firstPrefix?: string;
   // Passed to applyInlineMarkup for prose and list items.
-  inlineOpts?: {
-    codeOpen?: string;
-    boldReset?: string;
-    italicReset?: string;
-    codeReset?: string;
-  };
+  inlineOpts?: InlineOpts;
   // Total terminal width available for the rendered block (including the
   // prefix). When set, pipe tables clamp column widths to fit and word-wrap
   // cells across multiple physical rows; without it tables stay natural-width
@@ -1321,12 +1327,7 @@ function formatTable(
   const renderRow = (
     cells: string[],
     style: Style,
-    inlineOpts?: {
-      codeOpen?: string;
-      boldReset?: string;
-      italicReset?: string;
-      codeReset?: string;
-    },
+    inlineOpts?: InlineOpts,
   ): FormattedLine[] => {
     const wrapped: string[][] = [];
     let rowHeight = 1;

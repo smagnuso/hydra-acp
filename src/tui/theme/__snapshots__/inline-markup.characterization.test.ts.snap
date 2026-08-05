@@ -2,23 +2,23 @@
 
 exports[`inline markup end-to-end (xterm-256color) > renders hovered rows to stable bytes 1`] = `
 "plain prose                ESC[48;5;233mjust some words
-bold                       ESC[48;5;233ma ESC[1mboldESC[2m bESC[0m
-italic-star                ESC[48;5;233ma ESC[4mitalESC[0m bESC[0m
-italic-underscore          ESC[48;5;233ma ESC[4mitalESC[0m bESC[0m
-inline code                ESC[48;5;233mcall ESC[36mfoo()ESC[39m nowESC[0m
-link                       ESC[48;5;233msee ESC[96mESC[4mthe docsESC[0m nowESC[0m
-bold inside code           ESC[48;5;233mESC[36ma **b** cESC[39mESC[0m
-code inside bold           ESC[48;5;233mESC[1ma ESC[36mbESC[39m cESC[2mESC[0m
+bold                       ESC[48;5;233ma ESC[1mboldESC[0mESC[48;5;233mESC[39m bESC[0m
+italic-star                ESC[48;5;233ma ESC[4mitalESC[0mESC[48;5;233mESC[39m bESC[0m
+italic-underscore          ESC[48;5;233ma ESC[4mitalESC[0mESC[48;5;233mESC[39m bESC[0m
+inline code                ESC[48;5;233mcall ESC[36mfoo()ESC[0mESC[48;5;233mESC[39m nowESC[0m
+link                       ESC[48;5;233msee ESC[96mESC[4mthe docsESC[0mESC[48;5;233mESC[39m nowESC[0m
+bold inside code           ESC[48;5;233mESC[36ma **b** cESC[0mESC[48;5;233mESC[39mESC[0m
+code inside bold           ESC[48;5;233mESC[1ma ESC[36mbESC[0mESC[48;5;233mESC[39mESC[1m cESC[0mESC[48;5;233mESC[39mESC[0m
 literal caret in prose     ESC[48;5;233mpress ^C to quit
-literal caret in code      ESC[48;5;233mESC[36ma ^ bESC[39mESC[0m
+literal caret in code      ESC[48;5;233mESC[36ma ^ bESC[0mESC[48;5;233mESC[39mESC[0m
 backslash-escaped star     ESC[48;5;233ma *not italic* b
-heading-1 with code        ESC[48;5;233mpre ESC[36mcli/ESC[39m postESC[0m
-heading-2 with bold        ESC[48;5;233mESC[1mboldESC[2m midESC[0m
-heading-3 with code        ESC[48;5;233mESC[36mxESC[39m yESC[0m
-heading-1 with link        ESC[48;5;233msee ESC[96mESC[4mdocsESC[0m xESC[0m
-bullet list with spans     ESC[48;5;233m• ESC[1maESC[2m and ESC[36mbESC[39mESC[0m
+heading-1 with code        ESC[48;5;233mpre ESC[36mcli/ESC[0mESC[48;5;233mESC[39m postESC[0m
+heading-2 with bold        ESC[48;5;233mESC[1mboldESC[0mESC[48;5;233mESC[39m midESC[0m
+heading-3 with code        ESC[48;5;233mESC[36mxESC[0mESC[48;5;233mESC[39m yESC[0m
+heading-1 with link        ESC[48;5;233msee ESC[96mESC[4mdocsESC[0mESC[48;5;233mESC[39m xESC[0m
+bullet list with spans     ESC[48;5;233m• ESC[1maESC[0mESC[48;5;233mESC[39m and ESC[36mbESC[0mESC[48;5;233mESC[39mESC[0m
 bullet list with spans     ESC[48;5;233m• plain
-ordered list with spans    ESC[48;5;233m1. ESC[1maESC[2m and ESC[36mbESC[39mESC[0m
+ordered list with spans    ESC[48;5;233m1. ESC[1maESC[0mESC[48;5;233mESC[39m and ESC[36mbESC[0mESC[48;5;233mESC[39mESC[0m
 ordered list with spans    ESC[48;5;233m2. plain
 table with spans           ESC[1mh ESC[1mbESC[0mESC[1m │ h2ESC[0mESC[22m
 table with spans           ESC[48;5;236mESC[2m────┼───ESC[22mESC[49m
@@ -26,9 +26,9 @@ table with spans           ESC[96mcESC[0m   │ ESC[4miESC[0m ESC[0m
 fenced code                ESC[48;5;233mconst a = 1;
 fenced code no lang        ESC[48;5;233mraw ^ text
 unbalanced bold            ESC[48;5;233ma **b c
-adjacent spans             ESC[48;5;233mESC[1maESC[2mESC[36mbESC[39mESC[4mcESC[0mESC[0m
-multiline prose with spans ESC[48;5;233mline ESC[1moneESC[2mESC[0m
-multiline prose with spans ESC[48;5;233mline ESC[36mtwoESC[39mESC[0m"
+adjacent spans             ESC[48;5;233mESC[1maESC[0mESC[48;5;233mESC[39mESC[36mbESC[0mESC[48;5;233mESC[39mESC[4mcESC[0mESC[48;5;233mESC[39mESC[0m
+multiline prose with spans ESC[48;5;233mline ESC[1moneESC[0mESC[48;5;233mESC[39mESC[0m
+multiline prose with spans ESC[48;5;233mline ESC[36mtwoESC[0mESC[48;5;233mESC[39mESC[0m"
 `;
 
 exports[`inline markup end-to-end (xterm-256color) > renders the agent-markdown corpus to stable bytes 1`] = `
@@ -54,7 +54,7 @@ exports[`inline markup end-to-end (xterm-256color) > renders the agent-markdown 
   agent          ESC[96ma **b** cESC[0mESC[0m
 
 ### code inside bold
-  agent          ESC[1ma ESC[96mbESC[0m cESC[0mESC[0m
+  agent          ESC[1ma ESC[96mbESC[0mESC[1m cESC[0mESC[0m
 
 ### literal caret in prose
   agent          press ^C to quit
@@ -66,16 +66,16 @@ exports[`inline markup end-to-end (xterm-256color) > renders the agent-markdown 
   agent          a *not italic* b
 
 ### heading-1 with code
-  heading-1      ESC[1mESC[93mpre ESC[96mcli/ESC[1mESC[93m postESC[0mESC[39mESC[22m
+  heading-1      ESC[1mESC[93mpre ESC[96mcli/ESC[0mESC[1mESC[93m postESC[0mESC[39mESC[22m
 
 ### heading-2 with bold
-  heading-2      ESC[1mESC[96mESC[1mboldESC[1mESC[96m midESC[0mESC[39mESC[22m
+  heading-2      ESC[1mESC[96mESC[1mboldESC[0mESC[1mESC[96m midESC[0mESC[39mESC[22m
 
 ### heading-3 with code
   heading-3      ESC[1mESC[96mxESC[0mESC[1m yESC[0mESC[22m
 
 ### heading-1 with link
-  heading-1      ESC[1mESC[93msee ESC[96mESC[4mdocsESC[0m xESC[0mESC[39mESC[22m
+  heading-1      ESC[1mESC[93msee ESC[96mESC[4mdocsESC[0mESC[1mESC[93m xESC[0mESC[39mESC[22m
 
 ### bullet list with spans
   agent          • ESC[1maESC[0m and ESC[96mbESC[0mESC[0m
@@ -112,53 +112,53 @@ exports[`inline markup end-to-end (xterm-256color) > renders the thought-markdow
   thought      ESC[90m  ESC[39mESC[90mjust some wordsESC[39m
 
 ### bold
-  thought      ESC[90m  ESC[39mESC[90ma ESC[1mboldESC[2m bESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90ma ESC[1mboldESC[0mESC[90m bESC[0mESC[39m
 
 ### italic-star
-  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0m bESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0mESC[90m bESC[0mESC[39m
 
 ### italic-underscore
-  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0m bESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0mESC[90m bESC[0mESC[39m
 
 ### inline code
-  thought      ESC[90m  ESC[39mESC[90mcall ESC[36mfoo()ESC[90m nowESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mcall ESC[36mfoo()ESC[0mESC[90m nowESC[0mESC[39m
 
 ### link
-  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mthe docsESC[0m nowESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mthe docsESC[0mESC[90m nowESC[0mESC[39m
 
 ### bold inside code
-  thought      ESC[90m  ESC[39mESC[90mESC[36ma **b** cESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[36ma **b** cESC[0mESC[90mESC[0mESC[39m
 
 ### code inside bold
-  thought      ESC[90m  ESC[39mESC[90mESC[1ma ESC[36mbESC[90m cESC[2mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[1ma ESC[36mbESC[0mESC[90mESC[1m cESC[0mESC[90mESC[0mESC[39m
 
 ### literal caret in prose
   thought      ESC[90m  ESC[39mESC[90mpress ^C to quitESC[39m
 
 ### literal caret in code
-  thought      ESC[90m  ESC[39mESC[90mESC[36ma ^ bESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[36ma ^ bESC[0mESC[90mESC[0mESC[39m
 
 ### backslash-escaped star
   thought      ESC[90m  ESC[39mESC[90ma *not italic* bESC[39m
 
 ### heading-1 with code
-  thought      ESC[90m  ESC[39mESC[90mpre ESC[36mcli/ESC[90m postESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mpre ESC[36mcli/ESC[0mESC[90m postESC[0mESC[39m
 
 ### heading-2 with bold
-  thought      ESC[90m  ESC[39mESC[90mESC[1mboldESC[2m midESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[1mboldESC[0mESC[90m midESC[0mESC[39m
 
 ### heading-3 with code
-  thought      ESC[90m  ESC[39mESC[90mESC[36mxESC[90m yESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[36mxESC[0mESC[90m yESC[0mESC[39m
 
 ### heading-1 with link
-  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mdocsESC[0m xESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mdocsESC[0mESC[90m xESC[0mESC[39m
 
 ### bullet list with spans
-  thought      ESC[90m  ESC[39mESC[90m• ESC[1maESC[2m and ESC[36mbESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90m• ESC[1maESC[0mESC[90m and ESC[36mbESC[0mESC[90mESC[0mESC[39m
   thought      ESC[90m  ESC[39mESC[90m• plainESC[39m
 
 ### ordered list with spans
-  thought      ESC[90m  ESC[39mESC[90m1. ESC[1maESC[2m and ESC[36mbESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90m1. ESC[1maESC[0mESC[90m and ESC[36mbESC[0mESC[90mESC[0mESC[39m
   thought      ESC[90m  ESC[39mESC[90m2. plainESC[39m
 
 ### table with spans
@@ -176,32 +176,32 @@ exports[`inline markup end-to-end (xterm-256color) > renders the thought-markdow
   thought      ESC[90m  ESC[39mESC[90ma **b cESC[39m
 
 ### adjacent spans
-  thought      ESC[90m  ESC[39mESC[90mESC[1maESC[2mESC[36mbESC[90mESC[4mcESC[0mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[1maESC[0mESC[90mESC[36mbESC[0mESC[90mESC[4mcESC[0mESC[90mESC[0mESC[39m
 
 ### multiline prose with spans
-  thought      ESC[90m  ESC[39mESC[90mline ESC[1moneESC[2mESC[0mESC[39m
-  thought      ESC[90m  ESC[39mESC[90mline ESC[36mtwoESC[90mESC[0mESC[39m"
+  thought      ESC[90m  ESC[39mESC[90mline ESC[1moneESC[0mESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mline ESC[36mtwoESC[0mESC[90mESC[0mESC[39m"
 `;
 
 exports[`inline markup end-to-end (xterm-truecolor) > renders hovered rows to stable bytes 1`] = `
 "plain prose                ESC[48;2;25;25;25mjust some words
-bold                       ESC[48;2;25;25;25ma ESC[1mboldESC[2m bESC[0m
-italic-star                ESC[48;2;25;25;25ma ESC[4mitalESC[0m bESC[0m
-italic-underscore          ESC[48;2;25;25;25ma ESC[4mitalESC[0m bESC[0m
-inline code                ESC[48;2;25;25;25mcall ESC[36mfoo()ESC[39m nowESC[0m
-link                       ESC[48;2;25;25;25msee ESC[96mESC[4mthe docsESC[0m nowESC[0m
-bold inside code           ESC[48;2;25;25;25mESC[36ma **b** cESC[39mESC[0m
-code inside bold           ESC[48;2;25;25;25mESC[1ma ESC[36mbESC[39m cESC[2mESC[0m
+bold                       ESC[48;2;25;25;25ma ESC[1mboldESC[0mESC[48;2;25;25;25mESC[39m bESC[0m
+italic-star                ESC[48;2;25;25;25ma ESC[4mitalESC[0mESC[48;2;25;25;25mESC[39m bESC[0m
+italic-underscore          ESC[48;2;25;25;25ma ESC[4mitalESC[0mESC[48;2;25;25;25mESC[39m bESC[0m
+inline code                ESC[48;2;25;25;25mcall ESC[36mfoo()ESC[0mESC[48;2;25;25;25mESC[39m nowESC[0m
+link                       ESC[48;2;25;25;25msee ESC[96mESC[4mthe docsESC[0mESC[48;2;25;25;25mESC[39m nowESC[0m
+bold inside code           ESC[48;2;25;25;25mESC[36ma **b** cESC[0mESC[48;2;25;25;25mESC[39mESC[0m
+code inside bold           ESC[48;2;25;25;25mESC[1ma ESC[36mbESC[0mESC[48;2;25;25;25mESC[39mESC[1m cESC[0mESC[48;2;25;25;25mESC[39mESC[0m
 literal caret in prose     ESC[48;2;25;25;25mpress ^C to quit
-literal caret in code      ESC[48;2;25;25;25mESC[36ma ^ bESC[39mESC[0m
+literal caret in code      ESC[48;2;25;25;25mESC[36ma ^ bESC[0mESC[48;2;25;25;25mESC[39mESC[0m
 backslash-escaped star     ESC[48;2;25;25;25ma *not italic* b
-heading-1 with code        ESC[48;2;25;25;25mpre ESC[36mcli/ESC[39m postESC[0m
-heading-2 with bold        ESC[48;2;25;25;25mESC[1mboldESC[2m midESC[0m
-heading-3 with code        ESC[48;2;25;25;25mESC[36mxESC[39m yESC[0m
-heading-1 with link        ESC[48;2;25;25;25msee ESC[96mESC[4mdocsESC[0m xESC[0m
-bullet list with spans     ESC[48;2;25;25;25m• ESC[1maESC[2m and ESC[36mbESC[39mESC[0m
+heading-1 with code        ESC[48;2;25;25;25mpre ESC[36mcli/ESC[0mESC[48;2;25;25;25mESC[39m postESC[0m
+heading-2 with bold        ESC[48;2;25;25;25mESC[1mboldESC[0mESC[48;2;25;25;25mESC[39m midESC[0m
+heading-3 with code        ESC[48;2;25;25;25mESC[36mxESC[0mESC[48;2;25;25;25mESC[39m yESC[0m
+heading-1 with link        ESC[48;2;25;25;25msee ESC[96mESC[4mdocsESC[0mESC[48;2;25;25;25mESC[39m xESC[0m
+bullet list with spans     ESC[48;2;25;25;25m• ESC[1maESC[0mESC[48;2;25;25;25mESC[39m and ESC[36mbESC[0mESC[48;2;25;25;25mESC[39mESC[0m
 bullet list with spans     ESC[48;2;25;25;25m• plain
-ordered list with spans    ESC[48;2;25;25;25m1. ESC[1maESC[2m and ESC[36mbESC[39mESC[0m
+ordered list with spans    ESC[48;2;25;25;25m1. ESC[1maESC[0mESC[48;2;25;25;25mESC[39m and ESC[36mbESC[0mESC[48;2;25;25;25mESC[39mESC[0m
 ordered list with spans    ESC[48;2;25;25;25m2. plain
 table with spans           ESC[1mh ESC[1mbESC[0mESC[1m │ h2ESC[0mESC[22m
 table with spans           ESC[48;5;236mESC[2m────┼───ESC[22mESC[49m
@@ -209,9 +209,9 @@ table with spans           ESC[96mcESC[0m   │ ESC[4miESC[0m ESC[0m
 fenced code                ESC[48;2;25;25;25mconst a = 1;
 fenced code no lang        ESC[48;2;25;25;25mraw ^ text
 unbalanced bold            ESC[48;2;25;25;25ma **b c
-adjacent spans             ESC[48;2;25;25;25mESC[1maESC[2mESC[36mbESC[39mESC[4mcESC[0mESC[0m
-multiline prose with spans ESC[48;2;25;25;25mline ESC[1moneESC[2mESC[0m
-multiline prose with spans ESC[48;2;25;25;25mline ESC[36mtwoESC[39mESC[0m"
+adjacent spans             ESC[48;2;25;25;25mESC[1maESC[0mESC[48;2;25;25;25mESC[39mESC[36mbESC[0mESC[48;2;25;25;25mESC[39mESC[4mcESC[0mESC[48;2;25;25;25mESC[39mESC[0m
+multiline prose with spans ESC[48;2;25;25;25mline ESC[1moneESC[0mESC[48;2;25;25;25mESC[39mESC[0m
+multiline prose with spans ESC[48;2;25;25;25mline ESC[36mtwoESC[0mESC[48;2;25;25;25mESC[39mESC[0m"
 `;
 
 exports[`inline markup end-to-end (xterm-truecolor) > renders the agent-markdown corpus to stable bytes 1`] = `
@@ -237,7 +237,7 @@ exports[`inline markup end-to-end (xterm-truecolor) > renders the agent-markdown
   agent          ESC[96ma **b** cESC[0mESC[0m
 
 ### code inside bold
-  agent          ESC[1ma ESC[96mbESC[0m cESC[0mESC[0m
+  agent          ESC[1ma ESC[96mbESC[0mESC[1m cESC[0mESC[0m
 
 ### literal caret in prose
   agent          press ^C to quit
@@ -249,16 +249,16 @@ exports[`inline markup end-to-end (xterm-truecolor) > renders the agent-markdown
   agent          a *not italic* b
 
 ### heading-1 with code
-  heading-1      ESC[1mESC[93mpre ESC[96mcli/ESC[1mESC[93m postESC[0mESC[39mESC[22m
+  heading-1      ESC[1mESC[93mpre ESC[96mcli/ESC[0mESC[1mESC[93m postESC[0mESC[39mESC[22m
 
 ### heading-2 with bold
-  heading-2      ESC[1mESC[96mESC[1mboldESC[1mESC[96m midESC[0mESC[39mESC[22m
+  heading-2      ESC[1mESC[96mESC[1mboldESC[0mESC[1mESC[96m midESC[0mESC[39mESC[22m
 
 ### heading-3 with code
   heading-3      ESC[1mESC[96mxESC[0mESC[1m yESC[0mESC[22m
 
 ### heading-1 with link
-  heading-1      ESC[1mESC[93msee ESC[96mESC[4mdocsESC[0m xESC[0mESC[39mESC[22m
+  heading-1      ESC[1mESC[93msee ESC[96mESC[4mdocsESC[0mESC[1mESC[93m xESC[0mESC[39mESC[22m
 
 ### bullet list with spans
   agent          • ESC[1maESC[0m and ESC[96mbESC[0mESC[0m
@@ -295,53 +295,53 @@ exports[`inline markup end-to-end (xterm-truecolor) > renders the thought-markdo
   thought      ESC[90m  ESC[39mESC[90mjust some wordsESC[39m
 
 ### bold
-  thought      ESC[90m  ESC[39mESC[90ma ESC[1mboldESC[2m bESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90ma ESC[1mboldESC[0mESC[90m bESC[0mESC[39m
 
 ### italic-star
-  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0m bESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0mESC[90m bESC[0mESC[39m
 
 ### italic-underscore
-  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0m bESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90ma ESC[4mitalESC[0mESC[90m bESC[0mESC[39m
 
 ### inline code
-  thought      ESC[90m  ESC[39mESC[90mcall ESC[36mfoo()ESC[90m nowESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mcall ESC[36mfoo()ESC[0mESC[90m nowESC[0mESC[39m
 
 ### link
-  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mthe docsESC[0m nowESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mthe docsESC[0mESC[90m nowESC[0mESC[39m
 
 ### bold inside code
-  thought      ESC[90m  ESC[39mESC[90mESC[36ma **b** cESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[36ma **b** cESC[0mESC[90mESC[0mESC[39m
 
 ### code inside bold
-  thought      ESC[90m  ESC[39mESC[90mESC[1ma ESC[36mbESC[90m cESC[2mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[1ma ESC[36mbESC[0mESC[90mESC[1m cESC[0mESC[90mESC[0mESC[39m
 
 ### literal caret in prose
   thought      ESC[90m  ESC[39mESC[90mpress ^C to quitESC[39m
 
 ### literal caret in code
-  thought      ESC[90m  ESC[39mESC[90mESC[36ma ^ bESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[36ma ^ bESC[0mESC[90mESC[0mESC[39m
 
 ### backslash-escaped star
   thought      ESC[90m  ESC[39mESC[90ma *not italic* bESC[39m
 
 ### heading-1 with code
-  thought      ESC[90m  ESC[39mESC[90mpre ESC[36mcli/ESC[90m postESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mpre ESC[36mcli/ESC[0mESC[90m postESC[0mESC[39m
 
 ### heading-2 with bold
-  thought      ESC[90m  ESC[39mESC[90mESC[1mboldESC[2m midESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[1mboldESC[0mESC[90m midESC[0mESC[39m
 
 ### heading-3 with code
-  thought      ESC[90m  ESC[39mESC[90mESC[36mxESC[90m yESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[36mxESC[0mESC[90m yESC[0mESC[39m
 
 ### heading-1 with link
-  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mdocsESC[0m xESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90msee ESC[96mESC[4mdocsESC[0mESC[90m xESC[0mESC[39m
 
 ### bullet list with spans
-  thought      ESC[90m  ESC[39mESC[90m• ESC[1maESC[2m and ESC[36mbESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90m• ESC[1maESC[0mESC[90m and ESC[36mbESC[0mESC[90mESC[0mESC[39m
   thought      ESC[90m  ESC[39mESC[90m• plainESC[39m
 
 ### ordered list with spans
-  thought      ESC[90m  ESC[39mESC[90m1. ESC[1maESC[2m and ESC[36mbESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90m1. ESC[1maESC[0mESC[90m and ESC[36mbESC[0mESC[90mESC[0mESC[39m
   thought      ESC[90m  ESC[39mESC[90m2. plainESC[39m
 
 ### table with spans
@@ -359,9 +359,9 @@ exports[`inline markup end-to-end (xterm-truecolor) > renders the thought-markdo
   thought      ESC[90m  ESC[39mESC[90ma **b cESC[39m
 
 ### adjacent spans
-  thought      ESC[90m  ESC[39mESC[90mESC[1maESC[2mESC[36mbESC[90mESC[4mcESC[0mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mESC[1maESC[0mESC[90mESC[36mbESC[0mESC[90mESC[4mcESC[0mESC[90mESC[0mESC[39m
 
 ### multiline prose with spans
-  thought      ESC[90m  ESC[39mESC[90mline ESC[1moneESC[2mESC[0mESC[39m
-  thought      ESC[90m  ESC[39mESC[90mline ESC[36mtwoESC[90mESC[0mESC[39m"
+  thought      ESC[90m  ESC[39mESC[90mline ESC[1moneESC[0mESC[90mESC[0mESC[39m
+  thought      ESC[90m  ESC[39mESC[90mline ESC[36mtwoESC[0mESC[90mESC[0mESC[39m"
 `;

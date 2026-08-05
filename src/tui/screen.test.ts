@@ -679,6 +679,54 @@ describe("Screen scrollback search", () => {
     expect(state.matchIndex).toBe(0);
   });
 
+  it("does not match inside a line's escape sequences", () => {
+    // Inline spans are real SGR, so the raw body contains "\x1b[96m…".
+    // Searching the raw body found the "m" that terminates every sequence,
+    // and "1" / ";" / "[" were poisoned the same way.
+    const screen = makeScreen();
+    screen.appendLine({
+      body: "call \x1b[96mfoo\x1b[0m now",
+      bodyStyle: "agent",
+    });
+    screen.enterScrollbackSearch();
+    const state = () =>
+      (
+        screen as unknown as {
+          scrollbackSearch: {
+            matches: Array<{ lineIdx: number; col: number }>;
+          };
+        }
+      ).scrollbackSearch;
+    for (const noise of ["m", "[", ";", "96", "1b"]) {
+      screen.updateScrollbackSearchTerm(noise);
+      expect(state().matches.length, `term: ${noise}`).toBe(0);
+    }
+    // Real visible text still matches, at its RAW offset so the highlight
+    // painter slices the right bytes.
+    screen.updateScrollbackSearchTerm("foo");
+    expect(state().matches.length).toBe(1);
+    expect(state().matches[0]?.col).toBe("call \x1b[96m".length);
+  });
+
+  it("matches visible text that a span boundary splits", () => {
+    // "fo" + reset + "o" renders as "foo", so it should match — and the
+    // recorded offset is the start of the raw span, not of the clean one.
+    const screen = makeScreen();
+    screen.appendLine({
+      body: "a fo\x1b[0mo b",
+      bodyStyle: "agent",
+    });
+    screen.enterScrollbackSearch();
+    screen.updateScrollbackSearchTerm("foo");
+    const state = (
+      screen as unknown as {
+        scrollbackSearch: { matches: Array<{ lineIdx: number; col: number }> };
+      }
+    ).scrollbackSearch;
+    expect(state.matches.length).toBe(1);
+    expect(state.matches[0]?.col).toBe(2);
+  });
+
   it("within a single line, matches are ordered right-to-left", () => {
     const screen = makeScreen();
     screen.appendLine({ body: "alpha" });

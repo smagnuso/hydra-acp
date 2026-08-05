@@ -368,19 +368,18 @@ describe("parseAgentMarkdown", () => {
   });
 
   it("applies inline markup inside headings with level-specific restore closers", () => {
-    // heading-1 is bold + brightYellow: a code span opens bright cyan and
-    // closes by re-emitting bold + brightYellow so the rest of the heading
-    // keeps its style. heading-2 swaps the code opener to bright yellow (the
-    // default bright cyan would vanish into the heading's own brightCyan) and
-    // restores bold + brightCyan. heading-3 has no colour of its own, so its
-    // closer fully resets and re-bolds.
+    // Every span closes with a full reset followed by the row's own style, so
+    // the rest of the heading keeps bold + its colour. heading-2 swaps the
+    // code opener to bright yellow (the default bright cyan would vanish into
+    // the heading's own brightCyan); heading-3 has no colour of its own, so
+    // its restore is just bold.
     const h1 = parseAgentMarkdown("# pre `cli/` post");
     expect(h1[0]?.bodyStyle).toBe("heading-1");
-    expect(h1[0]?.body).toBe("pre \x1b[96mcli/\x1b[1m\x1b[93m post");
+    expect(h1[0]?.body).toBe("pre \x1b[96mcli/\x1b[0m\x1b[1m\x1b[93m post");
 
     const h2 = parseAgentMarkdown("## **bold** mid");
     expect(h2[0]?.bodyStyle).toBe("heading-2");
-    expect(h2[0]?.body).toBe("\x1b[1mbold\x1b[1m\x1b[96m mid");
+    expect(h2[0]?.body).toBe("\x1b[1mbold\x1b[0m\x1b[1m\x1b[96m mid");
 
     const h3 = parseAgentMarkdown("### `x` y");
     expect(h3[0]?.bodyStyle).toBe("heading-3");
