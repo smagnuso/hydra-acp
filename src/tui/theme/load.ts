@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { backgroundHint } from "./capability.js";
 import { join } from "node:path";
 import { builtinNames, builtinTheme } from "./builtins.js";
-import { parseColor, rgb, type Color } from "./color.js";
+import { isDark, parseColor, rgb, type Color } from "./color.js";
 import {
   DEFAULT_PALETTE,
   elementNames,
@@ -500,6 +500,47 @@ export function resolveThemeBackground(
   }
   const hint = backgroundHint(env);
   return hint === undefined ? undefined : namedBackground(hint);
+}
+
+/**
+ * Whether the active theme was designed for the opposite kind of terminal.
+ *
+ * `themeBackground` can only fix the BANDS. A light theme's foregrounds are
+ * chosen against a pale background — solarized-light's body text is `#657b83`,
+ * a mid grey — and on a black terminal they stay hard to read however the bands
+ * derive. There is no knob for that, so the answer is to say so and name the
+ * counterpart.
+ *
+ * Lightness is measured from the theme's own `bg` rather than read off a flag.
+ * A flag would have to be maintained per theme and could drift from the palette
+ * it describes, and it would say nothing about a user's own theme file, which is
+ * exactly the case with nobody to ask. A theme declaring no `bg` (`terminal`,
+ * `mono`) is making no claim, so there is nothing to disagree with.
+ *
+ * Returns undefined when there is no mismatch or not enough information: this
+ * fires only when the terminal background is actually KNOWN (sensed via OSC 11,
+ * configured, or hinted by COLORFGBG). Guessing here would nag people whose
+ * setup is fine.
+ */
+export function themeBackgroundMismatch(
+  palette: Palette,
+  name: string,
+  background: Color | undefined,
+): string | undefined {
+  if (background === undefined || palette.bg === undefined) {
+    return undefined;
+  }
+  const terminalDark = isDark(background);
+  const themeDark = isDark(palette.bg);
+  if (terminalDark === themeDark) {
+    return undefined;
+  }
+  const counterpart = builtinTheme(name)?.counterpart;
+  const suggestion =
+    counterpart === undefined ? "" : ` — try "${counterpart}" instead`;
+  return terminalDark
+    ? `"${name}" is a light theme and this terminal is dark${suggestion}`
+    : `"${name}" is a dark theme and this terminal is light${suggestion}`;
 }
 
 function namedBackground(name: string): Color | undefined {

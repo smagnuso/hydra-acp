@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadTheme, resolveThemeBackground } from "./load.js";
+import {
+  loadTheme,
+  resolveThemeBackground,
+  themeBackgroundMismatch,
+} from "./load.js";
 import {
   DEFAULT_PALETTE,
   elementNames,
@@ -11,7 +15,7 @@ import {
   setTheme,
   type ThemeToken,
 } from "./index.js";
-import { builtinNames } from "./builtins.js";
+import { builtinNames, builtinTheme } from "./builtins.js";
 import { parseAgentMarkdown } from "../format.js";
 import { parseColor, rgb, type Color } from "./color.js";
 
@@ -597,7 +601,9 @@ describe("a token that sets both a foreground and a background has contrast", ()
     return null;
   };
 
-  it.each(["terminal", "dracula", "nord", "gruvbox-dark", "solarized-light", "mono"])(
+  // Every builtin, derived rather than listed: a theme added to builtins.ts must
+  // not be able to skip this by not being named here.
+  it.each(builtinNames())(
     "%s",
     async (name) => {
       apply(await loadTheme(name, await dir()));
@@ -859,7 +865,10 @@ describe("a theme's accent slots are not near-white washes", () => {
     "brightCyan",
   ] as const;
 
-  it.each(["dracula", "nord", "gruvbox-dark", "solarized-dark", "solarized-light"])(
+  // Derived from the builtin list for the same reason as above. Themes with no
+  // rgb accents at all (terminal, mono) pass trivially, which is correct — they
+  // defer to the user's own palette and have nothing to wash out.
+  it.each(builtinNames())(
     "%s",
     async (name) => {
       const t = await loadTheme(name, await dir());
@@ -879,4 +888,60 @@ describe("a theme's accent slots are not near-white washes", () => {
       expect(washed).toEqual([]);
     },
   );
+});
+
+describe("themeBackgroundMismatch", () => {
+  // themeBackground fixes the BANDS. It cannot fix a light theme's foregrounds,
+  // which are chosen against a pale background — solarized-light's body text is a
+  // mid grey — so on a black terminal they stay hard to read whatever the bands
+  // do. The only remedy is to say so and name the other half of the pair.
+  const dark = rgb(0, 0, 0);
+  const light = rgb(255, 255, 255);
+  const lightTheme = builtinTheme("solarized-light")!.palette;
+  const darkTheme = builtinTheme("solarized-dark")!.palette;
+
+  it("flags a light theme on a dark terminal, and names the counterpart", () => {
+    const msg = themeBackgroundMismatch(lightTheme, "solarized-light", dark);
+    expect(msg).toContain("light theme");
+    expect(msg).toContain("solarized-dark");
+  });
+
+  it("flags the reverse too", () => {
+    const msg = themeBackgroundMismatch(darkTheme, "solarized-dark", light);
+    expect(msg).toContain("dark theme");
+    expect(msg).toContain("solarized-light");
+  });
+
+  it("says nothing when they agree", () => {
+    expect(
+      themeBackgroundMismatch(darkTheme, "solarized-dark", dark),
+    ).toBeUndefined();
+    expect(
+      themeBackgroundMismatch(lightTheme, "solarized-light", light),
+    ).toBeUndefined();
+  });
+
+  // Guessing would nag people whose setup is fine.
+  it("says nothing when the terminal background is unknown", () => {
+    expect(
+      themeBackgroundMismatch(lightTheme, "solarized-light", undefined),
+    ).toBeUndefined();
+  });
+
+  // `terminal` and `mono` declare no bg, so they make no claim to disagree with.
+  it("says nothing for a theme that declares no background", () => {
+    const t = builtinTheme("terminal")!.palette;
+    expect(t.bg).toBeUndefined();
+    expect(themeBackgroundMismatch(t, "terminal", light)).toBeUndefined();
+  });
+
+  it("omits the suggestion for a theme with no counterpart", () => {
+    const msg = themeBackgroundMismatch(
+      builtinTheme("dracula")!.palette,
+      "dracula",
+      light,
+    );
+    expect(msg).toContain("dark theme");
+    expect(msg).not.toContain("try");
+  });
 });

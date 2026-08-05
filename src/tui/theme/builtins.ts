@@ -66,8 +66,16 @@ export interface BuiltinTheme {
   name: string;
   /** Shown in the picker. */
   description: string;
-  /** Whether the palette expects a light terminal background. */
-  light: boolean;
+  /**
+   * The same theme for the opposite background, when there is one. Suggested by
+   * themeBackgroundMismatch when a theme is being used on the wrong kind of
+   * terminal — the one thing `themeBackground` cannot fix, since a light theme's
+   * foregrounds stay unreadable on black however the bands derive.
+   *
+   * Whether a theme IS light is not recorded here: it is measured from the
+   * palette's own `bg`, which cannot drift from the palette the way a flag can.
+   */
+  counterpart?: string;
   palette: Palette;
   /** Role overrides, for a theme that needs more than a palette. */
   roles?: Record<string, ColorOverride>;
@@ -231,47 +239,291 @@ const SOLARIZED_DARK = palette(
   { bg: "#002b36", fg: "#839496" },
 );
 
+// catppuccin latte: catppuccin.com, and the neutral light theme this set was
+// missing — solarized-light is a cream, this is close to white.
+//
+// Only the light member of the family is here. Mocha, the popular dark one, is a
+// pastel palette whose accents are tinted whites: #f9e2af yellow and #f5c2e7 pink
+// have the same max channel as its #cdd6f4 foreground, differing only in chroma —
+// the exact shape of the bug that made dracula render near-monochrome (see the
+// note there, and the guard in load.test.ts). Substituting deeper colours does not
+// work either: peach is mocha's only legible warm accent, so `warn` and `active`
+// would collide. A theme that cannot express "busy" distinctly from "warning" is
+// not worth shipping as a default, and anyone who wants mocha can drop it in
+// ~/.hydra-acp/themes/ where the guard is not the judge of their taste.
+//
+// The accents are latte's own, which are DARKER than mocha's rather than being
+// the same hues: a pastel on white is invisible. That is also why brightWhite
+// here is a dark grey — the slot names are ANSI vocabulary, but the slots feed
+// roles, and `fgStrong` has to be the most emphatic foreground, which on a light
+// background means the darkest.
+const CATPPUCCIN_LATTE = palette(
+  {
+    black: "#ccd0da", // surface0
+    red: "#d20f39",
+    green: "#40a02b",
+    yellow: "#df8e1d",
+    blue: "#1e66f5",
+    magenta: "#ea76cb", // pink
+    cyan: "#179299", // teal
+    white: "#5c5f77", // subtext1
+    brightBlack: "#8c8fa1", // subtext0 — the grey for scaffolding
+    brightRed: "#e64553", // maroon
+    brightGreen: "#40a02b",
+    brightYellow: "#fe640b", // peach
+    brightBlue: "#7287fd", // lavender
+    brightMagenta: "#8839ef", // mauve
+    brightCyan: "#04a5e5", // sky
+    brightWhite: "#4c4f69", // text: the darkest, per the note above
+  },
+  { bg: "#eff1f5", fg: "#4c4f69" },
+);
+
+// gruvbox light: morhetz/gruvbox's light hard variant. Same inversion as latte —
+// the accents are gruvbox's `faded` set (darker) rather than its `bright` one,
+// and brightWhite is the darkest foreground rather than the palest.
+const GRUVBOX_LIGHT = palette(
+  {
+    black: "#ebdbb2", // light1
+    red: "#9d0006",
+    green: "#79740e",
+    yellow: "#b57614",
+    blue: "#076678",
+    magenta: "#8f3f71",
+    cyan: "#427b58",
+    white: "#504945", // dark2
+    brightBlack: "#7c6f64", // dark4: gruvbox's own comment grey for light bgs
+    brightRed: "#cc241d",
+    brightGreen: "#98971a",
+    brightYellow: "#af3a03", // orange: warmer and darker than the yellow, which
+    // on cream is nearly illegible as an accent
+    brightBlue: "#458588",
+    brightMagenta: "#b16286",
+    brightCyan: "#689d6a",
+    brightWhite: "#3c3836", // dark0
+  },
+  { bg: "#fbf1c7", fg: "#3c3836" },
+);
+
+// tokyo night: enkia/tokyo-night. Distinct from everything else here — dracula is
+// purple, nord is cool grey, gruvbox is warm — this is deep blue.
+const TOKYO_NIGHT = palette(
+  {
+    black: "#414868",
+    red: "#f7768e",
+    green: "#9ece6a",
+    yellow: "#e0af68",
+    blue: "#7aa2f7",
+    magenta: "#bb9af7",
+    cyan: "#7dcfff",
+    white: "#a9b1d6",
+    brightBlack: "#565f89", // the comment colour, which is what subtle/muted want
+    brightRed: "#ff757f",
+    brightGreen: "#73daca",
+    brightYellow: "#ff9e64", // orange
+    brightBlue: "#7aa2f7",
+    brightMagenta: "#bb9af7",
+    brightCyan: "#2ac3de",
+    brightWhite: "#c0caf5",
+  },
+  { bg: "#1a1b26", fg: "#c0caf5" },
+);
+
+// one dark: atom's default, and the most widely recognised editor palette here.
+const ONE_DARK = palette(
+  {
+    black: "#3f4451",
+    red: "#e05561",
+    green: "#8cc265",
+    yellow: "#d18f52",
+    blue: "#4aa5f0",
+    magenta: "#c162de",
+    cyan: "#42b3c2",
+    white: "#abb2bf",
+    brightBlack: "#5c6370", // one dark's comment grey
+    brightRed: "#ff616e",
+    brightGreen: "#a5e075",
+    brightYellow: "#e5c07b",
+    brightBlue: "#61afef",
+    brightMagenta: "#c678dd",
+    brightCyan: "#56b6c2",
+    brightWhite: "#e6e6e6",
+  },
+  { bg: "#282c34", fg: "#abb2bf" },
+);
+
+// colorblind: the one theme here that exists for a functional reason rather than
+// an aesthetic one.
+//
+// Hydra encodes state on the red/green axis in three places — ok vs error, a
+// diff's + vs -, and git staged vs dirty — which is the single worst axis to use
+// for anyone with deuteranopia or protanopia, the most common colour vision
+// deficiencies. No palette swap fixes that, because the problem is not which red
+// and green: it is that MEANING is carried by a distinction those eyes do not
+// make. What has to move is the roles.
+//
+// So the palette below is an ordinary dark base drawn from the Okabe-Ito
+// qualitative set (jfly.uni-koeln.de/color), whose colours are chosen to stay
+// mutually distinguishable under all common forms of CVD, and the role overrides
+// then take every state signal off red-versus-green:
+//
+//   ok        bluish green   error    vermillion
+//   warn      orange         active   yellow
+//   + lines   sky blue       - lines  vermillion
+//   staged    blue           dirty    orange
+//
+// Blue-versus-orange is the standard accessible substitute for green-versus-red,
+// and it is why accessible diff viewers colour additions blue.
+//
+// `ok` is NOT green, which is the part that surprised me. Okabe-Ito guarantees its
+// seven colours are mutually distinguishable, and I first read that as licence to
+// use its bluish green for success and its vermillion for failure. Simulating
+// deuteranopia says otherwise: that pair separates by 118, and green against the
+// reddish purple `errorSoft` uses collapses to 52 — worse than dracula's ordinary
+// red/green, which manages 86. Okabe-Ito's guarantee leans on lightness as much as
+// hue, and lightness is not what tells a success line from a failure line when
+// they are the same weight and one line apart. Every pair that survives the
+// simulation well is blue-family against orange-family, so success is sky blue
+// here and green appears nowhere that carries meaning. colorblind.test.ts measures
+// this rather than asserting it.
+//
+// What collapse is tolerated, deliberately: `warn` against `error`. Mistaking a
+// warning for an error costs a moment; mistaking a failure for a success costs
+// more. The pairs that mean OPPOSITE things are the ones held apart.
+//
+// Note this theme is only expressible because roles sit between the palette and
+// the tokens, and because gitStaged stopped borrowing ok — on the old wiring,
+// moving "staged" off green would have moved every success signal with it.
+const OKABE_ITO = {
+  orange: "#e69f00",
+  skyBlue: "#56b4e9",
+  bluishGreen: "#009e73",
+  yellow: "#f0e442",
+  blue: "#0072b2",
+  vermillion: "#d55e00",
+  reddishPurple: "#cc79a7",
+} as const;
+
+const COLORBLIND = palette(
+  {
+    black: "#3a3a3a",
+    red: OKABE_ITO.reddishPurple,
+    green: OKABE_ITO.bluishGreen,
+    yellow: OKABE_ITO.orange,
+    blue: OKABE_ITO.blue,
+    magenta: OKABE_ITO.reddishPurple,
+    cyan: OKABE_ITO.skyBlue,
+    white: "#d0d0d0",
+    brightBlack: "#8a8a8a",
+    brightRed: OKABE_ITO.vermillion,
+    brightGreen: OKABE_ITO.bluishGreen,
+    brightYellow: OKABE_ITO.yellow,
+    brightBlue: OKABE_ITO.skyBlue,
+    brightMagenta: OKABE_ITO.reddishPurple,
+    brightCyan: OKABE_ITO.skyBlue,
+    brightWhite: "#f0f0f0",
+  },
+  { bg: "#1c1c1c", fg: "#d0d0d0" },
+);
+
+/** A role override pinned to an explicit colour. */
+function fgRole(value: string): ColorOverride {
+  return { fg: hex(value) };
+}
+
 export const BUILTIN_THEMES: BuiltinTheme[] = [
   {
     name: "terminal",
     description: "your terminal's own 16 colours (default)",
-    light: false,
     palette: DEFAULT_PALETTE,
   },
   {
     name: "dracula",
     description: "dark, high contrast, purple-leaning",
-    light: false,
     palette: DRACULA,
   },
   {
     name: "nord",
     description: "dark, cool, low contrast",
-    light: false,
     palette: NORD,
   },
   {
     name: "gruvbox-dark",
     description: "dark, warm, retro",
-    light: false,
+    counterpart: "gruvbox-light",
     palette: GRUVBOX_DARK,
   },
   {
+    name: "catppuccin-latte",
+    description: "light, soft pastel",
+    palette: CATPPUCCIN_LATTE,
+  },
+  {
+    name: "tokyo-night",
+    description: "dark, deep blue",
+    palette: TOKYO_NIGHT,
+  },
+  {
+    name: "one-dark",
+    description: "dark, the Atom default",
+    palette: ONE_DARK,
+  },
+  {
+    name: "gruvbox-light",
+    description: "light, warm, retro",
+    counterpart: "gruvbox-dark",
+    palette: GRUVBOX_LIGHT,
+  },
+  {
+    name: "colorblind",
+    description: "dark, no meaning carried on the red/green axis",
+    palette: COLORBLIND,
+    roles: {
+      // The state axis, moved to blue-versus-orange. See COLORBLIND above for why
+      // success is not green and why these specific pairings.
+      ok: fgRole(OKABE_ITO.skyBlue),
+      error: fgRole(OKABE_ITO.vermillion),
+      // The same hue as `error` rather than a second one: these are two
+      // intensities of failure, not two different things, so a dichromat
+      // collapsing them loses nothing. Spending a distinguishable colour here
+      // would take it from a pair that needs it.
+      errorSoft: fgRole(OKABE_ITO.vermillion),
+      warn: fgRole(OKABE_ITO.orange),
+      // Yellow, not orange: `active` is a running tool and `error` is a failed one,
+      // and those appear in the same block a line apart. Orange against vermillion
+      // separates by 54 under simulation; yellow manages 135.
+      active: fgRole(OKABE_ITO.yellow),
+      cold: fgRole(OKABE_ITO.reddishPurple),
+      // A diff is the densest red/green in the app, and the one place the two
+      // colours sit adjacent line by line.
+      diffAdded: fgRole(OKABE_ITO.skyBlue),
+      diffRemoved: fgRole(OKABE_ITO.vermillion),
+      // The git list is a three-way classification, so it needs three
+      // distinguishable colours rather than two plus a grey.
+      gitStaged: fgRole(OKABE_ITO.blue),
+      gitDirty: fgRole(OKABE_ITO.orange),
+      // Syntax keeps hues but drops the red/green pairing: a deletion-coloured
+      // regexp next to an addition-coloured number is noise, not signal.
+      syntaxRegexp: fgRole(OKABE_ITO.reddishPurple),
+      syntaxNumber: fgRole(OKABE_ITO.skyBlue),
+    },
+  },
+
+  {
     name: "solarized-dark",
     description: "dark, low contrast",
-    light: false,
+    counterpart: "solarized-light",
     palette: SOLARIZED_DARK,
   },
   {
     name: "solarized-light",
     description: "light",
-    light: true,
+    counterpart: "solarized-dark",
     palette: SOLARIZED_LIGHT,
   },
   {
     name: "mono",
     description: "no colour; weight and glyphs only",
-    light: false,
     palette: MONO_PALETTE,
     roles: {
       // Nothing here adds a hue. These lift the states that must stand out to

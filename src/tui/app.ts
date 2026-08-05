@@ -196,11 +196,15 @@ import {
   listThemes,
   loadTheme,
   resolveThemeBackground,
+  themeBackgroundMismatch,
 } from "./theme/load.js";
 
 // Theme-load problems, carried from config load to the first paint. Module
 // scope because the two happen in different functions.
 let pendingThemeProblems: string[] = [];
+// Same carry, for things that are worth saying but are not wrong — currently a
+// light theme on a dark terminal or the reverse.
+let pendingThemeNotices: string[] = [];
 // Selectable themes and which one is live, for the ^O picker. Same reason for
 // module scope: loaded during startup, read by the modal.
 let themeChoices: Array<{
@@ -968,6 +972,18 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // Stashed rather than reported here: the transcript does not exist yet, and
   // stderr would be wiped by the alt-screen switch.
   pendingThemeProblems = loadedTheme.problems;
+  // A separate list from the problems above because it is not an error: the theme
+  // loaded fine, it is just the wrong half of a pair for this terminal. Reported
+  // on a notice line rather than notice-error.
+  pendingThemeNotices = [];
+  const mismatch = themeBackgroundMismatch(
+    loadedTheme.palette,
+    loadedTheme.name,
+    themeBackground,
+  );
+  if (mismatch !== undefined) {
+    pendingThemeNotices.push(mismatch);
+  }
   // Only autostart the daemon when it's on this machine. Remote
   // targets get a connection error from the WS layer if the daemon
   // isn't up, which is the right behavior (we can't reach across the
@@ -3869,6 +3885,16 @@ async function runSession(
     // Everything on screen was painted with the old palette, including the
     // row cache, so this has to be a full redraw rather than a repaint.
     screen.fullRedraw();
+    // Both paths into here can produce a mismatch: cycling onto the light half of
+    // a pair, or the terminal itself going light under a dark theme.
+    const mismatch = themeBackgroundMismatch(
+      active.palette,
+      activeThemeName,
+      themeBackground,
+    );
+    if (mismatch !== undefined) {
+      screen.notify(mismatch);
+    }
   };
 
   const cycleTheme = (): void => {
@@ -8408,6 +8434,16 @@ async function runSession(
       })),
     );
     pendingThemeProblems = [];
+  }
+  if (pendingThemeNotices.length > 0) {
+    screen.appendLines(
+      pendingThemeNotices.map((notice): FormattedLine => ({
+        prefix: "  ",
+        body: `theme: ${notice}`,
+        bodyStyle: "notice",
+      })),
+    );
+    pendingThemeNotices = [];
   }
 
   // Composer prompt typed in the picker before the session existed.
