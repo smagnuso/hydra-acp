@@ -21,6 +21,7 @@ import {
 } from "../format.js";
 import { writeBodyWithHighlight, writeStyled } from "../screen.js";
 import { createCapturingTerminal, visible } from "./capture.js";
+import { buildSyntaxTheme } from "./index.js";
 
 // Constructs chosen to hit every inline emission point in
 // applyInlineMarkupWithLinks, plus the per-style closer tables
@@ -296,5 +297,64 @@ describe("syntax highlighting closes back to the code band", () => {
   it("leaves an unsupported language untouched", () => {
     const body = fence("not-a-language", "plain text");
     expect(body).not.toContain("\x1b");
+  });
+});
+
+describe("no highlight scope falls through to cli-highlight's own theme", () => {
+  // cli-highlight resolves `theme[scope] || DEFAULT_THEME[scope] || plain`, and
+  // its DEFAULT_THEME is chalk-based. A gap in our theme therefore means a
+  // scope that (a) cannot be themed and (b) closes with SGR 39, which on a code
+  // band drops the rest of the line to the terminal's default foreground —
+  // exactly what the old `\x1b[39m` -> `\x1b[37m` rewrite existed to paper over.
+  //
+  // `doctag` was that gap. It is invisible in a plain test run because chalk
+  // autodetects and vitest's stdout is not a tty, so this asserts on the theme's
+  // key coverage rather than on rendered output.
+  it("covers every key of cli-highlight's DEFAULT_THEME", async () => {
+    const { DEFAULT_THEME } = await import("cli-highlight");
+    const ours = buildSyntaxTheme();
+    const missing = Object.keys(DEFAULT_THEME).filter((k) => !(k in ours));
+    expect(missing).toEqual([]);
+  });
+
+  it("never emits a default-foreground close from a fence", async () => {
+    // The property the coverage above protects, checked end to end.
+    const md =
+      "```js\n/**\n * @param x thing\n */\nfunction f(x) { return `s${x}`; }\n```";
+    const body = parseAgentMarkdown(md)
+      .map((l) => l.body)
+      .join("\n");
+    expect(body).not.toContain("\x1b[39m");
+  });
+});
+
+describe("a syntax span's close depends on what it set", () => {
+  // Two different jobs, and getting one wrong is invisible in a default test
+  // run because chalk autodetects and vitest is not a tty.
+  //
+  //   colour scope    -> must land back on the code band's base (white), not
+  //                      the terminal default, or the rest of the line drops
+  //                      off the band.
+  //   attribute scope -> must emit that attribute's own off-code, or the
+  //                      italic/bold leaks to end of line. Re-asserting the
+  //                      foreground does NOT turn an attribute off.
+  const theme = buildSyntaxTheme();
+
+  it("closes a colour scope onto the band base", () => {
+    expect(theme.keyword!("X")).toBe("\x1b[94mX\x1b[37m");
+    expect(theme.doctag!("X")).toBe("\x1b[32mX\x1b[37m");
+    expect(theme.addition!("X")).toBe("\x1b[92mX\x1b[37m");
+  });
+
+  it("closes an attribute scope with its own off-code", () => {
+    expect(theme.emphasis!("X")).toBe("\x1b[3mX\x1b[23m");
+    expect(theme.strong!("X")).toBe("\x1b[1mX\x1b[22m");
+    expect(theme.link!("X")).toBe("\x1b[4mX\x1b[24m");
+  });
+
+  it("passes an unstyled scope straight through", () => {
+    for (const scope of ["subst", "bullet", "quote", "selector-tag"]) {
+      expect(theme[scope]!("X"), scope).toBe("X");
+    }
   });
 });

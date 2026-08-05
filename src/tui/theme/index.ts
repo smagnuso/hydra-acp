@@ -161,6 +161,13 @@ const attr = (on: number, off: number): Layer => ({
 const bold = attr(1, 22);
 const dim = attr(2, 22);
 const inverse = attr(7, 27);
+// Only reached by highlight.js's `emphasis` and `link` scopes. Note format.ts
+// deliberately renders markdown italic as underline instead, because SGR 3 is
+// unreliable — tmux drops it and some terminals show it as inverse video. That
+// argument applies here too; these keep italic/underline only because it is
+// what cli-highlight already emitted.
+const italic = attr(3, 23);
+const underline = attr(4, 24);
 
 // ---------------------------------------------------------------------------
 // Tier 1: roles
@@ -185,7 +192,10 @@ const inverse = attr(7, 27);
 //     path), the other marks which box has keyboard focus. Unrelated meanings
 //     that happen to share a colour.
 const roles = {
-  // Text.
+  // Text. `fg` is the terminal's own foreground, i.e. deliberately unstyled —
+  // used where the normal case should not draw the eye (a Ready status), where
+  // removing emphasis IS the signal (a hovered hint chunk), and by the
+  // highlight.js scopes that carry no colour of their own.
   fg: [] as Layer[],
   fgStrong: [fgL(palette.brightWhite)],
   muted: [dim],
@@ -248,6 +258,12 @@ const roles = {
   // signal anyway.
   diffAdded: [fgL(palette.brightGreen)],
   diffRemoved: [fgL(palette.brightRed)],
+  // A documentation tag inside a comment (`@param`, `@returns`).
+  syntaxDoctag: [fgL(palette.green)],
+  // Markup emphasis inside a fence, e.g. a ```markdown block.
+  syntaxEmphasis: [italic],
+  syntaxStrong: [bold],
+  syntaxLink: [underline],
 } satisfies Record<string, Layer[]>;
 
 /** The opening bytes of a role, for callers that splice colour into a string. */
@@ -460,28 +476,48 @@ export type ChromeToken =
  * see SYNTAX_THEME below.
  */
 export type SyntaxToken =
-  | "syntax-keyword"
-  | "syntax-built_in"
-  | "syntax-type"
-  | "syntax-literal"
-  | "syntax-number"
-  | "syntax-string"
-  | "syntax-regexp"
-  | "syntax-comment"
-  | "syntax-function"
-  | "syntax-title"
-  | "syntax-class"
+  | "syntax-addition"
   | "syntax-attr"
   | "syntax-attribute"
-  | "syntax-variable"
-  | "syntax-params"
+  | "syntax-built_in"
+  | "syntax-builtin-name"
+  | "syntax-bullet"
+  | "syntax-class"
+  | "syntax-code"
+  | "syntax-comment"
+  | "syntax-default"
+  | "syntax-deletion"
+  | "syntax-doctag"
+  | "syntax-emphasis"
+  | "syntax-formula"
+  | "syntax-function"
+  | "syntax-keyword"
+  | "syntax-link"
+  | "syntax-literal"
   | "syntax-meta"
-  | "syntax-symbol"
-  | "syntax-section"
-  | "syntax-tag"
+  | "syntax-meta-keyword"
+  | "syntax-meta-string"
   | "syntax-name"
-  | "syntax-addition"
-  | "syntax-deletion";
+  | "syntax-number"
+  | "syntax-params"
+  | "syntax-quote"
+  | "syntax-regexp"
+  | "syntax-section"
+  | "syntax-selector-attr"
+  | "syntax-selector-class"
+  | "syntax-selector-id"
+  | "syntax-selector-pseudo"
+  | "syntax-selector-tag"
+  | "syntax-string"
+  | "syntax-strong"
+  | "syntax-subst"
+  | "syntax-symbol"
+  | "syntax-tag"
+  | "syntax-template-tag"
+  | "syntax-template-variable"
+  | "syntax-title"
+  | "syntax-type"
+  | "syntax-variable";
 
 /** Anything the theme can resolve. */
 export type ThemeToken = Style | ChromeToken | SyntaxToken;
@@ -754,28 +790,48 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // Several scopes share a role, which is highlight.js's granularity rather
   // than a decision here: `attr`/`attribute`, `section`/`tag`, and
   // `function`/`title` are the same thing under different language grammars.
-  "syntax-keyword": { layers: [...roles.syntaxKeyword] },
-  "syntax-built_in": { layers: [...roles.syntaxBuiltin] },
-  "syntax-type": { layers: [...roles.syntaxType] },
-  "syntax-literal": { layers: [...roles.syntaxLiteral] },
-  "syntax-number": { layers: [...roles.syntaxNumber] },
-  "syntax-string": { layers: [...roles.syntaxString] },
-  "syntax-regexp": { layers: [...roles.syntaxRegexp] },
-  "syntax-comment": { layers: [...roles.syntaxComment] },
-  "syntax-function": { layers: [...roles.syntaxString] },
-  "syntax-title": { layers: [...roles.syntaxString] },
-  "syntax-class": { layers: [...roles.syntaxClass] },
+  "syntax-addition": { layers: [...roles.diffAdded] },
   "syntax-attr": { layers: [...roles.syntaxBuiltin] },
   "syntax-attribute": { layers: [...roles.syntaxBuiltin] },
-  "syntax-variable": { layers: [...roles.syntaxVariable] },
-  "syntax-params": { layers: [...roles.syntaxVariable] },
-  "syntax-meta": { layers: [...roles.syntaxMeta] },
-  "syntax-symbol": { layers: [...roles.syntaxMeta] },
-  "syntax-section": { layers: [...roles.syntaxBuiltin] },
-  "syntax-tag": { layers: [...roles.syntaxBuiltin] },
-  "syntax-name": { layers: [...roles.syntaxType] },
-  "syntax-addition": { layers: [...roles.diffAdded] },
+  "syntax-built_in": { layers: [...roles.syntaxBuiltin] },
+  "syntax-builtin-name": { layers: [...roles.fg] },
+  "syntax-bullet": { layers: [...roles.fg] },
+  "syntax-class": { layers: [...roles.syntaxClass] },
+  "syntax-code": { layers: [...roles.fg] },
+  "syntax-comment": { layers: [...roles.syntaxComment] },
+  "syntax-default": { layers: [...roles.fg] },
   "syntax-deletion": { layers: [...roles.diffRemoved] },
+  "syntax-doctag": { layers: [...roles.syntaxDoctag] },
+  "syntax-emphasis": { layers: [...roles.syntaxEmphasis] },
+  "syntax-formula": { layers: [...roles.fg] },
+  "syntax-function": { layers: [...roles.syntaxString] },
+  "syntax-keyword": { layers: [...roles.syntaxKeyword] },
+  "syntax-link": { layers: [...roles.syntaxLink] },
+  "syntax-literal": { layers: [...roles.syntaxLiteral] },
+  "syntax-meta": { layers: [...roles.syntaxMeta] },
+  "syntax-meta-keyword": { layers: [...roles.fg] },
+  "syntax-meta-string": { layers: [...roles.fg] },
+  "syntax-name": { layers: [...roles.syntaxType] },
+  "syntax-number": { layers: [...roles.syntaxNumber] },
+  "syntax-params": { layers: [...roles.syntaxVariable] },
+  "syntax-quote": { layers: [...roles.fg] },
+  "syntax-regexp": { layers: [...roles.syntaxRegexp] },
+  "syntax-section": { layers: [...roles.syntaxBuiltin] },
+  "syntax-selector-attr": { layers: [...roles.fg] },
+  "syntax-selector-class": { layers: [...roles.fg] },
+  "syntax-selector-id": { layers: [...roles.fg] },
+  "syntax-selector-pseudo": { layers: [...roles.fg] },
+  "syntax-selector-tag": { layers: [...roles.fg] },
+  "syntax-string": { layers: [...roles.syntaxString] },
+  "syntax-strong": { layers: [...roles.syntaxStrong] },
+  "syntax-subst": { layers: [...roles.fg] },
+  "syntax-symbol": { layers: [...roles.syntaxMeta] },
+  "syntax-tag": { layers: [...roles.syntaxBuiltin] },
+  "syntax-template-tag": { layers: [...roles.fg] },
+  "syntax-template-variable": { layers: [...roles.fg] },
+  "syntax-title": { layers: [...roles.syntaxString] },
+  "syntax-type": { layers: [...roles.syntaxType] },
+  "syntax-variable": { layers: [...roles.syntaxVariable] },
 
   // A bare warning printed outside any frame ("no sessions found", a daemon
   // version mismatch on stderr). Plain yellow, not the bright yellow of the
@@ -902,6 +958,60 @@ export function styled(
 }
 
 /**
+ * Every scope cli-highlight knows about.
+ *
+ * Completeness is load-bearing, not tidiness: cli-highlight resolves a scope as
+ * `theme[scope] || DEFAULT_THEME[scope] || plain`, and its DEFAULT_THEME is
+ * chalk-based. Any scope left out would fall through to chalk — unthemeable,
+ * and closing with SGR 39, which on a code band drops the rest of the line to
+ * the terminal's default foreground. `doctag` did exactly that.
+ */
+const SYNTAX_TOKENS: SyntaxToken[] = [
+  "syntax-addition",
+  "syntax-attr",
+  "syntax-attribute",
+  "syntax-built_in",
+  "syntax-builtin-name",
+  "syntax-bullet",
+  "syntax-class",
+  "syntax-code",
+  "syntax-comment",
+  "syntax-default",
+  "syntax-deletion",
+  "syntax-doctag",
+  "syntax-emphasis",
+  "syntax-formula",
+  "syntax-function",
+  "syntax-keyword",
+  "syntax-link",
+  "syntax-literal",
+  "syntax-meta",
+  "syntax-meta-keyword",
+  "syntax-meta-string",
+  "syntax-name",
+  "syntax-number",
+  "syntax-params",
+  "syntax-quote",
+  "syntax-regexp",
+  "syntax-section",
+  "syntax-selector-attr",
+  "syntax-selector-class",
+  "syntax-selector-id",
+  "syntax-selector-pseudo",
+  "syntax-selector-tag",
+  "syntax-string",
+  "syntax-strong",
+  "syntax-subst",
+  "syntax-symbol",
+  "syntax-tag",
+  "syntax-template-tag",
+  "syntax-template-variable",
+  "syntax-title",
+  "syntax-type",
+  "syntax-variable",
+];
+
+/**
  * A cli-highlight theme: highlight.js scope -> a function that wraps a run of
  * code in that scope's colour.
  *
@@ -923,35 +1033,23 @@ export function styled(
  */
 export function buildSyntaxTheme(): Record<string, (code: string) => string> {
   const base = openOf(roles.codeText);
-  const scopes: SyntaxToken[] = [
-    "syntax-keyword",
-    "syntax-built_in",
-    "syntax-type",
-    "syntax-literal",
-    "syntax-number",
-    "syntax-string",
-    "syntax-regexp",
-    "syntax-comment",
-    "syntax-function",
-    "syntax-title",
-    "syntax-class",
-    "syntax-attr",
-    "syntax-attribute",
-    "syntax-variable",
-    "syntax-params",
-    "syntax-meta",
-    "syntax-symbol",
-    "syntax-section",
-    "syntax-tag",
-    "syntax-name",
-    "syntax-addition",
-    "syntax-deletion",
-  ];
   const theme: Record<string, (code: string) => string> = {};
-  for (const scope of scopes) {
-    const open = resolveStyle(scope, "ansi256").open;
-    // cli-highlight keys on the bare scope name.
-    theme[scope.slice("syntax-".length)] = (code) => open + code + base;
+  for (const token of SYNTAX_TOKENS) {
+    const { open, close } = resolveStyle(token, "ansi256");
+    const scope = token.slice("syntax-".length);
+    if (open === "") {
+      // No colour of its own: pass text through rather than bracketing it in
+      // empty escapes.
+      theme[scope] = (code) => code;
+      continue;
+    }
+    // Rewrite only the foreground half of the close. A scope that set a colour
+    // has to land back on the band's base rather than the terminal default; a
+    // scope that set an attribute (highlight.js `emphasis` is italic, `strong`
+    // is bold) has to emit that attribute's own off-code, or the attribute
+    // leaks to the end of the line. A scope that set both gets both.
+    const shut = close.split(fgReset).join(base);
+    theme[scope] = (code) => open + code + shut;
   }
   return theme;
 }
