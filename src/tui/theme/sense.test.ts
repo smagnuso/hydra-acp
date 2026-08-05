@@ -212,6 +212,17 @@ describe("installReplyFilter", () => {
     expect(f.seen).toEqual(["abcd"]);
   });
 
+  // The only thing that asks for a CPR is the startup width probe, which has its
+  // own listener and is finished by the time this filter is live. A late one is
+  // an answer to a question nobody still has, and would otherwise surface as a
+  // phantom cursor-location event.
+  it("drops a late cursor position report", () => {
+    const f = fakeTerm();
+    installReplyFilter(f.term);
+    f.term.onStdin(Buffer.from("ab\u001b[3;5Rcd", "latin1"));
+    expect(f.seen).toEqual(["abcd"]);
+  });
+
   it("passes unrelated input through untouched, bytes and all", () => {
     const f = fakeTerm();
     installReplyFilter(f.term);

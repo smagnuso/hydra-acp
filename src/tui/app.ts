@@ -215,6 +215,11 @@ let themeChoices: Array<{
 let activeThemeName = "terminal";
 // The band reference, carried alongside the theme so cycling keeps it.
 let themeBackground: Color | undefined;
+// What the terminal measured as its ambiguous-glyph width at startup, or
+// undefined when it did not answer the probe. Module-scoped for the same reason
+// themeBackground is: it is sensed once in runTuiApp, before anything grabs the
+// keyboard, and consumed by every runSession() the loop goes on to run.
+let probedAmbiguousWide: boolean | undefined;
 // Set by the session closure, called by the stdin reply filter. The filter is
 // installed before that closure exists (grabInput captures onStdin by reference),
 // so the two are joined here rather than by passing a callback down.
@@ -229,6 +234,7 @@ import {
   SCHEME_REPORTS_ON,
   type ColorScheme,
 } from "./theme/sense.js";
+import { probeAmbiguousWidth } from "./width-probe.js";
 import type {
   SidebarEditedFile,
   SidebarLiveSession,
@@ -956,6 +962,20 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     config.tui.themeBackground === undefined
       ? await senseBackground()
       : undefined;
+  // Same window, same reasoning: measured with a cursor position report before
+  // the keyboard is grabbed, because the reply arrives as input. Skipped when the
+  // user has stated a width explicitly, so nobody pays a round trip for an
+  // answer that resolveAmbiguousWide would outrank anyway.
+  if (config.tui.ambiguousWidth === "auto") {
+    const probe = await probeAmbiguousWidth();
+    probedAmbiguousWide = probe?.wide;
+    writeDebugLine({
+      src: "width-probe",
+      answered: probe !== undefined,
+      wide: probe?.wide,
+      widths: probe?.widths,
+    });
+  }
   themeBackground = resolveThemeBackground(
     config.tui.themeBackground,
     loadedTheme.problems,
@@ -2775,7 +2795,9 @@ async function runSession(
   // Tell the wrap/truncate engine how this terminal draws ambiguous-width
   // glyphs before any line is measured, so the column budget matches the
   // render (prevents right-margin bleed on ambiguous-wide terminals).
-  setAmbiguousWide(resolveAmbiguousWide(config.tui.ambiguousWidth, process.env));
+  setAmbiguousWide(
+    resolveAmbiguousWide(config.tui.ambiguousWidth, process.env, probedAmbiguousWide),
+  );
   // Bound expanded-diff context so full-file edit payloads (e.g. pi's ACP
   // diff blocks) render a hunk around the change, not the whole file.
   setDiffContextLines(config.tui.diffContextLines);

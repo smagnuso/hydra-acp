@@ -23,6 +23,7 @@
 // notification is a trigger to ask again rather than an answer in itself.
 
 import { parseColor, rgb, type Color } from "./color.js";
+import { hasCprReport, scrubCprReports } from "../width-probe.js";
 
 /** How long to wait for a reply before giving up and falling back. */
 const DEFAULT_TIMEOUT_MS = 200;
@@ -289,13 +290,22 @@ export function installReplyFilter(
   }
   t.onStdin = function filtered(chunk: Buffer): void {
     const text = chunk.toString("latin1");
-    if (!hasOsc11(text) && !/\u001b\[\?997;/.test(text)) {
+    if (
+      !hasOsc11(text) &&
+      !/\u001b\[\?997;/.test(text) &&
+      !hasCprReport(text)
+    ) {
       original.call(this, chunk);
       return;
     }
     const background = parseOsc11(text);
     const scheme = parseSchemeReport(text);
-    const cleaned = scrubSchemeReports(scrubOsc11(text));
+    // CPR replies are dropped without a handler: the only thing that asks for
+    // one is the startup width probe, which has its own listener and is done by
+    // the time this filter is live. A late one is an answer to a question nobody
+    // still has, and passing it through would surface as a phantom
+    // cursor-location event.
+    const cleaned = scrubCprReports(scrubSchemeReports(scrubOsc11(text)));
     // The keystrokes go first: a redraw triggered by a scheme change should not
     // land between a keypress and its handler.
     if (cleaned.length > 0) {

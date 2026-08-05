@@ -8077,22 +8077,34 @@ export function setAmbiguousWide(wide: boolean): void {
   ambiguousWide = wide;
 }
 
-// Resolve the user's ambiguousWidth config to a concrete boolean. "auto" sniffs
-// the environment: CJK locales (ja/ko/zh in LC_ALL/LC_CTYPE/LANG) and known
-// wide-by-default emulators (Apple Terminal.app) get wide; everything else
-// gets narrow. Pure function — takes env as input so it's trivially testable.
+// Resolve the user's ambiguousWidth config to a concrete boolean.
+//
+// "auto" prefers `probed` — what probeAmbiguousWidth() measured out of the
+// terminal with a cursor position report, which is the only source that knows
+// how this terminal is actually configured. Explicit "narrow"/"wide" still
+// outrank it: the user gets the last word over the measurement.
+//
+// The env sniff is the fallback for terminals that do not answer CPR, and is
+// deliberately locale-only. It used to also treat TERM_PROGRAM=Apple_Terminal
+// as wide, which was wrong for the default Terminal.app profile ("East Asian
+// ambiguous characters are wide" ships off) and truncated every box-drawing
+// rule at half width. Emulator identity cannot see profile configuration, so
+// guessing from it was never sound; the probe replaces it.
+//
+// Pure function — takes env as input so it's trivially testable.
 export function resolveAmbiguousWide(
   mode: "auto" | "narrow" | "wide",
   env: NodeJS.ProcessEnv,
+  probed?: boolean,
 ): boolean {
   if (mode === "wide")
     return true;
   if (mode === "narrow")
     return false;
+  if (probed !== undefined)
+    return probed;
   const locale = env.LC_ALL || env.LC_CTYPE || env.LANG || "";
   if (/^(ja|ko|zh)(_|\.|@|$)/i.test(locale))
-    return true;
-  if (env.TERM_PROGRAM === "Apple_Terminal")
     return true;
   return false;
 }

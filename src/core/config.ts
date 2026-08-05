@@ -265,11 +265,15 @@ const TuiConfig = z.object({
   // How the terminal renders East-Asian "Ambiguous" width glyphs (em-dash
   // —, smart quotes “ ”, ellipsis …, middle-dot ·). Most modern terminals
   // draw them 1 col wide ("narrow"); CJK-locale / legacy setups (and
-  // macOS Terminal.app) draw them 2 cols wide ("wide"). Defaults to "auto"
-  // which sniffs LC_*/LANG for a CJK locale and TERM_PROGRAM for known
-  // wide-by-default emulators, falling back to "narrow" — the right answer
+  // CJK-configured macOS Terminal.app profiles) draw them 2 cols wide
+  // ("wide"). Defaults to "auto", which measures the terminal directly at
+  // startup: it draws each glyph and asks where the cursor landed (CSI 6n),
+  // so the answer reflects the emulator's actual configuration rather than a
+  // guess from its name. Terminals that do not answer fall back to sniffing
+  // LC_*/LANG for a CJK locale, then to "narrow" — the right answer
   // for xterm, gnome-terminal, iTerm2, Alacritty, Kitty, WezTerm, Ghostty,
-  // VS Code terminal, and Windows Terminal. Set explicitly to override.
+  // VS Code terminal, and Windows Terminal. Set explicitly to override the
+  // measurement.
   ambiguousWidth: z.enum(["auto", "narrow", "wide"]).default("auto"),
   // How the TUI receives tool payload on attach/replay.
   //   "references" — the lean path (default): the daemon ships blob refs and

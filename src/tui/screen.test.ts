@@ -5,7 +5,7 @@ import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import type { FormattedLine } from "./format.js";
 import { parseThoughtMarkdown } from "./format.js";
-import { setAmbiguousWide } from "./screen.js";
+import { resolveAmbiguousWide, setAmbiguousWide } from "./screen.js";
 import type { InputDispatcher, KeyEvent } from "./input.js";
 import {
   Screen,
@@ -411,6 +411,23 @@ describe("Screen wrapTail bounded walk", () => {
     } finally {
       setAmbiguousWide(false);
     }
+  });
+
+  it("resolves ambiguous width from the probe, and lets the user override it", () => {
+    const appleCjkFree = { TERM_PROGRAM: "Apple_Terminal", LANG: "en_US.UTF-8" };
+    // The probe measured the terminal, so it beats every heuristic.
+    expect(resolveAmbiguousWide("auto", appleCjkFree, false)).toBe(false);
+    expect(resolveAmbiguousWide("auto", {}, true)).toBe(true);
+    // An explicit config value still beats the probe: the user gets the last word.
+    expect(resolveAmbiguousWide("narrow", {}, true)).toBe(false);
+    expect(resolveAmbiguousWide("wide", {}, false)).toBe(true);
+    // No probe answer (no CPR support) falls back to the locale sniff.
+    expect(resolveAmbiguousWide("auto", { LANG: "ja_JP.UTF-8" })).toBe(true);
+    expect(resolveAmbiguousWide("auto", { LANG: "en_US.UTF-8" })).toBe(false);
+    // Emulator identity is no longer a signal: TERM_PROGRAM cannot see the
+    // per-profile ambiguous-width switch, and assuming Terminal.app is wide
+    // truncated every box-drawing rule at half width on the default profile.
+    expect(resolveAmbiguousWide("auto", appleCjkFree)).toBe(false);
   });
 
   it("keeps every thought line aligned at the gutter across paragraphs", () => {
