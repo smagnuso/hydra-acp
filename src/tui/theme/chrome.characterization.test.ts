@@ -1,0 +1,76 @@
+// Equivalence test for the chrome tokens.
+//
+// The scrollback tokens had a single choke point (writeStyled) to snapshot.
+// Chrome does not: it was ~160 scattered `term.brightYellow.noFormat(...)`
+// calls across seven renderers whose existing tests drive a no-op Proxy mock
+// and never observe a byte.
+//
+// So instead of snapshotting output, each token records the terminal-kit chain
+// it replaced, and this asserts the two emit the same bytes when driven
+// through the real library. That proves the table is right. Whether a given
+// call site got the *right* token is a review matter, not something a test can
+// know — but every substitution was 1:1, so the table is where an error would
+// actually hide.
+//
+// Verified against terminal-kit rather than assumed, for the same reason
+// bgGrayscale was: its close sequences are LIFO and its bold-off is SGR 22,
+// neither of which is guessable.
+
+import { describe, expect, it } from "vitest";
+import type { Terminal } from "terminal-kit";
+import { paint, type ChromeToken } from "./index.js";
+import { createCapturingTerminal, visible } from "./capture.js";
+
+// token -> the chain it replaced. Keyed so a renamed token fails to compile.
+const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
+  "box-border": (t, s) => t.dim.noFormat(s),
+  "box-title": (t, s) => t.brightCyan.noFormat(s),
+  "modal-title": (t, s) => t.brightWhite.bold.noFormat(s),
+  "modal-label": (t, s) => t.dim.noFormat(s),
+  "modal-value": (t, s) => t.brightWhite.noFormat(s),
+  "modal-note": (t, s) => t.brightYellow.noFormat(s),
+  "modal-error": (t, s) => t.brightRed.noFormat(s),
+  "modal-hint": (t, s) => t.dim.noFormat(s),
+  "input-error": (t, s) => t.red.noFormat(s),
+  "input-cursor": (t, s) => t.bgWhite.noFormat(s),
+  "list-selected": (t, s) => t.brightWhite.bgBlue.noFormat(s),
+  "list-description": (t, s) => t.dim.noFormat(s),
+  "status-progress": (t, s) => t.brightYellow.noFormat(s),
+};
+
+for (const generic of ["xterm-256color", "xterm-truecolor"]) {
+  describe(`chrome tokens match the chains they replaced (${generic})`, () => {
+    for (const [token, chain] of Object.entries(REPLACED) as Array<
+      [ChromeToken, (t: Terminal, s: string) => void]
+    >) {
+      it(token, () => {
+        const { term, take } = createCapturingTerminal(generic);
+        take();
+        chain(term, "Xy");
+        const before = take();
+        paint(term, token, "Xy");
+        const after = take();
+        expect(visible(after)).toBe(visible(before));
+      });
+    }
+  });
+}
+
+describe("paint", () => {
+  it("writes nothing for empty text", () => {
+    const { term, take } = createCapturingTerminal();
+    take();
+    paint(term, "box-border", "");
+    expect(take()).toBe("");
+  });
+
+  it("never interprets a caret as a style command", () => {
+    // Chrome text is paths, branch names and agent-supplied labels. One of the
+    // sites this replaced used terminal-kit's markup-interpreting call, so a
+    // caret in an install progress line would have been eaten.
+    const { term, take } = createCapturingTerminal();
+    take();
+    paint(term, "status-progress", "press ^C to cancel");
+    expect(take()).toContain("press ^C to cancel");
+  });
+});

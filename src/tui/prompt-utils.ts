@@ -15,8 +15,8 @@
 // they stay in lockstep — and so future modals don't reinvent the wheel.
 //
 // Box characters match the single-line set already used by screen.ts's
-// separator (`─`). Borders render with `term.dim` so they recede behind
-// the body content.
+// separator (`─`). Borders render with the `box-border` token so they recede
+// behind the body content.
 //
 // Layout strategy: we never need partial repaints inside the box — every
 // caller does full re-render on key events and resize, which is what
@@ -35,6 +35,7 @@ import {
   MOUSE_SGR_OFF,
   MOUSE_X10_OFF,
 } from "./ansi.js";
+import { paint } from "./theme/index.js";
 
 export interface BoxLayout {
   // Outer coordinates (1-based, terminal-kit convention).
@@ -124,12 +125,12 @@ export function drawBox(term: Terminal, opts: DrawBoxOptions): BoxLayout {
   const topInner = HORIZ.repeat(w - 2);
   const top = renderTitleStrip(topInner, opts.title);
   term.moveTo(x, y);
-  term.dim.noFormat(TL);
+  paint(term, "box-border", TL);
   paintTopStrip(term, top);
-  term.dim.noFormat(TR);
+  paint(term, "box-border", TR);
   for (let row = 1; row <= contentH; row++) {
     term.moveTo(x, y + row);
-    term.dim.noFormat(VERT);
+    paint(term, "box-border", VERT);
     if (opts.overlay) {
       // Wipe the interior — the caller paints its content on top, but
       // any residue from the underlying frame would show through the
@@ -137,10 +138,10 @@ export function drawBox(term: Terminal, opts: DrawBoxOptions): BoxLayout {
       term.noFormat(" ".repeat(contentW));
     }
     term.moveTo(x + w - 1, y + row);
-    term.dim.noFormat(VERT);
+    paint(term, "box-border", VERT);
   }
   term.moveTo(x, y + h - 1);
-  term.dim.noFormat(BL + HORIZ.repeat(w - 2) + BR);
+  paint(term, "box-border", BL + HORIZ.repeat(w - 2) + BR);
 
   return {
     x,
@@ -180,18 +181,22 @@ export function renderTitleStrip(
 }
 
 // Paint a pre-rendered top strip — dashes first, then the title chip
-// (brightCyan) overlaid at the offset reserved by renderTitleStrip.
+// (`box-title`) overlaid at the offset reserved by renderTitleStrip.
 function paintTopStrip(
   term: Terminal,
   strip: ReturnType<typeof renderTitleStrip>,
 ): void {
   if (!strip.title) {
-    term.dim.noFormat(strip.dashes);
+    paint(term, "box-border", strip.dashes);
     return;
   }
-  term.dim.noFormat(strip.dashes.slice(0, strip.title.offset));
-  term.brightCyan.noFormat(strip.title.text);
-  term.dim.noFormat(strip.dashes.slice(strip.title.offset + strip.title.text.length));
+  paint(term, "box-border", strip.dashes.slice(0, strip.title.offset));
+  paint(term, "box-title", strip.title.text);
+  paint(
+    term,
+    "box-border",
+    strip.dashes.slice(strip.title.offset + strip.title.text.length),
+  );
 }
 
 // Single-line ellipsised truncate. Returns "" when max <= 1 so a one-cell

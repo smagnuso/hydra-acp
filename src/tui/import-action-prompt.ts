@@ -22,6 +22,7 @@ import {
   truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
+import { paint } from "./theme/index.js";
 
 export type ImportAction = "fork-local" | "view";
 
@@ -167,7 +168,7 @@ export async function promptForImportAction(
     let row = 0;
     for (const hr of headerRows) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(` ${hr.label}`);
+      paint(term, "modal-label", ` ${hr.label}`);
       term.noFormat(truncate(hr.value, innerW - hr.label.length - 2));
       row++;
     }
@@ -239,18 +240,18 @@ function paintActionBody(
     const label = ` ${pointer} ${choice.label}`;
     term.moveTo(layout.contentX, layout.contentY + row);
     if (i === opts.selected) {
-      term.brightWhite.bgBlue.noFormat(padRight(label, innerW));
+      paint(term, "list-selected", padRight(label, innerW));
     } else {
       term.noFormat(label);
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.dim.noFormat(`     ${choice.description}`);
+    paint(term, "list-description", `     ${choice.description}`);
     row++;
   }
   row++;
   term.moveTo(layout.contentX, layout.contentY + row);
-  term.dim.noFormat(` ${opts.footer}`);
+  paint(term, "modal-hint", ` ${opts.footer}`);
 }
 
 function mapKey(
@@ -311,7 +312,7 @@ export async function promptForLaunchOrView(
     const innerW = layout.contentW;
     let row = 0;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.dim.noFormat(" session: ");
+    paint(term, "modal-label", " session: ");
     term.noFormat(truncate(shortId, innerW - 10));
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);

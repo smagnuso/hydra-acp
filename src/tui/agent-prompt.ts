@@ -20,6 +20,7 @@ import {
   truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
+import { paint } from "./theme/index.js";
 
 export type AgentPromptResult =
   | { kind: "select"; agentId: string; persist: boolean }
@@ -122,16 +123,16 @@ export async function promptForAgent(
     const idPart = ` ${pointer} ${agent.id}`;
     if (i === selected) {
       const line = `${idPart}  ${desc}`;
-      term.brightWhite.bgBlue.noFormat(padRight(truncate(line, innerW), innerW));
+      paint(term, "list-selected", padRight(truncate(line, innerW), innerW));
     } else {
       // Padded to innerW so a previously-highlighted row's residual
-      // brightWhite.bgBlue cells get overwritten with default bg.
+      // `list-selected` cells get overwritten with default bg.
       const room = innerW - idPart.length - 2;
       const descPart =
         room > 1 ? `  ${truncate(desc, room)}` : "";
       term.noFormat(idPart);
       if (descPart.length > 0) {
-        term.dim.noFormat(descPart);
+        paint(term, "list-description", descPart);
       }
       // Trailing blank fill.
       const painted = idPart.length + descPart.length;
@@ -151,7 +152,7 @@ export async function promptForAgent(
         : "";
     const line = ` ↑/↓ navigate · Enter this session · s set default · Esc back${more}`;
     const padded = padRight(truncate(line, layout.contentW), layout.contentW);
-    term.dim.noFormat(padded);
+    paint(term, "modal-hint", padded);
   };
 
   const renderFrame = (): BoxLayout => {

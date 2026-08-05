@@ -1,6 +1,7 @@
 import type { Terminal as TermkitTerminal } from "terminal-kit";
 
 import type { AgentInstallProgressParams } from "../acp/types-capabilities.js";
+import { paint } from "./theme/index.js";
 
 // Sink for the launch/install status line. Two implementations live in
 // the tree: an in-place stdout redraw (used in the pre-alt-screen gap
@@ -149,7 +150,7 @@ export function createStdoutInstallStatusSink(
       }
       process.stdout.write("\r");
       term.eraseLineAfter();
-      term.brightYellow(text);
+      paint(term, "status-progress", text);
     },
     finalize() {
       if (finalized) {

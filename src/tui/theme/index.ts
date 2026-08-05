@@ -201,7 +201,11 @@ const brightYellow = fg(93);
 const brightCyan = fg(96);
 const brightWhite = fg(97);
 
+const brightRed = fg(91);
+
 const bgRed = bg(41);
+const bgBlue = bg(44);
+const bgWhite = bg(47);
 const bgBrightYellow = bg(103);
 
 function flatten(layers: Layer[]): SgrPair {
@@ -229,6 +233,42 @@ interface StyleSpec {
   /** Body carries inline SGR spans from format.ts. */
   inlineSgr?: boolean;
 }
+
+/**
+ * Tokens for the TUI's own furniture: box borders, modal contents, list rows,
+ * banners, input cursors, progress lines.
+ *
+ * Separate from `Style` because these can never be a FormattedLine's
+ * bodyStyle — there is no scrollback line for a box border. Keeping them out
+ * of that union stops it advertising ~40 members it cannot hold, while
+ * `ThemeToken` gives the resolver and the theme table a single key space.
+ *
+ * The `// role:` notes record which palette role each token should draw from
+ * once the palette layer lands. They are written now because the intent is
+ * obvious while reading the call site and much less obvious afterwards.
+ */
+export type ChromeToken =
+  // Shared modal box drawn by prompt-utils: corners, edges, title strip.
+  | "box-border"
+  | "box-title"
+  // Contents of a modal or banner.
+  | "modal-title"
+  | "modal-label"
+  | "modal-value"
+  | "modal-note"
+  | "modal-error"
+  | "modal-hint"
+  // A text input's validation message and cursor.
+  | "input-error"
+  | "input-cursor"
+  // A selectable list inside a modal.
+  | "list-selected"
+  | "list-description"
+  // In-place progress line (binary download, install).
+  | "status-progress";
+
+/** Anything the theme can resolve: a scrollback style or a piece of chrome. */
+export type ThemeToken = Style | ChromeToken;
 
 const STYLES: Record<string, StyleSpec> = {
   // Quiet full-width band marking the start of a user turn. Bold on a
@@ -318,6 +358,44 @@ const STYLES: Record<string, StyleSpec> = {
   // say. Separate because restyling it changes a signal, not a decoration.
   "status-idle": { layers: [dim] },
 
+  // --- chrome -------------------------------------------------------------
+
+  // Box edges recede so the content inside them reads first. role: muted
+  "box-border": { layers: [dim] },
+  // The one coloured part of the frame, so a stack of overlays stays legible.
+  // role: accent
+  "box-title": { layers: [brightCyan] },
+
+  // A banner or modal's headline. role: emphasis
+  "modal-title": { layers: [brightWhite, bold] },
+  // Label half of a label/value pair; the value is left unstyled, the same
+  // scaffolding-vs-data split the sidebar uses. role: muted
+  "modal-label": { layers: [dim] },
+  // Value half, where it needs to stand out (a command to run, a URL).
+  // role: emphasis
+  "modal-value": { layers: [brightWhite] },
+  // Attention without failure: "authentication required". role: warn
+  "modal-note": { layers: [brightYellow] },
+  // A banner reporting something that already went wrong. role: error
+  "modal-error": { layers: [brightRed] },
+  // Keybinding hints, footers, elision notes. role: muted
+  "modal-hint": { layers: [dim] },
+
+  // Validation failure on an input field. Renders plain red where
+  // modal-error is bright red: an inconsistency inherited from the two files,
+  // now at least visible and separately tunable. role: error
+  "input-error": { layers: [red] },
+  // Block cursor in a text field. role: cursor
+  "input-cursor": { layers: [bgWhite] },
+
+  // Selected row of a modal list. role: selection
+  "list-selected": { layers: [brightWhite, bgBlue] },
+  // Secondary text under a row. role: muted
+  "list-description": { layers: [dim] },
+
+  // In-place progress, which is a busy state. role: busy
+  "status-progress": { layers: [brightYellow] },
+
   // Editor-like block: dark band with an explicit white foreground, so a
   // `diff` fence can let context lines sit neutral while cli-highlight's
   // red/green +/- overlay on top. A different shade from the user band so
@@ -342,7 +420,7 @@ const EMPTY: StyleRender = { open: "", close: "", inlineSgr: false };
 
 /** Resolve a style to the bytes that wrap its text. */
 export function resolveStyle(
-  style: Style | undefined,
+  style: ThemeToken | undefined,
   trueColor: boolean,
 ): StyleRender {
   if (style === undefined) {
@@ -377,6 +455,40 @@ export function styleCarriesInlineSgr(style: Style | undefined): boolean {
     return false;
   }
   return STYLES[style]?.inlineSgr === true;
+}
+
+/**
+ * The slice of terminal-kit `paint` needs. Structural on purpose: this module
+ * stays free of a terminal-kit import so the theme table can be read and
+ * tested without one.
+ */
+interface PaintTarget {
+  noFormat: (text: string) => unknown;
+  esc?: { color24bits?: { na?: boolean; fb?: boolean } };
+}
+
+/**
+ * Write `text` styled as `token`.
+ *
+ * The chrome counterpart to writeStyled. It is deliberately much smaller:
+ * furniture has no hover state, carries no inline spans, and needs none of
+ * the trailing-reset replication that scrollback bodies do. All it does is
+ * bracket the text in the token's sequences.
+ *
+ * Always `.noFormat`, so a caret or a stray escape in a path, a branch name
+ * or an agent-supplied label is written literally rather than being read as a
+ * style command.
+ */
+export function paint(
+  term: PaintTarget,
+  token: ThemeToken,
+  text: string,
+): void {
+  if (text.length === 0) {
+    return;
+  }
+  const r = resolveStyle(token, supports24Bit(term));
+  term.noFormat(r.open + text + r.close);
 }
 
 /**

@@ -29,6 +29,7 @@ import {
   type BoxLayout,
 } from "./prompt-utils.js";
 import { LineEditor } from "./line-editor.js";
+import { paint } from "./theme/index.js";
 
 export interface PromptOptions {
   defaultCwd?: string;
@@ -110,7 +111,7 @@ export async function promptForImportCwd(
     let row = 0;
     for (const hr of headerRows) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(` ${hr.label}`);
+      paint(term, "modal-label", ` ${hr.label}`);
       term.noFormat(truncate(hr.value, innerW - hr.label.length - 2));
       row++;
     }
@@ -123,13 +124,13 @@ export async function promptForImportCwd(
     const screenRow = layout.contentY + row;
     if (errorLine !== null) {
       term.moveTo(layout.contentX, screenRow);
-      term.red.noFormat(` ${truncate(errorLine, innerW - 2)}`);
+      paint(term, "input-error", ` ${truncate(errorLine, innerW - 2)}`);
       hintRowY = null;
       acceptClickRange = null;
       backClickRange = null;
     } else {
       term.moveTo(layout.contentX, screenRow);
-      term.dim.noFormat(HINT_TEXT);
+      paint(term, "modal-hint", HINT_TEXT);
       hintRowY = screenRow;
       acceptClickRange = {
         start: layout.contentX + acceptOffset,
@@ -157,7 +158,7 @@ export async function promptForImportCwd(
     const r = rowOffset ?? inputRow();
     term.moveTo(layout.contentX, layout.contentY + r).eraseLineAfter();
     term.moveTo(layout.x + layout.w - 1, layout.contentY + r);
-    term.dim.noFormat("│");
+    paint(term, "box-border", "│");
     // Single leading space of padding; the intro line above ("Pick a
     // local cwd for this session:" / "New cwd for the picker …")
     // already establishes what's being edited, so no "cwd:" label.
@@ -187,10 +188,10 @@ export async function promptForImportCwd(
     }
     if (rel >= visible.length) {
       term.noFormat(visible);
-      term.bgWhite(" ");
+      paint(term, "input-cursor", " ");
     } else {
       term.noFormat(visible.slice(0, rel));
-      term.bgWhite.noFormat(visible[rel] ?? " ");
+      paint(term, "input-cursor", visible[rel] ?? " ");
       term.noFormat(visible.slice(rel + 1));
     }
   };
@@ -205,16 +206,16 @@ export async function promptForImportCwd(
     const errRow = inputRow() + 2;
     term.moveTo(layout.contentX, layout.contentY + errRow).eraseLineAfter();
     term.moveTo(layout.x + layout.w - 1, layout.contentY + errRow);
-    term.dim.noFormat("│");
+    paint(term, "box-border", "│");
     const screenRow = layout.contentY + errRow;
     term.moveTo(layout.contentX, screenRow);
     if (errorLine !== null) {
-      term.red.noFormat(` ${truncate(errorLine, layout.contentW - 2)}`);
+      paint(term, "input-error", ` ${truncate(errorLine, layout.contentW - 2)}`);
       hintRowY = null;
       acceptClickRange = null;
       backClickRange = null;
     } else {
-      term.dim.noFormat(HINT_TEXT);
+      paint(term, "modal-hint", HINT_TEXT);
       hintRowY = screenRow;
       acceptClickRange = {
         start: layout.contentX + acceptOffset,

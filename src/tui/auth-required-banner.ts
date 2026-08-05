@@ -26,6 +26,7 @@ import {
   truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
+import { paint } from "./theme/index.js";
 
 export interface AuthOnboarding {
   command?: string;
@@ -451,46 +452,46 @@ export async function promptAuthRequiredBanner(
     let row = 0;
     if (statusNote) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.brightYellow.noFormat(truncate(` ${statusNote}`, innerW));
+      paint(term, "modal-note", truncate(` ${statusNote}`, innerW));
       row++;
     }
     if (errorMessage) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.brightRed.noFormat(truncate(` ${errorMessage}`, innerW));
+      paint(term, "modal-error", truncate(` ${errorMessage}`, innerW));
       row++;
     }
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.brightWhite.bold.noFormat(truncate(` ${lines.title}`, innerW));
+    paint(term, "modal-title", truncate(` ${lines.title}`, innerW));
     row += 2;
     term.moveTo(layout.contentX, layout.contentY + row);
     term.noFormat(truncate(` ${lines.description}`, innerW));
     row++;
     if (lines.command) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(" Run:  ");
-      term.brightWhite.noFormat(truncate(lines.command, innerW - 7));
+      paint(term, "modal-label", " Run:  ");
+      paint(term, "modal-value", truncate(lines.command, innerW - 7));
       row++;
     }
     if (lines.url) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(" Docs: ");
-      term.brightWhite.noFormat(truncate(lines.url, innerW - 7));
+      paint(term, "modal-label", " Docs: ");
+      paint(term, "modal-value", truncate(lines.url, innerW - 7));
       row++;
     }
     if (lines.methodLines) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(" Methods reported by the agent:");
+      paint(term, "modal-label", " Methods reported by the agent:");
       row++;
       for (const ml of lines.methodLines) {
         term.moveTo(layout.contentX, layout.contentY + row);
-        term.dim.noFormat("   ");
+        paint(term, "modal-label", "   ");
         term.noFormat(truncate(ml.label, innerW - 3));
         row++;
       }
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.dim.noFormat(` ${lines.footer}`);
+    paint(term, "modal-hint", ` ${lines.footer}`);
     return layout;
   };
 

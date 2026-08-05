@@ -9,6 +9,7 @@ import {
   truncate,
   type BoxLayout,
 } from "./prompt-utils.js";
+import { paint } from "./theme/index.js";
 
 export type StartupFailureResult = "retry" | "back" | "cancel";
 
@@ -70,21 +71,25 @@ export async function promptStartupFailureBanner(
     const innerW = layout.contentW;
     let row = 0;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.brightWhite.bold.noFormat(truncate(` ${title}`, innerW));
+    paint(term, "modal-title", truncate(` ${title}`, innerW));
     row += 2;
     for (const line of body) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.brightRed.noFormat(truncate(` ${line}`, innerW));
+      paint(term, "modal-error", truncate(` ${line}`, innerW));
       row++;
     }
     if (overflow) {
       term.moveTo(layout.contentX, layout.contentY + row);
-      term.dim.noFormat(truncate(" … (full details in ~/.hydra-acp/tui.log)", innerW));
+      paint(
+        term,
+        "modal-hint",
+        truncate(" … (full details in ~/.hydra-acp/tui.log)", innerW),
+      );
       row++;
     }
     row++;
     term.moveTo(layout.contentX, layout.contentY + row);
-    term.dim.noFormat(truncate(` ${footer}`, innerW));
+    paint(term, "modal-hint", truncate(` ${footer}`, innerW));
     return layout;
   };
 
