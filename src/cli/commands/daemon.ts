@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import chalk from "chalk";
 import { styled } from "../../tui/theme/index.js";
+import { depthForStream } from "../../tui/theme/capability.js";
 import { paths } from "../../core/paths.js";
 import {
   isProcessAlive,
@@ -215,13 +215,11 @@ export async function runDaemonStatus(): Promise<void> {
 
   process.stdout.write(`CLI version:    ${HYDRA_VERSION}\n`);
   process.stdout.write(`Daemon version: ${health.version}\n`);
-  // The colour comes from the theme (`cli-warn`, the same token app.ts uses
-  // for the identical warning on stderr) but whether to emit it at all is
-  // still chalk's call: it knows about NO_COLOR, FORCE_COLOR, dumb terminals
-  // and CI, and this output is routinely piped. Unifying that detection into
-  // the theme is the enablement half of the palette work, not this change.
-  const warn = (msg: string): string =>
-    chalk.level > 0 ? styled("cli-warn", msg) : msg;
+  // `cli-warn` is the same token app.ts uses for the identical warning on
+  // stderr. Depth comes from the stream: this output is routinely piped, and
+  // "none" resolves the token to nothing rather than needing a branch here.
+  const depth = depthForStream(process.stdout);
+  const warn = (msg: string): string => styled("cli-warn", msg, depth);
   if (!versionMatch) {
     process.stdout.write(
       warn(

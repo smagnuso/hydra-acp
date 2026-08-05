@@ -129,25 +129,25 @@ describe("styleCarriesInlineSgr", () => {
 
 describe("bgGrayscale", () => {
   it("passes through on a 24-bit terminal", () => {
-    expect(bgGrayscale(43, true).open).toBe("\x1b[48;2;43;43;43m");
+    expect(bgGrayscale(43, "truecolor").open).toBe("\x1b[48;2;43;43;43m");
   });
 
   // Reproduces terminal-kit's quantisation, which is what decides the actual
   // shade of the user-message and code bands on a 256-colour terminal.
   it("quantises onto the 256-colour grayscale ramp", () => {
-    expect(bgGrayscale(43, false).open).toBe("\x1b[48;5;235m");
-    expect(bgGrayscale(28, false).open).toBe("\x1b[48;5;234m");
-    expect(bgGrayscale(25, false).open).toBe("\x1b[48;5;233m");
+    expect(bgGrayscale(43, "ansi256").open).toBe("\x1b[48;5;235m");
+    expect(bgGrayscale(28, "ansi256").open).toBe("\x1b[48;5;234m");
+    expect(bgGrayscale(25, "ansi256").open).toBe("\x1b[48;5;233m");
   });
 
   it("maps the ends of the range onto the cube corners", () => {
-    expect(bgGrayscale(0, false).open).toBe("\x1b[48;5;16m");
-    expect(bgGrayscale(255, false).open).toBe("\x1b[48;5;231m");
+    expect(bgGrayscale(0, "ansi256").open).toBe("\x1b[48;5;16m");
+    expect(bgGrayscale(255, "ansi256").open).toBe("\x1b[48;5;231m");
   });
 
   it("always closes with a background reset", () => {
-    expect(bgGrayscale(43, true).close).toBe("\x1b[49m");
-    expect(bgGrayscale(43, false).close).toBe("\x1b[49m");
+    expect(bgGrayscale(43, "truecolor").close).toBe("\x1b[49m");
+    expect(bgGrayscale(43, "ansi256").close).toBe("\x1b[49m");
   });
 });
 

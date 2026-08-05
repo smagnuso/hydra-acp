@@ -23,7 +23,9 @@ import {
   fgOpen,
   fgReset,
   type Color,
+  type ColorDepth,
 } from "./color.js";
+import { depthForTerminal } from "./capability.js";
 
 const ESC = "\x1b";
 const CSI = `${ESC}[`;
@@ -58,25 +60,6 @@ export interface StyleRender extends SgrPair {
 // ---------------------------------------------------------------------------
 
 /**
- * Whether the terminal takes 24-bit colour, as decided by terminal-kit's own
- * termconfig.
- *
- * We read terminal-kit's answer rather than sniffing COLORTERM ourselves so
- * grayscale bands land on the same bytes they did when terminal-kit's
- * `bgColorGrayscale` handler produced them. Its handler branches on exactly
- * these two flags (lib/Terminal.js, `colorGrayscale`).
- */
-export function supports24Bit(term: unknown): boolean {
-  const esc = (term as { esc?: { color24bits?: { na?: boolean; fb?: boolean } } })
-    .esc;
-  const c24 = esc?.color24bits;
-  if (!c24) {
-    return false;
-  }
-  return !c24.na && !c24.fb;
-}
-
-/**
  * Background grayscale, mirroring terminal-kit's `bgColorGrayscale(g)`.
  *
  * `g` is 0-255. On a 24-bit terminal that maps straight through; otherwise it
@@ -85,9 +68,9 @@ export function supports24Bit(term: unknown): boolean {
  * offsetting by 231 puts 43 on index 235 and 28 on index 234, and those are
  * the shades the user-message and code bands have always been.
  */
-export function bgGrayscale(g: number, trueColor: boolean): SgrPair {
+export function bgGrayscale(g: number, depth: ColorDepth): SgrPair {
   const close = `${CSI}49m`;
-  if (trueColor) {
+  if (depth === "truecolor") {
     return { open: `${CSI}48;2;${g};${g};${g}m`, close };
   }
   const step = Math.round((g * 25) / 255);
@@ -108,7 +91,7 @@ export function bgGrayscale(g: number, trueColor: boolean): SgrPair {
 // explicit RGB value, which emits 24-bit on terminals that take it and
 // quantises otherwise. Attributes and the 16 ansi slots ignore the argument.
 interface Layer {
-  open: (trueColor: boolean) => string;
+  open: (depth: ColorDepth) => string;
   close: string;
 }
 
@@ -158,12 +141,12 @@ const bands = {
 
 /** A palette colour used as a foreground. */
 const fgL = (c: Color): Layer => ({
-  open: (trueColor) => fgOpen(c, trueColor),
+  open: (depth) => fgOpen(c, depth),
   close: fgReset,
 });
 /** A palette colour used as a background. */
 const bgL = (c: Color): Layer => ({
-  open: (trueColor) => bgOpen(c, trueColor),
+  open: (depth) => bgOpen(c, depth),
   close: bgReset,
 });
 
@@ -251,7 +234,7 @@ const roles = {
  * palette, since ansi slots are depth-independent.
  */
 function openOf(role: Layer[]): string {
-  return role.map((l) => l.open(false)).join("");
+  return role.map((l) => l.open("ansi256")).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +317,7 @@ export function inlineOptsFor(style: Style): InlineOpts {
     // `active` is the one other colour already in the heading vocabulary.
     codeOpen: style === "heading-2" ? openOf(roles.active) : SPAN_CODE,
     linkOpen: SPAN_LINK,
-    base: resolveStyle(style, false).open,
+    base: resolveStyle(style, "ansi256").open,
   };
 }
 
@@ -342,9 +325,9 @@ export function inlineOptsFor(style: Style): InlineOpts {
 // Tier 2: tokens (the table below)
 // ---------------------------------------------------------------------------
 
-function flatten(layers: Layer[], trueColor: boolean): SgrPair {
+function flatten(layers: Layer[], depth: ColorDepth): SgrPair {
   return {
-    open: layers.map((l) => l.open(trueColor)).join(""),
+    open: layers.map((l) => l.open(depth)).join(""),
     close: layers
       .slice()
       .reverse()
@@ -735,9 +718,11 @@ const EMPTY: StyleRender = { open: "", close: "", inlineSgr: false };
 /** Resolve a style to the bytes that wrap its text. */
 export function resolveStyle(
   style: ThemeToken | undefined,
-  trueColor: boolean,
+  depth: ColorDepth,
 ): StyleRender {
-  if (style === undefined) {
+  // "none" is a depth like any other: every token resolves to nothing, so
+  // NO_COLOR needs no branch anywhere downstream.
+  if (style === undefined || depth === "none") {
     return EMPTY;
   }
   const spec = STYLES[style];
@@ -747,14 +732,14 @@ export function resolveStyle(
   const layers: Layer[] = [];
   if (spec.grayBg !== undefined) {
     // Already depth-resolved by bgGrayscale, so its open ignores the argument.
-    const gray = bgGrayscale(spec.grayBg, trueColor);
+    const gray = bgGrayscale(spec.grayBg, depth);
     layers.push({ open: () => gray.open, close: gray.close });
   }
   if (spec.layers) {
     layers.push(...spec.layers);
   }
   return {
-    ...flatten(layers, trueColor),
+    ...flatten(layers, depth),
     inlineSgr: spec.inlineSgr === true,
   };
 }
@@ -806,7 +791,7 @@ export function paint(
   if (text.length === 0) {
     return;
   }
-  term.noFormat(styled(token, text, supports24Bit(term)));
+  term.noFormat(styled(token, text, depthForTerminal(term)));
 }
 
 /**
@@ -814,17 +799,16 @@ export function paint(
  * ask — notably the pre-TUI stderr warnings, which run before a terminal is
  * constructed.
  *
- * `trueColor` defaults to false, so a token carrying a grayscale background
- * quantises to the 256-colour ramp. None of the tokens used on this path do,
- * but the conservative default is the one that renders somewhere rather than
- * emitting 24-bit escapes at a terminal that cannot read them.
+ * Depth defaults to 256-colour: the conservative choice that renders somewhere
+ * rather than emitting 24-bit at a terminal that cannot read it. Callers that
+ * know better (and that have already decided colour is wanted at all) pass it.
  */
 export function styled(
   token: ThemeToken,
   text: string,
-  trueColor: boolean = false,
+  depth: ColorDepth = "ansi256",
 ): string {
-  const r = resolveStyle(token, trueColor);
+  const r = resolveStyle(token, depth);
   return r.open + text + r.close;
 }
 
@@ -903,14 +887,14 @@ function restoreBandAfterResets(text: string, band: string): string {
 
 export function resolveHovered(
   style: Style | undefined,
-  trueColor: boolean,
+  depth: ColorDepth,
 ): StyleRender | undefined {
   if (style === undefined) {
     return undefined;
   }
 
   if (style === "thought") {
-    const band = bgGrayscale(bands.hoverThought, trueColor).open;
+    const band = bgGrayscale(bands.hoverThought, depth).open;
     // Lift the dim brightBlack baseline to the default foreground so the
     // thought stays readable on the band. Every place the body restores
     // brightBlack (a span closing back to the row's base) becomes SGR 39 —
@@ -949,7 +933,7 @@ export function resolveHovered(
   if (!HOVER_BANDED.has(style)) {
     return undefined;
   }
-  const base = resolveStyle(style, trueColor);
+  const base = resolveStyle(style, depth);
   return {
     open: HOVER_BAND.open + base.open,
     close: base.close + HOVER_BAND.close,

@@ -47,13 +47,14 @@ import {
   resolveStyle,
   SGR_RESET,
   styleCarriesInlineSgr,
-  supports24Bit,
 } from "./theme/index.js";
+import { depthForTerminal } from "./theme/capability.js";
 
 // An SGR sequence, i.e. a CSI ending in "m". Deliberately not any escape:
 // OSC 8 hyperlinks are also escapes but never carried a style command, so
 // they must not trigger the trailing reset.
 const SGR_PATTERN = /\x1b\[[0-9;]*m/;
+const SGR_GLOBAL = /\x1b\[[0-9;]*m/g;
 import { writeDebugLine } from "./debug-log.js";
 import {
   ALT_SCREEN_LEAVE,
@@ -7995,11 +7996,24 @@ export function writeStyled(
   if (text.length === 0) {
     return;
   }
-  const trueColor = supports24Bit(term);
+  // Asks terminal-kit what it can do, and the environment whether colour is
+  // wanted at all — NO_COLOR resolves every token to nothing.
+  const depth = depthForTerminal(term);
   const render =
-    (hovered ? resolveHovered(style, trueColor) : undefined) ??
-    resolveStyle(style, trueColor);
-  const body = render.transform ? render.transform(text) : text;
+    (hovered ? resolveHovered(style, depth) : undefined) ??
+    resolveStyle(style, depth);
+  let body = render.transform ? render.transform(text) : text;
+  if (depth === "none") {
+    // NO_COLOR. Tokens already resolve to nothing, but a body can carry SGR of
+    // its own: cli-highlight's syntax colours on a fenced code line, and the
+    // inline spans format.ts bakes in at parse time. format.ts cannot make this
+    // call — it runs before a terminal is in scope and feeds three different
+    // sinks — so the write path strips it.
+    //
+    // SGR only. OSC 8 hyperlinks survive: they are not colour, and a link is
+    // still useful without one.
+    body = body.replace(SGR_GLOBAL, "");
+  }
 
   // Everything goes through .noFormat: inline spans arrive as real SGR from
   // format.ts, so nothing needs terminal-kit's markup interpreter, and a

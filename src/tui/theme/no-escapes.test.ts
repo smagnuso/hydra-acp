@@ -51,12 +51,6 @@ const ALLOWED: Array<{ path: string; why: string; definitional?: boolean }> = [
       "HIGHLIGHT_THEME: cli-highlight's syntax colours, still a chalk table. " +
       "Folding it into the palette is outstanding work, tracked separately.",
   },
-  {
-    path: "cli/commands/daemon.ts",
-    why:
-      "imports chalk only as a colour-ENABLEMENT oracle (chalk.level > 0); " +
-      "the bytes come from the theme via styled()",
-  },
 ];
 
 // An SGR sequence: CSI ... m. Matched as it appears in SOURCE, where the

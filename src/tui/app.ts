@@ -183,6 +183,7 @@ import {
   type ToolLineState,
 } from "./format.js";
 import { paint, styled } from "./theme/index.js";
+import { depthForStream } from "./theme/capability.js";
 import type {
   SidebarEditedFile,
   SidebarLiveSession,
@@ -1059,13 +1060,15 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
           ? `daemon ${health.version} ≠ cli ${HYDRA_VERSION}`
           : "config changed since daemon started";
         // Runs before the TUI (and its terminal-kit instance) exists, so this
-        // takes the string-returning path rather than paint(). Note the close
+        // takes the string-returning path rather than paint(), with the depth
+        // sniffed from stderr — which is often redirected. Note the close
         // sequence changed from a full reset to a targeted colour reset when
         // this moved onto the theme; visually identical for a one-line write.
         process.stderr.write(
           styled(
             "cli-warn",
             `! ${reason} — run \`${invokedBinName()} daemon restart\` to apply.`,
+            depthForStream(process.stderr),
           ) + "\n",
         );
       }

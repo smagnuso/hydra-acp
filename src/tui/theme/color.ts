@@ -123,35 +123,94 @@ export function quantize256(c: RgbColor): number {
   return grayErr < cubeErr ? 232 + gStep : cubeIdx;
 }
 
+/**
+ * How much colour a terminal can show.
+ *
+ * "none" is a real depth rather than a separate enabled flag, so switching
+ * colour off is the same code path as any other depth: every token resolves to
+ * empty and nothing downstream needs a branch.
+ */
+export type ColorDepth = "none" | "ansi16" | "ansi256" | "truecolor";
+
+// Default RGB for the 16 ansi slots, used only to quantise an explicitly
+// themed colour down to a 16-colour terminal. Approximate by nature: these
+// slots are terminal-configurable, so this is xterm's defaults standing in for
+// "whatever the user actually has".
+const ANSI16_RGB: Array<[number, number, number]> = [
+  [0, 0, 0],
+  [128, 0, 0],
+  [0, 128, 0],
+  [128, 128, 0],
+  [0, 0, 128],
+  [128, 0, 128],
+  [0, 128, 128],
+  [192, 192, 192],
+  [128, 128, 128],
+  [255, 0, 0],
+  [0, 255, 0],
+  [255, 255, 0],
+  [0, 0, 255],
+  [255, 0, 255],
+  [0, 255, 255],
+  [255, 255, 255],
+];
+
+/** Nearest of the 16 ansi slots to `c`, by squared RGB distance. */
+export function quantize16(c: RgbColor): number {
+  let best = 0;
+  let bestErr = Infinity;
+  for (let i = 0; i < ANSI16_RGB.length; i++) {
+    const [r, g, b] = ANSI16_RGB[i]!;
+    const err = (r - c.r) ** 2 + (g - c.g) ** 2 + (b - c.b) ** 2;
+    if (err < bestErr) {
+      bestErr = err;
+      best = i;
+    }
+  }
+  return best;
+}
+
 /** SGR parameters that set `c` as the foreground. */
-export function fgParams(c: Color, trueColor: boolean): string {
+export function fgParams(c: Color, depth: ColorDepth): string {
+  const slot = (index: number): string =>
+    String(index < 8 ? 30 + index : 90 + (index - 8));
   if (c.kind === "ansi") {
     // Legacy codes, not 38;5;n — these are what the terminal maps to the
     // user's configured palette, and what the pre-theme code emitted.
-    return String(c.index < 8 ? 30 + c.index : 90 + (c.index - 8));
+    return slot(c.index);
   }
-  return trueColor
-    ? `38;2;${c.r};${c.g};${c.b}`
-    : `38;5;${quantize256(c)}`;
+  if (depth === "truecolor") {
+    return `38;2;${c.r};${c.g};${c.b}`;
+  }
+  if (depth === "ansi256") {
+    return `38;5;${quantize256(c)}`;
+  }
+  return slot(quantize16(c));
 }
 
 /** SGR parameters that set `c` as the background. */
-export function bgParams(c: Color, trueColor: boolean): string {
+export function bgParams(c: Color, depth: ColorDepth): string {
+  const slot = (index: number): string =>
+    String(index < 8 ? 40 + index : 100 + (index - 8));
   if (c.kind === "ansi") {
-    return String(c.index < 8 ? 40 + c.index : 100 + (c.index - 8));
+    return slot(c.index);
   }
-  return trueColor
-    ? `48;2;${c.r};${c.g};${c.b}`
-    : `48;5;${quantize256(c)}`;
+  if (depth === "truecolor") {
+    return `48;2;${c.r};${c.g};${c.b}`;
+  }
+  if (depth === "ansi256") {
+    return `48;5;${quantize256(c)}`;
+  }
+  return slot(quantize16(c));
 }
 
 export const fgReset = `${CSI}39m`;
 export const bgReset = `${CSI}49m`;
 
-export const fgOpen = (c: Color, trueColor: boolean): string =>
-  `${CSI}${fgParams(c, trueColor)}m`;
-export const bgOpen = (c: Color, trueColor: boolean): string =>
-  `${CSI}${bgParams(c, trueColor)}m`;
+export const fgOpen = (c: Color, depth: ColorDepth): string =>
+  `${CSI}${fgParams(c, depth)}m`;
+export const bgOpen = (c: Color, depth: ColorDepth): string =>
+  `${CSI}${bgParams(c, depth)}m`;
 
 // ---------------------------------------------------------------------------
 // Derivation

@@ -19,34 +19,34 @@ describe("ansi slots emit the legacy codes", () => {
   // Not 38;5;n: the legacy codes are what a terminal maps to the user's own
   // configured palette, and what the pre-theme code emitted.
   it("maps 0-7 to 30-37 / 40-47", () => {
-    expect(fgOpen(ansi(0), true)).toBe("\x1b[30m");
-    expect(fgOpen(ansi(1), false)).toBe("\x1b[31m");
-    expect(fgOpen(ansi(7), true)).toBe("\x1b[37m");
-    expect(bgOpen(ansi(4), true)).toBe("\x1b[44m");
-    expect(bgOpen(ansi(7), false)).toBe("\x1b[47m");
+    expect(fgOpen(ansi(0), "truecolor")).toBe("\x1b[30m");
+    expect(fgOpen(ansi(1), "ansi256")).toBe("\x1b[31m");
+    expect(fgOpen(ansi(7), "truecolor")).toBe("\x1b[37m");
+    expect(bgOpen(ansi(4), "truecolor")).toBe("\x1b[44m");
+    expect(bgOpen(ansi(7), "ansi256")).toBe("\x1b[47m");
   });
 
   it("maps 8-15 to 90-97 / 100-107", () => {
-    expect(fgOpen(ansi(8), true)).toBe("\x1b[90m");
-    expect(fgOpen(ansi(11), true)).toBe("\x1b[93m");
-    expect(fgOpen(ansi(15), false)).toBe("\x1b[97m");
-    expect(bgOpen(ansi(11), true)).toBe("\x1b[103m");
+    expect(fgOpen(ansi(8), "truecolor")).toBe("\x1b[90m");
+    expect(fgOpen(ansi(11), "truecolor")).toBe("\x1b[93m");
+    expect(fgOpen(ansi(15), "ansi256")).toBe("\x1b[97m");
+    expect(bgOpen(ansi(11), "truecolor")).toBe("\x1b[103m");
   });
 
   it("ignores colour depth, since the terminal owns these", () => {
-    expect(fgOpen(ansi(9), true)).toBe(fgOpen(ansi(9), false));
+    expect(fgOpen(ansi(9), "truecolor")).toBe(fgOpen(ansi(9), "ansi256"));
   });
 });
 
 describe("rgb emission", () => {
   it("emits 24-bit when the terminal takes it", () => {
-    expect(fgOpen(rgb(255, 110, 103), true)).toBe("\x1b[38;2;255;110;103m");
-    expect(bgOpen(rgb(40, 42, 54), true)).toBe("\x1b[48;2;40;42;54m");
+    expect(fgOpen(rgb(255, 110, 103), "truecolor")).toBe("\x1b[38;2;255;110;103m");
+    expect(bgOpen(rgb(40, 42, 54), "truecolor")).toBe("\x1b[48;2;40;42;54m");
   });
 
   it("quantises to the 256 cube otherwise", () => {
-    expect(fgOpen(rgb(255, 0, 0), false)).toBe("\x1b[38;5;196m");
-    expect(bgOpen(rgb(0, 0, 0), false)).toBe("\x1b[48;5;16m");
+    expect(fgOpen(rgb(255, 0, 0), "ansi256")).toBe("\x1b[38;5;196m");
+    expect(bgOpen(rgb(0, 0, 0), "ansi256")).toBe("\x1b[48;5;16m");
   });
 });
 
@@ -187,7 +187,7 @@ describe("a sparse theme fills itself in", () => {
   it("a derived bright colour differs from its base at both depths", () => {
     const red = parseColor("#dc322f")!;
     const bright = brighten(red);
-    expect(fgOpen(bright, true)).not.toBe(fgOpen(red, true));
+    expect(fgOpen(bright, "truecolor")).not.toBe(fgOpen(red, "truecolor"));
     expect(quantize256(bright as never)).not.toBe(quantize256(red as never));
   });
 });

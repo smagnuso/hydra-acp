@@ -26,6 +26,7 @@ import {
 } from "../../acp/permission-pick.js";
 import { createChunker } from "./cat-chunker.js";
 import { renderMarkdownForCat, type CatRenderMode } from "./cat-render.js";
+import { colorEnabled } from "../../tui/theme/capability.js";
 import {
   buildTitleFromArgv,
   setHydraProcessTitle,
@@ -311,7 +312,11 @@ export interface CatLoopArgs {
 // and a WS connection.
 export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   const { conn, opts, stdin, stdinIsTty, stdoutIsTty, stdout, stderr } = args;
-  const renderMode: CatRenderMode = stdoutIsTty ? "ansi" : "plain";
+  // Not just isTTY: colorEnabled also honours NO_COLOR and TERM=dumb, so
+  // `NO_COLOR=1 hydra cat` on a terminal renders plain like a pipe does.
+  const renderMode: CatRenderMode = colorEnabled({ isTTY: stdoutIsTty })
+    ? "ansi"
+    : "plain";
   const rawMode = opts.raw === true;
 
   // Piped (non-TTY) stdin to a fresh session with no --follow auto-uses

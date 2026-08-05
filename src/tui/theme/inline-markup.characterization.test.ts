@@ -203,3 +203,68 @@ describe("search highlight over a span-bearing body", () => {
     expect(painted).toContain("\x1b[41m\x1b[97mfoo");
   });
 });
+
+describe("NO_COLOR silences every source of colour", () => {
+  // Three independent sources have to go quiet, and they are reached
+  // differently: the token's own colour, the inline spans format.ts bakes into
+  // a body at parse time, and cli-highlight's syntax colours on a fenced code
+  // line. The first falls out of "none" being a depth; the other two are in the
+  // body text, so writeStyled strips them.
+  const render = (md: string, env: Record<string, string>): string => {
+    const { term, take } = createCapturingTerminal("xterm-truecolor");
+    const orig = { ...process.env };
+    Object.assign(process.env, env);
+    try {
+      take();
+      for (const line of parseAgentMarkdown(md)) {
+        writeStyled(term, line.body, line.bodyStyle);
+      }
+      return take();
+    } finally {
+      for (const k of Object.keys(env)) {
+        delete process.env[k];
+      }
+      Object.assign(process.env, orig);
+    }
+  };
+
+  const CASES: Array<[string, string]> = [
+    ["token colour", "# a heading"],
+    ["inline span", "call `foo()` now"],
+    ["link", "see [docs](https://example.com)"],
+    ["syntax highlighting", "```js\nconst a = 1;\n```"],
+    ["everything at once", "# h\n\n`c` and **b**\n\n```js\nconst a = 1;\n```"],
+  ];
+
+  for (const [what, md] of CASES) {
+    it(`emits no escape at all — ${what}`, () => {
+      const out = render(md, { NO_COLOR: "1" });
+      expect(out).not.toContain("\x1b");
+      // …and the visible text survives.
+      expect(out.length).toBeGreaterThan(0);
+    });
+
+    it(`still emits colour without NO_COLOR — ${what}`, () => {
+      // Guards against the assertion above passing because rendering broke.
+      expect(render(md, {})).toContain("\x1b");
+    });
+  }
+
+  it("leaves OSC 8 hyperlinks intact, since a link is not colour", () => {
+    const { term, take } = createCapturingTerminal("xterm-truecolor");
+    process.env.NO_COLOR = "1";
+    try {
+      take();
+      writeStyled(
+        term,
+        "see \x1b]8;;https://example.com\x1b\\\x1b[96mdocs\x1b[0m\x1b]8;;\x1b\\ end",
+        "agent",
+      );
+      const out = take();
+      expect(out).toContain("\x1b]8;;https://example.com");
+      expect(out).not.toContain("\x1b[96m");
+    } finally {
+      delete process.env.NO_COLOR;
+    }
+  });
+});
