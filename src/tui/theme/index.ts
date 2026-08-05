@@ -109,7 +109,15 @@ interface Layer {
 // fg-vs-bg is a usage decision, not a palette entry: `bgBlue` used to be its
 // own slot alongside `blue`, which meant the same colour was written twice.
 
-const palette = {
+/** A full set of palette slots. A theme supplies some or all of these. */
+export type Palette = Record<PaletteSlot, Color>;
+
+export type PaletteSlot =
+  | "black" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white"
+  | "brightBlack" | "brightRed" | "brightGreen" | "brightYellow"
+  | "brightBlue" | "brightMagenta" | "brightCyan" | "brightWhite";
+
+export const DEFAULT_PALETTE: Palette = {
   black: ansi(0),
   red: ansi(1),
   green: ansi(2),
@@ -126,7 +134,11 @@ const palette = {
   brightMagenta: ansi(13),
   brightCyan: ansi(14),
   brightWhite: ansi(15),
-} as const;
+};
+
+// The palette the token table is currently built against. Swapped by setTheme,
+// which rebuilds everything downstream — see ActiveTheme.
+let palette: Palette = DEFAULT_PALETTE;
 
 // Grayscale levels (0-255) for the background bands. Not palette colours:
 // these feed terminal-kit's grayscale quantisation, which resolveStyle applies
@@ -191,7 +203,8 @@ const underline = attr(4, 24);
 //   reference / focus  — both bright blue. One names a thing (a tool, a file
 //     path), the other marks which box has keyboard focus. Unrelated meanings
 //     that happen to share a colour.
-const roles = {
+function buildRoles() {
+  return {
   // Text. `fg` is the terminal's own foreground, i.e. deliberately unstyled —
   // used where the normal case should not draw the eye (a Ready status), where
   // removing emphasis IS the signal (a hovered hint chunk), and by the
@@ -264,7 +277,14 @@ const roles = {
   syntaxEmphasis: [italic],
   syntaxStrong: [bold],
   syntaxLink: [underline],
-} satisfies Record<string, Layer[]>;
+  };
+}
+
+/** Every role name, inferred from the builder so the two cannot drift. */
+type Roles = ReturnType<typeof buildRoles>;
+export type RoleName = keyof Roles;
+
+let roles: Roles = buildRoles();
 
 /** The opening bytes of a role, for callers that splice colour into a string. */
 /**
@@ -301,10 +321,16 @@ export const SGR_UNDERLINE = `${CSI}4m`;
 // Inline spans take their colour from roles like everything else: `accent` for
 // a code span or a link, `info` for the quieter code span inside a thought,
 // and `subtle` for the gray a thought's prose returns to.
-const SPAN_CODE = openOf(roles.accent);
-const SPAN_CODE_QUIET = openOf(roles.info);
-const SPAN_LINK = SPAN_CODE + SGR_UNDERLINE;
-const THOUGHT_BASE = openOf(roles.subtle);
+function buildSpans() {
+  const code = openOf(roles.accent);
+  return {
+    code,
+    codeQuiet: openOf(roles.info),
+    link: code + SGR_UNDERLINE,
+    thoughtBase: openOf(roles.subtle),
+  };
+}
+let spans = buildSpans();
 
 /**
  * How a row styles the inline spans inside it.
@@ -327,22 +353,36 @@ export interface InlineOpts {
  * foreground — so a plain reset is the right closer and nothing needs
  * restoring.
  */
-export const PROSE_INLINE_OPTS: InlineOpts = {
-  codeOpen: SPAN_CODE,
+function buildProseInlineOpts(): InlineOpts {
+  return {
+  codeOpen: spans.code,
   // Links are cyan + underlined.
-  linkOpen: SPAN_LINK,
+  linkOpen: spans.link,
   base: "",
-};
+  };
+}
 
 /**
  * Inline spans inside a thought. Code goes plain cyan rather than bright so
  * spans stay in the thought's gray register instead of punching out of it.
  */
-export const THOUGHT_INLINE_OPTS: InlineOpts = {
-  codeOpen: SPAN_CODE_QUIET,
-  linkOpen: SPAN_LINK,
-  base: THOUGHT_BASE,
-};
+function buildThoughtInlineOpts(): InlineOpts {
+  return {
+    codeOpen: spans.codeQuiet,
+    linkOpen: spans.link,
+    base: spans.thoughtBase,
+  };
+}
+
+/** Inline-span options for agent prose. Re-read after a theme swap. */
+export function proseInlineOpts(): InlineOpts {
+  return active.prose;
+}
+
+/** Inline-span options for a thought. Re-read after a theme swap. */
+export function thoughtInlineOpts(): InlineOpts {
+  return active.thought;
+}
 
 /**
  * Inline spans for a row whose base style carries its own colour: plan
@@ -359,8 +399,8 @@ export function inlineOptsFor(style: Style): InlineOpts {
   return {
     // heading-2 is itself `accent`, so a code span inside it would vanish;
     // `active` is the one other colour already in the heading vocabulary.
-    codeOpen: style === "heading-2" ? openOf(roles.active) : SPAN_CODE,
-    linkOpen: SPAN_LINK,
+    codeOpen: style === "heading-2" ? openOf(roles.active) : spans.code,
+    linkOpen: spans.link,
     base: resolveStyle(style, "ansi256").open,
   };
 }
@@ -525,7 +565,8 @@ export type ThemeToken = Style | ChromeToken | SyntaxToken;
 // Keyed by ThemeToken rather than string so a token declared in a union but
 // missing an entry here is a compile error rather than something that silently
 // resolves to unstyled.
-const STYLES: Record<ThemeToken, StyleSpec> = {
+function buildStyles(): Record<ThemeToken, StyleSpec> {
+  return {
   // Quiet full-width band marking the start of a user turn. Bold on a
   // grayscale lift rather than a colour, so it reads as a boundary rather
   // than a highlight stripe.
@@ -856,7 +897,79 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // Inverse video stays legible over every base style and can't collide with
   // the two search treatments when both land on one row.
   "selection-highlight": { layers: [...roles.invert] },
+  };
+}
+
+let STYLES = buildStyles();
+
+// ---------------------------------------------------------------------------
+// The active theme
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything derived from a palette, rebuilt as a unit when the theme changes.
+ *
+ * Rebuilding rather than resolving lazily is deliberate. A lazy scheme would
+ * avoid the rebuild but capture palette lookups in closures, which is exactly
+ * the kind of thing that half-updates and produces a screen mixing two themes.
+ * A swap is rare and the table is small.
+ *
+ * `revision` exists so consumers holding derived state can tell it is stale
+ * without needing to be notified — format.ts keys its highlight cache on it,
+ * so old-theme output is never reused.
+ */
+interface ActiveTheme {
+  prose: InlineOpts;
+  thought: InlineOpts;
+  revision: number;
+}
+
+let active: ActiveTheme = {
+  prose: buildProseInlineOpts(),
+  thought: buildThoughtInlineOpts(),
+  revision: 0,
 };
+
+// Built on first use rather than here: buildSyntaxTheme walks SYNTAX_TOKENS,
+// which is declared further down. Eager construction would depend on
+// declaration order within this file, which is exactly the kind of coupling
+// that breaks the moment someone reorders it.
+let syntaxCache: Record<string, (code: string) => string> | undefined;
+
+/**
+ * Swap the palette and rebuild everything derived from it.
+ *
+ * Does not repaint: the caller decides when, since a theme change during an
+ * interactive picker wants a redraw and one during startup does not.
+ *
+ * Note what this cannot reach: inline spans and syntax colours are baked into
+ * a FormattedLine's body when it is parsed, so scrollback already on screen
+ * keeps its old span colours until those lines are re-parsed. Everything
+ * resolved at paint time — every token, all chrome — updates on the next draw.
+ */
+export function setTheme(next: Palette): void {
+  palette = next;
+  roles = buildRoles();
+  spans = buildSpans();
+  STYLES = buildStyles();
+  syntaxCache = undefined;
+  active = {
+    prose: buildProseInlineOpts(),
+    thought: buildThoughtInlineOpts(),
+    revision: active.revision + 1,
+  };
+}
+
+/** Bumped on every setTheme, for consumers caching derived output. */
+export function themeRevision(): number {
+  return active.revision;
+}
+
+/** The active cli-highlight theme. Re-read after a theme swap. */
+export function syntaxTheme(): Record<string, (code: string) => string> {
+  syntaxCache ??= buildSyntaxTheme();
+  return syntaxCache;
+}
 
 const EMPTY: StyleRender = { open: "", close: "", inlineSgr: false };
 
@@ -1152,7 +1265,7 @@ export function resolveHovered(
       inlineSgr: true,
       transform: (text) =>
         restoreBandAfterResets(
-          text.split(THOUGHT_BASE).join(`${CSI}39m`),
+          text.split(spans.thoughtBase).join(`${CSI}39m`),
           band,
         ),
     };

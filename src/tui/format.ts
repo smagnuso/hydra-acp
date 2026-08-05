@@ -5,14 +5,15 @@
 import { highlight, supportsLanguage } from "cli-highlight";
 import stringWidth from "string-width";
 import {
-  buildSyntaxTheme,
   inlineOptsFor,
   type InlineOpts,
-  PROSE_INLINE_OPTS,
+  proseInlineOpts,
   SGR_BOLD,
   SGR_RESET,
   SGR_UNDERLINE,
-  THOUGHT_INLINE_OPTS,
+  syntaxTheme,
+  themeRevision,
+  thoughtInlineOpts,
 } from "./theme/index.js";
 import { thisMachine } from "../core/machine.js";
 import { shortenHomePath } from "../core/paths.js";
@@ -325,7 +326,7 @@ export function formatEvent(
 //          outer side is non-alphanumeric-and-non-`_`. This stops
 //          `some_snake_case` from italicizing `snake`.
 //
-// Openers come from the caller (see PROSE_INLINE_OPTS / THOUGHT_INLINE_OPTS /
+// Openers come from the caller (see proseInlineOpts / thoughtInlineOpts /
 // inlineOptsFor in theme/index.ts). Closers are computed — see `enclosing`
 // below.
 function applyInlineMarkup(text: string, opts?: InlineOpts): string {
@@ -372,7 +373,7 @@ function applyInlineMarkupWithLinks(
   // Defaults suit agent prose, whose base is the terminal's default
   // foreground. Rows that carry their own colour (plan entries, headings,
   // thoughts) pass opts.
-  const resolved = opts ?? PROSE_INLINE_OPTS;
+  const resolved = opts ?? proseInlineOpts();
   const { codeOpen, linkOpen } = resolved;
   // Top-level spans close back to the row's own style.
   const outer = enclosing ?? resolved.base;
@@ -951,14 +952,14 @@ export function parseAgentMarkdown(
 // the dim gray "thought" color plus the indent set thoughts apart, and a
 // blank gutter keeps copy/paste clean (no leading "*"/"·" to strip). Both
 // inline resets keep spans in the same gray register without a hue shift
-// (see THOUGHT_INLINE_OPTS).
+// (see thoughtInlineOpts).
 export function parseThoughtMarkdown(text: string): FormattedLine[] {
   return parseMarkdown(text, {
     proseStyle: "thought",
     highlightCode: false,
     prefixStyle: "thought",
     firstPrefix: "  ",
-    inlineOpts: THOUGHT_INLINE_OPTS,
+    inlineOpts: thoughtInlineOpts(),
   });
 }
 
@@ -1405,15 +1406,13 @@ function formatTable(
 }
 
 // Syntax colours come from the theme's `syntax-*` tokens, so a retheme reaches
-// code blocks like it reaches everything else. Built once: the token table is
-// static today, and rebuilding per fence would be wasted work.
+// code blocks like it reaches everything else.
 //
 // Unconditional, i.e. escapes are emitted even when stdout isn't a TTY. This
 // runs at parse time and feeds three sinks with different answers — the TUI,
 // `cat --ansi`, and `cat --plain` — so the decision belongs to each of them.
 // NO_COLOR is handled where it can be: cat's plain mode strips, and the TUI's
 // write path strips when the depth is "none".
-const HIGHLIGHT_THEME = buildSyntaxTheme();
 
 // Run highlight.js over a fenced block. Returns one entry per source
 // line. When the language is unknown / unsupported, or highlight.js
@@ -1438,7 +1437,10 @@ function highlightFencedBlock(
     return lines.map((body) => ({ body, ansi: false }));
   }
   const source = lines.join("\n");
-  const cacheKey = `${lang}\u0000${source}`;
+  // Keyed on the theme revision too: the cached value is already-coloured
+  // output, so a theme swap has to miss rather than serve the old palette.
+  // Stale entries age out through the LRU.
+  const cacheKey = `${themeRevision()}\u0000${lang}\u0000${source}`;
   const cached = highlightCache.get(cacheKey);
   let highlighted: string;
   if (cached !== undefined) {
@@ -1451,7 +1453,7 @@ function highlightFencedBlock(
     try {
       raw = highlight(source, {
         language: lang,
-        theme: HIGHLIGHT_THEME,
+        theme: syntaxTheme(),
         ignoreIllegals: true,
       });
     } catch {
