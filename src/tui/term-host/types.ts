@@ -119,6 +119,16 @@ export interface OpenTabResult {
 export interface TabLabelView {
   label: string;
   /**
+   * Whether the host generated this label rather than a human choosing it,
+   * when the host can answer authoritatively.
+   *
+   * Preferred over isAutoLabel when present. Some hosts track this as a fact
+   * rather than a naming convention — tmux has a per-window
+   * `automatic-rename` flag, so it can simply say, where herdr can only
+   * infer from the string. Omitted means "I don't know, use isAutoLabel".
+   */
+  auto?: boolean;
+  /**
    * Panes in this tab. Core refuses to rename a split tab: no single
    * pane's session has a claim on the whole tab's name, and a second
    * hydra in the other pane would fight over it.
@@ -170,6 +180,11 @@ export interface TerminalHost {
    * chose. Per-adapter because the conventions differ sharply: some number
    * their tabs, tmux names them after the running command ("zsh", "node"),
    * zellij uses "Tab #1". Required when caps.label.
+   *
+   * Only consulted when readLabel() did not return an authoritative `auto`.
+   * Answer conservatively (false) when unsure: the cost of a false negative
+   * is a tab that doesn't follow the title, the cost of a false positive is
+   * stomping a name the user chose.
    */
   isAutoLabel?(label: string): boolean;
 }

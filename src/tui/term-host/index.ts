@@ -33,10 +33,21 @@
 // left the hazard for every other embedder of Screen.
 
 import { herdrCandidate } from "./herdr.js";
+import { tmuxCandidate } from "./tmux.js";
 import type { TerminalHost, TerminalHostCandidate } from "./types.js";
 
-/** Most specific first. See the precedence note above. */
-export const CANDIDATES: readonly TerminalHostCandidate[] = [herdrCandidate];
+/**
+ * Most specific first. See the precedence note above.
+ *
+ * herdr before tmux because herdr inside tmux is an ordinary setup and herdr
+ * is then the inner host — it owns the pane. The reverse (tmux inside herdr)
+ * also happens, and picks tmux only if herdr's own variables are absent,
+ * which is exactly right: in that case herdr isn't our pane's owner.
+ */
+export const CANDIDATES: readonly TerminalHostCandidate[] = [
+  herdrCandidate,
+  tmuxCandidate,
+];
 
 let active: TerminalHost | null = null;
 

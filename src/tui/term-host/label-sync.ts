@@ -128,16 +128,25 @@ function labelHost(): {
   };
 }
 
-/** Whether we may overwrite `current` with a session title. */
+/**
+ * Whether we may overwrite `current` with a session title.
+ *
+ * `auto` is the host's authoritative answer when it has one; otherwise fall
+ * back to the adapter's naming-convention guess.
+ */
 export function mayRenameTab(
   current: string,
   paneCount: number,
   isAutoLabel: (label: string) => boolean,
+  auto?: boolean,
 ): boolean {
   if (paneCount !== 1) {
     return false;
   }
-  return isAutoLabel(current) || current === applied;
+  if (current === applied) {
+    return true;
+  }
+  return auto ?? isAutoLabel(current);
 }
 
 async function drain(): Promise<void> {
@@ -162,7 +171,7 @@ async function drain(): Promise<void> {
       continue;
     }
     adoptEnvLabel(info.label);
-    if (!mayRenameTab(info.label, info.paneCount, host.isAutoLabel)) {
+    if (!mayRenameTab(info.label, info.paneCount, host.isAutoLabel, info.auto)) {
       // Not ours to write. Drop the pending title rather than retrying: the
       // user owns this label now, and the next title change will ask again
       // anyway.
