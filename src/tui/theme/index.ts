@@ -353,6 +353,21 @@ function buildRoles() {
   errorSoft: [fgL(palette.red)],
   cold: [fgL(palette.brightMagenta)],
 
+  // Git working-tree status. Its own family rather than borrowing ok / reference /
+  // muted, for the reason syntax has its own: those three are a CLASSIFICATION of
+  // files, not a status ladder, and the fact that "staged" happened to land on the
+  // same green as "succeeded" was a coincidence of both wanting green. Sharing the
+  // role made the coincidence load-bearing — recolouring success moved the git
+  // list, and recolouring the git list moved plan-done, notice-ok and meter-fill.
+  //
+  // The default colours are unchanged, so this costs nothing to adopt: it only
+  // separates what a theme can now say independently.
+  gitStaged: [fgL(palette.green)],
+  gitDirty: [fgL(palette.brightBlue)],
+  // Keeps `muted`'s shape, dim attribute included: untracked files recede.
+  gitUntracked:
+    palette.fg === undefined ? [dim] : [dim, fgL(palette.brightBlack)],
+
   // Reference and navigation.
   accent: [fgL(palette.brightCyan)],
   info: [fgL(palette.cyan)],
@@ -933,9 +948,9 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // Working-tree state. Previously borrowed plan-done / tool / plan-pending,
   // which meant retinting plan entries also recoloured git status.
   // role: ok / accent / muted
-  "git-staged": { layers: [...roles.ok] },
-  "git-dirty": { layers: [...roles.reference] },
-  "git-untracked": { layers: [...roles.muted] },
+  "git-staged": { layers: [...roles.gitStaged] },
+  "git-dirty": { layers: [...roles.gitDirty] },
+  "git-untracked": { layers: [...roles.gitUntracked] },
 
   // A path in a list of touched files. Previously borrowed `tool`.
   // role: accent

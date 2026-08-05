@@ -206,18 +206,59 @@ describe("loadTheme", () => {
 
 describe("roles and elements overrides", () => {
   it("recolours a role, reaching every token that uses it", async () => {
-    // roles.ok is shared by plan-done, notice-ok, git-staged and meter-fill —
-    // the whole point of the role tier.
+    // roles.ok is shared by plan-done, notice-ok and meter-fill — the whole
+    // point of the role tier.
     const d = await dir();
     await writeFile(join(d, "t.json"), '{"roles":{"ok":"#123456"}}');
     const t = await loadTheme("t", d);
     expect(t.problems).toEqual([]);
     apply(t);
-    for (const token of ["plan-done", "notice-ok", "git-staged", "meter-fill"] as const) {
+    for (const token of ["plan-done", "notice-ok", "meter-fill"] as const) {
       expect(resolveStyle(token, "truecolor").open, token).toBe(
         "\x1b[38;2;18;52;86m",
       );
     }
+  });
+
+  // git-staged used to be on roles.ok, and moved off it: the git tokens are a
+  // three-way classification of files, not a status ladder, and "staged" landing
+  // on the same green as "succeeded" was a coincidence of both wanting green.
+  // While it was shared, recolouring success moved the git list and recolouring
+  // the git list moved plan-done, notice-ok and meter-fill. Both directions are
+  // pinned here, since a future tidy-up that "deduplicates" the two greens back
+  // together would reintroduce it silently.
+  it("keeps git status independent of the ok/reference/muted roles", async () => {
+    const d = await dir();
+    await writeFile(
+      join(d, "t.json"),
+      '{"roles":{"ok":"#123456","reference":"#123456","muted":"#123456"}}',
+    );
+    apply(await loadTheme("t", d));
+    expect(resolveStyle("git-staged", "truecolor").open).toBe("\x1b[32m");
+    expect(resolveStyle("git-dirty", "truecolor").open).toBe("\x1b[94m");
+    expect(resolveStyle("git-untracked", "truecolor").open).toBe("\x1b[2m");
+  });
+
+  it("recolours git status through its own roles", async () => {
+    const d = await dir();
+    await writeFile(
+      join(d, "t.json"),
+      '{"roles":{"gitStaged":"#123456","gitDirty":"#123456","gitUntracked":"#123456"}}',
+    );
+    const t = await loadTheme("t", d);
+    expect(t.problems).toEqual([]);
+    apply(t);
+    for (const token of ["git-staged", "git-dirty"] as const) {
+      expect(resolveStyle(token, "truecolor").open, token).toBe(
+        "\x1b[38;2;18;52;86m",
+      );
+    }
+    // Untracked keeps its dim: an override replaces colour, never attributes.
+    expect(resolveStyle("git-untracked", "truecolor").open).toBe(
+      "\x1b[2m\x1b[38;2;18;52;86m",
+    );
+    // ...and the status roles it used to borrow stay put.
+    expect(resolveStyle("notice-ok", "truecolor").open).toBe("\x1b[32m");
   });
 
   it("recolours a single element without touching its role's siblings", async () => {
@@ -227,8 +268,8 @@ describe("roles and elements overrides", () => {
     expect(resolveStyle("plan-done", "truecolor").open).toBe(
       "\x1b[38;2;18;52;86m",
     );
-    // git-staged shares roles.ok but was not named, so it is unchanged.
-    expect(resolveStyle("git-staged", "truecolor").open).toBe("\x1b[32m");
+    // notice-ok shares roles.ok but was not named, so it is unchanged.
+    expect(resolveStyle("notice-ok", "truecolor").open).toBe("\x1b[32m");
   });
 
   it("keeps attributes when a colour is overridden", async () => {
