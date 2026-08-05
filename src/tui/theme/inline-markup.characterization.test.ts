@@ -268,3 +268,33 @@ describe("NO_COLOR silences every source of colour", () => {
     }
   });
 });
+
+describe("syntax highlighting closes back to the code band", () => {
+  // A code block sits on its own band with an explicit white base. A syntax
+  // span that closed to SGR 39 would drop the rest of the line to whatever the
+  // user's default foreground is — which is why the highlighter's output used
+  // to be post-processed, rewriting every \x1b[39m to \x1b[37m. The syntax
+  // tokens now emit the right closer directly; this pins that they still do.
+  const fence = (lang: string, code: string): string =>
+    parseAgentMarkdown(`\`\`\`${lang}\n${code}\n\`\`\``)
+      .map((l) => l.body)
+      .join("\n");
+
+  it("never closes a span to the default foreground", () => {
+    const body = fence("js", "const a = 1; // note\nfunction f(x) { return x; }");
+    expect(body).toContain("\x1b[37m");
+    expect(body).not.toContain("\x1b[39m");
+  });
+
+  it("colours diff +/- lines", () => {
+    // The case this highlighting was originally added for.
+    const body = fence("diff", "@@ -1 +1 @@\n-gone\n+added");
+    expect(body).toContain("\x1b[92m"); // diffAdded
+    expect(body).toContain("\x1b[91m"); // diffRemoved
+  });
+
+  it("leaves an unsupported language untouched", () => {
+    const body = fence("not-a-language", "plain text");
+    expect(body).not.toContain("\x1b");
+  });
+});

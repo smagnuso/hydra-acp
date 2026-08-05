@@ -2,10 +2,10 @@
 // screen layer is the only place that knows how to translate Style names
 // into ANSI/terminal-kit calls.
 
-import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
 import stringWidth from "string-width";
 import {
+  buildSyntaxTheme,
   inlineOptsFor,
   type InlineOpts,
   PROSE_INLINE_OPTS,
@@ -1404,39 +1404,16 @@ function formatTable(
   return out;
 }
 
-// Forced-color chalk instance so highlight.js output carries ANSI escapes
-// even when stdout isn't a TTY (vitest, piped runs). The actual terminal
-// strips/renders these correctly in the TUI's fullscreen mode.
-const highlightChalk = new chalk.Instance({ level: 3 });
-
-// Theme keyed by highlight.js token classes. Picks per-token colors that
-// read well on the dark grayscale background stripe the screen layer
-// paints behind code blocks. Diff tokens (addition/deletion/meta) are
-// the common case the user asked us to handle first.
-const HIGHLIGHT_THEME = {
-  keyword: highlightChalk.blueBright,
-  built_in: highlightChalk.cyan,
-  type: highlightChalk.cyanBright,
-  literal: highlightChalk.blue,
-  number: highlightChalk.greenBright,
-  string: highlightChalk.yellow,
-  regexp: highlightChalk.red,
-  comment: highlightChalk.gray,
-  function: highlightChalk.yellow,
-  title: highlightChalk.yellow,
-  class: highlightChalk.yellowBright,
-  attr: highlightChalk.cyan,
-  attribute: highlightChalk.cyan,
-  variable: highlightChalk.white,
-  params: highlightChalk.white,
-  meta: highlightChalk.magenta,
-  symbol: highlightChalk.magenta,
-  addition: highlightChalk.greenBright,
-  deletion: highlightChalk.redBright,
-  section: highlightChalk.cyan,
-  tag: highlightChalk.cyan,
-  name: highlightChalk.cyanBright,
-};
+// Syntax colours come from the theme's `syntax-*` tokens, so a retheme reaches
+// code blocks like it reaches everything else. Built once: the token table is
+// static today, and rebuilding per fence would be wasted work.
+//
+// Unconditional, i.e. escapes are emitted even when stdout isn't a TTY. This
+// runs at parse time and feeds three sinks with different answers — the TUI,
+// `cat --ansi`, and `cat --plain` — so the decision belongs to each of them.
+// NO_COLOR is handled where it can be: cat's plain mode strips, and the TUI's
+// write path strips when the depth is "none".
+const HIGHLIGHT_THEME = buildSyntaxTheme();
 
 // Run highlight.js over a fenced block. Returns one entry per source
 // line. When the language is unknown / unsupported, or highlight.js
@@ -1480,17 +1457,11 @@ function highlightFencedBlock(
     } catch {
       return lines.map((body) => ({ body, ansi: false }));
     }
-    // chalk closes color spans with `\x1b[39m` (reset fg to terminal
-    // default). That works when the surrounding context is the terminal
-    // default, but our "code" body sits on a `bgColorGrayscale(28).white`
-    // base, so the close drops the rest of the line to whatever the user's
-    // default foreground is (blue / gray / etc. depending on theme) instead
-    // of back to our explicit white. Rewrite every fg-close to an explicit
-    // "set fg to white" so closes always restore the base we set in
-    // screen.ts. Side-effect: nested chalk closes also land at white, which
-    // matches the behavior cli-highlight already had (it concatenates spans
-    // without re-emitting parents).
-    highlighted = raw.replace(/\x1b\[39m/g, "\x1b[37m");
+    // No post-processing: each syntax span already closes back to the code
+    // band's base colour rather than to the terminal default. That used to
+    // need a rewrite of every `\x1b[39m` in this string — see
+    // buildSyntaxTheme.
+    highlighted = raw;
     if (highlightCache.size >= HIGHLIGHT_CACHE_MAX) {
       const oldestKey = highlightCache.keys().next().value;
       if (oldestKey !== undefined)

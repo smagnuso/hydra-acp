@@ -47,7 +47,7 @@ function renderLine(line: FormattedLine, mode: CatRenderMode): string {
   return stripAnsi(line.body);
 }
 
-// Map FormattedLine.bodyStyle to a chalk wrapper for ansi mode. Only covers
+// Map FormattedLine.bodyStyle to a theme token for ansi mode. Only covers
 // what parseAgentMarkdown actually emits, which is the sole source here:
 // headings, the table separator rule, and default unstyled prose (`agent`).
 // Fenced-code lines carry their syntax-highlighted ANSI inside `body`
@@ -56,7 +56,7 @@ function renderLine(line: FormattedLine, mode: CatRenderMode): string {
 //
 // An allowlist rather than a mapping: the bytes come from the theme, so a
 // heading recoloured there is recoloured here too. This file used to restate
-// each colour in chalk, which meant `hydra cat` quietly ignored the theme.
+// each colour itself, which meant `hydra cat` quietly ignored the theme.
 //
 // It stays an allowlist because "style every token" would be wrong for `code`:
 // fenced lines already carry cli-highlight's ANSI in `body`, and overlaying the

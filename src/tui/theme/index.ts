@@ -217,9 +217,37 @@ const roles = {
   matchActive: [bgL(palette.red), fgL(palette.brightWhite)],
   invert: [inverse],
   // The base text colour inside a code band. Explicit rather than the
-  // terminal default because cli-highlight's spans close to it — see the
-  // SGR-39 rewrite in format.ts.
+  // terminal default, because a syntax span closes back to it.
   codeText: [fgL(palette.white)],
+
+  // Syntax highlighting has its own role family rather than borrowing the
+  // general ones, even where the colours currently coincide. `string` is
+  // yellow and so is `warn`; `regexp` is red and so is `errorSoft`; `comment`
+  // is the same gray as `subtle`. Sharing them would mean retinting a warning
+  // also retinted every string literal — the borrowed-token problem the
+  // sidebar had, which is worth not reintroducing.
+  //
+  // Twelve slots for twenty-two highlight.js scopes. That is the normal shape
+  // for this domain; editor themes carry a comparable set.
+  syntaxKeyword: [fgL(palette.brightBlue)],
+  syntaxType: [fgL(palette.brightCyan)],
+  syntaxBuiltin: [fgL(palette.cyan)],
+  syntaxLiteral: [fgL(palette.blue)],
+  syntaxNumber: [fgL(palette.brightGreen)],
+  syntaxString: [fgL(palette.yellow)],
+  syntaxRegexp: [fgL(palette.red)],
+  syntaxComment: [fgL(palette.brightBlack)],
+  syntaxClass: [fgL(palette.brightYellow)],
+  syntaxMeta: [fgL(palette.magenta)],
+  // Same colour as codeText, so these render as plain code today. Kept as
+  // roles so a theme can give them one.
+  syntaxVariable: [fgL(palette.white)],
+  // A diff's +/- lines. Deliberately not roles.ok / roles.error: deletion
+  // happens to match `error` exactly but addition is a brighter green than
+  // `ok`, and a half-match is worse than none. A diff marker is its own
+  // signal anyway.
+  diffAdded: [fgL(palette.brightGreen)],
+  diffRemoved: [fgL(palette.brightRed)],
 } satisfies Record<string, Layer[]>;
 
 /** The opening bytes of a role, for callers that splice colour into a string. */
@@ -422,8 +450,41 @@ export type ChromeToken =
   // TUI starts, or while tearing it down.
   | "cli-warn";
 
-/** Anything the theme can resolve: a scrollback style or a piece of chrome. */
-export type ThemeToken = Style | ChromeToken;
+/**
+ * Syntax-highlighting scopes, named after highlight.js's own so they map 1:1
+ * onto what the highlighter emits rather than onto a vocabulary we invented.
+ *
+ * A third union for the same reason ChromeToken is separate from Style: these
+ * are never a FormattedLine's bodyStyle. They style runs *inside* a code
+ * block's body, which is why they resolve differently from every other token —
+ * see SYNTAX_THEME below.
+ */
+export type SyntaxToken =
+  | "syntax-keyword"
+  | "syntax-built_in"
+  | "syntax-type"
+  | "syntax-literal"
+  | "syntax-number"
+  | "syntax-string"
+  | "syntax-regexp"
+  | "syntax-comment"
+  | "syntax-function"
+  | "syntax-title"
+  | "syntax-class"
+  | "syntax-attr"
+  | "syntax-attribute"
+  | "syntax-variable"
+  | "syntax-params"
+  | "syntax-meta"
+  | "syntax-symbol"
+  | "syntax-section"
+  | "syntax-tag"
+  | "syntax-name"
+  | "syntax-addition"
+  | "syntax-deletion";
+
+/** Anything the theme can resolve. */
+export type ThemeToken = Style | ChromeToken | SyntaxToken;
 
 // Keyed by ThemeToken rather than string so a token declared in a union but
 // missing an entry here is a compile error rather than something that silently
@@ -688,6 +749,34 @@ const STYLES: Record<ThemeToken, StyleSpec> = {
   // The "· " marker starting a logical newline. role: muted
   "composer-continuation": { layers: [...roles.muted] },
 
+  // --- syntax highlighting -------------------------------------------------
+
+  // Several scopes share a role, which is highlight.js's granularity rather
+  // than a decision here: `attr`/`attribute`, `section`/`tag`, and
+  // `function`/`title` are the same thing under different language grammars.
+  "syntax-keyword": { layers: [...roles.syntaxKeyword] },
+  "syntax-built_in": { layers: [...roles.syntaxBuiltin] },
+  "syntax-type": { layers: [...roles.syntaxType] },
+  "syntax-literal": { layers: [...roles.syntaxLiteral] },
+  "syntax-number": { layers: [...roles.syntaxNumber] },
+  "syntax-string": { layers: [...roles.syntaxString] },
+  "syntax-regexp": { layers: [...roles.syntaxRegexp] },
+  "syntax-comment": { layers: [...roles.syntaxComment] },
+  "syntax-function": { layers: [...roles.syntaxString] },
+  "syntax-title": { layers: [...roles.syntaxString] },
+  "syntax-class": { layers: [...roles.syntaxClass] },
+  "syntax-attr": { layers: [...roles.syntaxBuiltin] },
+  "syntax-attribute": { layers: [...roles.syntaxBuiltin] },
+  "syntax-variable": { layers: [...roles.syntaxVariable] },
+  "syntax-params": { layers: [...roles.syntaxVariable] },
+  "syntax-meta": { layers: [...roles.syntaxMeta] },
+  "syntax-symbol": { layers: [...roles.syntaxMeta] },
+  "syntax-section": { layers: [...roles.syntaxBuiltin] },
+  "syntax-tag": { layers: [...roles.syntaxBuiltin] },
+  "syntax-name": { layers: [...roles.syntaxType] },
+  "syntax-addition": { layers: [...roles.diffAdded] },
+  "syntax-deletion": { layers: [...roles.diffRemoved] },
+
   // A bare warning printed outside any frame ("no sessions found", a daemon
   // version mismatch on stderr). Plain yellow, not the bright yellow of the
   // busy accent — nothing is in flight. role: warn
@@ -810,6 +899,61 @@ export function styled(
 ): string {
   const r = resolveStyle(token, depth);
   return r.open + text + r.close;
+}
+
+/**
+ * A cli-highlight theme: highlight.js scope -> a function that wraps a run of
+ * code in that scope's colour.
+ *
+ * Two things make this different from every other token consumer.
+ *
+ * It closes back to `codeText` rather than to the default foreground. A code
+ * block sits on its own band with an explicit white base, so a span that closed
+ * to SGR 39 would drop the rest of the line to whatever the user's default
+ * foreground happens to be. This used to be patched up afterwards by rewriting
+ * every `\x1b[39m` in the highlighter's output to `\x1b[37m`; emitting the
+ * right closer in the first place is the same bytes without the rewrite.
+ *
+ * And it resolves at a fixed 256-colour depth, because highlighting runs at
+ * parse time where no terminal is in scope — the same constraint the inline
+ * span openers have. Immaterial while the palette is the terminal's own ansi
+ * slots, since those are depth-independent; an explicitly-themed syntax palette
+ * on a truecolor terminal would be quantised. Threading depth in from the app
+ * layer would fix it.
+ */
+export function buildSyntaxTheme(): Record<string, (code: string) => string> {
+  const base = openOf(roles.codeText);
+  const scopes: SyntaxToken[] = [
+    "syntax-keyword",
+    "syntax-built_in",
+    "syntax-type",
+    "syntax-literal",
+    "syntax-number",
+    "syntax-string",
+    "syntax-regexp",
+    "syntax-comment",
+    "syntax-function",
+    "syntax-title",
+    "syntax-class",
+    "syntax-attr",
+    "syntax-attribute",
+    "syntax-variable",
+    "syntax-params",
+    "syntax-meta",
+    "syntax-symbol",
+    "syntax-section",
+    "syntax-tag",
+    "syntax-name",
+    "syntax-addition",
+    "syntax-deletion",
+  ];
+  const theme: Record<string, (code: string) => string> = {};
+  for (const scope of scopes) {
+    const open = resolveStyle(scope, "ansi256").open;
+    // cli-highlight keys on the bare scope name.
+    theme[scope.slice("syntax-".length)] = (code) => open + code + base;
+  }
+  return theme;
 }
 
 /**

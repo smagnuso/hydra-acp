@@ -45,12 +45,6 @@ const ALLOWED: Array<{ path: string; why: string; definitional?: boolean }> = [
     why: "the theme itself — the one place a token becomes bytes",
     definitional: true,
   },
-  {
-    path: "tui/format.ts",
-    why:
-      "HIGHLIGHT_THEME: cli-highlight's syntax colours, still a chalk table. " +
-      "Folding it into the palette is outstanding work, tracked separately.",
-  },
 ];
 
 // An SGR sequence: CSI ... m. Matched as it appears in SOURCE, where the
