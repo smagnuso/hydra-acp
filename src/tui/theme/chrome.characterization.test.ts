@@ -24,6 +24,9 @@ import { createCapturingTerminal, visible } from "./capture.js";
 // token -> the chain it replaced. Keyed so a renamed token fails to compile.
 const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   "box-border": (t, s) => t.dim.noFormat(s),
+  "box-border-focused": (t, s) => t.brightBlue.noFormat(s),
+  "box-border-hover": (t, s) => t.dim.bold.noFormat(s),
+  "box-border-focused-hover": (t, s) => t.brightBlue.bold.noFormat(s),
   "box-title": (t, s) => t.brightCyan.noFormat(s),
   "modal-title": (t, s) => t.brightWhite.bold.noFormat(s),
   "modal-label": (t, s) => t.dim.noFormat(s),
@@ -31,10 +34,16 @@ const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   "modal-note": (t, s) => t.brightYellow.noFormat(s),
   "modal-error": (t, s) => t.brightRed.noFormat(s),
   "modal-hint": (t, s) => t.dim.noFormat(s),
+  "modal-status": (t, s) => t.dim.noFormat(s),
+  "modal-key": (t, s) => t.brightCyan.noFormat(s),
   "input-error": (t, s) => t.red.noFormat(s),
   "input-cursor": (t, s) => t.bgWhite.noFormat(s),
+  "prompt-text": (t, s) => t.brightYellow.noFormat(s),
+  "prompt-cursor": (t, s) => t.bgBrightYellow.noFormat(s),
+  "prompt-destructive": (t, s) => t.brightRed.noFormat(s),
   "list-selected": (t, s) => t.brightWhite.bgBlue.noFormat(s),
   "list-description": (t, s) => t.dim.noFormat(s),
+  "list-header": (t, s) => t.dim.noFormat(s),
   "status-progress": (t, s) => t.brightYellow.noFormat(s),
 };
 

@@ -86,6 +86,7 @@ import {
   PASTE_START,
   SHOW_CURSOR,
 } from "./ansi.js";
+import { paint, type ChromeToken } from "./theme/index.js";
 import { decodeBundle } from "../core/bundle.js";
 import {
   aggregate as aggregateSessionInfo,
@@ -581,8 +582,8 @@ export async function pickSession(
   // Post-selection install / launch status, painted in the same
   // composer-adjacent row. Set only after the picker has resolved with
   // a "new" selection and deferred its cleanup — while it's non-null
-  // the row displays this string in brightYellow (matching the pre-
-  // alt-screen stdout redraw) instead of the dim hint / search line.
+  // the row displays this string as `status-progress` (matching the pre-
+  // alt-screen stdout redraw) instead of the hint / search line.
   // Precedence: installStatusText wins over search and hint.
   let installStatusText: string | null = null;
 
@@ -592,7 +593,7 @@ export async function pickSession(
       return {
         plain: text,
         render: () => {
-          term.brightYellow.noFormat(`  ${text}`);
+          paint(term, "status-progress", `  ${text}`);
         },
       };
     }
@@ -605,9 +606,9 @@ export async function pickSession(
       return {
         plain,
         render: () => {
-          term.brightYellow.noFormat(`  /${searchTerm}`);
-          term.bgBrightYellow(" ");
-          term.dim.noFormat(` ${matches} · ^c clears`);
+          paint(term, "prompt-text", `  /${searchTerm}`);
+          paint(term, "prompt-cursor", " ");
+          paint(term, "modal-hint", ` ${matches} · ^c clears`);
         },
       };
     }
@@ -615,7 +616,7 @@ export async function pickSession(
       return {
         plain: composerHint,
         render: () => {
-          term.dim.noFormat(`  ${composerHint}`);
+          paint(term, "modal-hint", `  ${composerHint}`);
         },
       };
     }
@@ -831,7 +832,7 @@ export async function pickSession(
   // the dashes flex to fill whatever remains so the border touches the
   // right edge of the terminal.
   // Set true while the mouse is over the composer box. Affordance only:
-  // flips the border to brightBlue (matches the focused color) so the
+  // flips the border to `box-border-focused` so the
   // user gets a hint that a click here would focus the composer. Does
   // NOT change selectedIdx — focus only moves on click.
   let composerHover = false;
@@ -925,22 +926,25 @@ export async function pickSession(
     } else {
       agentClickRange = null;
     }
-    // Border color is brightBlue when focused, dim otherwise. The
-    // hovered fragment (cwd title on the left, agent•model on the
-    // right) gets bolded so it visibly reads as clickable. Non-hovered
-    // fragments and the surrounding dashes/corners stay unbolded.
-    const style = focused ? term.brightBlue : term.dim;
-    const boldStyle = focused ? term.brightBlue.bold : term.dim.bold;
-    const emitFragment = (frag: string, bold: boolean): void => {
-      (bold ? boldStyle : style).noFormat(frag);
+    // The hovered fragment (cwd title on the left, agent•model on the right)
+    // bolds so it visibly reads as clickable. Non-hovered fragments and the
+    // surrounding dashes/corners stay unbolded.
+    const borderToken: ChromeToken = focused
+      ? "box-border-focused"
+      : "box-border";
+    const hoverToken: ChromeToken = focused
+      ? "box-border-focused-hover"
+      : "box-border-hover";
+    const emitFragment = (frag: string, hovered: boolean): void => {
+      paint(term, hovered ? hoverToken : borderToken, frag);
     };
-    style.noFormat("╭");
+    paint(term, borderToken, "╭");
     emitFragment(titleFragment, composerTopHover === "cwd");
-    style.noFormat(dashes);
+    paint(term, borderToken, dashes);
     if (rightFragment) {
       emitFragment(rightFragment, composerTopHover === "agent");
     }
-    style.noFormat("╮");
+    paint(term, borderToken, "╮");
   };
 
   // Bottom border: ╰──...──╯ stretched to the terminal width.
@@ -948,9 +952,9 @@ export async function pickSession(
     const inner = composerBoxInner();
     const dashes = "─".repeat(inner);
     if ((selectedIdx === 0 || composerHover) && terminalFocused) {
-      term.brightBlue.noFormat(`╰${dashes}╯`);
+      paint(term, "box-border-focused", `╰${dashes}╯`);
     } else {
-      term.dim.noFormat(`╰${dashes}╯`);
+      paint(term, "box-border", `╰${dashes}╯`);
     }
   };
 
@@ -965,7 +969,7 @@ export async function pickSession(
     const w = Math.max(0, readTermWidth(term) - 2);
     if (status.plain.length > w) {
       const truncated = status.plain.slice(0, Math.max(0, w - 1)) + "…";
-      term.dim.noFormat(`  ${truncated}`);
+      paint(term, "modal-hint", `  ${truncated}`);
       return;
     }
     status.render();
@@ -986,20 +990,20 @@ export async function pickSession(
   };
 
   // One visual row of the composer body. Focused: border glyphs in
-  // brightBlue, content plain. Unfocused: borders dim, content plain.
+  // `box-border-focused`, content plain. Unfocused: plain borders.
   const paintComposerBodyRow = (visualIdx: number): void => {
     const inner = composerBoxInner();
     const slice = composerSliceAt(visualIdx);
     const padWidth = Math.max(0, inner - 1 - slice.length);
     const pad = " ".repeat(padWidth);
     if ((selectedIdx === 0 || composerHover) && terminalFocused) {
-      term.brightBlue.noFormat("│");
+      paint(term, "box-border-focused", "│");
       term.noFormat(` ${slice}${pad}`);
-      term.brightBlue.noFormat("│");
+      paint(term, "box-border-focused", "│");
     } else {
-      term.dim.noFormat("│");
+      paint(term, "box-border", "│");
       term.noFormat(` ${slice}${pad}`);
-      term.dim.noFormat("│");
+      paint(term, "box-border", "│");
     }
   };
 
@@ -1011,7 +1015,7 @@ export async function pickSession(
     const prefix =
       session && session.priority && session.priority > 0 ? "* " : "  ";
     if (selectedIdx === sessionIdx + 1 && !composerHover && terminalFocused) {
-      term.brightWhite.bgBlue.noFormat(`${prefix}${label}`);
+      paint(term, "list-selected", `${prefix}${label}`);
     } else {
       term.noFormat(`${prefix}${label}`);
     }
@@ -1019,7 +1023,7 @@ export async function pickSession(
 
   // Indicator parts as structured tokens. `kind: "host"` is the
   // click target wired up by hostHitCols; everything else paints as
-  // plain dim text. Order is preserved so the join order matches what
+  // plain hint text. Order is preserved so the join order matches what
   // formatIndicator() reports.
   type IndicatorPart = { kind: "plain" | "host"; text: string };
   const indicatorParts = (): IndicatorPart[] => {
@@ -1097,40 +1101,44 @@ export async function pickSession(
         };
         if (mode === "confirm-kill" && pendingAction) {
           clearHits();
-          term.brightYellow.noFormat(`  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
+          paint(term, "prompt-text", `  kill ${shortId(pendingAction.sessionId)}? [y/N]`);
         } else if (mode === "confirm-delete" && pendingAction) {
           clearHits();
           if (pendingAction.status === "warm") {
-            term.brightRed.noFormat(
+            paint(
+              term,
+              "prompt-destructive",
               `  kill + delete ${shortId(pendingAction.sessionId)}? [y/N]`,
             );
           } else {
-            term.brightRed.noFormat(
+            paint(
+              term,
+              "prompt-destructive",
               `  delete ${shortId(pendingAction.sessionId)}? [y/N]`,
             );
           }
         } else if (mode === "busy" && pendingAction) {
           clearHits();
-          term.dim.noFormat(`  working on ${shortId(pendingAction.sessionId)}…`);
+          paint(term, "modal-status", `  working on ${shortId(pendingAction.sessionId)}…`);
         } else if (mode === "rename" && pendingAction && renameEditor) {
           clearHits();
           const text = renameEditor.text;
           const cur = renameEditor.cursor;
-          term.brightYellow.noFormat("  title: ");
-          term.brightYellow.noFormat(text.slice(0, cur));
+          paint(term, "prompt-text", "  title: ");
+          paint(term, "prompt-text", text.slice(0, cur));
           if (cur < text.length) {
-            term.bgBrightYellow.noFormat(text[cur] ?? " ");
-            term.brightYellow.noFormat(text.slice(cur + 1));
+            paint(term, "prompt-cursor", text[cur] ?? " ");
+            paint(term, "prompt-text", text.slice(cur + 1));
           } else {
-            term.bgBrightYellow(" ");
+            paint(term, "prompt-cursor", " ");
           }
-          term.dim.noFormat("  Enter saves · Esc cancels");
+          paint(term, "modal-hint", "  Enter saves · Esc cancels");
         } else if (transientStatus !== null) {
           clearHits();
-          term.dim.noFormat(`  ${transientStatus}`);
+          paint(term, "modal-status", `  ${transientStatus}`);
         } else {
           // Normal mode: left side is formatIndicator(); right edge gets
-          // a dim "Esc · Go Back" hint that doubles as a click target
+          // an "Esc · Go Back" hint that doubles as a click target
           // (see escHitCols / onMouse). The padding between left and
           // hint is rendered with spaces so the previous frame's text
           // is overwritten even when paintRow's eraseLineAfter only
@@ -1150,12 +1158,12 @@ export async function pickSession(
           // The leading "  " (2 cols) matches formatIndicator()'s prefix.
           hostHitCols = null;
           if (parts.length > 0) {
-            term.dim.noFormat("  ");
+            paint(term, "modal-hint", "  ");
             let col = 3; // 1-based column of next glyph
             for (let i = 0; i < parts.length; i++) {
               const p = parts[i]!;
               if (i > 0) {
-                term.dim.noFormat(" · ");
+                paint(term, "modal-hint", " · ");
                 col += 3;
               }
               if (p.kind === "host") {
@@ -1163,19 +1171,19 @@ export async function pickSession(
                 if (hostHintHovered) {
                   term.noFormat(p.text);
                 } else {
-                  term.dim.noFormat(p.text);
+                  paint(term, "modal-hint", p.text);
                 }
               } else {
-                term.dim.noFormat(p.text);
+                paint(term, "modal-hint", p.text);
               }
               col += p.text.length;
             }
           }
-          term.dim(" ".repeat(gap));
+          paint(term, "modal-hint", " ".repeat(gap));
           if (escHintHovered) {
             term.noFormat(escHint);
           } else {
-            term.dim.noFormat(escHint);
+            paint(term, "modal-hint", escHint);
           }
           escHitCols = {
             start: termWidth - rightMargin - hintWidth + 1,
@@ -1284,7 +1292,7 @@ export async function pickSession(
         () => paintComposerStatus(),
       );
       painter.paintRow(headerRow(), headerSig(), () => {
-        term.dim.noFormat(`  ${headerLine}`);
+        paint(term, "list-header", `  ${headerLine}`);
       });
       for (let v = 0; v < viewportSize; v++) {
         const sessionIdx = scrollOffset + v;
@@ -1330,18 +1338,20 @@ export async function pickSession(
       term.hideCursor();
       painter.clearCache();
       term.moveTo(1, 1).eraseDisplayBelow();
-      term.brightWhite.bold.noFormat("  Picker hotkeys")("\n\n");
+      paint(term, "modal-title", "  Picker hotkeys");
+      term.noFormat("\n\n");
       for (const entry of helpEntries()) {
         if (entry === null) {
           term("\n");
           continue;
         }
         const [keys, desc] = entry;
-        term.brightCyan.noFormat(`  ${keys.padEnd(HELP_KEYS_WIDTH)}`);
+        paint(term, "modal-key", `  ${keys.padEnd(HELP_KEYS_WIDTH)}`);
         term.noFormat(desc)("\n");
       }
       term("\n");
-      term.dim.noFormat("  press any key to dismiss")("\n");
+      paint(term, "modal-hint", "  press any key to dismiss");
+      term.noFormat("\n");
     });
   };
 
@@ -1387,7 +1397,7 @@ export async function pickSession(
 
   // ── Box paint helpers ──────────────────────────────────────────────
   // These mirror the composer's paintComposerTopBorder / Body / Bottom
-  // pattern. "focused" toggles brightBlue vs dim for the borders and
+  // pattern. "focused" picks the focused vs plain border token, and
   // determines whether the real terminal cursor is placed inside.
 
   const paintFindBoxTopBorder = (focused: boolean): void => {
@@ -1396,9 +1406,9 @@ export async function pickSession(
     const title = "─ Find sessions ";
     const dashes = "─".repeat(Math.max(1, inner - title.length));
     if (focused) {
-      term.brightBlue.noFormat(`╭${title}${dashes}╮`);
+      paint(term, "box-border-focused", `╭${title}${dashes}╮`);
     } else {
-      term.dim.noFormat(`╭${title}${dashes}╮`);
+      paint(term, "box-border", `╭${title}${dashes}╮`);
     }
     term.styleReset();
   };
@@ -1430,13 +1440,13 @@ export async function pickSession(
     const padWidth = Math.max(0, inner - 1 - slice.length);
     const pad = " ".repeat(padWidth);
     if (focused) {
-      term.brightBlue.noFormat("│");
+      paint(term, "box-border-focused", "│");
       term.noFormat(` ${slice}${pad}`);
-      term.brightBlue.noFormat("│");
+      paint(term, "box-border-focused", "│");
     } else {
-      term.dim.noFormat("│");
+      paint(term, "box-border", "│");
       term.noFormat(` ${slice}${pad}`);
-      term.dim.noFormat("│");
+      paint(term, "box-border", "│");
     }
     term.styleReset();
   };
@@ -1446,9 +1456,9 @@ export async function pickSession(
     const inner = Math.max(2, termWidth - 3);
     const dashes = "─".repeat(inner);
     if (focused) {
-      term.brightBlue.noFormat(`╰${dashes}╯`);
+      paint(term, "box-border-focused", `╰${dashes}╯`);
     } else {
-      term.dim.noFormat(`╰${dashes}╯`);
+      paint(term, "box-border", `╰${dashes}╯`);
     }
     term.styleReset();
   };
@@ -1584,7 +1594,7 @@ export async function pickSession(
   // picker's header, dimmed and indented by the 2-col row prefix so the
   // columns line up with the result rows below it.
   const paintFindHeader = (): void => {
-    term.dim.noFormat(`  ${findHeaderLine}`);
+    paint(term, "list-header", `  ${findHeaderLine}`);
     term.styleReset();
   };
 
@@ -1594,7 +1604,7 @@ export async function pickSession(
   const paintFindResultA = (idx: number, focused: boolean): void => {
     const { line1, focusedRow } = findResultData(idx, focused);
     if (focusedRow) {
-      term.brightWhite.bgBlue.noFormat(`❯ ${line1}`);
+      paint(term, "list-selected", `❯ ${line1}`);
     } else {
       term.noFormat(`  ${line1}`);
     }
@@ -1604,24 +1614,24 @@ export async function pickSession(
   // Paint just the snippet row for one result (no newline).
   const paintFindResultB = (idx: number, focused: boolean): void => {
     const { line2 } = findResultData(idx, focused);
-    term.dim.noFormat(line2);
+    paint(term, "list-description", line2);
     term.styleReset();
   };
 
   const paintFindIndicator = (): void => {
     if (findInFlight) {
-      term.dim.noFormat("  searching…");
+      paint(term, "modal-status", "  searching…");
       term.styleReset();
       term.eraseLineAfter();
     } else if (findError !== null) {
-      term.brightRed.noFormat(`  ${findError}`);
+      paint(term, "modal-error", `  ${findError}`);
       term.styleReset();
       term.eraseLineAfter();
     } else if (findSubMode === "input") {
       if (findResults.length > 0) {
-        term.dim.noFormat("  Enter to search · ↓ browse results · Esc cancel");
+        paint(term, "modal-hint", "  Enter to search · ↓ browse results · Esc cancel");
       } else {
-        term.dim.noFormat("  Enter to search · Esc cancel");
+        paint(term, "modal-hint", "  Enter to search · Esc cancel");
       }
       term.styleReset();
       term.eraseLineAfter();
@@ -1632,7 +1642,9 @@ export async function pickSession(
         sCount > 0
           ? `  ${sCount} ${sCount === 1 ? "session" : "sessions"} match${truncSuffix}  ·  `
           : "  ";
-      term.dim.noFormat(
+      paint(
+        term,
+        "modal-hint",
         `${countPart}↑ edit query · Up/Down sessions · n/p snippets · i info · Enter open · Esc back`,
       );
       term.styleReset();
@@ -1667,10 +1679,10 @@ export async function pickSession(
         if (findInFlight) {
           // indicator handles the in-flight text; nothing extra here
         } else if (findError === null && queryText.trim().length === 0) {
-          term.dim.noFormat("  type a query in the box above, then press Enter");
+          paint(term, "modal-hint", "  type a query in the box above, then press Enter");
           term.eraseLineAfter();
         } else if (findError === null) {
-          term.dim.noFormat("  no matches");
+          paint(term, "modal-status", "  no matches");
           term.eraseLineAfter();
         }
         term.moveTo(1, findResultsStartRow() + 1);
@@ -2012,7 +2024,7 @@ export async function pickSession(
   const repaintDataZone = (): void => {
     withSync(() => {
       painter.paintRow(headerRow(), headerSig(), () => {
-        term.dim.noFormat(`  ${headerLine}`);
+        paint(term, "list-header", `  ${headerLine}`);
       });
       for (let v = 0; v < viewportSize; v++) {
         const row = headerRow() + 1 + v;
@@ -2959,7 +2971,7 @@ export async function pickSession(
             term.moveTo(layout.contentX, layout.contentY + i);
             const slice = line.slice(0, layout.contentW - 1);
             if (error !== null) {
-              term.brightRed.noFormat(` ${slice}`);
+              paint(term, "modal-error", ` ${slice}`);
             } else {
               term.noFormat(` ${slice}`);
             }
@@ -2971,7 +2983,7 @@ export async function pickSession(
               ? `↑/↓/wheel scroll${more > 0 ? ` (${more} more)` : ""} · Esc or click outside to return`
               : "Esc or click outside to return";
           term.moveTo(layout.contentX, layout.contentY + bodyRows + 1);
-          term.dim.noFormat(` ${hint}`);
+          paint(term, "modal-hint", ` ${hint}`);
           term.styleReset();
         });
       };
@@ -3582,7 +3594,7 @@ export async function pickSession(
       // the key's normal behavior.
       clearTransient();
       // Mouse hover over the composer visually pretends the composer
-      // is focused (border brightBlue, session-row highlight hidden)
+      // is focused (border tinted, session-row highlight hidden)
       // even though selectedIdx still points at a session row. The
       // instant the user touches the keyboard they've switched to
       // keyboard control — commit the visual to real focus so the

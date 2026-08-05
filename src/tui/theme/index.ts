@@ -249,7 +249,13 @@ interface StyleSpec {
  */
 export type ChromeToken =
   // Shared modal box drawn by prompt-utils: corners, edges, title strip.
+  // The -focused variants exist because the picker draws several boxes at
+  // once and tints the one holding keyboard focus; -hover marks a clickable
+  // label embedded in a border (the picker's cwd and agent•model fragments).
   | "box-border"
+  | "box-border-focused"
+  | "box-border-hover"
+  | "box-border-focused-hover"
   | "box-title"
   // Contents of a modal or banner.
   | "modal-title"
@@ -258,19 +264,29 @@ export type ChromeToken =
   | "modal-note"
   | "modal-error"
   | "modal-hint"
-  // A text input's validation message and cursor.
+  | "modal-status"
+  | "modal-key"
+  // A text input's validation message and cursor, and an inline prompt
+  // (search filter, kill confirmation, rename) with its block cursor.
   | "input-error"
   | "input-cursor"
+  | "prompt-text"
+  | "prompt-cursor"
+  | "prompt-destructive"
   // A selectable list inside a modal.
   | "list-selected"
   | "list-description"
+  | "list-header"
   // In-place progress line (binary download, install).
   | "status-progress";
 
 /** Anything the theme can resolve: a scrollback style or a piece of chrome. */
 export type ThemeToken = Style | ChromeToken;
 
-const STYLES: Record<string, StyleSpec> = {
+// Keyed by ThemeToken rather than string so a token declared in a union but
+// missing an entry here is a compile error rather than something that silently
+// resolves to unstyled.
+const STYLES: Record<ThemeToken, StyleSpec> = {
   // Quiet full-width band marking the start of a user turn. Bold on a
   // grayscale lift rather than a colour, so it reads as a boundary rather
   // than a highlight stripe.
@@ -362,6 +378,15 @@ const STYLES: Record<string, StyleSpec> = {
 
   // Box edges recede so the content inside them reads first. role: muted
   "box-border": { layers: [dim] },
+  // The box holding keyboard focus, so a stack of them is readable at a
+  // glance. role: focus
+  "box-border-focused": { layers: [brightBlue] },
+  // A clickable label inside a border, under the pointer. Bold rather than a
+  // colour so it reads as "this bit is a target" without a second hue in the
+  // frame. role: muted + emphasis
+  "box-border-hover": { layers: [dim, bold] },
+  // role: focus + emphasis
+  "box-border-focused-hover": { layers: [brightBlue, bold] },
   // The one coloured part of the frame, so a stack of overlays stays legible.
   // role: accent
   "box-title": { layers: [brightCyan] },
@@ -380,6 +405,12 @@ const STYLES: Record<string, StyleSpec> = {
   "modal-error": { layers: [brightRed] },
   // Keybinding hints, footers, elision notes. role: muted
   "modal-hint": { layers: [dim] },
+  // Transient status: an action in flight, "searching…", "no matches". Reads
+  // the same as a hint today but it reports state rather than offering
+  // guidance. role: muted
+  "modal-status": { layers: [dim] },
+  // The key column of a hotkey table. role: accent
+  "modal-key": { layers: [brightCyan] },
 
   // Validation failure on an input field. Renders plain red where
   // modal-error is bright red: an inconsistency inherited from the two files,
@@ -387,11 +418,26 @@ const STYLES: Record<string, StyleSpec> = {
   "input-error": { layers: [red] },
   // Block cursor in a text field. role: cursor
   "input-cursor": { layers: [bgWhite] },
+  // An inline prompt the picker overlays on its own status row: the `/` search
+  // filter, a kill confirmation, a rename. Yellow because it is asking for
+  // something. role: warn
+  "prompt-text": { layers: [brightYellow] },
+  // Its block cursor, on the same hue as the text. Note this is a different
+  // colour from input-cursor (bgWhite) — two surfaces picked differently, now
+  // visible in one place rather than buried in two files. role: warn
+  "prompt-cursor": { layers: [bgBrightYellow] },
+  // Confirming something irreversible ("kill + delete abc123? [y/N]"). Shares
+  // bright red with modal-error but means the opposite thing: this is a
+  // question about to be answered, not a report of something already broken.
+  // Separated so the two can diverge. role: error
+  "prompt-destructive": { layers: [brightRed] },
 
   // Selected row of a modal list. role: selection
   "list-selected": { layers: [brightWhite, bgBlue] },
   // Secondary text under a row. role: muted
   "list-description": { layers: [dim] },
+  // Column-header row above a list. role: muted
+  "list-header": { layers: [dim] },
 
   // In-place progress, which is a busy state. role: busy
   "status-progress": { layers: [brightYellow] },
