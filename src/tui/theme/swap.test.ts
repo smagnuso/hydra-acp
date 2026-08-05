@@ -9,6 +9,7 @@ import {
   DEFAULT_PALETTE,
   proseInlineOpts,
   resolveStyle,
+  setInlineDepth,
   setTheme,
   syntaxTheme,
   themeRevision,
@@ -81,6 +82,34 @@ describe("setTheme", () => {
     const after = parseAgentMarkdown(md).map((l) => l.body).join("");
     expect(after).not.toBe(before);
     expect(after).toContain("38;5;");
+  });
+
+  // The symptom that made this concrete: switching from dracula to terminal, a
+  // paragraph rendered in TWO colours, splitting at its first backtick. Rows
+  // holding a span kept dracula's foreground; rows without fell back to the
+  // terminal's own. An inline span closes by restoring the ROW's base, so a body
+  // parsed under one theme carries that theme's foreground inside it forever —
+  // repainting cannot reach it, and the row's own open no longer agrees with it.
+  //
+  // Hence renderedAgentText in app.ts: a swap re-parses scrollback from source.
+  // This pins the half of that contract living here — that a re-parse actually
+  // yields the new theme, and that the old body is genuinely stale without one.
+  it("leaves an already-parsed body holding the old theme's colours", () => {
+    setInlineDepth("truecolor");
+    const md = "a `b` c";
+    const stale = parseAgentMarkdown(md)[0]!.body;
+    const withFg: Palette = { ...LOUD, fg: rgb(200, 201, 202) };
+    setTheme(withFg);
+
+    // The stale body still restores the palette it was parsed under, and the row
+    // style it will now be painted with disagrees with it.
+    expect(parseAgentMarkdown(md)[0]!.body).not.toBe(stale);
+    expect(stale).not.toContain("38;2;200;201;202");
+
+    // Re-parsed from source, the span closes back to the new foreground — the
+    // fix, and the reason the source has to be retained.
+    expect(parseAgentMarkdown(md)[0]!.body).toContain("38;2;200;201;202");
+    setInlineDepth("ansi256");
   });
 
   it("restores exactly on the way back", () => {

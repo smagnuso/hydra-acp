@@ -3796,12 +3796,17 @@ async function runSession(
 
   // Step to the next theme and apply it immediately.
   //
-  // What updates and what does not: every token resolves at paint time, so all
-  // row styles and all chrome change on the redraw below. Inline `code` spans,
-  // link colours and syntax highlighting are baked into a FormattedLine's body
-  // when it is parsed, so scrollback already on screen keeps its old span
-  // colours — new content is correct. Re-parsing is not available: agent block
-  // sources are not retained after their block is flushed.
+  // Two halves, because a theme reaches the screen by two routes. Every token
+  // resolves at paint time, so row styles and chrome follow the redraw below.
+  // Inline spans and syntax colours are baked into a body when it is parsed, so
+  // those need re-parsing from source — which is what renderedAgentText and
+  // renderedThoughts are retained for. Without that second half, switching from
+  // dracula to terminal left every row containing a span holding dracula's
+  // foreground while span-free rows used the terminal's own: one paragraph in
+  // two colours, split at the first backtick.
+  //
+  // Tool blocks and diffs re-render too: their bodies carry cli-highlight's
+  // syntax colours, baked the same way.
   const cycleTheme = (): void => {
     if (themeChoices.length === 0) {
       screen.notify("no themes available");
@@ -3814,6 +3819,10 @@ async function runSession(
       ...next.overrides,
       background: themeBackground,
     });
+    reparseScrollbackBlocks();
+    reRenderAllTools();
+    reRenderAllEditDiffs();
+    rerenderPlan();
     // Everything on screen was painted with the old palette, including the
     // row cache, so this has to be a full redraw rather than a repaint.
     screen.fullRedraw();
@@ -5196,6 +5205,7 @@ async function runSession(
         renderedTools.clear();
         toolsOverrides.clear();
         renderedThoughts.clear();
+        renderedAgentText.clear();
         collapsedThoughtRuns.clear();
         screen.clearScrollback();
         return true;
@@ -5865,6 +5875,20 @@ async function runSession(
   // the live buffer (the lines stay painted in scrollback). Cleared on
   // /clear. Mirrors renderedTools / renderedEditDiffs.
   const renderedThoughts = new Map<string, { text: string; workerTaskId?: string }>();
+  // The markdown source of every agent block painted this session, keyed by
+  // block key. The same retention renderedThoughts has, for the same reason:
+  // some things can only be fixed by re-parsing, and a block's source is gone
+  // the moment closeAgentText wipes the buffer.
+  //
+  // What needs it: inline `code` spans, link colours and syntax highlighting are
+  // baked into a FormattedLine's body when it is parsed, so a theme swap cannot
+  // reach them by repainting — a row keeps the palette it was parsed under.
+  // Switching from dracula to terminal left every row containing a span on
+  // dracula's white (a span's closer restores the row's base) while span-free
+  // rows fell back to the terminal's own foreground: one paragraph in two
+  // colours, split at the first backtick. Markdown table layout and wrapping are
+  // baked in at parse time too, so a resize wants this as much as a swap does.
+  const renderedAgentText = new Map<string, string>();
   // Collapsed thought runs, keyed by the run's lead (first) thought key →
   // the full ordered list of thought keys folded behind the single
   // "▸ Thoughts" line. A run is the maximal set of visually-contiguous
@@ -5994,6 +6018,7 @@ async function runSession(
       agentBuffer = "";
     }
     agentBuffer += text;
+    renderedAgentText.set(agentKey, agentBuffer);
     renderAgentBlock();
   };
 
@@ -6715,6 +6740,39 @@ async function runSession(
   // width-sensitive. This is also wired to terminal resize via
   // Screen.onLayoutChange, which fixes the same latent staleness that
   // resize has always had.
+  // Re-parse every agent and thought block in scrollback from its retained
+  // source — see renderedAgentText for what is baked in at parse time and so
+  // cannot be fixed by repainting.
+  //
+  // Thought runs currently folded behind a "▸ Thoughts" line are skipped: their
+  // blocks are not on screen, and re-upserting their bodies would unfold them.
+  // They pick the new theme up when a click expands them, which re-parses.
+  const reparseScrollbackBlocks = (): void => {
+    const w = screen.width();
+    const opts = w > 0 ? { maxWidth: w } : undefined;
+    for (const [key, text] of renderedAgentText) {
+      const lines = parseAgentMarkdown(text, opts);
+      if (lines.length > 0) {
+        screen.upsertLines(key, lines);
+      }
+    }
+    const folded = new Set<string>();
+    for (const run of collapsedThoughtRuns.values()) {
+      for (const key of run) {
+        folded.add(key);
+      }
+    }
+    for (const key of renderedThoughts.keys()) {
+      if (folded.has(key)) {
+        continue;
+      }
+      const lines = expandedThoughtLines(key);
+      if (lines.length > 0) {
+        screen.upsertLines(key, lines);
+      }
+    }
+  };
+
   const reflowWidthSensitiveBlocks = (): void => {
     // Nothing to do when the content width didn't change. A sidebar in
     // overlay mode floats over the transcript instead of narrowing it, so
@@ -6725,8 +6783,11 @@ async function runSession(
     reRenderAllTools();
     reRenderAllEditDiffs();
     rerenderPlan();
-    renderAgentBlock();
-    renderThoughtBlock();
+    // Every agent and thought block, not just the live one: their wrapping and
+    // table layout were baked at the old width too. This used to reflow only the
+    // block still being streamed, which left everything above it sized for the
+    // previous terminal width.
+    reparseScrollbackBlocks();
   };
 
   // ── git status polling ───────────────────────────────────────────────
