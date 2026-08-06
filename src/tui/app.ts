@@ -191,7 +191,7 @@ import {
   type ColorOverride,
   type Palette,
 } from "./theme/index.js";
-import { isDark, type Color } from "./theme/color.js";
+import type { Color } from "./theme/color.js";
 import {
   listThemes,
   loadTheme,
@@ -204,7 +204,8 @@ import { defaultThemeFor } from "./theme/builtins.js";
 // scope because the two happen in different functions.
 let pendingThemeProblems: string[] = [];
 // Same carry, for things that are worth saying but are not wrong — currently a
-// light theme on a dark terminal or the reverse.
+// light theme on a dark terminal or the reverse. Goes to the banner, not the
+// transcript.
 let pendingThemeNotices: string[] = [];
 // Selectable themes and which one is live, for the ^O picker. Same reason for
 // module scope: loaded during startup, read by the modal.
@@ -1010,19 +1011,14 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // stderr would be wiped by the alt-screen switch.
   pendingThemeProblems = loadedTheme.problems;
   // A separate list from the problems above because it is not an error: the theme
-  // loaded fine, it is just the wrong half of a pair for this terminal. Reported
-  // on a notice line rather than notice-error.
+  // loaded fine, it is just the wrong half of a pair for this terminal. Delivered
+  // to the banner rather than the transcript — see where this is drained.
   pendingThemeNotices = [];
-  // Announced rather than silent. A default that varies with the terminal means
-  // the colours differ between machines for no visible reason, and the way to pin
-  // one has to be discoverable. Setting tui.theme silences this.
-  if (autoThemeName !== undefined && autoThemeName !== "terminal") {
-    pendingThemeNotices.push(
-      `using "${autoThemeName}" for this terminal's ` +
-        `${isDark(themeBackground as Color) ? "dark" : "light"} background — ` +
-        `set tui.theme to pin your own (^O cycles)`,
-    );
-  }
+  // The auto-selected theme is NOT announced. It was, for about ten minutes: the
+  // argument was that a default varying with the terminal changes your colours
+  // between machines with no visible cause. But the ^O picker already shows which
+  // theme is live, so the line was permanent chrome answering a question asked
+  // once. What is left here is only the case where something is actually wrong.
   const mismatch = themeBackgroundMismatch(
     loadedTheme.palette,
     loadedTheme.name,
@@ -8484,14 +8480,14 @@ async function runSession(
     );
     pendingThemeProblems = [];
   }
+  // The banner, not the transcript — unlike the problems above. A malformed theme
+  // file is a fact about the config that should stay on screen until read; this is
+  // advice about a choice, and the same advice the ^O path already delivers
+  // through screen.notify. Two routes for one message meant it appeared in two
+  // different places depending on how you got there. Longer than the default
+  // dwell, since nobody is watching the banner in the first seconds of startup.
   if (pendingThemeNotices.length > 0) {
-    screen.appendLines(
-      pendingThemeNotices.map((notice): FormattedLine => ({
-        prefix: "  ",
-        body: `theme: ${notice}`,
-        bodyStyle: "notice",
-      })),
-    );
+    screen.notify(pendingThemeNotices.join(" · "), 10_000);
     pendingThemeNotices = [];
   }
 
