@@ -198,7 +198,7 @@ import {
   resolveThemeBackground,
   themeBackgroundMismatch,
 } from "./theme/load.js";
-import { defaultThemeFor } from "./theme/builtins.js";
+import { defaultThemeFor, stepTheme } from "./theme/builtins.js";
 
 // Theme-load problems, carried from config load to the first paint. Module
 // scope because the two happen in different functions.
@@ -3800,6 +3800,7 @@ async function runSession(
     title: string;
     options: Array<{ label: string; value: string }>;
     selectedIndex: number;
+    hint: string;
   } => ({
     title: "Session options",
     options: OPTION_IDS.map((id) => ({
@@ -3807,6 +3808,10 @@ async function runSession(
       value: optionValue(id),
     })),
     selectedIndex: optionsSelectedIndex,
+    // Stated rather than inherited from the renderer's default, which predates
+    // ←/→ and mentions neither direction. Same vocabulary as the ^Q questions
+    // modal, which has cycled its rows this way all along.
+    hint: "↑/↓ row · ←/→ cycle · ⏎ next · s save default · Esc close",
   });
 
   const refreshOptionsPrompt = (): void => {
@@ -3933,13 +3938,23 @@ async function runSession(
     }
   };
 
-  const cycleTheme = (): void => {
+  // `step` is +1 for the next theme and -1 for the previous. With fifteen
+  // builtins a one-way cycle means overshooting by one costs fourteen more
+  // presses, which is the whole reason ←/→ exists on this row.
+  const cycleTheme = (step: 1 | -1 = 1): void => {
     if (themeChoices.length === 0) {
       screen.notify("no themes available");
       return;
     }
-    const at = themeChoices.findIndex((t) => t.name === activeThemeName);
-    activeThemeName = themeChoices[(at + 1) % themeChoices.length]!.name;
+    const next = stepTheme(
+      themeChoices.map((t) => t.name),
+      activeThemeName,
+      step,
+    );
+    if (next === undefined) {
+      return;
+    }
+    activeThemeName = next;
     reapplyTheme();
   };
 
@@ -3996,7 +4011,15 @@ async function runSession(
   schemeChangeHook = onSchemeChange;
   backgroundReplyHook = applyBackground;
 
-  const applyOptionToggle = (id: OptionId): void => {
+  /**
+   * Advance an option's value.
+   *
+   * `step` is +1 for the next value and -1 for the previous. Every option but
+   * the theme has exactly two values, where "previous" and "next" are the same
+   * move, so they ignore it — which is why ←/→ works on every row rather than
+   * only on the one that needed it.
+   */
+  const applyOptionToggle = (id: OptionId, step: 1 | -1 = 1): void => {
     switch (id) {
       case "tools":
         viewPrefs.toolsExpanded = !viewPrefs.toolsExpanded;
@@ -4038,7 +4061,7 @@ async function runSession(
         setSidebarVisible(!screen.isSidebarVisible());
         break;
       case "theme":
-        cycleTheme();
+        cycleTheme(step);
         break;
     }
     refreshOptionsPrompt();
@@ -4118,6 +4141,14 @@ async function runSession(
           );
           refreshOptionsPrompt();
           return true;
+        case "left":
+        case "right": {
+          const id = OPTION_IDS[optionsSelectedIndex];
+          if (id) {
+            applyOptionToggle(id, ev.name === "left" ? -1 : 1);
+          }
+          return true;
+        }
         case "enter": {
           const id = OPTION_IDS[optionsSelectedIndex];
           if (id) {

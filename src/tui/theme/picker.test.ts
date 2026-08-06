@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listThemes, loadTheme } from "./load.js";
 import { DEFAULT_PALETTE, resolveStyle, setTheme } from "./index.js";
-import { builtinNames } from "./builtins.js";
+import { builtinNames, stepTheme } from "./builtins.js";
 
 afterEach(() => setTheme(DEFAULT_PALETTE));
 
@@ -131,5 +131,44 @@ describe("mono", () => {
     expect(failed).not.toBe(resolveStyle("tool-status-ok", "truecolor").open);
     // Failure keeps its bold.
     expect(failed).toContain("\x1b[1m");
+  });
+});
+
+describe("stepTheme", () => {
+  const names = ["a", "b", "c"];
+
+  it("moves both ways", () => {
+    expect(stepTheme(names, "a", 1)).toBe("b");
+    expect(stepTheme(names, "b", -1)).toBe("a");
+  });
+
+  // The reason ←/→ exists: with fifteen builtins, overshooting by one used to
+  // cost fourteen more presses.
+  it("wraps at both ends", () => {
+    expect(stepTheme(names, "c", 1)).toBe("a");
+    expect(stepTheme(names, "a", -1)).toBe("c");
+  });
+
+  // `tui.theme` given as an inline object resolves to the name "custom", which
+  // the picker never lists. Stepping from an unlisted name must still go
+  // somewhere sensible rather than off the end of the array.
+  it("handles an active theme that is not in the list", () => {
+    expect(stepTheme(names, "custom", 1)).toBe("a");
+    expect(stepTheme(names, "custom", -1)).toBe("c");
+  });
+
+  it("returns undefined for an empty list rather than throwing", () => {
+    expect(stepTheme([], "a", 1)).toBeUndefined();
+  });
+
+  // Round-tripping is the property the modal actually depends on: press right
+  // then left and you are back where you started, from every entry including
+  // the ends.
+  it("round-trips from every entry", async () => {
+    const all = builtinNames();
+    for (const name of all) {
+      expect(stepTheme(all, stepTheme(all, name, 1)!, -1)).toBe(name);
+      expect(stepTheme(all, stepTheme(all, name, -1)!, 1)).toBe(name);
+    }
   });
 });

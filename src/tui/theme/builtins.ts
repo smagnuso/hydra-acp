@@ -707,3 +707,31 @@ export function defaultThemeFor(background: Color | undefined): string {
   }
   return isDark(background) ? AUTO_DARK : AUTO_LIGHT;
 }
+
+/**
+ * The theme one step from `active` in `names`, wrapping at both ends.
+ *
+ * `step` is +1 for the next and -1 for the previous. Extracted from the modal's
+ * key handler because the interesting cases are not the common one: wrapping
+ * backwards off the first entry, and `active` not appearing in the list at all —
+ * which happens whenever `tui.theme` is an inline object, since that resolves to
+ * the name "custom" and the picker only lists named themes. Stepping from there
+ * lands on the first entry going forward and the last going back.
+ */
+export function stepTheme(
+  names: readonly string[],
+  active: string,
+  step: 1 | -1,
+): string | undefined {
+  if (names.length === 0) {
+    return undefined;
+  }
+  const at = names.indexOf(active);
+  if (at === -1) {
+    // Handled explicitly rather than by letting -1 fall into the modulo below,
+    // which lands on the SECOND entry going backwards — a result that is neither
+    // intended nor obviously wrong on inspection.
+    return step === 1 ? names[0] : names[names.length - 1];
+  }
+  return names[(at + step + names.length) % names.length];
+}
