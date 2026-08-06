@@ -867,8 +867,14 @@ describe("a theme's accent slots are not near-white washes", () => {
   // So this is a preference being overruled for one theme, listed slot by slot so
   // that overruling is visible. Every other slot of mocha is still checked, and a
   // future theme cannot inherit the exemption by accident.
+  // Every entry is one flavour of the same palette. Pink and lavender are pale in
+  // all of them; mocha, the darkest, also needs its yellow, where macchiato's
+  // clears the bar at 107. If a fourth family ever appears here, that is the
+  // signal to stop exempting and reconsider the rule.
   const EXEMPT: Record<string, ReadonlySet<string>> = {
     "catppuccin-mocha": new Set(["yellow", "magenta", "brightBlue"]),
+    "catppuccin-macchiato": new Set(["magenta", "brightBlue"]),
+    "catppuccin-frappe": new Set(["magenta", "brightBlue"]),
   };
 
   const ACCENT_SLOTS = [

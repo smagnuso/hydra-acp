@@ -282,6 +282,61 @@ const CATPPUCCIN_MOCHA = palette(
   { bg: "#1e1e2e", fg: "#cdd6f4" },
 );
 
+// catppuccin frappé and macchiato: the two mid-dark flavours of the same family,
+// between mocha (darkest) and latte (light). They differ from mocha almost only
+// in how dark the base ramp is — the accents shift with it, staying legible
+// against a lighter background — so the slot assignment below is mocha's, value
+// for value, and the notes there apply unchanged.
+//
+// Each needs two of the three accent-guard exemptions mocha needs (pink and
+// lavender), and notably not the third: macchiato's #eed49f yellow clears the
+// bar at 107 where mocha's #f9e2af fails at 85. See the table in load.test.ts.
+const CATPPUCCIN_FRAPPE = palette(
+  {
+    black: "#51576d", // surface1
+    red: "#e78284",
+    green: "#a6d189",
+    yellow: "#e5c890",
+    blue: "#8caaee",
+    magenta: "#f4b8e4", // pink
+    cyan: "#81c8be", // teal
+    white: "#b5bfe2", // subtext1
+    brightBlack: "#737994", // overlay0
+    brightRed: "#ea999c", // maroon
+    brightGreen: "#a6d189",
+    // Peach, as in mocha: `active` is the busy indicator and `warn` is the
+    // yellow above, and those two have to be told apart at a glance.
+    brightYellow: "#ef9f76",
+    brightBlue: "#babbf1", // lavender
+    brightMagenta: "#ca9ee6", // mauve
+    brightCyan: "#99d1db", // sky
+    brightWhite: "#c6d0f5", // text
+  },
+  { bg: "#303446", fg: "#c6d0f5" },
+);
+
+const CATPPUCCIN_MACCHIATO = palette(
+  {
+    black: "#494d64", // surface1
+    red: "#ed8796",
+    green: "#a6da95",
+    yellow: "#eed49f",
+    blue: "#8aadf4",
+    magenta: "#f5bde6", // pink
+    cyan: "#8bd5ca", // teal
+    white: "#b8c0e0", // subtext1
+    brightBlack: "#6e738d", // overlay0
+    brightRed: "#ee99a0", // maroon
+    brightGreen: "#a6da95",
+    brightYellow: "#f5a97f", // peach
+    brightBlue: "#b7bdf8", // lavender
+    brightMagenta: "#c6a0f6", // mauve
+    brightCyan: "#91d7e3", // sky
+    brightWhite: "#cad3f5", // text
+  },
+  { bg: "#24273a", fg: "#cad3f5" },
+);
+
 // catppuccin latte: the light member of the same family, and the neutral light
 // theme this set was missing — solarized-light is a cream, this is close to white.
 //
@@ -491,6 +546,18 @@ export const BUILTIN_THEMES: BuiltinTheme[] = [
     description: "dark, soft pastel (the default on a dark terminal)",
     counterpart: "catppuccin-latte",
     palette: CATPPUCCIN_MOCHA,
+  },
+  {
+    name: "catppuccin-macchiato",
+    description: "dark, soft pastel, one step lighter than mocha",
+    counterpart: "catppuccin-latte",
+    palette: CATPPUCCIN_MACCHIATO,
+  },
+  {
+    name: "catppuccin-frappe",
+    description: "dark, soft pastel, the lightest of the dark flavours",
+    counterpart: "catppuccin-latte",
+    palette: CATPPUCCIN_FRAPPE,
   },
   {
     name: "catppuccin-latte",
