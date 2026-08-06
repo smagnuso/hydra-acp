@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { collapseUsage, lifetimeCostOf } from "./usage-collapse.js";
+import { collapseUsage, lifetimeCostOf, distinctUpstreamSessionIds } from "./usage-collapse.js";
 
 describe("lifetimeCostOf", () => {
   it("sums the split", () => {
@@ -67,5 +67,32 @@ describe("collapseUsage", () => {
 
   it("returns undefined for undefined input", () => {
     expect(collapseUsage(undefined)).toBeUndefined();
+  });
+});
+
+describe("distinctUpstreamSessionIds", () => {
+  // A rollback re-enters an earlier upstream, so the generation list
+  // legitimately repeats an id. Summing ledger cost per interval would
+  // then charge that upstream twice.
+  it("collapses a rollback's repeated upstream to one entry", () => {
+    const gens = [
+      { upstreamSessionId: "ses_074dcded" },
+      { upstreamSessionId: "ses_06f30e6ed" },
+      { upstreamSessionId: "ses_074dcded" },
+    ];
+    expect(distinctUpstreamSessionIds(gens)).toEqual(["ses_074dcded", "ses_06f30e6ed"]);
+  });
+
+  it("preserves chronological order of first occurrence", () => {
+    const gens = [{ upstreamSessionId: "a" }, { upstreamSessionId: "b" }, { upstreamSessionId: "a" }];
+    expect(distinctUpstreamSessionIds(gens)).toEqual(["a", "b"]);
+  });
+
+  it("skips the empty-string sentinel used by import-pending records", () => {
+    expect(distinctUpstreamSessionIds([{ upstreamSessionId: "" }, { upstreamSessionId: "x" }])).toEqual(["x"]);
+  });
+
+  it("treats a missing list as no upstreams", () => {
+    expect(distinctUpstreamSessionIds(undefined)).toEqual([]);
   });
 });

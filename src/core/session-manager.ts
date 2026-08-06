@@ -33,6 +33,7 @@ import {
   type PersistedAgentModel,
   type PersistedUsage,
   type RollbackBreadcrumb,
+  type UpstreamGeneration,
   type SessionRecord,
 } from "./session-store.js";
 import {
@@ -3146,7 +3147,9 @@ export class SessionManager {
     agentId: string,
     upstreamSessionId: string,
   ): Promise<void> {
-    await this.mutateRecord(sessionId, { agentId, upstreamSessionId });
+    await this.mutateRecord(sessionId, { agentId, upstreamSessionId }, undefined, (prev) => ({
+      upstreamGenerations: appendUpstreamGeneration(prev, agentId, upstreamSessionId),
+    }));
   }
 
   // Update one or more snapshot fields (model, mode, commands) in
@@ -3186,6 +3189,11 @@ export class SessionManager {
     sessionId: string,
     fields: Partial<SessionRecord>,
     remove: ReadonlyArray<keyof SessionRecord> = [],
+    // Fields that can only be computed from the record as it exists on
+    // disk (e.g. appending to a list). Runs inside the same serialized
+    // meta-write slot as the read, so concurrent rotations can't
+    // interleave a read-modify-write and drop an entry.
+    derive?: (prev: SessionRecord) => Partial<SessionRecord>,
   ): Promise<void> {
     await this.enqueueMetaWrite(sessionId, async () => {
       const record = await this.store.read(sessionId);
@@ -3195,6 +3203,7 @@ export class SessionManager {
       const next: SessionRecord = {
         ...record,
         ...fields,
+        ...(derive ? derive(record) : {}),
         updatedAt: new Date().toISOString(),
       };
       for (const key of remove) {
@@ -3801,6 +3810,15 @@ export function mergeForPersistence(
     // persistSnapshot (currentUsage / mode / model change) would clobber
     // whatever an extension just wrote.
     extensionState: existing?.extensionState,
+    // Must be passed through explicitly: recordFromMemorySession seeds a
+    // fresh single-entry chain from the current upstream when this is
+    // absent, so omitting it here would silently truncate the lineage on
+    // every routine persist. Re-running the append also makes this path
+    // self-healing if a rotation persisted through here before
+    // persistAgentChange ran; it's idempotent on the current upstream.
+    upstreamGenerations: existing
+      ? appendUpstreamGeneration(existing, session.agentId, session.upstreamSessionId)
+      : undefined,
     createdAt: existing?.createdAt ?? new Date(session.createdAt).toISOString(),
   });
 }
@@ -4263,6 +4281,44 @@ async function loadPromptHistorySafely(sessionId: string): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+// Append a generation entry for the upstream the session just rotated
+// onto, closing out the previous one.
+//
+// Seeding: a record written before upstreamGenerations existed has no
+// list, so the first rotation after upgrade back-fills the upstream it
+// is rotating *away from* before appending the new one. That recovers
+// one generation of history for free; anything older than that is gone
+// and only a ledger-side reconstruction can find it. The seeded entry
+// carries no startedAt because it was never recorded — see the schema.
+//
+// Idempotent on upstreamSessionId: a rotation that lands on the same
+// upstream (a resurrect that reloads the same agent session) is not a
+// new generation and must not double-append, or cost attribution would
+// count that upstream twice.
+export function appendUpstreamGeneration(
+  prev: SessionRecord,
+  agentId: string,
+  upstreamSessionId: string,
+  now: string = new Date().toISOString(),
+): UpstreamGeneration[] {
+  const seeded: UpstreamGeneration[] =
+    prev.upstreamGenerations && prev.upstreamGenerations.length > 0
+      ? [...prev.upstreamGenerations]
+      : prev.upstreamSessionId
+        ? [{ upstreamSessionId: prev.upstreamSessionId, agentId: prev.agentId }]
+        : [];
+
+  const last = seeded[seeded.length - 1];
+  if (last && last.upstreamSessionId === upstreamSessionId) {
+    return seeded;
+  }
+  if (last && last.endedAt === undefined) {
+    seeded[seeded.length - 1] = { ...last, endedAt: now };
+  }
+  seeded.push({ upstreamSessionId, agentId, startedAt: now });
+  return seeded;
 }
 
 // "Last meaningful activity" for the picker/listing's USED hint. Uses

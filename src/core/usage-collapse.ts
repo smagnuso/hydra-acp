@@ -76,3 +76,32 @@ export function collapseUsage(
   }
   return out;
 }
+
+// Upstream generations are TIME INTERVALS, not a set of distinct agent
+// sessions. A rollback re-enters an upstream the session already occupied,
+// which correctly appends a second interval for the same
+// upstreamSessionId — jrN9-style lineages really do look like
+// A -> B -> A.
+//
+// So any consumer that joins these against a per-upstream cost ledger MUST
+// dedupe first. Summing per interval double-counts every rolled-back
+// upstream, which is the same shape as the cumulativeCost double-count
+// this module exists to prevent. Deduping here rather than leaving it to
+// each call site because the failure is silent and inflates costs.
+export function distinctUpstreamSessionIds(
+  generations: ReadonlyArray<{ upstreamSessionId: string }> | undefined,
+): string[] {
+  if (!generations) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const g of generations) {
+    if (g.upstreamSessionId.length === 0 || seen.has(g.upstreamSessionId)) {
+      continue;
+    }
+    seen.add(g.upstreamSessionId);
+    out.push(g.upstreamSessionId);
+  }
+  return out;
+}

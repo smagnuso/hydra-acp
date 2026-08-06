@@ -15,8 +15,10 @@ import {
   extractInitialModels,
   effectiveInteractive,
   mergeForPersistence,
+  appendUpstreamGeneration,
 } from "./session-manager.js";
 import { Registry, type RegistryAgent } from "./registry.js";
+import type { SessionRecord } from "./session-store.js";
 import {
   makeMockAgent,
   type MockAgentControls,
@@ -4347,6 +4349,129 @@ describe("SessionManager: extension state", () => {
     expect(merged.extensionState).toEqual({
       planner: { activated: true },
     });
+  });
+});
+
+// Every compaction swap, agent swap and cold resurrect abandons one
+// upstream agent session for a fresh one. The upstream id is the only
+// durable join key back to the agent's own cost ledger, and the
+// transcript that would otherwise reveal it gets pruned, so the chain
+// has to be persisted as it happens or the early generations of a
+// long-compacted session become permanently unattributable.
+describe("appendUpstreamGeneration", () => {
+  const base: SessionRecord = {
+    version: 1 as const,
+    sessionId: "hydra_session_gen",
+    cwd: "/tmp/x",
+    agentId: "opencode",
+    upstreamSessionId: "ses_1",
+    createdAt: "2026-06-01T00:00:00.000Z",
+    updatedAt: "2026-06-01T00:00:00.000Z",
+    attentionFlags: [],
+  };
+
+  it("seeds the outgoing upstream on the first rotation of a legacy record", () => {
+    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z");
+    expect(out.map((g) => g.upstreamSessionId)).toEqual(["ses_1", "ses_2"]);
+    // The seeded entry's real start was never recorded; inventing one
+    // (e.g. from createdAt) would be wrong for an already-rotated
+    // session, so it must stay absent.
+    expect(out[0]!.startedAt).toBeUndefined();
+    expect(out[0]!.endedAt).toBe("2026-06-02T00:00:00.000Z");
+    expect(out[1]!.startedAt).toBe("2026-06-02T00:00:00.000Z");
+    expect(out[1]!.endedAt).toBeUndefined();
+  });
+
+  it("accumulates every generation across repeated rotations", () => {
+    let rec = { ...base };
+    let gens = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-02T00:00:00.000Z");
+    rec = { ...rec, upstreamGenerations: gens, upstreamSessionId: "ses_2" };
+    gens = appendUpstreamGeneration(rec, "opencode", "ses_3", "2026-06-03T00:00:00.000Z");
+    rec = { ...rec, upstreamGenerations: gens, upstreamSessionId: "ses_3" };
+    gens = appendUpstreamGeneration(rec, "opencode", "ses_4", "2026-06-04T00:00:00.000Z");
+
+    expect(gens.map((g) => g.upstreamSessionId)).toEqual(["ses_1", "ses_2", "ses_3", "ses_4"]);
+    // Only the live entry is open; every prior one is closed, so a
+    // time-window attribution pass has a bounded interval per upstream.
+    expect(gens.filter((g) => g.endedAt === undefined)).toHaveLength(1);
+    expect(gens[3]!.endedAt).toBeUndefined();
+    expect(gens[1]!.endedAt).toBe("2026-06-03T00:00:00.000Z");
+  });
+
+  // A resurrect can reload the *same* upstream session. That is not a new
+  // generation, and appending it again would make any consumer summing
+  // per-generation ledger cost count that upstream twice.
+  it("does not append when the rotation lands on the same upstream", () => {
+    const rec = {
+      ...base,
+      upstreamSessionId: "ses_2",
+      upstreamGenerations: [
+        { upstreamSessionId: "ses_1", agentId: "opencode", endedAt: "2026-06-02T00:00:00.000Z" },
+        { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
+      ],
+    };
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-05T00:00:00.000Z");
+    expect(out.map((g) => g.upstreamSessionId)).toEqual(["ses_1", "ses_2"]);
+    expect(out[1]!.endedAt).toBeUndefined();
+  });
+
+  it("records the agent per generation so a cross-agent swap stays attributable", () => {
+    const out = appendUpstreamGeneration(base, "claude-acp", "u_9", "2026-06-02T00:00:00.000Z");
+    expect(out[0]!.agentId).toBe("opencode");
+    expect(out[1]!.agentId).toBe("claude-acp");
+  });
+
+  // recordFromMemorySession seeds a fresh chain when upstreamGenerations
+  // is absent, so any persist path that forgets to pass the existing
+  // chain through truncates the lineage back to one entry. That's silent
+  // and unrecoverable, so it gets its own test.
+  it("survives a routine persist without being truncated to the current upstream", async () => {
+    const { recordFromMemorySession } = await import("./session-store.js");
+    const chain = [
+      { upstreamSessionId: "ses_1", agentId: "opencode", startedAt: "2026-06-01T00:00:00.000Z" },
+      { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
+    ];
+    const rebuilt = recordFromMemorySession({
+      sessionId: base.sessionId,
+      upstreamSessionId: "ses_2",
+      agentId: "opencode",
+      cwd: base.cwd,
+      upstreamGenerations: chain,
+      createdAt: base.createdAt,
+    });
+    expect(rebuilt.upstreamGenerations).toHaveLength(2);
+    expect(rebuilt.upstreamGenerations!.map((g) => g.upstreamSessionId)).toEqual(["ses_1", "ses_2"]);
+  });
+
+  it("seeds a timestamped first generation at session creation", async () => {
+    const { recordFromMemorySession } = await import("./session-store.js");
+    const rec = recordFromMemorySession({
+      sessionId: "hydra_session_new",
+      upstreamSessionId: "ses_first",
+      agentId: "opencode",
+      cwd: "/tmp/x",
+      createdAt: "2026-08-01T00:00:00.000Z",
+    });
+    expect(rec.upstreamGenerations).toEqual([
+      {
+        upstreamSessionId: "ses_first",
+        agentId: "opencode",
+        startedAt: "2026-08-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  // An import-pending record uses upstreamSessionId="" as a sentinel; no
+  // upstream exists yet, so there is no generation to record.
+  it("records no generation for an import-pending record with no upstream", async () => {
+    const { recordFromMemorySession } = await import("./session-store.js");
+    const rec = recordFromMemorySession({
+      sessionId: "hydra_session_imported",
+      upstreamSessionId: "",
+      agentId: "opencode",
+      cwd: "/tmp/x",
+    });
+    expect(rec.upstreamGenerations).toEqual([]);
   });
 });
 

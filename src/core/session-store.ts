@@ -90,6 +90,36 @@ export const RollbackBreadcrumb = z.object({
 });
 export type RollbackBreadcrumb = z.infer<typeof RollbackBreadcrumb>;
 
+// One upstream agent session this hydra session has occupied. A session
+// rotates through many of these: every compaction swap, agent swap and
+// cold resurrect abandons the current upstream and takes a fresh one.
+//
+// `rollbackBreadcrumb` above is a single-slot undo pointer that is
+// deliberately cleared on the next turn, so it cannot answer "which
+// upstream sessions did this session ever use". This list can, and is
+// append-only for that reason.
+//
+// Why it has to be persisted rather than reconstructed: the upstream id
+// is the only durable join key back to the agent's own cost ledger, and
+// the transcript that would otherwise reveal it (via tool-call ids) gets
+// rotated into archives and pruned. Once that happens a long-compacted
+// session's early generations become permanently unattributable, and its
+// cost silently under-reports.
+export const UpstreamGeneration = z.object({
+  upstreamSessionId: z.string(),
+  agentId: z.string(),
+  // Absent only on a back-filled entry seeded from a pre-existing record
+  // on its first rotation after upgrade: that upstream's real start time
+  // was never recorded, and guessing it (e.g. from the session's
+  // createdAt) would be wrong for any session that had already rotated.
+  // Consumers doing time-window attribution must refuse an entry with no
+  // startedAt rather than assume a bound.
+  startedAt: z.string().optional(),
+  // Absent on the entry that is currently live. Set when rotated away.
+  endedAt: z.string().optional(),
+});
+export type UpstreamGeneration = z.infer<typeof UpstreamGeneration>;
+
 export const SessionRecord = z.object({
   version: z.literal(1),
   sessionId: z.string(),
@@ -135,6 +165,16 @@ export const SessionRecord = z.object({
   // safe window (no new turns). Cleared on first post-swap agent turn,
   // on successful rollback, and when a subsequent swap supersedes it.
   rollbackBreadcrumb: RollbackBreadcrumb.optional(),
+  // Append-only, oldest first. Optional for back-compat: records written
+  // before this field existed have no lineage to recover, and the first
+  // rotation after upgrade seeds it with the then-current upstream.
+  //
+  // These are INTERVALS, not a set: a rollback re-enters an upstream the
+  // session already occupied, so the same upstreamSessionId can appear
+  // more than once (A -> B -> A). Joining these against a per-upstream
+  // cost ledger without deduping double-charges every rolled-back
+  // upstream — use distinctUpstreamSessionIds() from usage-collapse.ts.
+  upstreamGenerations: z.array(UpstreamGeneration).optional(),
   // history.length at the last successful snapshot regen. Idempotency
   // guard: if current history length <= this value, regen is a no-op.
   summarizedThroughEntry: z.number().int().nonnegative().optional(),
@@ -371,12 +411,28 @@ export function recordFromMemorySession(args: {
   forwardedEnv?: Record<string, string>;
   compactionState?: CompactionState;
   rollbackBreadcrumb?: RollbackBreadcrumb;
+  upstreamGenerations?: UpstreamGeneration[];
   attentionFlags?: AttentionFlag[];
   extensionState?: Record<string, Record<string, unknown>>;
   createdAt?: string;
   updatedAt?: string;
 }): Omit<SessionRecord, "version"> {
   const now = new Date().toISOString();
+  const createdAt = args.createdAt ?? now;
+  // Seed the first generation at creation so the chain is complete and
+  // timestamped from the start. Without this, a session's original
+  // upstream only gets back-filled on its first rotation, and by then
+  // its start time is no longer knowable — leaving every session's
+  // earliest generation unbounded for time-window attribution.
+  //
+  // An import-pending record carries upstreamSessionId="" as a sentinel
+  // (no upstream exists yet); it gets its first entry when the first
+  // attach bootstraps a real agent session.
+  const upstreamGenerations =
+    args.upstreamGenerations ??
+    (args.upstreamSessionId
+      ? [{ upstreamSessionId: args.upstreamSessionId, agentId: args.agentId, startedAt: createdAt }]
+      : []);
   return {
     sessionId: args.sessionId,
     lineageId: args.lineageId,
@@ -391,6 +447,7 @@ export function recordFromMemorySession(args: {
     summarizedThroughEntry: args.summarizedThroughEntry,
     compactionState: args.compactionState,
     rollbackBreadcrumb: args.rollbackBreadcrumb,
+    upstreamGenerations,
     agentArgs: args.agentArgs,
     currentModel: args.currentModel,
     currentMode: args.currentMode,
@@ -410,7 +467,7 @@ export function recordFromMemorySession(args: {
     forwardedEnv: args.forwardedEnv,
       attentionFlags: args.attentionFlags ?? [],
     extensionState: args.extensionState ?? {},
-    createdAt: args.createdAt ?? now,
+    createdAt,
     updatedAt: args.updatedAt ?? now,
   };
 }
