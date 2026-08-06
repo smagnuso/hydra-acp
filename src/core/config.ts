@@ -186,7 +186,7 @@ const TUI_HOTKEY_KEY_NAMES = z.enum([
 // Field ids are listed in src/tui/bar/fields.ts (FIELDS). As of writing:
 //   status, elapsed, sessionId, sessionIdFull, queued, scroll, usage,
 //   tokens, cost, cwd, cwdFull, title, agent, model, agentModel, mode,
-//   helpHint, transient
+//   helpHint
 // Unknown ids are ignored rather than rejected, so a config written
 // against a newer build degrades instead of blanking the row.
 //
@@ -271,10 +271,7 @@ export const DEFAULT_COMPOSER_TOP_LEFT: BarSideConfig = [
 ];
 export const DEFAULT_COMPOSER_TOP_RIGHT: BarSideConfig = ["usage"];
 export const DEFAULT_COMPOSER_BOTTOM_LEFT: BarSideConfig = [];
-export const DEFAULT_COMPOSER_BOTTOM_RIGHT: BarSideConfig = [
-  "transient",
-  "helpHint",
-];
+export const DEFAULT_COMPOSER_BOTTOM_RIGHT: BarSideConfig = ["helpHint"];
 export const DEFAULT_SESSIONBAR_LEFT: BarSideConfig = ["cwd", "title"];
 export const DEFAULT_SESSIONBAR_RIGHT: BarSideConfig = ["agentModel"];
 
@@ -287,7 +284,14 @@ const TuiConfig = z.object({
   //
   // Each side is an ordered list of fields; see BarSlotEntry above.
   // Fields with nothing to report (no title, nothing queued, not
-  // scrolled) drop out along with their separator. When the two sides
+  // scrolled) drop out along with their separator.
+  //
+  // One exception to "the config decides what renders": while a
+  // notification, search counter or compaction/synthesis progress
+  // message is live, it takes over composer.bottom.right for its
+  // duration, whatever is configured there. That channel is the app's
+  // only ephemeral-message surface and there is no second place for it
+  // to go, so it is not something a user can accidentally switch off. When the two sides
   // would collide the row sheds whole fields in ascending priority,
   // then shrinks the ones that declared a minWidth, then truncates —
   // it never wraps.

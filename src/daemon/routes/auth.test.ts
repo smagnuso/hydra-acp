@@ -42,7 +42,7 @@ function testConfig(): HydraConfig {
     tui: {
       composer: {
         top: { left: ["status"], right: ["usage"] },
-        bottom: { left: [], right: ["transient", "helpHint"] },
+        bottom: { left: [], right: ["helpHint"] },
       },
       sessionbar: { left: ["cwd", "title"], right: ["agentModel"] },
       repaintThrottleMs: 1000,

@@ -226,6 +226,8 @@ describe("chrome bars", () => {
     expect(r.top.startsWith("── Busy ")).toBe(true);
   });
 
+  // The notification channel is force-rendered over composer.bottom.right
+  // rather than being a field, so emptying that side cannot switch it off.
   it("transient content replaces the hints", () => {
     const w = 120;
     const cap = makeCaptureTerm(w, 24);
@@ -248,6 +250,123 @@ describe("chrome bars", () => {
     priv.drawBar("composerBottom", 2);
     expect(cap.row(2)).not.toContain("^p pick");
     expect(cap.row(2)).toContain("needle");
+  });
+
+  it("still shows notifications when composer.bottom.right is empty", () => {
+    const cap = makeCaptureTerm(120, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setBarConfig({
+      composer: {
+        top: { left: ["status"], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    });
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerBottom", 2);
+    expect(cap.row(2).trimEnd()).toBe("─".repeat(118) + "──");
+
+    screen.setBannerSearchIndicator("needle");
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerBottom", 2);
+    expect(cap.row(2)).toContain("needle");
+  });
+
+  it("displaces configured content on the bottom rule while live", () => {
+    const cap = makeCaptureTerm(120, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setBarConfig({
+      composer: {
+        top: { left: [], right: [] },
+        bottom: { left: [], right: ["cwd", "agentModel"] },
+      },
+      sessionbar: { left: [], right: [] },
+    });
+    screen.setSessionbar({ agent: "claude", cwd: "/tmp/x", sessionId: "s1" });
+    screen.setBannerSearchIndicator("needle");
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerBottom", 2);
+    expect(cap.row(2)).toContain("needle");
+    expect(cap.row(2)).not.toContain("/tmp/x");
+  });
+
+  it("does not leak the channel onto the other rows", () => {
+    const cap = makeCaptureTerm(120, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setSessionbar({ agent: "claude", cwd: "/tmp/x", sessionId: "s1" });
+    screen.setBannerSearchIndicator("needle");
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerTop", 1);
+    priv.drawBar("sessionbar", 24);
+    expect(cap.row(1)).not.toContain("needle");
+    expect(cap.row(24)).not.toContain("needle");
+  });
+
+  it("is not an addressable field id", () => {
+    // Listing it in config used to be required; now it resolves to
+    // nothing so an old config degrades to the forced behaviour.
+    const cap = makeCaptureTerm(120, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setBarConfig({
+      composer: {
+        top: { left: ["transient"], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    });
+    screen.setBannerSearchIndicator("needle");
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerTop", 1);
+    expect(cap.row(1)).not.toContain("needle");
   });
 });
 

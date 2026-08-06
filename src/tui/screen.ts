@@ -14,7 +14,7 @@ import { layoutRow } from "./bar/layout.js";
 import type { BarAction, HitRegion } from "./bar/layout.js";
 import { SLOT_STYLES, expandBarConfig, resolveSide } from "./bar/slots.js";
 import type { SlotName } from "./bar/slots.js";
-import { formatUsage } from "./bar/fields.js";
+import { formatUsage, transientGroup } from "./bar/fields.js";
 import type {
   BarLayoutConfig,
   FieldContext,
@@ -5524,10 +5524,18 @@ export class Screen {
           : // composerTop and btw share one slot config.
             this.barConfig.composer.top;
     const ctx = slot === "btw" ? this.btwContext() : this.barContext();
+    // A live notification / search counter / progress message takes over
+    // the bottom rule's right side for its duration, displacing whatever
+    // is configured there. See transientGroup: this is the app's only
+    // ephemeral-message channel, so it can't be a field the user has to
+    // remember to keep.
+    const forced = slot === "composerBottom" ? transientGroup(ctx) : null;
+    const right =
+      forced !== null ? [forced] : resolveSide(slot, side.right, ctx);
     const result = layoutRow(
       w,
       resolveSide(slot, side.left, ctx),
-      resolveSide(slot, side.right, ctx),
+      right,
       style,
     );
     const hovered = this.terminalFocused ? this.hoveredBarHit : null;

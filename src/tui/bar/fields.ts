@@ -105,9 +105,6 @@ function helpHintAction(part: string): {
 }
 
 function helpHintGroups(ctx: FieldContext): FieldGroup[] | null {
-  if (ctx.transient !== null) {
-    return null;
-  }
   const base = ctx.banner.currentMode
     ? ctx.banner.hint.replace("⇧⇥ mode", `⇧⇥ mode: ${ctx.banner.currentMode}`)
     : ctx.banner.hint;
@@ -348,20 +345,31 @@ export const FIELDS: Record<string, FieldDef> = {
     resolve: () => null,
     resolveGroups: helpHintGroups,
   },
-  // Search progress / compaction and synthesis toasts. Outranks
-  // `helpHint`, and `helpHint` suppresses itself while one is active, so
-  // listing both in a slot gives "transient replaces the hints".
-  transient: {
-    priority: 90,
-    resolve: (ctx) => {
-      if (ctx.transient === null) {
-        return null;
-      }
-      const token: ThemeToken =
-        ctx.transient.kind === "search" ? "bar-indicator" : "modal-note";
-      return [{ text: ctx.transient.text, token }];
-    },
-  },
 };
 
 export const FIELD_IDS = Object.keys(FIELDS);
+
+/**
+ * Search progress, compaction/synthesis progress and every notify()
+ * message. Deliberately NOT in FIELDS: this is the app's only
+ * out-of-band channel, and making it an ordinary optional field meant
+ * emptying composer.bottom.right silently discarded ~180 call sites'
+ * worth of messages with no warning. drawBar force-renders it over
+ * composer.bottom.right for the duration of the message instead, so
+ * there is nothing for a user to remember to keep.
+ *
+ * Priority Infinity: it displaces whatever else is on that row rather
+ * than being shed by it.
+ */
+export function transientGroup(ctx: FieldContext): FieldGroup | null {
+  if (ctx.transient === null) {
+    return null;
+  }
+  const token: ThemeToken =
+    ctx.transient.kind === "search" ? "bar-indicator" : "modal-note";
+  return {
+    id: "transient",
+    chunks: [{ text: ctx.transient.text, token }],
+    priority: Infinity,
+  };
+}
