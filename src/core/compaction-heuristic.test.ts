@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { shouldCompactSession, estimateTokens } from "./compaction-heuristic.js";
+import {
+  shouldCompactSession,
+  estimateTokens,
+  estimateContextChars,
+} from "./compaction-heuristic.js";
 
 const config = {
   contextFraction: 0.5,
@@ -60,13 +64,35 @@ describe("shouldCompactSession", () => {
     expect(shouldCompactSession(input)).toBe(true);
   });
 
-  it("returns true when utilization exceeds hardCeilingFraction regardless of idle", () => {
-    // 408_000 chars = 102_000 tokens = 85% of 120k absoluteFallback
+  it("returns true when AGENT-REPORTED utilization exceeds hardCeilingFraction regardless of idle", () => {
     const input = baseInput({
-      unsummarizedChars: 408_000,
+      agentReportedUsed: 85_000,
+      agentReportedSize: 100_000,
       lastActivityMs: nowMs, // zero idle time
     });
     expect(shouldCompactSession(input)).toBe(true);
+  });
+
+  it("does NOT let an ESTIMATE bypass the idle gate, however large", () => {
+    // Agents that send no usage_update (Cursor) fall to the char estimate
+    // against a possibly-wrong context window. That combination used to trip
+    // the hard ceiling on every attach — 10x over the ceiling here — which
+    // trained the prompt to be ignored. Weak evidence must clear the soft
+    // rule, idle signal included.
+    const input = baseInput({
+      unsummarizedChars: 4_080_000,
+      lastActivityMs: nowMs, // zero idle time
+    });
+    expect(shouldCompactSession(input)).toBe(false);
+    // Same session, once idle: the soft rule fires as before.
+    expect(
+      shouldCompactSession(
+        baseInput({
+          unsummarizedChars: 4_080_000,
+          lastActivityMs: nowMs - 300_000,
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("unknown model falls back to absoluteFallback", () => {
@@ -108,5 +134,141 @@ describe("estimateTokens", () => {
     expect(estimateTokens(0)).toBe(0);
     expect(estimateTokens(3)).toBe(0);
     expect(estimateTokens(7)).toBe(1);
+  });
+});
+
+describe("estimateContextChars", () => {
+  const entry = (update: Record<string, unknown>) => ({
+    method: "session/update",
+    params: { sessionId: "s", update },
+  });
+
+  it("counts message and thought text, not the streaming envelope", () => {
+    // Three chunks of 4 chars each. The envelope (sessionUpdate, messageId,
+    // …) is many times that and must not be counted — this is the whole
+    // reason a delta-heavy agent read as near-full after one turn.
+    const chars = estimateContextChars([
+      entry({
+        sessionUpdate: "user_message_chunk",
+        content: { type: "text", text: "aaaa" },
+        messageId: "m_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+      entry({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "bbbb" },
+        messageId: "m_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+      }),
+      entry({
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "cccc" },
+        messageId: "m_cccccccccccccccccccccccccc",
+      }),
+    ]);
+    expect(chars).toBe(12);
+  });
+
+  it("ignores protocol-only updates", () => {
+    expect(
+      estimateContextChars([
+        entry({ sessionUpdate: "turn_complete", stopReason: "end_turn" }),
+        entry({ sessionUpdate: "usage_update", used: 1000, size: 200_000 }),
+        entry({ sessionUpdate: "prompt_received" }),
+      ]),
+    ).toBe(0);
+  });
+
+  it("counts a tool call's largest snapshot once, not once per update", () => {
+    // tool_call_update re-sends the whole payload on every status ping;
+    // summing them counted a single file read four times over.
+    const big = "x".repeat(1000);
+    const chars = estimateContextChars([
+      entry({ sessionUpdate: "tool_call", toolCallId: "t1", title: "Read" }),
+      entry({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "in_progress" }),
+      entry({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        rawOutput: { content: big },
+      }),
+      entry({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        status: "completed",
+        rawOutput: { content: big },
+      }),
+    ]);
+    // 1000 for the payload; "Read" (4) came on a smaller snapshot and loses
+    // to the max rather than adding to it.
+    expect(chars).toBe(1000);
+  });
+
+  it("sums distinct tool calls", () => {
+    const chars = estimateContextChars([
+      entry({ sessionUpdate: "tool_call", toolCallId: "t1", rawInput: { command: "aaaaa" } }),
+      entry({ sessionUpdate: "tool_call", toolCallId: "t2", rawInput: { command: "bbbbb" } }),
+    ]);
+    expect(chars).toBe(10);
+  });
+
+  it("counts a blob reference as the content it stands for", () => {
+    // History loaded in "references" mode swaps big strings for refs. A ref
+    // stringifies to ~100 chars whether it points at 2 KB or 2 MB, so the
+    // estimate would otherwise depend on how the caller loaded the history.
+    const chars = estimateContextChars([
+      entry({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        rawOutput: { content: { __hydraBlob: "abc", bytes: 61_016 } },
+      }),
+    ]);
+    expect(chars).toBe(61_016);
+  });
+
+  it("counts ACP content blocks and wrappers", () => {
+    const chars = estimateContextChars([
+      entry({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        content: [
+          { type: "content", content: { type: "text", text: "12345" } },
+          { type: "text", text: "678" },
+        ],
+      }),
+    ]);
+    expect(chars).toBe(8);
+  });
+
+  it("tolerates malformed entries", () => {
+    expect(
+      estimateContextChars([
+        {},
+        { params: null },
+        { params: { update: null } },
+        { params: { update: { sessionUpdate: "agent_message_chunk" } } },
+      ]),
+    ).toBe(0);
+  });
+});
+
+describe("estimateContextChars diff blocks", () => {
+  it("counts both sides of an edit diff, not its type/path keys", () => {
+    const chars = estimateContextChars([
+      {
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "t1",
+            content: [
+              {
+                type: "diff",
+                path: "/a/very/long/path/that/should/not/count.ts",
+                oldText: "aaa",
+                newText: "bbbbb",
+              },
+            ],
+          },
+        },
+      },
+    ]);
+    expect(chars).toBe(8);
   });
 });

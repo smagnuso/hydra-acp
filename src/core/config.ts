@@ -539,8 +539,11 @@ export const HydraConfig = z.object({
       // bypasses idleBeforePromptMs entirely per the two-signal rule.
       hardCeilingFraction: z.number().min(0).max(1).default(0.85),
       // Absolute token threshold used when the model's context window
-      // is unknown (modelContextWindows lookup miss). Default 120k.
-      absoluteFallback: z.number().int().positive().default(120_000),
+      // is unknown (modelContextWindows lookup miss). Default 200k —
+      // the smallest window among models anyone currently runs. The old
+      // 120k was below every one of them, so a lookup miss made the
+      // fallback path read as near-full on a session that was fine.
+      absoluteFallback: z.number().int().positive().default(200_000),
       // Only prompt after the session has been idle this long, on the
       // assumption that the prompt-prefix cache has expired by then and
       // compaction is free in cache terms. Skipped entirely when

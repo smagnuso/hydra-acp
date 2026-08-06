@@ -6,7 +6,11 @@ import type { FastifyInstance } from "fastify";
 import { thisMachine } from "../../core/machine.js";
 import { paths } from "../../core/paths.js";
 import { expandHome, type CompactionConfig } from "../../core/config.js";
-import { shouldCompactSession, estimateTokens } from "../../core/compaction-heuristic.js";
+import {
+  shouldCompactSession,
+  estimateTokens,
+  estimateContextChars,
+} from "../../core/compaction-heuristic.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { HistoryEntry as HistoryStoreEntry } from "../../core/history-store.js";
 import { decodeBundle, encodeBundle } from "../../core/bundle.js";
@@ -728,12 +732,13 @@ export function registerSessionRoutes(
       const summarized = summarizedThroughEntry ?? 0;
       const totalEntries = history.length;
       const unsummarizedLines = history.slice(summarized);
-      // Use a rough char estimate from the raw line lengths stored in
-      // history.jsonl (each line is a JSON stringified entry).
-      const unsummarizedChars = unsummarizedLines.reduce(
-        (sum, entry) => sum + JSON.stringify(entry.params).length,
-        0,
-      );
+      // Count only context-bearing payload: message/thought text plus each
+      // tool call's largest input+output snapshot. Summing the raw JSON of
+      // every entry instead (the original approach) counted the streaming
+      // envelope and re-counted every tool_call_update's full payload, which
+      // overshot an agent's own reported usage by ~2x and much worse for
+      // delta-heavy agents.
+      const unsummarizedChars = estimateContextChars(unsummarizedLines);
       approxTokens = estimateTokens(unsummarizedChars);
       const currentModel = session?.currentModel;
       const lastActivityMs = history.at(-1)!.recordedAt;
