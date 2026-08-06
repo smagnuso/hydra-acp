@@ -191,7 +191,7 @@ import {
   type ColorOverride,
   type Palette,
 } from "./theme/index.js";
-import type { Color } from "./theme/color.js";
+import { setSensedPalette, type Color } from "./theme/color.js";
 import {
   listThemes,
   loadTheme,
@@ -226,12 +226,15 @@ let probedAmbiguousWide: boolean | undefined;
 // installed before that closure exists (grabInput captures onStdin by reference),
 // so the two are joined here rather than by passing a callback down.
 let schemeChangeHook: ((scheme: ColorScheme) => void) | null = null;
+// The terminal's own foreground, kept alongside themeBackground so a theme swap
+// re-derives bands against the same text colour.
+let terminalForeground: Color | undefined;
 let backgroundReplyHook: ((color: Color) => void) | null = null;
 import { depthForStream, depthForTerminal } from "./theme/capability.js";
 import {
   installReplyFilter,
   schemeBackground,
-  senseBackground,
+  senseTerminalColors,
   SCHEME_REPORTS_OFF,
   SCHEME_REPORTS_ON,
   type ColorScheme,
@@ -947,19 +950,24 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // local TUI invocation falls through to resolveLocalTarget here.
   const target = opts.target ?? (await resolveLocalTarget(config));
   setLogMaxBytes(config.tui.logMaxBytes);
+  // Ask the terminal about itself, before anything grabs the keyboard, since the
+  // answers arrive as input. One round trip carries both questions: OSC 11 for the
+  // background and OSC 4 for the sixteen ansi slots. Bounded by the probe's own
+  // timeout and never fatal — a terminal that does not answer leaves both
+  // undefined and the config/COLORFGBG chain takes over, which is what shipped
+  // before.
+  //
+  // Not skipped when tui.themeBackground is set: that outranks the sensed
+  // BACKGROUND, but says nothing about the palette, which the 4-bit quantiser
+  // wants either way.
+  const sensed = await senseTerminalColors();
+  // What the terminal made of its own ansi slots, so quantising down to 4 bits
+  // matches against real colours instead of xterm's defaults.
+  setSensedPalette(sensed.palette);
+  terminalForeground = sensed.foreground;
   // The background is resolved BEFORE the theme is loaded, because with no theme
   // configured it is what chooses one — see defaultThemeFor.
-  //
-  // Asked of the terminal directly with OSC 11, before anything grabs the
-  // keyboard, since the answer arrives as input. Bounded by senseBackground's own
-  // timeout and never fatal: a terminal that does not answer leaves this
-  // undefined and the config/COLORFGBG chain takes over, which is what shipped
-  // before. Skipped when the user has already said, so nobody pays the round trip
-  // for an answer that would be outranked anyway.
-  const sensedBackground =
-    config.tui.themeBackground === undefined
-      ? await senseBackground()
-      : undefined;
+  const sensedBackground = sensed.background;
   // Problems from resolving the background are merged into the theme's below, so
   // both surface through the same path once the transcript exists.
   const backgroundProblems: string[] = [];
@@ -1003,6 +1011,7 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   setTheme(loadedTheme.palette, {
     ...loadedTheme.overrides,
     background: themeBackground,
+    foreground: sensed.foreground,
   });
   // Resolved up front so the ^O picker can cycle synchronously.
   themeChoices = await listThemes(paths.themesDir());
@@ -3922,6 +3931,7 @@ async function runSession(
     setTheme(active.palette, {
       ...active.overrides,
       background: themeBackground,
+      foreground: terminalForeground,
     });
     reparseScrollbackBlocks();
     reRenderAllTools();

@@ -192,17 +192,83 @@ const GREY_CHROMA = 24;
 // Above this, a slot's bright counterpart is the better match.
 const ANSI16_BRIGHT = 170;
 
+// What the terminal says its own sixteen slots are, when it has said.
+//
+// ANSI16_RGB is xterm's defaults standing in for "whatever the user actually
+// has", which is a guess, and quantising against a guess is how a grey band
+// became a cyan stripe: #40414c tied with the ASSUMED slot 6 of (0,128,128),
+// while the terminal's real slot 6 was a pale cyan nowhere near it. OSC 4 asks
+// instead of assuming — see senseTerminalColors — and this holds the answer.
+//
+// Sparse on purpose: a terminal may answer for some slots and not others, and a
+// slot with no answer falls back to the xterm default rather than dropping out
+// of consideration.
+let sensedSlots: ReadonlyMap<number, RgbColor> | undefined;
+
+/**
+ * Record the terminal's real ansi palette, from OSC 4.
+ *
+ * Affects only the 4-bit quantisation path: everything else either emits slot
+ * numbers, which the terminal resolves itself, or emits explicit colour.
+ */
+export function setSensedPalette(
+  slots: ReadonlyMap<number, Color> | undefined,
+): void {
+  if (slots === undefined || slots.size === 0) {
+    sensedSlots = undefined;
+    return;
+  }
+  // An ansi-kind answer would be circular — a slot defined as a slot — so only
+  // concrete colours are kept.
+  const rgbOnly = new Map<number, RgbColor>();
+  for (const [slot, color] of slots) {
+    if (color.kind === "rgb") {
+      rgbOnly.set(slot, color);
+    }
+  }
+  sensedSlots = rgbOnly.size > 0 ? rgbOnly : undefined;
+}
+
+/** The RGB of slot `i`: what the terminal reported, else xterm's default. */
+function slotRgb(i: number): RgbColor {
+  const sensed = sensedSlots?.get(i);
+  if (sensed !== undefined) {
+    return sensed;
+  }
+  const [r, g, b] = ANSI16_RGB[i]!;
+  return { kind: "rgb", r, g, b };
+}
+
+/** How far `c` is from slot `i`, squared. */
+function slotError(i: number, c: RgbColor): number {
+  const s = slotRgb(i);
+  return (s.r - c.r) ** 2 + (s.g - c.g) ** 2 + (s.b - c.b) ** 2;
+}
+
 /**
  * The nearest of the four grey ansi slots to `c`, ignoring its hue.
  *
  * Used for near-greys, and for any background marked neutral — see bgParams.
  */
 export function quantizeGrey16(c: RgbColor): number {
-  let best = 0;
+  // Which slots are actually neutral. ANSI16_GREYS is right for a default
+  // palette, but a themed terminal's "bright black" is often a tinted grey and
+  // sometimes frankly blue — dracula's is #6272a4 — so when the terminal has told
+  // us, believe it and use whichever of its slots are genuinely low-chroma.
+  let candidates: readonly number[] = ANSI16_GREYS;
+  if (sensedSlots !== undefined) {
+    const neutral = ANSI16_RGB.map((_, i) => i).filter((i) => {
+      const s = slotRgb(i);
+      return Math.max(s.r, s.g, s.b) - Math.min(s.r, s.g, s.b) <= GREY_CHROMA;
+    });
+    if (neutral.length > 0) {
+      candidates = neutral;
+    }
+  }
+  let best = candidates[0]!;
   let bestErr = Infinity;
-  for (const i of ANSI16_GREYS) {
-    const [r, g, b] = ANSI16_RGB[i]!;
-    const err = (r - c.r) ** 2 + (g - c.g) ** 2 + (b - c.b) ** 2;
+  for (const i of candidates) {
+    const err = slotError(i, c);
     if (err < bestErr) {
       bestErr = err;
       best = i;
@@ -233,6 +299,33 @@ export function quantize16(c: RgbColor): number {
   const min = Math.min(c.r, c.g, c.b);
   if (max - min <= GREY_CHROMA) {
     return quantizeGrey16(c);
+  }
+  // With the real palette in hand, nearest-slot uses the colours the user will
+  // actually see rather than xterm's defaults — but only among the slots that
+  // have a hue at all.
+  //
+  // Restricting the candidates is the whole trick, and leaving it out undid the
+  // pastel fix: nearest-RGB across ALL sixteen sent #8be9fd to this terminal's
+  // light grey at 7838, beating its actual cyan at 9861. A pale colour is
+  // genuinely nearer a grey by euclidean distance, which is why greys match greys
+  // and hues match hues, exactly as the unsensed path does with its two branches.
+  if (sensedSlots !== undefined) {
+    const hued = ANSI16_RGB.map((_, i) => i).filter((i) => {
+      const s = slotRgb(i);
+      return Math.max(s.r, s.g, s.b) - Math.min(s.r, s.g, s.b) > GREY_CHROMA;
+    });
+    if (hued.length > 0) {
+      let best = hued[0]!;
+      let bestErr = Infinity;
+      for (const i of hued) {
+        const err = slotError(i, c);
+        if (err < bestErr) {
+          bestErr = err;
+          best = i;
+        }
+      }
+      return best;
+    }
   }
   // Which channels are "on" for this colour, relative to its own range. The
   // bits are the ansi slot order: red 1, green 2, blue 4, so red+green is
@@ -330,10 +423,41 @@ export function luminance(c: Color): number | null {
   return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
 }
 
-/** True when a colour is dark enough that "lighter" means "away from it". */
+// Where white text stops winning and black text starts.
+//
+// Not 0.5. The question this answers is never "is this colour dark" in the
+// abstract — it is always "which foreground reads better on it", which decides
+// the band direction, which theme to default to, and whether to warn about a
+// mismatch. WCAG contrast against white is 1.05/(L+0.05) and against black is
+// (L+0.05)/0.05; those cross where (L+0.05)^2 = 0.0525, at L ≈ 0.179.
+//
+// The 0.5 this replaced put the crossover around #b6b6b6 in grey terms, so every
+// background from #808080 up to roughly #c0c0c0 was called dark and got light
+// text — on backgrounds where black text has nearly twice the contrast. Found by
+// comparing against herdr, whose perceived-brightness threshold of 128 lands
+// almost exactly on this crossover; the two tools disagreed on the same terminal.
+const CONTRAST_CROSSOVER = 0.179;
+
+/**
+ * True when white text reads better on `c` than black text does — i.e. `c` is
+ * dark enough that "lighter" means "away from it".
+ *
+ * An ansi colour has no measurable value, so the caller's fallback decides: the
+ * terminal owns those slots and we cannot know what it made of them.
+ */
 export function isDark(c: Color, fallback: boolean = true): boolean {
   const l = luminance(c);
-  return l === null ? fallback : l < 0.5;
+  return l === null ? fallback : l < CONTRAST_CROSSOVER;
+}
+
+/** WCAG contrast ratio between two colours, 1 (identical) to 21 (black/white). */
+export function contrastRatio(a: Color, b: Color): number | null {
+  const la = luminance(a);
+  const lb = luminance(b);
+  if (la === null || lb === null) {
+    return null;
+  }
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
 /** Move `c` toward white by `amount` (0-1). */
@@ -391,9 +515,39 @@ export function brighten(c: Color): Color {
  * light one it is darker. Without the flip, a light theme's bands would head
  * toward white and vanish.
  */
-export function band(bg: Color, step: number): Color {
+export function band(bg: Color, step: number, over?: Color): Color {
   if (bg.kind === "ansi") {
     return bg;
   }
-  return isDark(bg) ? lighten(bg, step) : darken(bg, step);
+  const lift = (amount: number): Color =>
+    isDark(bg) ? lighten(bg, amount) : darken(bg, amount);
+  if (over === undefined) {
+    return lift(step);
+  }
+  // `over` is the text that will sit on this band, when it is known — see
+  // bandTextColor, which supplies it only where the text is the TERMINAL's
+  // foreground rather than the theme's. A band moves the background toward that
+  // text, so every step of lift costs contrast, and a step chosen to look like a
+  // subtle boundary can quietly make the text on it hard to read. Back off until
+  // the text survives, rather than trusting a constant tuned against one
+  // terminal.
+  //
+  // Reduced only, never increased: the step is a design decision about how loud a
+  // band should be, and this is a floor under it, not a replacement for it.
+  for (let amount = step; amount > 0.005; amount -= 0.01) {
+    const candidate = lift(amount);
+    const ratio = contrastRatio(candidate, over);
+    if (ratio === null || ratio >= BAND_MIN_CONTRAST) {
+      return candidate;
+    }
+  }
+  return bg;
 }
+
+// The contrast a band must leave between itself and the text on it.
+//
+// Below WCAG AA's 4.5 for body text, deliberately: a band is furniture, and the
+// alternative to a slightly-too-quiet band is no band at all. This is a floor
+// against the failure mode — a background that has crept far enough toward the
+// text to make it hard to read — not a standard.
+const BAND_MIN_CONTRAST = 4;

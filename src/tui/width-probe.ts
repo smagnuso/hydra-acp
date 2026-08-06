@@ -180,7 +180,7 @@ interface ProbeStreams {
  * not implement CPR and must therefore cost nothing but the timeout.
  *
  * Runs before the TUI grabs input, so it does its own minimal raw-mode setup
- * and puts the stream back exactly as it found it — see senseBackground, which
+ * and puts the stream back exactly as it found it — see senseTerminalColors, which
  * this deliberately mirrors. Only ever resolves: a failure here must never be
  * the reason the TUI does not start.
  */

@@ -221,6 +221,31 @@ type Band = Color | number;
  * absolute levels are the fallback to that, for when nothing is known.
  */
 let bandReference: Color | undefined;
+// The terminal's own foreground, from OSC 10, when it answered.
+//
+// Used for one thing: a band is derived from the background and so moves toward
+// the text sitting on it, and for a theme that declares no `fg` that text is the
+// TERMINAL's foreground — a value we were previously deriving bands in complete
+// ignorance of. Knowing it lets band() back the lift off before the text becomes
+// hard to read. A theme that declares its own `fg` states what sits on its bands,
+// so this does not apply there.
+let terminalForeground: Color | undefined;
+
+/**
+ * What text will sit on a band, when knowing that is both possible and useful.
+ *
+ * Only for a theme that declares no `fg`. A theme that declares one has stated
+ * what sits on its bands and has been designed as a whole — and its code band
+ * carries `codeText` rather than `fg` anyway, so `fg` would be the wrong answer
+ * there. Applying the clamp to themed palettes also broke the invariant that a
+ * theme declaring pure black reproduces the legacy absolute band levels exactly.
+ *
+ * So this is narrowly the case the clamp was justified for: we are deferring to
+ * the terminal's foreground, and now we can measure it instead of hoping.
+ */
+function bandTextColor(): Color | undefined {
+  return palette.fg === undefined ? terminalForeground : undefined;
+}
 
 function bandBase(): Color | undefined {
   return bandReference ?? palette.bg;
@@ -234,11 +259,12 @@ function buildBands(): Record<
   if (bg === undefined) {
     return LEGACY_BANDS;
   }
+  const over = bandTextColor();
   return {
-    user: band(bg, BAND_STEPS.user),
-    code: band(bg, BAND_STEPS.code),
-    hoverThought: band(bg, BAND_STEPS.hoverThought),
-    hoverCode: band(bg, BAND_STEPS.hoverCode),
+    user: band(bg, BAND_STEPS.user, over),
+    code: band(bg, BAND_STEPS.code, over),
+    hoverThought: band(bg, BAND_STEPS.hoverThought, over),
+    hoverCode: band(bg, BAND_STEPS.hoverCode, over),
   };
 }
 
@@ -1230,12 +1256,19 @@ export function setTheme(
      * own `bg` for band derivation only — nothing paints it.
      */
     background?: Color;
+    /**
+     * The terminal's actual foreground, when it is known. Used only to keep a
+     * band from creeping too close to the text on it, and only for a theme that
+     * declares no `fg` of its own — see terminalForeground.
+     */
+    foreground?: Color;
   } = {},
 ): void {
   palette = next;
   roleOverrides = overrides.roles ?? {};
   elementOverrides = overrides.elements ?? {};
   bandReference = overrides.background;
+  terminalForeground = overrides.foreground;
   bands = buildBands();
   roles = applyRoleOverrides(buildRoles());
   spans = buildSpans();
@@ -1602,7 +1635,7 @@ function hoverBand(depth: ColorDepth): SgrPair {
   if (bg === undefined) {
     return HOVER_ROW_LITERAL;
   }
-  const layer = bgL(band(bg, BAND_STEPS.hoverRow));
+  const layer = bgL(band(bg, BAND_STEPS.hoverRow, bandTextColor()));
   return { open: layer.open(depth), close: layer.close };
 }
 

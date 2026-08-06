@@ -28,7 +28,33 @@ import { hasCprReport, scrubCprReports } from "../width-probe.js";
 /** How long to wait for a reply before giving up and falling back. */
 const DEFAULT_TIMEOUT_MS = 200;
 
-const OSC11_QUERY = "\u001b]11;?\u0007";
+// Once something has answered, how long to keep waiting for the rest.
+//
+// The queries go out together and a terminal that implements them answers all of
+// them quickly, so the full timeout is only ever paid by a terminal that will not
+// answer at all. But a terminal that answers OSC 11 and ignores OSC 4 would
+// otherwise pay it on every start, which this bounds: the first reply proves the
+// terminal is responsive, so the rest cannot be far behind.
+const SETTLE_MS = 50;
+
+/** Ask for foreground, background and all sixteen ansi slots in one write. */
+function queryAll(): string {
+  let out = "\u001b]10;?\u0007\u001b]11;?\u0007";
+  for (let i = 0; i < 16; i++) {
+    out += `\u001b]4;${i};?\u0007`;
+  }
+  return out;
+}
+
+/** What the terminal was willing to say about itself. Any part may be absent. */
+export interface SensedColors {
+  /** Default foreground, from OSC 10. */
+  foreground?: Color;
+  /** Default background, from OSC 11. */
+  background?: Color;
+  /** Ansi slots 0-15, from OSC 4. Possibly partial. */
+  palette: Map<number, Color>;
+}
 
 /**
  * An OSC 11 reply, anywhere in `data`.
@@ -44,15 +70,54 @@ const OSC11_QUERY = "\u001b]11;?\u0007";
  */
 export function parseOsc11(data: string): Color | undefined {
   const m = /\u001b\]11;([^\u0007\u001b]*)(?:\u0007|\u001b\\)/.exec(data);
-  if (m === null) {
-    return undefined;
+  return m === null ? undefined : parseColorSpec(m[1]!);
+}
+
+/** An OSC 10 reply — the terminal's default foreground — anywhere in `data`. */
+export function parseOsc10(data: string): Color | undefined {
+  const m = /\u001b\]10;([^\u0007\u001b]*)(?:\u0007|\u001b\\)/.exec(data);
+  return m === null ? undefined : parseColorSpec(m[1]!);
+}
+
+/**
+ * Every OSC 4 palette reply in `data`, as slot -> colour.
+ *
+ * `ESC ] 4 ; n ; ? BEL` asks what the terminal made of ansi slot n. Only slots
+ * 0-15 are asked for and only those are kept: the 256-colour cube is fixed by
+ * the spec, but the first sixteen are whatever the user's colour scheme says,
+ * and everything that quantises down to 4-bit has until now been guessing them
+ * from xterm's defaults.
+ */
+export function parseOsc4(data: string): Map<number, Color> {
+  const out = new Map<number, Color>();
+  for (const m of data.matchAll(
+    /\u001b\]4;(\d+);([^\u0007\u001b]*)(?:\u0007|\u001b\\)/g,
+  )) {
+    const slot = Number(m[1]);
+    if (!Number.isInteger(slot) || slot < 0 || slot > 15) {
+      continue;
+    }
+    const color = parseColorSpec(m[2]!);
+    if (color !== undefined) {
+      out.set(slot, color);
+    }
   }
-  const body = m[1]!.trim();
-  const hex = /^#([0-9a-f]+)$/i.exec(body);
-  if (hex !== null) {
-    return parseColor(body) ?? undefined;
+  return out;
+}
+
+/**
+ * A colour as terminals report one.
+ *
+ * They vary in the payload: `rgb:RRRR/GGGG/BBBB` (16 bits per channel, xterm's
+ * own form), `rgb:RR/GG/BB`, or `#RRGGBB`. Accepting all of them is cheaper than
+ * deciding which terminal we are talking to.
+ */
+function parseColorSpec(body: string): Color | undefined {
+  const trimmed = body.trim();
+  if (/^#[0-9a-f]+$/i.test(trimmed)) {
+    return parseColor(trimmed) ?? undefined;
   }
-  const spec = /^rgba?:([0-9a-f]+)\/([0-9a-f]+)\/([0-9a-f]+)/i.exec(body);
+  const spec = /^rgba?:([0-9a-f]+)\/([0-9a-f]+)\/([0-9a-f]+)/i.exec(trimmed);
   if (spec === null) {
     return undefined;
   }
@@ -60,12 +125,11 @@ export function parseOsc11(data: string): Color | undefined {
   // "0000" and "00" are both zero; "ffff" and "ff" are both 255. Truncating to
   // the leading two digits happens to work for 4-digit values and is wrong for
   // 1- and 3-digit ones, so scale properly.
-  const chan = (s: string): number | undefined => {
-    if (s.length === 0 || s.length > 4) {
+  const chan = (v: string): number | undefined => {
+    if (v.length === 0 || v.length > 4) {
       return undefined;
     }
-    const max = 16 ** s.length - 1;
-    return Math.round((parseInt(s, 16) / max) * 255);
+    return Math.round((parseInt(v, 16) / (16 ** v.length - 1)) * 255);
   };
   const r = chan(spec[1]!);
   const g = chan(spec[2]!);
@@ -86,12 +150,15 @@ export function parseOsc11(data: string): Color | undefined {
  * trusting the timeout to have been generous enough.
  */
 export function scrubOsc11(data: string): string {
-  return data.replace(/\u001b\]11;[^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "");
+  return data.replace(
+    /\u001b\](?:10|11|4);[^\u0007\u001b]*(?:\u0007|\u001b\\)/g,
+    "",
+  );
 }
 
-/** Whether `data` contains anything that looks like an OSC 11 reply. */
+/** Whether `data` contains anything that looks like a colour reply. */
 export function hasOsc11(data: string): boolean {
-  return /\u001b\]11;/.test(data);
+  return /\u001b\](?:10|11|4);/.test(data);
 }
 
 interface SenseStreams {
@@ -112,50 +179,70 @@ interface SenseStreams {
 }
 
 /**
- * Query the terminal's background colour. Resolves undefined when it does not
- * answer in time, which is the normal outcome for a terminal that does not
- * implement OSC 11 and must therefore cost nothing but the timeout.
+ * Ask the terminal to describe itself: foreground, background, and its sixteen
+ * ansi slots. Every field is optional — a terminal that answers nothing is the
+ * normal case for one that implements none of this, and must cost nothing but
+ * the timeout.
  *
  * Runs before the TUI grabs input, so it does its own minimal raw-mode setup and
  * puts the stream back exactly as it found it. Only ever resolves — a failure
  * here must never be the reason the TUI does not start.
  */
-export async function senseBackground(
+export async function senseTerminalColors(
   streams: SenseStreams = { input: process.stdin, output: process.stdout },
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-): Promise<Color | undefined> {
+): Promise<SensedColors> {
   const { input, output } = streams;
   if (input.isTTY !== true || output.isTTY !== true) {
-    return undefined;
+    return { palette: new Map() };
   }
-  return await new Promise<Color | undefined>((resolve) => {
+  return await new Promise<SensedColors>((resolve) => {
     let buf = "";
     let done = false;
     const wasPaused = input.isPaused?.() ?? false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let settle: ReturnType<typeof setTimeout> | undefined;
+
+    const collected = (): SensedColors => ({
+      foreground: parseOsc10(buf),
+      background: parseOsc11(buf),
+      palette: parseOsc4(buf),
+    });
 
     const onData = (chunk: Buffer | string): void => {
       buf += typeof chunk === "string" ? chunk : chunk.toString("latin1");
-      const found = parseOsc11(buf);
-      if (found !== undefined) {
-        finish(found);
+      // Everything asked for has arrived: stop immediately rather than holding
+      // startup open for the settle window.
+      const got = collected();
+      if (
+        got.foreground !== undefined &&
+        got.background !== undefined &&
+        got.palette.size === 16
+      ) {
+        finish();
         return;
       }
-      // A reply that is present but unparseable is still an answer: stop waiting
-      // rather than holding startup open for the full timeout.
-      if (hasOsc11(buf) && /\u0007|\u001b\\/.test(buf)) {
-        finish(undefined);
+      // Something answered, so the terminal is responsive; give the rest a short
+      // grace period rather than the full timeout. Reset on each reply, so a slow
+      // trickle of eighteen answers is not cut off midway.
+      if (settle !== undefined) {
+        clearTimeout(settle);
       }
+      settle = setTimeout(finish, SETTLE_MS);
+      (settle as unknown as { unref?: () => void }).unref?.();
     };
 
-    const finish = (result: Color | undefined): void => {
+    const finish = (): void => {
       if (done) {
         return;
       }
       done = true;
-      if (timer !== undefined) {
-        clearTimeout(timer);
+      for (const t of [timer, settle]) {
+        if (t !== undefined) {
+          clearTimeout(t);
+        }
       }
+      const result = collected();
       try {
         (input.off ?? input.removeListener)?.call(input, "data", onData);
         // Raw mode and flow are restored to what they were: the caller sets up
@@ -176,12 +263,12 @@ export async function senseBackground(
       input.setRawMode?.(true);
       input.resume?.();
       input.on("data", onData);
-      output.write(OSC11_QUERY);
+      output.write(queryAll());
     } catch {
-      finish(undefined);
+      finish();
       return;
     }
-    timer = setTimeout(() => finish(undefined), timeoutMs);
+    timer = setTimeout(finish, timeoutMs);
     // Never hold the process open on the timeout alone.
     (timer as unknown as { unref?: () => void }).unref?.();
   });
@@ -265,7 +352,7 @@ export interface ReplyHandlers {
  * them, routing them costs nothing.
  *
  * That makes this the delivery path for the live case too: after grabInput,
- * terminal-kit owns stdin, so senseBackground's raw-mode probe cannot be used
+ * terminal-kit owns stdin, so senseTerminalColors's raw-mode probe cannot be used
  * again. Writing an OSC 11 query and waiting for `onBackground` can.
  *
  * Wraps the `onStdin` property rather than filtering the stream, because

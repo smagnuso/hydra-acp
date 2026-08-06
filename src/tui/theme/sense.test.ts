@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { rgb } from "./color.js";
 import {
   hasOsc11,
+  parseOsc4,
+  parseOsc10,
   parseSchemeReport,
   schemeBackground,
   installReplyFilter,
   parseOsc11,
   scrubOsc11,
-  senseBackground,
+  senseTerminalColors,
 } from "./sense.js";
 
 describe("parseOsc11", () => {
@@ -128,34 +130,49 @@ function fakeTty(reply?: string) {
   };
 }
 
-describe("senseBackground", () => {
-  it("resolves the colour the terminal reports", async () => {
-    const tty = fakeTty("\u001b]11;rgb:2828/2a2a/3636\u0007");
-    await expect(senseBackground(tty.streams, 500)).resolves.toEqual(
-      rgb(40, 42, 54),
+describe("senseTerminalColors", () => {
+  it("resolves what the terminal reports", async () => {
+    const tty = fakeTty(
+      "\u001b]10;rgb:ffff/ffff/ffff\u0007" +
+        "\u001b]11;rgb:2828/2a2a/3636\u0007" +
+        "\u001b]4;1;rgb:ffff/0000/0000\u0007",
     );
-    expect(tty.calls).toEqual(["\u001b]11;?\u0007"]);
+    const got = await senseTerminalColors(tty.streams, 500);
+    expect(got.foreground).toEqual(rgb(255, 255, 255));
+    expect(got.background).toEqual(rgb(40, 42, 54));
+    expect(got.palette.get(1)).toEqual(rgb(255, 0, 0));
+    // One write, not eighteen: the queries go out together so there is a single
+    // round trip and a single raw-mode window.
+    expect(tty.calls).toHaveLength(1);
+    expect(tty.calls[0]).toContain("\u001b]11;?");
+    expect(tty.calls[0]).toContain("\u001b]4;15;?");
   });
 
-  // The normal outcome for a terminal that does not implement OSC 11, so it has
-  // to cost nothing but the timeout and must never fail startup.
-  it("resolves undefined when nothing answers", async () => {
+  // The normal outcome for a terminal that implements none of this, so it has to
+  // cost nothing but the timeout and must never fail startup.
+  it("resolves empty when nothing answers", async () => {
     const tty = fakeTty();
-    await expect(senseBackground(tty.streams, 5)).resolves.toBeUndefined();
+    const got = await senseTerminalColors(tty.streams, 5);
+    expect(got.background).toBeUndefined();
+    expect(got.palette.size).toBe(0);
   });
 
-  it("stops waiting early on a malformed reply", async () => {
-    const tty = fakeTty("\u001b]11;nonsense\u0007");
-    // Would take the full 10s if it waited out the timeout instead.
-    await expect(senseBackground(tty.streams, 10_000)).resolves.toBeUndefined();
+  // A terminal that answers OSC 11 but ignores OSC 4 must not pay the full
+  // timeout on every start.
+  it("settles shortly after a partial answer", async () => {
+    const tty = fakeTty("\u001b]11;rgb:0/0/0\u0007");
+    const started = Date.now();
+    const got = await senseTerminalColors(tty.streams, 10_000);
+    expect(got.background).toEqual(rgb(0, 0, 0));
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  // Leaving raw mode on, or a listener attached, breaks the keyboard for the
-  // real input handling that is set up immediately after this.
+  // Leaving raw mode on, or a listener attached, breaks the keyboard for the real
+  // input handling that is set up immediately after this.
   it("restores the stream either way", async () => {
     for (const reply of ["\u001b]11;rgb:0/0/0\u0007", undefined]) {
       const tty = fakeTty(reply);
-      await senseBackground(tty.streams, 5);
+      await senseTerminalColors(tty.streams, 5);
       expect(tty.rawAtEnd()).toBe(false);
       expect(tty.listenerCount()).toBe(0);
     }
@@ -164,7 +181,8 @@ describe("senseBackground", () => {
   it("does not query a non-tty", async () => {
     const tty = fakeTty("\u001b]11;rgb:0/0/0\u0007");
     tty.streams.input.isTTY = false;
-    await expect(senseBackground(tty.streams, 5)).resolves.toBeUndefined();
+    const got = await senseTerminalColors(tty.streams, 5);
+    expect(got.background).toBeUndefined();
     expect(tty.calls).toEqual([]);
   });
 
@@ -180,61 +198,9 @@ describe("senseBackground", () => {
       },
       output: { isTTY: true, write: spy },
     };
-    await expect(senseBackground(streams, 5)).resolves.toBeUndefined();
-  });
-});
-
-describe("installReplyFilter", () => {
-  const reply = "\u001b]11;rgb:0000/0000/0000\u0007";
-  const fakeTerm = () => {
-    const seen: string[] = [];
-    return {
-      seen,
-      term: {
-        onStdin(chunk: Buffer) {
-          seen.push(chunk.toString("latin1"));
-        },
-      },
-    };
-  };
-
-  it("drops a reply that arrives on its own", () => {
-    const f = fakeTerm();
-    installReplyFilter(f.term);
-    f.term.onStdin(Buffer.from(reply, "latin1"));
-    expect(f.seen).toEqual([]);
-  });
-
-  it("keeps real keystrokes in the same chunk", () => {
-    const f = fakeTerm();
-    installReplyFilter(f.term);
-    f.term.onStdin(Buffer.from(`ab${reply}cd`, "latin1"));
-    expect(f.seen).toEqual(["abcd"]);
-  });
-
-  // The only thing that asks for a CPR is the startup width probe, which has its
-  // own listener and is finished by the time this filter is live. A late one is
-  // an answer to a question nobody still has, and would otherwise surface as a
-  // phantom cursor-location event.
-  it("drops a late cursor position report", () => {
-    const f = fakeTerm();
-    installReplyFilter(f.term);
-    f.term.onStdin(Buffer.from("ab\u001b[3;5Rcd", "latin1"));
-    expect(f.seen).toEqual(["abcd"]);
-  });
-
-  it("passes unrelated input through untouched, bytes and all", () => {
-    const f = fakeTerm();
-    installReplyFilter(f.term);
-    // Multi-byte UTF-8 must survive the latin1 round trip byte-for-byte.
-    const bytes = Buffer.from("héllo→\u001b[A", "utf8");
-    f.term.onStdin(bytes);
-    expect(f.seen).toEqual([bytes.toString("latin1")]);
-  });
-
-  it("is a no-op on something without onStdin", () => {
-    expect(() => installReplyFilter({})).not.toThrow();
-    expect(() => installReplyFilter(undefined)).not.toThrow();
+    await expect(
+      senseTerminalColors(streams, 5),
+    ).resolves.toMatchObject({ palette: new Map() });
   });
 });
 
@@ -284,7 +250,7 @@ describe("installReplyFilter routes what it strips", () => {
   });
 
   // The delivery path for the live re-query: after grabInput, terminal-kit owns
-  // stdin, so senseBackground's raw-mode probe cannot be used a second time.
+  // stdin, so senseTerminalColors's raw-mode probe cannot be used a second time.
   it("delivers a background reply", () => {
     const f = fakeTerm();
     const colors: unknown[] = [];
@@ -320,5 +286,45 @@ describe("installReplyFilter routes what it strips", () => {
     f.term.onStdin(Buffer.from("\u001b[Ahello", "latin1"));
     expect(events).toEqual([]);
     expect(f.seen).toEqual(["\u001b[Ahello"]);
+  });
+});
+
+describe("parseOsc4 and parseOsc10", () => {
+  it("reads a palette answer per slot", () => {
+    const data =
+      "\u001b]4;0;rgb:0000/0000/0000\u0007" +
+      "\u001b]4;7;rgb:c0c0/c0c0/c0c0\u0007" +
+      "\u001b]4;15;#ffffff\u0007";
+    const got = parseOsc4(data);
+    expect(got.get(0)).toEqual(rgb(0, 0, 0));
+    expect(got.get(7)).toEqual(rgb(192, 192, 192));
+    expect(got.get(15)).toEqual(rgb(255, 255, 255));
+    expect(got.size).toBe(3);
+  });
+
+  // Only the first sixteen are asked for and only those mean anything here: the
+  // rest of the 256-colour cube is fixed by the spec.
+  it("ignores slots outside 0-15 and malformed ones", () => {
+    expect(parseOsc4("\u001b]4;16;rgb:0/0/0\u0007").size).toBe(0);
+    expect(parseOsc4("\u001b]4;3;garbage\u0007").size).toBe(0);
+    expect(parseOsc4("\u001b]4;3;rgb:0/0/0").size).toBe(0); // unterminated
+  });
+
+  it("reads the foreground", () => {
+    expect(parseOsc10("\u001b]10;rgb:8b8b/e9e9/fdfd\u0007")).toEqual(
+      rgb(139, 233, 253),
+    );
+    expect(parseOsc10("\u001b]11;rgb:0/0/0\u0007")).toBeUndefined();
+  });
+
+  // All three families have to be kept out of the input stream, not just OSC 11:
+  // terminal-kit recognises none of them, so any late reply is typed as text.
+  it("scrubs every colour reply", () => {
+    const data =
+      "a\u001b]10;rgb:0/0/0\u0007b\u001b]11;rgb:0/0/0\u0007c" +
+      "\u001b]4;2;rgb:0/0/0\u0007d";
+    expect(scrubOsc11(data)).toBe("abcd");
+    expect(hasOsc11(data)).toBe(true);
+    expect(hasOsc11(scrubOsc11(data))).toBe(false);
   });
 });

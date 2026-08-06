@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   ansi,
   band,
   bgOpen,
+  contrastRatio,
+  setSensedPalette,
+  quantizeGrey16,
+  type Color,
   brighten,
   darken,
   fgOpen,
@@ -237,5 +241,150 @@ describe("quantize16", () => {
     expect(quantize16(rgb(255, 255, 255))).toBe(15);
     expect(quantize16(rgb(130, 130, 130))).toBe(8);
     expect(quantize16(rgb(195, 195, 195))).toBe(7);
+  });
+});
+
+describe("isDark tracks which foreground actually reads better", () => {
+  // The invariant, not the constant: isDark decides band direction, which theme
+  // to default to, and whether to warn about a mismatch — and in every one of
+  // those the real question is "does white text or black text win here". So this
+  // derives the expected answer from WCAG contrast instead of restating the
+  // threshold, and would catch the number being wrong rather than just changed.
+  const winner = (c: Color): boolean => {
+    const l = luminance(c)!;
+    return (1.05 / (l + 0.05)) > ((l + 0.05) / 0.05);
+  };
+
+  it("agrees with the contrast winner across the whole grey ramp", () => {
+    const disagreements: string[] = [];
+    for (let g = 0; g <= 255; g++) {
+      const c = rgb(g, g, g);
+      if (isDark(c) !== winner(c)) {
+        disagreements.push(`#${g.toString(16).padStart(2, "0").repeat(3)}`);
+      }
+    }
+    expect(disagreements).toEqual([]);
+  });
+
+  it("agrees on saturated colours too, not just greys", () => {
+    for (const c of [
+      rgb(0, 0, 255), // deep blue: dark despite being a "bright" colour
+      rgb(255, 255, 0), // yellow: light despite being vivid
+      rgb(0, 128, 0),
+      rgb(255, 128, 0),
+      rgb(128, 0, 128),
+    ]) {
+      expect(isDark(c), JSON.stringify(c)).toBe(winner(c));
+    }
+  });
+
+  // The range the old 0.5 threshold got wrong: mid greys where black text has
+  // nearly twice the contrast were being called dark.
+  it("calls mid greys light", () => {
+    expect(isDark(rgb(0x80, 0x80, 0x80))).toBe(false);
+    expect(isDark(rgb(0x96, 0x96, 0x96))).toBe(false);
+    expect(isDark(rgb(0x6e, 0x6e, 0x6e))).toBe(true);
+  });
+
+  // The terminal owns its ansi slots and we cannot know what it made of them.
+  it("defers on an ansi slot", () => {
+    expect(isDark(ansi(0), true)).toBe(true);
+    expect(isDark(ansi(0), false)).toBe(false);
+  });
+});
+
+describe("band backs off to keep its text readable", () => {
+  // A band moves the background toward the text sitting on it, so every step of
+  // lift costs contrast. Without knowing the text colour the step is a guess
+  // tuned against one terminal; with OSC 10 it can be checked.
+  const ratio = (a: Color, b: Color): number => contrastRatio(a, b)!;
+
+  it("uses the full step when the text is far away", () => {
+    const bg = rgb(0, 0, 0);
+    expect(band(bg, 0.11, rgb(255, 255, 255))).toEqual(band(bg, 0.11));
+  });
+
+  it("reduces the lift when the text would be swallowed", () => {
+    // Dim grey text on black: the full 0.17 lift would leave under 4:1.
+    const bg = rgb(0, 0, 0);
+    const text = rgb(120, 120, 120);
+    const unaware = band(bg, 0.17);
+    const aware = band(bg, 0.17, text);
+    expect(ratio(unaware, text)).toBeLessThan(4);
+    expect(ratio(aware, text)).toBeGreaterThanOrEqual(4);
+  });
+
+  it("never increases the lift", () => {
+    // The step is a design decision about how loud a band is; this is a floor
+    // under it, not a replacement for it.
+    for (const text of [rgb(255, 255, 255), rgb(200, 200, 200), rgb(90, 90, 90)]) {
+      const bg = rgb(20, 20, 24);
+      const aware = band(bg, 0.11, text);
+      const unaware = band(bg, 0.11);
+      expect(luminance(aware)!).toBeLessThanOrEqual(luminance(unaware)! + 1e-9);
+    }
+  });
+
+  it("is a no-op for an ansi background, which has no measurable value", () => {
+    expect(band(ansi(0), 0.11, rgb(255, 255, 255))).toEqual(ansi(0));
+  });
+
+  it("leaves a themed palette's bands alone — see bandTextColor", () => {
+    // The clamp is for the case where we defer to the terminal's foreground.
+    expect(band(rgb(0, 0, 0), 0.17)).toEqual(rgb(43, 43, 43));
+  });
+});
+
+describe("a sensed palette replaces the assumption quantize16 was making", () => {
+  // gnome-terminal's actual answer to OSC 4, captured from a real session. Kept
+  // verbatim because the point is that it differs from xterm's defaults in the
+  // way that mattered: slot 6 here is #2aa1b3, not the assumed (0,128,128).
+  const GNOME = new Map<number, Color>(
+    (
+      [
+        "#171421", "#c01c28", "#26a269", "#a2734c",
+        "#12488b", "#a347ba", "#2aa1b3", "#d0cfcc",
+        "#5e5c64", "#f66151", "#33da7a", "#e9ad0c",
+        "#2a7bde", "#c061cb", "#33c7de", "#ffffff",
+      ] as const
+    ).map((h, i) => [i, parseColor(h)!]),
+  );
+
+  afterEach(() => setSensedPalette(undefined));
+
+  // The bug that started all of this. #40414c is dracula's code band, and against
+  // xterm's DEFAULTS it ties exactly — 10769 both ways — between bright black and
+  // dark cyan, with index order handing it to cyan. Every fenced code block wore
+  // an ESC[46m stripe.
+  //
+  // Against the terminal's real palette there is no tie to lose: slot 8 wins at
+  // 2205 and slot 6 is not close. Asking beats assuming.
+  it("cannot reproduce the cyan band once the palette is known", () => {
+    const codeBand = rgb(0x40, 0x41, 0x4c);
+    setSensedPalette(GNOME);
+    expect(quantize16(codeBand)).toBe(8);
+    expect(quantizeGrey16(codeBand)).toBe(8);
+  });
+
+  it("still finds the right hue for a saturated colour", () => {
+    setSensedPalette(GNOME);
+    expect(quantize16(rgb(0x50, 0xfa, 0x7b))).toBe(10); // dracula green
+    expect(quantize16(rgb(0xff, 0x55, 0x55))).toBe(9); // dracula red
+    expect(quantize16(rgb(0x8b, 0xe9, 0xfd))).toBe(14); // dracula cyan
+  });
+
+  // A terminal that answers for some slots and not others must not lose the
+  // others entirely — an unanswered slot falls back to the xterm default.
+  it("tolerates a partial answer", () => {
+    setSensedPalette(new Map([[6, parseColor("#2aa1b3")!]]));
+    expect(quantize16(rgb(0x40, 0x41, 0x4c))).toBe(8);
+  });
+
+  // tmux forwards OSC 10 and 11 but answers nothing for OSC 4, so this is the
+  // live path for anyone inside it.
+  it("falls back to the hue heuristic when nothing was sensed", () => {
+    setSensedPalette(undefined);
+    expect(quantize16(rgb(0x50, 0xfa, 0x7b))).toBe(10);
+    expect([0, 8, 7, 15]).toContain(quantize16(rgb(0x40, 0x41, 0x4c)));
   });
 });
