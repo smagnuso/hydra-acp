@@ -519,6 +519,95 @@ function fgRole(value: string): ColorOverride {
   return { fg: hex(value) };
 }
 
+// kanagawa: rebelot/kanagawa.nvim, after Hokusai's wave. Muted ink tones on a
+// near-black indigo. Its published ANSI mapping is used as-is — unusually for
+// this file, every slot already lands where the roles want it.
+const KANAGAWA = palette(
+  {
+    black: "#090618",
+    red: "#c34043",
+    green: "#76946a",
+    yellow: "#c0a36e",
+    blue: "#7e9cd8",
+    magenta: "#957fb8",
+    cyan: "#6a9589",
+    white: "#c8c093",
+    brightBlack: "#727169", // fujiGray, the comment colour muted/subtle want
+    brightRed: "#e82424",
+    brightGreen: "#98bb6c",
+    brightYellow: "#e6c384",
+    brightBlue: "#7fb4ca",
+    brightMagenta: "#938aa9",
+    brightCyan: "#7aa89f",
+    brightWhite: "#dcd7ba",
+  },
+  { bg: "#1f1f28", fg: "#dcd7ba" },
+);
+
+// everforest dark, medium contrast: sainnhe/everforest. Warm greens and a soft
+// background — the gentlest palette here, and it still clears the accent guard.
+const EVERFOREST = palette(
+  {
+    black: "#343f44", // bg3
+    red: "#e67e80",
+    green: "#a7c080",
+    // Orange for `warn`, and the yellow below for `active` — the reverse of the
+    // substitution catppuccin needs, because everforest's warm tones sit unusually
+    // close together. Orange #e69875 against red #e67e80 is 28 apart, so an orange
+    // `active` put a RUNNING tool and a FAILED one at 28 in the same block, which
+    // is the one confusion in this vocabulary that actually costs something.
+    // Yellow moves that pair to 63 and pushes the collision onto warn-versus-error
+    // instead: still close, but those are both "pay attention" and mistaking one
+    // for the other costs a glance rather than a wrong conclusion.
+    yellow: "#e69875",
+    blue: "#7fbbb3", // everforest's blue reads as a desaturated aqua
+    magenta: "#d699b6", // purple
+    cyan: "#83c092", // aqua
+    white: "#d3c6aa",
+    brightBlack: "#859289", // grey1
+    brightRed: "#e67e80",
+    brightGreen: "#a7c080",
+    brightYellow: "#dbbc7f",
+    brightBlue: "#7fbbb3",
+    brightMagenta: "#d699b6",
+    brightCyan: "#83c092",
+    brightWhite: "#d3c6aa",
+  },
+  { bg: "#2d353b", fg: "#d3c6aa" },
+);
+
+// matrix: green on black, with just enough non-green to keep the states apart.
+//
+// The interesting constraint is that a monochrome theme fights the role tier —
+// `ok`, `warn` and `error` all want to be distinguishable, and a green screen
+// has one hue to spend. So the non-green accents are kept for exactly the roles
+// where confusion costs something (error red, warn yellow-green, info blue) and
+// everything ambient stays in the rain: two greens plus the grey-green that
+// `muted` and `subtle` read from.
+const MATRIX = palette(
+  {
+    black: "#141c12",
+    red: "#ff4b4b",
+    green: "#1cc24b", // the dimmer rain green: `ok`, which is ambient
+    yellow: "#e6ff57",
+    blue: "#30b3ff",
+    magenta: "#c770ff",
+    cyan: "#24f6d9",
+    white: "#2eff6a",
+    brightBlack: "#8ca391", // rain grey: the one desaturated tone in the theme
+    brightRed: "#ff4b4b",
+    brightGreen: "#2eff6a",
+    // Orange for `active`. The only warm tone here, which is the point: a busy
+    // indicator has to break out of the green to register at all.
+    brightYellow: "#ffa83d",
+    brightBlue: "#30b3ff",
+    brightMagenta: "#c770ff",
+    brightCyan: "#00efff",
+    brightWhite: "#62ff94",
+  },
+  { bg: "#0a0e0a", fg: "#62ff94" },
+);
+
 export const BUILTIN_THEMES: BuiltinTheme[] = [
   {
     name: "terminal",
@@ -574,6 +663,21 @@ export const BUILTIN_THEMES: BuiltinTheme[] = [
     name: "one-dark",
     description: "dark, the Atom default",
     palette: ONE_DARK,
+  },
+  {
+    name: "kanagawa",
+    description: "dark, muted ink tones",
+    palette: KANAGAWA,
+  },
+  {
+    name: "everforest",
+    description: "dark, warm green, gentle contrast",
+    palette: EVERFOREST,
+  },
+  {
+    name: "matrix",
+    description: "dark, green on black",
+    palette: MATRIX,
   },
   {
     name: "gruvbox-light",
