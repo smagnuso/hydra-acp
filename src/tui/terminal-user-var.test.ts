@@ -79,7 +79,12 @@ describe("terminal-user-var", () => {
 
   it("listLiveHydraTtys reports liveness via kill(pid, 0)", () => {
     seedStickyFile("42", `${process.pid}:${process.ppid}:hydra_session_alive\n`);
-    seedStickyFile("99", `999999:1:hydra_session_dead\n`);
+    // A pid that cannot exist, rather than one that merely looks unlikely.
+    // This was 999999, which is a perfectly ordinary live pid on a machine with
+    // the modern default pid_max of 4194304 — and duly went red the day one
+    // existed. 2^31-1 is above every platform's ceiling, so kill(pid, 0) is
+    // ESRCH by construction instead of by luck.
+    seedStickyFile("99", `2147483647:1:hydra_session_dead\n`);
     seedStickyFile("legacy", `hydra_session_bare_id\n`);
     const entries = listLiveHydraTtys().sort((a, b) =>
       a.ttyBasename.localeCompare(b.ttyBasename),

@@ -703,10 +703,13 @@ describe("info gadget", () => {
   // Colour in the sidebar marks state; these are identity strings, so the
   // label is dim scaffolding and the value keeps the default foreground —
   // matching the sessionbar, which renders agent(model) unstyled too.
-  it("dims the labels and leaves the values uncoloured", () => {
+  it("dims the labels and gives the values the body colour", () => {
     for (const line of sessionInfoGadget.render(s, ctx(26))) {
       expect(line.prefixStyle).toBe("muted");
-      expect(line.bodyStyle).toBeUndefined();
+      // Named rather than absent. It resolves to the same bytes an unstyled row
+      // would, but saying it makes the plainness a decision — and gives the
+      // sessions list a token to match.
+      expect(line.bodyStyle).toBe("sidebar-value");
     }
   });
 
@@ -1214,12 +1217,35 @@ describe("sessions gadget", () => {
 
   // Quiet labels dim away; anything working or wanting attention stays at
   // full brightness.
-  it("dims only the quiet labels", () => {
+  // The labels are values, like the agent and model in the info gadget, and read
+  // the same whatever the session is doing. They used to carry the state: idle
+  // took `status-idle`, which is the common case, so the list read as dim and
+  // unimportant — and `status-waiting` is the same muted grey, so a session
+  // blocked on the user was dimmed too. State belongs to the marker, which
+  // carries it as both a glyph and a colour.
+  it("keeps busy loud and leaves the rest legible", () => {
     const labelStyle = (e: SidebarLiveSession): string | undefined =>
       sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!.prefixStyle;
-    expect(labelStyle(live("quiet"))).toBe("status-idle");
-    expect(labelStyle(live("b", { busy: true }))).toBeUndefined();
-    expect(labelStyle(live("w", { waiting: true }))).toBeUndefined();
+    // Busy is the one state worth pulling the eye across the whole row.
+    expect(labelStyle(live("b", { busy: true }))).toBe("status-active");
+    // The rest read as values, like the agent and model in the info gadget.
+    // Neither may be `status-idle`, which is what made the list look dim, nor
+    // undefined, which would silently inherit the marker's colour.
+    expect(labelStyle(live("quiet"))).toBe("sidebar-value");
+    expect(labelStyle(live("w", { waiting: true }))).toBe("sidebar-value");
+  });
+
+  // What the labels stopped carrying, the marker must still carry — otherwise
+  // dropping the dim would have dropped the signal with it.
+  it("still distinguishes every state on the marker", () => {
+    const row = (e: SidebarLiveSession) =>
+      sessionsGadget.render(snap({ liveSessions: [e] }), ctx(26))[0]!;
+    const states = [
+      live("quiet"),
+      live("b", { busy: true }),
+      live("w", { waiting: true }),
+    ].map((e) => `${row(e).body}|${row(e).bodyStyle}`);
+    expect(new Set(states).size).toBe(states.length);
   });
 
   // The working bubble carries the same yellow accent as the banner and the

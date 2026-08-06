@@ -128,6 +128,10 @@ export type Style =
   // Sidebar furniture.
   | "sidebar-rule"
   | "sidebar-title"
+  // A value in the sidebar: the agent and model names, a session's label. The
+  // body colour, deliberately — a value is content, and only the label beside it
+  // is scaffolding.
+  | "sidebar-value"
   | "code"
   | "heading-1"
   | "heading-2"

@@ -126,6 +126,10 @@ function fieldRow(
     prefix: `${label}${" ".repeat(gap)}`,
     prefixStyle: "muted",
     body: value,
+    // Explicit rather than relying on an absent style resolving to the body
+    // colour. It resolves the same, but it says so — and it is the token the
+    // sessions list matches to look like a value rather than like furniture.
+    bodyStyle: "sidebar-value",
   };
 }
 
@@ -729,9 +733,25 @@ export const sessionsGadget: Gadget = {
       const gap = Math.max(1, ctx.width - cellWidth(label) - markerWidth);
       return {
         prefix: `${label}${" ".repeat(gap)}`,
-        // Quiet sessions dim away; anything working or wanting you stays at
-        // full brightness.
-        prefixStyle: entry.busy || entry.waiting ? undefined : "status-idle",
+        // A label is a value — a session's name — so by default it reads like
+        // the agent and model values in the info gadget rather than like
+        // scaffolding. Busy is the exception: a session actively working is the
+        // one state worth pulling the eye across the whole row for, so it keeps
+        // the accent it has always had.
+        //
+        // What changed, and why: the label used to carry state for every case.
+        // Quiet sessions took `status-idle`, and idle is the common case, so the
+        // list as a whole read as dim and unimportant. Worse, `status-waiting`
+        // resolves to the same muted grey as idle, so a session actually blocked
+        // on you was dimmed too — despite the comment here once claiming it
+        // stayed bright. Only busy was ever really highlighted, and then only by
+        // accident: its style was undefined and the painter falls back to
+        // `prefixStyle ?? bodyStyle`, so it inherited the marker's colour.
+        //
+        // Now it is deliberate. Busy is loud, everything else is legible, and
+        // idle-versus-waiting is left to the marker, which carries it as both a
+        // glyph and a colour.
+        prefixStyle: entry.busy ? "status-active" : "sidebar-value",
         body: marker,
         // Shares status-active with the banner and the activity gadget, so the
         // three surfaces cannot drift apart. Waiting has its own token rather

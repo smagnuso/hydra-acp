@@ -994,6 +994,14 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // role: muted
   "sidebar-rule": { layers: [...roles.muted] },
   "sidebar-title": { layers: [...roles.muted] },
+  // A value in the sidebar — an agent name, a model, a session's label.
+  //
+  // The body colour, which is what the info gadget's values already had by
+  // omitting a style entirely. Naming it does two things: it says the plainness
+  // is a decision rather than an oversight, and it gives the sessions list
+  // something to match. Those labels were reading as scaffolding because they
+  // were literally styled as it.
+  "sidebar-value": { layers: [...roles.fg] },
 
   // The quiescent arm of a state enum whose other arms are
   // tool-status-running / -fail / -cancelled: idle, ready, awaiting approval,
