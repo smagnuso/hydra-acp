@@ -21,14 +21,17 @@ import type {
   SidebarSnapshot,
 } from "./types.js";
 
+// `sessions` sits second on purpose: it's a navigation target, so it has
+// to live at a position that doesn't move as the gadgets above and below
+// it come and go.
 export const DEFAULT_GADGET_IDS = [
   "activity",
+  "sessions",
   "context",
   "queue",
   "todo",
   "files",
   "git",
-  "sessions",
   "resources",
   "info",
   "tools",

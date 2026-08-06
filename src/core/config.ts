@@ -348,12 +348,12 @@ const TuiConfig = z.object({
         .array(z.string())
         .default([
           "activity",
+          "sessions",
           "context",
           "queue",
           "todo",
           "files",
           "git",
-          "sessions",
           "resources",
           "info",
           "tools",
