@@ -117,6 +117,19 @@ export const UpstreamGeneration = z.object({
   startedAt: z.string().optional(),
   // Absent on the entry that is currently live. Set when rotated away.
   endedAt: z.string().optional(),
+  // Spend on this generation, stamped when it is rotated away. This is the
+  // durable record: history.jsonl and its archives are a ring buffer
+  // (history-store compact()), so a long-lived session's early
+  // usage_update rows are eventually discarded and that generation's cost
+  // becomes unrecoverable from the transcript. Absent on the live entry
+  // (still accruing) and on generations retired before this field existed.
+  cost: z.number().nonnegative().optional(),
+  // True when this entry was reconstructed after the fact rather than
+  // recorded at rotation time (e.g. by matching externalized tool blobs
+  // against the agent's own ledger). Reconstruction cannot certify
+  // completeness, so a chain containing inferred entries is a lower
+  // bound: treat its cost as ">=", never "=".
+  inferred: z.boolean().optional(),
 });
 export type UpstreamGeneration = z.infer<typeof UpstreamGeneration>;
 

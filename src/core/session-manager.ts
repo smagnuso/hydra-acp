@@ -1889,10 +1889,13 @@ export class SessionManager {
         () => undefined,
       );
     });
-    session.onAgentChange(({ agentId, upstreamSessionId }) => {
-      void this.persistAgentChange(session.sessionId, agentId, upstreamSessionId).catch(
-        () => undefined,
-      );
+    session.onAgentChange(({ agentId, upstreamSessionId, retiredCost }) => {
+      void this.persistAgentChange(
+        session.sessionId,
+        agentId,
+        upstreamSessionId,
+        retiredCost,
+      ).catch(() => undefined);
     });
     session.onModelChange((model) => {
       void this.persistSnapshot(session.sessionId, { currentModel: model }).catch(
@@ -3146,9 +3149,16 @@ export class SessionManager {
     sessionId: string,
     agentId: string,
     upstreamSessionId: string,
+    retiredCost?: number,
   ): Promise<void> {
     await this.mutateRecord(sessionId, { agentId, upstreamSessionId }, undefined, (prev) => ({
-      upstreamGenerations: appendUpstreamGeneration(prev, agentId, upstreamSessionId),
+      upstreamGenerations: appendUpstreamGeneration(
+        prev,
+        agentId,
+        upstreamSessionId,
+        undefined,
+        retiredCost,
+      ),
     }));
   }
 
@@ -4302,6 +4312,7 @@ export function appendUpstreamGeneration(
   agentId: string,
   upstreamSessionId: string,
   now: string = new Date().toISOString(),
+  retiredCost?: number,
 ): UpstreamGeneration[] {
   const seeded: UpstreamGeneration[] =
     prev.upstreamGenerations && prev.upstreamGenerations.length > 0
@@ -4312,10 +4323,29 @@ export function appendUpstreamGeneration(
 
   const last = seeded[seeded.length - 1];
   if (last && last.upstreamSessionId === upstreamSessionId) {
+    // Already on this upstream. Either an idempotent re-notify, or a
+    // routine persist (mergeForPersistence) beat us to the append and
+    // closed the previous entry without a cost — it has no retiredCost to
+    // pass. Back-fill it here so the figure isn't lost to that race.
+    if (retiredCost !== undefined && seeded.length >= 2) {
+      const retiring = seeded[seeded.length - 2];
+      if (retiring && retiring.cost === undefined) {
+        seeded[seeded.length - 2] = { ...retiring, cost: retiredCost };
+      }
+    }
     return seeded;
   }
   if (last && last.endedAt === undefined) {
-    seeded[seeded.length - 1] = { ...last, endedAt: now };
+    seeded[seeded.length - 1] = {
+      ...last,
+      endedAt: now,
+      // Stamp the retiring generation's spend while we still know it. A
+      // rollback re-enters an upstream, so a later stint on the same
+      // upstream gets its own entry and its own cost — consumers must sum
+      // per entry for time attribution but dedupe by upstream id when
+      // joining an external per-session ledger.
+      ...(retiredCost !== undefined ? { cost: retiredCost } : {}),
+    };
   }
   seeded.push({ upstreamSessionId, agentId, startedAt: now });
   return seeded;

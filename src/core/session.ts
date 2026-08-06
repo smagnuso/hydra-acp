@@ -668,8 +668,20 @@ export class Session {
   private toolCallKind = new ToolKindTracker();
   private filesEditedSeen = new Set<string>();
   private agentChangeHandlers: Array<
-    (info: { agentId: string; upstreamSessionId: string }) => void
+    (info: {
+      agentId: string;
+      upstreamSessionId: string;
+      // Spend on the upstream we just rotated OFF, captured by
+      // accumulateAndResetCost before costAmount is reset. Recorded onto
+      // the retiring generation entry so the figure survives the history
+      // ring evicting that generation's usage_update rows.
+      retiredCost?: number;
+    }) => void
   > = [];
+  // Set by accumulateAndResetCost, consumed by the next agentChange
+  // notification. Not persisted directly — it only has to live long
+  // enough to reach the generation entry.
+  private retiringGenerationCost: number | undefined;
   // Last available_commands_update we observed from the agent. Stored
   // so we can re-broadcast a merged (hydra ∪ agent) list whenever
   // either half changes, and persisted to meta.json so a fresh attach
@@ -1214,7 +1226,11 @@ export class Session {
   }
 
   onAgentChange(
-    handler: (info: { agentId: string; upstreamSessionId: string }) => void,
+    handler: (info: {
+      agentId: string;
+      upstreamSessionId: string;
+      retiredCost?: number;
+    }) => void,
   ): void {
     this.agentChangeHandlers.push(handler);
   }
@@ -1528,7 +1544,13 @@ export class Session {
     // previous id, not the current).
     for (const handler of this.agentChangeHandlers) {
       try {
-        handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId });
+        handler({
+          agentId: this.agentId,
+          upstreamSessionId: this.upstreamSessionId,
+          ...(this.retiringGenerationCost !== undefined
+            ? { retiredCost: this.retiringGenerationCost }
+            : {}),
+        });
       } catch (err) {
         this.logger?.warn(`swapUpstream: agentChange handler failed: ${(err as Error).message}`);
       }
@@ -1702,7 +1724,13 @@ export class Session {
     // fires and persists the restored upstreamSessionId to meta.json.
     for (const handler of this.agentChangeHandlers) {
       try {
-        handler({ agentId: this.agentId, upstreamSessionId: this.upstreamSessionId });
+        handler({
+          agentId: this.agentId,
+          upstreamSessionId: this.upstreamSessionId,
+          ...(this.retiringGenerationCost !== undefined
+            ? { retiredCost: this.retiringGenerationCost }
+            : {}),
+        });
       } catch (err) {
         this.logger?.warn(`rollbackToUpstream: agentChange handler failed: ${(err as Error).message}`);
       }
@@ -3877,6 +3905,7 @@ export class Session {
     const amount = this._currentUsage?.costAmount;
     if (amount) {
       this.cumulativeCost += amount;
+      this.retiringGenerationCost = amount;
     }
     const next: UsageSnapshot = {
       used: 0,

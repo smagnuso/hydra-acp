@@ -4421,6 +4421,45 @@ describe("appendUpstreamGeneration", () => {
     expect(out[1]!.agentId).toBe("claude-acp");
   });
 
+  // The transcript is a ring buffer, so a long session's early
+  // usage_update rows are eventually discarded. Stamping the retiring
+  // generation's cost at rotation is what makes that spend survive.
+  it("stamps the retiring generation's cost when it is rotated away", () => {
+    const out = appendUpstreamGeneration(base, "opencode", "ses_2", "2026-06-02T00:00:00.000Z", 361.11);
+    expect(out[0]!.cost).toBe(361.11);
+    expect(out[1]!.cost).toBeUndefined();   // still live, still accruing
+  });
+
+  // mergeForPersistence appends without a cost (it has none to pass). If a
+  // routine persist wins the race it closes the entry, and the subsequent
+  // rotation notify would early-return and drop the figure.
+  it("back-fills the cost when a routine persist already closed the entry", () => {
+    const rec: SessionRecord = {
+      ...base,
+      upstreamSessionId: "ses_2",
+      upstreamGenerations: [
+        { upstreamSessionId: "ses_1", agentId: "opencode", endedAt: "2026-06-02T00:00:00.000Z" },
+        { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
+      ],
+    };
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-02T00:00:01.000Z", 361.11);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.cost).toBe(361.11);
+  });
+
+  it("does not overwrite a cost already recorded on a retired generation", () => {
+    const rec: SessionRecord = {
+      ...base,
+      upstreamSessionId: "ses_2",
+      upstreamGenerations: [
+        { upstreamSessionId: "ses_1", agentId: "opencode", endedAt: "2026-06-02T00:00:00.000Z", cost: 99 },
+        { upstreamSessionId: "ses_2", agentId: "opencode", startedAt: "2026-06-02T00:00:00.000Z" },
+      ],
+    };
+    const out = appendUpstreamGeneration(rec, "opencode", "ses_2", "2026-06-03T00:00:00.000Z", 361.11);
+    expect(out[0]!.cost).toBe(99);
+  });
+
   // recordFromMemorySession seeds a fresh chain when upstreamGenerations
   // is absent, so any persist path that forgets to pass the existing
   // chain through truncates the lineage back to one entry. That's silent
