@@ -226,14 +226,27 @@ describe("handleQuestionsKey — navigation", () => {
       .toEqual({ type: "row", selectedRow: 1 });
   });
 
-  it("clamps row movement at bottom", () => {
+  // Wraps rather than clamping, matching the ^O options modal and the ←/→ value
+  // cycling in both. On a short list, stopping dead at the ends just means more
+  // keypresses to reach the row furthest from the cursor.
+  it("wraps row movement at the bottom", () => {
     expect(handleQuestionsKey(key("down"), true, groups, sel, t, d, 2, "s"))
+      .toEqual({ type: "row", selectedRow: 0 });
+  });
+
+  it("wraps row movement at the top", () => {
+    expect(handleQuestionsKey(key("up"), true, groups, sel, t, d, 0, "s"))
       .toEqual({ type: "row", selectedRow: 2 });
   });
 
-  it("clamps row movement at top", () => {
-    expect(handleQuestionsKey(key("up"), true, groups, sel, t, d, 0, "s"))
-      .toEqual({ type: "row", selectedRow: 0 });
+  // A single row is the degenerate case the modulo has to survive: both
+  // directions stay put rather than dividing by zero or landing off the end.
+  it("stays put when there is only one row", () => {
+    const one = toGroups([q({ id: "only" })]);
+    for (const k of ["up", "down"] as const) {
+      expect(handleQuestionsKey(key(k), true, one, [0], falses(1), falses(1), 0, "s"))
+        .toEqual({ type: "row", selectedRow: 0 });
+    }
   });
 
   it("jumps to row N for digit chars 1-9", () => {

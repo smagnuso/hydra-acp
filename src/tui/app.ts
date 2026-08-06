@@ -508,14 +508,16 @@ export function handleQuestionsKey(
     const next = (cur + delta + ring.length) % ring.length;
     return { type: "cycle", selectedRow: currentRow, newValueIndex: next };
   };
+  // Row movement wraps rather than clamping. On a short list, stopping dead at
+  // the ends means the fastest way to the last row is to notice that up from the
+  // first would get there — which only works if it does.
+  const wrap = (next: number): number =>
+    (next + groups.length) % groups.length;
   switch (ev.name) {
     case "up":
-      return { type: "row", selectedRow: Math.max(0, currentRow - 1) };
+      return { type: "row", selectedRow: wrap(currentRow - 1) };
     case "down":
-      return {
-        type: "row",
-        selectedRow: Math.min(groups.length - 1, currentRow + 1),
-      };
+      return { type: "row", selectedRow: wrap(currentRow + 1) };
     case "right":
       return cycle(1);
     case "left":
@@ -4130,17 +4132,18 @@ async function runSession(
     }
     if (ev.type === "key") {
       switch (ev.name) {
+        // Wraps, like the questions modal and like ←/→ on the values: with nine
+        // rows, clamping at the ends just means more keypresses to reach the
+        // one furthest from where the cursor happens to be.
         case "up":
-          optionsSelectedIndex = Math.max(0, optionsSelectedIndex - 1);
+        case "down": {
+          const step = ev.name === "up" ? -1 : 1;
+          optionsSelectedIndex =
+            (optionsSelectedIndex + step + OPTION_IDS.length) %
+            OPTION_IDS.length;
           refreshOptionsPrompt();
           return true;
-        case "down":
-          optionsSelectedIndex = Math.min(
-            OPTION_IDS.length - 1,
-            optionsSelectedIndex + 1,
-          );
-          refreshOptionsPrompt();
-          return true;
+        }
         case "left":
         case "right": {
           const id = OPTION_IDS[optionsSelectedIndex];
