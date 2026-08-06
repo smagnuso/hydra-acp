@@ -199,6 +199,14 @@ export interface SessionInit {
   currentModel?: string;
   currentMode?: string;
   currentUsage?: UsageSnapshot;
+  // True when the agent this session is being wired to reloads the SAME
+  // upstream session that produced currentUsage.cumulativeCost (cold
+  // resurrect via session/load). Arms the cost-ledger probe so a
+  // session-scoped agent that re-reports its whole history doesn't
+  // double-count. Must stay false/absent when the agent gets a fresh
+  // upstream session (import reseed), where the banked total is real
+  // prior spend that the new agent knows nothing about.
+  reloadsUpstreamLedger?: boolean;
   agentCommands?: AdvertisedCommand[];
   agentModes?: AdvertisedMode[];
   agentModels?: AdvertisedModel[];
@@ -702,12 +710,48 @@ export class Session {
   private priorityHandlers: Array<(priority: number | undefined) => void> = [];
   private usageHandlers: Array<(usage: UsageSnapshot) => void> = [];
   private cumulativeCost: number = 0;
+  // Cost carried over from a RELOADED upstream session — the previous life's
+  // raw costAmount for the same upstream session id, retained across a cold
+  // resurrect or rollback rather than banked into cumulativeCost.
+  //
+  // Agents disagree about what cost.amount accumulates over. OpenCode scopes
+  // it to the upstream session (acp/usage.ts sends totalSessionCost(messages),
+  // a re-sum of every assistant message), so on reload it re-reports the whole
+  // history; replacement then yields the right number and banking would double
+  // it. Other agents restart at $0 on reload, in which case the retained
+  // amount is the only record of that life's spend and must be banked.
+  //
+  // We can't know which a priori, so we defer: retain the amount, and let the
+  // first cost report of the new life adjudicate. See reconcileCostLedger.
+  private costLedgerProbe: number | undefined;
+
+  // The split, for persistence: costAmount is the CURRENT life's raw amount
+  // and cumulativeCost is spend from retired upstream sessions. Keeping the
+  // two apart on disk is what lets a later resurrect arm the ledger probe
+  // against the right quantity — collapsing them (as `currentUsage` does)
+  // loses the information permanently.
+  //
+  // Readers of meta.json must sum the two fields. Daemons predating the split
+  // wrote the total into costAmount and omitted cumulativeCost, so summing is
+  // correct against either layout.
+  get persistableUsage(): UsageSnapshot | undefined {
+    if (!this._currentUsage && !this.cumulativeCost) {
+      return undefined;
+    }
+    return {
+      ...(this._currentUsage ?? {}),
+      ...(this.cumulativeCost
+        ? { cumulativeCost: this.cumulativeCost }
+        : { cumulativeCost: undefined }),
+    };
+  }
 
   // Total cost across all agent lives. costAmount in the returned snapshot
   // is cumulativeCost + the current agent's raw amount so every consumer
   // gets the right figure without knowing about the internal split.
   // cumulativeCost is stripped from the return value so it never leaks
-  // into persistence paths via session.currentUsage.
+  // into live-consumer paths (REST currentUsage, history.jsonl usage_update)
+  // that have always seen a single collapsed total.
   get currentUsage(): UsageSnapshot | undefined {
     if (!this._currentUsage && !this.cumulativeCost) {
       return undefined;
@@ -793,6 +837,13 @@ export class Session {
     this.currentMode = init.currentMode;
     this._currentUsage = init.currentUsage;
     this.cumulativeCost = init.currentUsage?.cumulativeCost ?? 0;
+    // Only cold resurrect reloads the upstream session that produced the
+    // banked total. Import reseeds mint a fresh upstream session via
+    // session/new, so the incoming agent's ledger is unrelated to the
+    // imported cost and must never cancel it out.
+    if (init.reloadsUpstreamLedger) {
+      this.armCostLedgerProbe();
+    }
     if (init.agentCommands && init.agentCommands.length > 0) {
       this.agentAdvertisedCommands = [...init.agentCommands];
     }
@@ -1603,6 +1654,11 @@ export class Session {
       mcpServers: this.mcpServersConfig ?? [],
     });
 
+    // Bank without arming the ledger probe. Rollback reloads an EARLIER
+    // upstream session, not the one whose costAmount we just banked, so the
+    // probe would be comparing against the wrong quantity — and a low first
+    // report would bank the same amount a second time. See the rollback note
+    // in PROTOCOL.md "Cost ledger scope".
     this.accumulateAndResetCost();
     this.wireAgent(fresh.agent);
 
@@ -3683,9 +3739,17 @@ export class Session {
     }
     if (update.cost && typeof update.cost === "object") {
       const cost = update.cost as { amount?: unknown; currency?: unknown };
-      if (typeof cost.amount === "number" && next.costAmount !== cost.amount) {
-        next.costAmount = cost.amount;
-        changed = true;
+      if (typeof cost.amount === "number") {
+        // Must run before the change check: an agent that resumes its ledger
+        // may re-report a value we already hold, and the probe still needs
+        // to fire so the duplicate banked copy is dropped.
+        if (this.reconcileCostLedger(cost.amount)) {
+          changed = true;
+        }
+        if (next.costAmount !== cost.amount) {
+          next.costAmount = cost.amount;
+          changed = true;
+        }
       }
       if (
         typeof cost.currency === "string" &&
@@ -3699,14 +3763,14 @@ export class Session {
       return true;
     }
     this._currentUsage = next;
-    // Fire handlers with the total (getter) not the raw snapshot so that
-    // meta.json always persists the accumulated costAmount. If we fire with
-    // the raw `next` (no cumulativeCost), a daemon restart would reconstruct
-    // cumulativeCost as 0 + raw instead of the true lifetime total.
-    const total = this.currentUsage ?? next;
+    // Fire handlers with the split, not the collapsed total. The sole
+    // consumer is SessionManager's persistSnapshot, and meta.json needs both
+    // fields kept apart — see persistableUsage. A daemon restart reconstructs
+    // the lifetime total by summing them.
+    const snapshot = this.persistableUsage ?? next;
     for (const handler of this.usageHandlers) {
       try {
-        handler(total);
+        handler(snapshot);
       } catch {
         void 0;
       }
@@ -3714,9 +3778,52 @@ export class Session {
     return true;
   }
 
+  // Retain the previous life's raw amount for adjudication. Call only on
+  // paths where the incoming agent reloads the SAME upstream session, since
+  // that raw amount is precisely the spend the agent may re-report. Cold
+  // resurrect is the only such path; rollback targets a different session.
+  //
+  // Note this is costAmount, NOT the lifetime total: cumulativeCost covers
+  // retired upstream sessions the reloaded agent has never seen and could
+  // never report, so including it would make the comparison unwinnable for
+  // any session that has rotated.
+  private armCostLedgerProbe(): void {
+    const raw = this._currentUsage?.costAmount;
+    if (typeof raw === "number" && raw > 0) {
+      this.costLedgerProbe = raw;
+    }
+  }
+
+  // One-shot adjudication of the first cost report after reloading an
+  // upstream session. The retained raw amount is still sitting in
+  // _currentUsage.costAmount and is about to be overwritten by replacement:
+  //
+  //   incoming >= retained — the agent's ledger survived the reload and
+  //     already covers it; replacement alone is correct, do nothing.
+  //   incoming <  retained — the agent restarted at $0, so replacement would
+  //     drop the retained spend; bank it into cumulativeCost first.
+  //
+  // Returns true if the banked total was adjusted, so the caller can force a
+  // persist even when the reported amount itself is unchanged.
+  private reconcileCostLedger(incoming: number): boolean {
+    const probe = this.costLedgerProbe;
+    if (probe === undefined) {
+      return false;
+    }
+    this.costLedgerProbe = undefined;
+    // Tolerance absorbs float drift in the agent's own summation; the two
+    // populations (continued ledger vs restarted at ~0) are far apart.
+    if (incoming >= probe - 1e-6) {
+      return false;
+    }
+    this.cumulativeCost += probe;
+    return true;
+  }
+
   // Move currentUsage.costAmount into cumulativeCost and clear it so the
   // next agent life starts accumulating from $0. Fires usageHandlers so
   // meta.json is updated before the new agent starts emitting.
+  //
   private accumulateAndResetCost(): void {
     // Called when the upstream agent rotates (compaction swap, /hydra agent
     // switch, seed-from-import). Roll the prior life's cost into the

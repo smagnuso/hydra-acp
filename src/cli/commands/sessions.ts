@@ -14,6 +14,7 @@ import { formatHydraUrl, isLoopbackHost } from "../../core/remote-url.js";
 import { stripHydraSessionPrefix } from "../../core/session.js";
 import { listSessions, pickMostRecent } from "../../tui/discovery.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
+import { collapseUsage } from "../../core/usage-collapse.js";
 import { bundleToMarkdown } from "../../core/transcript.js";
 import {
   HEADER,
@@ -485,7 +486,11 @@ export function bundleToSummary(parsed: Bundle): SessionSummary {
     sessionId: parsed.session.sessionId,
     cwd: parsed.session.cwd,
     agentId: parsed.session.agentId,
-    currentUsage: parsed.session.currentUsage,
+    // Collapse the persisted split (cumulativeCost = retired agent lives,
+    // costAmount = current life) into the single lifetime total the list
+    // formatter expects. Every other producer of SessionSummary gets this
+    // from the daemon already collapsed; a bundle is the raw record.
+    currentUsage: collapseUsage(parsed.session.currentUsage),
     title: parsed.session.title,
     importedFromMachine: parsed.exportedFrom.machine,
     attachedClients: 0,

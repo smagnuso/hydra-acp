@@ -1580,6 +1580,183 @@ describe("Session", () => {
     });
   });
 
+  // Regression: agents differ in whether their reported cost total is scoped
+  // to the process or to the upstream session. OpenCode's ACP adapter sends
+  // totalSessionCost(messages) — a re-sum of the whole session — so a
+  // resurrected session re-reports history that loadFromDisk already banked
+  // into cumulativeCost, doubling the displayed total on every resurrect.
+  describe("resurrect cost ledger reconciliation", () => {
+    // Shape produced by SessionManager.loadFromDisk: the persisted split,
+    // passed through untouched. `current` is spend on the upstream session
+    // about to be reloaded; `retired` is spend on upstream sessions the
+    // incoming agent has never seen and can never re-report.
+    const resurrected = (current: number, retired?: number) => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_led",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_led",
+        currentUsage: {
+          costAmount: current,
+          ...(retired !== undefined ? { cumulativeCost: retired } : {}),
+        },
+        reloadsUpstreamLedger: true,
+      });
+      return { session, mock };
+    };
+    const report = (
+      mock: ReturnType<typeof makeMockAgent>,
+      amount: number,
+    ): void => {
+      mock.triggerNotification("session/update", {
+        sessionId: "u_led",
+        update: {
+          sessionUpdate: "usage_update",
+          cost: { amount, currency: "USD" },
+        },
+      });
+    };
+
+    it("does not double-count when the agent re-reports the banked total", () => {
+      const { session, mock } = resurrected(10);
+      report(mock, 10);
+      expect(session.currentUsage?.costAmount).toBe(10);
+    });
+
+    it("stays correct as the resumed ledger grows past the banked total", () => {
+      const { session, mock } = resurrected(10);
+      report(mock, 10);
+      report(mock, 12.5);
+      expect(session.currentUsage?.costAmount).toBe(12.5);
+    });
+
+    it("still adds when the agent restarts its ledger at zero", () => {
+      const { session, mock } = resurrected(10);
+      report(mock, 0.25);
+      expect(session.currentUsage?.costAmount).toBe(10.25);
+    });
+
+    it("adjudicates once, not on every report", () => {
+      // A restarted-at-zero agent whose total later exceeds the banked
+      // amount must not retroactively un-bank on that later report.
+      const { session, mock } = resurrected(10);
+      report(mock, 0.25);
+      report(mock, 30);
+      expect(session.currentUsage?.costAmount).toBe(40);
+    });
+
+    // onUsageChange feeds persistSnapshot, so it must carry the SPLIT
+    // (retired vs current life), not the collapsed total that currentUsage
+    // exposes on the wire. Persisting the collapsed value is what destroyed
+    // the distinction and made a later resurrect unable to adjudicate.
+    it("persists the split, not the collapsed total", () => {
+      const { session, mock } = resurrected(1.5, 3.5);
+      const seen: Array<{ cost?: number; cumulative?: number }> = [];
+      session.onUsageChange((u) => {
+        seen.push({ cost: u.costAmount, cumulative: u.cumulativeCost });
+      });
+
+      // Process-scoped agent restarts at $0.10: the retained $1.50 is banked,
+      // so retired becomes $5.00 and the current life is $0.10.
+      report(mock, 0.1);
+      expect(seen).toEqual([{ cost: 0.1, cumulative: 5.0 }]);
+      // The wire getter still collapses to a single lifetime total.
+      expect(session.currentUsage?.costAmount).toBeCloseTo(5.1, 10);
+      expect(session.currentUsage?.cumulativeCost).toBeUndefined();
+    });
+
+    it("repeated resurrects stay flat instead of compounding", () => {
+      // Three resurrect cycles of a session whose true cost never grows.
+      // Pre-fix this produced 10 → 20 → 40.
+      let banked = 10;
+      for (let i = 0; i < 3; i += 1) {
+        const { session, mock } = resurrected(banked);
+        report(mock, 10);
+        banked = session.currentUsage?.costAmount ?? 0;
+      }
+      expect(banked).toBe(10);
+    });
+
+
+    // Out-of-band spend: hydra tracks $5, daemon exits, the user talks to the
+    // same upstream session directly (+$1), then reopens it in hydra.
+    it("absorbs out-of-band spend on a session-scoped agent", () => {
+      const { session, mock } = resurrected(5);
+      report(mock, 6);
+      expect(session.currentUsage?.costAmount).toBe(6);
+    });
+
+    // Same scenario, process-scoped agent: it restarts at 0 and has no idea
+    // about the out-of-band $1, so hydra can only preserve its own $5.
+    it("cannot see out-of-band spend on a process-scoped agent", () => {
+      const { session, mock } = resurrected(5);
+      report(mock, 0.1);
+      expect(session.currentUsage?.costAmount).toBe(5.1);
+    });
+
+
+    // Prior upstream sessions contributed $3.50 and the CURRENT upstream
+    // session $1.50. The reloaded agent can only report its own session's
+    // $1.50; the probe must compare against that, not the $5.00 lifetime
+    // total, or the $1.50 gets counted twice.
+    it("swap-then-resurrect does not double-count the current session", () => {
+      const { session, mock } = resurrected(1.5, 3.5);
+      report(mock, 1.5);
+      expect(session.currentUsage?.costAmount).toBe(5.0);
+    });
+
+    it("swap-then-resurrect absorbs out-of-band spend on the reloaded session", () => {
+      const { session, mock } = resurrected(1.5, 3.5);
+      report(mock, 2.5);
+      expect(session.currentUsage?.costAmount).toBe(6.0);
+    });
+
+    it("swap-then-resurrect banks the retained amount for a process-scoped agent", () => {
+      const { session, mock } = resurrected(1.5, 3.5);
+      report(mock, 0.1);
+      expect(session.currentUsage?.costAmount).toBeCloseTo(5.1, 10);
+    });
+
+    // doResurrectFromImport bootstraps via session/new, so the incoming agent
+    // has a fresh upstream session and its ledger is unrelated to the
+    // imported total. Arming the probe here would let the new agent's first
+    // sizeable turn cancel out the imported cost.
+    it("import reseed keeps the imported total (probe not armed)", () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_imp",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_led",
+        currentUsage: { cumulativeCost: 10 },
+        // reloadsUpstreamLedger deliberately omitted: import mints a fresh
+        // upstream session, so the incoming agent's ledger is unrelated.
+      });
+      // A first turn costing more than the imported total must still add.
+      report(mock, 25);
+      expect(session.currentUsage?.costAmount).toBe(35);
+    });
+
+    // hydra agent sync writes rows with no currentUsage at all, so nothing is
+    // banked and the agent's own ledger is the whole truth on first open.
+    it("synced session with no persisted usage adopts the agent total as-is", () => {
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_sync",
+        cwd: "/work",
+        agentId: "mock",
+        agent: mock.agent,
+        upstreamSessionId: "u_led",
+        reloadsUpstreamLedger: true,
+      });
+      report(mock, 5);
+      expect(session.currentUsage?.costAmount).toBe(5);
+    });
+  });
+
   describe("attach / detach", () => {
     it("rejects double-attach for the same clientId", () => {
       const { session } = makeSession();
@@ -5862,4 +6039,102 @@ describe("Session", () => {
       expect(received[2]).toHaveLength(3);
     });
   });
+});
+
+// The redesign's safety property: no code path may DECREASE recorded lifetime
+// cost. reconcileCostLedger only ever adds (the earlier un-bank variant could
+// subtract, which is how it could erase an imported total). These pin that.
+describe("cost ledger never loses spend", () => {
+  const build = (init: {
+    costAmount?: number;
+    cumulativeCost?: number;
+    reload?: boolean;
+  }) => {
+    const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+    const session = new Session({
+      sessionId: "sess_noloss",
+      cwd: "/work",
+      agentId: "mock",
+      agent: mock.agent,
+      upstreamSessionId: "u_noloss",
+      currentUsage: {
+        ...(init.costAmount !== undefined
+          ? { costAmount: init.costAmount }
+          : {}),
+        ...(init.cumulativeCost !== undefined
+          ? { cumulativeCost: init.cumulativeCost }
+          : {}),
+      },
+      ...(init.reload ? { reloadsUpstreamLedger: true } : {}),
+    });
+    return { session, mock };
+  };
+  const push = (mock: ReturnType<typeof makeMockAgent>, amount: number) => {
+    mock.triggerNotification("session/update", {
+      sessionId: "u_noloss",
+      update: {
+        sessionUpdate: "usage_update",
+        cost: { amount, currency: "USD" },
+      },
+    });
+  };
+
+  const cases: Array<{
+    name: string;
+    init: { costAmount?: number; cumulativeCost?: number; reload?: boolean };
+    reports: number[];
+    final: number;
+  }> = [
+    {
+      name: "legacy collapsed total, agent restarts low",
+      init: { costAmount: 5, reload: true },
+      reports: [0.01],
+      final: 5.01,
+    },
+    {
+      name: "legacy collapsed total, agent resumes high",
+      init: { costAmount: 5, reload: true },
+      reports: [5.5],
+      final: 5.5,
+    },
+    {
+      name: "split record, agent restarts low",
+      init: { costAmount: 1.5, cumulativeCost: 3.5, reload: true },
+      reports: [0.01],
+      final: 5.01,
+    },
+    {
+      name: "split record, agent resumes at exactly the retained amount",
+      init: { costAmount: 1.5, cumulativeCost: 3.5, reload: true },
+      reports: [1.5],
+      final: 5,
+    },
+    {
+      name: "import reseed (no reload), agent reports above the banked total",
+      init: { cumulativeCost: 10, reload: false },
+      reports: [25],
+      final: 35,
+    },
+    {
+      name: "many reports after a restart never regress",
+      init: { costAmount: 4, cumulativeCost: 1, reload: true },
+      reports: [0.1, 0.2, 0.3, 0.25],
+      final: 5.25,
+    },
+  ];
+
+  for (const c of cases) {
+    it(`never drops below prior spend: ${c.name}`, () => {
+      const { session, mock } = build(c.init);
+      const before = session.currentUsage?.costAmount ?? 0;
+      let low = before;
+      for (const r of c.reports) {
+        push(mock, r);
+        low = Math.min(low, session.currentUsage?.costAmount ?? 0);
+      }
+      // The invariant: recorded lifetime cost is monotonically non-decreasing.
+      expect(low).toBeGreaterThanOrEqual(before - 1e-9);
+      expect(session.currentUsage?.costAmount ?? 0).toBeCloseTo(c.final, 9);
+    });
+  }
 });

@@ -12,6 +12,7 @@
 
 import { daemonFetch } from "./_shared.js";
 import { decodeBundle, type Bundle } from "../../core/bundle.js";
+import { lifetimeCostOf } from "../../core/usage-collapse.js";
 import type { HistoryEntry } from "../../core/history-store.js";
 import {
   countTurns,
@@ -202,8 +203,9 @@ export function aggregate(
     turns,
     tools,
     files,
+    // The bundle carries the RAW persisted split; collapse it.
     cost: {
-      amount: usage?.costAmount ?? null,
+      amount: lifetimeCostOf(usage) ?? null,
       currency: usage?.costCurrency ?? null,
       cumulative: usage?.cumulativeCost ?? null,
       inputTokens: usage?.used ?? null,

@@ -614,7 +614,7 @@ The following session-update kinds may be queried. The list is additive — new 
 
 | Kind | Description |
 |------|-------------|
-| `usage_update` | Cost/token snapshot at turn boundary (persisted once per turn by `recordCurrentUsageSnapshot`, session.ts:1832). Cumulative running total — consumers diff successive rows to get per-turn deltas. |
+| `usage_update` | Cost/token snapshot at turn boundary (persisted once per turn by `recordCurrentUsageSnapshot`, session.ts:1832). Cumulative running total — consumers diff successive rows to get per-turn deltas. See [Cost ledger scope](#cost-ledger-scope) for how `cost.amount` behaves across agent rotation. |
 | `tool_call` | Tool call placed |
 | `tool_call_update` | Tool call updated (status, args, result refs) |
 | `prompt_received` | User turn boundary marker |
@@ -699,6 +699,87 @@ Stream selected session/update kinds from **every** session's `history.jsonl`, i
 
 - `400` — same validation rules as the per-session endpoint.
 - `500` — internal error (e.g., failure to open a session's `history.jsonl` that isn't ENOENT).
+
+#### Cost ledger scope
+
+`usage_update`'s `cost.amount` is a cumulative total, but the protocol does not
+say *what* it accumulates over, and agents disagree:
+
+- **Process-scoped** — the total resets to `0` when the agent process restarts.
+- **Session-scoped** — the total is derived from the upstream session's own
+  message history, so it survives a reload and is re-reported in full. OpenCode
+  is one: its adapter sends `totalSessionCost(messages)`, a re-sum of every
+  assistant message in the session.
+
+This matters because hydra maintains a `cumulativeCost` running total across
+agent lives (compaction swap, `/hydra agent` switch, `rollbackToUpstream`,
+cold resurrect) and adds it to whatever the current agent reports. For a
+session-scoped agent that reload re-reports history hydra already banked, and
+the displayed total doubles on every rotation that reloads the session.
+
+Hydra resolves this without needing to know the agent's flavour, by splitting
+lifetime cost into two quantities and deferring the decision:
+
+- **`cumulativeCost`** — spend on *retired* upstream sessions. The incoming
+  agent has never seen these and can never report them.
+- **`costAmount`** — spend on the *current* upstream session, replaced wholesale
+  by each `usage_update`.
+
+On a rotation that **reloads an existing upstream session**, `costAmount` is
+retained rather than banked, and the first `cost.amount` of the new life
+adjudicates (`Session.reconcileCostLedger`, session.ts):
+
+- `incoming >= retained` — the agent's ledger survived the reload and already
+  covers it; replacement alone is correct.
+- `incoming < retained` — the agent restarted at `0`, so replacement would drop
+  the retained spend; bank it into `cumulativeCost` first.
+
+Rotations that spawn a **new** upstream session bank unconditionally, because
+the incoming agent's ledger is unrelated to the outgoing one's.
+
+| Flow | Upstream session | On rotation | Probe |
+|------|------------------|-------------|-------|
+| Cold resurrect (`session/load`) | reused | retain | armed |
+| `rollbackToUpstream` | reused (**earlier** id) | bank | not armed |
+| Compaction swap / `/hydra agent` | new (`session/new`) | bank | not armed |
+| `/hydra restart`, `forceCancel` | new (`session/new`) | bank | not armed |
+| `session import` reseed | new (`session/new`) | bank exporter's total | not armed |
+| `agent sync` row, first open | reused | nothing to retain | no-op |
+| Fork | new | nothing (fork resets billing) | no-op |
+
+Import is the case most easily got wrong: the reseeded agent's ledger is
+unrelated to the imported total, so arming the probe there would let the first
+sizeable turn cancel the import out.
+
+**Rollback is approximate.** It reloads an *earlier* upstream session, not the
+one whose `costAmount` is being retired, so the probe cannot help — it would be
+comparing against the wrong session's spend. Hydra banks and does not arm. A
+session-scoped agent will then re-report the earlier session's cost, which is
+already inside `cumulativeCost`, inflating the total by that amount. Making
+this exact needs per-upstream-session cost tracking, which hydra does not keep.
+Rollback is rare and the error is an over-count, never a loss.
+
+**Comparing against the right quantity matters.** The probe is armed with
+`costAmount` alone, never the lifetime total. A session that rotated before
+being resurrected has spend the reloading agent cannot possibly report, so
+comparing against the total would make the test unwinnable and double-count the
+current session's portion.
+
+##### Reading cost off disk
+
+`meta.json` stores the split; **readers must sum `cumulativeCost + costAmount`**
+to get lifetime cost. Every *wire* shape collapses them for you — `GET
+/v1/sessions[/:id]` `currentUsage.costAmount`, the `usage_update` envelope's
+`cost.amount`, and attach `_meta` all carry a single lifetime total with
+`cumulativeCost` omitted. Only direct `meta.json` readers need to sum.
+
+Daemons predating the split wrote the lifetime total into `costAmount` and
+omitted `cumulativeCost`, so summing is correct against either layout and no
+migration is required; records pick up the split the next time they are
+written.
+
+Agent authors: either scope is supported, but be consistent within an agent.
+An agent whose total resets only *sometimes* on reload cannot be reconciled.
 
 ### Agents
 

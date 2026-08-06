@@ -1509,11 +1509,13 @@ describe("SessionManager: history persistence", () => {
       await live.close({ deleteRecord: false });
 
       const resumeParams = await manager.loadFromDisk(sessionId);
-      // loadFromDisk folds prior {costAmount} into cumulativeCost so the
-      // resurrected session starts with the full lifetime total in
-      // cumulativeCost and a clean costAmount for the new agent life.
-      expect(resumeParams?.currentUsage?.cumulativeCost).toBe(3);
-      expect(resumeParams?.currentUsage?.costAmount).toBeUndefined();
+      // loadFromDisk passes the persisted split through untouched. All $3 was
+      // spent on the upstream session we are about to reload, so it stays in
+      // costAmount; nothing has been retired yet, so cumulativeCost is absent.
+      // Session.armCostLedgerProbe needs that distinction to tell a reloading
+      // agent's re-reported history apart from genuinely new spend.
+      expect(resumeParams?.currentUsage?.costAmount).toBe(3);
+      expect(resumeParams?.currentUsage?.cumulativeCost).toBeUndefined();
 
       const revived = await manager.resurrect(resumeParams!);
       // The currentUsage getter returns the running total (cumulativeCost +

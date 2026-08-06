@@ -314,11 +314,29 @@ describe("aggregate — cost + duration", () => {
       }),
       "cold",
     );
-    expect(d.cost.amount).toBe(0.13);
+    // amount is the LIFETIME total: the bundle carries the raw persisted
+    // split, so cumulativeCost (retired lives) + costAmount (current life).
+    expect(d.cost.amount).toBeCloseTo(0.55, 10);
     expect(d.cost.cumulative).toBe(0.42);
     expect(d.cost.currency).toBe("USD");
     expect(d.cost.inputTokens).toBe(12000);
     expect(d.cost.outputTokens).toBe(4500);
+  });
+
+  it("legacy record with a collapsed total and no cumulativeCost is unchanged", () => {
+    const d = aggregate(
+      makeBundle({
+        currentUsage: { used: 10, size: 20, costAmount: 5, costCurrency: "USD" },
+      }),
+      "cold",
+    );
+    expect(d.cost.amount).toBe(5);
+    expect(d.cost.cumulative).toBeNull();
+  });
+
+  it("reports null cost when the record carries no usage at all", () => {
+    const d = aggregate(makeBundle({}), "cold");
+    expect(d.cost.amount).toBeNull();
   });
 
   it("computes duration from createdAt → updatedAt", () => {

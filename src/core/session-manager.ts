@@ -61,6 +61,7 @@ import {
   type AuthMethod,
   type SessionListEntry,
 } from "../acp/types.js";
+import { collapseUsage } from "./usage-collapse.js";
 import type { TransformerRef } from "./transformer-manager.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import { JsonRpcErrorCodes, ACP_PROTOCOL_VERSION } from "../acp/types.js";
@@ -949,6 +950,10 @@ export class SessionManager {
       currentMode: effectiveMode,
 
       currentUsage: params.currentUsage,
+      // This path reached the agent via session/load on the SAME upstream
+      // session id, so an agent that scopes its cost ledger to the session
+      // will re-report the total loadFromDisk just banked.
+      reloadsUpstreamLedger: true,
       agentCommands: params.agentCommands,
       agentModes: advertisedModes,
       // Always prefer the fresh list from session/load over the persisted
@@ -2014,17 +2019,17 @@ export class SessionManager {
       agentArgs: record.agentArgs,
       currentModel: record.currentModel,
       currentMode: record.currentMode,
-      currentUsage: persistedUsageToSnapshot(
-        record.currentUsage
-          ? {
-              ...record.currentUsage,
-              cumulativeCost:
-                (record.currentUsage.cumulativeCost ?? 0) +
-                (record.currentUsage.costAmount ?? 0),
-              costAmount: undefined,
-            }
-          : undefined,
-      ),
+      // Pass the split through untouched. Folding costAmount into
+      // cumulativeCost here would destroy the distinction between "spend on
+      // the upstream session we are about to reload" and "spend on retired
+      // ones", which is exactly what Session.armCostLedgerProbe needs to
+      // decide whether a reloading agent is re-reporting history.
+      //
+      // Legacy records (collapsed total in costAmount, no cumulativeCost)
+      // read as "retired = 0, current life = total", which is the correct
+      // interpretation for a single-life session and degrades gracefully for
+      // a rotated one.
+      currentUsage: persistedUsageToSnapshot(record.currentUsage),
       agentCommands: record.agentCommands,
       agentModes: record.agentModes,
       agentModels: record.agentModels,
@@ -2253,14 +2258,7 @@ export class SessionManager {
       title: r.title,
       agentId: r.agentId,
       currentModel: r.currentModel,
-      currentUsage: r.currentUsage
-        ? {
-            ...r.currentUsage,
-            costAmount:
-              (r.currentUsage.cumulativeCost ?? 0) +
-              (r.currentUsage.costAmount ?? 0) || undefined,
-          }
-        : undefined,
+      currentUsage: collapseUsage(r.currentUsage),
       importedFromMachine: r.importedFromMachine,
       importedFromUpstreamSessionId: r.importedFromUpstreamSessionId,
       parentSessionId: r.parentSessionId,
@@ -2432,14 +2430,7 @@ export class SessionManager {
         title: r.title,
         agentId: r.agentId,
         currentModel: r.currentModel,
-        currentUsage: r.currentUsage
-          ? {
-              ...r.currentUsage,
-              costAmount:
-                (r.currentUsage.cumulativeCost ?? 0) +
-                (r.currentUsage.costAmount ?? 0) || undefined,
-            }
-          : undefined,
+        currentUsage: collapseUsage(r.currentUsage),
         importedFromMachine: r.importedFromMachine,
         importedFromUpstreamSessionId: r.importedFromUpstreamSessionId,
         parentSessionId: r.parentSessionId,
@@ -3777,8 +3768,12 @@ export function mergeForPersistence(
     agentArgs: session.agentArgs,
     currentModel: session.currentModel ?? existing?.currentModel,
     currentMode: session.currentMode ?? existing?.currentMode,
+    // persistableUsage, not currentUsage: meta.json keeps the split
+    // (cumulativeCost = retired lives, costAmount = current life) while
+    // currentUsage collapses them for the wire.
     currentUsage:
-      usageSnapshotToPersisted(session.currentUsage) ?? existing?.currentUsage,
+      usageSnapshotToPersisted(session.persistableUsage) ??
+      existing?.currentUsage,
     agentCommands,
     agentModes,
     agentModels,

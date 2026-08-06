@@ -5,6 +5,7 @@
 import type { Bundle } from "./bundle.js";
 import { mapUpdate, type RenderEvent } from "./render-update.js";
 import { stripHydraSessionPrefix } from "./session.js";
+import { lifetimeCostOf } from "./usage-collapse.js";
 
 export interface TranscriptOptions {
   // Include tool-call activity as a bulleted "- ✓ Read foo.ts" list per
@@ -120,7 +121,12 @@ function emitHeader(out: string[], bundle: Bundle): void {
       ` (hydra ${bundle.exportedFrom.hydraVersion})`,
   );
   const usage = session.currentUsage;
-  if (usage && (usage.used !== undefined || usage.costAmount !== undefined)) {
+  if (
+    usage &&
+    (usage.used !== undefined ||
+      usage.costAmount !== undefined ||
+      usage.cumulativeCost !== undefined)
+  ) {
     const usageBits: string[] = [];
     if (usage.used !== undefined) {
       const denom =
@@ -131,9 +137,11 @@ function emitHeader(out: string[], bundle: Bundle): void {
           : `${formatNumber(usage.used)} tokens`,
       );
     }
-    if (usage.costAmount !== undefined) {
+    // Bundles carry the raw persisted split; collapse it.
+    const lifetimeCost = lifetimeCostOf(usage);
+    if (lifetimeCost !== undefined) {
       const currency = usage.costCurrency ?? "USD";
-      usageBits.push(`$${usage.costAmount.toFixed(2)} ${currency}`);
+      usageBits.push(`$${lifetimeCost.toFixed(2)} ${currency}`);
     }
     lines.push(`- **Usage:** ${usageBits.join(" · ")}`);
   }

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "ws";
 import { nanoid } from "nanoid";
 import { JsonRpcConnection } from "../acp/connection.js";
+import { collapseUsage } from "../core/usage-collapse.js";
 import { wsToMessageStream } from "../acp/ws-stream.js";
 import {
   SessionManager,
@@ -2890,7 +2891,9 @@ function buildViewerResponseMeta(
      title: fromDisk.title,
      agentId: fromDisk.agentId,
      currentModel: fromDisk.currentModel,
-     currentUsage: fromDisk.currentUsage,
+     // fromDisk carries the persisted SPLIT; SessionListEntry is a wire
+     // shape and needs the collapsed lifetime total.
+     currentUsage: collapseUsage(fromDisk.currentUsage),
      forkedFromSessionId: fromDisk.forkedFromSessionId,
      forkedFromMessageId: fromDisk.forkedFromMessageId,
      forkSynthesisState: fromDisk.forkSynthesisState,
