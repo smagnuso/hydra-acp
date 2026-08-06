@@ -5491,6 +5491,89 @@ describe("Session", () => {
       expect(usageEntries).toHaveLength(1);
     });
 
+    // Attribution stamp. params.sessionId is the HYDRA id, so without this the
+    // recorded row cannot be tied back to the agent session that incurred the
+    // cost. A hydra session's upstream rotates (compaction swap, /hydra agent,
+    // restart, rollback) and meta.json keeps only the current id, so a cost
+    // series spanning several upstreams is otherwise unattributable after the
+    // fact — reconciling it against an agent's own ledger degenerates into
+    // guessing by cwd and time window.
+    it("stamps upstreamSessionId + agentId on the recorded usage_update", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_attr",
+        cwd: "/work",
+        agentId: "opencode",
+        agent: mock.agent,
+        upstreamSessionId: "ses_upstream_abc",
+        historyStore: store,
+      });
+
+      mock.triggerNotification("session/update", {
+        sessionId: "ses_upstream_abc",
+        update: {
+          sessionUpdate: "usage_update",
+          used: 500,
+          size: 100_000,
+          cost: { amount: 0.12, currency: "USD" },
+        },
+      });
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void })
+        .broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+
+      const entries = await store.load("sess_attr");
+      const row = entries.find(
+        (e) =>
+          (e.params as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === "usage_update",
+      );
+      expect(row).toBeDefined();
+      const update = (row!.params as { update: Record<string, unknown> }).update;
+      const ns = (update._meta as Record<string, unknown>)["hydra-acp"] as Record<
+        string,
+        unknown
+      >;
+      expect(ns.upstreamSessionId).toBe("ses_upstream_abc");
+      expect(ns.agentId).toBe("opencode");
+      // The cost payload must be untouched by the stamp.
+      expect(update.cost).toEqual({ amount: 0.12, currency: "USD" });
+    });
+
+    // The stamp must be added AFTER the "any payload field present?" guard.
+    // Added before it, _meta alone would push the key count past the
+    // threshold and we would persist a usage row carrying no usage.
+    //
+    // Reaching that guard needs currentUsage to be DEFINED but empty — a
+    // session with no usage at all returns undefined and bails earlier, so
+    // seeding an empty snapshot is what actually exercises the ordering.
+    it("stamp does not defeat the empty-snapshot guard", async () => {
+      const store = new HistoryStore();
+      const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
+      const session = new Session({
+        sessionId: "sess_attr2",
+        cwd: "/work",
+        agentId: "opencode",
+        agent: mock.agent,
+        upstreamSessionId: "ses_upstream_def",
+        historyStore: store,
+        currentUsage: {},
+      });
+      expect(session.currentUsage).toBeDefined();
+      (session as unknown as { broadcastTurnComplete: (c: string, r: unknown) => void })
+        .broadcastTurnComplete("client_a", { stopReason: "end_turn" });
+      await flushHistoryWrites();
+      const entries = await store.load("sess_attr2");
+      expect(
+        entries.filter(
+          (e) =>
+            (e.params as { update?: { sessionUpdate?: string } }).update
+              ?.sessionUpdate === "usage_update",
+        ),
+      ).toHaveLength(0);
+    });
+
     it("zero-usage turn writes no usage_update entry", async () => {
       const store = new HistoryStore();
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });

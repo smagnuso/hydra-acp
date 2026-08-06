@@ -2355,6 +2355,34 @@ export class Session {
       return;
     }
 
+    // Attribution: which agent, and which of ITS sessions, incurred this
+    // cost. params.sessionId is the hydra id, so without this the row says
+    // nothing about where the money actually went.
+    //
+    // This matters because a hydra session's upstream is not stable. It
+    // rotates on compaction swap, /hydra agent switch, restart and rollback,
+    // and meta.json only ever holds the CURRENT id — the previous ones are
+    // overwritten and lost. A cost series spanning several upstream sessions
+    // therefore becomes unattributable after the fact: reconciling it against
+    // an agent's own ledger requires guessing which of its sessions were
+    // involved (by cwd and time window), which is ambiguous whenever an agent
+    // ran subagents or a second session in the same directory.
+    //
+    // agentId is included because it selects WHICH ledger to consult; a
+    // session that switched from opencode to claude-acp has rows that must be
+    // reconciled against different stores.
+    //
+    // Additive and hydra-namespaced, consistent with the existing
+    // _meta["hydra-acp"].compatFor stamp. The events endpoint passes
+    // params.update through verbatim, so consumers see it without a
+    // version bump (see PROTOCOL.md "Stability guarantee").
+    update._meta = {
+      "hydra-acp": {
+        upstreamSessionId: this.upstreamSessionId,
+        agentId: this.agentId,
+      },
+    };
+
     const params = {
       sessionId: this.sessionId,
       update,

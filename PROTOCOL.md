@@ -639,6 +639,31 @@ Other kinds (notably `agent_message_chunk`, `agent_thought_chunk`, `user_message
 
 The `update` field carries the full `params.update` object (with `sessionUpdate`, `cost`, `tokenUsage`, etc. as recorded). The `messageId` field is included only when the original entry had one (`update.messageId !== undefined && update.messageId !== null`).
 
+**Cost attribution on `usage_update`.** Recorded `usage_update` rows carry:
+
+```jsonc
+"_meta": { "hydra-acp": {
+  "upstreamSessionId": "ses_...",   // the agent session that incurred this cost
+  "agentId": "opencode"             // which agent's ledger to reconcile against
+} }
+```
+
+`params.sessionId` is the **hydra** session id, so without this a row says
+nothing about where the spend actually went. A hydra session's upstream is not
+stable — it rotates on compaction swap, `/hydra agent` switch, `/hydra restart`
+and `rollbackToUpstream` — and `meta.json` retains only the *current*
+`upstreamSessionId`; earlier ones are overwritten. A cost series spanning
+several upstream sessions is therefore unattributable after the fact without
+this stamp, and reconciling it against an agent's own ledger degenerates into
+guessing which of its sessions were involved by `cwd` and time window.
+
+`agentId` is present because it selects *which* ledger applies: a session that
+switched from `opencode` to `claude-acp` has rows that must be reconciled
+against different stores.
+
+Absent on rows written by daemons predating this field; consumers must tolerate
+its absence and fall back to `meta.json`'s current `upstreamSessionId`.
+
 **Stability guarantee**
 
 Consumers may rely on all documented fields being present in every row. New optional fields may be added to the `update` envelope or as top-level keys without a version bump. The daemon never removes or renames documented fields without a major version bump.
