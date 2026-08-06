@@ -179,7 +179,136 @@ const TUI_HOTKEY_KEY_NAMES = z.enum([
   "escape",
 ]);
 
+// One entry in a chrome-bar slot: either a bare field id ("cwd"), an
+// object naming a field with per-entry overrides, or a literal string
+// to interleave.
+//
+// Field ids are listed in src/tui/bar/fields.ts (FIELDS). As of writing:
+//   status, elapsed, sessionId, sessionIdFull, queued, scroll, usage,
+//   tokens, cost, cwd, cwdFull, title, agent, model, agentModel, mode,
+//   helpHint, transient
+// Unknown ids are ignored rather than rejected, so a config written
+// against a newer build degrades instead of blanking the row.
+//
+// The literal "..." stands for the built-in list for that side, so a
+// field can be added without restating the default:
+//
+//   "left": ["...", "cwd"]            append
+//   "left": ["cwd", "..."]            prepend
+//   "left": ["status", "cwd", "..."]  insert after status
+//
+// A field named explicitly is dropped from the expansion, so the third
+// form repositions `status` rather than showing it twice. Only the
+// first "..." expands.
+const BarSlotEntry = z.union([
+  z.string(),
+  z
+    .object({
+      field: z.string().optional(),
+      // Literal text instead of a field. Mutually exclusive with `field`.
+      text: z.string().optional(),
+      // Hard cap in columns; the value is truncated with an ellipsis.
+      maxWidth: z.number().int().positive().optional(),
+      // Marks the entry shrinkable down to this many columns before the
+      // row starts dropping whole fields.
+      minWidth: z.number().int().nonnegative().optional(),
+      // Shed order when the two sides collide: lower goes first. Omit
+      // to use the field's built-in priority.
+      priority: z.number().optional(),
+      prefix: z.string().optional(),
+      suffix: z.string().optional(),
+      // Overrides the slot separator painted *before* this entry. The
+      // default layout uses this to hang `elapsed` off `status` with a
+      // plain space instead of " · ".
+      separator: z.string().optional(),
+      // Theme token name (e.g. "rule-meta", "status-alert"). Raw colours
+      // are deliberately not accepted, so themes keep working.
+      style: z.string().optional(),
+      // Mouse bindings, overriding the field's built-in behaviour. One
+      // of: "toggle-mode", "switch-session", "show-help", "detach",
+      // "copy" (put the field's value on the clipboard), "open" (hand
+      // it to tui.openFileCommand), "none".
+      //
+      // "copy" and "open" act on the field's underlying value, not the
+      // painted text: double-clicking a truncated title copies it whole,
+      // and double-clicking `cwd` opens the absolute path rather than
+      // the ~-abbreviated form.
+      onClick: z.string().optional(),
+      onDoubleClick: z.string().optional(),
+    })
+    .strict(),
+]);
+
+export type BarSlotEntry = z.infer<typeof BarSlotEntry>;
+
+const BarSideConfig = z.array(BarSlotEntry);
+
+export type BarSideConfig = z.infer<typeof BarSideConfig>;
+
+// Built with explicit per-slot defaults so an absent key reproduces the
+// layout the TUI shipped with before any of this was configurable.
+function barConfig(
+  left: BarSideConfig,
+  right: BarSideConfig,
+): z.ZodDefault<
+  z.ZodObject<{ left: z.ZodDefault<typeof BarSideConfig>; right: z.ZodDefault<typeof BarSideConfig> }>
+> {
+  return z
+    .object({
+      left: BarSideConfig.default(left),
+      right: BarSideConfig.default(right),
+    })
+    .default({});
+}
+
+export const DEFAULT_COMPOSER_TOP_LEFT: BarSideConfig = [
+  "status",
+  // A plain space, not " · ": renders as "Busy 1m 2s".
+  { field: "elapsed", separator: " " },
+  "sessionId",
+  "queued",
+  "scroll",
+];
+export const DEFAULT_COMPOSER_TOP_RIGHT: BarSideConfig = ["usage"];
+export const DEFAULT_COMPOSER_BOTTOM_LEFT: BarSideConfig = [];
+export const DEFAULT_COMPOSER_BOTTOM_RIGHT: BarSideConfig = [
+  "transient",
+  "helpHint",
+];
+export const DEFAULT_SESSIONBAR_LEFT: BarSideConfig = ["cwd", "title"];
+export const DEFAULT_SESSIONBAR_RIGHT: BarSideConfig = ["agentModel"];
+
 const TuiConfig = z.object({
+  // Contents of the two rules that bracket the prompt composer.
+  //
+  //   composer.top    ── Busy 1m2s · a1b2c3 · 2 queued ──── 12.4k/200k · $0.31 ──
+  //   <the prompt itself>
+  //   composer.bottom ─────────────────────── ⇧⇥ mode · ^p pick · ^g guide ──
+  //
+  // Each side is an ordered list of fields; see BarSlotEntry above.
+  // Fields with nothing to report (no title, nothing queued, not
+  // scrolled) drop out along with their separator. When the two sides
+  // would collide the row sheds whole fields in ascending priority,
+  // then shrinks the ones that declared a minWidth, then truncates —
+  // it never wraps.
+  composer: z
+    .object({
+      top: barConfig(DEFAULT_COMPOSER_TOP_LEFT, DEFAULT_COMPOSER_TOP_RIGHT),
+      bottom: barConfig(
+        DEFAULT_COMPOSER_BOTTOM_LEFT,
+        DEFAULT_COMPOSER_BOTTOM_RIGHT,
+      ),
+    })
+    // Same reasoning as tui.sidebar: leaf defaults are the single
+    // source of truth.
+    .default({}),
+  // Contents of the sessionbar, the last row of the terminal:
+  //
+  //   ~/dev/hydra-acp/cli · My title              claude•sonnet-4
+  //
+  // Distinct from `tui.sidebar` (the right-hand column) despite the
+  // one-letter difference.
+  sessionbar: barConfig(DEFAULT_SESSIONBAR_LEFT, DEFAULT_SESSIONBAR_RIGHT),
   // Minimum interval (ms) between full-screen repaints driven by content
   // events (agent text chunks, tool/plan updates, elapsed-tick refreshes).
   // User-action repaints — scrolling, prompt-row changes, modal open/close,

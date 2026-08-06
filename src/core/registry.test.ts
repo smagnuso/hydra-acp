@@ -78,6 +78,11 @@ function fakeConfig(): HydraConfig {
     transformers: {},
     defaultTransformers: [],
     tui: {
+      composer: {
+        top: { left: ["status"], right: ["usage"] },
+        bottom: { left: [], right: ["transient", "helpHint"] },
+      },
+      sessionbar: { left: ["cwd", "title"], right: ["agentModel"] },
       repaintThrottleMs: 1000,
       maxScrollbackLines: 10_000,
       mouse: false,

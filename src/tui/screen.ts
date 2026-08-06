@@ -10,6 +10,25 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 import stringWidth from "string-width";
 import type { Terminal } from "terminal-kit";
 import { RepaintScheduler, RowPainter } from "./screen/painter.js";
+import { layoutRow } from "./bar/layout.js";
+import type { BarAction, HitRegion } from "./bar/layout.js";
+import { SLOT_STYLES, expandBarConfig, resolveSide } from "./bar/slots.js";
+import type { SlotName } from "./bar/slots.js";
+import { formatUsage } from "./bar/fields.js";
+import type {
+  BarLayoutConfig,
+  FieldContext,
+  SessionInfo,
+  UsageState,
+} from "./bar/types.js";
+import {
+  DEFAULT_COMPOSER_BOTTOM_LEFT,
+  DEFAULT_COMPOSER_BOTTOM_RIGHT,
+  DEFAULT_COMPOSER_TOP_LEFT,
+  DEFAULT_COMPOSER_TOP_RIGHT,
+  DEFAULT_SESSIONBAR_LEFT,
+  DEFAULT_SESSIONBAR_RIGHT,
+} from "../core/config.js";
 import { SidebarRenderer } from "./sidebar/registry.js";
 import { emptySnapshot } from "./sidebar/types.js";
 import type { SidebarBorder, SidebarSnapshot } from "./sidebar/types.js";
@@ -247,6 +266,14 @@ export interface ScreenOptions {
   // needs those blocks re-rendered, not merely re-wrapped. The handler
   // runs before the ensuing repaint.
   onLayoutChange?: () => void;
+  // Fired when a click on a chrome-bar field resolves to an application
+  // effect ("toggle-mode", "switch-session", "show-help", "detach").
+  // The self-contained actions ("copy", "open") never reach here —
+  // Screen owns the clipboard and tui.openFileCommand already.
+  //
+  // Routed through the app rather than handled locally so the dispatch
+  // goes through the same readonly gate as the equivalent hotkey.
+  onBarAction?: (action: BarAction, value: string) => void;
 }
 
 interface BannerState {
@@ -267,24 +294,12 @@ interface BannerState {
   stalled?: boolean;
 }
 
-interface SessionbarState {
-  agent: string;
-  cwd: string;
-  sessionId: string;
-  title?: string;
-  usage?: UsageState;
-  // Last known model id, rendered as "<agent>(<model>)" in the bar. Kept
-  // separate from `agent` so the TUI can update it independently when
-  // current_model_update arrives mid-session.
-  model?: string;
-}
-
-export interface UsageState {
-  used?: number;
-  size?: number;
-  costAmount?: number;
-  costCurrency?: string;
-}
+// Re-exported from ./bar/types.js, where they live so the bar field
+// registry can read them without importing screen.ts (which imports the
+// registry). SessionInfo is the old SessionbarState: it feeds all three
+// chrome rows, not just the sessionbar, and "sessionbar" now names a
+// config slot.
+export type { SessionInfo, UsageState } from "./bar/types.js";
 
 export interface PermissionPromptSpec {
   title: string;
@@ -705,26 +720,50 @@ export class Screen {
     hint: "⇧⇥ mode · ⌃P pick · ⌃G guide · ⌃D detach",
     queued: 0,
   };
-  // Click hit-regions for the banner hint chunks ("⇧⇥ mode", "⌃P pick",
-  // "⌃G guide"). Recomputed on every drawBanner so layout shifts (status
-  // changes, queued count, scrollOffset) keep the regions accurate.
-  // Each entry is the inclusive 1-based column range on `row`. `null`
-  // when the banner hasn't been painted yet.
-  private bannerHits: {
-    row: number;
-    mode: [number, number] | null;
-    pick: [number, number] | null;
-    guide: [number, number] | null;
-    detach: [number, number] | null;
-  } | null = null;
-  private hoveredBannerHit: "mode" | "pick" | "guide" | "detach" | null = null;
+  // Click hit-regions for the three chrome rows, keyed by terminal row.
+  // Rebuilt by every drawBar so layout shifts (status changes, queued
+  // count, a resize) keep the regions accurate. Written outside the
+  // paintRow signature check: a row skipped as unchanged still owns its
+  // regions.
+  private barHits = new Map<number, HitRegion[]>();
+  // Region id under the pointer, or null. Drives both the hover token
+  // swap in drawBar and the OS pointer shape.
+  private hoveredBarHit: string | null = null;
+  // Armed by a press on a bar region; a release on the same region
+  // completes the click.
+  private barPressHit: HitRegion | null = null;
+  // Double-click chain for the bars. Separate from the transcript's
+  // (which is anchored to source lines the bars do not have) and from
+  // the sidebar's, for the same reason.
+  private lastBarClick: { id: string; t: number } | null = null;
+  private onBarAction: ScreenOptions["onBarAction"];
   private hoveredBlockKey: string | null = null;
   private hoveredSubKey: string | null = null;
   // Expanded set of block keys that should all paint hovered when the
   // pointer is on any one of them. Populated by onHoverRun (e.g. a
   // contiguous thought run). null = scope to just hoveredBlockKey.
   private hoveredRunKeys: Set<string> | null = null;
-  private sessionbar: SessionbarState = { agent: "?", cwd: "?", sessionId: "?" };
+  private sessionbar: SessionInfo = { agent: "?", cwd: "?", sessionId: "?" };
+  // Slot contents for the three chrome rows. Seeded with the built-in
+  // layout so a Screen constructed without config (tests, the shim)
+  // still renders the shipped bars; app.ts overwrites it from
+  // tui.composer / tui.sessionbar.
+  private barConfig: BarLayoutConfig = {
+    composer: {
+      top: {
+        left: DEFAULT_COMPOSER_TOP_LEFT,
+        right: DEFAULT_COMPOSER_TOP_RIGHT,
+      },
+      bottom: {
+        left: DEFAULT_COMPOSER_BOTTOM_LEFT,
+        right: DEFAULT_COMPOSER_BOTTOM_RIGHT,
+      },
+    },
+    sessionbar: {
+      left: DEFAULT_SESSIONBAR_LEFT,
+      right: DEFAULT_SESSIONBAR_RIGHT,
+    },
+  };
   private lastWindowTitle: string | null = null;
   // Last cwd reported via OSC 7; suppresses redundant writes when
   // setSessionbar fires for an unrelated field.
@@ -887,6 +926,7 @@ export class Screen {
     this.onSidebarCollapseChange = opts.onSidebarCollapseChange;
     this.onHydraLinkClick = opts.onHydraLinkClick;
     this.onMouse = opts.onMouse;
+    this.onBarAction = opts.onBarAction;
     this.onHoverRun = opts.onHoverRun;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
@@ -2074,7 +2114,16 @@ export class Screen {
     this.scheduleRepaint();
   }
 
-  setSessionbar(sessionbar: Partial<SessionbarState>): void {
+  // Replace the slot contents for all three chrome rows. Called once at
+  // startup from the resolved config; the built-in layout is the
+  // fallback so a Screen built without config still renders.
+  setBarConfig(barConfig: BarLayoutConfig): void {
+    // "..." is resolved here, not per frame.
+    this.barConfig = expandBarConfig(barConfig);
+    this.scheduleRepaint();
+  }
+
+  setSessionbar(sessionbar: Partial<SessionInfo>): void {
     this.sessionbar = { ...this.sessionbar, ...sessionbar };
     this.syncWindowTitle();
     this.syncReportedCwd();
@@ -3364,11 +3413,22 @@ export class Screen {
     if (kind !== null && cell !== null && this.onMouse) {
       this.onMouse({ kind, button, x: cell.x, y: cell.y, name });
     }
+    // Hover feedback for every bar field, not just the hint chunks: the
+    // token swap says "this is a target" and the OS pointer shape
+    // reinforces it when the field actually does something.
+    const barRegion = cell !== null ? this.barHitAt(cell.x, cell.y) : null;
     if (kind === "move") {
-      const newHover = cell !== null ? this.bannerHitAt(cell.x, cell.y) : null;
-      if (newHover !== this.hoveredBannerHit) {
-        this.hoveredBannerHit = newHover;
-        this.syncedPartialRepaint(() => this.drawBanner());
+      const newHover = barRegion?.id ?? null;
+      if (newHover !== this.hoveredBarHit) {
+        this.hoveredBarHit = newHover;
+        this.syncedPartialRepaint(() => this.drawBars());
+      }
+      if (barRegion !== null) {
+        this.setPointerShape(
+          barRegion.action !== "none" || barRegion.doubleAction !== "none"
+            ? "pointer"
+            : "default",
+        );
       }
     }
     // Update the OS pointer-shape based on what's under the pointer.
@@ -3383,8 +3443,15 @@ export class Screen {
     // the column. Treat any cell at or past the sidebar's first column
     // (the gutter included: it belongs to the column, not the transcript)
     // as "off the transcript", the same bound resolveCellToSource uses.
+    // A bar row passes the column test below (the bars span the full
+    // width) but is not transcript. Without this the transcript branch
+    // would immediately reset the pointer shape the bar just set.
     const overTranscript =
-      cell !== null && cell.x >= 1 && cell.x <= this.transcriptVisibleWidth();
+      cell !== null &&
+      barRegion === null &&
+      this.barHits.get(cell.y) === undefined &&
+      cell.x >= 1 &&
+      cell.x <= this.transcriptVisibleWidth();
     if (cell !== null && overTranscript && kind !== "release") {
       const rawInfo = this.keyAndSubAtRow(cell.y);
       // agent_message blocks carry a blockKey only so streaming chunks
@@ -3476,6 +3543,13 @@ export class Screen {
       if (!sameCell) {
         this.flushPendingBlockClick();
       }
+      // Chrome-bar clicks get first refusal, for the same reason the
+      // sidebar does below: the bars own their rows outright and must
+      // not anchor a transcript selection.
+      if (cell !== null && this.handleBarPress(cell)) {
+        this.pressCell = null;
+        return;
+      }
       // Sidebar clicks are handled entirely by the column: they must not
       // anchor a transcript selection or toggle a scrollback block.
       if (this.handleSidebarPress(cell)) {
@@ -3515,6 +3589,10 @@ export class Screen {
       name === "MOUSE_OTHER_BUTTON_RELEASED" ||
       name === "MOUSE_BUTTON_RELEASED"
     ) {
+      if (this.handleBarRelease(cell)) {
+        this.pressCell = null;
+        return;
+      }
       const press = this.pressCell;
       this.pressCell = null;
       const selectionFinalize = this.inAppSelectionEnabled &&
@@ -3526,20 +3604,10 @@ export class Screen {
         cell.y === press.y &&
         !selectionFinalize
       ) {
-        // BTW header sid: single-click jumps to the fork session, matching
-        // the ^p picker convention. Checked before onBlockClick because
-        // the overlay header sits above the transcript block map and would
-        // never be a valid block target anyway.
-        const region = this.btwHeaderSidRegion();
-        if (
-          region !== null &&
-          this.onHydraLinkClick &&
-          cell.y === region.row &&
-          cell.x >= region.colStart &&
-          cell.x <= region.colEnd
-        ) {
-          this.onHydraLinkClick(region.sessionId);
-        } else if (this.onBlockClick) {
+        // The btw header's sid used to need a bespoke click region
+        // here; it is a bar hit region now, claimed by handleBarRelease
+        // before this point is reached.
+        if (this.onBlockClick) {
           const hit = this.keyAndSubAtRow(cell.y);
           const key = hit?.key ?? null;
           if (key !== null) {
@@ -5324,6 +5392,11 @@ export class Screen {
       return;
     }
     this.painter.ensureSize(w, h);
+    // Rows move as the prompt grows and the btw overlay opens/closes, so
+    // regions are rebuilt from scratch every full frame. Partial
+    // repaints (drawBars on hover) re-set only their own rows, leaving
+    // the overlay's entry intact.
+    this.barHits.clear();
     // Wrap the whole frame in DEC 2026 synchronized output so terminals
     // that support it commit every row change atomically. Big repaints
     // (resize, /clear, scrollback scroll, modal open/close) used to land
@@ -5364,10 +5437,10 @@ export class Screen {
       // BANNER_ROWS + BANNER_SEPARATOR_ROWS + SESSIONBAR_ROWS.
       const separatorAbovePromptRow =
         h - promptRows - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
-      this.drawSeparator(separatorAbovePromptRow);
+      this.drawBar("composerTop", separatorAbovePromptRow);
       this.drawPrompt();
-      this.drawBottomSeparator(h - SESSIONBAR_ROWS);
-      this.drawSessionbar();
+      this.drawBar("composerBottom", h - SESSIONBAR_ROWS);
+      this.drawBar("sessionbar", this.term.height);
       this.placeCursor();
       if (
         this.permissionPrompt ||
@@ -5382,395 +5455,210 @@ export class Screen {
     });
   }
 
-  private drawSessionbar(): void {
-    // Leave the rightmost column unwritten so painting the bottom row
-    // can't trigger an autowrap-induced scroll on terminals that scroll
-    // when the last column of the last row is filled. Same -1 convention
-    // the picker uses (picker.ts ROW_PREFIX_WIDTH/rowMaxWidth math).
-    const w = Math.max(1, this.term.width - 1);
-    const row = this.term.height;
-    const title = this.sessionbar.title?.trim();
-    const agentCell = formatAgentWithModel(this.sessionbar.agent, this.sessionbar.model);
-    const cwdDisplay = shortenHomePath(this.sessionbar.cwd);
-    const sig = `sbar|${w}|${agentCell}|${cwdDisplay}|${title ?? ""}`;
-    this.paintRow(row, sig, () => {
-      // Layout: <cwd · title> ........ <agent(model)>
-      // agent(model) is right-aligned to the terminal's right edge;
-      // cwd + title share whatever room is left on the left, with
-      // title getting priority over a long cwd so it always keeps a
-      // sliver. Usage / cost lives on the top (prompt-above) separator
-      // and the session id lives there too, so they're not painted here.
-      const agentWidth = stringWidth(agentCell);
-      const minGap = 1;
-      const leftRoom = Math.max(0, w - agentWidth - minGap);
-      const titleSep = title ? " · " : "";
-      const titleSepWidth = stringWidth(titleSep);
-      let cwdRoom: number;
-      let titleRoom: number;
-      if (title) {
-        const titleMin = Math.min(title.length, 8);
-        cwdRoom = Math.min(
-          cwdDisplay.length,
-          Math.max(8, leftRoom - titleSepWidth - titleMin),
-        );
-        titleRoom = Math.max(0, leftRoom - cwdRoom - titleSepWidth);
-      } else {
-        titleRoom = 0;
-        cwdRoom = leftRoom;
-      }
-      const cwdText = truncate(cwdDisplay, cwdRoom);
-      const titleText = title ? truncate(title, titleRoom) : "";
-      const leftWidth =
-        stringWidth(cwdText) + (title ? titleSepWidth + stringWidth(titleText) : 0);
-      const gap = Math.max(minGap, w - leftWidth - agentWidth);
-      paint(this.term, "bar-text", cwdText);
-      if (title) {
-        paint(this.term, "content", titleSep);
-        paint(this.term, "bar-text", titleText);
-      }
-      this.term(" ".repeat(gap));
-      paint(this.term, "content", agentCell);
-    });
-  }
-
-  // Renders the rule above the prompt as a btw-style header carrying
-  // ALL of the legacy banner chrome plus the session id. The legacy
-  // banner row has been folded into this line, so layout is:
+  // ── Chrome bars ─────────────────────────────────────────────────
   //
-  //   ── <Status>[ <elapsed>] · <sid>[ · N queued][ · ↑N] ───── <right> ──
+  // Three rows, one renderer. Content comes from tui.composer.top,
+  // tui.composer.bottom and tui.sessionbar; the per-row constants
+  // (prefix/suffix/fill/pad) live in SLOT_STYLES. See src/tui/bar/.
   //
-  // The right slot is either the transient bannerRightContent text
-  // (active scrollback search, compaction toast, etc.) painted in its
-  // kind token, or — when nothing transient is active — the hint chunks
-  // (mode / pick / guide / detach), with click-hit regions recomputed so the
-  // same mouse targets still work. The status label uses the same status-*
-  // tokens as the btw header, so the two surfaces cannot drift apart: Ready
-  // takes the terminal's own foreground, and only busy / alert / cold carry
-  // colour. The sid block is omitted when no session id is known.
-  private drawSeparator(row: number): void {
-    const w = this.term.width;
-    const sid = shortId(this.sessionbar.sessionId);
-    const status = this.banner.status;
-    const stalled = status === "busy" && this.banner.stalled === true;
-    let label: string;
-    if (stalled) {
-      label = "Stalled";
-    } else if (status === "busy") {
-      label = "Busy";
-    } else {
-      label = status.charAt(0).toUpperCase() + status.slice(1);
-    }
-    const elapsedStr =
-      status === "busy" &&
-      this.banner.elapsedMs !== undefined &&
-      this.banner.elapsedMs >= 1000
-        ? formatElapsed(this.banner.elapsedMs)
-        : "";
+  // Historically these were three hand-rolled methods with three
+  // separate width algorithms, two of which did not truncate at all and
+  // simply wrapped on a narrow terminal.
 
-    const auxChunks: Array<{ text: string; paint: () => void }> = [];
-    if (this.banner.queued > 0) {
-      const text = `${this.banner.queued} queued`;
-      auxChunks.push({
-        text,
-        paint: () => {
-          paint(this.term, "status-queued", text);
-        },
-      });
-    }
-    if (this.scrollOffset > 0) {
-      const text = `↑ ${this.scrollOffset}`;
-      auxChunks.push({
-        text,
-        paint: () => {
-          paint(this.term, "bar-indicator", text);
-        },
-      });
-    }
-
-    const usageStr = formatUsage(this.sessionbar.usage) ?? "";
-
-    const left = "── ";
-    const elapsedInline = elapsedStr ? ` ${elapsedStr}` : "";
-    const sidSep = sid ? " · " : "";
-    const padBeforeMiddle = " ";
-    const padAfterMiddle = usageStr ? " " : "";
-    // No usage → drop the leading space in the closing tail so the
-    // row ends flush instead of leaving a stray gap on the right edge.
-    const tail = usageStr ? " ──" : "──";
-
-    let leftWidth =
-      left.length +
-      stringWidth(label) +
-      stringWidth(elapsedInline) +
-      sidSep.length +
-      stringWidth(sid);
-    for (const c of auxChunks) {
-      leftWidth += stringWidth(" · ") + stringWidth(c.text);
-    }
-    leftWidth += stringWidth(padBeforeMiddle);
-
-    const rightWidth =
-      stringWidth(padAfterMiddle) +
-      stringWidth(usageStr) +
-      stringWidth(tail);
-
-    const middleCols = Math.max(0, w - leftWidth - rightWidth);
-    const middle = "─".repeat(middleCols);
-
-    const sig =
-      `sep|${w}|${status}|${stalled ? 1 : 0}|${sid}|${elapsedStr}|` +
-      `${this.banner.queued}|${this.scrollOffset}|${usageStr}`;
-
-    this.paintRow(row, sig, () => {
-      paint(this.term, "rule", left);
-      if (stalled || status === "disconnected") {
-        paint(this.term, "status-alert", label);
-      } else if (status === "busy") {
-        paint(this.term, "status-active", label);
-      } else if (status === "cold") {
-        paint(this.term, "status-cold", label);
-      } else {
-        paint(this.term, "status-ready", label);
-      }
-      if (elapsedInline) {
-        if (stalled) {
-          paint(this.term, "status-alert", elapsedInline);
-        } else if (status === "busy") {
-          paint(this.term, "status-active", elapsedInline);
-        } else {
-          paint(this.term, "status-idle", elapsedInline);
-        }
-      }
-      if (sid) {
-        paint(this.term, "rule-meta", sidSep);
-        paint(this.term, "rule-meta", sid);
-      }
-      for (const c of auxChunks) {
-        paint(this.term, "rule-meta", " · ");
-        c.paint();
-      }
-      paint(this.term, "rule-pad", padBeforeMiddle);
-      paint(this.term, "rule", middle);
-      if (usageStr) {
-        paint(this.term, "rule-pad", padAfterMiddle);
-        paint(this.term, "content", usageStr);
-      }
-      paint(this.term, "rule", tail);
-    });
-  }
-
-  // Bottom separator (one row above the sessionbar). Holds the hint
-  // chunks on the right, swapped to the transient right-slot text
-  // (search progress, compaction toast, synthesis toast) when one is
-  // active. Click-hit ranges for mode / pick / guide / detach are
-  // recorded against this row so the same mouse targets still work.
-  private drawBottomSeparator(row: number): void {
-    const w = this.term.width;
-    const transient = this.bannerRightContent();
-    const hintBase = this.banner.currentMode
-      ? this.banner.hint.replace(
-          "⇧⇥ mode",
-          `⇧⇥ mode: ${this.banner.currentMode}`,
-        )
-      : this.banner.hint;
-
-    const padAfterMiddle = " ";
-    const tail = " ──";
-    const rightText = transient ? transient.text : hintBase;
-    const rightWidth =
-      stringWidth(padAfterMiddle) +
-      stringWidth(rightText) +
-      stringWidth(tail);
-    const middleCols = Math.max(0, w - rightWidth);
-    const middle = "─".repeat(middleCols);
-
-    const transientSig = transient ? `${transient.kind}|${transient.text}` : "";
-    const hoverSig =
-      transient || !this.terminalFocused ? "" : (this.hoveredBannerHit ?? "");
-    const sig =
-      `bsep|${w}|${this.banner.currentMode ?? ""}|${this.banner.hint}|${transientSig}|${hoverSig}`;
-
-    this.paintRow(row, sig, () => {
-      paint(this.term, "rule", middle);
-      paint(this.term, "rule-pad", padAfterMiddle);
-      if (transient) {
-        if (transient.kind === "search") {
-          paint(this.term, "bar-indicator", transient.text);
-        } else {
-          paint(this.term, "modal-note", transient.text);
-        }
-      } else {
-        const chunks = hintBase.split(" · ");
-        const hovered = this.terminalFocused ? this.hoveredBannerHit : null;
-        for (let i = 0; i < chunks.length; i++) {
-          paint(this.term, "rule-meta", " · ");
-          const c = chunks[i];
-          if (c === undefined) continue;
-          let kind: "mode" | "pick" | "guide" | "detach" | null = null;
-          if (c.includes("mode")) kind = "mode";
-          else if (c.includes("pick")) kind = "pick";
-          else if (c.includes("guide")) kind = "guide";
-          else if (c.includes("detach")) kind = "detach";
-          if (kind !== null && kind === hovered) {
-            paint(this.term, "hint-hover", c);
-          } else {
-            paint(this.term, "modal-hint", c);
-          }
-        }
-      }
-      paint(this.term, "rule", tail);
-
-      const hits: {
-        mode: [number, number] | null;
-        pick: [number, number] | null;
-        guide: [number, number] | null;
-        detach: [number, number] | null;
-      } = { mode: null, pick: null, guide: null, detach: null };
-      if (!transient) {
-        let col = middleCols + stringWidth(padAfterMiddle) + 1;
-        const chunks = hintBase.split(" · ");
-        for (const chunk of chunks) {
-          const cw = stringWidth(chunk);
-          const range: [number, number] = [col, col + cw - 1];
-          if (chunk.includes("mode") && hits.mode === null) {
-            hits.mode = range;
-          } else if (chunk.includes("pick") && hits.pick === null) {
-            hits.pick = range;
-          } else if (chunk.includes("guide") && hits.guide === null) {
-            hits.guide = range;
-          } else if (chunk.includes("detach") && hits.detach === null) {
-            hits.detach = range;
-          }
-          col += cw + stringWidth(" · ");
-        }
-      }
-      this.bannerHits = { row, ...hits };
-    });
-  }
-
-  // Compose the header segments so paintBtwHeader can paint the dashes as
-  // `rule`, "By the way" with a status-* token, and the sid as `rule-meta` —
-  // the same tokens the bottom sessionbar uses. A single signature string is
-  // derived from all parts for repaint coalescing.
-  //
-  // Layout (left → right):
-  //   "── "  "By the way"  " · "  <sid>  <middle dashes>  " <usage> "  "──"
-  // The <sid> block (and its " · " separator) is omitted when no fork
-  // sessionId is known; the <usage> block is omitted when no usage
-  // snapshot has arrived.
-  private buildBtwHeaderSegments(): {
-    left: string;
-    label: string;
-    sidSep: string;
-    sid: string;
-    sidTrail: string;
-    middle: string;
-    usage: string;
-    right: string;
-    signature: string;
-  } {
-    const w = this.term.width;
-    const label = "By the way";
-    const left = "── ";
-    const sid = this.btwOverlaySessionId
-      ? shortId(this.btwOverlaySessionId)
-      : "";
-    const sidSep = sid ? " · " : " ";
-    const sidTrail = sid ? " " : "";
-    const usageStr = formatUsage(this.btwOverlayUsage);
-    const usage = usageStr ? ` ${usageStr} ` : "";
-    const right = usageStr ? "──" : "";
-    const consumed =
-      left.length +
-      stringWidth(label) +
-      sidSep.length +
-      stringWidth(sid) +
-      sidTrail.length +
-      stringWidth(usage) +
-      right.length;
-    const middle = "─".repeat(Math.max(0, w - consumed));
-    const signature =
-      `${w}|${sid}|${this.btwOverlayStatus}|${usageStr ?? ""}`;
-    return { left, label, sidSep, sid, sidTrail, middle, usage, right, signature };
-  }
-
-  // Compute the header row's sid click region for single-click jump-to-fork.
-  // Returns null when there's no overlay open, no sid populated, or the
-  // overlay hasn't been laid out yet. Column math mirrors buildBtwHeaderSegments's
-  // left→right layout so the region stays in sync with what's actually painted.
-  private btwHeaderSidRegion(): {
-    row: number;
-    colStart: number;
-    colEnd: number;
-    sessionId: string;
-  } | null {
-    if (!this.btwOverlayOpen || !this.btwOverlaySessionId) {
-      return null;
-    }
-    const rows = this.btwOverlayRows();
-    if (rows === 0) {
-      return null;
-    }
-    const h = this.term.height;
-    const separatorAbovePromptRow =
-      h - this.promptRows() - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
-    const zoneRows = this.chipRows() + this.queuedRows() + this.completionRows();
-    const overlayBottom = separatorAbovePromptRow - 1 - zoneRows;
-    const headerRow = overlayBottom - rows + 1;
-    const label = "By the way";
-    const left = "── ";
-    const sid = shortId(this.btwOverlaySessionId);
-    const sidSep = " \u00b7 ";
-    // Terminal columns are 1-indexed to match cell.x/cell.y coordinates
-    // used by handleMouse.
-    const colStart = 1 + left.length + stringWidth(label) + sidSep.length;
-    const colEnd = colStart + stringWidth(sid) - 1;
+  private barContext(): FieldContext {
     return {
-      row: headerRow,
-      colStart,
-      colEnd,
-      sessionId: this.btwOverlaySessionId,
+      scope: "session",
+      session: this.sessionbar,
+      banner: this.banner,
+      scrollOffset: this.scrollOffset,
+      transient: this.bannerRightContent(),
+      hovered: this.terminalFocused ? this.hoveredBarHit : null,
     };
   }
 
-  private paintBtwHeader(segments: {
-    left: string;
-    label: string;
-    sidSep: string;
-    sid: string;
-    sidTrail: string;
-    middle: string;
-    usage: string;
-    right: string;
-  }): void {
-    // The "By the way" label carries the status token so an at-a-glance scan
-    // shows colour ONLY where there is actual state: busy while running,
-    // the terminal's own foreground when done, alert on cancel/error.
-    paint(this.term, "rule", segments.left);
-    switch (this.btwOverlayStatus) {
-      case "busy":
-        paint(this.term, "status-active", segments.label);
-        break;
-      case "done":
-        paint(this.term, "status-ready", segments.label);
-        break;
-      case "cancelled":
-      case "errored":
-        paint(this.term, "status-alert", segments.label);
-        break;
-      default:
-        paint(this.term, "status-ready", segments.label);
+  // The btw frame renders the composer.top slot config against the
+  // overlay's own data. Substituting the context rather than adding
+  // btw-specific fields is what lets the two surfaces share a config
+  // key: `status` reads the label override, `sessionId` reads the
+  // fork's id, `usage` reads the fork's usage, and the turn-scoped
+  // fields (elapsed, queued, scroll) resolve to nothing on their own.
+  private btwContext(): FieldContext {
+    const status =
+      this.btwOverlayStatus === "busy"
+        ? "busy"
+        : this.btwOverlayStatus === "done"
+          ? "ready"
+          : "disconnected";
+    return {
+      scope: "btw",
+      statusLabel: "By the way",
+      session: {
+        ...this.sessionbar,
+        sessionId: this.btwOverlaySessionId ?? "",
+        ...(this.btwOverlayUsage !== undefined
+          ? { usage: this.btwOverlayUsage }
+          : { usage: undefined }),
+      },
+      banner: { status, currentMode: undefined, hint: "", queued: 0 },
+      scrollOffset: 0,
+      transient: null,
+      hovered: this.terminalFocused ? this.hoveredBarHit : null,
+    };
+  }
+
+  private drawBar(slot: SlotName, row: number): void {
+    const style = SLOT_STYLES[slot];
+    // The sessionbar leaves the rightmost column unwritten so painting
+    // the last row can't trigger an autowrap-induced scroll on
+    // terminals that scroll when the final cell is filled. Same -1
+    // convention the picker uses.
+    const w =
+      slot === "sessionbar"
+        ? Math.max(1, this.term.width - 1)
+        : this.term.width;
+    const side =
+      slot === "sessionbar"
+        ? this.barConfig.sessionbar
+        : slot === "composerBottom"
+          ? this.barConfig.composer.bottom
+          : // composerTop and btw share one slot config.
+            this.barConfig.composer.top;
+    const ctx = slot === "btw" ? this.btwContext() : this.barContext();
+    const result = layoutRow(
+      w,
+      resolveSide(slot, side.left, ctx),
+      resolveSide(slot, side.right, ctx),
+      style,
+    );
+    const hovered = this.terminalFocused ? this.hoveredBarHit : null;
+    // Derived from the placed chunks rather than hand-listed state, so
+    // adding a field can't silently leave a row stale. Hover is part of
+    // it: without that the row would not repaint as the pointer moves.
+    const sig = `${slot}|${w}|${hovered ?? ""}|${result.signature}`;
+    this.paintRow(row, sig, () => {
+      for (const chunk of result.chunks) {
+        // Hover styling is applied here rather than in the field
+        // resolvers so every field gets it for free.
+        const token =
+          chunk.id !== undefined && chunk.id === hovered
+            ? "hint-hover"
+            : chunk.token;
+        paint(this.term, token, chunk.text);
+      }
+    });
+    // Recorded outside paintRow: an unchanged row is skipped by the
+    // signature cache, but its hit regions are still the live ones and
+    // must not be dropped.
+    this.barHits.set(row, result.hits);
+  }
+
+  // Which bar chunk (if any) is under the given 1-based terminal cell?
+  barHitAt(x: number, y: number): HitRegion | null {
+    const regions = this.barHits.get(y);
+    if (regions === undefined) {
+      return null;
     }
-    paint(this.term, "rule-meta", segments.sidSep);
-    if (segments.sid) {
-      paint(this.term, "rule-meta", segments.sid);
-      paint(this.term, "rule-meta", segments.sidTrail);
+    return regions.find((r) => x >= r.start && x <= r.end) ?? null;
+  }
+
+  // Legacy narrow view of barHitAt, kept for the help-hint chunks whose
+  // ids are still the four original names.
+  bannerHitAt(x: number, y: number): "mode" | "pick" | "guide" | "detach" | null {
+    const hit = this.barHitAt(x, y);
+    if (hit === null) {
+      return null;
     }
-    paint(this.term, "rule", segments.middle);
-    if (segments.usage) {
-      paint(this.term, "content", segments.usage);
+    const name = hit.id.slice(hit.id.indexOf(":") + 1);
+    return name === "mode" || name === "pick" || name === "guide" || name === "detach"
+      ? name
+      : null;
+  }
+
+  // Press/release/double-click gesture handling for the three chrome
+  // rows. Kept here rather than in app.ts because the double-click
+  // chain, the clipboard and tui.openFileCommand all already live on
+  // Screen; only the four application effects have to leave.
+  //
+  // A click counts only when press and release land on the same region,
+  // matching the discipline the hint chunks have always used, so a
+  // press-drag-release never fires an action by accident.
+  private handleBarPress(cell: { x: number; y: number }): boolean {
+    const hit = this.barHitAt(cell.x, cell.y);
+    if (hit === null) {
+      this.barPressHit = null;
+      return false;
     }
-    paint(this.term, "rule", segments.right);
+    const now = Date.now();
+    const last = this.lastBarClick;
+    const isDouble =
+      last !== null &&
+      last.id === hit.id &&
+      now - last.t <= DOUBLE_CLICK_MAX_MS;
+    if (isDouble && hit.doubleAction !== "none") {
+      this.lastBarClick = null;
+      this.barPressHit = null;
+      this.dispatchBarAction(hit.doubleAction, hit.value);
+      return true;
+    }
+    this.lastBarClick = { id: hit.id, t: now };
+    this.barPressHit = hit;
+    return true;
+  }
+
+  private handleBarRelease(cell: { x: number; y: number } | null): boolean {
+    const pressed = this.barPressHit;
+    this.barPressHit = null;
+    if (pressed === null || cell === null) {
+      return false;
+    }
+    const hit = this.barHitAt(cell.x, cell.y);
+    if (hit === null || hit.id !== pressed.id) {
+      return false;
+    }
+    if (hit.action === "none") {
+      // Still claim the gesture: the cell belongs to a bar, and letting
+      // it fall through would start a transcript selection on a row the
+      // transcript does not own.
+      return true;
+    }
+    this.dispatchBarAction(hit.action, hit.value);
+    return true;
+  }
+
+  private dispatchBarAction(action: BarAction, value: string): void {
+    if (action === "none") {
+      return;
+    }
+    if (action === "copy") {
+      void writeClipboard(value, { target: this.selectionClipboard }).then(
+        (result) => {
+          this.notify(
+            result.ok
+              ? `copied ${value}`
+              : `clipboard copy failed: ${result.reason}`,
+          );
+        },
+        (err) => {
+          this.notify(`clipboard copy failed: ${(err as Error).message}`);
+        },
+      );
+      return;
+    }
+    if (action === "open-session") {
+      this.onHydraLinkClick?.(value);
+      return;
+    }
+    if (action === "open") {
+      if (!this.tryOpenPathString(value)) {
+        this.notify(
+          this.hasOpenFileCommand()
+            ? `can't open ${value}`
+            : "no tui.openFileCommand configured",
+        );
+      }
+      return;
+    }
+    this.onBarAction?.(action, value);
   }
 
   private drawScrollback(): void {
@@ -6757,36 +6645,25 @@ export class Screen {
     return parts.length > 0 ? parts.join(" · ") + " · " : "";
   }
 
-  // Public: which clickable banner chunk (if any) contains the given
-  // 1-based terminal cell? Returns null for clicks outside the banner
-  // row or in non-clickable areas (status dot, queued, scroll indicator,
-  // "detach" chunk, the gap before the right-side slot, etc.).
-  bannerHitAt(x: number, y: number): "mode" | "pick" | "guide" | "detach" | null {
-    const hits = this.bannerHits;
-    if (!hits || y !== hits.row) {
-      return null;
-    }
-    const inRange = (r: [number, number] | null): boolean =>
-      r !== null && x >= r[0] && x <= r[1];
-    if (inRange(hits.mode)) return "mode";
-    if (inRange(hits.pick)) return "pick";
-    if (inRange(hits.guide)) return "guide";
-    if (inRange(hits.detach)) return "detach";
-    return null;
-  }
-
   private drawBanner(): void {
-    // Banner state now spans two rows: status/sid/usage live on the
-    // prompt-above separator, and hint chunks / transient right-slot
-    // live on the bottom separator (one row above the sessionbar).
-    // Partial repaints fan out to both — paintRow's signature short-
-    // circuits no-op rewrites so the cost is negligible.
+    // Banner state spans the two composer rules: status/sid/usage on
+    // the prompt-above rule, hint chunks / transient right-slot on the
+    // one below. Partial repaints fan out to both — paintRow's
+    // signature short-circuits no-op rewrites so the cost is negligible.
     const h = this.term.height;
     const promptRows = this.promptRows();
     const separatorAbovePromptRow =
       h - promptRows - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
-    this.drawSeparator(separatorAbovePromptRow);
-    this.drawBottomSeparator(h - SESSIONBAR_ROWS);
+    this.drawBar("composerTop", separatorAbovePromptRow);
+    this.drawBar("composerBottom", h - SESSIONBAR_ROWS);
+  }
+
+  // All three chrome rows. Hover crosses between them freely, so the
+  // hover diff repaints the set rather than guessing which row owns the
+  // old and new region.
+  private drawBars(): void {
+    this.drawBanner();
+    this.drawBar("sessionbar", this.term.height);
   }
 
 
@@ -7105,10 +6982,7 @@ export class Screen {
     // No bottom separator — the existing separator above prompt does it.
     const contentRows = rows - 1;
     const headerRow = overlayTop;
-    const segments = this.buildBtwHeaderSegments();
-    this.paintRow(headerRow, `btw|h|${segments.signature}`, () => {
-      this.paintBtwHeader(segments);
-    });
+    this.drawBar("btw", headerRow);
     // Paint the content rows below the header. Show the LAST `contentRows`
     // WRAPPED rows top-down, so long lines flow onto continuation rows
     // instead of getting clipped at the right margin. Each line carries
@@ -8657,38 +8531,6 @@ function firstLine(text: string): string {
 // Re-export for clarity at call sites that read `shortId(id)`. The shared
 // helper lives in core/session.ts alongside the prefix constant.
 const shortId = stripHydraSessionPrefix;
-
-function formatUsage(usage: UsageState | undefined): string | null {
-  if (!usage) {
-    return null;
-  }
-  const parts: string[] = [];
-  if (typeof usage.used === "number") {
-    if (typeof usage.size === "number" && usage.size > 0) {
-      parts.push(`${formatTokens(usage.used)}/${formatTokens(usage.size)}`);
-    } else {
-      parts.push(formatTokens(usage.used));
-    }
-  } else if (typeof usage.size === "number") {
-    parts.push(`/${formatTokens(usage.size)}`);
-  }
-  if (typeof usage.costAmount === "number") {
-    parts.push(formatCost(usage.costAmount, usage.costCurrency));
-  }
-  return parts.length === 0 ? null : parts.join(" · ");
-}
-
-
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) {
-    return `${(n / 1_000_000).toFixed(1)}M`;
-  }
-  if (n >= 1_000) {
-    return `${(n / 1_000).toFixed(1)}k`;
-  }
-  return `${n}`;
-}
 
 export function mapKeyName(name: string): KeyName | null {
   switch (name) {

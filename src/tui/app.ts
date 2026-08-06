@@ -818,6 +818,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
   ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $VISUAL/$EDITOR)"],
+  ["Double-click bar", "copy the field under the pointer (cwd opens instead)"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
   ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
   null,
@@ -2872,12 +2873,6 @@ async function runSession(
     process.on("SIGCONT", onSigCont);
   }
 
-  // Banner-click state. A click only counts if press and release land
-  // on the same cell of the same chunk; intermediate motion / drag
-  // cancels it. State lives outside the onMouse closure so the press
-  // event can communicate with the release event.
-  let bannerPressHit: "mode" | "pick" | "guide" | "detach" | null = null;
-  let bannerPressCell: { x: number; y: number } | null = null;
   screen = new Screen({
     term,
     dispatcher,
@@ -2958,49 +2953,28 @@ async function runSession(
     // middle-click paste, so we read PRIMARY and paste text into the
     // prompt. Fires on press to match the X11 middle-down convention and
     // reuses the same effect + read-only gate as the ^V keybinding.
-    onMouse: (ev) => {
-      // Left-click on a clickable banner chunk fires the same effect as
-      // the corresponding hotkey. Click = press AND release on the same
-      // cell of the same chunk; a press-drag-release (or release on a
-      // different chunk than the press) is intentionally ignored so
-      // accidental clicks don't fire actions. Done here (not in
-      // screen.ts) so the dispatch routes through the same
-      // handleEffect path as keyboard input, including the
-      // readonly-forbidden gate.
-      if (ev.button === "left" && ev.kind === "press") {
-        bannerPressHit = screen.bannerHitAt(ev.x, ev.y);
-        bannerPressCell = bannerPressHit ? { x: ev.x, y: ev.y } : null;
+    // Chrome-bar fields that map to an application effect. The
+    // self-contained ones ("copy" a value, "open" a path) are handled
+    // inside Screen and never arrive here. Routing these through
+    // handleEffect keeps clicks and hotkeys on one path, readonly gate
+    // included.
+    onBarAction: (action) => {
+      if (action === "toggle-mode") {
+        void handleModeToggle(true);
         return;
       }
-      if (ev.button === "left" && ev.kind === "release") {
-        const press = bannerPressCell;
-        const hit = bannerPressHit;
-        bannerPressCell = null;
-        bannerPressHit = null;
-        if (
-          hit !== null &&
-          press !== null &&
-          press.x === ev.x &&
-          press.y === ev.y &&
-          screen.bannerHitAt(ev.x, ev.y) === hit
-        ) {
-          if (hit === "mode") {
-            void handleModeToggle(true);
-            return;
-          }
-          const effect: InputEffect =
-            hit === "pick"
-              ? { type: "switch-session" }
-              : hit === "detach"
-                ? { type: "exit" }
-                : { type: "show-help" };
-          if (opts.readonly === true && isReadonlyForbiddenEffect(effect)) {
-            return;
-          }
-          handleEffect(effect);
-          return;
-        }
+      const effect: InputEffect =
+        action === "switch-session"
+          ? { type: "switch-session" }
+          : action === "detach"
+            ? { type: "exit" }
+            : { type: "show-help" };
+      if (opts.readonly === true && isReadonlyForbiddenEffect(effect)) {
+        return;
       }
+      handleEffect(effect);
+    },
+    onMouse: (ev) => {
       if (ev.kind !== "press" || ev.button !== "middle") {
         return;
       }
@@ -3525,6 +3499,13 @@ async function runSession(
   screen.setHideThoughts(!viewPrefs.showThoughts);
   // Seed the sidebar from config. Gadget list and width first, so the
   // initial paint (if enabled) already has the user's column layout.
+  // Slot contents for the three chrome rows (composer.top,
+  // composer.bottom, sessionbar). Seeded before the first paint so the
+  // bars never flash the built-in layout under a customised config.
+  screen.setBarConfig({
+    composer: config.tui.composer,
+    sessionbar: config.tui.sessionbar,
+  });
   screen.setSidebarGadgets(config.tui.sidebar.gadgets);
   screen.setSidebarWidth(config.tui.sidebar.width ?? null);
   screen.setSidebarBorder(config.tui.sidebar.border);

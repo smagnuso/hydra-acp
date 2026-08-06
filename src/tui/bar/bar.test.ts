@@ -1,0 +1,620 @@
+import { describe, expect, it } from "vitest";
+import stringWidth from "string-width";
+import type { InputDispatcher } from "../input.js";
+import { Screen } from "../screen.js";
+import type { BarSideConfig } from "../../core/config.js";
+import { expandSide } from "./slots.js";
+import type { BarLayoutConfig } from "./types.js";
+import { makeCaptureTerm } from "./test-harness.js";
+
+const dispatcher = {
+  state: () => ({
+    buffer: [""],
+    row: 0,
+    col: 0,
+    planMode: false,
+    historyIndex: -1,
+    queueIndex: -1,
+    attachments: [],
+    historySearchQuery: null,
+  }),
+} as unknown as InputDispatcher;
+
+const HOME = process.env["HOME"] ?? "/home/x";
+
+interface Rows {
+  top: string;
+  bottom: string;
+  sessionbar: string;
+  screen: Screen;
+}
+
+function render(
+  width: number,
+  opts: {
+    bar?: BarLayoutConfig;
+    session?: Record<string, unknown>;
+    banner?: Record<string, unknown>;
+  } = {},
+): Rows {
+  const height = 24;
+  const cap = makeCaptureTerm(width, height);
+  const screen = new Screen({
+    term: cap.term,
+    dispatcher,
+    onKey: () => {},
+    repaintThrottleMs: 0,
+    progressIndicator: false,
+    mouse: false,
+  });
+  const priv = screen as unknown as Record<string, unknown> & {
+    drawBar(slot: string, row: number): void;
+  };
+  priv["started"] = true;
+  if (opts.bar) {
+    screen.setBarConfig(opts.bar);
+  }
+  screen.setSessionbar({
+    agent: "claude",
+    model: "claude-sonnet-4-5-20250929",
+    cwd: `${HOME}/dev/hydra-acp/cli`,
+    sessionId: "hydra-a1b2c3d4e5",
+    title: "make the sessionbar configurable",
+    usage: { used: 12_400, size: 200_000, costAmount: 0.31, costCurrency: "USD" },
+    ...opts.session,
+  });
+  screen.setBanner({
+    status: "busy",
+    elapsedMs: 62_000,
+    queued: 2,
+    hint: "⇧⇥ mode · ^p pick · ^g guide · ^d detach",
+    ...opts.banner,
+  });
+  // Setters above schedule their own repaints; drop whatever they
+  // emitted, and the row-signature cache with it, so the explicit
+  // draws below actually reach the terminal.
+  cap.reset();
+  (priv["painter"] as { clearCache(): void }).clearCache();
+  priv.drawBar("composerTop", 1);
+  priv.drawBar("composerBottom", 2);
+  priv.drawBar("sessionbar", height);
+  return {
+    top: cap.row(1),
+    bottom: cap.row(2),
+    sessionbar: cap.row(height),
+    screen,
+  };
+}
+
+describe("chrome bars", () => {
+  // The shipped defaults must reproduce what the three hand-rolled draw
+  // methods produced before the layout engine existed. These strings
+  // were captured from the pre-refactor code.
+  it("default layout matches the pre-refactor output at 120 columns", () => {
+    const r = render(120);
+    expect(r.top).toBe(
+      "── Busy 1m 2s · hydra-a1b2c3d4e5 · 2 queued ──────────────────────────────────────────────────── 12.4k/200.0k · $0.31 ──",
+    );
+    expect(r.sessionbar).toBe(
+      "~/dev/hydra-acp/cli · make the sessionbar configurable                                claude•claude-sonnet-4-5-20250929",
+    );
+  });
+
+  it("default layout matches the pre-refactor output at 80 columns", () => {
+    const r = render(80);
+    expect(r.top).toBe(
+      "── Busy 1m 2s · hydra-a1b2c3d4e5 · 2 queued ──────────── 12.4k/200.0k · $0.31 ──",
+    );
+    expect(r.sessionbar).toBe(
+      "~/dev/hydra-acp/cli · make the sessionbar co… claude•claude-sonnet-4-5-20250929",
+    );
+  });
+
+  it("default layout matches the pre-refactor output at 60 columns", () => {
+    const r = render(60);
+    expect(r.sessionbar).toBe(
+      "~/dev/hydra-a… · make th… claude•claude-sonnet-4-5-20250929",
+    );
+  });
+
+  // The old bottom separator painted a " · " before the *first* hint
+  // chunk while sizing the row as if it were not there, so the row ran
+  // three columns past the terminal and wrapped.
+  it("bottom rule no longer emits a leading separator", () => {
+    const r = render(120);
+    expect(r.bottom).toBe(
+      "──────────────────────────────────────────────────────────────────────────── ⇧⇥ mode · ^p pick · ^g guide · ^d detach ──",
+    );
+    expect(r.bottom).not.toContain("── · ");
+  });
+
+  // The pre-refactor rules did not truncate at all: at 40 columns the
+  // top rule was 67 cells wide and the sessionbar 46.
+  it.each([200, 120, 100, 80, 72, 60, 50, 40, 30, 24, 20])(
+    "never exceeds the terminal width (w=%i)",
+    (w) => {
+      const r = render(w);
+      expect(stringWidth(r.top)).toBeLessThanOrEqual(w);
+      expect(stringWidth(r.bottom)).toBeLessThanOrEqual(w);
+      // The sessionbar deliberately leaves the last column unwritten.
+      expect(stringWidth(r.sessionbar)).toBeLessThanOrEqual(w - 1);
+    },
+  );
+
+  it("sheds low-priority fields before high-priority ones", () => {
+    const r = render(40);
+    // Status survives (priority Infinity); the session id does not.
+    expect(r.top).toContain("Busy");
+    expect(r.top).not.toContain("hydra-a1b2c3d4e5");
+  });
+
+  it("sheds hint chunks right-to-left rather than all at once", () => {
+    const r = render(40);
+    expect(r.bottom).toContain("⇧⇥ mode");
+    expect(r.bottom).not.toContain("detach");
+  });
+
+  it("shrinks flex fields before shedding them", () => {
+    // cwd has a lower priority than title but is flex, so at 60 columns
+    // both survive in truncated form rather than cwd vanishing.
+    const r = render(60);
+    expect(r.sessionbar).toContain("~/dev/hydra-a…");
+    expect(r.sessionbar).toContain("make th…");
+  });
+
+  it("drops absent fields and their separators", () => {
+    const r = render(120, {
+      session: { title: undefined, usage: undefined },
+      banner: { queued: 0, status: "ready", elapsedMs: undefined },
+    });
+    expect(r.top).toBe(
+      `── Ready · hydra-a1b2c3d4e5 ${"─".repeat(120 - 28)}`,
+    );
+    expect(r.sessionbar).not.toContain("·");
+  });
+
+  it("records click ranges for the hint chunks", () => {
+    const w = 120;
+    const r = render(w);
+    const col = r.bottom.indexOf("^p pick") + 1;
+    expect(r.screen.bannerHitAt(col, 2)).toBe("pick");
+    expect(r.screen.bannerHitAt(col, 1)).toBe(null);
+    expect(r.screen.bannerHitAt(1, 2)).toBe(null);
+  });
+
+  it("honours a custom slot configuration", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: ["agent", "model"], right: ["cost"] },
+        bottom: { left: [{ text: "hello" }], right: [] },
+      },
+      sessionbar: { left: ["sessionId"], right: ["tokens"] },
+    };
+    const r = render(80, { bar });
+    expect(r.top).toContain("claude · claude-sonnet-4-5-20250929");
+    expect(r.top).toContain("$0.31");
+    expect(r.top).not.toContain("Busy");
+    expect(r.bottom.startsWith(" hello ")).toBe(true);
+    expect(r.sessionbar).toContain("hydra-a1b2c3d4e5");
+    expect(r.sessionbar).toContain("12.4k/200.0k");
+  });
+
+  it("applies per-entry maxWidth and prefix/suffix overrides", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: ["status"], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: {
+        left: [{ field: "cwd", maxWidth: 10, prefix: "[", suffix: "]" }],
+        right: [],
+      },
+    };
+    const r = render(80, { bar });
+    expect(r.sessionbar.trimEnd()).toBe("[~/dev/hyd…]");
+  });
+
+  it("ignores unknown field ids instead of blanking the row", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: ["nope", "status"], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: ["cwd"], right: [] },
+    };
+    const r = render(80, { bar });
+    expect(r.top.startsWith("── Busy ")).toBe(true);
+  });
+
+  it("transient content replaces the hints", () => {
+    const w = 120;
+    const cap = makeCaptureTerm(w, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setBanner({ status: "ready", queued: 0, hint: "⇧⇥ mode · ^p pick" });
+    screen.setBannerSearchIndicator("needle");
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("composerBottom", 2);
+    expect(cap.row(2)).not.toContain("^p pick");
+    expect(cap.row(2)).toContain("needle");
+  });
+});
+
+describe("chrome bar mouse", () => {
+  // Everything painted from a field is a hit region, on all three rows.
+  // Before this the only click targets in the whole chrome were the four
+  // hint chunks on the composer bottom rule.
+  it("registers hit regions on every row, sessionbar included", () => {
+    const r = render(120);
+    const col = r.sessionbar.indexOf("~/dev") + 1;
+    const hit = r.screen.barHitAt(col, 24);
+    expect(hit?.id).toBe("sessionbar:cwd");
+    expect(hit?.doubleAction).toBe("open");
+  });
+
+  it("carries the underlying value, not the painted text", () => {
+    // cwd paints "~/dev/…" but must open the absolute path.
+    const r = render(120);
+    const hit = r.screen.barHitAt(r.sessionbar.indexOf("~/dev") + 1, 24);
+    expect(hit?.value).toBe(`${HOME}/dev/hydra-acp/cli`);
+    // sessionId paints the stripped form but must copy the full id.
+    const sid = r.screen.barHitAt(r.top.indexOf("hydra-a1b2") + 1, 1);
+    expect(sid?.value).toBe("hydra-a1b2c3d4e5");
+    expect(sid?.doubleAction).toBe("copy");
+  });
+
+  it("keeps the hint chunks wired to their application effects", () => {
+    const r = render(120);
+    const at = (needle: string): string | undefined =>
+      r.screen.barHitAt(r.bottom.indexOf(needle) + 1, 2)?.action;
+    expect(at("⇧⇥ mode")).toBe("toggle-mode");
+    expect(at("^p pick")).toBe("switch-session");
+    expect(at("^g guide")).toBe("show-help");
+    expect(at("^d detach")).toBe("detach");
+  });
+
+  it("returns null off any field", () => {
+    const r = render(120);
+    // The fill run between the two sides belongs to no field.
+    expect(r.screen.barHitAt(60, 1)).toBe(null);
+    expect(r.screen.barHitAt(1, 5)).toBe(null);
+  });
+
+  it("honours onClick / onDoubleClick overrides from config", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: [{ field: "status", onClick: "show-help" }], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: {
+        left: [{ field: "cwd", onDoubleClick: "copy" }],
+        right: [],
+      },
+    };
+    const r = render(80, { bar });
+    expect(r.screen.barHitAt(4, 1)?.action).toBe("show-help");
+    expect(r.screen.barHitAt(1, 24)?.doubleAction).toBe("copy");
+  });
+
+  it("rejects an unrecognised action name rather than crashing", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: [{ field: "status", onClick: "rm -rf" }], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    };
+    const r = render(80, { bar });
+    expect(r.screen.barHitAt(4, 1)?.action).toBe("none");
+  });
+
+  it("hit regions survive a repaint that the signature cache skips", () => {
+    const r = render(120);
+    const priv = r.screen as unknown as { drawBar(s: string, n: number): void };
+    priv.drawBar("sessionbar", 24);
+    expect(r.screen.barHitAt(1, 24)?.id).toBe("sessionbar:cwd");
+  });
+});
+
+describe("chrome bar gestures", () => {
+  interface Priv {
+    handleBarPress(c: { x: number; y: number }): boolean;
+    handleBarRelease(c: { x: number; y: number } | null): boolean;
+    tryOpenPathString(raw: string): boolean;
+    notify(msg: string): void;
+  }
+
+  function gestures(width = 120): { r: Rows; priv: Priv; actions: string[][] } {
+    const r = render(width);
+    const actions: string[][] = [];
+    (r.screen as unknown as Record<string, unknown>)["onBarAction"] = (
+      a: string,
+      v: string,
+    ) => actions.push([a, v]);
+    return { r, priv: r.screen as unknown as Priv, actions };
+  }
+
+  it("fires the click action only when press and release agree", () => {
+    const { r, priv, actions } = gestures();
+    const x = r.bottom.indexOf("^p pick") + 1;
+    expect(priv.handleBarPress({ x, y: 2 })).toBe(true);
+    expect(priv.handleBarRelease({ x, y: 2 })).toBe(true);
+    expect(actions).toEqual([["switch-session", "^p pick"]]);
+  });
+
+  it("ignores a press-drag-release that lands on a different field", () => {
+    const { r, priv, actions } = gestures();
+    const from = r.bottom.indexOf("^p pick") + 1;
+    const to = r.bottom.indexOf("^g guide") + 1;
+    priv.handleBarPress({ x: from, y: 2 });
+    expect(priv.handleBarRelease({ x: to, y: 2 })).toBe(false);
+    expect(actions).toEqual([]);
+  });
+
+  it("claims the gesture on an inert field so it can't start a selection", () => {
+    const { r, priv, actions } = gestures();
+    const x = r.top.indexOf("Busy") + 1;
+    expect(priv.handleBarPress({ x, y: 1 })).toBe(true);
+    expect(priv.handleBarRelease({ x, y: 1 })).toBe(true);
+    expect(actions).toEqual([]);
+  });
+
+  it("double-click on cwd opens the absolute path", () => {
+    const { r, priv } = gestures();
+    const opened: string[] = [];
+    priv.tryOpenPathString = (raw) => {
+      opened.push(raw);
+      return true;
+    };
+    const x = r.sessionbar.indexOf("~/dev") + 1;
+    priv.handleBarPress({ x, y: 24 });
+    priv.handleBarRelease({ x, y: 24 });
+    priv.handleBarPress({ x, y: 24 });
+    expect(opened).toEqual([`${HOME}/dev/hydra-acp/cli`]);
+  });
+
+  it("reports when there is no openFileCommand to open with", () => {
+    const { r, priv } = gestures();
+    const notes: string[] = [];
+    priv.notify = (m) => notes.push(m);
+    const x = r.sessionbar.indexOf("~/dev") + 1;
+    priv.handleBarPress({ x, y: 24 });
+    priv.handleBarRelease({ x, y: 24 });
+    priv.handleBarPress({ x, y: 24 });
+    expect(notes).toEqual(["no tui.openFileCommand configured"]);
+  });
+
+  it("a slow second click is not a double-click", async () => {
+    const { r, priv } = gestures();
+    const opened: string[] = [];
+    priv.tryOpenPathString = (raw) => {
+      opened.push(raw);
+      return true;
+    };
+    const x = r.sessionbar.indexOf("~/dev") + 1;
+    priv.handleBarPress({ x, y: 24 });
+    priv.handleBarRelease({ x, y: 24 });
+    // Rewind the chain tip past the double-click window.
+    (r.screen as unknown as { lastBarClick: { id: string; t: number } })
+      .lastBarClick.t -= 10_000;
+    priv.handleBarPress({ x, y: 24 });
+    expect(opened).toEqual([]);
+  });
+
+  it("a double-click split across two different fields is two singles", () => {
+    const { r, priv, actions } = gestures();
+    const pick = r.bottom.indexOf("^p pick") + 1;
+    const guide = r.bottom.indexOf("^g guide") + 1;
+    priv.handleBarPress({ x: pick, y: 2 });
+    priv.handleBarRelease({ x: pick, y: 2 });
+    priv.handleBarPress({ x: guide, y: 2 });
+    priv.handleBarRelease({ x: guide, y: 2 });
+    expect(actions).toEqual([
+      ["switch-session", "^p pick"],
+      ["show-help", "^g guide"],
+    ]);
+  });
+});
+
+// The frame above the btw overlay was a fourth hand-rolled row painting
+// the same three things as composer.top (a status label, a session id, a
+// usage readout) against the fork's data. It now renders composer.top's
+// slot config through a substituted context.
+describe("btw frame", () => {
+  function renderBtw(
+    width: number,
+    meta: { sessionId?: string | null; usage?: Record<string, number> } = {
+      sessionId: "hydra-f0f0f0f0",
+      usage: { used: 8200, size: 200_000, costAmount: 0.12 },
+    },
+  ): { row: string; screen: Screen } {
+    const cap = makeCaptureTerm(width, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setBtwOverlayMeta(meta);
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("btw", 3);
+    return { row: cap.row(3), screen };
+  }
+
+  it("reproduces the hand-rolled header layout", () => {
+    const { row } = renderBtw(80);
+    expect(row).toBe(
+      "── By the way · hydra-f0f0f0f0 ────────────────────────── 8.2k/200.0k · $0.12 ──",
+    );
+  });
+
+  it("omits the session id block when no fork id is known", () => {
+    const { row } = renderBtw(80, { sessionId: null, usage: {} });
+    expect(row.startsWith("── By the way ─")).toBe(true);
+    expect(row).not.toContain(" · ");
+  });
+
+  it("shows the fork's usage, not the session's", () => {
+    const { row } = renderBtw(80);
+    expect(row).toContain("8.2k/200.0k");
+    expect(row).not.toContain("12.4k");
+  });
+
+  it("makes the fork id a single-click jump target", () => {
+    const { row, screen } = renderBtw(80);
+    const hit = screen.barHitAt(row.indexOf("hydra-f0") + 1, 3);
+    expect(hit?.action).toBe("open-session");
+    expect(hit?.value).toBe("hydra-f0f0f0f0");
+  });
+
+  it("still honours a customised composer.top on the frame", () => {
+    const cap = makeCaptureTerm(80, 24);
+    const screen = new Screen({
+      term: cap.term,
+      dispatcher,
+      onKey: () => {},
+      repaintThrottleMs: 0,
+      progressIndicator: false,
+      mouse: false,
+    });
+    const priv = screen as unknown as Record<string, unknown> & {
+      drawBar(slot: string, row: number): void;
+    };
+    priv["started"] = true;
+    screen.setBarConfig({
+      composer: {
+        top: { left: ["status"], right: ["cost"] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    });
+    screen.setBtwOverlayMeta({
+      sessionId: "hydra-f0f0f0f0",
+      usage: { used: 8200, costAmount: 0.12 },
+    });
+    cap.reset();
+    (priv["painter"] as { clearCache(): void }).clearCache();
+    priv.drawBar("btw", 3);
+    // sessionId dropped from the slot → dropped from the frame too.
+    expect(cap.row(3)).not.toContain("hydra-f0f0f0f0");
+    expect(cap.row(3)).toContain("By the way");
+    expect(cap.row(3)).toContain("$0.12");
+  });
+});
+
+// Adding one field used to mean restating the whole side — copying the
+// default list (freezing it) and knowing that `elapsed` needs
+// {"separator": " "} or the row reads "Busy · 1m 2s".
+describe('the "..." defaults sentinel', () => {
+  const ids = (side: BarSideConfig): string[] =>
+    side.map((e) => (typeof e === "string" ? e : (e.field ?? `text:${e.text}`)));
+
+  it("appends without restating the default list", () => {
+    expect(ids(expandSide("composerTop", "left", ["...", "cwd"]))).toEqual([
+      "status",
+      "elapsed",
+      "sessionId",
+      "queued",
+      "scroll",
+      "cwd",
+    ]);
+  });
+
+  it("prepends", () => {
+    expect(ids(expandSide("composerTop", "left", ["cwd", "..."]))).toEqual([
+      "cwd",
+      "status",
+      "elapsed",
+      "sessionId",
+      "queued",
+      "scroll",
+    ]);
+  });
+
+  it("repositions rather than duplicating an explicitly named field", () => {
+    expect(
+      ids(expandSide("composerTop", "left", ["queued", "..."])),
+    ).toEqual(["queued", "status", "elapsed", "sessionId", "scroll"]);
+  });
+
+  it("matches the object entry form too", () => {
+    const out = expandSide("composerTop", "left", [
+      { field: "elapsed", maxWidth: 6 },
+      "...",
+    ]);
+    expect(ids(out)).toEqual([
+      "elapsed",
+      "status",
+      "sessionId",
+      "queued",
+      "scroll",
+    ]);
+    // The user's own entry survives with its overrides intact.
+    expect(out[0]).toEqual({ field: "elapsed", maxWidth: 6 });
+  });
+
+  it("carries the default's own overrides into the expansion", () => {
+    // `elapsed` must keep its " " separator or the row reads
+    // "Busy · 1m 2s" instead of "Busy 1m 2s".
+    const out = expandSide("composerTop", "left", ["...", "cwd"]);
+    expect(out[1]).toEqual({ field: "elapsed", separator: " " });
+  });
+
+  it("expands only the first sentinel", () => {
+    expect(
+      ids(expandSide("composerTop", "right", ["...", "cost", "..."])),
+    ).toEqual(["usage", "cost"]);
+  });
+
+  it("is a no-op on a side that does not use it", () => {
+    const side: BarSideConfig = ["cwd", "title"];
+    expect(expandSide("sessionbar", "left", side)).toBe(side);
+  });
+
+  it("expands an empty default to nothing", () => {
+    expect(ids(expandSide("composerBottom", "left", ["...", "mode"]))).toEqual([
+      "mode",
+    ]);
+  });
+
+  it("resolves on the btw frame against composer.top's defaults", () => {
+    expect(ids(expandSide("btw", "left", ["..."]))).toEqual([
+      "status",
+      "elapsed",
+      "sessionId",
+      "queued",
+      "scroll",
+    ]);
+  });
+
+  it("renders end to end through setBarConfig", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: ["...", "cwd"], right: ["..."] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: [], right: [] },
+    };
+    const r = render(140, { bar });
+    expect(r.top).toContain("Busy 1m 2s · hydra-a1b2c3d4e5 · 2 queued · ~/dev");
+    expect(r.top).toContain("12.4k/200.0k · $0.31");
+  });
+});
