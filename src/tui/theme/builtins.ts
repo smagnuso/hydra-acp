@@ -17,7 +17,7 @@
 // would render grey and be indistinguishable from idle. So the accents go in
 // the bright slots instead.
 
-import { ansi, parseColor, type Color } from "./color.js";
+import { ansi, isDark, parseColor, type Color } from "./color.js";
 import {
   DEFAULT_PALETTE,
   type ColorOverride,
@@ -239,18 +239,51 @@ const SOLARIZED_DARK = palette(
   { bg: "#002b36", fg: "#839496" },
 );
 
-// catppuccin latte: catppuccin.com, and the neutral light theme this set was
-// missing — solarized-light is a cream, this is close to white.
+// catppuccin mocha: catppuccin.com. The default on a dark terminal, and the same
+// default herdr ships, which is the point — two tools from the same ecosystem
+// sitting side by side should not look like two different products.
 //
-// Only the light member of the family is here. Mocha, the popular dark one, is a
-// pastel palette whose accents are tinted whites: #f9e2af yellow and #f5c2e7 pink
-// have the same max channel as its #cdd6f4 foreground, differing only in chroma —
-// the exact shape of the bug that made dracula render near-monochrome (see the
-// note there, and the guard in load.test.ts). Substituting deeper colours does not
-// work either: peach is mocha's only legible warm accent, so `warn` and `active`
-// would collide. A theme that cannot express "busy" distinctly from "warning" is
-// not worth shipping as a default, and anyone who wants mocha can drop it in
-// ~/.hydra-acp/themes/ where the guard is not the judge of their taste.
+// This palette is a deliberate exception to the near-white accent guard in
+// load.test.ts, and it is worth being precise about why, because the guard exists
+// for a real bug. Mocha's accents sit 65-85 from its own foreground; dracula's
+// published bright variants, the ones that made it render near-monochrome, sat 85.
+// By that measure they are the same kind of colour, and no threshold admits one
+// while excluding the other.
+//
+// What differs is intent. Dracula's brights were a mistake — its ICONIC colours
+// are high-contrast and were sitting unused while pale "more visible on a dark
+// background" variants got copied in by mistake. Catppuccin has no such
+// alternative: low contrast between accent and text IS the palette, chosen
+// deliberately, and it is the most widely used palette there is. Shipping it means
+// accepting that the guard encodes a preference rather than a law, so the
+// exemption names these slots explicitly instead of loosening the rule for
+// everyone.
+const CATPPUCCIN_MOCHA = palette(
+  {
+    black: "#45475a", // surface1
+    red: "#f38ba8",
+    green: "#a6e3a1",
+    yellow: "#f9e2af",
+    blue: "#89b4fa",
+    magenta: "#f5c2e7", // pink
+    cyan: "#94e2d5", // teal
+    white: "#bac2de", // subtext1
+    brightBlack: "#6c7086", // overlay0 — the comment grey muted/subtle want
+    brightRed: "#eba0ac", // maroon
+    brightGreen: "#a6e3a1",
+    // Peach, not the pale yellow: `active` is the busy indicator and `warn` is the
+    // yellow above, and those two have to be told apart at a glance.
+    brightYellow: "#fab387",
+    brightBlue: "#b4befe", // lavender
+    brightMagenta: "#cba6f7", // mauve
+    brightCyan: "#89dceb", // sky
+    brightWhite: "#cdd6f4", // text
+  },
+  { bg: "#1e1e2e", fg: "#cdd6f4" },
+);
+
+// catppuccin latte: the light member of the same family, and the neutral light
+// theme this set was missing — solarized-light is a cream, this is close to white.
 //
 // The accents are latte's own, which are DARKER than mocha's rather than being
 // the same hues: a pastel on white is invisible. That is also why brightWhite
@@ -454,8 +487,15 @@ export const BUILTIN_THEMES: BuiltinTheme[] = [
     palette: GRUVBOX_DARK,
   },
   {
+    name: "catppuccin-mocha",
+    description: "dark, soft pastel (the default on a dark terminal)",
+    counterpart: "catppuccin-latte",
+    palette: CATPPUCCIN_MOCHA,
+  },
+  {
     name: "catppuccin-latte",
-    description: "light, soft pastel",
+    description: "light, soft pastel (the default on a light terminal)",
+    counterpart: "catppuccin-mocha",
     palette: CATPPUCCIN_LATTE,
   },
   {
@@ -570,4 +610,33 @@ export function builtinTheme(name: string): BuiltinTheme | undefined {
 
 export function builtinNames(): string[] {
   return BUILTIN_THEMES.map((t) => t.name);
+}
+
+// The theme to use when the user has not chosen one.
+//
+// `terminal` was the unconditional default, and it has one property no curated
+// palette has: it cannot be wrong. It uses the sixteen colours the terminal is
+// already configured with, which by construction work against that terminal's
+// background. Every curated palette instead ASSUMES a background, and assuming
+// wrong is what produces pale bands on black or grey-on-grey text.
+//
+// Once the background is measured rather than assumed, that objection mostly
+// goes: pick the theme that matches what the terminal actually is. So a known
+// background selects a curated theme, and an unknown one still falls back to
+// deferring to the user's own palette, which remains the only safe answer when
+// nothing is known.
+//
+// What this still cannot see is whether the user's palette was CHOSEN. Someone
+// with a carefully configured terminal profile looks identical from here to
+// someone who never touched it, and this overrides both. That is why the choice
+// is announced at startup and why pinning `tui.theme` silences it: the way out
+// has to be visible, or the colours just mysteriously differ between machines.
+export const AUTO_DARK = "catppuccin-mocha";
+export const AUTO_LIGHT = "catppuccin-latte";
+
+export function defaultThemeFor(background: Color | undefined): string {
+  if (background === undefined) {
+    return "terminal";
+  }
+  return isDark(background) ? AUTO_DARK : AUTO_LIGHT;
 }

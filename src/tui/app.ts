@@ -191,13 +191,14 @@ import {
   type ColorOverride,
   type Palette,
 } from "./theme/index.js";
-import type { Color } from "./theme/color.js";
+import { isDark, type Color } from "./theme/color.js";
 import {
   listThemes,
   loadTheme,
   resolveThemeBackground,
   themeBackgroundMismatch,
 } from "./theme/load.js";
+import { defaultThemeFor } from "./theme/builtins.js";
 
 // Theme-load problems, carried from config load to the first paint. Module
 // scope because the two happen in different functions.
@@ -945,12 +946,8 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // local TUI invocation falls through to resolveLocalTarget here.
   const target = opts.target ?? (await resolveLocalTarget(config));
   setLogMaxBytes(config.tui.logMaxBytes);
-  // Apply the colour theme before anything draws. Problems are collected rather
-  // than thrown: a typo in a hand-edited theme should show up as a message in
-  // the transcript, not stop the TUI from starting.
-  const loadedTheme = await loadTheme(config.tui.theme, paths.themesDir());
-  // Band derivation needs to know the real terminal background, which the theme
-  // cannot tell us — see resolveThemeBackground.
+  // The background is resolved BEFORE the theme is loaded, because with no theme
+  // configured it is what chooses one — see defaultThemeFor.
   //
   // Asked of the terminal directly with OSC 11, before anything grabs the
   // keyboard, since the answer arrives as input. Bounded by senseBackground's own
@@ -962,6 +959,32 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
     config.tui.themeBackground === undefined
       ? await senseBackground()
       : undefined;
+  // Problems from resolving the background are merged into the theme's below, so
+  // both surface through the same path once the transcript exists.
+  const backgroundProblems: string[] = [];
+  themeBackground = resolveThemeBackground(
+    config.tui.themeBackground,
+    backgroundProblems,
+    process.env,
+    sensedBackground,
+  );
+  // Apply the colour theme before anything draws. Problems are collected rather
+  // than thrown: a typo in a hand-edited theme should show up as a message in
+  // the transcript, not stop the TUI from starting.
+  //
+  // With nothing configured the background picks the theme: catppuccin mocha on a
+  // dark terminal, latte on a light one, and `terminal` when the background could
+  // not be determined, since deferring to the user's own palette is the only safe
+  // answer with nothing measured.
+  const autoThemeName =
+    config.tui.theme === undefined
+      ? defaultThemeFor(themeBackground)
+      : undefined;
+  const loadedTheme = await loadTheme(
+    autoThemeName ?? config.tui.theme,
+    paths.themesDir(),
+  );
+  loadedTheme.problems.unshift(...backgroundProblems);
   // Same window, same reasoning: measured with a cursor position report before
   // the keyboard is grabbed, because the reply arrives as input. Skipped when the
   // user has stated a width explicitly, so nobody pays a round trip for an
@@ -976,12 +999,6 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
       widths: probe?.widths,
     });
   }
-  themeBackground = resolveThemeBackground(
-    config.tui.themeBackground,
-    loadedTheme.problems,
-    process.env,
-    sensedBackground,
-  );
   setTheme(loadedTheme.palette, {
     ...loadedTheme.overrides,
     background: themeBackground,
@@ -996,6 +1013,16 @@ export async function runTuiApp(opts: TuiOptions): Promise<void> {
   // loaded fine, it is just the wrong half of a pair for this terminal. Reported
   // on a notice line rather than notice-error.
   pendingThemeNotices = [];
+  // Announced rather than silent. A default that varies with the terminal means
+  // the colours differ between machines for no visible reason, and the way to pin
+  // one has to be discoverable. Setting tui.theme silences this.
+  if (autoThemeName !== undefined && autoThemeName !== "terminal") {
+    pendingThemeNotices.push(
+      `using "${autoThemeName}" for this terminal's ` +
+        `${isDark(themeBackground as Color) ? "dark" : "light"} background — ` +
+        `set tui.theme to pin your own (^O cycles)`,
+    );
+  }
   const mismatch = themeBackgroundMismatch(
     loadedTheme.palette,
     loadedTheme.name,

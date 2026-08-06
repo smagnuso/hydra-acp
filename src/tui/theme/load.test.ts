@@ -15,7 +15,11 @@ import {
   setTheme,
   type ThemeToken,
 } from "./index.js";
-import { builtinNames, builtinTheme } from "./builtins.js";
+import {
+  builtinNames,
+  builtinTheme,
+  defaultThemeFor,
+} from "./builtins.js";
 import { parseAgentMarkdown } from "../format.js";
 import { parseColor, rgb, type Color } from "./color.js";
 
@@ -850,6 +854,23 @@ describe("a theme's accent slots are not near-white washes", () => {
   // across the five themes is 116 or further.
   const MIN_FROM_WHITE = 100;
 
+  // Catppuccin is the exception, and it is named rather than accommodated by
+  // moving the threshold.
+  //
+  // Mocha's accents sit 65-85 from its own foreground; the dracula variants this
+  // guard was written for sat at 85. They are the same kind of colour and no
+  // threshold separates them. What differs is that dracula had better colours
+  // going unused, and catppuccin does not: low contrast between accent and text is
+  // the palette, deliberately, and it is the most widely used one there is. It is
+  // also what herdr defaults to, and two tools from one ecosystem should match.
+  //
+  // So this is a preference being overruled for one theme, listed slot by slot so
+  // that overruling is visible. Every other slot of mocha is still checked, and a
+  // future theme cannot inherit the exemption by accident.
+  const EXEMPT: Record<string, ReadonlySet<string>> = {
+    "catppuccin-mocha": new Set(["yellow", "magenta", "brightBlue"]),
+  };
+
   const ACCENT_SLOTS = [
     "red",
     "green",
@@ -872,10 +893,11 @@ describe("a theme's accent slots are not near-white washes", () => {
     "%s",
     async (name) => {
       const t = await loadTheme(name, await dir());
+      const exempt = EXEMPT[name] ?? new Set<string>();
       const washed: string[] = [];
       for (const slot of ACCENT_SLOTS) {
         const c = t.palette[slot];
-        if (c.kind !== "rgb") {
+        if (c.kind !== "rgb" || exempt.has(slot)) {
           continue;
         }
         const d = Math.sqrt(
@@ -888,6 +910,29 @@ describe("a theme's accent slots are not near-white washes", () => {
       expect(washed).toEqual([]);
     },
   );
+
+  // An exemption that stops being needed is an exemption that should be deleted,
+  // and one naming a slot that no longer exists is a lie. Both are easy to leave
+  // behind, so neither is allowed to go unnoticed.
+  it("has no stale exemptions", async () => {
+    for (const [name, slots] of Object.entries(EXEMPT)) {
+      const t = await loadTheme(name, await dir());
+      for (const slot of slots) {
+        const c = t.palette[slot as (typeof ACCENT_SLOTS)[number]];
+        expect(c, `${name}.${slot} is not a slot`).toBeDefined();
+        if (c.kind !== "rgb") {
+          continue;
+        }
+        const d = Math.sqrt(
+          (255 - c.r) ** 2 + (255 - c.g) ** 2 + (255 - c.b) ** 2,
+        );
+        expect(
+          d,
+          `${name}.${slot} now passes on its own — drop the exemption`,
+        ).toBeLessThan(MIN_FROM_WHITE);
+      }
+    }
+  });
 });
 
 describe("themeBackgroundMismatch", () => {
@@ -943,5 +988,44 @@ describe("themeBackgroundMismatch", () => {
     );
     expect(msg).toContain("dark theme");
     expect(msg).not.toContain("try");
+  });
+});
+
+describe("defaultThemeFor", () => {
+  // With no tui.theme configured, the measured background chooses. This is only
+  // defensible because the background is MEASURED — `terminal` was the
+  // unconditional default precisely because a curated palette that assumes the
+  // wrong background is illegible, and OSC 11 is what removed the assumption.
+  it("picks by background", () => {
+    expect(defaultThemeFor(rgb(0, 0, 0))).toBe("catppuccin-mocha");
+    expect(defaultThemeFor(rgb(30, 30, 46))).toBe("catppuccin-mocha");
+    expect(defaultThemeFor(rgb(255, 255, 255))).toBe("catppuccin-latte");
+    expect(defaultThemeFor(rgb(239, 241, 245))).toBe("catppuccin-latte");
+  });
+
+  // Nothing measured, nothing assumed: defer to the palette the user's terminal
+  // is already configured with, which is the only choice that cannot be wrong.
+  it("falls back to the terminal's own palette when nothing is known", () => {
+    expect(defaultThemeFor(undefined)).toBe("terminal");
+  });
+
+  it("only ever names a real theme", async () => {
+    for (const bg of [rgb(0, 0, 0), rgb(255, 255, 255), undefined]) {
+      const name = defaultThemeFor(bg);
+      expect(builtinNames()).toContain(name);
+      // ...and it loads without complaint, which a name-only check would miss.
+      const t = await loadTheme(name, await dir());
+      expect(t.problems).toEqual([]);
+    }
+  });
+
+  // The auto-selected theme must never trip the warning that fires right after it
+  // — picking a light theme and then telling the user it is wrong would be absurd.
+  it("never selects a theme that mismatches the background it selected for", async () => {
+    for (const bg of [rgb(0, 0, 0), rgb(255, 255, 255)]) {
+      const name = defaultThemeFor(bg);
+      const t = await loadTheme(name, await dir());
+      expect(themeBackgroundMismatch(t.palette, name, bg)).toBeUndefined();
+    }
   });
 });
