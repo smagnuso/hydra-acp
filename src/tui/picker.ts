@@ -2683,9 +2683,11 @@ export async function pickSession(
       }
       const keepId = session.sessionId;
       allSessions = sortSessions(allSessions, currentCwd);
-      applyFilter();
-      restoreCursorAfterFilter(keepId);
-      renderFromScratch();
+          applyFilter();
+          if (keepId !== undefined) {
+            restoreCursorAfterFilter(keepId);
+          }
+          renderFromScratch();
       transientStatus = nextValue > 0 ? "priority: high" : "priority: normal";
       paintIndicator();
       try {
@@ -3872,9 +3874,17 @@ export async function pickSession(
       }
       if (data?.isCharacter) {
         if (name === "/") {
+          // Entering search mode with an empty term doesn't filter
+          // anything, so the cursor should stay where it was — applyFilter
+          // snaps to the first match whenever searchActive, which would
+          // otherwise jerk the selection to the top row before the user
+          // has typed a single character.
+          const keepId =
+            selectedIdx > 0 ? visible[selectedIdx - 1]?.sessionId : undefined;
           searchActive = true;
           searchTerm = "";
           applyFilter();
+          restoreCursorAfterFilter(keepId);
           renderFromScratch();
           return;
         }

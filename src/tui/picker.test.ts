@@ -754,6 +754,47 @@ describe("pickSession composer", () => {
       prompt: "prefix: pasted value",
     });
   });
+
+  it("entering search mode with `/` keeps the current selection", async () => {
+    const drv = makePicker({
+      sessions: [
+        session({ sessionId: "hydra-aaa", title: "first" }),
+        session({ sessionId: "hydra-bbb", title: "second" }),
+        session({ sessionId: "hydra-ccc", title: "third" }),
+      ],
+    });
+    drv.press("DOWN");
+    drv.press("DOWN");
+    drv.press("DOWN");
+    // An empty query filters nothing, so `/` must not jerk the cursor
+    // back to the top row.
+    drv.type("/");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toMatchObject({
+      kind: "attach",
+      sessionId: "hydra-ccc",
+    });
+  });
+
+  it("`/` followed by a query still snaps to the first match", async () => {
+    const drv = makePicker({
+      sessions: [
+        session({ sessionId: "hydra-aaa", title: "first" }),
+        session({ sessionId: "hydra-bbb", title: "second" }),
+        session({ sessionId: "hydra-ccc", title: "third" }),
+      ],
+    });
+    drv.press("DOWN");
+    drv.press("DOWN");
+    drv.press("DOWN");
+    drv.type("/");
+    drv.type("second");
+    drv.press("ENTER");
+    await expect(drv.resolveOnce).resolves.toMatchObject({
+      kind: "attach",
+      sessionId: "hydra-bbb",
+    });
+  });
 });
 
 describe("pickSession: killing the current session blocks abort", () => {
