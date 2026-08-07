@@ -1542,19 +1542,7 @@ export class Session {
     // onCompactionSwapHook so meta.json's upstreamSessionId is updated
     // before the breadcrumb is written (the breadcrumb references the
     // previous id, not the current).
-    for (const handler of this.agentChangeHandlers) {
-      try {
-        handler({
-          agentId: this.agentId,
-          upstreamSessionId: this.upstreamSessionId,
-          ...(this.retiringGenerationCost !== undefined
-            ? { retiredCost: this.retiringGenerationCost }
-            : {}),
-        });
-      } catch (err) {
-        this.logger?.warn(`swapUpstream: agentChange handler failed: ${(err as Error).message}`);
-      }
-    }
+    this.notifyAgentChange("swapUpstream");
     // Cross-agent swaps skip the rollback breadcrumb: rollbackToUpstream
     // resumes the prior upstream on this.agentId, which after a cross-
     // agent swap is the NEW agent — incompatible with a session created
@@ -1722,19 +1710,7 @@ export class Session {
 
     // Notify agent change handlers so SessionManager's persistAgentChange
     // fires and persists the restored upstreamSessionId to meta.json.
-    for (const handler of this.agentChangeHandlers) {
-      try {
-        handler({
-          agentId: this.agentId,
-          upstreamSessionId: this.upstreamSessionId,
-          ...(this.retiringGenerationCost !== undefined
-            ? { retiredCost: this.retiringGenerationCost }
-            : {}),
-        });
-      } catch (err) {
-        this.logger?.warn(`rollbackToUpstream: agentChange handler failed: ${(err as Error).message}`);
-      }
-    }
+    this.notifyAgentChange("rollbackToUpstream");
 
     this.updatedAt = Date.now();
   }
@@ -3880,6 +3856,36 @@ export class Session {
   // next agent life starts accumulating from $0. Fires usageHandlers so
   // meta.json is updated before the new agent starts emitting.
   //
+  // Notify agentChange handlers that the upstream (and possibly the agent)
+  // rotated, so SessionManager's persistAgentChange writes the new ids and
+  // stamps the retiring generation's spend.
+  //
+  // retiringGenerationCost is consumed here and cleared. Clearing is
+  // load-bearing: the next rotation may retire a generation that never
+  // reported any usage (two swaps with no turn in between), and
+  // accumulateAndResetCost only assigns the field when there is a nonzero
+  // amount to bank. A sticky value would then be stamped onto a
+  // zero-spend generation, mis-attributing the earlier generation's spend
+  // a second time. The lifetime total is unaffected — cumulativeCost is
+  // banked separately — but per-generation attribution would be wrong.
+  private notifyAgentChange(context: string): void {
+    const retiredCost = this.retiringGenerationCost;
+    this.retiringGenerationCost = undefined;
+    for (const handler of this.agentChangeHandlers) {
+      try {
+        handler({
+          agentId: this.agentId,
+          upstreamSessionId: this.upstreamSessionId,
+          ...(retiredCost !== undefined ? { retiredCost } : {}),
+        });
+      } catch (err) {
+        this.logger?.warn(
+          `${context}: agentChange handler failed: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
+
   private accumulateAndResetCost(): void {
     // Called when the upstream agent rotates (compaction swap, /hydra agent
     // switch, seed-from-import). Roll the prior life's cost into the
