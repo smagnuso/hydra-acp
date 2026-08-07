@@ -32,14 +32,14 @@ export interface SessionSummary {
   attachedClients: number;
   updatedAt: string;
   status?: "warm" | "cold";
-  // Mid-turn flag from the daemon. Renders as a filled trailing dot
-  // (`•`) in the STATE cell so the picker can show which warm sessions
+  // Mid-turn flag from the daemon. Renders the STATE cell's base word as
+  // `BUSY` instead of `WARM` so the picker can show which live sessions
   // are working without the user having to attach.
   busy?: boolean;
   // Set when the agent is blocked on the user (outstanding permission
-  // request / posed question). Renders as a hollow trailing dot (`◦`),
-  // distinct from the busy dot. Takes precedence over `busy` since a
-  // session awaiting input is mid-turn but stalled on the human.
+  // request / posed question). Renders as a hollow trailing dot (`◦`) on
+  // whichever base word applies, so `BUSY◦` and `WARM◦` stay
+  // distinguishable.
   awaitingInput?: boolean;
   // Present when compaction is in progress. Drives the trailing ⟳ in
   // the STATE cell (`WARM⟳`) so operators can spot mid-compaction
@@ -54,9 +54,9 @@ export interface SessionSummary {
 export interface Row {
   session: string;
   upstream: string;
-  // Live/cold status plus a trailing dot for in-flight work: filled
-  // `•` when mid-turn, hollow `◦` when blocked awaiting the user.
-  // `WARM` / `WARM•` / `WARM◦` / `COLD`.
+  // Live/cold status plus a trailing marker for in-flight work. The base
+  // word carries mid-turn state, the hollow `◦` carries blocked-on-user.
+  // `WARM` / `BUSY` / `WARM◦` / `BUSY◦` / `COLD`.
   state: string;
   agent: string;
   // Last-known model id, provider prefix stripped (e.g. "claude-opus-4").
@@ -239,15 +239,22 @@ export function formatUpstreamCell(
 }
 
 // Live/cold state cell. Cold sessions render as `COLD`. Live sessions
-// render as `WARM◦` when the agent is blocked awaiting the user (a
-// permission request / posed question), `WARM•` when actively mid-turn,
-// `WARM✨` when fork synopsis synthesis is running, `WARM⟳` when
-// background compaction is running, or plain `WARM` when idle.
-// Precedence: awaiting-input > busy > synthesizing > compacting > idle.
-// The two user-attention signals (◦, •) outrank the background-work
-// signals because they indicate something the operator may need to react
-// to. Failed synthesis shows ⚠ below any activity signal so it is always
-// visible regardless of what else is happening.
+// carry two independent signals that used to collapse into one another:
+//
+//   - the base word is `BUSY` when the agent is mid-turn, `WARM` when it
+//     is live but idle;
+//   - a trailing `◦` means the agent is blocked awaiting the user (a
+//     permission request / posed question).
+//
+// Those cross, so all four combinations are reachable and distinct:
+// `WARM`, `BUSY`, `WARM◦` (a pending question on a session whose turn is
+// over — often a flag nobody will clear), `BUSY◦`.
+//
+// The remaining markers are background-work signals and are mutually
+// exclusive with `◦`, which outranks them because it is the one thing
+// the operator has to react to: `✨` fork synopsis synthesis running,
+// `⟳` background compaction running. Failed synthesis shows `⚠` below
+// every other signal so it stays visible regardless.
 // The HEADER row reuses formatRow's plumbing but its `state` cell is
 // literal "STATE".
 function formatState(
@@ -260,22 +267,21 @@ function formatState(
   if (status === "cold") {
     return "COLD";
   }
+  const base = busy ? "BUSY" : "WARM";
+  const failed = forkSynthesisState === "failed" ? "\u26a0" : "";
   if (awaitingInput) {
-    return forkSynthesisState === "failed" ? "WARM◦⚠" : "WARM\u25e6";
-  }
-  if (busy) {
-    return forkSynthesisState === "failed" ? "WARM•⚠" : "WARM\u2022";
+    return `${base}\u25e6${failed}`;
   }
   if (forkSynthesisState === "running") {
-    return "WARM✨";
+    return `${base}\u2728`;
   }
-  if (forkSynthesisState === "failed") {
-    return "WARM⚠";
+  if (failed) {
+    return `${base}${failed}`;
   }
   if (compacting) {
-    return "WARM\u27f3";
+    return `${base}\u27f3`;
   }
-  return "WARM";
+  return base;
 }
 
 // Header-aware natural width per column. Only the selected columns are

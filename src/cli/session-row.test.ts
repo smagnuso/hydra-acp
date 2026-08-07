@@ -157,12 +157,12 @@ describe("toRow state column", () => {
     expect(r.state).toBe("WARM");
   });
 
-  it("renders WARM• for a warm session that is mid-turn", () => {
+  it("renders BUSY for a warm session that is mid-turn", () => {
     const r = toRow({ ...base, attachedClients: 1, status: "warm", busy: true });
-    expect(r.state).toBe("WARM•");
+    expect(r.state).toBe("BUSY");
   });
 
-  it("renders WARM◦ for a warm session awaiting user input", () => {
+  it("renders BUSY◦ for a mid-turn session awaiting user input", () => {
     const r = toRow({
       ...base,
       attachedClients: 1,
@@ -170,10 +170,10 @@ describe("toRow state column", () => {
       busy: true,
       awaitingInput: true,
     });
-    expect(r.state).toBe("WARM◦");
+    expect(r.state).toBe("BUSY◦");
   });
 
-  it("awaiting input wins over busy on the state glyph", () => {
+  it("distinguishes an idle session awaiting input from a busy one", () => {
     const r = toRow({
       ...base,
       attachedClients: 1,
@@ -329,13 +329,13 @@ describe("toRow compaction badge in STATE column", () => {
     expect(r.title).toBe("Auth refactor");
   });
 
-  it("busy takes precedence over compacting", () => {
+  it("shows compacting on the BUSY base word when both apply", () => {
     const r = toRow({
       ...base,
       busy: true,
       compactionState: { status: "running", requestedAt: Date.now() },
     });
-    expect(r.state).toBe("WARM\u2022");
+    expect(r.state).toBe("BUSY\u27f3");
   });
 
   it("awaitingInput takes precedence over compacting", () => {

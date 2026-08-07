@@ -436,7 +436,10 @@ describe("sortSessions", () => {
     ]);
   });
 
-  it("ranks awaiting-input elsewhere above busy in the current cwd", () => {
+  // An awaiting-input flag with no turn behind it is the weakest of the
+  // active signals — often nobody is standing by to act on it — so it
+  // sorts below a session that is actually mid-turn, in any cwd.
+  it("ranks busy above awaiting-input whose turn is already over", () => {
     const busyHere = session({
       sessionId: "hydra-here",
       status: "warm",
@@ -453,8 +456,39 @@ describe("sortSessions", () => {
     });
     const out = sortSessions([busyHere, awaitingElsewhere], cwd);
     expect(out.map((s) => s.sessionId)).toEqual([
-      "hydra-elsewhere",
       "hydra-here",
+      "hydra-elsewhere",
+    ]);
+  });
+
+  it("ranks busy + awaiting-input above plain busy", () => {
+    const busy = session({
+      sessionId: "hydra-busy",
+      status: "warm",
+      busy: true,
+      cwd,
+      updatedAt: "2026-05-20T12:00:00Z",
+    });
+    const busyAwaiting = session({
+      sessionId: "hydra-busy-awaiting",
+      status: "warm",
+      busy: true,
+      awaitingInput: true,
+      cwd,
+      updatedAt: "2026-05-20T10:00:00Z",
+    });
+    const idleAwaiting = session({
+      sessionId: "hydra-idle-awaiting",
+      status: "warm",
+      awaitingInput: true,
+      cwd,
+      updatedAt: "2026-05-20T13:00:00Z",
+    });
+    const out = sortSessions([idleAwaiting, busy, busyAwaiting], cwd);
+    expect(out.map((s) => s.sessionId)).toEqual([
+      "hydra-busy-awaiting",
+      "hydra-busy",
+      "hydra-idle-awaiting",
     ]);
   });
 

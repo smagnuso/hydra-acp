@@ -4574,16 +4574,23 @@ function formatComposerTitle(cwd: string, maxWidth: number): string {
 }
 
 // Order sessions for the picker. Tiers (highest first):
-//   5: live + awaiting input
-//   4: live + busy
+//   6: live + busy + awaiting input
+//   5: live + busy
+//   4: live + awaiting input (turn over)
 //   3: live + priority (idle)
 //   2: live (idle)
 //   1: cold + priority
 //   0: cold
-// Active sessions (awaiting input / busy) outrank everything else —
-// even pinned ones — because they're the ones with real-time activity
-// the user might want to peek at. Priority then floats idle-live rows
-// above other idle-live, and cold-priority rows above plain cold.
+// Active sessions outrank everything else — even pinned ones — because
+// they're the ones with real-time activity the user might want to peek
+// at. Busy is the primary axis and awaiting-input breaks ties within it:
+// a mid-turn agent blocked on a question is the most urgent row there
+// is, but an awaiting-input flag on a session whose turn is already over
+// is the *least* urgent of the active signals, since it is frequently
+// just a flag nobody cleared (see the dead-agent case in
+// daemon/server.ts) rather than an agent actually standing by. Hence 4
+// sits below plain busy. Priority then floats idle-live rows above other
+// idle-live, and cold-priority rows above plain cold.
 // Within a tier, higher priority value wins; final tiebreak is
 // updatedAt at minute precision so per-chunk mtime churn doesn't
 // reshuffle the list between auto-refreshes.
@@ -4596,8 +4603,9 @@ export function sortSessions(
   const tier = (s: DiscoveredSession): number => {
     const isWarm = s.status === "warm";
     const isPriority = priorityOf(s) > 0;
-    if (isWarm && s.awaitingInput) return 5;
-    if (isWarm && s.busy) return 4;
+    if (isWarm && s.busy && s.awaitingInput) return 6;
+    if (isWarm && s.busy) return 5;
+    if (isWarm && s.awaitingInput) return 4;
     if (isWarm && isPriority) return 3;
     if (isWarm) return 2;
     if (isPriority) return 1;
