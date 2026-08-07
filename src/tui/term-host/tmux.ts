@@ -97,6 +97,12 @@ const TOKEN_KEYS = [
   "@hydra_model",
   "@hydra_cost",
   "@hydra_queue",
+  // Unlike its neighbours this one is not for display: `tmux-hardcopy.sh`
+  // reads it to decide whether the pane is showing a hydra session, and
+  // which. It lives here rather than in terminal-user-var.ts — which used
+  // to set it with its own detached `tmux set-option` — so that setting and
+  // unsetting share this class's pane target, timeout, and teardown path.
+  "@hydra_session",
 ] as const;
 
 function detect(env: NodeJS.ProcessEnv): boolean {
@@ -177,6 +183,9 @@ class TmuxHost implements TerminalHost {
       "@hydra_model": snap.model,
       "@hydra_cost": snap.cost,
       "@hydra_queue": snap.queued !== null && snap.queued > 0 ? String(snap.queued) : null,
+      // snap.sessionId is the HYDRA session; this.sessionId() above is the
+      // tmux one. Unrelated despite the name.
+      "@hydra_session": snap.sessionId,
     };
   }
 

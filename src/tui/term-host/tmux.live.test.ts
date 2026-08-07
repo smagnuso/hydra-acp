@@ -91,6 +91,7 @@ describe.skipIf(!installed)("tmux adapter against a real server", () => {
     // #{@hydra_state} in window-status-format sees which sessions need them.
     await host.report({
       state: "blocked",
+      sessionId: "hydra_session_LIVEBLOCKED",
       title: "Refactor auth",
       cwd: "/tmp",
       agent: "claude-code",
@@ -111,6 +112,7 @@ describe.skipIf(!installed)("tmux adapter against a real server", () => {
   it("clears tokens rather than leaving a stale value after a switch", async () => {
     await host.report({
       state: "idle",
+      sessionId: "hydra_session_LIVEIDLE",
       title: "Other",
       cwd: "/tmp",
       agent: null,

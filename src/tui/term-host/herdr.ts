@@ -75,7 +75,18 @@ const AGENT_LABEL = "hydra";
 
 // The complete set of tokens we own. Every metadata report sends all of
 // them so a session switch can't leak stale values.
-const TOKEN_KEYS = ["kind", "cwd", "model", "cost", "queue"] as const;
+//
+// `session` is the odd one out: the others are display values a user may
+// render in a sidebar row, while `session` exists so external tooling can
+// ask herdr which session a pane is attached to. It rides the token map
+// because herdr's purpose-built field for this — `agent_session`, set via
+// `pane.report_agent_session` — silently discards our value:
+// `session_ref_from_report` gates on `is_official_agent_source`, a
+// hardcoded allowlist of herdr's own 16 integrations, and returns `ok`
+// while dropping the id for everyone else. Tokens have no such gate.
+// If hydra is ever added to that allowlist, move `session` there and drop
+// it from this set.
+const TOKEN_KEYS = ["kind", "cwd", "model", "cost", "queue", "session"] as const;
 type TokenKey = (typeof TOKEN_KEYS)[number];
 type Tokens = Record<TokenKey, string | null>;
 
@@ -324,6 +335,7 @@ class HerdrHost implements TerminalHost {
       model: snap.model ?? null,
       cost: snap.cost ?? null,
       queue: formatQueue(snap.queued),
+      session: snap.sessionId ?? null,
     };
   }
 
@@ -422,6 +434,7 @@ class HerdrHost implements TerminalHost {
       model: null,
       cost: null,
       queue: null,
+      session: null,
     };
     const flushed = this.send([
       {

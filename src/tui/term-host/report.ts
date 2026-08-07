@@ -160,6 +160,7 @@ function resolveTitle(): string | null {
 function snapshot(): TerminalHostSnapshot {
   return {
     state: deriveState(),
+    sessionId: live.sessionId ?? null,
     title: resolveTitle(),
     cwd: live.cwd?.trim() || null,
     agent: live.agent ?? null,

@@ -527,6 +527,7 @@ describe("tokens", () => {
       model: "opus-5",
       cost: "$1.24",
       queue: "3",
+      session: "s1",
     });
 
     // Switching to a session with no model/cost/queue must null those
@@ -548,6 +549,9 @@ describe("tokens", () => {
       model: null,
       cost: null,
       queue: null,
+      // The whole reason this token exists: it has to follow an
+      // in-process switch, which argv and the environment cannot.
+      session: "s2",
     });
   });
 
@@ -556,6 +560,20 @@ describe("tokens", () => {
     await settle();
     expect(
       (lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>).cost,
+    ).toBeNull();
+  });
+
+  it("clears the session token on release", async () => {
+    // A pane still advertising a session after the TUI exited would send
+    // the hardcopy script off to fetch a transcript for a session nobody
+    // is attached to.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    await settle();
+    frames = [];
+    await releaseTerminalHost();
+    await settle();
+    expect(
+      (lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>).session,
     ).toBeNull();
   });
 });

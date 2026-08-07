@@ -54,6 +54,7 @@ function argv(n = 0): string[] {
 function snapshot(over: Partial<TerminalHostSnapshot> = {}): TerminalHostSnapshot {
   return {
     state: "working",
+    sessionId: "hydra_session_TESTSESSION",
     title: "Refactor auth",
     cwd: "/home/me/dev/proj",
     agent: "claude-code",
@@ -129,7 +130,7 @@ describe("targeting", () => {
     const a = argv();
     // Every set-option in the chain carries the target, not just the first.
     const targets = a.filter((_, i) => a[i - 1] === "-t");
-    expect(targets).toHaveLength(7);
+    expect(targets).toHaveLength(8);
     expect(new Set(targets)).toEqual(new Set(["%3"]));
   });
 
@@ -221,12 +222,13 @@ describe("splitTab", () => {
 
 describe("report", () => {
   it("writes the whole token set in a single invocation", async () => {
-    // Seven spawns per report would be absurd at the banner funnel's 1Hz.
+    // One spawn per report; eight set-options chained inside it. Anything
+    // per-key would be absurd at the banner funnel's 1Hz.
     await host().report(snapshot());
     expect(calls).toHaveLength(1);
     const a = argv();
-    expect(a.filter((x) => x === ";")).toHaveLength(6);
-    expect(a.filter((x) => x === "set-option")).toHaveLength(7);
+    expect(a.filter((x) => x === ";")).toHaveLength(7);
+    expect(a.filter((x) => x === "set-option")).toHaveLength(8);
   });
 
   it("sets semantic words, not glyphs", async () => {
@@ -283,12 +285,30 @@ describe("report", () => {
     await host().report(snapshot());
     calls = [];
     await host().release();
-    expect(argv().filter((x) => x === "-u")).toHaveLength(7);
+    expect(argv().filter((x) => x === "-u")).toHaveLength(8);
   });
 
   it("does not clear on release when nothing was ever reported", async () => {
     await host().release();
     expect(calls).toEqual([]);
+  });
+
+  it("publishes the hydra session id as @hydra_session", async () => {
+    // tmux-hardcopy.sh reads this to decide whether the pane is showing a
+    // hydra session, and which one. It used to be set by a detached
+    // `tmux set-option` in terminal-user-var.ts; owning it here is what
+    // makes it follow an in-process session switch.
+    await host().report(snapshot({ sessionId: "hydra_session_abc" }));
+    const a = argv();
+    expect(a[a.indexOf("@hydra_session") + 1]).toBe("hydra_session_abc");
+  });
+
+  it("unsets @hydra_session on release so a dead TUI stops advertising", async () => {
+    await host().report(snapshot({ sessionId: "hydra_session_abc" }));
+    calls = [];
+    await host().release();
+    const a = argv();
+    expect(a[a.indexOf("@hydra_session") - 1]).toBe("-u");
   });
 });
 

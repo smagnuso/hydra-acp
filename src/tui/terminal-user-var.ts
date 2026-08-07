@@ -1,13 +1,14 @@
 // Advertise the currently-attached hydra session id to external
-// tooling. Two independent channels — one per consumer:
+// tooling, on the channels that work with NO terminal host at all.
 //
-//  1. tmux pane user option `@hydra_session` (via `tmux set-option
-//     -p`). Set on TUI attach, cleared on TUI exit. Used by
-//     `tmux-hardcopy.sh` and any other tmux binding that needs to
-//     know "is hydra running in this pane right now, and if so which
-//     session". Skipped when $TMUX_PANE is unset.
+// Host-specific publishing lives in the hosts: TmuxHost owns the
+// `@hydra_session` pane option and HerdrHost owns the `session`
+// metadata token, both driven from TerminalHostSnapshot.sessionId so
+// they follow an in-process session switch. What's left here is the
+// two channels that have to work in a plain xterm over ssh, where
+// there is no host to own them:
 //
-//  2. A per-TTY sticky file at ~/.hydra-acp/tty/<tty-basename>
+//  1. A per-TTY sticky file at ~/.hydra-acp/tty/<tty-basename>
 //     containing the session id. Set on TUI attach; NEVER cleared on
 //     exit. Used by `hydra --reattach` to prefer "the last session
 //     that lived on this terminal" over "the most-recent session for
@@ -15,22 +16,22 @@
 //     Alacritty, Ghostty, plain xterm, in or out of tmux/screen —
 //     because it only depends on stdin pointing at a real TTY.
 //
-// The tmux setopt runs detached; failures are swallowed (missing
-// binary, unreachable server). The file write is best-effort too —
-// if we can't resolve the controlling TTY or writing fails, we just
-// skip the sticky part. Neither channel is required to be reliable
-// enough to block session attach.
+//  2. OSC 1337 SetUserVar bytes on stdout, in case a terminal picks
+//     them up natively (iTerm2, Kitty). Nothing in hydra depends on
+//     this path — it's decoration, and worth knowing that herdr in
+//     particular drops it: the libghostty-vt OSC 1337 parser lists
+//     SetUserVar as unimplemented and invalidates the sequence.
 //
-// The OSC 1337 SetUserVar bytes still go on the wire in case a
-// terminal picks them up natively (iTerm2, Kitty), but nothing in
-// hydra depends on that path — it's decoration.
+// The file write is best-effort — if we can't resolve the controlling
+// TTY or writing fails, we just skip the sticky part. Neither channel
+// is required to be reliable enough to block session attach.
 //
 // Files accumulate one per pty basename that ever hosted hydra on
 // this host; they're small and rarely churn. If cleanup ever
 // matters, add a periodic sweep that unlinks entries older than N
 // days — out of scope here.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { paths } from "../core/paths.js";
@@ -43,19 +44,6 @@ const ST = "\x1b\\";
 function writeOSC(name: string, value: string): void {
   const encoded = Buffer.from(value, "utf8").toString("base64");
   process.stdout.write(`${OSC}1337;SetUserVar=${name}=${encoded}${BEL}`);
-}
-
-function runTmuxDetached(args: string[]): void {
-  if (!process.env.TMUX_PANE) {
-    return;
-  }
-  try {
-    const child = spawn("tmux", args, { stdio: "ignore", detached: true });
-    child.on("error", () => {});
-    child.unref();
-  } catch {
-    // Best-effort — nothing to surface to the user here.
-  }
 }
 
 // Resolve the controlling TTY's basename (e.g. "pts0", "ttys004").
@@ -293,24 +281,11 @@ export function restoreReportedCwd(): void {
 
 export function publishActiveHydraSession(sessionId: string): void {
   writeOSC("hydra_session", sessionId);
-  runTmuxDetached([
-    "set-option",
-    "-pt",
-    process.env.TMUX_PANE ?? "",
-    "@hydra_session",
-    sessionId,
-  ]);
   writeTtyStickyFile(sessionId);
 }
 
 export function clearActiveHydraSession(): void {
   writeOSC("hydra_session", "");
-  runTmuxDetached([
-    "set-option",
-    "-put",
-    process.env.TMUX_PANE ?? "",
-    "@hydra_session",
-  ]);
   // Deliberately does NOT delete the per-TTY sticky file — that file
   // is the sticky "last session on this terminal" pointer that
   // `hydra --reattach` reads.

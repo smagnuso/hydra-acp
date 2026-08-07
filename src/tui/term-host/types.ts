@@ -44,6 +44,21 @@ export type AgentActivity = "idle" | "working" | "blocked" | "unknown";
  */
 export interface TerminalHostSnapshot {
   state: AgentActivity;
+  /**
+   * The session the pane is CURRENTLY attached to.
+   *
+   * Published so external tooling can ask a host "which hydra session is
+   * this pane showing right now" — `tmux-hardcopy.sh` and its herdr
+   * equivalent both hinge on it. It has to ride the snapshot rather than
+   * being read from argv or the environment, because the TUI switches
+   * sessions in-process: `hydra tui --session X` keeps X in argv forever
+   * while this field follows the switch.
+   *
+   * Never null in practice — report.ts refuses to flush before it knows
+   * the session — but typed like its neighbours so hosts don't have to
+   * care about that invariant.
+   */
+  sessionId: string | null;
   /** Already resolved by core, including the fall back to a cwd label. */
   title: string | null;
   /** The SESSION's cwd (not the pane process's — they diverge on switch). */
