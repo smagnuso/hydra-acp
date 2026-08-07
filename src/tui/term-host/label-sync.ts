@@ -64,6 +64,36 @@ export const TAB_LABEL_ENV = "HYDRA_TAB_LABEL";
  */
 export const TRANSIENT_TAB_LABEL = "hydra…";
 
+/**
+ * Longest tab label hydra will write.
+ *
+ * Tab bars divide a fixed width between every tab, so one long label
+ * doesn't just clip itself, it squeezes its neighbours. Session titles
+ * are frequently the user's opening message and run to hundreds of
+ * characters, which is unusable in a tab bar.
+ *
+ * Same 40 as the prompt-derived labels in open.ts, which have always
+ * been truncated for exactly this reason — session titles were simply
+ * never routed through the same policy.
+ */
+export const TAB_LABEL_MAX = 40;
+
+/**
+ * Reduce arbitrary text to something a tab bar can render.
+ *
+ * First line only: a pasted multi-line prompt can become a session
+ * title, and a newline in a tab label corrupts the bar rather than
+ * wrapping. Then truncate, counting the ellipsis toward the budget so
+ * the result is never longer than TAB_LABEL_MAX.
+ */
+export function tabLabelFor(text: string): string {
+  const first = text.split("\n")[0]?.trim() ?? "";
+  if (first.length <= TAB_LABEL_MAX) {
+    return first;
+  }
+  return `${first.slice(0, TAB_LABEL_MAX - 1).trimEnd()}…`;
+}
+
 // The label we last successfully wrote. This is what makes guard (1) stable
 // across the many title updates in one session: after our first rename the
 // label is no longer auto-generated, so without this we would rename exactly
@@ -241,7 +271,9 @@ export function syncTabLabel(
   if (!labelHost()) {
     return;
   }
-  const want = title?.trim();
+  // Truncate here rather than at the call sites: this is the only way a
+  // tab label is written, so capping it here means no caller can forget.
+  const want = title ? tabLabelFor(title) : "";
   if (!want) {
     return;
   }

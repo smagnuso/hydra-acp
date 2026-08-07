@@ -5,6 +5,8 @@ import {
   mayRenameTab,
   restoreTabLabel,
   syncTabLabel,
+  TAB_LABEL_MAX,
+  tabLabelFor,
   TRANSIENT_TAB_LABEL,
 } from "./label-sync.js";
 import type { TabLabelView, TerminalHost } from "./types.js";
@@ -476,5 +478,58 @@ describe("transient labels", () => {
     tab = tabGet("real title");
     await restoreTabLabel();
     expect(renames()).toEqual(["1"]);
+  });
+});
+
+// A session title is frequently the user's whole opening message. Tab bars
+// divide a fixed width between every tab, so one 200-character label does
+// not merely clip itself — it squeezes every neighbour out of view.
+describe("tab labels are capped for the tab bar", () => {
+  const long =
+    "wonder if we should mark busy sessions as BUSY in picker state, " +
+    "because a session with pending questions and busy is impossible to tell apart";
+
+  it("truncates a long title to the cap, ellipsis included", async () => {
+    tab = tabGet("1");
+    syncTabLabel(long);
+    await settle();
+    const written = renames()[0]!;
+    // Never longer than the cap. It can be shorter: a trailing space is
+    // trimmed before the ellipsis rather than rendered as a gap.
+    expect(written.length).toBeLessThanOrEqual(TAB_LABEL_MAX);
+    expect(written.length).toBeGreaterThan(TAB_LABEL_MAX - 3);
+    expect(written.endsWith("…")).toBe(true);
+    expect(long.startsWith(written.slice(0, -1))).toBe(true);
+  });
+
+  it("leaves a short title exactly as it is", async () => {
+    tab = tabGet("1");
+    syncTabLabel("NRDAPP-14698");
+    await settle();
+    expect(renames()).toEqual(["NRDAPP-14698"]);
+  });
+
+  it("keeps only the first line, so a pasted prompt cannot corrupt the bar", () => {
+    expect(tabLabelFor("first line\nsecond line")).toBe("first line");
+  });
+
+  it("does not leave a dangling space before the ellipsis", () => {
+    const text = "x".repeat(TAB_LABEL_MAX - 1) + " tail";
+    expect(tabLabelFor(text)).toBe("x".repeat(TAB_LABEL_MAX - 1) + "…");
+  });
+
+  it("still owns the tab after truncating, so later titles keep syncing", async () => {
+    // `applied` has to record what was WRITTEN, not what was asked for, or
+    // the ownership guard would read our own truncated label back as a
+    // name a human chose and stop syncing.
+    tab = tabGet("1");
+    syncTabLabel(long);
+    await settle();
+    const written = renames()[0]!;
+    tab = tabGet(written);
+    sent = [];
+    syncTabLabel("Second title");
+    await settle();
+    expect(renames()).toEqual(["Second title"]);
   });
 });

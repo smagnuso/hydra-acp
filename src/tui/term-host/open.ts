@@ -12,7 +12,7 @@
 // management.
 
 import { terminalHost } from "./index.js";
-import { tabLabelOwnershipEnv } from "./label-sync.js";
+import { tabLabelFor, tabLabelOwnershipEnv } from "./label-sync.js";
 import type { OpenTabResult } from "./types.js";
 
 /** Whether the active host can open a new tab at all. */
@@ -67,23 +67,14 @@ function hydraArgv(args: string[]): string[] {
   return [...base, "tui", ...args];
 }
 
-const PROMPT_LABEL_MAX = 40;
-
 /**
  * A tab label derived from a prompt: first line, truncated.
  *
- * Only the first line, because a pasted multi-line prompt would otherwise put
- * newlines in a tab label. Truncated because tab bars are narrow and hosts
- * render whatever they're given.
+ * Shares tabLabelFor with the session-title path so both obey one cap;
+ * this function only adds the empty-prompt fallback.
  */
 export function labelForPrompt(prompt: string | undefined): string {
-  const first = prompt?.split("\n")[0]?.trim();
-  if (!first) {
-    return "new session";
-  }
-  return first.length > PROMPT_LABEL_MAX
-    ? `${first.slice(0, PROMPT_LABEL_MAX - 1)}…`
-    : first;
+  return (prompt ? tabLabelFor(prompt) : "") || "new session";
 }
 
 export interface OpenExistingSpec {
@@ -109,7 +100,9 @@ export type OpenSpec = OpenExistingSpec | OpenNewSpec;
 function buildArgs(spec: OpenSpec): { label: string; args: string[] } {
   if (spec.kind === "attach") {
     return {
-      label: spec.title?.trim() || spec.sessionId,
+      // Same cap as labelForPrompt below: a session title is often the
+      // user's opening message and runs to hundreds of characters.
+      label: (spec.title ? tabLabelFor(spec.title) : "") || spec.sessionId,
       args: ["--session", spec.sessionId],
     };
   }
