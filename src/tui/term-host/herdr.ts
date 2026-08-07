@@ -376,7 +376,27 @@ class HerdrHost implements TerminalHost {
     const tokens = this.tokens(snap);
     const metaKey = JSON.stringify({ title: snap.title, tokens });
     const frames: Array<{ method: string; params: unknown }> = [];
-    if (this.sentState !== snap.state) {
+    // Withhold an OPENING `unknown`, and only that one.
+    //
+    // The two funnels core reports from don't arrive together: the session
+    // bar seeds first, so there is no banner to derive activity from yet and
+    // the state is `unknown`. The banner lands a moment later and corrects it
+    // to `idle`. Publishing both makes herdr see `unknown -> idle, same
+    // agent`, which is precisely its definition of a COMPLETION — so every
+    // freshly attached pane announces that its agent just finished. Attach a
+    // few at once and it is a burst of false "done" toasts.
+    //
+    // This lives in the adapter rather than in core because it is herdr's
+    // reading of that pair that causes the problem; tmux is indifferent to
+    // it, and core's state machine should not be bent around one host's
+    // notification heuristic.
+    //
+    // Skipping the frame means herdr never learns an agent label here, which
+    // is what makes the following `idle` a first observation rather than a
+    // transition. The cost is no agent row until a real state arrives, a
+    // fraction of a second, versus a false notification on every attach.
+    const withholdOpeningUnknown = this.sentState === null && snap.state === "unknown";
+    if (this.sentState !== snap.state && !withholdOpeningUnknown) {
       frames.push({
         method: "pane.report_agent",
         params: {

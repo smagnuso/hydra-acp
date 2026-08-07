@@ -260,15 +260,41 @@ describe("reporting gate", () => {
     expect(frames).toEqual([]);
   });
 
-  it("reports once a session id arrives", async () => {
+  it("publishes identity as soon as a session id arrives", async () => {
     reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
-    expect(methodsSent()).toContain("pane.report_agent");
+    expect(methodsSent()).toContain("pane.report_metadata");
+  });
+
+  it("claims the pane once a real state is known, not before", async () => {
+    // The session bar seeds before the banner, so the only state available
+    // at that point is `unknown` — see the withhold in report().
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    await settle();
+    expect(methodsSent()).not.toContain("pane.report_agent");
+
+    reportBanner({ status: "ready" });
+    await settle();
     expect(lastOf("pane.report_agent")!.params).toMatchObject({
       pane_id: "w1:p1",
       source: "hydra",
       agent: "hydra",
+      state: "idle",
     });
+  });
+
+  it("never publishes the opening unknown, so herdr sees no completion", async () => {
+    // `unknown -> idle, same agent` is herdr's definition of a completion.
+    // Publishing the pair made every freshly attached pane announce that
+    // its agent had just finished.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    await settle();
+    reportBanner({ status: "ready" });
+    await settle();
+    const states = frames
+      .filter((f) => f.method === "pane.report_agent")
+      .map((f) => f.params.state);
+    expect(states).toEqual(["idle"]);
   });
 });
 
@@ -360,6 +386,7 @@ describe("suspended (picker up)", () => {
 
   it("re-claims the pane when the picker closes", async () => {
     reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportBanner({ status: "ready" });
     await settle();
     setReportSuspended(true);
     await settle();
@@ -534,6 +561,8 @@ describe("seq", () => {
   it("advances by exactly one per frame, so drift is bounded by frame count", async () => {
     reportSessionbar({ sessionId: "s1", agent: "claude" });
     await settle();
+    reportBanner({ status: "ready" });
+    await settle();
     const seqs = frames.map((f) => f.params.seq as number);
     expect(seqs.length).toBe(2);
     expect(seqs[1]! - seqs[0]!).toBe(1);
@@ -649,6 +678,7 @@ describe("agent identity", () => {
   // daemon-owned one on restart.
   it("keeps the semantic agent label as hydra so herdr cannot resume it", async () => {
     reportSessionbar({ sessionId: "s1", agent: "claude" });
+    reportBanner({ status: "ready" });
     await settle();
     expect(lastOf("pane.report_agent")!.params.agent).toBe("hydra");
   });
@@ -823,7 +853,10 @@ describe("socket failure", () => {
   it("uses exactly one connection per frame", async () => {
     reportSessionbar({ sessionId: "s1", agent: "claude", title: "t" });
     await settle();
-    // First report emits both a state frame and a metadata frame.
+    reportBanner({ status: "ready" });
+    await settle();
+    // Metadata lands with the session bar; the state frame waits for the
+    // banner. Two frames either way, one connection each.
     expect(frames.length).toBe(2);
     expect(connectCalls).toBe(2);
   });
