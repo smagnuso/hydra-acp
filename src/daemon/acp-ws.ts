@@ -2122,10 +2122,13 @@ export function registerAcpWsEndpoint(
       const { modelId } = decision;
       // Forward the resolved modelId (may differ from the requested one
       // when a bare id resolved to a provider-prefixed advertised id).
-      const result = await decision.session.forwardRequest("session/set_model", {
-        ...(rawParams as Record<string, unknown>),
+      // forwardModelChange picks the verb the agent actually implements
+      // (session/set_model vs session/set_config_option) — see
+      // core/model-verb.ts.
+      const result = await decision.session.forwardModelChange(
         modelId,
-      });
+        rawParams as Record<string, unknown>,
+      );
       // Mirror set_mode: apply the change daemon-side so all attached clients
       // (including the originator) receive a current_model_update immediately,
       // regardless of whether the agent emits one on its own.
@@ -2210,10 +2213,7 @@ export function registerAcpWsEndpoint(
       switch (params.configId) {
         case "model": {
           if (params.value !== session.currentModel) {
-            await session.forwardRequest("session/set_model", {
-              sessionId: params.sessionId,
-              modelId: params.value,
-            });
+            await session.forwardModelChange(params.value);
           }
           session.applyModelChange(params.value);
           break;

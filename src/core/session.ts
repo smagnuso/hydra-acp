@@ -56,6 +56,12 @@ import {
   type ConfigOptionValue,
 } from "./hydra-commands.js";
 import { resolveCandidate, resolveModelId } from "./model-resolve.js";
+import {
+  MODEL_VERB_SET_MODEL,
+  inferModelVerbFromUpdate,
+  requestModelChange,
+  type ModelVerb,
+} from "./model-verb.js";
 import type { ExtensionCommandRegistry } from "./extension-commands.js";
 import type { HistoryEntry, HistoryStore } from "./history-store.js";
 import { coalesceReplay } from "./coalesce-replay.js";
@@ -124,6 +130,10 @@ export interface SpawnReplacementAgentResult {
   initialModels?: AdvertisedModel[];
   initialMode?: string;
   initialModes?: AdvertisedMode[];
+  // Which verb this agent takes for model changes, inferred from the
+  // shape of its session/new response (see core/model-verb.ts).
+  // Undefined when the response advertised no models at all.
+  modelVerb?: ModelVerb;
 }
 
 export type SpawnReplacementAgent = (
@@ -165,6 +175,10 @@ export interface SessionInit {
   // don't have to re-probe the agent later. Used by cat --stream to
   // pick between MCP and file surfaces.
   agentCapabilities?: AgentCapabilities;
+  // Verb this agent takes for model changes, inferred by SessionManager
+  // from the session/new / session/load response shape. Only the lead
+  // verb — forwardModelChange still probes if the agent disagrees.
+  modelVerb?: ModelVerb;
   agentArgs?: string[];
   idleTimeoutMs?: number;
   // Pino-style logger for close + idle paths. Optional so tests/consumers
@@ -426,6 +440,15 @@ export class Session {
   upstreamSessionId: string;
   agentMeta: Record<string, unknown> | undefined;
   agentCapabilities: AgentCapabilities | undefined;
+  // Which wire verb this agent generation accepts for model changes.
+  // Seeded per agent generation from the session/new response shape
+  // (see model-verb.ts), refined by agent notifications, and finally
+  // pinned by whichever verb an actual call accepted.
+  private modelVerb: ModelVerb = MODEL_VERB_SET_MODEL;
+  // True once a model change actually succeeded on this agent
+  // generation — an accepted call outranks any inference, so hints stop
+  // moving `modelVerb` after that.
+  private modelVerbConfirmed = false;
   readonly agentArgs: string[] | undefined;
   readonly parentSessionId: string | undefined;
   readonly forkedFromSessionId: string | undefined;
@@ -941,6 +964,7 @@ export class Session {
     // attaching now is current activity.
     this.lastRecordedAt = this.updatedAt;
 
+    this.resetModelVerb(init.modelVerb);
     this.wireAgent(this.agent);
     this.scheduleIdleCheck();
     this.notifyChain("session.opened", {});
@@ -1196,6 +1220,13 @@ export class Session {
       this.setAgentAdvertisedModes(agentModes);
       return;
     }
+    // Model advertisement shape tells us which verb this agent takes:
+    // current_model_update ⇒ session/set_model, config_option_update with
+    // a "model" entry ⇒ session/set_config_option (model-verb.ts).
+    this.noteModelVerbHint(
+      inferModelVerbFromUpdate((envelope as { update?: unknown }).update),
+      "session/update",
+    );
     if (this.maybeApplyAgentModel(envelope)) {
       this.recordAndBroadcast("session/update", envelope);
       return;
@@ -1517,6 +1548,7 @@ export class Session {
     this.upstreamSessionId = fresh.upstreamSessionId;
     this.agentMeta = fresh.agentMeta;
     this.agentCapabilities = fresh.agentCapabilities;
+    this.resetModelVerb(fresh.modelVerb);
 
     if (crossAgent) {
       this.agentId = targetAgentId;
@@ -1694,6 +1726,7 @@ export class Session {
     this.upstreamSessionId = fresh.upstreamSessionId;
     this.agentMeta = fresh.agentMeta;
     this.agentCapabilities = fresh.agentCapabilities;
+    this.resetModelVerb(fresh.modelVerb);
 
     this.broadcastMergedCommands();
     this.broadcastConfigOptions();
@@ -3120,6 +3153,57 @@ export class Session {
       return undefined;
     }
     return this.agent.connection.request(method, envelope);
+  }
+
+  // Push a model change to the agent, tolerating both wire verbs
+  // (`session/set_model` and `session/set_config_option` with
+  // configId "model" — see model-verb.ts for why both exist). Routes
+  // through forwardRequest so the transformer chain still sees the
+  // call; a probe that gets MethodNotFound means transformers may see
+  // the rejected verb first, then the accepted one.
+  //
+  // Every hydra path that changes a live session's model MUST go
+  // through here rather than forwarding session/set_model directly —
+  // otherwise agents on @agentclientprotocol/sdk >= 0.26 (pi-acp) fail
+  // the change with -32601.
+  async forwardModelChange(
+    modelId: string,
+    extraParams?: Record<string, unknown>,
+  ): Promise<unknown> {
+    const outcome = await requestModelChange({
+      request: (method, params) => this.forwardRequest(method, params),
+      sessionId: this.sessionId,
+      modelId,
+      verb: this.modelVerb,
+      extraParams,
+      logger: this.logger,
+    });
+    // An accepted call is ground truth — pin it so later hints can't
+    // move us back onto a verb the agent already rejected.
+    this.modelVerb = outcome.verb;
+    this.modelVerbConfirmed = true;
+    return outcome.result;
+  }
+
+  // Adopt an inferred lead verb (from a session/new response shape or an
+  // agent notification). No-op once a real call has confirmed a verb, or
+  // when there's nothing to infer.
+  private noteModelVerbHint(verb: ModelVerb | undefined, source: string): void {
+    if (verb === undefined || this.modelVerbConfirmed || verb === this.modelVerb) {
+      return;
+    }
+    this.logger?.info(
+      `model verb for agent ${this.agentId} inferred as ${verb} from ${source} (was ${this.modelVerb})`,
+    );
+    this.modelVerb = verb;
+  }
+
+  // Reset the model-verb state for a fresh agent generation. A swapped-in
+  // agent may speak the other verb, so nothing about the dead agent's
+  // answer carries over.
+  private resetModelVerb(verb: ModelVerb | undefined): void {
+    this.modelVerb = verb ?? MODEL_VERB_SET_MODEL;
+    this.modelVerbConfirmed = false;
   }
 
   // Walk the agent→client request chain. Currently dispatched for
@@ -4944,10 +5028,7 @@ export class Session {
       });
       return { stopReason: "end_turn" };
     }
-    await this.forwardRequest("session/set_model", {
-      sessionId: this.sessionId,
-      modelId,
-    });
+    await this.forwardModelChange(modelId);
     // Mirror the daemon's session/set_model WS handler (acp-ws.ts) —
     // update the cached currentModel and broadcast a synthetic
     // current_model_update. Some agents don't emit one themselves, so
@@ -5131,10 +5212,7 @@ export class Session {
     // appeared to no-op.
     if (id === "model") {
       if (resolvedValue !== this.currentModel) {
-        await this.forwardRequest("session/set_model", {
-          sessionId: this.sessionId,
-          modelId: resolvedValue,
-        });
+        await this.forwardModelChange(resolvedValue);
       }
       this.applyModelChange(resolvedValue);
       return { stopReason: "end_turn" };
@@ -5521,6 +5599,7 @@ export class Session {
     this.upstreamSessionId = fresh.upstreamSessionId;
     this.agentMeta = fresh.agentMeta;
     this.agentCapabilities = fresh.agentCapabilities;
+    this.resetModelVerb(fresh.modelVerb);
     this.agentAdvertisedCommands = [];
     this.broadcastMergedCommands();
     // Re-advertise the restarted agent's models/modes from its session/new

@@ -57,6 +57,11 @@ import type {
 } from "./hydra-commands.js";
 import { resolveModelId } from "./model-resolve.js";
 import {
+  inferModelVerbFromResult,
+  requestModelChange,
+  type ModelVerb,
+} from "./model-verb.js";
+import {
   HYDRA_CLIENT_CAPABILITIES,
   type AgentCapabilities,
   type AuthMethod,
@@ -670,6 +675,7 @@ export class SessionManager {
       upstreamSessionId: fresh.upstreamSessionId,
       agentMeta: fresh.agentMeta,
       agentCapabilities: fresh.agentCapabilities,
+      ...(fresh.modelVerb ? { modelVerb: fresh.modelVerb } : {}),
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
@@ -910,11 +916,15 @@ export class SessionManager {
     // _meta extension, opencode and claude-acp with _meta both agree),
     // push the persisted model back via set_model. Falls back to whatever
     // the agent reported if the call fails.
+    // Verb inferred from the session/load response shape; restoreCurrentModel
+    // leads with it and probes the other on MethodNotFound.
+    const loadedModelVerb = inferModelVerbFromResult(loadResult);
     const effectiveModel = await restoreCurrentModel({
       agent,
       upstreamSessionId: params.upstreamSessionId,
       persistedModel: params.currentModel,
       agentReportedModel,
+      ...(loadedModelVerb ? { modelVerb: loadedModelVerb } : {}),
       logger: this.logger,
     });
     if (params.pendingHistorySync !== true) {
@@ -932,6 +942,7 @@ export class SessionManager {
       upstreamSessionId: params.upstreamSessionId,
       agentMeta: loadResult?._meta as Record<string, unknown> | undefined,
       agentCapabilities,
+      ...(loadedModelVerb ? { modelVerb: loadedModelVerb } : {}),
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
@@ -1037,6 +1048,7 @@ export class SessionManager {
       upstreamSessionId: fresh.upstreamSessionId,
       persistedModel: params.currentModel,
       agentReportedModel: fresh.initialModel,
+      ...(fresh.modelVerb ? { modelVerb: fresh.modelVerb } : {}),
       logger: this.logger,
     });
     // Drop any buffered session/update notifications that arrived during
@@ -1050,6 +1062,7 @@ export class SessionManager {
       upstreamSessionId: fresh.upstreamSessionId,
       agentMeta: fresh.agentMeta,
       agentCapabilities: fresh.agentCapabilities,
+      ...(fresh.modelVerb ? { modelVerb: fresh.modelVerb } : {}),
       title: params.title,
       agentArgs: params.agentArgs,
       idleTimeoutMs: this.idleTimeoutMs,
@@ -1397,13 +1410,22 @@ export class SessionManager {
     sessionId: string,
     modelId: string,
     where: string,
+    // Lead verb inferred from the agent's session/new response shape;
+    // undefined falls back to session/set_model.
+    modelVerb?: ModelVerb,
   ): Promise<boolean> {
     try {
-      await agent.connection.request("session/set_model", {
+      // Leads with the inferred verb and probes the other on
+      // MethodNotFound — agents on @agentclientprotocol/sdk >= 0.26 only
+      // implement session/set_config_option (see core/model-verb.ts).
+      const { verb } = await requestModelChange({
+        request: (method, params) => agent.connection.request(method, params),
         sessionId,
         modelId,
+        ...(modelVerb ? { verb: modelVerb } : {}),
+        logger: this.logger,
       });
-      this.logger?.info(`${where}: session/set_model accepted`);
+      this.logger?.info(`${where}: ${verb} accepted`);
       return true;
     } catch (err) {
       this.logger?.warn(
@@ -1443,6 +1465,7 @@ export class SessionManager {
     initialModels?: AdvertisedModel[];
     initialModes?: AdvertisedMode[];
     initialMode?: string;
+    modelVerb?: ModelVerb;
   }> {
     const agentDef = await this.registry.getAgent(params.agentId);
     if (!agentDef) {
@@ -1495,6 +1518,9 @@ export class SessionManager {
       // runs that might cause the agent to emit a current_model_update.
       let initialModel = extractInitialModel(newResult);
       const initialModels = extractInitialModels(newResult);
+      // Which verb this agent takes for model changes, read off the shape
+      // of its model advertisement (see core/model-verb.ts).
+      const modelVerb = inferModelVerbFromResult(newResult);
       const desired = params.model ?? this.defaultModels[params.agentId];
       if (desired && desired !== initialModel) {
         // Resolve against the agent's advertised model list when we have
@@ -1517,7 +1543,15 @@ export class SessionManager {
         if (resolution.kind === "exact" || resolution.kind === "none") {
           // Only adopt the desired id if the agent actually accepted it;
           // a rejection leaves the session on the agent's own default.
-          if (await this.applySeedModel(agent, sessionIdRaw, desired, where)) {
+          if (
+            await this.applySeedModel(
+              agent,
+              sessionIdRaw,
+              desired,
+              where,
+              modelVerb,
+            )
+          ) {
             initialModel = desired;
           }
         } else if (resolution.kind === "resolved") {
@@ -1529,6 +1563,7 @@ export class SessionManager {
               sessionIdRaw,
               resolution.modelId,
               `${where} resolved to ${JSON.stringify(resolution.modelId)}`,
+              modelVerb,
             )
           ) {
             initialModel = resolution.modelId;
@@ -1555,6 +1590,7 @@ export class SessionManager {
         initialModels: initialModels.length > 0 ? initialModels : undefined,
         initialModes: initialModes.length > 0 ? initialModes : undefined,
         initialMode,
+        modelVerb,
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);
@@ -1635,6 +1671,7 @@ export class SessionManager {
         initialModels,
         initialModes: initialModes.length > 0 ? initialModes : undefined,
         initialMode,
+        modelVerb: inferModelVerbFromResult(loadResult),
       };
     } catch (err) {
       await agent.kill().catch(() => undefined);

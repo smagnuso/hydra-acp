@@ -1050,6 +1050,20 @@ Resource groups: `prompt/*` (cancel, update, amend, amended), `prompt_queue/*` (
 
 The `hydra-acp/transformer/*` methods are transformer-specific: only callable on a connection that authenticated as a transformer; extensions and ordinary clients receive `MethodNotFound`.
 
+**Model changes: two upstream verbs.** Clients may set a session's model with either `session/set_model {sessionId, modelId}` or `session/set_config_option {sessionId, configId: "model", value}` — the daemon accepts both and normalizes. Upstream, the agent may implement only one: recent `@agentclientprotocol/sdk` releases (the 0.26 line, the 1.x line) **removed `session/set_model` from the dispatch table**, so agents built on them (`pi-acp`, `claude-agent-acp` ≥ 0.66) answer `-32601 MethodNotFound` to it and accept only the config-option form, while older agents accept `session/set_model`.
+
+No capability bit distinguishes them — `AgentCapabilities` says nothing about model selection and `PROTOCOL_VERSION` is `1` on both sides of the break. The daemon therefore **infers the verb from the shape of the agent's model advertisement**, which changed in the same SDK commit that dropped the method:
+
+| Agent advertises models as | Verb hydra uses |
+|---|---|
+| `availableModels` (top level, nested under `models`, or in a foreign `_meta` namespace) / `current_model_update` | `session/set_model` |
+| `configOptions[id="model"]` on `session/new`/`session/load` / `config_option_update` | `session/set_config_option` |
+| nothing yet | `session/set_model` (default) |
+
+Inference picks the **lead** verb only. A `MethodNotFound` rejection still triggers a one-shot retry with the other verb, and whichever verb an actual call accepted is pinned for the rest of that agent process (re-inferred on agent swap, restart, and resurrect). Agents that mix the two — advertising via `configOptions` while still implementing `session/set_model` — keep working.
+
+Transformers should declare **both** `request:session/set_model` and `request:session/set_config_option` if they care about model changes, and must tolerate seeing a rejected `session/set_model` followed by an accepted `session/set_config_option` for a single client-initiated change.
+
 ### Agent discovery
 
 #### Request: `hydra-acp/agents/list`
@@ -1154,7 +1168,7 @@ Live-only extras (present on `session/new` and `session/attach`; the read-only v
 | `agentArgs` | `string[]?` | Agent command-line args, when set. |
 | `availableCommands` | `{name, description?}[]?` | Command palette known to the daemon (agent + hydra slash commands + extension verbs). |
 | `availableModes` | `{id, name?, description?}[]?` | Modes the underlying agent advertises. |
-| `availableModels` | `{modelId, name?, description?}[]?` | Models the agent will accept on `session/set_model`. |
+| `availableModels` | `{modelId, name?, description?}[]?` | Models the agent will accept on `session/set_model` (or, for SDK 0.26+ agents, `session/set_config_option` with `configId: "model"` — see [ACP wire protocol](#acp-wire-protocol)). |
 | `turnStartedAt` | `number?` (epoch ms) | Present only when an agent turn is in flight at response time. Lets a fresh client paint the busy indicator with the right elapsed time. |
 | `agentCapabilities` | `object?` | The underlying agent's own initialize-time capability claim, forwarded verbatim. |
 | `queue` | `PromptQueueEntry[]?` | Snapshot of the daemon-side queue at attach time, so late-joining clients can paint chips without waiting for new `prompt_queue_added` notifications. Omitted when empty. |

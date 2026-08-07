@@ -2761,6 +2761,167 @@ describe("Session", () => {
     });
   });
 
+  describe("forwardModelChange (set_model / set_config_option probe)", () => {
+    it("forwards session/set_model when the agent implements it", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue(null);
+
+      await session.forwardModelChange("anthropic/claude-opus-4-7");
+
+      expect(requestMock).toHaveBeenCalledTimes(1);
+      expect(requestMock).toHaveBeenCalledWith("session/set_model", {
+        sessionId: "u_agent",
+        modelId: "anthropic/claude-opus-4-7",
+      });
+    });
+
+    // Agents on @agentclientprotocol/sdk >= 0.26 (pi-acp) removed
+    // session/set_model entirely; the model lives behind
+    // session/set_config_option with configId "model".
+    it("retries via session/set_config_option on MethodNotFound and remembers the verb", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      const notFound = new Error('"Method not found": session/set_model') as Error & {
+        code: number;
+      };
+      notFound.code = JsonRpcErrorCodes.MethodNotFound;
+      requestMock.mockImplementation(async (method: string) => {
+        if (method === "session/set_model") throw notFound;
+        return { configOptions: [] };
+      });
+
+      await session.forwardModelChange("anthropic/claude-fable-5");
+      expect(requestMock.mock.calls.map((c) => c[0])).toEqual([
+        "session/set_model",
+        "session/set_config_option",
+      ]);
+      expect(requestMock).toHaveBeenLastCalledWith("session/set_config_option", {
+        sessionId: "u_agent",
+        configId: "model",
+        value: "anthropic/claude-fable-5",
+      });
+
+      // Second change goes straight to the learned verb — no repeat probe.
+      requestMock.mockClear();
+      await session.forwardModelChange("anthropic/claude-opus-5");
+      expect(requestMock.mock.calls.map((c) => c[0])).toEqual([
+        "session/set_config_option",
+      ]);
+    });
+
+    // Inference: an agent whose model advertisement arrived as a
+    // config_option_update is on the modern SDK, so lead with
+    // set_config_option and don't waste a probe on the dead verb.
+    it("leads with session/set_config_option after an agent config_option_update(model)", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ configOptions: [] });
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_agent",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            {
+              id: "model",
+              currentValue: "anthropic/claude-opus-5",
+              options: [
+                { value: "anthropic/claude-opus-5" },
+                { value: "anthropic/claude-fable-5" },
+              ],
+            },
+          ],
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+      requestMock.mockClear();
+
+      await session.forwardModelChange("anthropic/claude-fable-5");
+      expect(requestMock.mock.calls.map((c) => c[0])).toEqual([
+        "session/set_config_option",
+      ]);
+    });
+
+    it("keeps session/set_model for an agent that advertises via current_model_update", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue(null);
+
+      mock.triggerNotification("session/update", {
+        sessionId: "u_agent",
+        update: {
+          sessionUpdate: "current_model_update",
+          currentModel: "anthropic/claude-opus-4-7",
+          availableModels: [{ modelId: "anthropic/claude-opus-4-7" }],
+        },
+      });
+      await new Promise((r) => setImmediate(r));
+      requestMock.mockClear();
+
+      await session.forwardModelChange("anthropic/claude-opus-4-7");
+      expect(requestMock.mock.calls.map((c) => c[0])).toEqual(["session/set_model"]);
+    });
+
+    it("a confirmed verb outranks a later inference hint", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      const notFound = new Error("nope") as Error & { code: number };
+      notFound.code = JsonRpcErrorCodes.MethodNotFound;
+      requestMock.mockImplementation(async (method: string) => {
+        if (method === "session/set_model") throw notFound;
+        return { configOptions: [] };
+      });
+
+      // Probe pins set_config_option.
+      await session.forwardModelChange("m1");
+
+      // A stray current_model_update (hydra itself synthesizes these on
+      // every applyModelChange) must not drag us back to the dead verb.
+      mock.triggerNotification("session/update", {
+        sessionId: "u_agent",
+        update: { sessionUpdate: "current_model_update", currentModel: "m1" },
+      });
+      await new Promise((r) => setImmediate(r));
+      requestMock.mockClear();
+
+      await session.forwardModelChange("m2");
+      expect(requestMock.mock.calls.map((c) => c[0])).toEqual([
+        "session/set_config_option",
+      ]);
+    });
+
+    it("carries client passthrough fields (_meta) onto the forwarded envelope", async () => {
+      const { session, mock } = makeSession("sess_hyd", "u_agent");
+      const requestMock = mock.agent.connection.request as unknown as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue(null);
+
+      await session.forwardModelChange("m1", {
+        sessionId: "sess_hyd",
+        modelId: "stale",
+        _meta: { keep: true },
+      });
+
+      expect(requestMock).toHaveBeenCalledWith("session/set_model", {
+        sessionId: "u_agent",
+        modelId: "m1",
+        _meta: { keep: true },
+      });
+    });
+  });
+
   describe("forwardRequest (transparent passthrough for unknown session/* methods)", () => {
     it("rewrites the hydra sessionId to the upstream id and forwards", async () => {
       const { session, mock } = makeSession("sess_hyd", "u_agent");

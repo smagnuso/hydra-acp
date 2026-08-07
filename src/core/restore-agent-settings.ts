@@ -1,5 +1,6 @@
 import type { AgentInstance, AgentLogger } from "./agent-instance.js";
 import type { AdvertisedMode } from "./hydra-commands.js";
+import { requestModelChange, type ModelVerb } from "./model-verb.js";
 
 // Push a persisted mode back to a freshly loaded or spawned agent so a
 // session that was in plan mode (or any non-default mode) doesn't silently
@@ -70,9 +71,13 @@ export async function restoreCurrentModel(opts: {
   upstreamSessionId: string;
   persistedModel: string | undefined;
   agentReportedModel: string | undefined;
+  // Lead verb inferred from the session/load response shape (see
+  // model-verb.ts). Undefined falls back to session/set_model.
+  modelVerb?: ModelVerb;
   logger?: AgentLogger;
 }): Promise<string | undefined> {
-  const { agent, upstreamSessionId, persistedModel, agentReportedModel, logger } = opts;
+  const { agent, upstreamSessionId, persistedModel, agentReportedModel, modelVerb, logger } =
+    opts;
   if (!persistedModel) {
     return agentReportedModel;
   }
@@ -83,12 +88,18 @@ export async function restoreCurrentModel(opts: {
     logger?.info(
       `resurrect: pushing persisted modelId=${JSON.stringify(persistedModel)} to agent (agentReported=${JSON.stringify(agentReportedModel)})`,
     );
-    await agent.connection.request("session/set_model", {
+    // Leads with the inferred verb, probing the other on MethodNotFound —
+    // agents on @agentclientprotocol/sdk >= 0.26 only implement
+    // session/set_config_option.
+    const { verb } = await requestModelChange({
+      request: (method, params) => agent.connection.request(method, params),
       sessionId: upstreamSessionId,
       modelId: persistedModel,
+      ...(modelVerb ? { verb: modelVerb } : {}),
+      logger,
     });
     logger?.info(
-      `resurrect: session/set_model accepted, effectiveModel=${JSON.stringify(persistedModel)}`,
+      `resurrect: ${verb} accepted, effectiveModel=${JSON.stringify(persistedModel)}`,
     );
     return persistedModel;
   } catch (err) {
