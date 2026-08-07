@@ -47,6 +47,23 @@ import { terminalHost } from "./index.js";
  */
 export const TAB_LABEL_ENV = "HYDRA_TAB_LABEL";
 
+/**
+ * What the tab is called while the picker is up.
+ *
+ * Deliberately not a name a human would plausibly type. It used to be
+ * plain "hydra", which collided with the ownership guard in a way that
+ * bricked tabs: restoreTabLabel puts the real label back on a clean exit,
+ * but a process killed with the picker up — a crash, or a restart to pick
+ * up a new build — leaves the tab holding this string. The next process
+ * starts with `applied` null, sees a label that is neither auto-shaped nor
+ * one it remembers writing, and concludes a human named the tab. That tab
+ * then never syncs its title again, with no indication why.
+ *
+ * The marker makes hydra's own leftovers self-identifying, so
+ * adoptExistingLabel can reclaim them without ever touching a real name.
+ */
+export const TRANSIENT_TAB_LABEL = "hydra…";
+
 // The label we last successfully wrote. This is what makes guard (1) stable
 // across the many title updates in one session: after our first rename the
 // label is no longer auto-generated, so without this we would rename exactly
@@ -64,7 +81,7 @@ let adoptChecked = false;
 // Matching rather than merely trusting the variable's presence is the point:
 // if the user has renamed the tab since it was created, the label no longer
 // matches and ownership stays with them.
-function adoptEnvLabel(current: string): void {
+function adoptExistingLabel(current: string): void {
   if (adoptChecked) {
     return;
   }
@@ -76,6 +93,16 @@ function adoptEnvLabel(current: string): void {
     // counts as the last real one — that's what a transient label has to be
     // able to fall back to.
     lastReal = current;
+    adopted = true;
+    return;
+  }
+  if (current === TRANSIENT_TAB_LABEL) {
+    // Our own leftover from a process that died with the picker up. Claim
+    // it so the guard lets us write over it. `lastReal` stays null on
+    // purpose: a transient label is not a real one to fall back to, and
+    // marking `adopted` keeps exit restoring to the next real title rather
+    // than putting this marker back.
+    applied = current;
     adopted = true;
   }
 }
@@ -170,7 +197,7 @@ async function drain(): Promise<void> {
     if (!info) {
       continue;
     }
-    adoptEnvLabel(info.label);
+    adoptExistingLabel(info.label);
     if (!mayRenameTab(info.label, info.paneCount, host.isAutoLabel, info.auto)) {
       // Not ours to write. Drop the pending title rather than retrying: the
       // user owns this label now, and the next title change will ask again

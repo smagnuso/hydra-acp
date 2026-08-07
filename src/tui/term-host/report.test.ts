@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const tabLabels: Array<{ label: string; transient: boolean }> = [];
 vi.mock("./label-sync.js", () => ({
   TAB_LABEL_ENV: "HYDRA_TAB_LABEL",
+  TRANSIENT_TAB_LABEL: "hydra…",
   syncTabLabel: (label: string, opts: { transient?: boolean } = {}) => {
     tabLabels.push({ label, transient: opts.transient === true });
   },
@@ -225,7 +226,7 @@ describe("suspended (picker up)", () => {
     expect(tabLabels.at(-1)).toEqual({ label: "Refactor auth", transient: false });
     setReportSuspended(true);
     await settle();
-    expect(tabLabels.at(-1)).toEqual({ label: "hydra", transient: true });
+    expect(tabLabels.at(-1)).toEqual({ label: "hydra…", transient: true });
   });
 
   it("puts the session title back on the tab when the picker closes", async () => {
@@ -241,7 +242,7 @@ describe("suspended (picker up)", () => {
     reportSessionbar({ sessionId: "s1", title: "Refactor auth" });
     setReportSuspended(true);
     await settle();
-    expect(tabLabels.filter((t) => t.transient).map((t) => t.label)).toEqual(["hydra"]);
+    expect(tabLabels.filter((t) => t.transient).map((t) => t.label)).toEqual(["hydra…"]);
   });
 
   it("is idempotent", async () => {

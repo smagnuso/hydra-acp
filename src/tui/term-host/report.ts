@@ -33,7 +33,7 @@
 
 import * as path from "node:path";
 import { terminalHost } from "./index.js";
-import { restoreTabLabel, syncTabLabel } from "./label-sync.js";
+import { restoreTabLabel, syncTabLabel, TRANSIENT_TAB_LABEL } from "./label-sync.js";
 import type { AgentActivity, TerminalHostSnapshot } from "./types.js";
 
 /**
@@ -42,7 +42,6 @@ import type { AgentActivity, TerminalHostSnapshot } from "./types.js";
  * Names the pane's actual contents rather than the session it came from:
  * what's in the tab is hydra, not any particular session.
  */
-const SUSPENDED_TAB_LABEL = "hydra";
 
 /** Mirrors the subset of Screen's SessionbarState we report on. */
 export interface SessionbarView {
@@ -179,7 +178,7 @@ function flush(): void {
   // avoids one field up. Marked transient so it can never be what the tab is
   // left holding on exit.
   if (live.suspended) {
-    syncTabLabel(SUSPENDED_TAB_LABEL, { transient: true });
+    syncTabLabel(TRANSIENT_TAB_LABEL, { transient: true });
   } else {
     syncTabLabel(resolveTitle());
   }
@@ -281,7 +280,7 @@ function suspendReport(): void {
   if (!host) {
     return;
   }
-  syncTabLabel(SUSPENDED_TAB_LABEL, { transient: true });
+  syncTabLabel(TRANSIENT_TAB_LABEL, { transient: true });
   if (sent === null) {
     return;
   }

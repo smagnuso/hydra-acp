@@ -5,6 +5,7 @@ import {
   mayRenameTab,
   restoreTabLabel,
   syncTabLabel,
+  TRANSIENT_TAB_LABEL,
 } from "./label-sync.js";
 import type { TabLabelView, TerminalHost } from "./types.js";
 
@@ -307,6 +308,38 @@ describe("ownership adopted from the creating process", () => {
     syncTabLabel("Parser rewrite");
     await settle();
     expect(renames()).toEqual([]);
+  });
+
+  // A process killed with the picker up (crash, or a restart onto a new
+  // build) leaves the tab holding the transient label. restoreTabLabel
+  // never ran, so nothing put the real one back.
+  it("reclaims a transient label left behind by a process that died in the picker", async () => {
+    tab = tabGet(TRANSIENT_TAB_LABEL);
+    syncTabLabel("Parser rewrite");
+    await settle();
+    expect(renames()).toEqual(["Parser rewrite"]);
+  });
+
+  it("does not reclaim a tab the user named, even something hydra-ish", async () => {
+    // The old transient label was literally "hydra", which is also a name
+    // a human would pick — indistinguishable, so hydra bricked such tabs.
+    // The marker exists so this case stays the user's.
+    tab = tabGet("hydra");
+    syncTabLabel("Parser rewrite");
+    await settle();
+    expect(renames()).toEqual([]);
+  });
+
+  it("does not put a reclaimed transient label back on exit", async () => {
+    // `original` would otherwise capture the marker as the label to
+    // restore, leaving the tab named after the picker forever.
+    tab = tabGet(TRANSIENT_TAB_LABEL);
+    syncTabLabel("Parser rewrite");
+    await settle();
+    tab = tabGet("Parser rewrite");
+    sent = [];
+    await restoreTabLabel();
+    expect(renames()).not.toContain(TRANSIENT_TAB_LABEL);
   });
 
   it("still honours the split-tab guard on an adopted tab", async () => {
