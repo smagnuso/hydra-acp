@@ -99,20 +99,9 @@ let sent: string | null = null;
  * act on, and `blocked` is what makes a host's UI demand attention.
  */
 function deriveState(): AgentActivity {
-  // While the picker is up this pane isn't showing any session, so the
-  // session's activity is not this pane's state. Reporting `working` here
-  // sends a host's attention machinery after a pane that will just show a
-  // picker when you tab to it.
-  //
-  // `unknown` is the right term for exactly this: an agent is present but
-  // its lifecycle can't be classified confidently. It also sits below every
-  // other state in a rollup, so it won't pull attention.
-  //
-  // This mirrors writeProgressIndicator, which already declines to touch the
-  // OSC 9;4 taskbar pulse while the screen is stopped.
-  if (live.suspended) {
-    return "unknown";
-  }
+  // No suspended case here: while the picker is up the pane is released
+  // outright (see suspendReport) rather than reported as `unknown`, so
+  // this is only ever reached for a pane actually showing a session.
   if (live.permission) {
     return "blocked";
   }
@@ -195,6 +184,13 @@ function flush(): void {
     syncTabLabel(resolveTitle());
   }
 
+  // Suspended panes have already been released — see suspendReport. The
+  // banner funnel keeps ticking at 1Hz while the picker is up, so without
+  // this the next tick would re-claim the pane we just gave back.
+  if (live.suspended) {
+    return;
+  }
+
   if (!host.caps.report) {
     return;
   }
@@ -251,7 +247,52 @@ export function setReportSuspended(suspended: boolean): void {
     return;
   }
   live.suspended = suspended;
+  if (suspended) {
+    suspendReport();
+    return;
+  }
+  // Force a full re-report rather than relying on the resume path to
+  // re-seed the funnels. Returning from the picker to the SAME session
+  // need not push a fresh sessionbar, and `live` still holds everything,
+  // so dropping the dedupe key is enough to re-claim the pane.
+  sent = null;
   flush();
+}
+
+/**
+ * Give the pane back to the host while the picker is up.
+ *
+ * A pane showing a picker is not showing a session, so it should not be
+ * an agent: it drops out of herdr's Agent panel entirely rather than
+ * lingering as an `unknown` row, and stops advertising a session id that
+ * external tooling would otherwise act on — `herdr-hardcopy.sh` would
+ * happily fetch a transcript for whatever session was up before.
+ *
+ * `live` is deliberately NOT cleared. The session data has to survive so
+ * that cancelling the picker can re-report it verbatim.
+ *
+ * Releasing does not clear published metadata on its own — herdr's
+ * `release_agent` drops the agent label and leaves tokens and title
+ * behind — so a host's release() has to null its own token set. Both
+ * ours do.
+ */
+function suspendReport(): void {
+  const host = terminalHost();
+  if (!host) {
+    return;
+  }
+  syncTabLabel(SUSPENDED_TAB_LABEL, { transient: true });
+  if (sent === null) {
+    return;
+  }
+  sent = null;
+  if (!host.caps.report) {
+    return;
+  }
+  void Promise.resolve(host.release()).catch(() => {
+    // Best-effort, exactly like report(). A failed release leaves a stale
+    // agent row until the next successful report replaces it.
+  });
 }
 
 /** Tap for Screen.setPermissionPrompt — the blocked state. */

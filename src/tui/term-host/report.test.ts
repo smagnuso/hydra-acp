@@ -154,14 +154,19 @@ describe("state derivation", () => {
 });
 
 describe("suspended (picker up)", () => {
-  it("reports unknown instead of the session's activity", async () => {
+  it("releases the pane instead of reporting a state for it", async () => {
+    // A pane showing a picker is not showing a session, so it should not
+    // be an agent at all. Reporting `unknown` instead would leave a row in
+    // herdr's Agent panel for a pane with nothing attached.
     reportSessionbar({ sessionId: "s1", agent: "claude" });
     reportBanner({ status: "busy" });
     await settle();
     expect(last()?.state).toBe("working");
+    snaps = [];
     setReportSuspended(true);
     await settle();
-    expect(last()?.state).toBe("unknown");
+    expect(releases).toBe(1);
+    expect(snaps).toEqual([]);
   });
 
   it("overrides a busy state that arrives while suspended", async () => {
@@ -176,12 +181,15 @@ describe("suspended (picker up)", () => {
     expect(snaps).toEqual([]);
   });
 
-  it("outranks a pending permission too", async () => {
+  it("releases even when a permission is pending", async () => {
     reportSessionbar({ sessionId: "s1" });
     reportPermission(true);
+    await settle();
+    snaps = [];
     setReportSuspended(true);
     await settle();
-    expect(last()?.state).toBe("unknown");
+    expect(releases).toBe(1);
+    expect(snaps).toEqual([]);
   });
 
   it("restores the real state on resume", async () => {
@@ -194,13 +202,18 @@ describe("suspended (picker up)", () => {
     expect(last()?.state).toBe("working");
   });
 
-  it("leaves the title and tokens alone", async () => {
-    // Only the state is a lie while suspended; the session's identity is
-    // still exactly what it was.
+  it("retains the session so cancelling the picker re-reports it verbatim", async () => {
+    // The release must not destroy `live`: returning to the SAME session
+    // need not push a fresh sessionbar, so the resume has to be able to
+    // replay what was there.
     reportSessionbar({ sessionId: "s1", agent: "claude", title: "T", model: "m" });
     await settle();
     setReportSuspended(true);
     await settle();
+    snaps = [];
+    setReportSuspended(false);
+    await settle();
+    expect(last()?.sessionId).toBe("s1");
     expect(last()?.title).toBe("T");
     expect(last()?.agent).toBe("claude");
     expect(last()?.model).toBe("m");

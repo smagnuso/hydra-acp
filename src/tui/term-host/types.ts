@@ -170,11 +170,32 @@ export interface TerminalHost {
   report(snapshot: TerminalHostSnapshot): Promise<void>;
 
   /**
-   * Withdraw everything on TUI exit.
+   * Withdraw everything published about the session.
    *
    * Not cosmetic: a host that shows agent state has no way to notice this
    * pane's hydra is gone, so anything left behind stays until the pane
-   * dies. Awaited by core, unlike report().
+   * dies. Awaited by core on exit; fire-and-forget on suspend.
+   *
+   * CALLED MORE THAN ONCE PER PROCESS. Two situations, not one:
+   *
+   *   - TUI exit, the obvious one.
+   *   - Whenever the picker opens. A pane showing a picker is not showing
+   *     a session, so it stops being an agent until one is chosen. Expect
+   *     release/report cycles at user speed, and keep this cheap enough
+   *     to run on every picker toggle.
+   *
+   * Withdraw EVERYTHING, not just liveness state. Anything a host
+   * publishes that an external consumer might act on has to go: herdr's
+   * `release_agent` drops the agent label but deliberately leaves tokens
+   * and title in place, so HerdrHost nulls its whole token map first.
+   * A session id left behind sends tooling off to the wrong session.
+   *
+   * A host cannot currently tell the two cases apart, because nothing has
+   * needed to: core owns the only asymmetry, restoring the tab label on
+   * exit but parking it on "hydra" while the picker is up. A host that
+   * needs the distinction — one holding a resource too expensive to give
+   * up for a picker toggle, say — is the point at which this should grow
+   * a reason argument.
    */
   release(): Promise<void>;
 

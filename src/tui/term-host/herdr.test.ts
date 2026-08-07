@@ -328,7 +328,10 @@ describe("state mapping", () => {
 // activity isn't the pane's state. Screen.stop()/start() drive this, mirroring
 // the started-guard that already stops the OSC 9;4 taskbar pulse.
 describe("suspended (picker up)", () => {
-  it("reports unknown instead of the session's activity", async () => {
+  it("releases the agent so the pane leaves herdr's Agent panel", async () => {
+    // herdr keeps a pane in the Agent panel for as long as it has an agent
+    // label, whatever its state — so reporting `unknown` would leave a row
+    // for a pane that is showing a picker. release_agent drops the label.
     reportSessionbar({ sessionId: "s1", agent: "claude" });
     reportBanner({ status: "busy" });
     await settle();
@@ -336,7 +339,36 @@ describe("suspended (picker up)", () => {
     frames = [];
     setReportSuspended(true);
     await settle();
-    expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
+    expect(lastOf("pane.release_agent")).toBeTruthy();
+    expect(frames.filter((f) => f.method === "pane.report_agent")).toEqual([]);
+  });
+
+  it("clears the session token when the picker opens", async () => {
+    // release_agent drops the agent label but leaves published metadata
+    // behind, so the token map has to be nulled in the same breath or
+    // herdr-hardcopy.sh keeps resolving the session that was up before.
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    await settle();
+    frames = [];
+    setReportSuspended(true);
+    await settle();
+    expect(
+      (lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>).session,
+    ).toBeNull();
+  });
+
+  it("re-claims the pane when the picker closes", async () => {
+    reportSessionbar({ sessionId: "s1", agent: "claude" });
+    await settle();
+    setReportSuspended(true);
+    await settle();
+    frames = [];
+    setReportSuspended(false);
+    await settle();
+    expect(lastOf("pane.report_agent")).toBeTruthy();
+    expect(
+      (lastOf("pane.report_metadata")!.params.tokens as Record<string, unknown>).session,
+    ).toBe("s1");
   });
 
   // Muting updates instead would freeze the last report, leaving a session
@@ -351,12 +383,14 @@ describe("suspended (picker up)", () => {
     expect(frames.filter((f) => f.method === "pane.report_agent")).toEqual([]);
   });
 
-  it("outranks a pending permission too", async () => {
+  it("releases even when a permission is pending", async () => {
     reportSessionbar({ sessionId: "s1", agent: "claude" });
     reportPermission(true);
+    await settle();
+    frames = [];
     setReportSuspended(true);
     await settle();
-    expect(lastOf("pane.report_agent")!.params.state).toBe("unknown");
+    expect(lastOf("pane.release_agent")).toBeTruthy();
   });
 
   it("renames the tab off the session, so the tab bar doesn't read as still-in-session", async () => {
@@ -398,7 +432,10 @@ describe("suspended (picker up)", () => {
   });
 
   // Otherwise the pane loses its identity in herdr's sidebar while picking.
-  it("leaves the title and tokens alone", async () => {
+  it("withdraws the title and tokens along with the agent", async () => {
+    // The inverse of the old behaviour: identity used to be left in place
+    // because only the state was suspect. Now the pane stops being an
+    // agent at all, so anything published about the session goes with it.
     reportSessionbar({
       sessionId: "s1",
       agent: "claude",
@@ -409,7 +446,16 @@ describe("suspended (picker up)", () => {
     frames = [];
     setReportSuspended(true);
     await settle();
-    expect(frames.filter((f) => f.method === "pane.report_metadata")).toEqual([]);
+    const meta = lastOf("pane.report_metadata")!.params;
+    expect(meta.clear_title).toBe(true);
+    expect(meta.tokens).toEqual({
+      kind: null,
+      cwd: null,
+      model: null,
+      cost: null,
+      queue: null,
+      session: null,
+    });
   });
 
   it("is idempotent", async () => {
