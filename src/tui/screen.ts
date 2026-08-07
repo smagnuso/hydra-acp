@@ -8658,6 +8658,7 @@ export function mapKeyName(name: string): KeyName | null {
 // isn't set is harmless.
 export function emergencyTerminalReset(): void {
   const seq = [
+    SGR_RESET, // clear inverse / bold / colors before anything else
     MOUSE_X10_OFF, // mouse button reporting off
     MOUSE_BUTTON_OFF, // mouse drag reporting off
     MOUSE_ANY_MOTION_OFF, // mouse any-motion reporting off

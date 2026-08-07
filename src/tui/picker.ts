@@ -86,7 +86,7 @@ import {
   PASTE_START,
   SHOW_CURSOR,
 } from "./ansi.js";
-import { paint, type ChromeToken } from "./theme/index.js";
+import { paint, type ChromeToken, SGR_RESET } from "./theme/index.js";
 import { decodeBundle } from "../core/bundle.js";
 import {
   aggregate as aggregateSessionInfo,
@@ -383,6 +383,7 @@ export async function pickSession(
   // resume — the shell we yielded to during ^Z can leave any of these
   // modes in an unknown state, so we re-assert them before painting.
   const resetPickerTerminalModes = (): void => {
+    process.stdout.write(SGR_RESET);
     process.stdout.write(KITTY_KBD_POP);
     process.stdout.write(BRACKETED_PASTE_OFF);
     process.stdout.write(MODIFY_OTHER_KEYS_OFF);

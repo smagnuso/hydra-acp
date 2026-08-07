@@ -35,7 +35,7 @@ import {
   MOUSE_SGR_OFF,
   MOUSE_X10_OFF,
 } from "./ansi.js";
-import { paint } from "./theme/index.js";
+import { paint, SGR_RESET } from "./theme/index.js";
 
 export interface BoxLayout {
   // Outer coordinates (1-based, terminal-kit convention).
@@ -82,6 +82,7 @@ const BR = "┘";
 // picker.ts:105-113 so prompt-utils owns one copy and future prompts
 // import the helper instead of pasting the block.
 export function resetTerminalModes(): void {
+  process.stdout.write(SGR_RESET);
   process.stdout.write(KITTY_KBD_POP);
   process.stdout.write(BRACKETED_PASTE_OFF);
   process.stdout.write(MODIFY_OTHER_KEYS_OFF);

@@ -7,6 +7,15 @@
 // (screen teardown, picker entry, prompt-utils resetTerminalModes) need
 // to agree on the same shut-down sequence.
 
+// Character attributes (bold, dim, inverse, colors) are NOT part of the
+// alternate-screen buffer state, so anything still active when we leave
+// the alt screen is inherited by the host shell: exiting mid-way through
+// an inverse-video selection band leaves the whole pane rendering
+// inverted until a manual `reset`. Every teardown path therefore emits
+// an SGR reset first. The constant itself is SGR_RESET in theme/index.ts
+// — colour bytes live in the theme (see theme/no-escapes.test.ts), and a
+// second copy here would be exactly the drift this file warns about.
+
 // Bracketed paste mode (DECSET 2004). When on, terminals wrap pasted
 // text in \x1b[200~ … \x1b[201~ so the app can distinguish typed input
 // from a paste.

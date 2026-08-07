@@ -10,6 +10,7 @@ import type { InputDispatcher, KeyEvent } from "./input.js";
 import {
   Screen,
   buildIterm2ImageEscape,
+  emergencyTerminalReset,
   truncate,
   wrap,
 } from "./screen.js";
@@ -2667,6 +2668,25 @@ describe("Screen block-click routing", () => {
     expect(screen.getSelectionText()).toBe("foo-bar-baz");
     dispatchMouse(screen, "MOUSE_LEFT_BUTTON_RELEASED", { x: 8, y });
     expect(screen.getSelectionText()).toBe("foo-bar-baz");
+  });
+
+  it("leads the terminal reset with an SGR reset", () => {
+    // Character attributes survive ?1049l — leaving the alt screen mid-way
+    // through an inverse-video selection band used to hand the host shell a
+    // permanently inverted pane. The SGR reset has to come first: emitting
+    // it after ALT_SCREEN_LEAVE would style the shell's screen instead.
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+    emergencyTerminalReset();
+    spy.mockRestore();
+    const all = writes.join("");
+    expect(all.startsWith("\x1b[0m")).toBe(true);
+    expect(all.indexOf("\x1b[0m")).toBeLessThan(all.indexOf("\x1b[?1049l"));
   });
 
   it("paints a prose link span as OSC 8, bracketing only the label", () => {
