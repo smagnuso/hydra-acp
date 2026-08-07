@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { currentPlatformKey } from "../../core/binary-install.js";
 import { paths } from "../../core/paths.js";
-import { runAgentsUninstall } from "./agents.js";
+import { canonicalAgentId, runAgentsUninstall } from "./agents.js";
 
 const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -57,5 +57,27 @@ describe("runAgentsUninstall", () => {
     await runAgentsUninstall("never-installed-agent");
     const msg = stdoutSpy.mock.calls.map((c) => String(c[0])).join("");
     expect(msg).toContain("Nothing to remove");
+  });
+});
+
+describe("canonicalAgentId", () => {
+  const known = ["pi-acp", "pi-dev", "pi-local", "claude-acp", "codex-acp"];
+
+  it("returns an exact id unchanged", () => {
+    expect(canonicalAgentId("pi-dev", known)).toBe("pi-dev");
+  });
+
+  it("resolves an implied -acp suffix over an ambiguous prefix", () => {
+    expect(canonicalAgentId("pi", known)).toBe("pi-acp");
+    expect(canonicalAgentId("PI", known)).toBe("pi-acp");
+  });
+
+  it("still resolves unique prefixes", () => {
+    expect(canonicalAgentId("clau", known)).toBe("claude-acp");
+  });
+
+  it("returns undefined on ambiguous prefix with no -acp sibling", () => {
+    expect(canonicalAgentId("c", known)).toBeUndefined();
+    expect(canonicalAgentId("nope", known)).toBeUndefined();
   });
 });

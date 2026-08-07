@@ -174,7 +174,11 @@ export class Registry {
   async getAgent(id: string): Promise<RegistryAgent | undefined> {
     // Config-defined local agents shadow the registry — check them first
     // so a user can override a broken registry agent by id.
-    const local = this.localAgents().find((a) => a.id === id);
+    const locals = this.localAgents();
+    const local =
+      locals.find((a) => a.id === id) ??
+      // Implied `-acp` suffix (see below) also shadows the registry.
+      locals.find((a) => a.id.toLowerCase() === `${id.toLowerCase()}-acp`);
     if (local) {
       return local;
     }
@@ -187,6 +191,16 @@ export class Registry {
     if (byBasename) {
       return this.applyOverride(byBasename);
     }
+    const lcId = id.toLowerCase();
+    // Implied `-acp` suffix: `--agent pi` means `pi-acp`. Checked before
+    // the prefix rule so shorthand still resolves when sibling ids share
+    // the prefix (e.g. local pi-dev / pi-local).
+    const bySuffix = doc.agents.find(
+      (a) => a.id.toLowerCase() === `${lcId}-acp`,
+    );
+    if (bySuffix) {
+      return this.applyOverride(bySuffix);
+    }
     // Unique-prefix fuzzy match on agent id (case-insensitive). Lets a
     // user type `--agent claude` and get `claude-acp` without having to
     // know the canonical id, but only when the prefix unambiguously
@@ -194,10 +208,9 @@ export class Registry {
     // codex-acp / codebuddy-code / cortex-code) deliberately fail so
     // the caller surfaces a "not found" rather than silently picking
     // the first hit.
-    const lc = id.toLowerCase();
-    if (lc.length > 0) {
+    if (lcId.length > 0) {
       const prefixHits = doc.agents.filter((a) =>
-        a.id.toLowerCase().startsWith(lc),
+        a.id.toLowerCase().startsWith(lcId),
       );
       if (prefixHits.length === 1) {
         return this.applyOverride(prefixHits[0]!);

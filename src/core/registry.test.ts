@@ -185,6 +185,27 @@ describe("Registry.getAgent fallback", () => {
     expect((await registry.getAgent("cod"))?.id).toBe("codex-acp");
   });
 
+  it("resolves an implied -acp suffix even when the prefix is ambiguous", async () => {
+    const registry = new Registry({
+      ...fakeConfig(),
+      agents: {
+        "pi-dev": { command: "pi-dev" },
+        "pi-local": { command: "pi-local" },
+      },
+    });
+    seedCache(registry, {
+      agents: [
+        {
+          id: "pi-acp",
+          name: "pi ACP",
+          distribution: { npx: { package: "pi-acp@0.0.33" } },
+        },
+      ],
+    });
+    expect((await registry.getAgent("pi"))?.id).toBe("pi-acp");
+    expect((await registry.getAgent("PI"))?.id).toBe("pi-acp");
+  });
+
   it("returns undefined when a prefix matches multiple agents", async () => {
     const registry = new Registry({
       ...fakeConfig(),

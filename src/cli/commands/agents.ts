@@ -99,9 +99,10 @@ export async function runAgentsList(): Promise<void> {
 // later session/new path surface whatever error it would have.
 // Pure prefix-match ladder shared by assertKnownAgent /
 // resolveAgentIdOrExit / TUI-side canonicalization. Mirrors
-// Registry.getAgent's resolution rules: exact id first, then unique
-// case-insensitive prefix. Returns undefined on unknown or ambiguous
-// input — callers decide whether that's fatal, silent, or a warning.
+// Registry.getAgent's resolution rules: exact id first, then an implied
+// `-acp` suffix, then unique case-insensitive prefix. Returns undefined
+// on unknown or ambiguous input — callers decide whether that's fatal,
+// silent, or a warning.
 export function canonicalAgentId(
   agentId: string,
   known: readonly string[],
@@ -112,6 +113,13 @@ export function canonicalAgentId(
   const lc = agentId.toLowerCase();
   if (lc.length === 0) {
     return undefined;
+  }
+  // `--agent pi` means `pi-acp`, even when other ids share the `pi`
+  // prefix (pi-dev, pi-local). The canonical `<id>-acp` adapter wins
+  // over the ambiguous-prefix failure below.
+  const suffixHit = known.find((id) => id.toLowerCase() === `${lc}-acp`);
+  if (suffixHit !== undefined) {
+    return suffixHit;
   }
   const prefixHits = known.filter((id) => id.toLowerCase().startsWith(lc));
   if (prefixHits.length === 1) {
@@ -343,10 +351,12 @@ export async function runAgentsSet(
   const isLocal = config.agents[agentId] !== undefined;
   if (!isLocal && known !== undefined && !known.includes(agentId)) {
     // Mirror the resolution ladder used by --agent and the other
-    // subcommands: unique case-insensitive prefix match against the
-    // registry rewrites to the canonical id.
+    // subcommands: an implied `-acp` suffix, then a unique
+    // case-insensitive prefix match against the registry rewrites to the
+    // canonical id.
     const lc = agentId.toLowerCase();
-    const prefixHits =
+    const suffixHit = known.find((id) => id.toLowerCase() === `${lc}-acp`);
+    const prefixHits = suffixHit !== undefined ? [suffixHit] :
       lc.length > 0 ? known.filter((id) => id.toLowerCase().startsWith(lc)) : [];
     if (prefixHits.length === 1) {
       agentId = prefixHits[0]!;
