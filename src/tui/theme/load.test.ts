@@ -21,7 +21,7 @@ import {
   defaultThemeFor,
 } from "./builtins.js";
 import { parseAgentMarkdown } from "../format.js";
-import { parseColor, rgb, type Color } from "./color.js";
+import { contrastRatio, parseColor, rgb, type Color } from "./color.js";
 
 const dir = async (): Promise<string> =>
   await mkdtemp(join(tmpdir(), "hydra-theme-"));
@@ -635,6 +635,49 @@ describe("a token that sets both a foreground and a background has contrast", ()
       expect(same).toEqual([]);
     },
   );
+});
+
+describe("a token that sets both a foreground and a background is readable", () => {
+  // Stronger than the equality check above, which only caught a pair collapsing
+  // to the same colour. Reported as "the picker's selected row is hard to read in
+  // matrix", and it was — in fourteen of sixteen themes.
+  //
+  // The cause was hardcoded pairings: `selection` was `blue` background with
+  // `brightWhite` text, which is 12:1 on the ANSI default palette where blue is a
+  // dark navy, and 1.5:1 on any modern palette where blue is a light pastel. Now
+  // derived — see onL in index.ts — so this guards the property rather than the
+  // arithmetic that currently satisfies it.
+  const MIN = 3; // WCAG's large-text floor. These are whole rows and highlights.
+
+  // Band-bearing tokens are excluded: their foreground is the row's own text
+  // rather than a colour the role chose, and band() has its own contrast
+  // mechanism (BAND_MIN_CONTRAST). solarized's `user` band sits at 2.8:1 here,
+  // which is that mechanism's gap, not this one's — see bandTextColor.
+  const BANDED = new Set(["user", "code"]);
+
+  it.each(builtinNames())("%s", async (name) => {
+    apply(await loadTheme(name, await dir()));
+    const unreadable: string[] = [];
+    for (const token of elementNames()) {
+      if (BANDED.has(token)) {
+        continue;
+      }
+      const { open } = resolveStyle(token as ThemeToken, "truecolor");
+      const f = /\x1b\[38;2;(\d+);(\d+);(\d+)m/.exec(open);
+      const b = /\x1b\[48;2;(\d+);(\d+);(\d+)m/.exec(open);
+      if (f === null || b === null) {
+        continue;
+      }
+      const ratio = contrastRatio(
+        rgb(Number(f[1]), Number(f[2]), Number(f[3])),
+        rgb(Number(b[1]), Number(b[2]), Number(b[3])),
+      )!;
+      if (ratio < MIN) {
+        unreadable.push(`${token} (${ratio.toFixed(1)}:1)`);
+      }
+    }
+    expect(unreadable).toEqual([]);
+  });
 });
 
 describe("parse-time and paint-time colour agree", () => {

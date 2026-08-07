@@ -72,7 +72,12 @@ const REPLACED: Record<ChromeToken, (t: Terminal, s: string) => void> = {
   "completion-desc": (t, s) => t.dim.noFormat(s),
   attachment: (t, s) => t.yellow.noFormat(s),
   "queue-row": (t, s) => t.bgBlue.brightWhite.noFormat(s),
-  "queue-cursor": (t, s) => t.bgBlue.brightYellow.noFormat(s),
+  // Deliberately NOT the original chain, which was bgBlue + brightYellow — the
+  // busy accent on the selection band, at 1.2:1 in most hex themes and the worst
+  // pairing in the whole table. The cursor row is now the selected-row treatment
+  // plus bold: weight carries "this is the cursor", which is structural, and the
+  // row is already marked as selected.
+  "queue-cursor": (t, s) => t.bgBlue.brightWhite.bold.noFormat(s),
   "queue-blank": (t, s) => t.bgBlue.noFormat(s),
   "composer-gutter": (t, s) => t.brightWhite.noFormat(s),
   "composer-inactive": (t, s) => t.dim.noFormat(s),

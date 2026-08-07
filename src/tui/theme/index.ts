@@ -21,8 +21,10 @@ import {
   band,
   bgOpen,
   bgReset,
+  contrastRatio,
   fgOpen,
   fgReset,
+  rgb,
   type Color,
   type ColorDepth,
 } from "./color.js";
@@ -279,6 +281,65 @@ const HOVER_ROW_LITERAL: SgrPair = {
 
 let bands = buildBands();
 
+/**
+ * A foreground that actually reads on `bg`, picked from the palette's own colours.
+ *
+ * These pairings used to be hardcoded — selection was `blue` background with
+ * `brightWhite` text — which works on the ANSI default palette, where `blue` is a
+ * dark navy. Every hex theme breaks that assumption, because modern palettes make
+ * `blue` a light pastel: catppuccin's selected picker row was #cdd6f4 on #89b4fa
+ * at 1.5:1, matrix's was bright green on bright blue at 1.8:1, and WCAG's floor
+ * for large text is 3:1. Reported as "the picker's selected row is hard to read",
+ * and it was, in fourteen of sixteen themes.
+ *
+ * `fallback` is what to use when the background is an ansi slot: its value is the
+ * terminal's to decide, so there is nothing to measure and the historical choice
+ * stands. That is also what keeps `terminal` and `mono` byte-identical.
+ */
+function onL(bg: Color, fallback: Color): Layer {
+  return fgL(mostReadableOn(bg, fallback));
+}
+
+function mostReadableOn(bg: Color, fallback: Color): Color {
+  if (bg.kind !== "rgb") {
+    return fallback;
+  }
+  // The theme's own colours first, so a derived pairing stays inside the palette
+  // rather than introducing a white or a black the theme never uses. bg and fg are
+  // the extremes of a well-made palette, which is exactly what a band wants.
+  const inPalette = [palette.bg, palette.fg, fallback].filter(
+    (c): c is Color => c !== undefined,
+  );
+  const pick = (from: Color[]): { color: Color; ratio: number } => {
+    let color = fallback;
+    let ratio = -1;
+    for (const c of from) {
+      const r = contrastRatio(bg, c) ?? -1;
+      if (r > ratio) {
+        ratio = r;
+        color = c;
+      }
+    }
+    return { color, ratio };
+  };
+  const best = pick(inPalette);
+  if (best.ratio >= MIN_ON_CONTRAST) {
+    return best.color;
+  }
+  // Nothing in the palette reads on this background. That is not hypothetical:
+  // catppuccin latte inverts the ramp, so its `black` slot is a light grey, and
+  // every candidate above sits light against its #fe640b peach — 2.7:1 at best.
+  // Pure black and white are outside the palette and a visible compromise, but a
+  // highlight nobody can read is a worse one.
+  const escape = pick([...inPalette, rgb(0, 0, 0), rgb(255, 255, 255)]);
+  return escape.ratio > best.ratio ? escape.color : best.color;
+}
+
+// The floor below which the palette is considered to have no answer and pure
+// black or white is allowed in. WCAG's large-text minimum: these are backgrounds
+// behind whole rows and highlighted runs, not body copy on the page background.
+const MIN_ON_CONTRAST = 3;
+
 /** A palette colour used as a foreground. */
 const fgL = (c: Color): Layer => ({
   open: (depth) => fgOpen(c, depth),
@@ -401,13 +462,14 @@ function buildRoles() {
   focus: [fgL(palette.brightBlue)],
 
   // Bands and highlights. Composites, because a band is a background and the
-  // foreground that stays legible on it.
+  // foreground that stays legible on it — and `legible` is now measured rather
+  // than assumed. See onL.
   selectionBand: [bgL(palette.blue)],
-  selection: [bgL(palette.blue), fgL(palette.brightWhite)],
+  selection: [bgL(palette.blue), onL(palette.blue, palette.brightWhite)],
   cursor: [bgL(palette.white)],
   promptCursor: [bgL(palette.brightYellow)],
-  match: [bgL(palette.brightYellow), fgL(palette.black)],
-  matchActive: [bgL(palette.red), fgL(palette.brightWhite)],
+  match: [bgL(palette.brightYellow), onL(palette.brightYellow, palette.black)],
+  matchActive: [bgL(palette.red), onL(palette.red, palette.brightWhite)],
   invert: [inverse],
   // The base text colour inside a code band. Explicit rather than the
   // terminal default, because a syntax span closes back to it.
@@ -1113,7 +1175,13 @@ function buildStyles(): Record<ThemeToken, StyleSpec> {
   // as one block. The cursor marks which row an edit would land on.
   // role: selection
   "queue-row": { layers: [...roles.selection] },
-  "queue-cursor": { layers: [...roles.selectionBand, ...roles.active] },
+  // The cursor row in the queue: the selected-row treatment plus bold.
+  //
+  // It used to be the selection BAND plus `active`, i.e. the busy yellow on the
+  // band's blue — 1.2:1 in most themes, the worst pairing in the table. Weight is
+  // the right carrier here anyway: the row is already marked as selected, and
+  // "this is the cursor" is a structural distinction rather than a state.
+  "queue-cursor": { layers: [...roles.selection, bold] },
   "queue-blank": { layers: [...roles.selectionBand] },
 
   // The composer's "> " gutter when it holds focus, and everything about it
