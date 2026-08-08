@@ -55,6 +55,48 @@ pnpm dev          # watch
 
 Ships two bins: `hydra-acp` and `hydra` (both dispatch to `dist/cli.js`).
 
+## Seeing the TUI
+
+Agents changing `src/tui/` are otherwise blind to the result.
+`scripts/tui-capture.mjs` renders a terminal program headlessly and turns the
+screen into an SVG, so you can look at what you changed instead of guessing.
+
+```
+# spawn, drive to a state, capture — no human in the loop
+node scripts/tui-capture.mjs --cols 100 --rows 30 --keys 'C-p' \
+  --out /tmp/shot.svg -- hydra-acp tui --session <id> --readonly
+
+# or grab a pane a human is already driving
+node scripts/tui-capture.mjs --list-panes
+node scripts/tui-capture.mjs --pane <target> --ansi /tmp/raw.ansi --out /tmp/shot.svg
+```
+
+To actually *see* it, rasterize and read the PNG — an SVG on disk tells you
+nothing:
+
+```
+google-chrome --headless --disable-gpu --screenshot=/tmp/shot.png \
+  --window-size=900,520 /tmp/shot.svg
+```
+
+`--ansi` writes the raw capture alongside, which is what to grep when you want
+to assert on content rather than eyeball it. `--from <file>` re-renders an
+existing capture without re-running anything. `--record` samples over time into
+one animated SVG.
+
+Before trusting a capture:
+
+- **tmux withholds truecolor** unless `default-terminal` is off `screen*` with
+  the RGB terminal-feature set. `theme/capability.ts` does this deliberately,
+  reading a changed TERM as the signal that passthrough was configured on
+  purpose, so an unconfigured tmux yields a faithful capture of a 256-colour
+  downgrade rather than of the real theme.
+- `--record` is a flipbook, not a recording. It polls, so anything between two
+  samples is never seen, and each distinct frame is a full copy (~3.6 KB per
+  second per fps on a busy screen). 6-10 fps is the useful range.
+- A terminal outside tmux cannot be captured at all. A pty has no screen
+  buffer; the grid lives in the emulator's memory.
+
 ## Conventions
 
 - TypeScript, ESM, tsup for bundling, vitest for tests.
