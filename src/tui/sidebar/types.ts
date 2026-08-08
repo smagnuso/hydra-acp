@@ -15,6 +15,7 @@
 // rather than imported from screen.ts: screen.ts imports this module, so
 // importing back would form a cycle.
 
+import type { ChromeActionTarget } from "../chrome-action.js";
 import type { FormattedLine } from "../format.js";
 import type { PlanEntry } from "../../core/render-update.js";
 
@@ -190,6 +191,16 @@ export interface SidebarContext {
 // through the same tryOpenPathString() the transcript uses, so the sidebar
 // honours tui.openFileCommand with no separate plumbing.
 export interface SidebarLine extends FormattedLine {
+  // Row-scoped double-click, in the same vocabulary the chrome bars use
+  // and dispatched through the same Screen.dispatchBarAction — so a row
+  // that opens the model chooser and the sessionbar field that opens it
+  // are one mechanism, and the readonly gate lives in one place.
+  //
+  // Takes precedence over openPath. Rows that name a file keep using
+  // openPath instead: it carries the link rendering (openSpan, OSC 8) as
+  // well as the gesture, and splitting those would be two sources of
+  // truth for one row.
+  doubleAction?: ChromeActionTarget;
   openPath?: string;
   // The run of `body` that actually names the file, as [start, end) byte
   // offsets. Gadgets compose rows out of glyphs, deltas and gap padding

@@ -2237,9 +2237,18 @@ export function registerAcpWsEndpoint(
           break;
         }
         default:
-          throw invalid(
-            `configId ${JSON.stringify(params.configId)} is not settable`,
-          );
+          // Anything else in the snapshot came from the agent's own
+          // configOptions (effort, thought_level, whatever it invents), so
+          // it's the agent's to apply: forward it. This mirrors the text
+          // path in Session.runConfigCommand, which has always forwarded
+          // the tail case. Without it a dimension hydra advertises as
+          // settable is refused over WS but accepted via
+          // `/hydra config <id> <value>`.
+          await session.forwardRequest("session/set_config_option", {
+            sessionId: params.sessionId,
+            configId: params.configId,
+            value: params.value,
+          });
       }
       return { configOptions: session.buildConfigOptions() };
     });

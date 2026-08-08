@@ -110,31 +110,33 @@ describe("buildAllQuestionsSpec", () => {
     ]);
     const spec = buildAllQuestionsSpec(groups, [0, 0], falses(2), 0);
     expect(spec.title).toBe("Open questions (2)");
-    expect(spec.options).toEqual([
-      { label: "First?", value: "yes" },
-      { label: "Second?", value: "later" },
+    // Every row is a cycling select; the ids are the representatives'.
+    expect(spec.rows).toEqual([
+      { id: "a", kind: "select", label: "First?", value: "yes" },
+      { id: "c", kind: "select", label: "Second?", value: "later" },
     ]);
   });
 
   it("shows 'dismiss' value when row is in dismiss-mode", () => {
     const groups = toGroups([q({ id: "a", options: ["yes", "no"] })]);
     const spec = buildAllQuestionsSpec(groups, [0], [true], 0);
-    expect(spec.options[0]!.value).toBe(QUESTION_VALUE_DISMISS);
-    expect(spec.options[0]!.label).toBe(groups[0]!.representative.question);
+    const row = spec.rows[0]!;
+    expect(row.kind === "select" && row.value).toBe(QUESTION_VALUE_DISMISS);
+    expect(row.label).toBe(groups[0]!.representative.question);
   });
 
   it("truncates long question text with ellipsis", () => {
     const long = "A".repeat(80);
     const groups = toGroups([q({ question: long })]);
     const spec = buildAllQuestionsSpec(groups, [0], falses(1), 0, 20);
-    expect(spec.options[0]!.label).toHaveLength(20);
-    expect(spec.options[0]!.label.endsWith("…")).toBe(true);
+    expect(spec.rows[0]!.label).toHaveLength(20);
+    expect(spec.rows[0]!.label.endsWith("…")).toBe(true);
   });
 
-  it("clamps selectedIndex into valid range", () => {
+  it("clamps the cursor into valid range", () => {
     const groups = toGroups([q({ id: "x" })]);
-    expect(buildAllQuestionsSpec(groups, [0], falses(1), -5).selectedIndex).toBe(0);
-    expect(buildAllQuestionsSpec(groups, [0], falses(1), 99).selectedIndex).toBe(0);
+    expect(buildAllQuestionsSpec(groups, [0], falses(1), -5).cursor).toBe(0);
+    expect(buildAllQuestionsSpec(groups, [0], falses(1), 99).cursor).toBe(0);
   });
 });
 

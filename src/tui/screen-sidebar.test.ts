@@ -435,6 +435,42 @@ describe("Screen sidebar double-click to open", () => {
     expect(opened).toEqual([]);
   });
 
+  // A row carrying a typed action dispatches it through the bars' own
+  // handler, so the sidebar's info rows and the sessionbar's fields are
+  // one mechanism and the readonly gate stays in one place.
+  it("dispatches a row's typed double-click action", () => {
+    const { screen } = makeScreen(100, 40);
+    (screen as unknown as { started: boolean }).started = true;
+    const fired: Array<[string, string]> = [];
+    (
+      screen as unknown as { onBarAction: (a: string, v: string) => void }
+    ).onBarAction = (a, v) => {
+      fired.push([a, v]);
+    };
+    screen.setSidebarGadgets(["info"]);
+    screen.setSidebarSnapshot({
+      agent: "claude-acp",
+      model: "opus[1m]",
+      mode: "default",
+      sessionId: "abc123",
+    });
+    screen.setSidebarVisible(true);
+    screen.repaintNow();
+    const targets = (
+      screen as unknown as {
+        sidebarRowDoubleActions: Map<number, { action: string; value: string }>;
+      }
+    ).sidebarRowDoubleActions;
+    const modelRow = [...targets.entries()].find(
+      ([, t]) => t.action === "choose-model",
+    )![0];
+    const col = screen.width() + SIDEBAR_GUTTER_COLS + 1;
+    click(screen, col, modelRow);
+    expect(fired).toEqual([]);
+    click(screen, col, modelRow);
+    expect(fired).toEqual([["choose-model", "model"]]);
+  });
+
   it("does not anchor a transcript selection from a sidebar click", () => {
     const { screen, fileRow, sidebarCol } = withSidebar();
     screen.appendLines([{ body: "selectable transcript text" }]);

@@ -8,6 +8,7 @@
 //     the memo cache in registry.ts doesn't churn on invisible changes.
 //   - render() must not exceed ctx.width cells per row.
 
+import type { ChromeActionTarget } from "../chrome-action.js";
 import type { FormattedLine } from "../format.js";
 import { RUNNING_TOOL_CAP } from "./running-tools.js";
 import type {
@@ -604,23 +605,34 @@ export const sessionInfoGadget: Gadget = {
   render: (s, ctx) => {
     const { cellWidth } = ctx.metrics;
     const lines: SidebarLine[] = [];
-    const field = (label: string, value: string): void => {
+    // `target` makes the row a double-click target. The three config
+    // dimensions open the same chooser their sessionbar field opens,
+    // through the same dispatch; the value is the config id, not the
+    // displayed setting, since the chooser reads the live option list.
+    const field = (
+      label: string,
+      value: string,
+      target?: ChromeActionTarget,
+    ): void => {
       // One column of separation between label and value at minimum.
       const budget = ctx.width - cellWidth(label) - 1;
-      lines.push(fieldRow(label, fitIdentifier(value, budget, ctx), ctx));
+      const row = fieldRow(label, fitIdentifier(value, budget, ctx), ctx);
+      lines.push(target === undefined ? row : { ...row, doubleAction: target });
     };
     // All four are identity strings, so none of them takes a colour.
     if (s.agent !== null) {
-      field("agent", s.agent);
+      field("agent", s.agent, { action: "choose-agent", value: "agent" });
     }
     if (s.model !== null) {
-      field("model", s.model);
+      field("model", s.model, { action: "choose-model", value: "model" });
     }
     if (s.mode !== null) {
-      field("mode", s.mode);
+      field("mode", s.mode, { action: "choose-mode", value: "mode" });
     }
     if (s.sessionId !== null) {
-      field("id", s.sessionId);
+      // Not a chooser: the id is what it is, so copy it — and copy the
+      // whole id, not the head-clipped form the row displays.
+      field("id", s.sessionId, { action: "copy", value: s.sessionId });
     }
     return lines;
   },
@@ -763,7 +775,7 @@ export const sessionsGadget: Gadget = {
           : entry.waiting
             ? "status-waiting"
             : "status-idle",
-        openPath: `hydra://sessions/${entry.sessionId}`,
+        doubleAction: { action: "open-session", value: entry.sessionId },
         item: true,
       } satisfies SidebarLine;
     });

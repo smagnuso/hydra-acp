@@ -788,6 +788,57 @@ describe("Session", () => {
       expect(session.currentModel).toBe("ncp-anthropic/claude-opus-4-7");
     });
 
+    // An agent-advertised dimension (effort, thought_level, ...) has to be
+    // BOTH offered in the snapshot and actually settable. The WS handler
+    // validates against buildConfigOptions() and then dispatches; its
+    // default branch forwards to the agent, which is the only thing that
+    // knows what "effort" means. This used to throw "not settable", so the
+    // TUI could list effort and then refuse to set it while the text verb
+    // `/hydra config effort high` worked.
+    it("offers an agent-advertised config option and forwards a set of it", async () => {
+      const { session, mock } = makeSession("sess_eff", "u_eff");
+      const warm = makeClient();
+      await session.attach(warm.client, "full");
+      mock.triggerNotification("session/update", {
+        sessionId: "u_eff",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [
+            {
+              id: "effort",
+              name: "Effort",
+              currentValue: "default",
+              options: [
+                { value: "default", name: "Default" },
+                { value: "high", name: "High" },
+              ],
+            },
+          ],
+        },
+      });
+      await flushHistoryWrites();
+
+      const effort = session
+        .buildConfigOptions()
+        .find((o) => o.id === "effort");
+      expect(effort?.options.map((v) => v.value)).toEqual(["default", "high"]);
+
+      const requestSpy = vi
+        .spyOn(session.agent.connection, "request")
+        .mockResolvedValueOnce({ ok: true });
+      await session.forwardRequest("session/set_config_option", {
+        sessionId: "sess_eff",
+        configId: "effort",
+        value: "high",
+      });
+      // Reaches the agent under the UPSTREAM session id.
+      expect(requestSpy).toHaveBeenCalledWith("session/set_config_option", {
+        sessionId: "u_eff",
+        configId: "effort",
+        value: "high",
+      });
+    });
+
     it("captures availableModes + currentMode from a config_option_update (id=mode)", async () => {
       // claude-acp advertises its permission modes ONLY via a
       // config_option_update with id="mode" (no available_modes_update).

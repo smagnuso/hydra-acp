@@ -273,6 +273,10 @@ export const DEFAULT_COMPOSER_TOP_RIGHT: BarSideConfig = ["usage"];
 export const DEFAULT_COMPOSER_BOTTOM_LEFT: BarSideConfig = [];
 export const DEFAULT_COMPOSER_BOTTOM_RIGHT: BarSideConfig = ["helpHint"];
 export const DEFAULT_SESSIONBAR_LEFT: BarSideConfig = ["cwd", "title"];
+// No `mode` here on purpose: the composer's bottom rule already reports it,
+// since helpHint rewrites its "⇧⇥ mode" legend to "⇧⇥ mode: <current>".
+// Anyone who wants it on the sessionbar too can add the field, and it
+// opens the mode chooser on double-click when they do.
 export const DEFAULT_SESSIONBAR_RIGHT: BarSideConfig = ["agentModel"];
 
 const TuiConfig = z.object({

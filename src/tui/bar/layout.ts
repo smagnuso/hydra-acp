@@ -22,37 +22,16 @@
 
 import stringWidth from "string-width";
 import type { ThemeToken } from "../theme/index.js";
+import { CHROME_ACTIONS, type ChromeAction } from "../chrome-action.js";
 
 /**
- * What a click on a bar chunk does.
- *
- *   "toggle-mode" / "switch-session" / "show-help" / "detach"
- *     application effects, dispatched via Screen.onBarAction so they go
- *     through the same readonly gate as the equivalent hotkey.
- *   "copy"  put the chunk's value on the clipboard (Screen handles it).
- *   "open"  hand the value to tui.openFileCommand (Screen handles it).
- *   "none"  inert, but still hoverable-as-plain-text.
+ * What a click on a bar chunk does. The vocabulary is shared with the
+ * sidebar (see chrome-action.ts) so both dispatch through one function;
+ * `BarAction` remains the name the bar modules use for it.
  */
-export type BarAction =
-  | "toggle-mode"
-  | "switch-session"
-  | "show-help"
-  | "detach"
-  | "copy"
-  | "open"
-  | "open-session"
-  | "none";
+export type BarAction = ChromeAction;
 
-export const BAR_ACTIONS: readonly BarAction[] = [
-  "toggle-mode",
-  "switch-session",
-  "show-help",
-  "detach",
-  "copy",
-  "open",
-  "open-session",
-  "none",
-];
+export const BAR_ACTIONS: readonly BarAction[] = CHROME_ACTIONS;
 
 /** One painted run of text. Fields resolve to zero or more of these. */
 export interface Chunk {

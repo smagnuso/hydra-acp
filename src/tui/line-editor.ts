@@ -48,6 +48,12 @@ export class LineEditor {
     this.cur = text.length;
   }
 
+  // Park the caret at an absolute offset, clamped into the buffer. Used by
+  // click-to-position-caret, where the offset comes from a screen column.
+  setCursor(offset: number): void {
+    this.cur = Math.max(0, Math.min(offset, this.buffer.length));
+  }
+
   clearUndoHistory(): void {
     this.undoStack = [];
     this.redoStack = [];

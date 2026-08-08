@@ -3022,13 +3022,12 @@ describe("Screen block-click routing", () => {
     const a = resolve(screen, 1, y)!;
     const b = resolve(screen, 6, y)!;
     screen.setSelection(a, b);
-    screen.setOptionsPrompt({
+    screen.setFormPrompt({
       title: "Options",
-      options: [],
-      hint: "",
-      cursor: 0,
-    } as unknown as Parameters<Screen["setOptionsPrompt"]>[0] extends infer T
-      ? T extends null ? never : T : never);
+      rows: [],
+      hints: [],
+      selectedIndex: 0,
+    });
     expect(screen.hasSelection()).toBe(false);
   });
 

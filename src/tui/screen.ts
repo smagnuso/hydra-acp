@@ -76,6 +76,7 @@ import { depthForTerminal } from "./theme/capability.js";
 const SGR_PATTERN = /\x1b\[[0-9;]*m/;
 const SGR_GLOBAL = /\x1b\[[0-9;]*m/g;
 import { writeDebugLine } from "./debug-log.js";
+import type { ChromeActionTarget } from "./chrome-action.js";
 import {
   ALT_SCREEN_LEAVE,
   AUTOWRAP_OFF,
@@ -274,6 +275,11 @@ export interface ScreenOptions {
   // Routed through the app rather than handled locally so the dispatch
   // goes through the same readonly gate as the equivalent hotkey.
   onBarAction?: (action: BarAction, value: string) => void;
+  // Fired when a click (or a wheel notch) inside the open form modal
+  // resolves to a target. The app owns the form's state, so the screen
+  // reports the gesture rather than acting on it, and the app funnels it
+  // into the same handler the equivalent keypress uses.
+  onFormClick?: (target: FormClickTarget) => void;
 }
 
 interface BannerState {
@@ -310,19 +316,71 @@ export interface PermissionPromptSpec {
   selectedIndex: number;
 }
 
-// Interactive session-options modal opened by ^O. Each row shows its
-// current value (e.g. on/off, edit/diff, amend/enqueue); the app cycles
-// one in place and re-renders without closing, so several can be changed
-// in one visit. Dismissed by passing null to setOptionsPrompt.
-export interface OptionsPromptSpec {
+// One row of a form modal. See modal-form.ts for the state machine that
+// drives these and for what each kind means to the user.
+//
+//   select  ` ❯ 1. Label          value`   (^O, ^Q)
+//   choice  ` ❯ 1. • Label         note`   (a chooser; • marks the live one)
+//   text    ` ❯ label: field`              (the title rename)
+export type FormRowSpec =
+  | { kind: "select"; label: string; value: string }
+  | { kind: "choice"; label: string; note?: string; current?: boolean }
+  | { kind: "text"; label: string; text: string; cursor: number };
+
+// What clicking a hint word does. Deliberately the same vocabulary the key
+// reducer reports, so a click and the equivalent keypress run one code path.
+export type FormHintAction =
+  | "commit"
+  | "close"
+  | "cancel"
+  | "save"
+  | "dismiss";
+
+// One segment of the hint footer. Segments without an action are legends
+// for keys that have no click equivalent ("↑/↓ row"); the ones with an
+// action are click targets, like the composer rule's help chunks.
+export interface FormHintSpec {
+  label: string;
+  action?: FormHintAction;
+}
+
+// A resolved click inside the form modal, handed to ScreenOptions.onFormClick.
+//
+//   row    the user clicked (or wheeled onto) row `row`. `select: true` means
+//          "move the cursor here, don't act", which is what the wheel does.
+//          `caretOffset` is set when the click landed inside a text row's
+//          field, and is an index into that row's full text.
+//   hint   the user clicked a hint word.
+export type FormClickTarget =
+  | { kind: "row"; row: number; caretOffset?: number; select?: boolean }
+  | { kind: "hint"; action: FormHintAction };
+
+// Per-row click geometry recorded at paint time.
+interface FormRowHitInfo {
+  row: number;
+  // Text rows only: where the editable field starts on screen, the visible
+  // slice, and the index into the full text that slice begins at (the field
+  // scrolls under a long value, so screen column alone can't locate a caret).
+  field?: { startCol: number; slice: string; sliceStart: number };
+}
+
+// Modal that takes over the prompt area with a titled list of rows and a
+// hint footer: ^O session options, the ^Q questions list, the title field,
+// the model / mode / agent choosers. The app owns all editing state and
+// re-pushes a spec whenever anything changes; the screen only paints.
+// Dismissed by passing null to setFormPrompt.
+export interface FormPromptSpec {
   title: string;
-  options: Array<{ label: string; value: string }>;
+  rows: FormRowSpec[];
   selectedIndex: number;
-  // Bottom-line hint shown under the rows. When omitted, the renderer uses
-  // the legacy hint tailored to the ^O session-options modal — the modal
-  // this widget was originally built for. The ^Q questions modal sets its
-  // own hint with the dispatch / save / discard keys.
-  hint?: string;
+  // Bottom-line hint under the rows, rendered " · "-joined. When omitted,
+  // the renderer uses the legacy ^O wording, the modal this widget was
+  // originally built for.
+  hints?: FormHintSpec[];
+  // Total rows the modal may occupy, title and hint included. Longer lists
+  // scroll inside the window rather than being cut off. Defaults to
+  // DEFAULT_FORM_ROWS.
+  maxRows?: number;
 }
 
 // Tiny modal used by the TUI to confirm a destructive exit (e.g. "agent
@@ -416,7 +474,13 @@ const MIN_SIDEBAR_HOST_WIDTH = 80;
 const MIN_VISIBLE_TRANSCRIPT = 12;
 const MAX_QUEUED_ROWS = 5;
 const MAX_PERMISSION_ROWS = 12;
-const MAX_OPTIONS_ROWS = 12;
+// Rows a form modal takes when its spec doesn't say: title + 10 rows +
+// hint, which is what the ^O modal has always occupied. Lists longer than
+// the window scroll inside it.
+const DEFAULT_FORM_ROWS = 12;
+// Never window a form down to a single row: below this the modal can't
+// show enough context to navigate.
+const MIN_FORM_WINDOW = 3;
 const MAX_HELP_ROWS = 30;
 const MAX_COMPLETION_ROWS = 6;
 const MAX_CHIP_ROWS = 4;
@@ -591,6 +655,9 @@ export class Screen {
   // Keyed by terminal row; entries for rows the column no longer covers
   // are dropped when the map is rebuilt.
   private sidebarRowPaths = new Map<number, string>();
+  // Typed row-scoped double-click targets, recorded alongside
+  // sidebarRowPaths. Takes precedence over the path when a row has both.
+  private sidebarRowDoubleActions = new Map<number, ChromeActionTarget>();
   // Row → click regions, in absolute terminal columns. Rebuilt on every
   // sidebar paint alongside sidebarRowPaths. Two kinds: a pager arrow
   // (carries the target `index`) and a title row's fold toggle.
@@ -625,7 +692,26 @@ export class Screen {
   private sidebarScrollOffset = 0;
   private sidebarOverflowRows = 0;
   private permissionPrompt: PermissionPromptSpec | null = null;
-  private optionsPrompt: OptionsPromptSpec | null = null;
+  private formPrompt: FormPromptSpec | null = null;
+  // Click targets inside the form modal, recorded by drawFormPrompt the
+  // same way barHits is: the renderer already knows the geometry, so
+  // hit-testing re-deriving it would be a second source of truth.
+  private formRowHits = new Map<number, FormRowHitInfo>();
+  private formHintHits: Array<{
+    row: number;
+    start: number;
+    end: number;
+    action: FormHintAction;
+  }> = [];
+  // Inclusive terminal-row span the modal occupies, so a click anywhere
+  // inside it can be claimed (and never anchor a selection behind it).
+  private formRegion: { top: number; bottom: number } | null = null;
+  private formPressHit: FormClickTarget | null = null;
+  // Top row of the form's scroll window, and the form identity it belongs
+  // to. Held across paints so the list doesn't move under the pointer; a
+  // different form (or a changed row count) re-centres on its selection.
+  private formWindowTop = 0;
+  private formWindowKey: string | null = null;
   private confirmPrompt: ConfirmPromptSpec | null = null;
   private compactionPrompt: CompactionPromptSpec | null = null;
   private helpPrompt: HelpPromptSpec | null = null;
@@ -737,6 +823,7 @@ export class Screen {
   // the sidebar's, for the same reason.
   private lastBarClick: { id: string; t: number } | null = null;
   private onBarAction: ScreenOptions["onBarAction"];
+  private onFormClick: ScreenOptions["onFormClick"];
   private hoveredBlockKey: string | null = null;
   private hoveredSubKey: string | null = null;
   // Expanded set of block keys that should all paint hovered when the
@@ -927,6 +1014,7 @@ export class Screen {
     this.onHydraLinkClick = opts.onHydraLinkClick;
     this.onMouse = opts.onMouse;
     this.onBarAction = opts.onBarAction;
+    this.onFormClick = opts.onFormClick;
     this.onHoverRun = opts.onHoverRun;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
@@ -1747,6 +1835,7 @@ export class Screen {
     this.sidebarVisible = visible;
     this.lastSidebarClick = null;
     this.sidebarRowPaths.clear();
+    this.sidebarRowDoubleActions.clear();
     this.sidebarRowActions.clear();
     this.sidebarPages = {};
     this.sidebarScrollOffset = 0;
@@ -2215,6 +2304,13 @@ export class Screen {
 
   currentModeId(): string | undefined {
     return this.banner.currentMode;
+  }
+
+  // The live session title, as the sessionbar has it. Undefined when the
+  // session has none yet (a fresh session before the first prompt seeds
+  // one), which callers seeding a rename field treat as an empty field.
+  sessionTitle(): string | undefined {
+    return this.sessionbar.title;
   }
 
   // OSC 9;4 progress-bar control. State 3 = indeterminate (pulsing
@@ -3035,20 +3131,35 @@ export class Screen {
     this.repaint();
   }
 
-  // Interactive session-options modal (^O). Takes over the prompt area
-  // like the permission modal. Pass null to dismiss.
-  setOptionsPrompt(spec: OptionsPromptSpec | null): void {
-    if (spec !== null && this.optionsPrompt === null) {
+  // Form modal (^O options, ^Q questions, the title field, the config
+  // choosers). Takes over the prompt area like the permission modal. Pass
+  // null to dismiss.
+  setFormPrompt(spec: FormPromptSpec | null): void {
+    if (spec !== null && this.formPrompt === null) {
       this.clearSelection();
     }
-    this.optionsPrompt = spec
-      ? { ...spec, options: spec.options.map((o) => ({ ...o })) }
+    this.formPrompt = spec
+      ? { ...spec, rows: spec.rows.map((r) => ({ ...r })) }
       : null;
+    if (spec === null) {
+      this.clearFormHits();
+      // Next form starts with a fresh window rather than inheriting this
+      // one's scroll position.
+      this.formWindowKey = null;
+      this.formWindowTop = 0;
+    }
     this.repaint();
   }
 
-  isOptionsPromptActive(): boolean {
-    return this.optionsPrompt !== null;
+  private clearFormHits(): void {
+    this.formRowHits.clear();
+    this.formHintHits = [];
+    this.formRegion = null;
+    this.formPressHit = null;
+  }
+
+  isFormPromptActive(): boolean {
+    return this.formPrompt !== null;
   }
 
   // Two-line confirmation modal that takes over the prompt area. Pass
@@ -3368,6 +3479,14 @@ export class Screen {
       // wheel over a short sidebar still does the useful thing instead of
       // nothing.
       const wheelCell = this.mouseCell(data);
+      // Wheel over the open modal walks its rows. Scrolling the transcript
+      // underneath while a chooser is up would be answering the wrong
+      // question, and a long model list is exactly what you'd want to
+      // wheel through.
+      if (wheelCell !== null && this.isFormCell(wheelCell.y)) {
+        this.stepFormCursor(name === "MOUSE_WHEEL_UP" ? -3 : 3);
+        return;
+      }
       if (
         wheelCell !== null &&
         this.isSidebarCell(wheelCell.x, wheelCell.y) &&
@@ -3429,6 +3548,24 @@ export class Screen {
             ? "pointer"
             : "default",
         );
+      }
+      // Same affordance inside the form modal: its rows and hint words are
+      // targets, and the pointer shape is the only thing that says so.
+      if (cell !== null && this.isFormCell(cell.y)) {
+        const hit = this.formHitAt(cell.x, cell.y);
+        this.setPointerShape(hit !== null ? "pointer" : "default");
+        // Hover moves the highlight, the way a menu does, so the row under
+        // the pointer is the row a keypress would act on. Guarded on an
+        // actual change: motion events arrive per cell, and each one
+        // otherwise rebuilds and repaints the whole form.
+        if (
+          hit !== null &&
+          hit.kind === "row" &&
+          this.formPrompt !== null &&
+          hit.row !== this.formPrompt.selectedIndex
+        ) {
+          this.onFormClick?.({ kind: "row", row: hit.row, select: true });
+        }
       }
     }
     // Update the OS pointer-shape based on what's under the pointer.
@@ -3550,6 +3687,11 @@ export class Screen {
         this.pressCell = null;
         return;
       }
+      // Likewise the form modal: it owns its rows while it's open.
+      if (cell !== null && this.handleFormPress(cell)) {
+        this.pressCell = null;
+        return;
+      }
       // Sidebar clicks are handled entirely by the column: they must not
       // anchor a transcript selection or toggle a scrollback block.
       if (this.handleSidebarPress(cell)) {
@@ -3590,6 +3732,10 @@ export class Screen {
       name === "MOUSE_BUTTON_RELEASED"
     ) {
       if (this.handleBarRelease(cell)) {
+        this.pressCell = null;
+        return;
+      }
+      if (this.handleFormRelease(cell)) {
         this.pressCell = null;
         return;
       }
@@ -5444,13 +5590,14 @@ export class Screen {
       this.placeCursor();
       if (
         this.permissionPrompt ||
-        this.optionsPrompt ||
         this.confirmPrompt ||
         this.compactionPrompt ||
         this.helpPrompt
       ) {
         this.term.hideCursor(false);
       }
+      // The form decides for itself: a text row shows a caret, a list row
+      // shows none. placeCursor has already set it either way.
       this.lastPromptRows = promptRows;
     });
   }
@@ -5590,6 +5737,105 @@ export class Screen {
   // A click counts only when press and release land on the same region,
   // matching the discipline the hint chunks have always used, so a
   // press-drag-release never fires an action by accident.
+  // Move the form's cursor by `delta`, clamped (a wheel that wraps around
+  // the ends of a list is disorienting, unlike ↑/↓ which the user aimed).
+  private stepFormCursor(delta: number): void {
+    const spec = this.formPrompt;
+    if (spec === null || spec.rows.length === 0) {
+      return;
+    }
+    const next = Math.max(
+      0,
+      Math.min(spec.rows.length - 1, spec.selectedIndex + delta),
+    );
+    if (next === spec.selectedIndex) {
+      return;
+    }
+    this.onFormClick?.({ kind: "row", row: next, select: true });
+  }
+
+  // Whether a cell is inside the open form modal. Used to claim clicks and
+  // wheel events for it before the transcript sees them.
+  isFormCell(y: number): boolean {
+    const region = this.formRegion;
+    return (
+      this.formPrompt !== null &&
+      region !== null &&
+      y >= region.top &&
+      y <= region.bottom
+    );
+  }
+
+  formHitAt(x: number, y: number): FormClickTarget | null {
+    if (!this.isFormCell(y)) {
+      return null;
+    }
+    for (const hint of this.formHintHits) {
+      if (hint.row === y && x >= hint.start && x <= hint.end) {
+        return { kind: "hint", action: hint.action };
+      }
+    }
+    const rowHit = this.formRowHits.get(y);
+    if (rowHit === undefined) {
+      return null;
+    }
+    // A click inside a text row's field lands the caret there, the way it
+    // would in any editor; anywhere else on the row just selects it.
+    if (rowHit.field !== undefined && x >= rowHit.field.startCol) {
+      const { slice, sliceStart, startCol } = rowHit.field;
+      let offset = sliceStart;
+      let col = startCol;
+      for (const chr of slice) {
+        const next = col + cellWidth(chr);
+        if (x < next) {
+          break;
+        }
+        col = next;
+        offset += chr.length;
+      }
+      return { kind: "row", row: rowHit.row, caretOffset: offset };
+    }
+    return { kind: "row", row: rowHit.row };
+  }
+
+  // Press/release for the form modal, same discipline as the bars: the
+  // action fires on release, and only when it lands on the target the press
+  // armed, so a drag across rows never commits the wrong one.
+  private handleFormPress(cell: { x: number; y: number }): boolean {
+    if (!this.isFormCell(cell.y)) {
+      this.formPressHit = null;
+      return false;
+    }
+    this.formPressHit = this.formHitAt(cell.x, cell.y);
+    // Claim the whole modal region either way: the rows behind it are not
+    // the user's target, and a selection anchored there would be nonsense.
+    return true;
+  }
+
+  private handleFormRelease(cell: { x: number; y: number } | null): boolean {
+    const pressed = this.formPressHit;
+    this.formPressHit = null;
+    if (pressed === null || cell === null || !this.isFormCell(cell.y)) {
+      return pressed !== null;
+    }
+    const hit = this.formHitAt(cell.x, cell.y);
+    if (hit === null || hit.kind !== pressed.kind) {
+      return true;
+    }
+    if (hit.kind === "row" && pressed.kind === "row" && hit.row !== pressed.row) {
+      return true;
+    }
+    if (
+      hit.kind === "hint" &&
+      pressed.kind === "hint" &&
+      hit.action !== pressed.action
+    ) {
+      return true;
+    }
+    this.onFormClick?.(hit);
+    return true;
+  }
+
   private handleBarPress(cell: { x: number; y: number }): boolean {
     const hit = this.barHitAt(cell.x, cell.y);
     if (hit === null) {
@@ -5890,6 +6136,9 @@ export class Screen {
       if (line?.openPath !== undefined) {
         this.sidebarRowPaths.set(row, line.openPath);
       }
+      if (line?.doubleAction !== undefined) {
+        this.sidebarRowDoubleActions.set(row, line.doubleAction);
+      }
       if (line?.actions !== undefined && line.actions.length > 0) {
         this.sidebarRowActions.set(
           row,
@@ -6070,6 +6319,14 @@ export class Screen {
       // Consume the chain so a third click starts fresh rather than
       // re-opening the file.
       this.lastSidebarClick = null;
+      // A typed action wins over a path: it says what the row means
+      // instead of encoding it in a string for the URL dispatcher to
+      // parse back out.
+      const target = this.sidebarRowDoubleActions.get(cell.y);
+      if (target !== undefined) {
+        this.dispatchBarAction(target.action, target.value);
+        return true;
+      }
       const path = this.sidebarRowPaths.get(cell.y);
       // Same dispatcher the transcript uses, so a sidebar row honours the
       // #L fragment and scheme rules identically.
@@ -6136,12 +6393,14 @@ export class Screen {
   private completionRows(): number {
     if (
       this.permissionPrompt ||
-      this.optionsPrompt ||
+      this.formPrompt ||
       this.confirmPrompt ||
       this.helpPrompt
     ) {
       // Completions are pointless when the prompt area is taken over by
-      // a modal — the user can't be typing into it.
+      // a modal: the user isn't typing into the composer. (A form's text
+      // row does take typing, but it's a title field, not a slash
+      // command.)
       return 0;
     }
     return Math.min(MAX_COMPLETION_ROWS, this.completions.length);
@@ -6342,8 +6601,8 @@ export class Screen {
       this.drawPermissionPrompt();
       return;
     }
-    if (this.optionsPrompt) {
-      this.drawOptionsPrompt();
+    if (this.formPrompt) {
+      this.drawFormPrompt();
       return;
     }
     if (this.confirmPrompt) {
@@ -6696,20 +6955,30 @@ export class Screen {
       this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
       return;
     }
-    if (this.optionsPrompt) {
-      const rows = this.optionsRows();
-      const top =
-        this.term.height -
-        rows -
-        BANNER_ROWS -
-        BANNER_SEPARATOR_ROWS -
-        SESSIONBAR_ROWS +
-        1;
-      // title precedes the option rows
-      const optionRow = top + 1 + this.optionsPrompt.selectedIndex;
+    if (this.formPrompt) {
+      const spec = this.formPrompt;
+      const visible = this.formWindowSize();
+      // The window the renderer actually painted, not a fresh centring of
+      // it: those disagree the moment hover or the wheel moves the
+      // selection, which parks the cursor on some unrelated row.
+      const start = this.formWindowTop;
+      // The title precedes the rows, and the window offsets the selection.
+      const selectedRow =
+        this.formTop() + 1 + (spec.selectedIndex - start);
       const lastUsableRow =
         this.term.height - BANNER_ROWS - BANNER_SEPARATOR_ROWS - SESSIONBAR_ROWS;
-      this.term.moveTo(2, Math.min(optionRow, lastUsableRow));
+      const row = Math.min(selectedRow, lastUsableRow);
+      // Only a text row wants a caret, and it goes where typing will land.
+      // On a list row the ❯ marker and the row highlight already say what
+      // is selected, so a block parked in the margin is just an artifact.
+      const layouts = layoutFormRows(spec, this.term.width, start, visible);
+      const active = layouts.find((l) => l.selected);
+      if (active?.kind !== "text") {
+        this.term.hideCursor(true);
+        return;
+      }
+      this.term.hideCursor(false);
+      this.term.moveTo(Math.min(active.caretCol, this.term.width), row);
       return;
     }
     if (this.confirmPrompt) {
@@ -6805,8 +7074,8 @@ export class Screen {
     if (this.permissionPrompt) {
       return this.permissionRows();
     }
-    if (this.optionsPrompt) {
-      return this.optionsRows();
+    if (this.formPrompt) {
+      return this.formRows();
     }
     if (this.confirmPrompt) {
       return CONFIRM_PROMPT_ROWS;
@@ -6840,28 +7109,65 @@ export class Screen {
     );
   }
 
-  private optionsRows(): number {
-    if (!this.optionsPrompt) {
+  private formRows(): number {
+    if (!this.formPrompt) {
       return 0;
     }
-    // title + N options + hint = 2 + N
-    return Math.min(MAX_OPTIONS_ROWS, 2 + this.optionsPrompt.options.length);
+    // title + N rows + hint = 2 + N, capped by the spec's row budget.
+    return Math.min(
+      Math.max(MIN_FORM_WINDOW, this.formPrompt.maxRows ?? DEFAULT_FORM_ROWS),
+      2 + this.formPrompt.rows.length,
+    );
   }
 
-  private drawOptionsPrompt(): void {
-    const spec = this.optionsPrompt;
+  // Rows the list itself gets, i.e. formRows() less the title and hint.
+  private formWindowSize(): number {
+    return Math.max(1, this.formRows() - 2);
+  }
+
+  private formTop(): number {
+    return (
+      this.term.height -
+      this.formRows() -
+      BANNER_ROWS -
+      BANNER_SEPARATOR_ROWS -
+      SESSIONBAR_ROWS +
+      1
+    );
+  }
+
+  private drawFormPrompt(): void {
+    const spec = this.formPrompt;
     if (!spec) {
       return;
     }
     const w = this.term.width;
-    const rows = this.optionsRows();
-    const top =
-      this.term.height -
-      rows -
-      BANNER_ROWS -
-      BANNER_SEPARATOR_ROWS -
-      SESSIONBAR_ROWS +
-      1;
+    const rows = this.formRows();
+    const top = this.formTop();
+    const visible = this.formWindowSize();
+    const windowKey = `${spec.title}|${spec.rows.length}|${visible}`;
+    if (windowKey !== this.formWindowKey) {
+      // First paint of this form: centre on whatever it opened selecting,
+      // which for a chooser is the live value, often deep in a long list.
+      this.formWindowKey = windowKey;
+      this.formWindowTop = formWindowStart(
+        spec.rows.length,
+        spec.selectedIndex,
+        visible,
+      );
+    } else {
+      this.formWindowTop = clampFormWindow(
+        this.formWindowTop,
+        spec.rows.length,
+        spec.selectedIndex,
+        visible,
+      );
+    }
+    const start = this.formWindowTop;
+    // Hit regions are rebuilt every frame: the window slides, so last
+    // frame's row-to-index mapping is stale the moment the cursor moves.
+    this.clearFormHits();
+    this.formRegion = { top, bottom: top + rows - 1 };
     let row = top;
     const writeRow = (sig: string, paint: () => void): void => {
       if (row >= top + rows) {
@@ -6870,45 +7176,59 @@ export class Screen {
       this.paintRow(row, sig, paint);
       row += 1;
     };
-    writeRow(`opts|t|${w}|${spec.title}`, () => {
-      paint(this.term, "prompt-text", ` ⚙ ${truncate(spec.title, w - 5)}`);
+    // The counter is the only cue that the list runs past the window, so it
+    // rides the title rather than the hint (which callers overwrite).
+    const counter =
+      spec.rows.length > visible
+        ? ` (${spec.selectedIndex + 1}/${spec.rows.length})`
+        : "";
+    writeRow(`form|t|${w}|${spec.title}|${counter}`, () => {
+      paint(
+        this.term,
+        "prompt-text",
+        ` ⚙ ${truncate(`${spec.title}${counter}`, w - 5)}`,
+      );
     });
-    // Align the value column just past the longest label so values line
-    // up in a tidy right-hand column.
-    const labelWidth = Math.max(
-      ...spec.options.map((o) => o.label.length),
-      0,
-    );
-    for (let i = 0; i < spec.options.length; i++) {
+    const layouts = layoutFormRows(spec, w, start, visible);
+    for (const l of layouts) {
       if (row >= top + rows - 1) {
         break;
       }
-      const opt = spec.options[i];
-      if (!opt) {
-        continue;
-      }
-      const isSel = i === spec.selectedIndex;
-      const marker = isSel ? "❯" : " ";
-      const prefix = ` ${marker} ${i + 1}. `;
-      const paddedLabel = opt.label.padEnd(labelWidth);
-      const room = w - prefix.length - 3;
-      const body = `${prefix}${truncate(`${paddedLabel}  ${opt.value}`, room)}`;
-      writeRow(
-        `opts|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.value}|${opt.label}`,
-        () => {
-          if (isSel) {
-            paint(this.term, "modal-option-selected", body);
-          } else {
-            paint(this.term, "modal-option", body);
-          }
-        },
-      );
+      this.formRowHits.set(row, {
+        row: l.index,
+        ...(l.kind === "text"
+          ? {
+              field: {
+                startCol: 1 + cellWidth(l.prefix),
+                slice: l.field,
+                sliceStart: l.fieldStart,
+              },
+            }
+          : {}),
+      });
+      writeRow(l.sig, () => {
+        if (l.kind === "text") {
+          paint(this.term, l.selected ? "modal-option-selected" : "modal-option", l.prefix);
+          // The field holds user-typed text; paint() writes via .noFormat
+          // so a literal `^X` in it stays literal.
+          paint(this.term, "content", l.field);
+          return;
+        }
+        paint(
+          this.term,
+          l.selected ? "modal-option-selected" : "modal-option",
+          l.body,
+        );
+      });
     }
-    const hint =
-      spec.hint ??
-      "↑/↓ choose · Enter this session · s save default · Esc close";
-    writeRow(`opts|hint|${w}|${hint}`, () => {
-      paint(this.term, "modal-hint", ` ${hint}`);
+    const hints = spec.hints ?? DEFAULT_FORM_HINTS;
+    const hintRow = row;
+    const laidOut = layoutFormHints(hints, w);
+    for (const span of laidOut.spans) {
+      this.formHintHits.push({ row: hintRow, ...span });
+    }
+    writeRow(`form|hint|${w}|${laidOut.text}`, () => {
+      paint(this.term, "modal-hint", ` ${laidOut.text}`);
     });
   }
 
@@ -8529,6 +8849,235 @@ function takeFromSegments(segments: WidthSegment[], budget: number): string {
     used += s.width;
   }
   return out;
+}
+
+// First row of the visible window, centring the cursor once the list is
+// longer than the window. Edge-scrolling (only moving the window when the
+// cursor hits a boundary) reads worse on a long chooser: you lose the sense
+// of where you are in the list.
+export function formWindowStart(
+  rowCount: number,
+  selectedIndex: number,
+  visible: number,
+): number {
+  if (rowCount <= visible || visible <= 0) {
+    return 0;
+  }
+  const half = Math.floor((visible - 1) / 2);
+  return Math.max(
+    0,
+    Math.min(selectedIndex - half, rowCount - visible),
+  );
+}
+
+// Keep an already-established window where it is, moving it only far enough
+// that the selected row stays visible.
+//
+// The window is sticky rather than re-centred per paint because the pointer
+// selects the row it hovers: re-centring would slide the list out from under
+// the pointer, which then hovers a different row. Scrolling belongs to the
+// gestures that ask for it (↑/↓ off the edge, the wheel), and a hovered row
+// is by definition already visible, so this is a no-op for hover.
+export function clampFormWindow(
+  top: number,
+  rowCount: number,
+  selectedIndex: number,
+  visible: number,
+): number {
+  if (rowCount <= visible || visible <= 0) {
+    return 0;
+  }
+  const maxTop = rowCount - visible;
+  let next = Math.max(0, Math.min(top, maxTop));
+  if (selectedIndex < next) {
+    next = selectedIndex;
+  } else if (selectedIndex > next + visible - 1) {
+    next = selectedIndex - visible + 1;
+  }
+  return Math.max(0, Math.min(next, maxTop));
+}
+
+export interface FormRowLayout {
+  kind: FormRowSpec["kind"];
+  index: number;
+  selected: boolean;
+  // select / choice: the whole painted body. Empty for text rows.
+  body: string;
+  // text: painted in the row style, then `field` in the content style.
+  prefix: string;
+  field: string;
+  // Index into the row's full text where `field` begins. Text rows only;
+  // non-zero once a long value has scrolled the field.
+  fieldStart: number;
+  // 1-based terminal column the caret sits on. Text rows only.
+  caretCol: number;
+  sig: string;
+}
+
+// Fallback hint for callers that don't supply one: the ^O wording this
+// widget was originally built for.
+const DEFAULT_FORM_HINTS: readonly FormHintSpec[] = [
+  { label: "↑/↓ choose" },
+  { label: "⏎ this session", action: "commit" },
+  { label: "s save default", action: "save" },
+  { label: "Esc close", action: "close" },
+];
+
+// Join the hint segments for painting and report where the clickable ones
+// landed. Columns are 1-based and account for the row's leading space, so
+// they can be compared against a mouse cell directly. Segments that would
+// spill past the row are dropped rather than half-painted: a click target
+// the user can only see part of is worse than one that isn't offered.
+export function layoutFormHints(
+  hints: readonly FormHintSpec[],
+  width: number,
+): {
+  text: string;
+  spans: Array<{ start: number; end: number; action: FormHintAction }>;
+} {
+  const usable = Math.max(0, width - 1);
+  const spans: Array<{ start: number; end: number; action: FormHintAction }> = [];
+  const SEP = " · ";
+  let text = "";
+  for (const hint of hints) {
+    const piece = text.length === 0 ? hint.label : `${SEP}${hint.label}`;
+    // 1 for the leading space the row is painted with.
+    if (1 + cellWidth(text) + cellWidth(piece) > usable) {
+      break;
+    }
+    const start = 1 + cellWidth(text) + cellWidth(piece) - cellWidth(hint.label) + 1;
+    text += piece;
+    if (hint.action !== undefined) {
+      spans.push({
+        start,
+        end: start + cellWidth(hint.label) - 1,
+        action: hint.action,
+      });
+    }
+  }
+  return { text, spans };
+}
+
+// Lay out the visible slice of a form's rows. Widths are measured in cells
+// throughout, so a CJK label doesn't drag the value column out of true. The
+// last column is left unwritten: painting it wraps the row on terminals
+// with DECAWM on.
+export function layoutFormRows(
+  spec: FormPromptSpec,
+  width: number,
+  start: number,
+  visible: number,
+): FormRowLayout[] {
+  const usable = Math.max(0, width - 1);
+  // Numbering only earns its keep when there's more than one row to jump
+  // between; a lone text field reads better as just "title: …".
+  const numbered = spec.rows.length > 1;
+  const numWidth = numbered
+    ? Math.max(...spec.rows.map((_, i) => `${i + 1}. `.length))
+    : 0;
+  // Align every value column against the widest label in the WHOLE list,
+  // not just the visible window, so the columns hold still while scrolling.
+  const labelWidth = Math.max(
+    0,
+    ...spec.rows.map((r) => cellWidth(r.kind === "text" ? `${r.label} ` : r.label)),
+  );
+  const out: FormRowLayout[] = [];
+  for (let i = start; i < Math.min(spec.rows.length, start + visible); i++) {
+    const r = spec.rows[i];
+    if (!r) {
+      continue;
+    }
+    const selected = i === spec.selectedIndex;
+    const cursorMark = selected ? "❯" : " ";
+    const num = numbered ? `${i + 1}. `.padStart(numWidth) : "";
+    if (r.kind === "text") {
+      const prefix = truncate(` ${cursorMark} ${num}${r.label} `, usable);
+      const { field, caretOffset, fieldStart } = windowTextField(
+        r.text,
+        r.cursor,
+        usable - cellWidth(prefix),
+      );
+      out.push({
+        kind: "text",
+        index: i,
+        selected,
+        body: "",
+        prefix,
+        field,
+        fieldStart,
+        caretCol: 1 + cellWidth(prefix) + caretOffset,
+        sig: `form|r|${width}|${i}|${selected ? 1 : 0}|text|${prefix}|${field}`,
+      });
+      continue;
+    }
+    const prefix = ` ${cursorMark} ${num}`;
+    // The dot marks the row holding the live value, which is independent of
+    // where the cursor happens to be resting. Non-current rows still pay for
+    // the column so the labels line up.
+    const dot = r.kind === "choice" ? (r.current === true ? "• " : "  ") : "";
+    const trailing = r.kind === "select" ? r.value : (r.note ?? "");
+    // Pad the label only when something follows it; otherwise the row would
+    // carry a tail of spaces that shows up in every paint signature.
+    const content =
+      trailing.length > 0
+        ? `${dot}${padToWidth(r.label, labelWidth)}  ${trailing}`
+        : `${dot}${r.label}`;
+    const body = `${prefix}${truncate(content, usable - cellWidth(prefix))}`;
+    out.push({
+      kind: r.kind,
+      index: i,
+      selected,
+      body,
+      prefix: "",
+      field: "",
+      fieldStart: 0,
+      caretCol: 1,
+      sig: `form|r|${width}|${i}|${selected ? 1 : 0}|${r.kind}|${body}`,
+    });
+  }
+  return out;
+}
+
+function padToWidth(s: string, width: number): string {
+  const pad = width - cellWidth(s);
+  return pad > 0 ? s + " ".repeat(pad) : s;
+}
+
+// Slide a one-line field so the caret is always visible in `room` columns.
+// The caret's own cell is reserved, so a caret past the last character has
+// somewhere to sit; once the text outgrows the field the caret rides the
+// right edge and the view scrolls under it.
+export function windowTextField(
+  text: string,
+  cursor: number,
+  room: number,
+): { field: string; caretOffset: number; fieldStart: number } {
+  if (room <= 0) {
+    return { field: "", caretOffset: 0, fieldStart: 0 };
+  }
+  const cur = Math.max(0, Math.min(cursor, text.length));
+  if (cellWidth(text) + 1 <= room) {
+    return {
+      field: text,
+      caretOffset: cellWidth(text.slice(0, cur)),
+      fieldStart: 0,
+    };
+  }
+  let start = cur;
+  let used = 1;
+  while (start > 0) {
+    const chWidth = cellWidth(text[start - 1] ?? "");
+    if (used + chWidth > room) {
+      break;
+    }
+    used += chWidth;
+    start -= 1;
+  }
+  return {
+    field: takeByWidth(text.slice(start), room),
+    caretOffset: cellWidth(text.slice(start, cur)),
+    fieldStart: start,
+  };
 }
 
 function firstLine(text: string): string {

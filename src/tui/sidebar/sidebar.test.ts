@@ -700,6 +700,20 @@ describe("info gadget", () => {
     expect(rows.some((b) => b.startsWith("id"))).toBe(true);
   });
 
+  // The three switchable dimensions open the same chooser their sessionbar
+  // fields do. The action carries the CONFIG ID, not the current setting:
+  // the chooser reads the live option list, and the row's own text is a
+  // head-clipped display form anyway.
+  it("makes agent / model / mode open their chooser, and id copy in full", () => {
+    const rows = sessionInfoGadget.render(s, ctx(26));
+    expect(rows.map((r) => r.doubleAction)).toEqual([
+      { action: "choose-agent", value: "agent" },
+      { action: "choose-model", value: "model" },
+      { action: "choose-mode", value: "mode" },
+      { action: "copy", value: "a1b2c3d4e5f6" },
+    ]);
+  });
+
   // Colour in the sidebar marks state; these are identity strings, so the
   // label is dim scaffolding and the value keeps the default foreground —
   // matching the sessionbar, which renders agent(model) unstyled too.
@@ -1192,7 +1206,7 @@ describe("sessions gadget", () => {
       }),
       ctx(26),
     );
-    expect(lines.map((l) => l.openPath!.split("_").pop())).toEqual([
+    expect(lines.map((l) => l.doubleAction!.value.split("_").pop())).toEqual([
       "both",
       "justwaiting",
       "justbusy",
@@ -1270,17 +1284,21 @@ describe("sessions gadget", () => {
     }
   });
 
-  // Double-click routes through the same hydra:// dispatch a session link in
-  // the transcript uses, so a row is a way to GO to that session.
-  it("carries a hydra:// session URL, spanning only the label", () => {
+  // Double-click names its intent ("go to this session") rather than
+  // encoding it in a URL for the link dispatcher to parse back out. Same
+  // action the sessionbar's btw session-id chunk uses.
+  it("carries an open-session action, and no link span", () => {
     const line = sessionsGadget.render(
       snap({ liveSessions: [live("blocked", { waiting: true })] }),
       ctx(26),
     )[0]!;
-    expect(line.openPath).toBe("hydra://sessions/hydra_session_blocked");
+    expect(line.doubleAction).toEqual({
+      action: "open-session",
+      value: "hydra_session_blocked",
+    });
+    expect(line.openPath).toBeUndefined();
     // No openSpan: the screen layer only paints an OSC 8 link for
-    // filesystem paths, and the row is double-clickable through openPath
-    // regardless. See the gadget's header comment.
+    // filesystem paths. See the gadget's header comment.
     expect(line.openSpan).toBeUndefined();
   });
 

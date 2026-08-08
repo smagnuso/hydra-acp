@@ -393,6 +393,54 @@ describe("chrome bar mouse", () => {
     expect(sid?.doubleAction).toBe("copy");
   });
 
+  it("opens the rename field on a double-click of the title", () => {
+    const r = render(120);
+    const hit = r.screen.barHitAt(r.sessionbar.indexOf("make the") + 1, 24);
+    expect(hit?.id).toBe("sessionbar:title");
+    expect(hit?.doubleAction).toBe("rename-session");
+    // Seeds the field from the full title even when the bar truncated it.
+    const narrow = render(50);
+    const trunc = narrow.screen.barHitAt(
+      narrow.sessionbar.indexOf("make th") + 1,
+      24,
+    );
+    expect(narrow.sessionbar).toContain("make th…");
+    expect(trunc?.value).toBe("make the sessionbar configurable");
+  });
+
+  it("opens the model chooser from the combined agent•model field", () => {
+    const r = render(120);
+    // The shipped sessionbar default is one chunk covering both, and model
+    // is the dimension people switch.
+    const hit = r.screen.barHitAt(r.sessionbar.indexOf("claude•") + 1, 24);
+    expect(hit?.id).toBe("sessionbar:agentModel");
+    expect(hit?.doubleAction).toBe("choose-model");
+  });
+
+  it("wires the mode / agent / model fields to their choosers", () => {
+    const bar: BarLayoutConfig = {
+      composer: {
+        top: { left: ["mode"], right: [] },
+        bottom: { left: [], right: [] },
+      },
+      sessionbar: { left: ["agent"], right: ["model"] },
+    };
+    const r = render(80, { bar, banner: { currentMode: "plan" } });
+    // `mode` picks from the chooser like the other two. It deliberately no
+    // longer cycles on a single click: one chunk can't do both, since the
+    // first click of a double would have already changed the mode.
+    const mode = r.screen.barHitAt(r.top.indexOf("plan") + 1, 1);
+    expect(mode?.action).toBe("none");
+    expect(mode?.doubleAction).toBe("choose-mode");
+    expect(
+      r.screen.barHitAt(r.sessionbar.indexOf("claude") + 1, 24)?.doubleAction,
+    ).toBe("choose-agent");
+    expect(
+      r.screen.barHitAt(r.sessionbar.indexOf("claude-sonnet") + 1, 24)
+        ?.doubleAction,
+    ).toBe("choose-model");
+  });
+
   it("keeps the hint chunks wired to their application effects", () => {
     const r = render(120);
     const at = (needle: string): string | undefined =>

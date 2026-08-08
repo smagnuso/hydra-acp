@@ -30,6 +30,7 @@ import {
   setTuiConfigValue,
   setTuiSidebarEnabled,
   setDefaultAgent,
+  setDefaultModelForAgent,
   hasConfiguredDefaultAgent,
   resolveInAppSelection,
   type HydraConfig,
@@ -83,8 +84,23 @@ import {
   listSessions,
   listAgents,
   pickMostRecent,
+  renameSession,
   type DiscoveredSession,
 } from "./discovery.js";
+import {
+  buildChooserForm,
+  buildConfigIndexForm,
+  cycleConfigValue,
+} from "./config-chooser.js";
+import {
+  handleFormClick,
+  handleFormKey,
+  textForm,
+  toFormSpec,
+  type FormKeyResult,
+  type FormRow,
+  type FormState,
+} from "./modal-form.js";
 import { runBtwSidechain, type SidechainEventEmitter } from "./btw/sidechain.js";
 import { BtwOverlayBuffer } from "./btw/overlay-buffer.js";
 import {
@@ -116,6 +132,7 @@ import {
   Screen,
   resolveAmbiguousWide,
   setAmbiguousWide,
+  type FormClickTarget,
 } from "./screen.js";
 import { formatApproxTokens } from "../core/compaction-heuristic.js";
 import {
@@ -346,25 +363,20 @@ function truncateQuestionLabel(text: string, max: number): string {
   return text.slice(0, max - 1) + "…";
 }
 
-// Pure helper: build a multi-row OptionsPromptSpec showing every open
-// question group. Each row's value column renders the currently-selected
-// answer — or "dismiss" when the row is in dismiss-mode. Dedup is hidden;
-// save fans out under the hood. `touched` is still tracked by the caller
-// to decide which rows dispatch, but it has no visual representation —
-// the value column itself is enough cue.
+// Pure helper: build the form showing every open question group. Each row
+// is a `select` whose value column renders the currently-selected answer,
+// or "dismiss" when the row is in dismiss-mode. Dedup is hidden; save fans
+// out under the hood. `touched` is still tracked by the caller to decide
+// which rows dispatch, but it has no visual representation: the value
+// column itself is enough cue.
 export function buildAllQuestionsSpec(
   groups: QuestionGroup[],
   selectedValues: number[],
   dismissed: boolean[],
   currentRow: number,
   maxLabelWidth: number = 60,
-): {
-  title: string;
-  options: Array<{ label: string; value: string }>;
-  selectedIndex: number;
-  hint?: string;
-} {
-  const options = groups.map((g, i) => {
+): FormState {
+  const rows: FormRow[] = groups.map((g, i) => {
     const ring = getQuestionValueRing(g.representative);
     const idx = selectedValues[i] ?? 0;
     const value = dismissed[i]
@@ -374,13 +386,20 @@ export function buildAllQuestionsSpec(
       g.representative.question,
       maxLabelWidth,
     );
-    return { label, value };
+    return { id: g.representative.id, kind: "select", label, value };
   });
   return {
     title: `Open questions (${groups.length})`,
-    options,
-    selectedIndex: Math.max(0, Math.min(groups.length - 1, currentRow)),
-    hint: "↑/↓ row · ←/→ cycle · d dismiss · 1-9 jump · ⏎/Esc save · ^C discard",
+    rows,
+    cursor: Math.max(0, Math.min(groups.length - 1, currentRow)),
+    hints: [
+      { label: "↑/↓ row" },
+      { label: "←/→ cycle" },
+      { label: "d dismiss", action: "dismiss" },
+      { label: "1-9 jump" },
+      { label: "⏎/Esc save", action: "commit" },
+      { label: "^C discard", action: "cancel" },
+    ],
   };
 }
 
@@ -466,6 +485,11 @@ export type QuestionsKeyResult =
  * Process a key event while the questions modal is active.
  * Pure function — takes all state as parameters, returns an immutable result.
  * The caller applies mutations based on the result.
+ *
+ * The navigation vocabulary (row movement, 1-9 jump, ←/→, Esc vs ^C) comes
+ * from the shared form reducer, driven by the very spec the modal renders,
+ * so what the keys do can't drift from what's on screen. This function is
+ * the translation layer: form results in, clarifier semantics out.
  */
 export function handleQuestionsKey(
   ev: KeyEvent,
@@ -480,62 +504,89 @@ export function handleQuestionsKey(
   if (!questionsActive || groups === null || groups.length === 0) {
     return { type: "noop" };
   }
-  if (ev.type === "char") {
-    if (ev.ch === "d" || ev.ch === "D") {
-      return { type: "dismiss-toggle", selectedRow: currentRow };
-    }
-    if (/^[1-9]$/.test(ev.ch)) {
-      const idx = parseInt(ev.ch, 10) - 1;
-      if (idx < groups.length) {
-        return { type: "row", selectedRow: idx };
+  const save = (): QuestionsKeyResult => ({
+    type: "save",
+    dispatches: buildSaveDispatches(
+      groups,
+      selectedValues,
+      touched,
+      dismissed,
+      sessionId,
+    ),
+  });
+  // ^Q is this modal's own hotkey, so it's claimed before the shared
+  // vocabulary gets a look at it.
+  if (ev.type === "key" && ev.name === "ctrl-q") {
+    return save();
+  }
+  const state = buildAllQuestionsSpec(
+    groups,
+    selectedValues,
+    dismissed,
+    currentRow,
+  );
+  return mapFormResultToQuestions(
+    handleFormKey(state, ev),
+    groups,
+    selectedValues,
+    touched,
+    dismissed,
+    sessionId,
+  );
+}
+
+/**
+ * Translate a form result into clarifier semantics. Split out from
+ * handleQuestionsKey so a mouse gesture, which produces results without ever
+ * being a key, lands on the same logic.
+ */
+export function mapFormResultToQuestions(
+  result: FormKeyResult,
+  groups: QuestionGroup[],
+  selectedValues: number[],
+  touched: boolean[],
+  dismissed: boolean[],
+  sessionId: string,
+): QuestionsKeyResult {
+  const save = (): QuestionsKeyResult => ({
+    type: "save",
+    dispatches: buildSaveDispatches(
+      groups,
+      selectedValues,
+      touched,
+      dismissed,
+      sessionId,
+    ),
+  });
+  switch (result.type) {
+    case "row":
+      return { type: "row", selectedRow: result.row };
+    case "cycle": {
+      const g = groups[result.row];
+      if (!g) {
+        return { type: "noop" };
       }
-    }
-    return { type: "noop" };
-  }
-  if (ev.type !== "key") {
-    return { type: "noop" };
-  }
-  const cycle = (delta: 1 | -1): QuestionsKeyResult => {
-    const g = groups[currentRow];
-    if (!g) {
-      return { type: "noop" };
-    }
-    const ring = getQuestionValueRing(g.representative);
-    if (ring.length === 0) {
-      return { type: "noop" };
-    }
-    const cur = selectedValues[currentRow] ?? 0;
-    const next = (cur + delta + ring.length) % ring.length;
-    return { type: "cycle", selectedRow: currentRow, newValueIndex: next };
-  };
-  // Row movement wraps rather than clamping. On a short list, stopping dead at
-  // the ends means the fastest way to the last row is to notice that up from the
-  // first would get there — which only works if it does.
-  const wrap = (next: number): number =>
-    (next + groups.length) % groups.length;
-  switch (ev.name) {
-    case "up":
-      return { type: "row", selectedRow: wrap(currentRow - 1) };
-    case "down":
-      return { type: "row", selectedRow: wrap(currentRow + 1) };
-    case "right":
-      return cycle(1);
-    case "left":
-      return cycle(-1);
-    case "enter":
-    case "escape":
-    case "ctrl-q":
+      const ring = getQuestionValueRing(g.representative);
+      if (ring.length === 0) {
+        return { type: "noop" };
+      }
+      const cur = selectedValues[result.row] ?? 0;
       return {
-        type: "save",
-        dispatches: buildSaveDispatches(
-          groups,
-          selectedValues,
-          touched,
-          dismissed,
-          sessionId,
-        ),
+        type: "cycle",
+        selectedRow: result.row,
+        newValueIndex: (cur + result.delta + ring.length) % ring.length,
       };
-    case "ctrl-c":
+    }
+    case "dismiss":
+      return { type: "dismiss-toggle", selectedRow: result.row };
+    // Enter and Esc both commit here: the rows carry answers the user has
+    // already chosen, so closing without saving them would be the surprise.
+    // ^C is the discard door.
+    case "advance":
+    case "commit":
+    case "close":
+      return save();
+    case "cancel":
       return { type: "discard" };
     default:
       return { type: "noop" };
@@ -820,7 +871,8 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
   ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $VISUAL/$EDITOR)"],
-  ["Double-click bar", "copy the field under the pointer (cwd opens instead)"],
+  ["Double-click bar", "cwd opens · title renames · agent/model/mode pick · else copy"],
+  ["Click in a modal", "row picks / cycles it · hint words act · wheel walks the list"],
   ["Right-click", "extend selection to click (drag past top/bottom to autoscroll)"],
   ["^X", "toggle mouse capture (wheel scroll vs. text selection)"],
   null,
@@ -2960,9 +3012,28 @@ async function runSession(
     // inside Screen and never arrive here. Routing these through
     // handleEffect keeps clicks and hotkeys on one path, readonly gate
     // included.
-    onBarAction: (action) => {
+    onBarAction: (action, value) => {
       if (action === "toggle-mode") {
         void handleModeToggle(true);
+        return;
+      }
+      if (action === "rename-session") {
+        // `value` is the untruncated title the chunk was painted from.
+        openTitleForm(value);
+        return;
+      }
+      // The chooser reads the live ConfigOption, so the chunk's painted
+      // value is irrelevant here: only which dimension was clicked.
+      if (action === "choose-model") {
+        openConfigChooser("model");
+        return;
+      }
+      if (action === "choose-agent") {
+        openConfigChooser("agent");
+        return;
+      }
+      if (action === "choose-mode") {
+        openConfigChooser("mode");
         return;
       }
       const effect: InputEffect =
@@ -2976,6 +3047,7 @@ async function runSession(
       }
       handleEffect(effect);
     },
+    onFormClick: (target) => onFormClick(target),
     onMouse: (ev) => {
       if (ev.kind !== "press" || ev.button !== "middle") {
         return;
@@ -3013,15 +3085,17 @@ async function runSession(
           }
           continue;
         }
-        if (tryHandleQuestionsKey(ev)) {
+        // The one form slot: ^O options, ^Q questions, the title field, a
+        // config chooser. Placed after the modals that can take the prompt
+        // area away from it (see Screen.drawPrompt's order): while one of
+        // those is up the form isn't visible, so the keys belong to it.
+        if (tryHandleFormKey(ev)) {
           if (ev.type === "key") {
-            writeDebugLine({ src: "key-swallowed", site: "questions", name: ev.name });
-          }
-          continue;
-        }
-        if (tryHandleOptionsKey(ev)) {
-          if (ev.type === "key") {
-            writeDebugLine({ src: "key-swallowed", site: "options", name: ev.name });
+            writeDebugLine({
+              src: "key-swallowed",
+              site: `form:${formOwner ?? "none"}`,
+              name: ev.name,
+            });
           }
           continue;
         }
@@ -3129,8 +3203,22 @@ async function runSession(
       name: "/rename",
       description: "Rename this session (alias for /hydra title): /rename [title]",
     },
-    { name: "/model", description: "Switch model: /model <model-id>" },
-    { name: "/agent", description: "Switch agent via config option: /agent <agent-id>" },
+    {
+      name: "/title",
+      description: "Rename this session: /title [title] (no arg opens the field)",
+    },
+    {
+      name: "/model",
+      description: "Switch model: /model [model-id] (no arg opens the picker)",
+    },
+    {
+      name: "/mode",
+      description: "Switch mode: /mode [mode-id] (no arg opens the picker)",
+    },
+    {
+      name: "/agent",
+      description: "Switch agent: /agent [agent-id] (no arg opens the picker)",
+    },
     { name: "/btw", description: "Run an ancillary forked session: /btw <prompt> (no args toggles the last overlay)" },
     {
       name: "/export",
@@ -3142,12 +3230,11 @@ async function runSession(
   let agentCommands: AvailableCommand[] = initialCommands ?? [];
   // Available modes advertised by the agent. Used by Shift+Tab to cycle.
   let agentModes: AvailableMode[] = initialModes ?? [];
-  // PoC: the unified config-options snapshot (model/mode/agent), seeded
-  // from the session/new + attach response and kept fresh by
-  // config_option_update notifications. Drives the `/agent` selector.
+  // The unified config-options snapshot (model / mode / agent, plus
+  // anything else the agent advertises), seeded from the session/new +
+  // attach response and kept fresh by config_option_update notifications.
+  // Drives every chooser and the /model, /mode and /agent commands.
   let agentConfigOptions: ConfigOption[] = initialConfigOptions ?? [];
-  const agentConfigOption = (): ConfigOption | undefined =>
-    agentConfigOptions.find((o) => o.id === "agent");
 
   const allCommands = (): AvailableCommand[] => {
     const seen = new Set<string>();
@@ -3756,6 +3843,45 @@ async function runSession(
   let questionsDismissed: boolean[] = [];
   let questionsCurrentRow = 0;
 
+  // ── The form slot ───────────────────────────────────────────────
+  //
+  // The screen has one form modal, and four features want it: ^O options,
+  // the ^Q questions list, the title field, and the config choosers. Who
+  // holds it is explicit rather than inferred (this used to be
+  // "refreshOptionsPrompt bails if openQuestionGroups is non-null", which
+  // doesn't survive a fourth caller), and the live FormState lives here so
+  // the key handler can hand it to the reducer.
+  type FormOwner = "options" | "questions" | "title" | "chooser";
+  let formOwner: FormOwner | null = null;
+  let form: FormState | null = null;
+
+  const setForm = (owner: FormOwner, next: FormState): void => {
+    if (owner !== "chooser") {
+      // Another modal taking the slot ends whatever the chooser was
+      // choosing; leaving the target set would outlive its form.
+      chooserTarget = null;
+    }
+    formOwner = owner;
+    form = next;
+    screen.setFormPrompt(toFormSpec(next));
+  };
+
+  // Close only if `owner` still holds the slot: a stale async callback must
+  // not tear down whatever took it over in the meantime.
+  const closeForm = (owner: FormOwner): void => {
+    if (formOwner !== owner) {
+      return;
+    }
+    formOwner = null;
+    form = null;
+    // Drop the chooser's subject with it, so a stale target can't decide
+    // what the next commit means. Pending picks go too: every close path
+    // has already either applied them or discarded them on purpose.
+    chooserTarget = null;
+    pendingConfig = new Map();
+    screen.setFormPrompt(null);
+  };
+
   const optionValue = (id: OptionId): string => {
     switch (id) {
       case "tools":
@@ -3798,58 +3924,59 @@ async function runSession(
     }
   };
 
-  const buildOptionsSpec = (): {
-    title: string;
-    options: Array<{ label: string; value: string }>;
-    selectedIndex: number;
-    hint: string;
-  } => ({
+  const buildOptionsSpec = (): FormState => ({
     title: "Session options",
-    options: OPTION_IDS.map((id) => ({
+    rows: OPTION_IDS.map((id) => ({
+      id,
+      kind: "select" as const,
       label: optionLabel(id),
       value: optionValue(id),
     })),
-    selectedIndex: optionsSelectedIndex,
+    cursor: optionsSelectedIndex,
     // Stated rather than inherited from the renderer's default, which predates
     // ←/→ and mentions neither direction. Same vocabulary as the ^Q questions
     // modal, which has cycled its rows this way all along.
-    hint: "↑/↓ row · ←/→ cycle · ⏎ next · s save default · Esc close",
+    hints: [
+      { label: "↑/↓ row" },
+      { label: "←/→ cycle" },
+      { label: "⏎ next", action: "commit" },
+      { label: "s save default", action: "save" },
+      { label: "Esc close", action: "close" },
+    ],
   });
 
   const refreshOptionsPrompt = (): void => {
-    if (!screen.isOptionsPromptActive()) {
+    if (formOwner !== "options") {
       return;
     }
-    // Questions modal manages its own spec — don't overwrite it with ^O spec.
-    if (openQuestionGroups !== null) {
-      return;
-    }
-    screen.setOptionsPrompt(buildOptionsSpec());
+    setForm("options", buildOptionsSpec());
   };
 
   const toggleOptionsModal = (): void => {
-    if (screen.isOptionsPromptActive()) {
-      screen.setOptionsPrompt(null);
+    if (formOwner === "options") {
+      closeForm("options");
       return;
     }
     optionsSelectedIndex = 0;
-    screen.setOptionsPrompt(buildOptionsSpec());
+    setForm("options", buildOptionsSpec());
   };
 
-  // Rebuild the multi-row OptionsPromptSpec from the current modal state
-  // and push it to the screen. Called after every key that changes either
-  // the highlighted row or a row's selected value.
+  // Rebuild the questions form from the current modal state and push it to
+  // the screen. Called after every key that changes either the highlighted
+  // row or a row's selected value.
   const refreshQuestionsSpec = (): void => {
     if (openQuestionGroups === null) {
       return;
     }
-    const spec = buildAllQuestionsSpec(
-      openQuestionGroups,
-      questionsSelectedValues,
-      questionsDismissed,
-      questionsCurrentRow,
+    setForm(
+      "questions",
+      buildAllQuestionsSpec(
+        openQuestionGroups,
+        questionsSelectedValues,
+        questionsDismissed,
+        questionsCurrentRow,
+      ),
     );
-    screen.setOptionsPrompt(spec);
   };
 
   const closeQuestionsModal = (): void => {
@@ -3858,7 +3985,7 @@ async function runSession(
     questionsTouched = [];
     questionsDismissed = [];
     questionsCurrentRow = 0;
-    screen.setOptionsPrompt(null);
+    closeForm("questions");
   };
 
   const toggleQuestionsModal = async (): Promise<void> => {
@@ -4122,113 +4249,468 @@ async function runSession(
   // `s` saves the selected value as the config default, Esc or ^O closes.
   // The modal stays open after Enter / `s`. Everything else is swallowed
   // so it can't leak into the prompt buffer behind the modal.
-  const tryHandleOptionsKey = (ev: KeyEvent): boolean => {
-    // Questions modal takes priority — it's handled before this in the key loop.
-    if (openQuestionGroups !== null) {
-      return false;
-    }
-    if (!screen.isOptionsPromptActive()) {
-      return false;
-    }
-    if (ev.type === "key") {
-      switch (ev.name) {
-        // Wraps, like the questions modal and like ←/→ on the values: with nine
-        // rows, clamping at the ends just means more keypresses to reach the
-        // one furthest from where the cursor happens to be.
-        case "up":
-        case "down": {
-          const step = ev.name === "up" ? -1 : 1;
-          optionsSelectedIndex =
-            (optionsSelectedIndex + step + OPTION_IDS.length) %
-            OPTION_IDS.length;
-          refreshOptionsPrompt();
-          return true;
-        }
-        case "left":
-        case "right": {
-          const id = OPTION_IDS[optionsSelectedIndex];
-          if (id) {
-            applyOptionToggle(id, ev.name === "left" ? -1 : 1);
-          }
-          return true;
-        }
-        case "enter": {
-          const id = OPTION_IDS[optionsSelectedIndex];
-          if (id) {
-            applyOptionToggle(id);
-          }
-          return true;
-        }
-        case "ctrl-o":
-        case "escape":
-        case "ctrl-c":
-          screen.setOptionsPrompt(null);
-          return true;
-        case "ctrl-d":
-          // Detach must always work — close the modal and let ^D fall
-          // through to the dispatcher's normal exit-on-empty-buffer path.
-          screen.setOptionsPrompt(null);
-          return false;
-        default:
-          return true;
-      }
-    }
-    if (ev.type === "char") {
-      if (/^[1-9]$/.test(ev.ch)) {
-        const idx = parseInt(ev.ch, 10) - 1;
-        const id = OPTION_IDS[idx];
+  const applyOptionsFormResult = (result: FormKeyResult): void => {
+    const idAt = (row: number): OptionId | undefined => OPTION_IDS[row];
+    switch (result.type) {
+      case "row": {
+        optionsSelectedIndex = result.row;
+        // A digit both jumps and steps the row's value, which is how ^O has
+        // always worked; arrows only move.
+        const id = result.viaDigit === true ? idAt(result.row) : undefined;
         if (id) {
-          optionsSelectedIndex = idx;
+          applyOptionToggle(id);
+        } else {
+          refreshOptionsPrompt();
+        }
+        return;
+      }
+      case "cycle": {
+        const id = idAt(result.row);
+        if (id) {
+          optionsSelectedIndex = result.row;
+          applyOptionToggle(id, result.delta);
+        }
+        return;
+      }
+      case "advance": {
+        const id = idAt(result.row);
+        if (id) {
           applyOptionToggle(id);
         }
-        return true;
+        return;
       }
-      // `s` saves the selected option's current value as the config default.
-      if (ev.ch === "s" || ev.ch === "S") {
-        const id = OPTION_IDS[optionsSelectedIndex];
+      case "save": {
+        const id = idAt(result.row);
         if (id) {
           saveOption(id);
         }
+        return;
+      }
+      case "close":
+      case "cancel":
+        closeForm("options");
+        return;
+      default:
+        return;
+    }
+  };
+
+  const tryHandleOptionsFormKey = (ev: KeyEvent, state: FormState): boolean => {
+    if (ev.type === "key") {
+      if (ev.name === "ctrl-o") {
+        closeForm("options");
         return true;
       }
+      if (ev.name === "ctrl-d") {
+        // Detach must always work, so close the modal and let ^D fall
+        // through to the dispatcher's normal exit-on-empty-buffer path.
+        closeForm("options");
+        return false;
+      }
     }
+    applyOptionsFormResult(handleFormKey(state, ev));
     return true;
   };
 
-  // While the questions modal is open it owns input: ↑/↓ navigate rows,
-  // ←/→/Enter cycle the current row's value through its ring, 1-9 jumps
-  // to a row by index, Esc/^Q saves all touched rows, ^C discards. The
-  // modal stays open after a cycle so several rows can be set in one
-  // visit. Everything else is swallowed.
-  const tryHandleQuestionsKey = (ev: KeyEvent): boolean => {
-    if (openQuestionGroups === null) {
+  // ── Title rename field ──────────────────────────────────────────
+  //
+  // Double-clicking the sessionbar's title (or `/title` with no argument)
+  // opens a one-row text form over the composer: the TUI's equivalent of
+  // `t` in the picker, and the same PATCH /v1/sessions/:id underneath.
+  const TITLE_ROW_ID = "title";
+
+  const formTextValue = (state: FormState, id: string): string => {
+    const row = state.rows.find((r) => r.id === id);
+    return row?.kind === "text" ? row.editor.text : "";
+  };
+
+  const openTitleForm = (seed: string): void => {
+    if (formOwner === "title") {
+      // Already editing. A second double-click must not reseed the field
+      // out from under what the user has typed.
+      return;
+    }
+    if (opts.readonly === true) {
+      screen.notify("view-only: rename disabled");
+      return;
+    }
+    if (resolvedSessionId === "__new__") {
+      screen.notify("no active session to rename");
+      return;
+    }
+    setForm(
+      "title",
+      textForm({
+        title: "Rename session",
+        id: TITLE_ROW_ID,
+        label: "title:",
+        initial: seed,
+        hints: [
+          { label: "⏎ save", action: "commit" },
+          { label: "Esc cancel", action: "close" },
+        ],
+      }),
+    );
+  };
+
+  const submitTitleForm = (state: FormState): void => {
+    const title = formTextValue(state, TITLE_ROW_ID).trim();
+    const sessionId = resolvedSessionId;
+    closeForm("title");
+    // An empty field cancels rather than clearing the title, matching the
+    // picker (the daemon rejects a blank title with a 400 anyway).
+    if (title.length === 0) {
+      return;
+    }
+    // Fire and forget: the daemon serializes a live retitle behind any
+    // in-flight turn, and the new title arrives back as a
+    // session_info_update, so awaiting here would only freeze the field
+    // (and time out mid-turn).
+    void renameSession(target, sessionId, title).catch((err: Error) => {
+      screen.notify(`rename failed: ${err.message}`);
+    });
+  };
+
+  const applyTitleFormResult = (state: FormState, result: FormKeyResult): void => {
+    switch (result.type) {
+      case "commit":
+        submitTitleForm(state);
+        return;
+      case "close":
+      case "cancel":
+        closeForm("title");
+        return;
+      case "edited":
+        // The editor mutated in place; re-push so the screen sees the text.
+        setForm("title", state);
+        return;
+      default:
+        return;
+    }
+  };
+
+  const tryHandleTitleFormKey = (ev: KeyEvent, state: FormState): boolean => {
+    applyTitleFormResult(state, handleFormKey(state, ev));
+    return true;
+  };
+
+  // ── Config-option choosers ──────────────────────────────────────
+  //
+  // Model, mode, agent and whatever else the agent advertises all arrive as
+  // one uniform ConfigOption list, and one validated call sets any of them,
+  // so they get one chooser. Every entry point (a slash command with no
+  // argument, a sessionbar double-click) opens this; the resulting
+  // config_option_update is what repaints the chrome, so nothing here
+  // writes local state.
+  // What the open chooser is choosing. "values" lists one dimension's
+  // settings; "index" lists the dimensions themselves and drills into one.
+  // An explicit union rather than a nullable id: both are choice-row forms
+  // and only `commit` differs, so the discriminator is the whole difference.
+  type ChooserTarget = { kind: "values"; configId: string } | { kind: "index" };
+  let chooserTarget: ChooserTarget | null = null;
+  // Index mode only: dimensions cycled but not yet applied. Nothing leaves
+  // here until the dialog closes, see buildConfigIndexForm.
+  let pendingConfig = new Map<string, string>();
+
+  // Fuzzy-resolve an argument against a config option's values: exact id
+  // first, then a unique case-insensitive prefix. Ambiguous prefixes return
+  // null rather than silently picking the first hit. Shared by /model,
+  // /mode and /agent, which all used to spell this out.
+  const resolveConfigOptionValue = (
+    opt: ConfigOption,
+    arg: string,
+  ): string | null => {
+    const exact = opt.options.find((v) => v.value === arg);
+    if (exact) {
+      return exact.value;
+    }
+    const lc = arg.toLowerCase();
+    const hits = opt.options.filter((v) =>
+      v.value.toLowerCase().startsWith(lc),
+    );
+    return hits.length === 1 ? hits[0]!.value : null;
+  };
+
+  // Guard shared by every config write: the daemon needs a live session and
+  // refuses under readonly, so say so here rather than surfacing an RPC
+  // error the user can't act on.
+  const configOptionFor = (configId: string): ConfigOption | null => {
+    if (opts.readonly === true) {
+      screen.notify(`view-only: ${configId} switching disabled`);
+      return null;
+    }
+    if (resolvedSessionId === "__new__") {
+      screen.notify("no active session yet");
+      return null;
+    }
+    const opt = agentConfigOptions.find((o) => o.id === configId);
+    if (!opt || opt.options.length === 0) {
+      screen.notify(`no ${configId} option advertised for this session`);
+      return null;
+    }
+    return opt;
+  };
+
+  const openConfigChooser = (configId: string): void => {
+    if (
+      formOwner === "chooser" &&
+      chooserTarget?.kind === "values" &&
+      chooserTarget.configId === configId
+    ) {
+      return;
+    }
+    const opt = configOptionFor(configId);
+    if (!opt) {
+      return;
+    }
+    chooserTarget = { kind: "values", configId };
+    setForm("chooser", buildChooserForm(opt));
+  };
+
+  const openConfigIndex = (): void => {
+    if (agentConfigOptions.length === 0) {
+      screen.notify("no config options advertised for this session");
+      return;
+    }
+    chooserTarget = { kind: "index" };
+    pendingConfig = new Map();
+    setForm("chooser", buildConfigIndexForm(agentConfigOptions, pendingConfig));
+  };
+
+  const refreshConfigIndex = (cursor: number): void => {
+    setForm("chooser", {
+      ...buildConfigIndexForm(agentConfigOptions, pendingConfig),
+      cursor,
+    });
+  };
+
+  // Fire every dimension the user actually changed, on close. A row arrowed
+  // away and back holds a pending value equal to the live one; comparing
+  // here rather than tracking "touched" means that costs nothing.
+  const applyPendingConfig = (): void => {
+    const live = new Map(agentConfigOptions.map((o) => [o.id, o.currentValue]));
+    for (const [configId, value] of pendingConfig) {
+      if (live.get(configId) !== value) {
+        applyConfigOption(configId, value);
+      }
+    }
+    pendingConfig = new Map();
+  };
+
+  const applyConfigOption = (configId: string, value: string): void => {
+    screen.notify(`switching ${configId} to ${value}…`);
+    void conn
+      .request("session/set_config_option", {
+        sessionId: resolvedSessionId,
+        configId,
+        value,
+      })
+      .catch((err: unknown) => {
+        screen.notify(
+          `${configId} switch failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  };
+
+  // `s` on a chooser row. Only the dimensions with a config home can be
+  // persisted; the rest say so rather than silently doing nothing, matching
+  // how ^O reports its session-only rows.
+  const saveConfigDefault = (configId: string, value: string): void => {
+    void (async (): Promise<void> => {
+      try {
+        if (configId === "agent") {
+          await setDefaultAgent(value);
+        } else if (configId === "model") {
+          const agentId = resolvedAgentId || agentInfoName || "";
+          if (!agentId) {
+            screen.notify("can't save a model default without an agent");
+            return;
+          }
+          await setDefaultModelForAgent(agentId, value);
+        } else {
+          screen.notify(`${configId} is session-only, not saved`);
+          return;
+        }
+        screen.notify(`saved default: ${configId} ${value}`);
+      } catch (err) {
+        screen.notify(
+          `save failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    })();
+  };
+
+  const applyChooserFormResult = (
+    state: FormState,
+    result: FormKeyResult,
+  ): void => {
+    const target = chooserTarget;
+    if (target === null) {
+      return;
+    }
+    // On the index a row IS a dimension and its id is the configId; in a
+    // value list the row id is the value being picked.
+    const idAt = (row: number): string | undefined => state.rows[row]?.id;
+    const optionAt = (row: number): ConfigOption | undefined => {
+      const configId = idAt(row);
+      return configId === undefined
+        ? undefined
+        : agentConfigOptions.find((o) => o.id === configId);
+    };
+    // What the index row is showing right now: the pending pick if the user
+    // has cycled it, else what the session is on.
+    const shownValue = (opt: ConfigOption): string =>
+      pendingConfig.get(opt.id) ?? opt.currentValue;
+    switch (result.type) {
+      case "row":
+        setForm("chooser", { ...state, cursor: result.row });
+        return;
+      // ←/→ (and a row click) only reach a select row, which is the index.
+      case "cycle": {
+        const opt = optionAt(result.row);
+        if (!opt) {
+          return;
+        }
+        pendingConfig.set(
+          opt.id,
+          cycleConfigValue(opt, shownValue(opt), result.delta),
+        );
+        refreshConfigIndex(result.row);
+        return;
+      }
+      // Enter on the index. Not "cycle and move on" as it is in ^O: here it
+      // means the same as Esc, which is what the hint says.
+      case "advance":
+        applyPendingConfig();
+        closeForm("chooser");
+        return;
+      case "commit": {
+        const value = idAt(result.row);
+        if (target.kind !== "values" || value === undefined) {
+          return;
+        }
+        closeForm("chooser");
+        applyConfigOption(target.configId, value);
+        return;
+      }
+      case "save": {
+        if (target.kind === "values") {
+          const value = idAt(result.row);
+          if (value !== undefined) {
+            saveConfigDefault(target.configId, value);
+          }
+          return;
+        }
+        // On the index, save the dimension's shown value: the pending pick
+        // if there is one, so `s` persists what the row displays.
+        const opt = optionAt(result.row);
+        if (opt) {
+          saveConfigDefault(opt.id, shownValue(opt));
+        }
+        return;
+      }
+      case "close":
+        // Esc applies on the index (it is the dialog's commit) and merely
+        // closes a value list, where picking is what applies.
+        if (target.kind === "index") {
+          applyPendingConfig();
+        }
+        closeForm("chooser");
+        return;
+      case "cancel":
+        pendingConfig = new Map();
+        closeForm("chooser");
+        return;
+      default:
+        return;
+    }
+  };
+
+  const tryHandleChooserKey = (ev: KeyEvent, state: FormState): boolean => {
+    if (chooserTarget === null) {
       return false;
     }
-    const result = handleQuestionsKey(
-      ev,
-      true,
-      openQuestionGroups,
-      questionsSelectedValues,
-      questionsTouched,
-      questionsDismissed,
-      questionsCurrentRow,
-      resolvedSessionId,
-    );
+    applyChooserFormResult(state, handleFormKey(state, ev));
+    return true;
+  };
+
+  // One interceptor for the whole form slot: whoever owns it gets the key.
+  // Only the ^O ^D pass-through returns false; every other key is
+  // swallowed rather than leaking into the composer behind the modal.
+  const tryHandleFormKey = (ev: KeyEvent): boolean => {
+    const state = form;
+    if (formOwner === null || state === null) {
+      return false;
+    }
+    switch (formOwner) {
+      case "questions":
+        return tryHandleQuestionsKey(ev);
+      case "options":
+        return tryHandleOptionsFormKey(ev, state);
+      case "title":
+        return tryHandleTitleFormKey(ev, state);
+      case "chooser":
+        return tryHandleChooserKey(ev, state);
+    }
+  };
+
+  // Mouse half of the same slot. handleFormClick turns the gesture into the
+  // very results a keypress produces, so each owner's apply function is
+  // reached by exactly one path no matter how the user got there.
+  const onFormClick = (target: FormClickTarget): void => {
+    const state = form;
+    if (formOwner === null || state === null) {
+      return;
+    }
+    for (const result of handleFormClick(state, target)) {
+      switch (formOwner) {
+        case "options":
+          applyOptionsFormResult(result);
+          break;
+        case "title":
+          applyTitleFormResult(state, result);
+          break;
+        case "chooser":
+          applyChooserFormResult(state, result);
+          break;
+        case "questions":
+          applyQuestionsResult(
+            openQuestionGroups === null
+              ? { type: "noop" }
+              : mapFormResultToQuestions(
+                  result,
+                  openQuestionGroups,
+                  questionsSelectedValues,
+                  questionsTouched,
+                  questionsDismissed,
+                  resolvedSessionId,
+                ),
+          );
+          break;
+      }
+    }
+  };
+
+  // Apply one clarifier outcome. The modal stays open after a cycle or a
+  // dismiss so several rows can be set in one visit; save and discard close
+  // it.
+  const applyQuestionsResult = (result: QuestionsKeyResult): void => {
     switch (result.type) {
       case "noop":
-        return true;
+        return;
       case "row":
         questionsCurrentRow = result.selectedRow;
         refreshQuestionsSpec();
-        return true;
+        return;
       case "cycle":
+        questionsCurrentRow = result.selectedRow;
         questionsSelectedValues[result.selectedRow] = result.newValueIndex;
         questionsTouched[result.selectedRow] = true;
         // Cycling out of dismiss-mode unsets the dismiss flag — user has
         // changed their mind and wants to commit a real answer instead.
         questionsDismissed[result.selectedRow] = false;
         refreshQuestionsSpec();
-        return true;
+        return;
       case "dismiss-toggle": {
         const i = result.selectedRow;
         if (questionsDismissed[i]) {
@@ -4240,16 +4722,16 @@ async function runSession(
           questionsTouched[i] = true;
         }
         refreshQuestionsSpec();
-        return true;
+        return;
       }
       case "discard":
         closeQuestionsModal();
-        return true;
+        return;
       case "save": {
         const dispatches = result.dispatches;
         closeQuestionsModal();
         if (dispatches.length === 0) {
-          return true;
+          return;
         }
         void (async (): Promise<void> => {
           let answered = 0;
@@ -4287,10 +4769,33 @@ async function runSession(
             screen.notify(`clarifier: ${parts.join(", ")}`);
           }
         })();
-        return true;
+        return;
       }
     }
-    return false;
+  };
+
+  // While the questions modal is open it owns input: ↑/↓ navigate rows,
+  // ←/→/Enter cycle the current row's value through its ring, 1-9 jumps
+  // to a row by index, Esc/^Q saves all touched rows, ^C discards. The
+  // modal stays open after a cycle so several rows can be set in one
+  // visit. Everything else is swallowed.
+  const tryHandleQuestionsKey = (ev: KeyEvent): boolean => {
+    if (openQuestionGroups === null) {
+      return false;
+    }
+    applyQuestionsResult(
+      handleQuestionsKey(
+        ev,
+        true,
+        openQuestionGroups,
+        questionsSelectedValues,
+        questionsTouched,
+        questionsDismissed,
+        questionsCurrentRow,
+        resolvedSessionId,
+      ),
+    );
+    return true;
   };
 
   const teardown = (): void => {
@@ -5439,70 +5944,84 @@ async function runSession(
         screen.appendLines(lines);
         return true;
       }
-      case "/agent": {
-        // PoC: drive an agent swap through the spec config-options surface
-        // (session/set_config_option) rather than the `/hydra agent` text
-        // command. With no arg, list the agent option's values; otherwise
-        // request the swap and let the resulting config_option_update
-        // repaint the sessionbar.
+      // Every switchable session dimension the daemon advertises goes
+      // through one path: no argument opens the chooser, an argument is
+      // fuzzy-resolved and set directly. The resulting config_option_update
+      // repaints the chrome either way.
+      case "/agent":
+      case "/model":
+      case "/mode": {
+        const configId = cmd.slice(1);
         const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
-        const opt = agentConfigOption();
-        if (!opt) {
-          screen.appendLines([
-            {
-              prefix: "  ",
-              body: "no agent config option advertised for this session",
-              bodyStyle: "notice-error",
-            },
-          ]);
-          return true;
-        }
         if (!arg) {
-          const lines: FormattedLine[] = [
-            { prefix: "  ", body: "Available agents:", bodyStyle: "local-heading" },
-          ];
-          for (const v of opt.options) {
-            const marker = v.value === opt.currentValue ? "* " : "  ";
-            lines.push({
-              prefix: "  ",
-              body: `${marker}${v.value.padEnd(16)} ${v.name}`,
-              bodyStyle: "local-item",
-            });
-          }
-          screen.appendLines(lines);
+          openConfigChooser(configId);
           return true;
         }
-        // Match /hydra agent's fuzzy resolution: exact id, else unique
-        // case-insensitive prefix. Ambiguous prefixes fall through to
-        // "unknown agent" rather than silently picking the first hit.
-        let resolvedArg = opt.options.find((v) => v.value === arg)?.value;
-        if (!resolvedArg) {
-          const lc = arg.toLowerCase();
-          const hits = opt.options.filter((v) =>
-            v.value.toLowerCase().startsWith(lc),
-          );
-          if (hits.length === 1) {
-            resolvedArg = hits[0]!.value;
-          }
+        const opt = configOptionFor(configId);
+        if (!opt) {
+          return true;
         }
-        if (!resolvedArg) {
-          screen.notify(`unknown agent: ${arg}`);
+        const resolvedArg = resolveConfigOptionValue(opt, arg);
+        if (resolvedArg === null) {
+          screen.notify(`unknown ${configId}: ${arg}`);
           return true;
         }
         if (resolvedArg === opt.currentValue) {
-          screen.notify(`already on agent ${resolvedArg}`);
+          screen.notify(`already on ${configId} ${resolvedArg}`);
           return true;
         }
-        screen.notify(`switching to ${resolvedArg}…`);
-        void conn
-          .request("session/set_config_option", {
-            sessionId: resolvedSessionId,
-            configId: "agent",
-            value: resolvedArg,
-          })
-          .catch((err: Error) => {
-            screen.notify(`set_config_option failed: ${err.message}`);
-          });
+        applyConfigOption(configId, resolvedArg);
+        return true;
+      }
+      case "/hydra": {
+        // `/hydra config` is the DAEMON's verb, not ours: it is advertised
+        // by the daemon's command registry, every other client gets the
+        // text rendering of it, and its grammar can grow without this file
+        // hearing about it. So the interception is deliberately narrow.
+        //
+        //   /hydra config        the dimensions, as a picker
+        //   /hydra config <id>   that dimension's values, as a picker
+        //
+        // and ONLY when <id> is a config option the session is currently
+        // advertising. Anything else -- a third argument, an unrecognized
+        // word, a verb this build has never heard of -- falls through to
+        // the daemon, which owns the answer. That keeps the coupling down
+        // to "these ids exist right now", which is protocol data we
+        // already hold, rather than a second copy of the verb's grammar.
+        const rest = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        const parts = rest.length > 0 ? rest.split(/\s+/) : [];
+        if (parts[0] !== "config" || parts.length > 2) {
+          return false;
+        }
+        if (parts.length === 1) {
+          openConfigIndex();
+          return true;
+        }
+        if (!agentConfigOptions.some((o) => o.id === parts[1])) {
+          return false;
+        }
+        openConfigChooser(parts[1]!);
+        return true;
+      }
+      case "/title": {
+        // The dialog-shaped sibling of /rename: no argument opens the same
+        // field the sessionbar double-click does, an argument renames
+        // straight away. /rename keeps its prompt-queue echo and history
+        // recall; this one is silent.
+        const arg = space === -1 ? "" : trimmed.slice(space + 1).trim();
+        if (!arg) {
+          openTitleForm(screen.sessionTitle() ?? "");
+          return true;
+        }
+        if (opts.readonly === true) {
+          screen.notify("view-only: rename disabled");
+          return true;
+        }
+        void renameSession(target, resolvedSessionId, arg).catch(
+          (err: Error) => {
+            screen.notify(`rename failed: ${err.message}`);
+          },
+        );
         return true;
       }
       case "/sessions":

@@ -278,6 +278,9 @@ export const FIELDS: Record<string, FieldDef> = {
     priority: 75,
     resolve: (ctx) => {
       const t = ctx.session.title?.trim();
+      // Double-click opens the rename prompt seeded with the *full*
+      // title (the painted form may be truncated), the same dialog `t`
+      // gives you in the picker.
       return t
         ? [
             {
@@ -285,7 +288,7 @@ export const FIELDS: Record<string, FieldDef> = {
               token: "bar-text",
               flex: true,
               minWidth: 8,
-              doubleAction: "copy",
+              doubleAction: "rename-session",
               value: t,
             },
           ]
@@ -296,20 +299,35 @@ export const FIELDS: Record<string, FieldDef> = {
     priority: 80,
     resolve: (ctx) =>
       ctx.session.agent
-        ? [{ text: ctx.session.agent, token: "content", doubleAction: "copy" }]
+        ? [
+            {
+              text: ctx.session.agent,
+              token: "content",
+              doubleAction: "choose-agent",
+            },
+          ]
         : null,
   },
   model: {
     priority: 65,
     resolve: (ctx) =>
       ctx.session.model
-        ? [{ text: ctx.session.model, token: "content", doubleAction: "copy" }]
+        ? [
+            {
+              text: ctx.session.model,
+              token: "content",
+              doubleAction: "choose-model",
+            },
+          ]
         : null,
   },
   agentModel: {
     priority: 80,
     resolve: (ctx) => {
       const text = formatAgentWithModel(ctx.session.agent, ctx.session.model);
+      // One chunk covers both dimensions, and it opens the MODEL chooser:
+      // that's the one people switch. Agent switching lives on the `agent`
+      // field and `/agent`.
       return text
         ? [
             {
@@ -317,7 +335,7 @@ export const FIELDS: Record<string, FieldDef> = {
               token: "content",
               flex: true,
               minWidth: 6,
-              doubleAction: "copy",
+              doubleAction: "choose-model",
               value: text,
             },
           ]
@@ -332,7 +350,14 @@ export const FIELDS: Record<string, FieldDef> = {
             {
               text: ctx.banner.currentMode,
               token: "rule-meta",
-              action: "toggle-mode",
+              // Double-click to pick, matching agent and model rather than
+              // cycling in place. Cycle-on-single-click used to live here,
+              // but the two can't share a chunk: the first click of a
+              // double has already changed the mode by the time the chooser
+              // opens, so backing out with Esc would leave you somewhere you
+              // never asked to be. Shift+Tab still cycles.
+              doubleAction: "choose-mode",
+              value: "mode",
             },
           ]
         : null,
