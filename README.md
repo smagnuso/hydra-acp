@@ -53,6 +53,7 @@ The TUI is the front door: it picks an agent, drives the conversation, lists you
 - **A session manager.** Every session is tracked, named, listable (`hydra-acp session`), exportable, and resurrectable. Close your terminal and the session keeps running in the daemon; reattach later from anywhere.
 - **A multiplexer.** Many clients share one live session. Events broadcast to all attached clients; prompts serialize through a per-session queue; permission requests race (first response wins). Editor, TUI, browser, and Slack all watch the same agent at once.
 - **A TUI.** A full terminal UI for driving sessions interactively — picking agents, prompting, approving tool calls, scrolling transcripts, and switching between live sessions.
+- **Long sessions that stay coherent.** History [compacts](#compaction-and-recall) as it approaches the context window, and the agent keeps a recall tool to search back into what was compacted away. `/hydra uncompact` reverses the last one, and `/hydra fork` branches a conversation so you can chase a tangent without losing the thread.
 - **Extensions.** Optional companion processes — Slack bridge, web UI, desktop notifier, auto-approver, cross-machine sync — that the daemon spawns and manages for you. See [Extensions](#extensions) below.
 
 ## Choosing an agent
@@ -120,6 +121,12 @@ reasoning, `^D` on an empty prompt detaches. Detaching leaves the session
 running in the daemon; `hydra-acp session` will still list it and you can
 attach again from anywhere.
 
+`^S` on an empty prompt opens the sidebar, which runs alongside the
+conversation and tracks what the agent is doing: running tools, the current
+todo list, files edited so far, git status, context usage, and your other
+sessions. Click a gadget's title to fold it. (With a draft in the composer,
+`^S` amends the in-flight turn instead.)
+
 ### From your editor
 
 Point your editor's ACP agent command at `hydra-acp acp` instead of the agent
@@ -139,6 +146,49 @@ To pin a specific agent for that editor instead, spawn `hydra-acp launch
 Either way the session is a normal hydra session: `hydra-acp session` lists it,
 and the TUI, browser, or Slack can attach to the same live conversation while
 your editor is still driving it.
+
+### Handing one off
+
+`hydra-acp session share` prints a `hydra://host/id` URL that someone else, or
+you on another machine, pastes into `--session` to attach to the running
+conversation:
+
+```sh
+hydra-acp session share                      # most-recent session for this cwd
+hydra-acp --session hydra://box:55514/hydra_session_abc123
+```
+
+This only reaches past your own machine if the daemon is listening past it, and
+the daemon refuses to bind to a non-loopback address without TLS. So sharing
+means setting `daemon.host`, pointing `daemon.tls.cert`/`key` at a certificate,
+and setting `daemon.publicHost` to the name the URL should carry. See
+[Security](#security). Without that, `share` still prints a URL and warns you
+that it's loopback-only.
+
+## Compaction and recall
+
+Long sessions run into the model's context window. When a session's history
+approaches it, hydra compacts asynchronously during an idle gap: the older
+turns are summarized, the most recent ones are kept verbatim, and the
+conversation carries on. `/hydra compact` returns immediately for the same
+reason, with the summarization running behind it.
+
+The part that matters is what happens to the history that got summarized away:
+it isn't gone. The agent can pull it back on demand, so "what did we decide
+three hours ago" stays answerable after the turns holding that decision have
+left the live context.
+
+Two escape hatches, typed in any composer:
+
+| Command | Effect |
+|---|---|
+| `/hydra compact` | Compact now instead of waiting for the heuristic. `/hydra compact status` reports state without triggering. |
+| `/hydra uncompact` | Roll back the most recent compaction. Only available immediately after one, before any new turns. |
+
+The thresholds that decide when this fires, how much recent history survives
+verbatim, and what context window to assume for an unfamiliar model all live
+under `compaction` in `~/.hydra-acp/config.json`. `hydra-acp config get
+compaction` prints them.
 
 ## CLI
 
@@ -323,17 +373,46 @@ This is the machinery behind the short names in [Choosing an agent](#choosing-an
 
 So in practice you type the short name and hydra finds it. Prefix matching is the last resort and only fires when exactly one id matches — `cod` is ambiguous between `codex-acp` and `codebuddy-code`, so it resolves to nothing rather than picking one.
 
-### Slash commands (typed in any composer)
+### Slash commands
 
-Slash commands of the form `/hydra <verb> [args]` are intercepted by hydra before the prompt reaches the agent. They never appear in the conversation log; the only client-visible signal is the notification(s) the verb implies.
+Two different sets, which is worth knowing before you go looking for one in the
+wrong place.
+
+**`/hydra <verb>` is server-side**, intercepted by the daemon before the prompt
+reaches the agent. They work from anywhere a prompt can be typed: the TUI, the
+Slack thread, the browser composer, agent-shell. They never appear in the
+conversation log.
 
 | Command | Effect |
 |---|---|
-| `/hydra title` | Asks the agent for a one-line summary, applies it as the new title via `session_info_update`. The sub-prompt and reply are suppressed from clients. |
-| `/hydra title <text>` | Sets the title to `<text>` directly. No agent call. |
-| `/hydra agent <agent>` | Swaps the agent process backing this session. Spawns the new agent (must be in the registry — see `hydra-acp agent list`), kills the old one, and feeds the conversation transcript so far back in as the first prompt to the new agent. `session_info_update` carries the new `agentId`; a synthetic `agent_message_chunk` banner marks the switch in the transcript. The on-disk session record is updated so resurrection brings the session back on the new agent. |
+| `/hydra title [text]` | Regenerate the title and synopsis via the agent, or set the title directly with an argument. |
+| `/hydra agent <id \| status>` | Schedule a swap to a different agent. Synthesizes a brief in the target's idiom and rotates on idle; `status` reports a pending swap. |
+| `/hydra config [<id> [<value>]]` | List or set an agent-advertised config option (model, mode, effort). No args lists them; `<id>` shows its choices; `<id> <value>` applies one. |
+| `/hydra compact [status]` | Compact history now. `status` inspects state without triggering. |
+| `/hydra uncompact` | Roll back the most recent compaction, before any new turns. |
+| `/hydra fork [verbatim]` | Fork into a new session. Default is a synopsis brief; `verbatim` slices at the last completed turn. |
+| `/hydra restart` | Restart the agent with a fresh `session/new`, preserving history. Useful when the available models have changed underneath you. |
+| `/hydra kill` | Close this session. The agent dies; the record is kept and can be resumed. |
 
-These work from anywhere a session prompt can be typed — the TUI's input box, agent-shell, the slack thread composer, the browser chat composer. Hydra detects them server-side; clients send them as ordinary `session/prompt` requests.
+Extensions and transformers register their own, reachable as `/hydra <name>
+<verb>` — and the `hydra-acp-` prefix can be elided, so `/hydra planner status`
+routes to `hydra-acp-planner`.
+
+**The TUI has its own set**, which only work there:
+
+| Command | Effect |
+|---|---|
+| `/help` | The built-in command list |
+| `/btw <prompt>` | Ask a side question on a throwaway fork of this session, answered in an overlay, main conversation untouched. No args toggles the last overlay. |
+| `/export [path]` | Write this session out as a markdown transcript |
+| `/session <id \| next \| prev>` | Switch session; no argument opens the picker |
+| `/model <id>`, `/agent <id>` | Switch model or agent via config options |
+| `/rename [title]`, `/sessions`, `/resume`, `/clear`, `/quit` | Rename, list, re-pick, clear scrollback, exit |
+
+`/btw` is the one worth trying early. It forks the conversation, asks your
+question on the fork, and shows the answer in an overlay, so a "wait, what does
+this error mean" detour doesn't end up in the transcript of the thing you were
+actually doing. A follow-up `/btw` reuses the still-warm fork.
 
 ### Exporting and importing sessions
 
@@ -386,6 +465,16 @@ The service token lives in its own file (`~/.hydra-acp/auth-token`, mode 0600) a
 `sessionListColdLimit` (top-level, default 20) caps how many cold (disk-only) sessions `hydra-acp session` lists. Live sessions are always shown; cold ones are sorted by recency and truncated to this count. `--all` lifts the cap and `--json` ignores it. Set to `0` to never list cold sessions.
 
 `daemon.sessionGcMaxAgeDays` (default 2) is why a session can vanish from the list entirely: a background sweep deletes *non-interactive* cold records — one-shot `hydra-acp cat` runs and editor panels that never took a turn — once they're older than this. Sessions that held a real conversation are never swept. `daemon.sessionGcIntervalMinutes` (default 60) sets how often the sweep runs, and `hydra-acp session collect` triggers it by hand.
+
+### Themes and the options panel
+
+`^O` opens the options panel: tools, plan, thoughts, diffs, mouse, enter,
+sidebar, and theme. `↑/↓` picks a row, `←/→` cycles its value, `s` saves the
+current value as your default, `Esc` closes.
+
+The theme row recolours the UI live as you cycle, so the quickest way to choose
+one is to sit on that row and walk through them. Eighteen ship built in, and
+`tui.theme` accepts a custom one if you want to write your own.
 
 `tui.mouse` (default `false`) controls whether the TUI captures mouse events. With capture off (the default), plain click-drag selects text via your terminal emulator, but wheel-driven scrollback stops working — use `PgUp` / `PgDn` instead. Set to `true` to enable capture, which lets the scroll wheel drive scrollback at the cost of requiring `shift+drag` to select text.
 
