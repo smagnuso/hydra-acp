@@ -76,7 +76,13 @@ describe("SessionManager forwardedEnv plumbing", () => {
       agentId: "claude-code",
       forwardedEnv: { FOO: "bar" },
     });
-    expect(spawns[0]?.opts.extraEnv).toEqual({ FOO: "bar" });
+    // The daemon layers the agent's own session id on top of whatever
+    // the caller forwarded, so the agent can identify itself to tools it
+    // shells out to (hydra cat --from-session).
+    expect(spawns[0]?.opts.extraEnv).toEqual({
+      FOO: "bar",
+      HYDRA_ACP_SESSION: session.sessionId,
+    });
     await manager.flushMetaWrites();
     const reloaded = await manager.loadFromDisk(session.sessionId);
     expect(reloaded?.forwardedEnv).toEqual({ FOO: "bar" });
@@ -96,7 +102,10 @@ describe("SessionManager forwardedEnv plumbing", () => {
     expect(resurrectParams?.forwardedEnv).toEqual({ FOO: "bar" });
     await manager.resurrect(resurrectParams!);
     // spawns[0] = original create; spawns[1] = resurrect spawn.
-    expect(spawns[1]?.opts.extraEnv).toEqual({ FOO: "bar" });
+    expect(spawns[1]?.opts.extraEnv).toEqual({
+      FOO: "bar",
+      HYDRA_ACP_SESSION: session.sessionId,
+    });
   });
 
   it("setForwardedEnv overwrites the persisted map in full (no merge)", async () => {
@@ -161,8 +170,12 @@ describe("SessionManager forwardedEnv plumbing", () => {
     await (
       session as unknown as { respawnAgent(): Promise<void> }
     ).respawnAgent();
-    // spawns[0] = original; spawns[1] = respawn.
-    expect(spawns[1]?.opts.extraEnv).toEqual({ FOO: "bar" });
+    // spawns[0] = original; spawns[1] = respawn. The self-session id
+    // survives the swap: a respawned agent is still the same session.
+    expect(spawns[1]?.opts.extraEnv).toEqual({
+      FOO: "bar",
+      HYDRA_ACP_SESSION: session.sessionId,
+    });
   });
 
   it("does not write env values to the logger (secret hygiene)", async () => {

@@ -2115,6 +2115,85 @@ describe("Session", () => {
       expect(session.title).toBe("first prompt title");
     });
 
+    it("does not seed the title from an ancillary prompt", async () => {
+      const { session, mock } = makeSession("hydra_session_TL4", "u_TL4");
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "Build 12847 failed: 3 link errors" }],
+        _meta: { "hydra-acp": { ancillary: true } },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).not.toBe("Build 12847 failed: 3 link errors");
+    });
+
+    it("does not seed the title from a prompt carrying sentBy provenance", async () => {
+      const { session, mock } = makeSession("hydra_session_TL5", "u_TL5");
+      const { client: alice } = makeClient();
+      session.attach(alice, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(alice.clientId, {
+        prompt: [{ type: "text", text: "Heads up: I changed flush()" }],
+        _meta: { "hydra-acp": { sentBy: { sessionId: "hydra_session_peer" } } },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(session.title).not.toBe("Heads up: I changed flush()");
+    });
+
+    it("carries sentBy through to the prompt_received broadcast", async () => {
+      const { session, mock } = makeSession("hydra_session_TL6", "u_TL6");
+      const { client: alice } = makeClient();
+      // prompt_received excludes the originator, so observe from a peer.
+      const { client: bob, stream: bobStream } = makeClient();
+      session.attach(alice, "full");
+      session.attach(bob, "full");
+      const requestMock = mock.agent.connection.request as ReturnType<
+        typeof vi.fn
+      >;
+      requestMock.mockResolvedValue({ stopReason: "end_turn" });
+
+      await session.prompt(
+        alice.clientId,
+        { prompt: [{ type: "text", text: "migration finished" }] },
+        {
+          fromSession: "hydra_session_peer",
+          fromSessionTitle: "schema work",
+          fromLabel: "jenkins:12847",
+        },
+      );
+      await new Promise((r) => setImmediate(r));
+
+      const received = bobStream.sent.find(
+        (m) =>
+          "method" in m &&
+          m.method === "session/update" &&
+          (m.params as { update?: { sessionUpdate?: string } } | undefined)
+            ?.update?.sessionUpdate === "prompt_received",
+      );
+      expect(received).toMatchObject({
+        params: {
+          update: {
+            sentBy: {
+              fromSession: "hydra_session_peer",
+              fromSessionTitle: "schema work",
+              fromLabel: "jenkins:12847",
+            },
+          },
+        },
+      });
+    });
+
     it("does not clobber a resurrected title with the first prompt", async () => {
       const mock = makeMockAgent({ agentId: "mock", cwd: "/work" });
       const session = new Session({

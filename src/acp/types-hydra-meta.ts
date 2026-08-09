@@ -27,6 +27,19 @@ export interface PromptOriginator {
   clientId: string;
   name?: string;
   version?: string;
+  // Provenance the sender asserted per-prompt, above the connection's
+  // clientInfo. `name` says which program delivered the prompt
+  // (hydra-acp-cat, hydra-acp-slack); these say who was behind it.
+  // Populated from `_meta["hydra-acp"].sentBy` on session/prompt.
+  //
+  // Untrusted by construction: any holder of the token can assert any
+  // value, so render it as an attribution and never gate a permission
+  // decision on it. The daemon does resolve fromSession against its own
+  // session table and drops it when unknown, which makes a stale id
+  // fail closed rather than mislead.
+  fromSession?: string;
+  fromSessionTitle?: string;
+  fromLabel?: string;
 }
 
 // One entry in the daemon-owned prompt queue, surfaced to clients via

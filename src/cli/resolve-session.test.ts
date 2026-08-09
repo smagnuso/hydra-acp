@@ -8,15 +8,23 @@ import { RemotesStore } from "../core/remotes-store.js";
 
 describe("readSessionInput", () => {
   let originalEnv: string | undefined;
+  let originalSelfEnv: string | undefined;
   beforeEach(() => {
-    originalEnv = process.env.HYDRA_ACP_SESSION;
+    originalEnv = process.env.HYDRA_ACP_TARGET_SESSION;
+    originalSelfEnv = process.env.HYDRA_ACP_SESSION;
+    delete process.env.HYDRA_ACP_TARGET_SESSION;
     delete process.env.HYDRA_ACP_SESSION;
   });
   afterEach(() => {
     if (originalEnv === undefined) {
+      delete process.env.HYDRA_ACP_TARGET_SESSION;
+    } else {
+      process.env.HYDRA_ACP_TARGET_SESSION = originalEnv;
+    }
+    if (originalSelfEnv === undefined) {
       delete process.env.HYDRA_ACP_SESSION;
     } else {
-      process.env.HYDRA_ACP_SESSION = originalEnv;
+      process.env.HYDRA_ACP_SESSION = originalSelfEnv;
     }
   });
 
@@ -25,13 +33,21 @@ describe("readSessionInput", () => {
   });
 
   it("returns env var when --session flag is absent", () => {
-    process.env.HYDRA_ACP_SESSION = "from-env";
+    process.env.HYDRA_ACP_TARGET_SESSION = "from-env";
     expect(readSessionInput({})).toBe("from-env");
   });
 
   it("flag wins over env", () => {
-    process.env.HYDRA_ACP_SESSION = "from-env";
+    process.env.HYDRA_ACP_TARGET_SESSION = "from-env";
     expect(readSessionInput({ session: "from-flag" })).toBe("from-flag");
+  });
+
+  // HYDRA_ACP_SESSION is the agent's own id, exported by the daemon into
+  // every agent process. Reading it as the attach target would make a
+  // bare `hydra cat` inside an agent prompt its own session.
+  it("ignores HYDRA_ACP_SESSION, which names the caller not the target", () => {
+    process.env.HYDRA_ACP_SESSION = "hydra_session_self";
+    expect(readSessionInput({})).toBeUndefined();
   });
 
   it("ignores bare boolean --session", () => {

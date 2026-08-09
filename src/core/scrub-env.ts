@@ -112,10 +112,44 @@ export const PANE_SCOPED_ENV_BY_BACKEND: Readonly<Record<string, readonly string
   hydra: ["HYDRA_TAB_LABEL"],
 };
 
-/** Every pane-identity variable we know about, across all backends. */
-export const DEFAULT_SCRUBBED_ENV: readonly string[] = Object.values(
-  PANE_SCOPED_ENV_BY_BACKEND,
-).flat();
+/**
+ * The agent's own hydra session id, exported into every agent process so
+ * a tool the agent shells out to knows which session it is speaking for
+ * (`hydra cat --from-session` defaults to it).
+ *
+ * Scrubbed from the inherited environment for the same reason the
+ * pane-scoped names above are: the daemon outlives the shell that
+ * started it, so a value inherited from that shell describes some other
+ * session and would attribute this agent's messages to it. The daemon
+ * sets the correct value per-agent afterwards, and explicit spawn env is
+ * layered on after scrubbing, so scrubbing here can't erase it.
+ */
+export const SELF_SESSION_ENV = "HYDRA_ACP_SESSION";
+
+/** Variables the daemon owns and re-sets per agent, so never inherited. */
+export const DAEMON_OWNED_ENV: readonly string[] = [SELF_SESSION_ENV];
+
+/** Every variable scrubbed from the inherited environment by default. */
+export const DEFAULT_SCRUBBED_ENV: readonly string[] = [
+  ...Object.values(PANE_SCOPED_ENV_BY_BACKEND).flat(),
+  ...DAEMON_OWNED_ENV,
+];
+
+/**
+ * Layer the agent's own session id onto caller-supplied spawn env.
+ * Wins over anything forwarded: the daemon knows which session it is
+ * spawning for, and a caller passing a different value is either stale
+ * or confused.
+ */
+export function withSelfSessionEnv(
+  sessionId: string | undefined,
+  forwarded?: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  if (!sessionId) {
+    return forwarded;
+  }
+  return { ...(forwarded ?? {}), [SELF_SESSION_ENV]: sessionId };
+}
 
 // Set once at daemon startup from config. Module-level rather than
 // threaded through every spawn site because the two call sites

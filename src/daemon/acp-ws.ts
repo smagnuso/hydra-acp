@@ -65,6 +65,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
 import { mintExtensionMcpDescriptors, buildMintMcpServersForSwap } from "./extension-mcp-mint.js";
+import { normalizeSentBy } from "./sent-by.js";
 
 interface ClientState {
   clientId: string;
@@ -1841,6 +1842,15 @@ export function registerAcpWsEndpoint(
     connection.onRequest("session/prompt", async (raw) => {
       const params = SessionPromptParams.parse(raw);
       denyIfReadonly(params.sessionId, "session/prompt");
+      // Validate the sender's per-prompt provenance claim before it
+      // reaches the queue. A claimed session id the daemon doesn't know
+      // is dropped rather than forwarded, so a stale HYDRA_ACP_SESSION
+      // shows up as no attribution instead of a wrong one.
+      const sentBy = await normalizeSentBy(params, deps.manager, (claimed) => {
+        app.log.warn(
+          `session/prompt: dropping unknown sentBy.sessionId=${claimed} sessionId=${params.sessionId}`,
+        );
+      });
       const att = state.attached.get(params.sessionId);
       if (!att) {
         app.log.warn(
@@ -1876,7 +1886,7 @@ export function registerAcpWsEndpoint(
         );
         await session.attach(client, "none");
       }
-      return session.prompt(att.clientId, params);
+      return session.prompt(att.clientId, params, sentBy);
     });
 
     // session/cancel is a *notification* per the ACP spec — clients send it

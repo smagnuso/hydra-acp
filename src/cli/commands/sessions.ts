@@ -305,19 +305,67 @@ export async function runSessionsExport(
 // id (fetches the daemon's GET /transcript route) or a local .hydra
 // bundle file (decoded + rendered in-process via bundleToMarkdown).
 // Both paths share the same renderer in core/transcript.ts.
+// Parse a --since value: either a bare epoch-millis number or a short
+// duration like 45s / 10m / 2h / 3d, resolved against now. Returns
+// undefined for an unparseable value so the caller can complain.
+export function parseSinceToEpochMs(
+  raw: string,
+  now: number = Date.now(),
+): number | undefined {
+  const match = /^(\d+(?:\.\d+)?)([smhd])$/.exec(raw.trim());
+  if (match) {
+    const value = Number(match[1]);
+    const unit = match[2] as "s" | "m" | "h" | "d";
+    const scale = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit];
+    return now - value * scale;
+  }
+  const asNumber = Number(raw);
+  if (Number.isFinite(asNumber) && asNumber > 0) {
+    return asNumber;
+  }
+  return undefined;
+}
+
+export interface TranscriptWindowOptions {
+  includeTools?: boolean;
+  includeThoughts?: boolean;
+  from?: number;
+  to?: number;
+  last?: number;
+  sinceMs?: number;
+}
+
 export async function runSessionsTranscript(
   idOrFile: string | undefined,
   outPath: string | undefined,
-  options: { includeTools?: boolean; includeThoughts?: boolean } = {},
+  options: TranscriptWindowOptions = {},
 ): Promise<void> {
   if (!idOrFile) {
     process.stderr.write(
-      "Usage: hydra-acp sessions transcript <session-id>|<file> [--out <file>|.] [--tools] [--thoughts]\n",
+      "Usage: hydra-acp sessions transcript <session-id>|<file> [--out <file>|.] [--tools] [--thoughts] [--last <n>] [--from <n>] [--to <n>] [--since <dur>]\n",
     );
     process.exit(2);
   }
   const includeTools = options.includeTools ?? false;
   const includeThoughts = options.includeThoughts ?? false;
+  const window: {
+    from?: number;
+    to?: number;
+    last?: number;
+    sinceMs?: number;
+  } = {};
+  if (options.from !== undefined) {
+    window.from = options.from;
+  }
+  if (options.to !== undefined) {
+    window.to = options.to;
+  }
+  if (options.last !== undefined) {
+    window.last = options.last;
+  }
+  if (options.sinceMs !== undefined) {
+    window.sinceMs = options.sinceMs;
+  }
   // File-path branch: avoids a daemon round-trip and works on bundles
   // the user hasn't imported (or on hosts without a daemon running).
   let body: string;
@@ -325,7 +373,11 @@ export async function runSessionsTranscript(
   const localFile = await readBundleFileIfExists(idOrFile);
   if (localFile !== null) {
     const bundle = decodeBundleOrExit(localFile.raw);
-    body = bundleToMarkdown(bundle, { includeTools, includeThoughts });
+    body = bundleToMarkdown(bundle, {
+      includeTools,
+      includeThoughts,
+      ...window,
+    });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     defaultName = `${path.basename(idOrFile, path.extname(idOrFile))}-${stamp}.md`;
   } else {
@@ -339,6 +391,18 @@ export async function runSessionsTranscript(
     }
     if (includeThoughts) {
       url.searchParams.set("thoughts", "1");
+    }
+    if (window.from !== undefined) {
+      url.searchParams.set("from", String(window.from));
+    }
+    if (window.to !== undefined) {
+      url.searchParams.set("to", String(window.to));
+    }
+    if (window.last !== undefined) {
+      url.searchParams.set("last", String(window.last));
+    }
+    if (window.sinceMs !== undefined) {
+      url.searchParams.set("since", String(window.sinceMs));
     }
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${serviceToken}` },

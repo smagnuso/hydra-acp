@@ -312,4 +312,90 @@ describe("bundleToMarkdown", () => {
     ]);
     expect(bundleToMarkdown(bundle)).toBe(bundleToMarkdown(bundle));
   });
+
+  describe("windowing", () => {
+    // Five turns, each one prompt + one reply, recorded a second apart
+    // so the --since tests have something to bite on.
+    function fiveTurns(): Bundle {
+      const history: Bundle["history"] = [];
+      for (let i = 1; i <= 5; i += 1) {
+        const t = 1000 + i * 1000;
+        history.push(
+          update(
+            {
+              sessionUpdate: "prompt_received",
+              prompt: [{ type: "text", text: `ask ${i}` }],
+            },
+            t,
+          ),
+          update(
+            {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `reply ${i}` },
+            },
+            t + 100,
+          ),
+          update({ sessionUpdate: "turn_complete" }, t + 200),
+        );
+      }
+      return makeBundle(history);
+    }
+
+    it("renders every turn when no window is requested", () => {
+      const md = bundleToMarkdown(fiveTurns());
+      for (let i = 1; i <= 5; i += 1) {
+        expect(md).toContain(`ask ${i}`);
+      }
+      expect(md).not.toContain("Showing turns");
+    });
+
+    it("--last keeps only the final n turns", () => {
+      const md = bundleToMarkdown(fiveTurns(), { last: 2 });
+      expect(md).not.toContain("ask 3");
+      expect(md).toContain("ask 4");
+      expect(md).toContain("ask 5");
+      expect(md).toContain("_Showing turns 4-5 of 5._");
+    });
+
+    it("negative from counts back from the end", () => {
+      const md = bundleToMarkdown(fiveTurns(), { from: -2 });
+      expect(md).not.toContain("ask 3");
+      expect(md).toContain("ask 4");
+      expect(md).toContain("ask 5");
+    });
+
+    it("from/to select a middle slice, inclusive on both ends", () => {
+      const md = bundleToMarkdown(fiveTurns(), { from: 2, to: 3 });
+      expect(md).not.toContain("ask 1");
+      expect(md).toContain("ask 2");
+      expect(md).toContain("ask 3");
+      expect(md).not.toContain("ask 4");
+      expect(md).toContain("_Showing turns 2-3 of 5._");
+    });
+
+    it("clamps an over-long window instead of erroring", () => {
+      const md = bundleToMarkdown(fiveTurns(), { last: 99 });
+      expect(md).toContain("ask 1");
+      expect(md).toContain("ask 5");
+      expect(md).not.toContain("Showing turns");
+    });
+
+    it("sinceMs keeps turns with activity at or after the cutoff", () => {
+      // Turn 4 starts at 5000; anything at/after that is turns 4 and 5.
+      const md = bundleToMarkdown(fiveTurns(), { sinceMs: 5000 });
+      expect(md).not.toContain("ask 3");
+      expect(md).toContain("ask 4");
+      expect(md).toContain("ask 5");
+    });
+
+    it("says which turns a slice covers so it cannot read as a short session", () => {
+      const md = bundleToMarkdown(fiveTurns(), { last: 1 });
+      expect(md).toContain("_Showing turns 5-5 of 5._");
+    });
+
+    it("renders an inverted window as empty rather than throwing", () => {
+      const md = bundleToMarkdown(fiveTurns(), { from: 4, to: 2 });
+      expect(md).toContain("_No conversation history recorded._");
+    });
+  });
 });

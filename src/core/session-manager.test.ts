@@ -544,6 +544,38 @@ describe("SessionManager.reapIfOrphanedNonInteractive", () => {
     expect(await manager.loadFromDisk(id)).toBeDefined();
   });
 
+  // Regression: `hydra cat --no-wait` enqueues a prompt and detaches as
+  // soon as the daemon acks the enqueue, so the turn is still queued when
+  // the detach handler runs. Reaping there killed the agent mid-flight
+  // and the message vanished with no error on either side.
+  it("defers reaping while a queued turn is still in flight", async () => {
+    const { manager } = makeCreateManager();
+    const session = await manager.create({
+      cwd: REAP_CWD,
+      agentId: "claude-code",
+      originatingClient: { name: HYDRA_CAT_CLIENT_NAME },
+    });
+    const id = session.sessionId;
+
+    // A queued entry with nobody attached is exactly the --no-wait shape.
+    const client = {
+      clientId: "c_nowait",
+      clientInfo: { name: HYDRA_CAT_CLIENT_NAME },
+      connection: { notify: vi.fn(async () => undefined) },
+    };
+    session.attach(client as never, "none");
+    void session.prompt(client.clientId, {
+      prompt: [{ type: "text", text: "fire and forget" }],
+      _meta: { "hydra-acp": { ancillary: true } },
+    });
+    session.detach(client.clientId);
+    expect(session.hasWorkInFlight).toBe(true);
+
+    await manager.reapIfOrphanedNonInteractive(id);
+
+    expect(manager.get(id)).toBeDefined();
+  });
+
   it("leaves an interactive session running", async () => {
     const { manager } = makeCreateManager();
     const session = await manager.create({

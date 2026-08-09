@@ -82,6 +82,19 @@ export interface CatOptions {
   // streaming behavior intact for callers that want progressive output
   // or that prefer to consume the original markdown unmodified.
   raw?: boolean | undefined;
+  // Provenance for the prompts this invocation sends. --from-session is
+  // a hydra session id (the daemon resolves it to a title/cwd and
+  // rejects one it doesn't know); --from-label is a free string for
+  // producers that aren't sessions at all ("jenkins:build-12847").
+  // Both merge into the existing PromptOriginator, surfacing as `sentBy`
+  // on the receiving session's prompt_received.
+  fromSession?: string | undefined;
+  fromLabel?: string | undefined;
+  // --no-wait: return once the daemon has the prompt queued instead of
+  // blocking for the receiving agent's whole turn. Fire-and-forget for
+  // CI and cross-session notifications; the default (ask-and-wait) is
+  // still what you want when you need the answer on stdout.
+  noWait?: boolean | undefined;
 }
 
 const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
@@ -99,11 +112,23 @@ const HYDRA_STDIN_TOOL_PREFIX = "mcp__hydra-acp-stdin__";
 function catPromptParams(
   sessionId: string,
   prompt: unknown[],
+  opts?: CatOptions,
 ): Record<string, unknown> {
+  const meta: Record<string, unknown> = { ancillary: true };
+  const sentBy: Record<string, unknown> = {};
+  if (opts?.fromSession) {
+    sentBy.sessionId = opts.fromSession;
+  }
+  if (opts?.fromLabel) {
+    sentBy.label = opts.fromLabel;
+  }
+  if (Object.keys(sentBy).length > 0) {
+    meta.sentBy = sentBy;
+  }
   return {
     sessionId,
     prompt,
-    _meta: { [HYDRA_META_KEY]: { ancillary: true } },
+    _meta: { [HYDRA_META_KEY]: meta },
   };
 }
 
@@ -375,7 +400,11 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     // initialize is best-effort on the daemon side; proceed.
   }
 
-  const sessionId = await openOrAttachSession(conn, opts, useAutoStream);
+  const { sessionId, clientId } = await openOrAttachSession(
+    conn,
+    opts,
+    useAutoStream,
+  );
 
   // Wire session/update → stdout. Two modes:
   //   - Default: agent_message_chunk text is buffered until the block
@@ -498,6 +527,71 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
   // a failed first turn leaves it false so a retry would re-send the
   // mission.
   let firstChunkSent = false;
+
+  // --no-wait returns once the daemon has the prompt queued rather than
+  // when the receiving agent finishes its turn. The enqueue ack is
+  // hydra-acp/prompt_queue/added, which the daemon broadcasts to every
+  // attached client including the originator, so matching our own
+  // clientId proves the prompt landed on the queue and it's safe to
+  // detach. The timeout fallback is deliberate: a missed ack should
+  // degrade to a slower exit, never to a silently dropped message.
+  const ENQUEUE_ACK_TIMEOUT_MS = 5000;
+  const enqueueWaiters: Array<() => void> = [];
+  if (opts.noWait) {
+    conn.onNotification("hydra-acp/prompt_queue/added", (params) => {
+      const originator = (
+        params as { originator?: { clientId?: unknown } } | undefined
+      )?.originator;
+      // A queue entry replayed by attach, or one another client
+      // enqueued, is not our ack.
+      if (clientId !== undefined && originator?.clientId !== clientId) {
+        return;
+      }
+      const waiter = enqueueWaiters.shift();
+      if (waiter) {
+        waiter();
+      }
+    });
+  }
+
+  const sendChunkNoWait = async (
+    promptBlocks: Array<Record<string, unknown>>,
+  ): Promise<void> => {
+    let resolveAck: () => void = () => undefined;
+    const acked = new Promise<void>((resolve) => {
+      resolveAck = resolve;
+    });
+    const waiter = (): void => {
+      const idx = enqueueWaiters.indexOf(waiter);
+      if (idx !== -1) {
+        enqueueWaiters.splice(idx, 1);
+      }
+      resolveAck();
+    };
+    enqueueWaiters.push(waiter);
+    const timer = setTimeout(waiter, ENQUEUE_ACK_TIMEOUT_MS);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    try {
+      const { response } = conn.requestWithId(
+        "session/prompt",
+        catPromptParams(sessionId, promptBlocks, opts),
+      );
+      // The turn's completion isn't our business in this mode, but an
+      // unhandled rejection would still take the process down.
+      response.catch(() => undefined);
+      firstChunkSent = true;
+    } catch (err) {
+      stderr(`hydra-acp cat: prompt failed: ${(err as Error).message}\n`);
+      clearTimeout(timer);
+      waiter();
+      return;
+    }
+    await acked;
+    clearTimeout(timer);
+  };
+
   const sendChunk = async (text: string): Promise<void> => {
     const promptBlocks: Array<Record<string, unknown>> = [];
     if (opts.prompt && !firstChunkSent) {
@@ -509,8 +603,15 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     if (promptBlocks.length === 0) {
       return;
     }
+    if (opts.noWait) {
+      await sendChunkNoWait(promptBlocks);
+      return;
+    }
     try {
-      await conn.request("session/prompt", catPromptParams(sessionId, promptBlocks));
+      await conn.request(
+        "session/prompt",
+        catPromptParams(sessionId, promptBlocks, opts),
+      );
       firstChunkSent = true;
     } catch (err) {
       stderr(`hydra-acp cat: prompt failed: ${(err as Error).message}\n`);
@@ -616,6 +717,17 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     }
   };
 
+  // A -p mission that never rode a stdin chunk still has to go out.
+  // `hydra cat --session <id> -p "..." < /dev/null` has no bytes to
+  // attach the mission to, and without this the invocation exits 0
+  // having sent nothing at all. sendChunk("") collapses to the mission
+  // alone, and to a no-op when there's no mission or it already went.
+  const queueStandingPromptIfUnsent = (): void => {
+    if (opts.prompt && !firstChunkSent) {
+      chunkQueue.push("");
+    }
+  };
+
   // TTY-stdin behaviour splits on whether we have an obvious reason
   // to read from the keyboard:
   //
@@ -714,9 +826,11 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     stdin.on("end", () => {
       chunker.eof();
       stdinEnded = true;
-      if (!draining && chunkQueue.length === 0) {
-        void settle(exitCode);
-      }
+      queueStandingPromptIfUnsent();
+      // drainQueue self-guards on `draining` and settles from its
+      // finally when the queue empties, so this covers both the
+      // nothing-to-send and mission-still-pending cases.
+      void drainQueue();
     });
     stdin.on("error", (err: Error) => {
       stderr(`hydra-acp cat: stdin error: ${err.message}\n`);
@@ -742,6 +856,8 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
     stdinEnded = true;
     if (oneShotBuffer.length > 0) {
       chunkQueue.push(oneShotBuffer);
+    } else {
+      queueStandingPromptIfUnsent();
     }
     void drainQueue();
   });
@@ -866,7 +982,7 @@ function runStreamingPath(args: StreamingPathArgs): void {
     const promptDone = conn
       .request(
         "session/prompt",
-        catPromptParams(sessionId, [{ type: "text", text: promptText }]),
+        catPromptParams(sessionId, [{ type: "text", text: promptText }], opts),
       )
       .catch((err) => {
         args.onPromptFailed(
@@ -976,7 +1092,7 @@ async function openOrAttachSession(
   conn: JsonRpcConnection,
   opts: CatOptions,
   useAutoStream: boolean,
-): Promise<string> {
+): Promise<{ sessionId: string; clientId?: string | undefined }> {
   if (opts.sessionId) {
     // "pending_only" replays just the in-flight turn (if any) plus
     // queued prompts. Full history would drown a pipe consumer in
@@ -988,8 +1104,8 @@ async function openOrAttachSession(
       sessionId: opts.sessionId,
       historyPolicy: "pending_only",
       clientInfo: { name: HYDRA_CAT_CLIENT_NAME, version: HYDRA_VERSION },
-    })) as { sessionId: string };
-    return attached.sessionId;
+    })) as { sessionId: string; clientId?: string };
+    return { sessionId: attached.sessionId, clientId: attached.clientId };
   }
   const hydraMeta: Record<string, unknown> = {};
   if (opts.name) {
@@ -1030,8 +1146,8 @@ async function openOrAttachSession(
   // Touch extractHydraMeta to keep the response side validated; future
   // work (e.g. surfacing the upstreamSessionId for resume hints) plugs
   // in here.
-  void extractHydraMeta(created._meta);
-  return created.sessionId;
+  const createdMeta = extractHydraMeta(created._meta);
+  return { sessionId: created.sessionId, clientId: createdMeta.clientId };
 }
 
 

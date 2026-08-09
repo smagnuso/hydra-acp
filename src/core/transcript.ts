@@ -17,16 +17,51 @@ export interface TranscriptOptions {
   // Default false, same rationale as includeTools: thoughts are bulky
   // and rarely what a reader of the transcript wants.
   includeThoughts?: boolean;
+  // Restrict the rendered body to a slice of the conversation. A turn
+  // starts at each user prompt and runs to the next one; everything
+  // before the first prompt (cold-start agent output) rides with the
+  // first turn's window.
+  //
+  // Turn numbers are 1-indexed and inclusive on both ends. Negative
+  // values count back from the last turn, so -1 is the final turn and
+  // `from: -5` is the last five. Reading a peer session usually wants
+  // the tail rather than the whole history, which for a long session is
+  // the difference between a few hundred tokens and a few hundred
+  // thousand.
+  from?: number;
+  to?: number;
+  // Convenience for `from: -last, to: -1`. Wins over from/to when set.
+  last?: number;
+  // Epoch millis. Keeps turns with any recorded activity at or after
+  // this instant, for "what happened while I was building" questions
+  // that don't map cleanly onto a turn count.
+  sinceMs?: number;
+}
+
+interface ResolvedWindow {
+  from: number;
+  to: number;
+  total: number;
 }
 
 export function bundleToMarkdown(
   bundle: Bundle,
   options: TranscriptOptions = {},
 ): string {
-  const events = collectEvents(bundle);
+  const allEvents = collectEvents(bundle);
+  const { events, window } = applyWindow(allEvents, options);
   const toolFinalStates = collectToolFinalStates(events);
   const out: string[] = [];
   emitHeader(out, bundle);
+  // Say so when this is a slice. Without it a windowed transcript reads
+  // exactly like a short session, and a reader (or an agent) draws
+  // conclusions from history that was never shown to it.
+  if (window && (window.from > 1 || window.to < window.total)) {
+    out.push(
+      `_Showing turns ${window.from}-${window.to} of ${window.total}._`,
+    );
+    out.push("");
+  }
   emitBody(out, events, toolFinalStates, {
     includeTools: options.includeTools ?? false,
     includeThoughts: options.includeThoughts ?? false,
@@ -42,6 +77,96 @@ export function bundleToMarkdown(
 interface TimedEvent {
   event: RenderEvent;
   recordedAt: number;
+}
+
+// Map a possibly-negative, possibly-out-of-range turn number onto a
+// real one. Negatives index from the end (-1 is the last turn).
+function clampTurn(value: number, total: number): number {
+  const resolved = value < 0 ? total + value + 1 : value;
+  if (resolved < 1) {
+    return 1;
+  }
+  if (resolved > total) {
+    return total;
+  }
+  return resolved;
+}
+
+// Slice the event list down to the requested turns. Returns the events
+// unchanged (and no window) when nothing was requested, so the common
+// full-transcript path costs one boolean.
+function applyWindow(
+  events: TimedEvent[],
+  options: TranscriptOptions,
+): { events: TimedEvent[]; window?: ResolvedWindow } {
+  const wantsTurnWindow =
+    options.from !== undefined ||
+    options.to !== undefined ||
+    options.last !== undefined;
+  if (!wantsTurnWindow && options.sinceMs === undefined) {
+    return { events };
+  }
+
+  // Turn 0 is everything before the first user prompt. It rides with
+  // turn 1 so a cold-start preamble isn't stranded by `--last`.
+  const turnOf: number[] = [];
+  let turn = 0;
+  for (const { event } of events) {
+    if (event.kind === "user-text") {
+      turn += 1;
+    }
+    turnOf.push(turn === 0 ? 1 : turn);
+  }
+  const total = Math.max(turn, 1);
+
+  let from = 1;
+  let to = total;
+  if (options.last !== undefined && options.last > 0) {
+    from = clampTurn(total - options.last + 1, total);
+  } else {
+    if (options.from !== undefined) {
+      from = clampTurn(options.from, total);
+    }
+    if (options.to !== undefined) {
+      to = clampTurn(options.to, total);
+    }
+  }
+  if (from > to) {
+    return { events: [], window: { from, to, total } };
+  }
+
+  const sinceMs = options.sinceMs;
+  // A turn survives the time filter when anything in it was recorded at
+  // or after the cutoff, so a turn that started earlier and is still
+  // producing output isn't dropped mid-flight.
+  const turnsAfterCutoff = new Set<number>();
+  if (sinceMs !== undefined) {
+    events.forEach((e, i) => {
+      if (e.recordedAt >= sinceMs) {
+        turnsAfterCutoff.add(turnOf[i] as number);
+      }
+    });
+  }
+
+  const kept: TimedEvent[] = [];
+  let firstKeptTurn: number | undefined;
+  let lastKeptTurn: number | undefined;
+  events.forEach((e, i) => {
+    const t = turnOf[i] as number;
+    if (t < from || t > to) {
+      return;
+    }
+    if (sinceMs !== undefined && !turnsAfterCutoff.has(t)) {
+      return;
+    }
+    kept.push(e);
+    firstKeptTurn ??= t;
+    lastKeptTurn = t;
+  });
+  return {
+    events: kept,
+    window: { from: firstKeptTurn ?? from, to: lastKeptTurn ?? to, total },
+  };
 }
 
 function collectEvents(bundle: Bundle): TimedEvent[] {

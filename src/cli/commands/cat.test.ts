@@ -875,9 +875,11 @@ describe("runCatLoop", () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        // --follow so stdin.end() with no data just settles, leaving the
-        // permission handler the only thing exercised by this test.
-        opts: { prompt: "watch", follow: true },
+        // --follow with no -p so stdin.end() with no data just settles,
+        // leaving the permission handler the only thing exercised by this
+        // test. A standing prompt here would now be flushed as a one-shot
+        // turn at EOF and this harness never answers it.
+        opts: { follow: true },
       });
       await performHandshake(h);
 
@@ -914,7 +916,7 @@ describe("runCatLoop", () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        opts: { prompt: "watch", follow: true },
+        opts: { follow: true },
       });
       await performHandshake(h);
 
@@ -950,7 +952,7 @@ describe("runCatLoop", () => {
       const h = makeHarness();
       const loopPromise = runCatLoop({
         ...h.baseArgs,
-        opts: { prompt: "watch", follow: true, dangerouslySkipPermissions: true },
+        opts: { follow: true, dangerouslySkipPermissions: true },
       });
       await performHandshake(h);
 

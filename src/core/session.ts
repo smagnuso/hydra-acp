@@ -87,6 +87,8 @@ import type {
   UpdatePromptResult,
 } from "../acp/types.js";
 import { JsonRpcErrorCodes, extractHydraMeta, withRecordedAt } from "../acp/types.js";
+import { HYDRA_META_KEY } from "../acp/types-hydra-meta.js";
+import type { SentBy } from "../daemon/sent-by.js";
 import * as fsp from "node:fs/promises";
 
 export interface AttachedClient {
@@ -2211,7 +2213,15 @@ export class Session {
     }
   }
 
-  async prompt(clientId: string, params: unknown): Promise<unknown> {
+  // `sentBy` is per-prompt provenance the caller has already validated
+  // (see daemon/sent-by.ts). It rides on the queue entry's originator so
+  // it reaches prompt_queue_added, prompt_received, and the persisted
+  // queue alike, rather than being re-derived at each broadcast.
+  async prompt(
+    clientId: string,
+    params: unknown,
+    sentBy?: SentBy,
+  ): Promise<unknown> {
     const client = this.clients.get(clientId);
     if (!client) {
       throw withCode(
@@ -2280,7 +2290,7 @@ export class Session {
         }
       }
     }
-    return this.enqueueUserPrompt(client, params, messageId);
+    return this.enqueueUserPrompt(client, params, messageId, sentBy);
   }
 
   // DEVIATION FROM RFD #533: this broadcast is deliberately deferred
@@ -2301,6 +2311,15 @@ export class Session {
     }
     if (entry.originator.version) {
       sentBy.version = entry.originator.version;
+    }
+    if (entry.originator.fromSession) {
+      sentBy.fromSession = entry.originator.fromSession;
+    }
+    if (entry.originator.fromSessionTitle) {
+      sentBy.fromSessionTitle = entry.originator.fromSessionTitle;
+    }
+    if (entry.originator.fromLabel) {
+      sentBy.fromLabel = entry.originator.fromLabel;
     }
     this.promptStartedAt = Date.now();
     this.recordAndBroadcast(
@@ -3596,6 +3615,21 @@ export class Session {
   // touch the title; that'd flap as conversations evolved.
   private maybeSeedTitleFromPrompt(params: unknown): void {
     if (this.firstPromptSeeded) {
+      return;
+    }
+    // Machine traffic is not a conversation summary. An ancillary turn
+    // (`hydra cat`, transformer-driven worker prompts) or one carrying
+    // per-prompt provenance came from a program or a peer session, not
+    // from someone describing what this session is for, so titling a
+    // session "Build 12847 failed: 3 link errors" is just wrong. Same
+    // reasoning as the slash-command skip below. Note the caller
+    // promotes _firstPromptSeeded unconditionally right after this
+    // returns, so a skip here means the session keeps whatever title
+    // session/new gave it rather than deferring to a later prompt.
+    const meta = extractHydraMeta(
+      ((params ?? {}) as { _meta?: Record<string, unknown> })._meta,
+    );
+    if (meta.ancillary === true || this.promptCarriesSentBy(params)) {
       return;
     }
     const promptParams = (params ?? {}) as { prompt?: unknown };
@@ -6265,11 +6299,7 @@ export class Session {
     // by a full idle window — the next broadcast will re-arm us sooner
     // anyway, and this avoids a tight reschedule loop when activity is
     // stale but work is genuinely in flight or queued behind it.
-    if (
-      this.turnStartedAt !== undefined ||
-      this.hasPermissionFlag ||
-      this.promptQueue.length > 0
-    ) {
+    if (this.hasWorkInFlight) {
       this.armIdleTimer(this.idleTimeoutMs);
       return;
     }
@@ -6317,6 +6347,20 @@ export class Session {
   // doesn't "leak" into the next quiesce.
   //
   // Returns a disposer the caller can use to deregister.
+  // True while the session holds work that must not be abandoned: a
+  // turn in flight, an unresolved permission request, or entries still
+  // waiting on the queue. Every teardown path has to consult this, not
+  // just the idle-close timer: a client that fires a prompt and detaches
+  // immediately (hydra cat --no-wait) leaves a queued turn behind with
+  // nobody attached, and killing the agent then loses it silently.
+  get hasWorkInFlight(): boolean {
+    return (
+      this.turnStartedAt !== undefined ||
+      this.hasPermissionFlag ||
+      this.promptQueue.length > 0
+    );
+  }
+
   onIdle(
     fn: (s: Session) => void,
     opts?: { once?: boolean; debounceMs?: number },
@@ -6801,6 +6845,7 @@ export class Session {
     client: AttachedClient,
     params: unknown,
     messageId: string,
+    sentBy?: SentBy,
   ): Promise<unknown> {
     const promptArray = (((params ?? {}) as { prompt?: unknown[] }).prompt ??
       []) as unknown[];
@@ -6808,6 +6853,15 @@ export class Session {
     if (client.clientInfo?.name) originator.name = client.clientInfo.name;
     if (client.clientInfo?.version)
       originator.version = client.clientInfo.version;
+    if (sentBy?.fromSession) {
+      originator.fromSession = sentBy.fromSession;
+    }
+    if (sentBy?.fromSessionTitle) {
+      originator.fromSessionTitle = sentBy.fromSessionTitle;
+    }
+    if (sentBy?.fromLabel) {
+      originator.fromLabel = sentBy.fromLabel;
+    }
     // Read `_meta["hydra-acp"].queuePosition` to let callers select
     // where in the queue this entry lands. Defaults to "tail" (the
     // historical behavior — every prompt was pushed to the end).
@@ -6842,6 +6896,26 @@ export class Session {
       this.broadcastQueueAdded(entry, { position: insertedAt });
       void this.drainQueue();
     });
+  }
+
+  // True when session/prompt params assert `_meta["hydra-acp"].sentBy`.
+  // Deliberately a presence check on the raw claim rather than a read of
+  // the validated SentBy: the title heuristic runs before validation and
+  // only needs to know "a program asserted provenance," not who.
+  private promptCarriesSentBy(params: unknown): boolean {
+    if (!params || typeof params !== "object") {
+      return false;
+    }
+    const meta = (params as { _meta?: unknown })._meta;
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+      return false;
+    }
+    const hydra = (meta as Record<string, unknown>)[HYDRA_META_KEY];
+    if (!hydra || typeof hydra !== "object" || Array.isArray(hydra)) {
+      return false;
+    }
+    const sentBy = (hydra as Record<string, unknown>).sentBy;
+    return Boolean(sentBy) && typeof sentBy === "object";
   }
 
   // Parse the optional `_meta["hydra-acp"].queuePosition` field from

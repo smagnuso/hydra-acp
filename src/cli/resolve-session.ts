@@ -1,6 +1,9 @@
-// Resolves the user-facing `--session <value>` flag (or HYDRA_ACP_SESSION
-// env var) into the concrete inputs the TUI / shim / cat entry points
-// need: a sessionId string and a RemoteTarget.
+// Resolves the user-facing `--session <value>` flag (or the
+// HYDRA_ACP_TARGET_SESSION env var) into the concrete inputs the TUI /
+// shim / cat entry points need: a sessionId string and a RemoteTarget.
+//
+// Not HYDRA_ACP_SESSION: that names the session the caller IS, not the
+// one it wants to attach to. See readSessionInput.
 //
 // Two cases:
 //   - value is a `hydra://` URL → parse it, resolve a RemoteTarget
@@ -83,9 +86,17 @@ export async function resolveSessionFlag(
   };
 }
 
-// Read --session from flags, falling back to HYDRA_ACP_SESSION env var.
-// Returns the raw string value (URL or id) for resolveSessionFlag to
-// interpret, or undefined when neither is set.
+// Read --session from flags, falling back to the HYDRA_ACP_TARGET_SESSION
+// env var. Returns the raw string value (URL or id) for
+// resolveSessionFlag to interpret, or undefined when neither is set.
+//
+// BREAKING (0.1.x): this fallback used to be HYDRA_ACP_SESSION. That
+// name now means "the session you are in" and is exported by the daemon
+// into every agent's environment, so reading it here would make a bare
+// `hydra cat` from inside an agent attach to its own session and prompt
+// itself. One variable can't be both the ambient identity and the
+// attach target; identity won because it's the one the daemon can set
+// correctly per-agent.
 export function readSessionInput(
   flags: Record<string, string | boolean>,
 ): string | undefined {
@@ -93,7 +104,7 @@ export function readSessionInput(
   if (typeof flag === "string" && flag.length > 0) {
     return flag;
   }
-  const env = process.env.HYDRA_ACP_SESSION;
+  const env = process.env.HYDRA_ACP_TARGET_SESSION;
   if (typeof env === "string" && env.length > 0) {
     return env;
   }

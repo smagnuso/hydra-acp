@@ -12,6 +12,7 @@ import {
   type AgentInstallProgressCallback,
   type SpawnPlan,
 } from "./registry.js";
+import { withSelfSessionEnv } from "./scrub-env.js";
 import {
   HYDRA_SESSION_PREFIX,
   Session,
@@ -630,6 +631,11 @@ export class SessionManager {
     if (canonical && canonical.id !== params.agentId) {
       params = { ...params, agentId: canonical.id };
     }
+    // Mint the id before the agent spawns rather than letting Session
+    // mint it afterwards. The agent's environment is fixed at exec, so
+    // "tell the agent which session it is" only works if we already
+    // know. Session accepts the id and skips its own generation.
+    const sessionId = `${HYDRA_SESSION_PREFIX}${generateRawSessionId()}`;
     const fresh = await this.bootstrapAgent({
       agentId: params.agentId,
       cwd: params.cwd,
@@ -638,6 +644,7 @@ export class SessionManager {
       model: params.model,
       onInstallProgress: params.onInstallProgress,
       forwardedEnv: params.forwardedEnv,
+      selfSessionId: sessionId,
     });
 
     // Run the agent:initialize chain intercept. Transformers that declared
@@ -669,6 +676,7 @@ export class SessionManager {
       fresh.agentCapabilities = caps as AgentCapabilities;
     }
     const session: Session = new Session({
+      sessionId,
       cwd: params.cwd,
       agentId: params.agentId,
       agent: fresh.agent,
@@ -682,9 +690,17 @@ export class SessionManager {
       idleEventTimeoutMs: this.idleEventTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? [] }),
+        this.bootstrapAgent({
+          ...p,
+          mcpServers: p.mcpServers ?? [],
+          selfSessionId: sessionId,
+        }),
       loadExistingAgentSession: (upstreamId, p) =>
-        this.bootstrapAgentLoad(upstreamId, { ...p, mcpServers: p.mcpServers ?? [] }),
+        this.bootstrapAgentLoad(upstreamId, {
+          ...p,
+          mcpServers: p.mcpServers ?? [],
+          selfSessionId: sessionId,
+        }),
       ...(params.mintMcpServersForSwap
         ? { mintMcpServersForSwap: params.mintMcpServersForSwap }
         : {}),
@@ -787,11 +803,15 @@ export class SessionManager {
       npmRegistry: this.npmRegistry,
       onInstallProgress: params.onInstallProgress,
     });
+    const resurrectEnv = withSelfSessionEnv(
+      params.hydraSessionId,
+      params.forwardedEnv,
+    );
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
       plan,
-      ...(params.forwardedEnv ? { extraEnv: params.forwardedEnv } : {}),
+      ...(resurrectEnv ? { extraEnv: resurrectEnv } : {}),
     });
 
     let agentCapabilities: AgentCapabilities | undefined;
@@ -948,9 +968,17 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
+        this.bootstrapAgent({
+          ...p,
+          mcpServers: p.mcpServers ?? params.mcpServers ?? [],
+          selfSessionId: params.hydraSessionId,
+        }),
       loadExistingAgentSession: (upstreamId, p) =>
-        this.bootstrapAgentLoad(upstreamId, { ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
+        this.bootstrapAgentLoad(upstreamId, {
+          ...p,
+          mcpServers: p.mcpServers ?? params.mcpServers ?? [],
+          selfSessionId: params.hydraSessionId,
+        }),
       ...(params.mintMcpServersForSwap
         ? { mintMcpServersForSwap: params.mintMcpServersForSwap }
         : {}),
@@ -1068,9 +1096,17 @@ export class SessionManager {
       idleTimeoutMs: this.idleTimeoutMs,
       logger: this.logger,
       spawnReplacementAgent: (p) =>
-        this.bootstrapAgent({ ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
+        this.bootstrapAgent({
+          ...p,
+          mcpServers: p.mcpServers ?? params.mcpServers ?? [],
+          selfSessionId: params.hydraSessionId,
+        }),
       loadExistingAgentSession: (upstreamId, p) =>
-        this.bootstrapAgentLoad(upstreamId, { ...p, mcpServers: p.mcpServers ?? params.mcpServers ?? [] }),
+        this.bootstrapAgentLoad(upstreamId, {
+          ...p,
+          mcpServers: p.mcpServers ?? params.mcpServers ?? [],
+          selfSessionId: params.hydraSessionId,
+        }),
       ...(params.mintMcpServersForSwap
         ? { mintMcpServersForSwap: params.mintMcpServersForSwap }
         : {}),
@@ -1169,6 +1205,23 @@ export class SessionManager {
     // promoted by a real prompt — i.e. interactive === true. undefined
     // (never prompted, including cat) and an explicit false both reap.
     if (session.interactive === true) {
+      return;
+    }
+    // A detach does not mean the work is over. `hydra cat --no-wait`
+    // enqueues a prompt and detaches as soon as the daemon acks the
+    // enqueue, so the turn it asked for often hasn't started yet;
+    // reaping here kills the agent mid-flight and the message is lost
+    // with no error anywhere. Defer to the next quiesce, matching what
+    // the idle-close path already does with the same guard.
+    if (session.hasWorkInFlight) {
+      this.logger?.info(
+        `deferring reap of ${sessionId}: work still in flight after detach`,
+      );
+      session.onceIdle((s) => {
+        void this.reapIfOrphanedNonInteractive(s.sessionId).catch(
+          () => undefined,
+        );
+      });
       return;
     }
     this.logger?.info(
@@ -1456,6 +1509,10 @@ export class SessionManager {
     // (brand-new, agent switch, import re-seed, /hydra restart) so
     // resurrect paths and respawn carry the same env.
     forwardedEnv?: Record<string, string>;
+    // The hydra session this agent is being spawned for. Exported into
+    // the child as HYDRA_ACP_SESSION so anything the agent shells out to
+    // can identify itself without being told.
+    selfSessionId?: string;
   }): Promise<{
     agent: AgentInstance;
     upstreamSessionId: string;
@@ -1479,11 +1536,15 @@ export class SessionManager {
       npmRegistry: this.npmRegistry,
       onInstallProgress: params.onInstallProgress,
     });
+    const bootstrapEnv = withSelfSessionEnv(
+      params.selfSessionId,
+      params.forwardedEnv,
+    );
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
       plan,
-      ...(params.forwardedEnv ? { extraEnv: params.forwardedEnv } : {}),
+      ...(bootstrapEnv ? { extraEnv: bootstrapEnv } : {}),
     });
     try {
       const initResult = await agent.connection.request<Record<string, unknown>>(
@@ -1616,6 +1677,7 @@ export class SessionManager {
       agentArgs?: string[];
       forwardedEnv?: Record<string, string>;
       mcpServers?: unknown[];
+      selfSessionId?: string;
     },
   ): Promise<SpawnReplacementAgentResult> {
     const agentDef = await this.registry.getAgent(params.agentId);
@@ -1629,11 +1691,15 @@ export class SessionManager {
     const plan = await planSpawn(agentDef, params.agentArgs ?? [], {
       npmRegistry: this.npmRegistry,
     });
+    const loadEnv = withSelfSessionEnv(
+      params.selfSessionId,
+      params.forwardedEnv,
+    );
     const agent = this.spawner({
       agentId: params.agentId,
       cwd: params.cwd,
       plan,
-      ...(params.forwardedEnv ? { extraEnv: params.forwardedEnv } : {}),
+      ...(loadEnv ? { extraEnv: loadEnv } : {}),
     });
     try {
       const initResult = await agent.connection.request<Record<string, unknown>>(

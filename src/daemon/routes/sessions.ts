@@ -544,18 +544,51 @@ export function registerSessionRoutes(
       hydraHost: resolveHydraHost(defaults),
     });
     const q = request.query as
-      | { tools?: string; thoughts?: string }
+      | {
+          tools?: string;
+          thoughts?: string;
+          from?: string;
+          to?: string;
+          last?: string;
+          since?: string;
+        }
       | undefined;
     // ?tools=1 / true / yes opts into the bulleted tool list, and
     // ?thoughts=1 into the reasoning stream. Default (missing or
     // anything else) omits both.
     const isTruthy = (v: string | undefined): boolean =>
       v === "1" || v === "true" || v === "yes";
+    // ?from / ?to / ?last window by turn (negatives count from the
+    // end), ?since by epoch millis. A malformed value is a 400 rather
+    // than a silent full render: a caller asking for the last 5 turns
+    // and getting 500 has no way to notice from the body.
+    const numeric = (
+      name: "from" | "to" | "last" | "since",
+    ): number | undefined | "bad" => {
+      const v = q?.[name];
+      if (v === undefined || v === "") {
+        return undefined;
+      }
+      const n = Number(v);
+      return Number.isFinite(n) ? n : "bad";
+    };
+    const window: Record<string, number> = {};
+    for (const name of ["from", "to", "last", "since"] as const) {
+      const value = numeric(name);
+      if (value === "bad") {
+        reply.code(400).send({ error: `${name} must be a number` });
+        return;
+      }
+      if (value !== undefined) {
+        window[name === "since" ? "sinceMs" : name] = value;
+      }
+    }
     reply.header("Content-Type", "text/markdown; charset=utf-8");
     reply.code(200).send(
       bundleToMarkdown(bundle, {
         includeTools: isTruthy(q?.tools),
         includeThoughts: isTruthy(q?.thoughts),
+        ...window,
       }),
     );
   });

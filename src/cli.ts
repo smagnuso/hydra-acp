@@ -30,6 +30,7 @@ import {
   runSessionsRemove,
   runSessionsShare,
   runSessionsTranscript,
+  parseSinceToEpochMs,
 } from "./cli/commands/sessions.js";
 import { runSessionsInfo } from "./cli/commands/sessions-info.js";
 import { parseColumns } from "./cli/session-row.js";
@@ -230,7 +231,7 @@ async function main(): Promise<void> {
   const dangerouslySkipPermissions =
     flags["dangerously-skip-permissions"] === true;
   warnIfDangerouslySkipping(dangerouslySkipPermissions);
-  // `--session <value>` (or HYDRA_ACP_SESSION env var) accepts either a
+  // `--session <value>` (or HYDRA_ACP_TARGET_SESSION env var) accepts either a
   // bare session id or a hydra:// URL pointing at any daemon. URL
   // resolution may hit a password prompt; that's gated below based on
   // whether the entry point can support interactive prompting. The
@@ -331,10 +332,24 @@ async function main(): Promise<void> {
         detach: flags.detach === true,
         follow: flags.follow === true,
         raw: flags.raw === true,
+        noWait: flags["no-wait"] === true,
         dangerouslySkipPermissions,
       };
       if (cwd !== undefined) {
         catOpts.cwd = cwd;
+      }
+      // resolveOption falls back to HYDRA_ACP_FROM_SESSION, but the
+      // daemon exports the agent's own id as HYDRA_ACP_SESSION, so an
+      // agent shelling out to cat is stamped correctly without passing
+      // anything.
+      const fromSession =
+        resolveOption(flags, "from-session") ?? process.env.HYDRA_ACP_SESSION;
+      if (fromSession !== undefined && fromSession.length > 0) {
+        catOpts.fromSession = fromSession;
+      }
+      const fromLabel = resolveOption(flags, "from-label");
+      if (fromLabel !== undefined && fromLabel.length > 0) {
+        catOpts.fromLabel = fromLabel;
       }
       if (sessionTarget !== undefined) {
         catOpts.target = sessionTarget;
@@ -485,10 +500,55 @@ async function main(): Promise<void> {
         const out = resolveOption(flags, "out");
         const includeTools = flags.tools === true;
         const includeThoughts = flags.thoughts === true;
-        await runSessionsTranscript(positional[2], out, {
+        // A value flag with nothing after it parses as `true`, so an
+        // absent-minded `--last --tools` would silently render the whole
+        // transcript. Reject anything non-numeric loudly instead.
+        const turnFlag = (name: "from" | "to" | "last"): number | undefined => {
+          const raw = flags[name];
+          if (raw === undefined) {
+            return undefined;
+          }
+          const value = typeof raw === "string" ? Number(raw) : Number.NaN;
+          if (!Number.isInteger(value) || value === 0) {
+            process.stderr.write(
+              `hydra-acp: --${name} takes a non-zero integer turn number (negatives count from the end)\n`,
+            );
+            process.exit(2);
+          }
+          return value;
+        };
+        const transcriptOpts: Parameters<typeof runSessionsTranscript>[2] = {
           includeTools,
           includeThoughts,
-        });
+        };
+        const from = turnFlag("from");
+        if (from !== undefined) {
+          transcriptOpts.from = from;
+        }
+        const to = turnFlag("to");
+        if (to !== undefined) {
+          transcriptOpts.to = to;
+        }
+        const last = turnFlag("last");
+        if (last !== undefined) {
+          if (last < 0) {
+            process.stderr.write("hydra-acp: --last takes a positive count\n");
+            process.exit(2);
+          }
+          transcriptOpts.last = last;
+        }
+        const sinceRaw = resolveOption(flags, "since");
+        if (sinceRaw !== undefined) {
+          const sinceMs = parseSinceToEpochMs(sinceRaw);
+          if (sinceMs === undefined) {
+            process.stderr.write(
+              "hydra-acp: --since takes a duration (45s, 10m, 2h, 3d) or epoch millis\n",
+            );
+            process.exit(2);
+          }
+          transcriptOpts.sinceMs = sinceMs;
+        }
+        await runSessionsTranscript(positional[2], out, transcriptOpts);
         return;
       }
       if (sub === "import") {
@@ -961,7 +1021,7 @@ function printHelp(subcommand?: string): void {
     [TUI, "  hydra-acp tui   [same flags]       Force TUI explicitly."],
     [SHIM, "  hydra-acp acp   [same flags]       Force shim explicitly (non-interactive; password prompts not allowed)."],
     [SHIM, "  hydra-acp shim  [same flags]       Alias for `acp` (kept for backward compatibility)."],
-    [CAT, "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--agent <id>] [--model <id>] [--name <label>]"],
+    [CAT, "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--no-wait] [--agent <id>] [--model <id>] [--name <label>]"],
     [CAT, "                                     Pipe-friendly headless mode. Reads stdin and sends it"],
     [CAT, "                                     as a prompt to a fresh session, streams the agent's"],
     [CAT, "                                     response to stdout, exits when stdin closes. A bounded"],
@@ -976,9 +1036,15 @@ function printHelp(subcommand?: string): void {
     [CAT, "                                     but otherwise stay hidden. --raw bypasses the renderer"],
     [CAT, "                                     and emits chunks immediately, the way cat used to behave."],
     [CAT, "                                     With --session, attach to an existing session instead"],
-    [CAT, "                                     of creating a new one. With --detach, the session"],
-    [CAT, "                                     survives in the daemon for slack/browser/notifier"],
-    [CAT, "                                     extensions."],
+    [CAT, "                                     of creating a new one; -p alone is then a one-shot turn"],
+    [CAT, "                                     against it. With --detach, the session survives in the"],
+    [CAT, "                                     daemon for slack/browser/notifier extensions."],
+    [CAT, "                                     --no-wait returns once the prompt is queued instead of"],
+    [CAT, "                                     blocking for the receiving agent's whole turn (nothing is"],
+    [CAT, "                                     streamed to stdout in that mode). --from-session <id> and"],
+    [CAT, "                                     --from-label <text> stamp provenance onto the prompt so"],
+    [CAT, "                                     the receiver can tell it came from another session or a"],
+    [CAT, "                                     machine; --from-session defaults to HYDRA_ACP_SESSION."],
     [LAUNCH, "  hydra-acp launch <agent> [agent-args...]"],
     [LAUNCH, "                                     Shim mode, force daemon to spawn <agent>"],
     [LAUNCH, "                                     from the registry. Args after <agent>"],
@@ -997,7 +1063,9 @@ function printHelp(subcommand?: string): void {
         [ENTRY, "  --new                              Force a fresh session."],
         [ENTRY, "  --readonly                         Open a session as a transcript viewer (requires --session)."],
         [ENTRY, "  --dangerously-skip-permissions     Auto-approve every tool permission request (tui / shim / launch / cat)."],
-        [ENTRY, "  HYDRA_ACP_SESSION                  Env var equivalent of --session (flag wins)."],
+        [ENTRY, "  HYDRA_ACP_TARGET_SESSION           Env var equivalent of --session (flag wins)."],
+        [ENTRY, "  HYDRA_ACP_SESSION                  Set by the daemon inside each agent to that agent's own"],
+        [ENTRY, "                                     session id. Read by cat as the default --from-session."],
       ];
     })()),
     [INIT, "  hydra-acp init [--rotate-token]    Initialize ~/.hydra-acp/config.json"],
@@ -1021,8 +1089,9 @@ function printHelp(subcommand?: string): void {
     [SESSION, "                                     Delete cold sessions that were never promoted to a real conversation — `hydra cat` one-shots (interactive=false) AND editor-spawned panels that never had a turn (interactive=undefined). With no --max-age-days, collects every matching cold row regardless of age (you typed `collect`, so collect it all). Pass --max-age-days N to scope to anything older than N days; 0 is the same as omitting it. --keep-undecided narrows to only explicit interactive=false rows (matches what the background timer does). --limit caps deletions per call (default 1000); re-run to drain a larger backlog. The daemon also runs this on a timer using config.daemon.sessionGcMaxAgeDays (with the conservative explicit-only policy) — this is the manual trigger."],
     [SESSION, "  hydra-acp session export <id> [--out <file>|.]"],
     [SESSION, "                                     Write a session bundle to <file>, to a default-named file when --out=., or to stdout"],
-    [SESSION, "  hydra-acp session transcript <id>|<file> [--out <file>|.] [--tools] [--thoughts]"],
-    [SESSION, "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout. --tools adds the tool-call list, --thoughts adds the agent's reasoning stream (both off by default)"],
+    [SESSION, "  hydra-acp session transcript <id>|<file> [--out <file>|.] [--tools] [--thoughts] [--last <n>] [--from <n>] [--to <n>] [--since <dur>]"],
+    [SESSION, "                                     Render a session as a markdown transcript. Accepts a session id (renders via the daemon) or a local .hydra bundle file (rendered in-process). Writes to <file>, to a default-named file when --out=., or to stdout. --tools adds the tool-call list, --thoughts adds the agent's reasoning stream (both off by default)."],
+    [SESSION, "                                     Windowing: a turn starts at each user prompt. --last <n> renders the final n turns; --from/--to take 1-indexed turn numbers where negatives count from the end (--from -5 is the last five, --from 3 --to 7 a middle slice); --since takes a duration (45s, 10m, 2h, 3d) and keeps turns with activity in it. A windowed render says which turns it covers so a slice can't be mistaken for a short session."],
     [SESSION, "  hydra-acp session import <file>|- [--replace] [--cwd <path>] [--info]"],
     [SESSION, "                                     Import a bundle from <file> or stdin (-); --replace overwrites a lineage match (kills it if live); --cwd overrides the bundle's recorded working directory; --info prints the bundle's meta without importing"],
     [SESSION, "  hydra-acp session share [<id>] [--host <name>] [--cwd <path>]"],
@@ -1072,7 +1141,7 @@ function printHelp(subcommand?: string): void {
     { globalOnly: "Config knob flags accept env-var equivalents (flag wins):" },
     { globalOnly: "  --agent                 HYDRA_ACP_AGENT" },
     { globalOnly: "  --model                 HYDRA_ACP_MODEL    (one-shot at session/new; ignored on --session resume)" },
-    { globalOnly: "  --session               HYDRA_ACP_SESSION  (session id or hydra:// URL)" },
+    { globalOnly: "  --session               HYDRA_ACP_TARGET_SESSION  (session id or hydra:// URL)" },
     { globalOnly: "  --name                  HYDRA_ACP_NAME" },
     "",
   ];
