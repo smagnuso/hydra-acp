@@ -3936,10 +3936,6 @@ export class Session {
     return true;
   }
 
-  // Move currentUsage.costAmount into cumulativeCost and clear it so the
-  // next agent life starts accumulating from $0. Fires usageHandlers so
-  // meta.json is updated before the new agent starts emitting.
-  //
   // Notify agentChange handlers that the upstream (and possibly the agent)
   // rotated, so SessionManager's persistAgentChange writes the new ids and
   // stamps the retiring generation's spend.
@@ -3970,6 +3966,9 @@ export class Session {
     }
   }
 
+  // Move currentUsage.costAmount into cumulativeCost and clear it so the
+  // next agent life starts accumulating from $0. Fires usageHandlers so
+  // meta.json is updated before the new agent starts emitting.
   private accumulateAndResetCost(): void {
     // Called when the upstream agent rotates (compaction swap, /hydra agent
     // switch, seed-from-import). Roll the prior life's cost into the
