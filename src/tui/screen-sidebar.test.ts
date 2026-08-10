@@ -471,6 +471,72 @@ describe("Screen sidebar double-click to open", () => {
     expect(fired).toEqual([["choose-model", "model"]]);
   });
 
+  // Regression: the hit maps are keyed by TERMINAL ROW, and rows move as
+  // gadgets appear, paginate and scroll. Rebuilding only some of them left
+  // a file row inheriting the typed action of whatever occupied that row
+  // before, so double-clicking an edited file opened the agent chooser.
+  it("drops typed row actions from the previous paint", () => {
+    const { screen } = makeScreen(100, 40);
+    (screen as unknown as { started: boolean }).started = true;
+    const opened: string[] = [];
+    (
+      screen as unknown as { tryOpenPathString: (p: string) => boolean }
+    ).tryOpenPathString = (p: string) => {
+      opened.push(p);
+      return true;
+    };
+    const fired: Array<[string, string]> = [];
+    (
+      screen as unknown as { onBarAction: (a: string, v: string) => void }
+    ).onBarAction = (a, v) => {
+      fired.push([a, v]);
+    };
+    // Paint the info gadget first: its rows carry choose-agent / -model /
+    // -mode and land on terminal rows near the bottom of the column.
+    screen.setSidebarGadgets(["info"]);
+    screen.setSidebarSnapshot({
+      agent: "claude-acp",
+      model: "opus[1m]",
+      mode: "default",
+      sessionId: "abc123",
+    });
+    screen.setSidebarVisible(true);
+    screen.repaintNow();
+    const targets = (
+      screen as unknown as {
+        sidebarRowDoubleActions: Map<number, { action: string }>;
+      }
+    ).sidebarRowDoubleActions;
+    expect(targets.size).toBeGreaterThan(0);
+    const infoRows = [...targets.keys()];
+
+    // Now swap in a gadget whose rows are files. Every previous target must
+    // be gone, not just the ones this paint happened to overwrite.
+    screen.setSidebarGadgets(["files"]);
+    screen.setSidebarSnapshot({
+      agent: null,
+      model: null,
+      mode: null,
+      sessionId: null,
+      editedFiles: [{ path: "/repo/Makefile", added: 3 }],
+    });
+    screen.repaintNow();
+    expect(targets.size).toBe(0);
+
+    const rowPaths = (
+      screen as unknown as { sidebarRowPaths: Map<number, string> }
+    ).sidebarRowPaths;
+    const fileRow = [...rowPaths.keys()][0]!;
+    const col = screen.width() + SIDEBAR_GUTTER_COLS + 1;
+    click(screen, col, fileRow);
+    click(screen, col, fileRow);
+    // The file opens, and no chooser fires. The row it landed on is one the
+    // info gadget had used, which is exactly the collision that broke.
+    expect(infoRows).toContain(fileRow);
+    expect(opened).toEqual(["/repo/Makefile"]);
+    expect(fired).toEqual([]);
+  });
+
   it("does not anchor a transcript selection from a sidebar click", () => {
     const { screen, fileRow, sidebarCol } = withSidebar();
     screen.appendLines([{ body: "selectable transcript text" }]);

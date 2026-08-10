@@ -6500,7 +6500,13 @@ export class Screen {
       this.sidebarScrollOffset = this.sidebarOverflowRows;
     }
     const start = this.sidebarScrollOffset;
+    // All three are rebuilt from this paint. Missing one leaves stale
+    // targets keyed by terminal row, and rows move constantly as gadgets
+    // appear, paginate and scroll: a row that once held the info gadget's
+    // `agent` would keep firing the agent chooser after a file row took
+    // its place.
     this.sidebarRowPaths.clear();
+    this.sidebarRowDoubleActions.clear();
     this.sidebarRowActions.clear();
     // Body origin: the gutter (blank columns + the rule/indicator channel)
     // sits between the column start and the body.
