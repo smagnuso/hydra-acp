@@ -133,6 +133,7 @@ import {
   resolveAmbiguousWide,
   setAmbiguousWide,
   type FormClickTarget,
+  type PermissionClickTarget,
 } from "./screen.js";
 import { formatApproxTokens } from "../core/compaction-heuristic.js";
 import {
@@ -3049,6 +3050,7 @@ async function runSession(
       handleEffect(effect);
     },
     onFormClick: (target) => onFormClick(target),
+    onPermissionClick: (target) => onPermissionClick(target),
     onMouse: (ev) => {
       if (ev.kind !== "press" || ev.button !== "middle") {
         return;
@@ -3452,6 +3454,36 @@ async function runSession(
       }
     }
     return true;
+  };
+
+  // Mouse half of the permission modal. Hover selects (so the keyboard and
+  // the pointer agree on what Enter would submit), a click on an option
+  // submits it, and the hint words do what they say. Every path lands on
+  // resolvePermission, the same one the keys use, so the reply is sent once
+  // and the modal is torn down identically.
+  const onPermissionClick = (target: PermissionClickTarget): void => {
+    if (!pendingPermission) {
+      return;
+    }
+    const opts = pendingPermission.options;
+    if (target.kind === "hint") {
+      if (target.action === "cancel") {
+        resolvePermission(null);
+        return;
+      }
+      resolvePermission(opts[pendingPermission.selectedIndex]?.optionId ?? null);
+      return;
+    }
+    const opt = opts[target.index];
+    if (!opt) {
+      return;
+    }
+    if (target.select === true) {
+      pendingPermission.selectedIndex = target.index;
+      refreshPermissionPrompt();
+      return;
+    }
+    resolvePermission(opt.optionId);
   };
 
   // While a permission is pending the modal owns input: arrow keys navigate,

@@ -285,6 +285,11 @@ export interface ScreenOptions {
   // reports the gesture rather than acting on it, and the app funnels it
   // into the same handler the equivalent keypress uses.
   onFormClick?: (target: FormClickTarget) => void;
+  // Fired when a click or hover resolves inside the permission modal. Same
+  // split as onFormClick: the app owns the pending decision, so the screen
+  // reports the gesture and the app applies it through the very path the
+  // equivalent keypress uses.
+  onPermissionClick?: (target: PermissionClickTarget) => void;
 }
 
 interface BannerState {
@@ -359,6 +364,15 @@ export interface FormHintSpec {
 export type FormClickTarget =
   | { kind: "row"; row: number; caretOffset?: number; select?: boolean }
   | { kind: "hint"; action: FormHintAction };
+
+// A resolved click inside the permission modal.
+//
+//   option  the option row clicked (or hovered, with `select`). Without
+//           `select` this SUBMITS that option.
+//   hint    a hint word: submit the selection, or cancel.
+export type PermissionClickTarget =
+  | { kind: "option"; index: number; select?: boolean }
+  | { kind: "hint"; action: "commit" | "cancel" };
 
 // Per-row click geometry recorded at paint time.
 interface FormRowHitInfo {
@@ -483,6 +497,20 @@ const MAX_PERMISSION_ROWS = 12;
 // hint, which is what the ^O modal has always occupied. Lists longer than
 // the window scroll inside it.
 const DEFAULT_FORM_ROWS = 12;
+// A permission grant can't be taken back, and the modal appears unbidden
+// mid-turn, so clicks landing within this long of it opening are treated as
+// in-flight-toward-something-else rather than a decision.
+const PERMISSION_CLICK_ARM_MS = 350;
+
+// Hint footer for the permission modal, in the shared segment form so the
+// clickable words are typed rather than sniffed out of prose.
+const PERMISSION_HINTS: readonly FormHintSpec[] = [
+  { label: "↑/↓ choose" },
+  { label: "⏎ submit", action: "commit" },
+  { label: "Esc cancel", action: "cancel" },
+  { label: "1-9 quick-pick" },
+];
+
 // Never window a form down to a single row: below this the modal can't
 // show enough context to navigate.
 const MIN_FORM_WINDOW = 3;
@@ -726,6 +754,21 @@ export class Screen {
   // different form (or a changed row count) re-centres on its selection.
   private formWindowTop = 0;
   private formWindowKey: string | null = null;
+  // Permission modal click targets, recorded at paint time like the form's.
+  private permissionRowHits = new Map<number, number>();
+  private permissionHintHits: Array<{
+    row: number;
+    start: number;
+    end: number;
+    action: "commit" | "cancel";
+  }> = [];
+  private permissionRegion: { top: number; bottom: number } | null = null;
+  private permissionPressHit: PermissionClickTarget | null = null;
+  // When the modal appeared. A permission grant is not undoable, and this
+  // modal arrives unbidden mid-turn, so a click that was already travelling
+  // toward the transcript must not land on "Allow always". Clicks inside
+  // this window are dropped; hover and the keyboard are unaffected.
+  private permissionArmedAt = 0;
   private confirmPrompt: ConfirmPromptSpec | null = null;
   private compactionPrompt: CompactionPromptSpec | null = null;
   private helpPrompt: HelpPromptSpec | null = null;
@@ -851,6 +894,7 @@ export class Screen {
   private lastBarClick: { id: string; t: number } | null = null;
   private onBarAction: ScreenOptions["onBarAction"];
   private onFormClick: ScreenOptions["onFormClick"];
+  private onPermissionClick: ScreenOptions["onPermissionClick"];
   private hoveredBlockKey: string | null = null;
   private hoveredSubKey: string | null = null;
   // Expanded set of block keys that should all paint hovered when the
@@ -1042,6 +1086,7 @@ export class Screen {
     this.onMouse = opts.onMouse;
     this.onBarAction = opts.onBarAction;
     this.onFormClick = opts.onFormClick;
+    this.onPermissionClick = opts.onPermissionClick;
     this.onHoverRun = opts.onHoverRun;
     this.onBlockVisible = opts.onBlockVisible;
     this.onSuspend = opts.onSuspend;
@@ -3156,8 +3201,18 @@ export class Screen {
   setPermissionPrompt(spec: PermissionPromptSpec | null): void {
     if (spec !== null && this.permissionPrompt === null) {
       this.clearSelection();
+      // Start the arm timer on APPEARANCE only. The app re-pushes a spec on
+      // every arrow key, and restarting it there would make the modal
+      // unclickable for as long as you kept navigating.
+      this.permissionArmedAt = Date.now();
     }
     this.permissionPrompt = spec ? { ...spec } : null;
+    if (spec === null) {
+      this.permissionRowHits.clear();
+      this.permissionHintHits = [];
+      this.permissionRegion = null;
+      this.permissionPressHit = null;
+    }
     // The one signal neither the session bar nor the banner carries;
     // A host renders it as `blocked`, which is what drives its attention
     // rollup.
@@ -3593,6 +3648,24 @@ export class Screen {
             : "default",
         );
       }
+      // Permission modal: hover selects the option under the pointer, so
+      // the keyboard and the mouse agree on what Enter would submit.
+      if (cell !== null && this.isPermissionCell(cell.y)) {
+        const hit = this.permissionHitAt(cell.x, cell.y);
+        this.setPointerShape(hit !== null ? "pointer" : "default");
+        if (
+          hit !== null &&
+          hit.kind === "option" &&
+          this.permissionPrompt !== null &&
+          hit.index !== this.permissionPrompt.selectedIndex
+        ) {
+          this.onPermissionClick?.({
+            kind: "option",
+            index: hit.index,
+            select: true,
+          });
+        }
+      }
       // Same affordance inside the form modal: its rows and hint words are
       // targets, and the pointer shape is the only thing that says so.
       if (cell !== null && this.isFormCell(cell.y)) {
@@ -3731,7 +3804,12 @@ export class Screen {
         this.pressCell = null;
         return;
       }
-      // Likewise the form modal: it owns its rows while it's open.
+      // Likewise the modals: they own their rows while open. Permission
+      // first, matching the key path, where it outranks the form.
+      if (cell !== null && this.handlePermissionPress(cell)) {
+        this.pressCell = null;
+        return;
+      }
       if (cell !== null && this.handleFormPress(cell)) {
         this.pressCell = null;
         return;
@@ -3776,6 +3854,10 @@ export class Screen {
       name === "MOUSE_BUTTON_RELEASED"
     ) {
       if (this.handleBarRelease(cell)) {
+        this.pressCell = null;
+        return;
+      }
+      if (this.handlePermissionRelease(cell)) {
         this.pressCell = null;
         return;
       }
@@ -7145,6 +7227,11 @@ export class Screen {
       SESSIONBAR_ROWS +
       1;
     let row = top;
+    // Rebuilt every frame: the option list and the row it lands on both
+    // move as the modal is redrawn.
+    this.permissionRowHits.clear();
+    this.permissionHintHits = [];
+    this.permissionRegion = { top, bottom: top + rows - 1 };
     const writeRow = (sig: string, paint: () => void): void => {
       if (row >= top + rows) {
         return;
@@ -7175,6 +7262,7 @@ export class Screen {
       const isSel = i === spec.selectedIndex;
       const marker = isSel ? "❯" : " ";
       const body = ` ${marker} ${i + 1}. ${truncate(opt.label, w - 8)}`;
+      this.permissionRowHits.set(row, i);
       writeRow(`perm|o|${w}|${i}|${isSel ? "1" : "0"}|${opt.label}`, () => {
         if (isSel) {
           paint(this.term, "modal-option-selected", body);
@@ -7183,9 +7271,90 @@ export class Screen {
         }
       });
     }
-    writeRow(`perm|hint|${w}`, () => {
-      paint(this.term, "modal-hint", " ↑/↓ choose · Enter submit · Esc cancel · 1–9 quick-pick");
+    const hints = layoutFormHints(PERMISSION_HINTS, w);
+    const hintRow = row;
+    for (const span of hints.spans) {
+      // Only the two the permission modal understands; layoutFormHints is
+      // shared with the form, whose vocabulary is wider.
+      if (span.action === "commit" || span.action === "cancel") {
+        this.permissionHintHits.push({
+          row: hintRow,
+          start: span.start,
+          end: span.end,
+          action: span.action,
+        });
+      }
+    }
+    writeRow(`perm|hint|${w}|${hints.text}`, () => {
+      paint(this.term, "modal-hint", ` ${hints.text}`);
     });
+  }
+
+  isPermissionCell(y: number): boolean {
+    const region = this.permissionRegion;
+    return (
+      this.permissionPrompt !== null &&
+      region !== null &&
+      y >= region.top &&
+      y <= region.bottom
+    );
+  }
+
+  permissionHitAt(x: number, y: number): PermissionClickTarget | null {
+    if (!this.isPermissionCell(y)) {
+      return null;
+    }
+    for (const hint of this.permissionHintHits) {
+      if (hint.row === y && x >= hint.start && x <= hint.end) {
+        return { kind: "hint", action: hint.action };
+      }
+    }
+    const index = this.permissionRowHits.get(y);
+    return index === undefined ? null : { kind: "option", index };
+  }
+
+  private handlePermissionPress(cell: { x: number; y: number }): boolean {
+    if (!this.isPermissionCell(cell.y)) {
+      this.permissionPressHit = null;
+      return false;
+    }
+    this.permissionPressHit = this.permissionHitAt(cell.x, cell.y);
+    // Claim the whole modal: nothing behind it is the user's target.
+    return true;
+  }
+
+  private handlePermissionRelease(cell: { x: number; y: number } | null): boolean {
+    const pressed = this.permissionPressHit;
+    this.permissionPressHit = null;
+    if (pressed === null || cell === null || !this.isPermissionCell(cell.y)) {
+      return pressed !== null;
+    }
+    const hit = this.permissionHitAt(cell.x, cell.y);
+    if (hit === null || hit.kind !== pressed.kind) {
+      return true;
+    }
+    if (
+      hit.kind === "option" &&
+      pressed.kind === "option" &&
+      hit.index !== pressed.index
+    ) {
+      return true;
+    }
+    if (
+      hit.kind === "hint" &&
+      pressed.kind === "hint" &&
+      hit.action !== pressed.action
+    ) {
+      return true;
+    }
+    if (Date.now() - this.permissionArmedAt < PERMISSION_CLICK_ARM_MS) {
+      // Too soon after the modal appeared to be a click the user aimed at
+      // it. Say so rather than silently eating the gesture.
+      this.notify("permission prompt just appeared, click again to confirm");
+      return true;
+    }
+    this.onPermissionClick?.(hit);
+    return true;
   }
 
   // Plain-text reproduction of everything drawBanner paints before the
