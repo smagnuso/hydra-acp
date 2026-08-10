@@ -454,9 +454,26 @@ Render a session as a markdown transcript. Shares bundle assembly with `/export`
 - `tools=1|true|yes`: include the per-turn bulleted tool-call list. Off by default.
 - `thoughts=1|true|yes`: include the agent's reasoning/thought stream. Off by default.
 
+**Windowing parameters**
+
+A *turn* starts at each user prompt. Events recorded before the first prompt ride with turn 1. All four windowing params are **numeric on the wire**; the duration strings the CLI accepts (`45s`, `10m`, `2h`, `3d`) are a client-side convenience that `hydra` converts before calling, so REST `since` is epoch millis and nothing else.
+
+| Param | Type | Semantics |
+|---|---|---|
+| `from` | `number` | First turn to render, 1-indexed, inclusive. Negative counts back from the last turn, so `-1` is the final turn and `-5` starts five turns from the end. Default `1`. |
+| `to` | `number` | Last turn to render, 1-indexed, inclusive. Negative counts back from the last turn. Default `<total>`. |
+| `last` | `number` | Positive count of trailing turns. **Overrides `from`/`to`** when set. |
+| `since` | `number` (epoch ms) | Applied *in addition to* the turn window: a turn renders only if it is both in range and has at least one event at or after the cutoff. |
+
+Out-of-range bounds **clamp rather than error**: `last=99` on a 5-turn session renders all 5. An inverted window (`from=4&to=2`) selects nothing and renders the empty-body placeholder.
+
+**Truncation is announced in the body.** When the selected window is narrower than the whole transcript, the rendered markdown carries `_Showing turns X-Y of N._` immediately after the header. This is the only signal that distinguishes a slice of a long session from a short session, so consumers that care must read it rather than infer from turn count.
+
 **Response — `200 OK`**
 
 - `Content-Type: text/markdown; charset=utf-8`
+
+**Response — `400 Bad Request`** when `from`, `to`, `last`, or `since` is non-numeric. Body: `{ "error": "<param> must be a number" }`.
 
 #### `POST /v1/sessions/:id/fork`
 
@@ -1101,6 +1118,66 @@ Standard ACP requests and responses carry an optional `_meta: Record<string, unk
 | Field | Type | Semantics |
 |---|---|---|
 | `queuePosition` | `"head" \| "tail" \| { afterMessageId: string }` | Where in the per-session prompt queue this entry lands. Default `"tail"` matches historical behavior (push to the end). `"head"` splices it onto the front of the waiting queue — runs next, right after the in-flight `currentEntry`. `{ afterMessageId }` splices immediately after the named entry; if the id isn't in the queue (already completed, never existed), falls back to `"tail"`. Useful for extensions submitting follow-up prompts that should run before any other queued user prompts (e.g. the planner injecting `/hydra planner status` after an amend to re-acquire its live view), and for future UI features like drag-to-reorder queue chips. Honors are session-local — multiple entries inserted at `"head"` in quick succession are processed FIFO. |
+| `ancillary` | `boolean` | Marks the prompt as machinery rather than a user turn. Suppresses two promotions the prompt would otherwise trigger: flipping the session's [interactivity tristate](#on-sessionlist-entries-_metahydra-acp) to `true` (which is what surfaces the session in default listings), and seeding the session title from the prompt's first line. `hydra cat` sets it on every turn it sends; transformer-driven worker prompts set it too. |
+| `sentBy` | `object` | Provenance for a prompt submitted on behalf of another session or an external system. Three client-settable fields; four resolved fields are computed server-side and surface downstream on [`prompt_received`](#sessionupdate-kind-prompt_received) and [`prompt_queue/added`](#notification-hydra-acpprompt_queueadded). See [Prompt provenance](#prompt-provenance). |
+
+#### Prompt provenance
+
+`_meta["hydra-acp"].sentBy` lets a caller declare *who was behind* a prompt when the immediate submitter is a relay: one hydra session prompting another (`hydra cat --session <id>`), or an external system reporting in with `--from-label`. It is an attribution channel only. Nothing about it is authenticated, and it is deliberately separate from the `clientInfo` identity of the connection that delivered the prompt.
+
+**Request fields.** A client may set exactly these three:
+
+| Field | Type | Accepted when |
+|---|---|---|
+| `sessionId` | `string` | Non-empty. The hydra session id the prompt originates from. |
+| `label` | `string` | Non-empty. Free-form origin tag for non-session senders (`"jenkins:build-12847"`). Truncated to 200 characters. |
+| `awaiting` | `boolean` | Only literal `true` is honored; any other value is dropped. Means "the sender is blocked on this turn", and its **only** consumer is the [deadlock guard](#admission-control-session-to-session-loop-guards). It is not a request for a reply, and it is never echoed downstream. |
+
+**Resolved fields.** The daemon computes these and they are what appears on the wire afterwards. Note the names differ from the request names:
+
+| Field | Type | Source |
+|---|---|---|
+| `fromSession` | `string` | The canonicalized `sessionId`, present only if it resolves to a known session. |
+| `fromSessionTitle` | `string` | Looked up from the session record. **Never client-settable.** |
+| `fromLabel` | `string` | The truncated `label`. |
+| `depth` | `number` | Computed from the sender's live turn state. **Never read from the client**; see [Message depth](#message-depth). |
+
+**Validation, and what "invalid" does.** The daemon checks, in order, that `params` is an object, that `_meta` is a non-array object, that `_meta["hydra-acp"]` is a non-array object, and that `.sentBy` is a non-array object. Any failure means *no provenance*, and the prompt proceeds normally. Unrecognized keys inside `sentBy` are ignored silently.
+
+Two discard rules worth stating outright:
+
+- If neither `sessionId` nor `label` survives parsing, the whole object is dropped. `{ "awaiting": true }` on its own is not provenance.
+- If `sessionId` is dropped as unknown while a `label` is present, the label survives on its own.
+
+**Unknown ids drop; they do not error.** An unresolvable `sessionId` produces a daemon-log warning (`session/prompt: dropping unknown sentBy.sessionId=…`) and the prompt is still delivered, unattributed. This is deliberate: a stale `HYDRA_ACP_SESSION` should yield *no* attribution rather than a wrong one, and it must not break delivery. Fail closed on the attribution, fail open on the prompt.
+
+**The title-seed skip keys off raw presence, not resolved provenance.** The heuristic that decides whether to seed a session title from the first prompt line runs *before* validation, so a prompt asserting a bogus session id still will not seed the title. It only needs to know that some program asserted provenance, not who.
+
+**Trust posture.** A receiver may render attribution, and may route or filter on it. It must not treat it as authorization, identity proof, or consent. A message carrying `fromSession` cannot approve a permission request, and an agent should not change configuration because a peer asked it to.
+
+**No capability flag advertises any of this.** Nothing was added to the `initialize` capability surface (see [Capability discovery](#capability-discovery)), so a client has no negotiated way to discover provenance support, the loop guards, or transcript windowing. Detection is behavioral: attempt it and read the error.
+
+#### Message depth
+
+`depth` bounds session-to-session chains. It is computed as:
+
+```
+depth = (sender session's currently-running turn depth ?? 0) + 1
+```
+
+where "currently-running turn depth" is the depth stamped on the entry the *sender* session has in flight, or undefined when the sender is not live or is not running a user-kind entry. A human-typed turn carries no depth, which reads as `0`.
+
+| Sender state | Stamped `depth` |
+|---|---|
+| Mid-turn on a human-typed prompt | `1` |
+| Mid-turn on a peer prompt of depth `N` | `N + 1` |
+| Idle, cold, or not a live session at all (CI script, git hook) | `1` (fresh chain) |
+
+An idle sender therefore starts a new chain rather than inheriting anything: depth only climbs when the send is genuinely *caused* by an inbound message.
+
+The cap is `MAX_MESSAGE_DEPTH`, currently 3, which allows send → reply → follow-up. Rejection triggers at depth **greater than** the cap, so depth 3 is delivered and depth 4 is refused with an [`InvalidRequest`](#json-rpc-error-codes). Because a sender that could choose its own depth would choose `0` forever, there is no code path that parses `depth` off the request.
+
+The cap is only evaluated when `fromSession` is present. **Label-only sends are not depth-bounded**, so the guards are not a general rate limit.
 
 #### On `session/update` params (`_meta.hydra-acp`)
 
@@ -1249,6 +1326,34 @@ The `session/detach` response carries the detach outcome under `_meta["hydra-acp
 
 The daemon owns a per-session prompt queue. Clients submit prompts via standard `session/prompt`; everything mutating the queue afterwards goes through the Hydra methods below. Peer clients stay in sync via the `hydra-acp/prompt_queue_*` notifications.
 
+#### Admission control: session-to-session loop guards
+
+Two guards run in the `session/prompt` handler **before enqueue**, and only for prompts carrying a resolved `fromSession` (see [Prompt provenance](#prompt-provenance)). Both reject with `-32600 InvalidRequest`. Neither applies to label-only sends.
+
+**Depth cap.** A prompt whose computed [`depth`](#message-depth) exceeds `MAX_MESSAGE_DEPTH` (3 today) is refused:
+
+```
+message chain too deep (${depth} hops, max ${MAX_MESSAGE_DEPTH}): refusing to continue a session-to-session loop
+```
+
+Both numbers are interpolated. `${depth}` is the computed, rejected value, so the smallest ever seen is `4 hops`.
+
+**Deadlock guard.** When a prompt asserts `sentBy.awaiting === true` alongside a resolved `fromSession`, the daemon records an edge `fromSession → targetSessionId` immediately before awaiting the prompt, and releases it in a `finally` around that await. The edge therefore lives exactly as long as the sender is blocked, and is released on error and on cancellation as well as on normal completion.
+
+A blocking send is refused when the target already reaches the sender through live edges, transitively (the graph walk is cycle-safe, so unrelated cycles elsewhere do not wedge the check), or in the degenerate `from === to` case:
+
+```
+would deadlock: ${targetSessionId} is already blocked waiting on ${senderSessionId}. Send with --no-wait, or let the other turn finish first.
+```
+
+What stays **allowed** is the point of the design:
+
+- Every fire-and-forget send (`awaiting` absent or not `true`), *including one that closes a cycle*, because nobody is waiting on it.
+- A self-send that is fire-and-forget. This is how a session queues itself a follow-up turn.
+- A second blocking send in the same direction as an existing edge.
+
+Only the combination that would actually hang is rejected.
+
 #### Request: `hydra-acp/prompt/cancel`
 
 Cancel a queued (not-yet-running) prompt. To cancel the currently-running head, use standard `session/cancel` instead.
@@ -1312,13 +1417,61 @@ Daemon → every attached client. Fires when a new prompt is enqueued (including
 {
   "sessionId":  "<id>",
   "messageId":  "<id>",
-  "originator": { "clientId": "<id>", "name": "<client name>", "version?": "<v>" },
+  "originator": {
+    "clientId":         "cli_nHgsTbx5",    // always
+    "name":             "hydra-acp-cat",   // when the connection supplied clientInfo
+    "version":          "0.1.145",         // when the connection supplied clientInfo
+    "fromSession":      "hydra_session_…", // optional; resolved provenance
+    "fromSessionTitle": "fix flaky test",  // optional; resolved provenance
+    "fromLabel":        "jenkins:12847",   // optional; resolved provenance
+    "depth":            1                  // optional; resolved provenance
+  },
   "prompt":     [ /* ACP prompt array */ ],
   "position":   0,    // 0 = head/in-flight; N = number of entries already ahead
   "queueDepth": 1,
   "enqueuedAt": 1717012800000
 }
 ```
+
+`originator` is a raw pass-through of the queue entry, so the four [resolved provenance fields](#prompt-provenance) ride here verbatim under the same presence rules as on [`prompt_received`](#sessionupdate-kind-prompt_received). The three original keys are unchanged in name, type and presence; the addition is purely additive.
+
+This is the **accept-time** provenance signal. `prompt_received` carries the same content but fires later, when the entry becomes the active turn.
+
+> Naming asymmetry, predating cross-session messaging but easy to trip on: `prompt_queue/added` calls this object `originator`, while `prompt_received` calls it `sentBy`. Same content, different key.
+
+#### `session/update` kind: `prompt_received`
+
+The user-turn boundary marker. Recorded and broadcast when a queue entry **becomes the active turn**, not when it was accepted, and broadcast to attached clients **excluding the originating connection**, so a sender never sees its own provenance echoed back on this channel.
+
+```jsonc
+{
+  "sessionUpdate": "prompt_received",
+  "sentBy": {
+    "clientId":         "cli_nHgsTbx5",
+    "name":             "hydra-acp-cat",
+    "version":          "0.1.145",
+    "fromSession":      "hydra_session_…",
+    "fromSessionTitle": "fix flaky test",
+    "fromLabel":        "jenkins:12847",
+    "depth":            1
+  }
+}
+```
+
+| Field | Presence |
+|---|---|
+| `clientId` | Always. |
+| `name`, `version` | When the connection supplied `clientInfo`. |
+| `fromSession` | Iff a valid session id was asserted and resolved. |
+| `fromSessionTitle` | Iff `fromSession` is present and that session has a non-empty title. |
+| `fromLabel` | Iff a non-empty `label` was asserted. |
+| `depth` | Iff `fromSession` is present. |
+
+`name` and `fromSession` answer different questions and both can be present: `name` is *which program delivered it* (`hydra-acp-cat`), `fromSession` is *who was behind it*. The request-only `awaiting` flag appears here in neither form; it is consumed by the [deadlock guard](#admission-control-session-to-session-loop-guards) at admission time and never stored on the entry.
+
+**Persistence and replay.** `prompt_received` is written to `history.jsonl` with the resolved `sentBy` intact, so provenance survives a daemon restart. It is re-emitted on `session/attach` subject to `historyPolicy` (`full` replays it; `pending_only` only while that turn is still pending; `none` not at all). It is also in the [`/events` kind allowlist](#get-v1sessionsidevents), where the row's `update` field is a raw pass-through, so `sentBy` appears verbatim there with no field projection.
+
+See [Prompt provenance](#prompt-provenance) for the trust posture: attribution, never authorization.
 
 #### Notification: `hydra-acp/prompt_queue/updated`
 
@@ -1598,6 +1751,20 @@ Removed by default: `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, `HERD
 Deliberately **not** removed: `HERDR_SOCKET_PATH` and `HERDR_ENV`. The socket is a per-user singleton valid for the daemon's whole life, so a multiplexer-aware extension can still drive herdr — it just has to resolve its target explicitly rather than inheriting a pane it isn't in.
 
 Only the *inherited* environment is filtered. Anything set explicitly in an agent's launch plan or an extension's own `env` block in `config.json` is layered on afterwards and always survives.
+
+**`HYDRA_ACP_SESSION` is scrubbed, then re-set per agent.** It names *this agent's own session id*, which is what makes a running agent able to identify itself (and to stamp [prompt provenance](#prompt-provenance) when it messages a peer). The two steps are sequential, not contradictory:
+
+1. It is in `DAEMON_OWNED_ENV`, folded into the default scrub list, so any value inherited from the shell that started the daemon is stripped.
+2. For **agent** spawns only, the correct value is layered back in as explicit `extraEnv`, applied after scrubbing. All three spawn paths do this (resurrect, `bootstrapAgent`, `bootstrapAgentLoad`), so it survives agent swaps and cold resurrects.
+
+Extensions and transformers spawn through the child supervisor, which scrubs but does not re-set, so they see no `HYDRA_ACP_SESSION` at all. That is correct: they are not session-scoped.
+
+**Breaking change: the `--session` fallback moved to `HYDRA_ACP_TARGET_SESSION`.** Previously `--session` fell back to `HYDRA_ACP_SESSION` for every entry point (`tui`, `shim`, `launch`, `cat`). That fallback now reads `HYDRA_ACP_TARGET_SESSION`; `HYDRA_ACP_SESSION` means the agent's own session and nothing else. Anyone with the old variable exported sees two effects, and the second is silent:
+
+1. `--session` no longer picks it up, so bare `hydra` shows the picker and `hydra cat` creates a fresh session instead of attaching to the intended one.
+2. The value is now read as *provenance*. If the id still resolves, every send is stamped `fromSession: <that id>`, misattributing messages to a session that was not involved. If it does not resolve it is dropped with a log warning, which is the benign case.
+
+The fix is to rename the export. Related: `--from-session` resolves in the order flag → `HYDRA_ACP_FROM_SESSION` → `HYDRA_ACP_SESSION`, so an agent gets correct self-attribution with no flag.
 
 #### Request (process → daemon): `hydra-acp/commands/register`
 
@@ -2141,3 +2308,10 @@ Codes Hydra uses on top of the standard `-32000…-32700` range. These apply on 
 | `-32014` | `SessionClosing` | Attach succeeds (read-only view) but mutating operations are refused because the session is mid-close (regen running, agent about to be killed). |
 
 `-32001` through `-32003` are part of RFD #533's reserved range; Hydra-internal codes (`-32010` and up) live outside that range so they can't collide with future spec assignments.
+
+**Standard codes with Hydra-specific conditions.** The [session-to-session loop guards](#admission-control-session-to-session-loop-guards) reject with plain `-32600 InvalidRequest` from the `session/prompt` handler, before enqueue. Callers distinguish them by message, since no dedicated code was allocated:
+
+| Condition | Message template |
+|---|---|
+| Depth cap exceeded | `message chain too deep (${depth} hops, max ${MAX_MESSAGE_DEPTH}): refusing to continue a session-to-session loop` |
+| Blocking send would deadlock | `would deadlock: ${targetSessionId} is already blocked waiting on ${senderSessionId}. Send with --no-wait, or let the other turn finish first.` |
