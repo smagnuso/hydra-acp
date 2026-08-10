@@ -25,6 +25,7 @@ const KNOWN_BOOLEAN_FLAGS = new Set([
   "json",
   "new",
   "no-color",
+  "no-from-note",
   "no-pager",
   "no-wait",
   "tools",

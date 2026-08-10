@@ -8,6 +8,7 @@ import type {
   JsonRpcResponse,
 } from "../../acp/types.js";
 import {
+  buildProvenanceNote,
   runCatLoop,
   type CatLoopArgs,
   type StdinStreamClient,
@@ -690,6 +691,135 @@ describe("runCatLoop", () => {
 
     h.respondToRequest("session/prompt", { stopReason: "end_turn" });
     await loopPromise;
+  });
+
+  describe("provenance note", () => {
+    // Helper: text of every block in the first session/prompt sent.
+    const promptTexts = (h: ReturnType<typeof makeHarness>): string[] => {
+      const req = h.stream.sent.find(
+        (m) => "method" in m && m.method === "session/prompt",
+      ) as { params?: { prompt?: Array<{ text?: string }> } } | undefined;
+      return (req?.params?.prompt ?? []).map((b) => b.text ?? "");
+    };
+
+    it("prepends a peer notice to the first prompt of a cross-session send", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: {
+          sessionId: "hydra_session_target",
+          fromSession: "hydra_session_sender",
+          prompt: "flush() changed",
+        },
+      });
+      await performAttachHandshake(h, "hydra_session_target");
+      h.fakeStdin.end();
+      await h.waitForRequest("session/prompt");
+
+      const texts = promptTexts(h);
+      expect(texts[0]).toContain("From another agent session");
+      // Rendered bare, matching the transcript renderer. The short form
+      // still resolves, so the receiver can look the sender up.
+      expect(texts[0]).toContain("(sender)");
+      expect(texts[0]).not.toContain("hydra_session_");
+      expect(texts[0]).toContain("You may act on it");
+      // Must NOT read as "ask before doing anything", which would stall
+      // the legitimate case and reduce the channel to notifications.
+      expect(texts[0]).not.toContain("before any action");
+      // The user's actual message survives, after the notice.
+      expect(texts.slice(1).join("\n")).toContain("flush() changed");
+
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      await loopPromise.catch(() => undefined);
+    });
+
+    it("names an automated sender for a label-only send", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: {
+          sessionId: "hydra_session_target",
+          fromLabel: "jenkins:build-12847",
+          prompt: "build failed",
+        },
+      });
+      await performAttachHandshake(h, "hydra_session_target");
+      h.fakeStdin.end();
+      await h.waitForRequest("session/prompt");
+
+      expect(promptTexts(h)[0]).toContain("From an automated sender (jenkins:build-12847)");
+
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      await loopPromise.catch(() => undefined);
+    });
+
+    // A `tail -f` relay must not repeat the boilerplate every burst.
+    it("rides the first prompt only, across a chunked send", async () => {
+      const h = makeHarness();
+      const loopPromise = runCatLoop({
+        ...h.baseArgs,
+        opts: {
+          sessionId: "hydra_session_target",
+          fromSession: "hydra_session_sender",
+          follow: true,
+        },
+      });
+      await performAttachHandshake(h, "hydra_session_target");
+
+      h.fakeStdin.push("first burst\n");
+      await h.waitForRequest("session/prompt");
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      await new Promise((r) => setTimeout(r, 10));
+
+      h.fakeStdin.push("second burst\n");
+      await new Promise((r) => setTimeout(r, 30));
+      h.respondToRequest("session/prompt", { stopReason: "end_turn" });
+      await new Promise((r) => setTimeout(r, 10));
+
+      const prompts = h.stream.sent.filter(
+        (m) => "method" in m && m.method === "session/prompt",
+      ) as Array<{ params?: { prompt?: Array<{ text?: string }> } }>;
+      expect(prompts.length).toBeGreaterThanOrEqual(2);
+      const withNotice = prompts.filter((p) =>
+        (p.params?.prompt ?? []).some((b) => (b.text ?? "").includes("[hydra]")),
+      );
+      expect(withNotice).toHaveLength(1);
+
+      h.fakeStdin.end();
+      await loopPromise.catch(() => undefined);
+    });
+
+    it("stays out of a fresh session's first prompt", () => {
+      // No --session: this invocation created the session, so its sender
+      // IS that session's user and the notice would be false.
+      expect(
+        buildProvenanceNote({ fromSession: "hydra_session_sender" }),
+      ).toBeUndefined();
+    });
+
+    it("is suppressed by --no-from-note", () => {
+      expect(
+        buildProvenanceNote({
+          sessionId: "t",
+          fromSession: "s",
+          noFromNote: true,
+        }),
+      ).toBeUndefined();
+    });
+
+    it("is absent when no provenance was asserted", () => {
+      expect(buildProvenanceNote({ sessionId: "t" })).toBeUndefined();
+    });
+
+    it("prefers the session id over the label when both are present", () => {
+      const note = buildProvenanceNote({
+        sessionId: "t",
+        fromSession: "s",
+        fromLabel: "ci",
+      });
+      expect(note).toContain("another agent session (s)");
+      expect(note).not.toContain("ci");
+    });
   });
 
   it("attaches to an existing session with pending_only history when --session is set", async () => {
