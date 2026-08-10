@@ -95,6 +95,11 @@ export interface CatOptions {
   // CI and cross-session notifications; the default (ask-and-wait) is
   // still what you want when you need the answer on stdout.
   noWait?: boolean | undefined;
+  // --timeout <s>: stop waiting for the receiving turn after this long.
+  // The turn keeps running daemon-side; only our wait ends. Defense in
+  // depth behind the daemon's deadlock guard, which can only see cycles
+  // it knows about — a target that is merely wedged looks fine to it.
+  timeoutSeconds?: number | undefined;
 }
 
 const DEFAULT_STREAM_THRESHOLD = 1 * 1024 * 1024;
@@ -122,6 +127,11 @@ function catPromptParams(
   if (opts?.fromLabel) {
     sentBy.label = opts.fromLabel;
   }
+  // Tells the daemon we're going to sit on this turn, which is what
+  // makes a cycle back to us a deadlock rather than merely a loop.
+  if (opts?.fromSession && !opts.noWait) {
+    sentBy.awaiting = true;
+  }
   if (Object.keys(sentBy).length > 0) {
     meta.sentBy = sentBy;
   }
@@ -130,6 +140,45 @@ function catPromptParams(
     prompt,
     _meta: { [HYDRA_META_KEY]: meta },
   };
+}
+
+// Give up waiting on a turn after `seconds`, without cancelling it. The
+// prompt was accepted and the receiving agent is still working; all we
+// stop is our own blocking. Rejecting (rather than resolving) is what
+// gets the caller a non-zero exit, so a script can tell "no answer yet"
+// apart from "answered".
+class PromptTimeoutError extends Error {
+  constructor(seconds: number) {
+    super(
+      `timed out after ${seconds}s waiting for the receiving turn (it is still running; re-read with \`hydra session transcript <id> --last 1\`)`,
+    );
+    this.name = "PromptTimeoutError";
+  }
+}
+
+async function raceWithTimeout<T>(
+  pending: Promise<T>,
+  seconds: number,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new PromptTimeoutError(seconds)),
+          seconds * 1000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    // The losing request promise stays pending; swallow its eventual
+    // settlement so a later rejection isn't unhandled.
+    void pending.catch(() => undefined);
+  }
 }
 
 function deriveTitleFromPrompt(prompt: string | undefined): string | undefined {
@@ -608,13 +657,28 @@ export async function runCatLoop(args: CatLoopArgs): Promise<CatLoopResult> {
       return;
     }
     try {
-      await conn.request(
+      const pending = conn.request(
         "session/prompt",
         catPromptParams(sessionId, promptBlocks, opts),
       );
+      if (opts.timeoutSeconds !== undefined) {
+        await raceWithTimeout(pending, opts.timeoutSeconds);
+      } else {
+        await pending;
+      }
       firstChunkSent = true;
     } catch (err) {
-      stderr(`hydra-acp cat: prompt failed: ${(err as Error).message}\n`);
+      const timedOut = err instanceof PromptTimeoutError;
+      stderr(
+        timedOut
+          ? `hydra-acp cat: ${(err as Error).message}\n`
+          : `hydra-acp cat: prompt failed: ${(err as Error).message}\n`,
+      );
+      // A refused prompt (daemon loop/deadlock guard, permission denied,
+      // unknown session) and a timeout both have to reach the caller as
+      // a non-zero exit. Scripts branch on it, and exiting 0 after
+      // printing "prompt failed" is indistinguishable from success.
+      exitCode = 1;
       // Don't finalize — the response failed, so any in-flight text
       // (probably none) is in an unknown state. Just bail and let the
       // outer drain loop decide whether to keep going.

@@ -66,6 +66,11 @@ import * as path from "node:path";
 import type { McpTokenRegistry } from "./mcp/token-registry.js";
 import { mintExtensionMcpDescriptors, buildMintMcpServersForSwap } from "./extension-mcp-mint.js";
 import { normalizeSentBy } from "./sent-by.js";
+import {
+  MAX_MESSAGE_DEPTH,
+  registerBlockingEdge,
+  wouldDeadlock,
+} from "./message-guard.js";
 
 interface ClientState {
   clientId: string;
@@ -1851,6 +1856,31 @@ export function registerAcpWsEndpoint(
           `session/prompt: dropping unknown sentBy.sessionId=${claimed} sessionId=${params.sessionId}`,
         );
       });
+      // Two guards on agent-to-agent traffic, both no-ops for a prompt
+      // a human typed (no fromSession, so no depth and no edge).
+      if (sentBy?.fromSession !== undefined) {
+        if ((sentBy.depth ?? 0) > MAX_MESSAGE_DEPTH) {
+          app.log.warn(
+            `session/prompt: refusing depth ${sentBy.depth} chain from ${sentBy.fromSession} to ${params.sessionId}`,
+          );
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidRequest,
+            `message chain too deep (${sentBy.depth} hops, max ${MAX_MESSAGE_DEPTH}): refusing to continue a session-to-session loop`,
+          );
+        }
+        if (
+          sentBy.awaiting === true &&
+          wouldDeadlock(sentBy.fromSession, params.sessionId)
+        ) {
+          app.log.warn(
+            `session/prompt: refusing deadlock ${sentBy.fromSession} -> ${params.sessionId}`,
+          );
+          throw rpcError(
+            JsonRpcErrorCodes.InvalidRequest,
+            `would deadlock: ${params.sessionId} is already blocked waiting on ${sentBy.fromSession}. Send with --no-wait, or let the other turn finish first.`,
+          );
+        }
+      }
       const att = state.attached.get(params.sessionId);
       if (!att) {
         app.log.warn(
@@ -1886,7 +1916,19 @@ export function registerAcpWsEndpoint(
         );
         await session.attach(client, "none");
       }
-      return session.prompt(att.clientId, params, sentBy);
+      // Hold the "sender is blocked on this turn" edge for exactly as
+      // long as the daemon awaits the prompt, which is exactly as long
+      // as the sender's cat is blocked. The finally is load-bearing: a
+      // stranded edge would wedge the pair for the daemon's lifetime.
+      const releaseEdge =
+        sentBy?.awaiting === true && sentBy.fromSession !== undefined
+          ? registerBlockingEdge(sentBy.fromSession, params.sessionId)
+          : undefined;
+      try {
+        return await session.prompt(att.clientId, params, sentBy);
+      } finally {
+        releaseEdge?.();
+      }
     });
 
     // session/cancel is a *notification* per the ACP spec — clients send it

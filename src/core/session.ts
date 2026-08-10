@@ -2321,6 +2321,9 @@ export class Session {
     if (entry.originator.fromLabel) {
       sentBy.fromLabel = entry.originator.fromLabel;
     }
+    if (entry.originator.depth !== undefined) {
+      sentBy.depth = entry.originator.depth;
+    }
     this.promptStartedAt = Date.now();
     this.recordAndBroadcast(
       "session/update",
@@ -6347,6 +6350,20 @@ export class Session {
   // doesn't "leak" into the next quiesce.
   //
   // Returns a disposer the caller can use to deregister.
+  // Hop depth of the turn this session is running right now, or
+  // undefined when it isn't running one. A turn the user typed is 0; a
+  // turn that arrived from a peer session carries whatever depth the
+  // daemon stamped on it. Read when this session originates an outbound
+  // message, so the chain can be bounded: an agent messaging a peer
+  // while handling a peer's message is one hop deeper, and eventually
+  // hits the cap instead of ponging forever.
+  get currentPromptDepth(): number | undefined {
+    if (this.currentEntry?.kind !== "user") {
+      return undefined;
+    }
+    return this.currentEntry.originator.depth ?? 0;
+  }
+
   // True while the session holds work that must not be abandoned: a
   // turn in flight, an unresolved permission request, or entries still
   // waiting on the queue. Every teardown path has to consult this, not
@@ -6861,6 +6878,9 @@ export class Session {
     }
     if (sentBy?.fromLabel) {
       originator.fromLabel = sentBy.fromLabel;
+    }
+    if (sentBy?.depth !== undefined) {
+      originator.depth = sentBy.depth;
     }
     // Read `_meta["hydra-acp"].queuePosition` to let callers select
     // where in the queue this entry lands. Defaults to "tail" (the

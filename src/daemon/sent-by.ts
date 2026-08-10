@@ -20,13 +20,22 @@ export interface SentBy {
   fromSession?: string;
   fromSessionTitle?: string;
   fromLabel?: string;
+  // Hop count for this chain of agent-originated messages. Computed by
+  // the daemon from the sender's in-flight turn, never taken from the
+  // client: a sender that could pick its own depth could pick 0 forever
+  // and the bound would mean nothing.
+  depth?: number;
+  // The sender is blocked awaiting this turn (a cat send without
+  // --no-wait). Drives the deadlock guard; a fire-and-forget send can't
+  // deadlock because nobody is waiting.
+  awaiting?: boolean;
 }
 
 const MAX_LABEL_LEN = 200;
 
 function readRawSentBy(
   params: unknown,
-): { sessionId?: string; label?: string } | undefined {
+): { sessionId?: string; label?: string; awaiting?: boolean } | undefined {
   if (!params || typeof params !== "object") {
     return undefined;
   }
@@ -43,12 +52,15 @@ function readRawSentBy(
     return undefined;
   }
   const obj = raw as Record<string, unknown>;
-  const out: { sessionId?: string; label?: string } = {};
+  const out: { sessionId?: string; label?: string; awaiting?: boolean } = {};
   if (typeof obj.sessionId === "string" && obj.sessionId.length > 0) {
     out.sessionId = obj.sessionId;
   }
   if (typeof obj.label === "string" && obj.label.length > 0) {
     out.label = obj.label.slice(0, MAX_LABEL_LEN);
+  }
+  if (obj.awaiting === true) {
+    out.awaiting = true;
   }
   if (out.sessionId === undefined && out.label === undefined) {
     return undefined;
@@ -72,6 +84,9 @@ export async function normalizeSentBy(
   if (raw.label !== undefined) {
     out.fromLabel = raw.label;
   }
+  if (raw.awaiting === true) {
+    out.awaiting = true;
+  }
   if (raw.sessionId !== undefined) {
     const canonical =
       (await manager.resolveCanonicalId(raw.sessionId)) ?? raw.sessionId;
@@ -81,6 +96,13 @@ export async function normalizeSentBy(
       if (entry.title) {
         out.fromSessionTitle = entry.title;
       }
+      // Depth is one more than whatever the sender is currently
+      // handling. A user-typed turn is depth 0, so the first
+      // agent-to-agent hop is 1. A sender with no live turn (a CI
+      // script, a hook, a cold session) starts a fresh chain at 1
+      // rather than inheriting anything.
+      const senderDepth = manager.get(canonical)?.currentPromptDepth;
+      out.depth = (senderDepth ?? 0) + 1;
     } else {
       onDropped?.(raw.sessionId);
     }

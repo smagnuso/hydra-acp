@@ -351,6 +351,17 @@ async function main(): Promise<void> {
       if (fromLabel !== undefined && fromLabel.length > 0) {
         catOpts.fromLabel = fromLabel;
       }
+      const timeoutRaw = resolveOption(flags, "timeout");
+      if (timeoutRaw !== undefined) {
+        const seconds = Number(timeoutRaw);
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+          process.stderr.write(
+            "hydra-acp: --timeout takes a positive number of seconds\n",
+          );
+          process.exit(2);
+        }
+        catOpts.timeoutSeconds = seconds;
+      }
       if (sessionTarget !== undefined) {
         catOpts.target = sessionTarget;
       }
@@ -1021,7 +1032,7 @@ function printHelp(subcommand?: string): void {
     [TUI, "  hydra-acp tui   [same flags]       Force TUI explicitly."],
     [SHIM, "  hydra-acp acp   [same flags]       Force shim explicitly (non-interactive; password prompts not allowed)."],
     [SHIM, "  hydra-acp shim  [same flags]       Alias for `acp` (kept for backward compatibility)."],
-    [CAT, "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--no-wait] [--agent <id>] [--model <id>] [--name <label>]"],
+    [CAT, "  hydra-acp cat [-p <prompt>] [--session <id-or-url>] [--detach] [--raw] [--no-wait] [--timeout <s>] [--agent <id>] [--model <id>] [--name <label>]"],
     [CAT, "                                     Pipe-friendly headless mode. Reads stdin and sends it"],
     [CAT, "                                     as a prompt to a fresh session, streams the agent's"],
     [CAT, "                                     response to stdout, exits when stdin closes. A bounded"],
@@ -1041,10 +1052,15 @@ function printHelp(subcommand?: string): void {
     [CAT, "                                     daemon for slack/browser/notifier extensions."],
     [CAT, "                                     --no-wait returns once the prompt is queued instead of"],
     [CAT, "                                     blocking for the receiving agent's whole turn (nothing is"],
-    [CAT, "                                     streamed to stdout in that mode). --from-session <id> and"],
-    [CAT, "                                     --from-label <text> stamp provenance onto the prompt so"],
-    [CAT, "                                     the receiver can tell it came from another session or a"],
-    [CAT, "                                     machine; --from-session defaults to HYDRA_ACP_SESSION."],
+    [CAT, "                                     streamed to stdout in that mode); --timeout <s> caps the"],
+    [CAT, "                                     wait without cancelling the turn, exiting non-zero."],
+    [CAT, "                                     --from-session <id> and --from-label <text> stamp"],
+    [CAT, "                                     provenance onto the prompt so the receiver can tell it"],
+    [CAT, "                                     came from another session or a machine; --from-session"],
+    [CAT, "                                     defaults to HYDRA_ACP_SESSION. The daemon bounds"],
+    [CAT, "                                     session-to-session chains: a blocking send whose target"],
+    [CAT, "                                     already waits on the sender is refused as a deadlock, and"],
+    [CAT, "                                     a chain deeper than 3 hops is refused as a loop."],
     [LAUNCH, "  hydra-acp launch <agent> [agent-args...]"],
     [LAUNCH, "                                     Shim mode, force daemon to spawn <agent>"],
     [LAUNCH, "                                     from the registry. Args after <agent>"],

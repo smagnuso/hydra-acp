@@ -64,6 +64,7 @@ const KNOWN_VALUE_FLAGS = new Set([
   "stream-bytes",
   "stream-threshold",
   "tail",
+  "timeout",
   "to",
 ]);
 

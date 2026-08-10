@@ -40,6 +40,11 @@ export interface PromptOriginator {
   fromSession?: string;
   fromSessionTitle?: string;
   fromLabel?: string;
+  // Hops taken by this chain of agent-originated messages. Daemon
+  // computed, never client asserted. 0 (or absent) is a turn the user
+  // typed; each agent-to-agent hop adds one, and the daemon refuses
+  // past MAX_MESSAGE_DEPTH so a ping-pong terminates.
+  depth?: number;
 }
 
 // One entry in the daemon-owned prompt queue, surfaced to clients via
