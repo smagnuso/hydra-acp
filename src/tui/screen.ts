@@ -247,6 +247,11 @@ export interface ScreenOptions {
   // running (taskbar pulse on Windows Terminal, dock badge on Konsole,
   // etc.). When false, no progress sequences are written.
   progressIndicator?: boolean;
+  // When true (default), the turn keys ease the viewport to their
+  // destination over a few frames instead of jumping. Set false for a
+  // hard cut — on a slow link the frames cost more than the continuity
+  // buys, and tests want the offset settled synchronously.
+  turnSlide?: boolean;
   // View-only mode. When true: the composer pane is suppressed (all
   // prompt rows return to scrollback), the OSC window title carries
   // " [VIEW ONLY]", and a "🔒 read-only" badge appears in the banner.
@@ -501,6 +506,15 @@ const DEFAULT_CONTENT_REPAINT_THROTTLE_MS = 1000;
 // `tui.maxScrollbackLines` in config.
 const DEFAULT_MAX_SCROLLBACK_LINES = 10_000;
 
+// Turn-jump slide. ~30ms frames each covering 45% of the distance left
+// puts a one-page hop at roughly 5 frames / 150ms: fast enough not to
+// feel like waiting, slow enough for the eye to lock onto the motion.
+// Hops of SLIDE_MIN_ROWS or fewer skip the animation — below that the
+// destination is already in view and the frames would only add latency.
+const SLIDE_FRAME_MS = 30;
+const SLIDE_EASE = 0.45;
+const SLIDE_MIN_ROWS = 2;
+
 // Recognise a chunk that is just a bare URL (optionally with a trailing
 // newline). Some terminals deliver link drag-drops as raw keystrokes
 // rather than bracketed paste; without this, each char would be typed
@@ -735,6 +749,19 @@ export class Screen {
   // highlight rendering. Mirrors scrollbackSearch?.term but cached as a
   // separate field so the per-row signature can include it cheaply.
   private scrollbackHighlight: string | null = null;
+  // Turn-jump pulse: the SOURCE lines of the prompt the last turn jump
+  // landed on, blinked in inverse video for a few hundred ms so the eye
+  // can find the landing spot without scanning. Source lines, not wrapped
+  // rows — drawScrollback re-derives the wrapped chunks through the wrap
+  // cache, which returns the same objects the paint slice holds, so
+  // matching is by identity and a blank row inside a multi-line prompt
+  // still blinks with the rest of it.
+  // Turn-jump slide. While slideTimer is live the viewport is easing
+  // toward slideTarget a few rows per frame; anything else that moves the
+  // viewport must cancel it first or the two will fight over scrollOffset.
+  private slideTarget = 0;
+  private slideTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly slideEnabled: boolean;
   // Source-anchored selection region. Stored in normalized form
   // (start <= end by sourceLineId, then by offset) so renderers don't
   // re-normalize on every row. Selection points are {sourceLineId,
@@ -1051,6 +1078,7 @@ export class Screen {
         : ofc;
     this.openFileCommand = ofcArgv && ofcArgv.length > 0 ? ofcArgv : null;
     this.progressIndicatorEnabled = opts.progressIndicator ?? true;
+    this.slideEnabled = opts.turnSlide ?? true;
     this.readonly = opts.readonly ?? false;
     this.resizeHandler = () => {
       // A resize changes contentWidth, so width-baked blocks are stale.
@@ -1158,6 +1186,7 @@ export class Screen {
       clearTimeout(this.bannerNotificationTimer);
       this.bannerNotificationTimer = null;
     }
+    this.cancelSlide();
     // A throttled repaint queued just before stop would otherwise fire
     // AFTER we leave the alternate screen and write raw cursor-position
     // escapes into the host shell, scrambling it.
@@ -1955,6 +1984,11 @@ export class Screen {
   // bug: any wrapped append would slide the view up by N−1 rows.
   private adjustScrollForRowChange(delta: number): void {
     if (this.scrollOffset > 0 && delta !== 0) {
+      // Content landing mid-slide would shift the rows out from under an
+      // animation whose target was computed against the old layout, so
+      // settle the slide first and let the anchor adjustment apply to the
+      // final offset like it would for any other stationary view.
+      this.cancelSlide(true);
       this.scrollOffset = Math.max(0, this.scrollOffset + delta);
     }
   }
@@ -3457,6 +3491,16 @@ export class Screen {
     }
     if (name === "PAGE_DOWN") {
       this.scrollBy(-this.scrollPageSize());
+      return;
+    }
+    // Alt+PgUp / Alt+PgDn move by turn instead of by page, landing the
+    // turn's user prompt on the top row.
+    if (name === "ALT_PAGE_UP") {
+      this.scrollToPrevTurn();
+      return;
+    }
+    if (name === "ALT_PAGE_DOWN") {
+      this.scrollToNextTurn();
       return;
     }
     const mapped = mapKeyName(name);
@@ -5180,6 +5224,9 @@ export class Screen {
     if (delta === 0) {
       return;
     }
+    // A wheel tick or PgUp mid-slide means the user is steering by hand
+    // now; stop where the animation got to and apply the delta from there.
+    this.cancelSlide();
     // Manual scroll (wheel / PgUp / PgDn) while a scrollback search is
     // engaged is taken as "I'm done searching, let me look around" —
     // accept the current match position and leave search mode so the
@@ -5197,6 +5244,7 @@ export class Screen {
   }
 
   scrollToBottom(): void {
+    this.cancelSlide();
     if (this.scrollbackSearch !== null) {
       this.acceptScrollbackSearch();
     }
@@ -5208,6 +5256,7 @@ export class Screen {
   }
 
   scrollToTop(): void {
+    this.cancelSlide();
     if (this.scrollbackSearch !== null) {
       this.acceptScrollbackSearch();
     }
@@ -5216,6 +5265,251 @@ export class Screen {
       return;
     }
     this.scrollOffset = max;
+    this.repaint();
+  }
+
+  // Step one stop older. Stops are the turn boundaries plus page-sized
+  // waypoints through any turn too tall to fit on screen — see turnStops.
+  // Past the oldest stop this runs to the top of the buffer rather than
+  // doing nothing, so the key always moves.
+  scrollToPrevTurn(): void {
+    const stops = this.turnStops();
+    const from = this.settledScrollOffset();
+    // Stops ascend with age, so the first one above where we are now is the
+    // nearest older stop.
+    const target = stops.find((o) => o > from);
+    this.stepToTurnStop(target ?? this.maxScrollOffset());
+  }
+
+  // Step one stop newer. Past the newest, fall through to the live tail.
+  scrollToNextTurn(): void {
+    const stops = this.turnStops();
+    const from = this.settledScrollOffset();
+    let target = 0;
+    for (const o of stops) {
+      if (o >= from) {
+        break;
+      }
+      target = o;
+    }
+    this.stepToTurnStop(target);
+  }
+
+  // Where the viewport is headed: the live offset normally, the slide's
+  // destination while one is in flight. Stepping from the destination is
+  // what lets a held key advance one stop per press — measuring from the
+  // animated position instead would keep re-picking the stop it was
+  // already gliding toward, and the repeat would crawl.
+  private settledScrollOffset(): number {
+    return this.slideTimer !== null ? this.slideTarget : this.scrollOffset;
+  }
+
+  // Shared landing for both turn keys: leave any live search, glide to the
+  // stop, and report where we ended up. The counter is read off the target
+  // rather than the live offset because the slide hasn't arrived yet.
+  private stepToTurnStop(target: number): void {
+    if (this.scrollbackSearch !== null) {
+      this.acceptScrollbackSearch();
+    }
+    this.slideScrollTo(target);
+    this.notifyTurnPosition(target);
+  }
+
+  // Every offset the turn keys stop at, ascending (newest → oldest).
+  //
+  // The turn tops are the point of the feature, but on their own they make
+  // a bad stop list. A turn taller than the viewport gets its middle
+  // skipped entirely, and one press can move the transcript hundreds of
+  // rows with no overlap between the before and after screens — which
+  // reads as teleporting, not scrolling, and leaves no way to tell which
+  // direction you just went. So every gap wider than a page is subdivided
+  // into page-sized waypoints: no press moves more than one screen,
+  // nothing is skipped, and the turn tops stay in the list so a turn still
+  // starts flush with the top row.
+  //
+  // Waypoints are aligned from the top of each gap downward, so paging
+  // forward through a long turn from its prompt gives even, full-page
+  // steps and the last step lands exactly on the next turn's top.
+  private turnStops(): number[] {
+    const max = this.maxScrollOffset();
+    const page = this.scrollPageSize();
+    // The buffer ends are stops too: the live tail is where scrollToNextTurn
+    // has to be able to land, and there can be content above the oldest
+    // prompt (replay banners, a resurrection notice) that would otherwise be
+    // unreachable.
+    const bounds = [0, ...this.turnScrollOffsets(), max]
+      .filter((o) => o >= 0 && o <= max)
+      .sort((a, b) => a - b);
+    const stops: number[] = [];
+    for (let i = 0; i < bounds.length; i++) {
+      const lo = bounds[i]!;
+      if (stops.at(-1) !== lo) {
+        stops.push(lo);
+      }
+      const hi = bounds[i + 1];
+      if (hi === undefined || page <= 0) {
+        continue;
+      }
+      const between: number[] = [];
+      for (let s = hi - page; s > lo; s -= page) {
+        between.push(s);
+      }
+      between.reverse();
+      stops.push(...between);
+    }
+    return stops;
+  }
+
+  // Transient "where am I" cue on the banner. A turn jump can replace the
+  // whole screen at once, and when nothing you were reading is left on it
+  // the movement itself is invisible — the counter is what tells you that
+  // you moved, and which way.
+  private notifyTurnPosition(offset: number): void {
+    const tops = this.turnScrollOffsets();
+    if (tops.length === 0) {
+      return;
+    }
+    // Turn k spans offsets (tops[k-1], tops[k]], so the turn under the
+    // viewport's top row is the first whose prompt sits at or above it.
+    const fromNewest = tops.findIndex((o) => o >= offset);
+    const nth = fromNewest === -1 ? 1 : tops.length - fromNewest;
+    this.notify(`turn ${nth}/${tops.length}`, 1500);
+  }
+
+  private turnScrollOffsets(): number[] {
+    return this.turnAnchors().map((a) => a.offset);
+  }
+
+  // One entry per turn: the scrollOffset that puts the first row of that
+  // turn's user prompt on the viewport's top row, plus the index of that
+  // prompt's first line in this.lines. Ordered newest turn (smallest
+  // offset) to oldest (largest).
+  //
+  // A turn starts at any visible line styled "user" whose predecessor
+  // isn't — formatEvent's user-text case is the only producer of that
+  // style, so the transcript needs no separate turn bookkeeping to survive
+  // upsertLines splices and trimScrollback drops.
+  //
+  // Turns still near the tail clamp to offset 0: there are no rows below
+  // them to scroll away, so their prompt can't reach row 1. That's also
+  // what makes "already at the newest turn" fall out of the > / <
+  // comparisons in the steppers without a special case.
+  private turnAnchors(): Array<{ offset: number; lineIndex: number }> {
+    const w = this.contentWidth();
+    const visibleRows = this.scrollbackVisibleRows();
+    if (visibleRows <= 0) {
+      return [];
+    }
+    const anchors: Array<{ offset: number; lineIndex: number }> = [];
+    // Walking backwards, `rowsAtOrBelow` counts the wrapped rows from the
+    // current line through the tail, which is exactly the scrollOffset
+    // that puts this line's first row on the top of the viewport (less the
+    // viewport's own height).
+    let rowsAtOrBelow = 0;
+    // A multi-line prompt is one turn, and walking backwards we can't tell
+    // we've reached the run's first line until we step past it. So hold the
+    // oldest user line seen so far and commit it when the run ends (or when
+    // we run out of scrollback).
+    let pending: { offset: number; lineIndex: number } | null = null;
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      const line = this.lines[i];
+      if (!line || this.isHiddenLine(line)) {
+        continue;
+      }
+      rowsAtOrBelow += this.wrapOne(line, w).length;
+      if (line.bodyStyle === "user") {
+        pending = {
+          offset: Math.max(0, rowsAtOrBelow - visibleRows),
+          lineIndex: i,
+        };
+        continue;
+      }
+      if (pending !== null) {
+        anchors.push(pending);
+        pending = null;
+      }
+    }
+    if (pending !== null) {
+      anchors.push(pending);
+    }
+    return anchors;
+  }
+
+  // Ease the viewport to `target` instead of teleporting. A jump that
+  // repaints the whole screen in one frame gives the eye nothing to
+  // follow, so the landing spot has to be hunted for; a short slide keeps
+  // the content spatially continuous and the direction is simply the way
+  // the text moved. Stops are capped at one page (see turnStops), so the
+  // distance covered here is always at most one screen.
+  //
+  // Frames get smaller as they approach the target: the burst of speed
+  // reads as intent, and the deceleration lands the eye on the prompt
+  // rather than leaving it mid-flight.
+  private slideScrollTo(target: number): void {
+    this.cancelSlide();
+    const clamped = Math.min(this.maxScrollOffset(), Math.max(0, target));
+    const distance = Math.abs(clamped - this.scrollOffset);
+    // Nothing to animate, or a hop short enough that a slide would just
+    // add latency.
+    if (distance === 0) {
+      return;
+    }
+    if (distance <= SLIDE_MIN_ROWS || !this.slideEnabled) {
+      this.setScrollOffset(clamped);
+      return;
+    }
+    this.slideTarget = clamped;
+    this.slideTimer = setInterval(() => {
+      const remaining = this.slideTarget - this.scrollOffset;
+      // Ease-out: cover a fixed fraction of what's left, with a floor so
+      // the tail doesn't crawl.
+      const step =
+        Math.sign(remaining) *
+        Math.max(1, Math.round(Math.abs(remaining) * SLIDE_EASE));
+      const next =
+        Math.abs(remaining) <= Math.abs(step)
+          ? this.slideTarget
+          : this.scrollOffset + step;
+      this.scrollOffset = next;
+      this.syncedPartialRepaint(() => this.drawScrollback());
+      if (next === this.slideTarget) {
+        this.cancelSlide();
+      }
+    }, SLIDE_FRAME_MS);
+  }
+
+  // Land immediately wherever the running slide was headed. Called before
+  // starting another one (held key repeat) and by anything that moves the
+  // viewport by other means, so a stale animation can't drag the view out
+  // from under it.
+  private cancelSlide(settle = false): void {
+    if (this.slideTimer === null) {
+      return;
+    }
+    clearInterval(this.slideTimer);
+    this.slideTimer = null;
+    if (settle && this.scrollOffset !== this.slideTarget) {
+      this.scrollOffset = Math.min(
+        this.maxScrollOffset(),
+        Math.max(0, this.slideTarget),
+      );
+      this.syncedPartialRepaint(() => this.drawScrollback());
+    }
+  }
+
+  // Shared tail of every absolute-position scroll: mirrors scrollBy's
+  // contract (accept a live search, clamp, skip the repaint when the
+  // offset didn't actually move).
+  private setScrollOffset(next: number): void {
+    this.cancelSlide();
+    if (this.scrollbackSearch !== null) {
+      this.acceptScrollbackSearch();
+    }
+    const clamped = Math.min(this.maxScrollOffset(), Math.max(0, next));
+    if (clamped === this.scrollOffset) {
+      return;
+    }
+    this.scrollOffset = clamped;
     this.repaint();
   }
 
@@ -7333,6 +7627,24 @@ export class Screen {
     }
   }
 
+  // True for scrollback lines that exist in this.lines but are skipped at
+  // both measure and draw time. bodyStyle === "thought" is the source of
+  // truth for thought-rendered lines (set by appendStreaming in the
+  // agent-thought path); when hideThoughts is on they're skipped but stay
+  // in this.lines so toggling back on restores them. Lines explicitly
+  // marked `collapsed` (a folded thought run's secondary lines +
+  // separators) are skipped always, regardless of hideThoughts.
+  //
+  // Every piece of row arithmetic must route through this, or offsets
+  // computed for a scroll target will disagree with what the painter
+  // actually lays down.
+  private isHiddenLine(line: FormattedLine): boolean {
+    return (
+      line.collapsed === true ||
+      (this.hideThoughts && line.bodyStyle === "thought")
+    );
+  }
+
   // Walk this.lines from the tail, accumulating wrapped rows via the
   // wrap cache, until we have at least `needed` rows or run out. Returns
   // the collected rows in original (top-down) order plus an `exhausted`
@@ -7345,20 +7657,10 @@ export class Screen {
     width: number,
     needed: number,
   ): { rows: FormattedLine[]; exhausted: boolean } {
-    // bodyStyle === "thought" is the source of truth for thought-rendered
-    // lines (set by appendStreaming in the agent-thought path). When
-    // hideThoughts is on, skip those entries at measure / draw time;
-    // they stay in this.lines so toggling back on restores them. Lines
-    // explicitly marked `collapsed` (a folded thought run's secondary
-    // lines + separators) are likewise skipped but always, regardless of
-    // hideThoughts.
-    const isThought = (line: FormattedLine): boolean =>
-      line.collapsed === true ||
-      (this.hideThoughts && line.bodyStyle === "thought");
     if (width <= 4) {
       const visible: FormattedLine[] = [];
       for (const line of this.lines) {
-        if (isThought(line)) {
+        if (this.isHiddenLine(line)) {
           continue;
         }
         visible.push(line);
@@ -7382,7 +7684,7 @@ export class Screen {
     let sawOldest = false;
     for (let i = this.lines.length - 1; i >= 0; i--) {
       const line = this.lines[i]!;
-      if (isThought(line)) {
+      if (this.isHiddenLine(line)) {
         if (i === 0) {
           sawOldest = true;
         }

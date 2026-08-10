@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
 import { thisMachine } from "../core/machine.js";
 import stringWidth from "string-width";
@@ -23,6 +23,7 @@ function makeScreen(
     repaintThrottleMs?: number;
     progressIndicator?: boolean;
     mouse?: boolean;
+    turnSlide?: boolean;
   } = {},
 ): Screen {
   // Proxy-based mock: `term` itself is callable (`term("text")` writes
@@ -66,6 +67,7 @@ function makeScreen(
     maxScrollbackLines: opts.maxScrollbackLines,
     progressIndicator: opts.progressIndicator ?? false,
     mouse: opts.mouse ?? false,
+    turnSlide: opts.turnSlide ?? false,
   });
 }
 
@@ -3846,5 +3848,463 @@ describe("OSC 7 session cwd reporting", () => {
       screen.setSessionbar({ sessionId: "s1", title: "t" });
     });
     expect(osc7Of(out)).toEqual([]);
+  });
+});
+
+
+describe("Screen scroll by turn", () => {
+  function getScrollOffset(screen: Screen): number {
+    return (screen as unknown as { scrollOffset: number }).scrollOffset;
+  }
+
+  function visibleRows(screen: Screen): number {
+    return (
+      screen as unknown as { scrollbackVisibleRows: () => number }
+    ).scrollbackVisibleRows();
+  }
+
+  function pageSize(screen: Screen): number {
+    return (screen as unknown as { scrollPageSize: () => number }).scrollPageSize();
+  }
+
+  function maxScrollOffset(screen: Screen): number {
+    return (
+      screen as unknown as { maxScrollOffset: () => number }
+    ).maxScrollOffset();
+  }
+
+  function turnTops(screen: Screen): number[] {
+    return (
+      screen as unknown as { turnScrollOffsets: () => number[] }
+    ).turnScrollOffsets();
+  }
+
+  function turnStops(screen: Screen): number[] {
+    return (screen as unknown as { turnStops: () => number[] }).turnStops();
+  }
+
+  // The row that actually paints at the top of the scrollback viewport,
+  // sliced exactly the way keyAtRow / drawScrollback slice it.
+  function topRow(screen: Screen): FormattedLine | undefined {
+    const s = screen as unknown as {
+      contentWidth: () => number;
+      scrollOffset: number;
+      wrapTail: (w: number, needed: number) => { rows: FormattedLine[] };
+    };
+    const rowCount = visibleRows(screen);
+    const { rows } = s.wrapTail(s.contentWidth(), rowCount + s.scrollOffset);
+    const end = rows.length - s.scrollOffset;
+    const start = Math.max(0, end - rowCount);
+    return rows.slice(start, end)[0];
+  }
+
+  // Bodies stay short so every logical line is exactly one wrapped row —
+  // the turn arithmetic is what's under test, not the wrapper.
+  function appendTurn(
+    screen: Screen,
+    n: number,
+    opts: { promptRows?: number; bodyRows?: number } = {},
+  ): void {
+    for (let p = 0; p < (opts.promptRows ?? 1); p++) {
+      screen.appendLines([
+        { prefix: "▎ ", prefixStyle: "user", body: `u${n}${p}`, bodyStyle: "user" },
+      ]);
+    }
+    for (let i = 0; i < (opts.bodyRows ?? 6); i++) {
+      screen.appendLines([{ prefix: "  ", body: `a${n}${i}`, bodyStyle: "agent" }]);
+    }
+  }
+
+  function makeTurns(
+    count: number,
+    opts: { promptRows?: number; bodyRows?: number } = {},
+  ): Screen {
+    const screen = makeScreen();
+    for (let t = 0; t < count; t++) {
+      appendTurn(screen, t, opts);
+    }
+    return screen;
+  }
+
+  // Walk to the top one press at a time, collecting where each press lands.
+  function walkUp(screen: Screen, presses = 500): number[] {
+    const seen: number[] = [];
+    for (let i = 0; i < presses; i++) {
+      screen.scrollToPrevTurn();
+      seen.push(getScrollOffset(screen));
+      if (getScrollOffset(screen) === maxScrollOffset(screen)) {
+        break;
+      }
+    }
+    return seen;
+  }
+
+  it("lands the turn's prompt flush with the top row", () => {
+    // Turns that fit on screen: one press per turn, prompt at row 1.
+    const screen = makeTurns(8, { bodyRows: 3 });
+    expect(pageSize(screen)).toBeGreaterThanOrEqual(
+      visibleRows(screen) - 2,
+    );
+    screen.scrollToPrevTurn();
+    expect(getScrollOffset(screen)).toBeGreaterThan(0);
+    expect(topRow(screen)?.bodyStyle).toBe("user");
+    expect(turnTops(screen)).toContain(getScrollOffset(screen));
+  });
+
+  it("never moves more than one page per press", () => {
+    // Turns far taller than the viewport are the case that used to
+    // teleport: prompt-to-prompt was a single jump of the whole turn.
+    const screen = makeTurns(6, { bodyRows: 40 });
+    const tall = turnTops(screen);
+    expect(tall[1]! - tall[0]!).toBeGreaterThan(pageSize(screen) * 3);
+    let prev = getScrollOffset(screen);
+    for (const at of walkUp(screen)) {
+      expect(at - prev).toBeLessThanOrEqual(pageSize(screen));
+      expect(at).toBeGreaterThan(prev);
+      prev = at;
+    }
+  });
+
+  it("stops on every turn top on the way up, skipping none", () => {
+    const screen = makeTurns(6, { bodyRows: 40 });
+    const tops = turnTops(screen);
+    const visited = new Set(walkUp(screen));
+    for (const top of tops) {
+      expect(visited.has(top)).toBe(true);
+    }
+  });
+
+  it("walks back down through the same stops in reverse", () => {
+    const screen = makeTurns(6, { bodyRows: 40 });
+    const up = walkUp(screen);
+    const down: number[] = [];
+    for (let i = 0; i < up.length; i++) {
+      screen.scrollToNextTurn();
+      down.push(getScrollOffset(screen));
+    }
+    // Reversing the walk retraces it exactly: prev and next are inverses,
+    // which is what makes the direction readable.
+    expect(down).toEqual([...up].reverse().slice(1).concat(0));
+  });
+
+  it("saturates at the top and bottom rather than sitting still", () => {
+    const screen = makeTurns(4, { bodyRows: 3 });
+    for (let i = 0; i < 40; i++) {
+      screen.scrollToPrevTurn();
+    }
+    expect(getScrollOffset(screen)).toBe(maxScrollOffset(screen));
+    for (let i = 0; i < 40; i++) {
+      screen.scrollToNextTurn();
+    }
+    expect(getScrollOffset(screen)).toBe(0);
+  });
+
+  it("keeps every turn top in the stop list", () => {
+    const screen = makeTurns(6, { bodyRows: 40 });
+    const stops = turnStops(screen);
+    for (const top of turnTops(screen)) {
+      expect(stops).toContain(top);
+    }
+    // Ascending and duplicate-free — both directions rely on the ordering.
+    expect([...stops].sort((a, b) => a - b)).toEqual(stops);
+    expect(new Set(stops).size).toBe(stops.length);
+  });
+
+  it("treats a multi-line prompt as one turn, not one per line", () => {
+    const single = makeTurns(5, { promptRows: 1 });
+    const multi = makeTurns(5, { promptRows: 3 });
+    expect(turnTops(single)).toHaveLength(5);
+    expect(turnTops(multi)).toHaveLength(5);
+  });
+
+  it("skips hidden thought rows when counting turn offsets", () => {
+    const withThoughts = makeScreen();
+    const without = makeScreen();
+    for (let t = 0; t < 5; t++) {
+      appendTurn(withThoughts, t);
+      appendTurn(without, t);
+      for (let i = 0; i < 4; i++) {
+        withThoughts.appendLines([
+          { prefix: "  ", body: `t${t}${i}`, bodyStyle: "thought" },
+        ]);
+      }
+    }
+    withThoughts.setHideThoughts(true);
+    expect(turnTops(withThoughts)).toEqual(turnTops(without));
+  });
+
+  it("counts thought rows when thoughts are visible", () => {
+    const screen = makeScreen();
+    for (let t = 0; t < 5; t++) {
+      appendTurn(screen, t);
+      screen.appendLines([{ prefix: "  ", body: `th${t}`, bodyStyle: "thought" }]);
+    }
+    const shown = turnTops(screen);
+    screen.setHideThoughts(true);
+    expect(turnTops(screen)).not.toEqual(shown);
+  });
+
+  it("still pages when scrollback holds no user turns", () => {
+    const screen = makeScreen();
+    for (let i = 0; i < 40; i++) {
+      screen.appendLines([{ body: `a${i}`, bodyStyle: "agent" }]);
+    }
+    expect(turnTops(screen)).toEqual([]);
+    screen.scrollToPrevTurn();
+    expect(getScrollOffset(screen)).toBeGreaterThan(0);
+    expect(getScrollOffset(screen)).toBeLessThanOrEqual(pageSize(screen));
+    for (let i = 0; i < 40; i++) {
+      screen.scrollToNextTurn();
+    }
+    expect(getScrollOffset(screen)).toBe(0);
+  });
+
+  it("reports the turn position on the banner", () => {
+    const screen = makeTurns(8, { bodyRows: 3 });
+    const banner = (): string | null =>
+      (screen as unknown as { bannerNotification: string | null })
+        .bannerNotification;
+    // The newest turn is already framed at the tail, so the first press
+    // lands on the one before it.
+    screen.scrollToPrevTurn();
+    expect(banner()).toBe("turn 7/8");
+    screen.scrollToPrevTurn();
+    expect(banner()).toBe("turn 6/8");
+    screen.scrollToNextTurn();
+    expect(banner()).toBe("turn 7/8");
+  });
+
+  it("routes ALT_PAGE_UP / ALT_PAGE_DOWN to the turn walk", () => {
+    const viaKey = makeTurns(8);
+    const viaCall = makeTurns(8);
+    const press = (screen: Screen, name: string): void => {
+      (
+        screen as unknown as {
+          handleKey: (n: string, d: { isCharacter?: boolean }) => void;
+        }
+      ).handleKey(name, {});
+    };
+    press(viaKey, "ALT_PAGE_UP");
+    press(viaKey, "ALT_PAGE_UP");
+    viaCall.scrollToPrevTurn();
+    viaCall.scrollToPrevTurn();
+    expect(getScrollOffset(viaKey)).toBe(getScrollOffset(viaCall));
+    expect(getScrollOffset(viaKey)).toBeGreaterThan(0);
+    press(viaKey, "ALT_PAGE_DOWN");
+    viaCall.scrollToNextTurn();
+    expect(getScrollOffset(viaKey)).toBe(getScrollOffset(viaCall));
+  });
+
+  it("snaps to turn boundaries where a plain page would not", () => {
+    const byTurn = makeTurns(8, { bodyRows: 3 });
+    const byPage = makeTurns(8, { bodyRows: 3 });
+    const press = (screen: Screen, name: string): void => {
+      (
+        screen as unknown as {
+          handleKey: (n: string, d: { isCharacter?: boolean }) => void;
+        }
+      ).handleKey(name, {});
+    };
+    press(byTurn, "ALT_PAGE_UP");
+    press(byPage, "PAGE_UP");
+    expect(topRow(byTurn)?.bodyStyle).toBe("user");
+    expect(getScrollOffset(byTurn)).not.toBe(getScrollOffset(byPage));
+  });
+});
+
+describe("Screen turn-jump slide", () => {
+  function getScrollOffset(screen: Screen): number {
+    return (screen as unknown as { scrollOffset: number }).scrollOffset;
+  }
+
+  function slideTo(screen: Screen, target: number): void {
+    (
+      screen as unknown as { slideScrollTo: (t: number) => void }
+    ).slideScrollTo(target);
+  }
+
+  function filled(turnSlide: boolean): Screen {
+    const screen = makeScreen({ turnSlide });
+    for (let i = 0; i < 200; i++) {
+      screen.appendLines([{ body: `r${i}`, bodyStyle: "agent" }]);
+    }
+    return screen;
+  }
+
+  // Advance the clock frame by frame, sampling the offset after each.
+  function frames(screen: Screen, count: number): number[] {
+    const out: number[] = [];
+    for (let i = 0; i < count; i++) {
+      vi.advanceTimersByTime(30);
+      out.push(getScrollOffset(screen));
+    }
+    return out;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("moves over several frames rather than jumping", () => {
+    const screen = filled(true);
+    slideTo(screen, 40);
+    // Nothing has moved yet — the first frame is still one tick away.
+    expect(getScrollOffset(screen)).toBe(0);
+    const seen = frames(screen, 3);
+    for (const at of seen) {
+      expect(at).toBeGreaterThan(0);
+      expect(at).toBeLessThan(40);
+    }
+    expect(seen[1]!).toBeGreaterThan(seen[0]!);
+  });
+
+  it("decelerates and lands exactly on the target", () => {
+    const screen = filled(true);
+    slideTo(screen, 40);
+    const seen = frames(screen, 40).filter((v, i, a) => i === 0 || v !== a[i - 1]!);
+    expect(seen.at(-1)).toBe(40);
+    // Never overshoots, and each step is no larger than the one before.
+    let prevStep = Infinity;
+    let prev = 0;
+    for (const at of seen) {
+      expect(at).toBeLessThanOrEqual(40);
+      const step = at - prev;
+      expect(step).toBeLessThanOrEqual(prevStep);
+      prevStep = step;
+      prev = at;
+    }
+  });
+
+  it("cuts straight to a destination only a row or two away", () => {
+    const screen = filled(true);
+    slideTo(screen, 2);
+    expect(getScrollOffset(screen)).toBe(2);
+  });
+
+  it("retargets when a second jump lands mid-slide", () => {
+    const screen = filled(true);
+    slideTo(screen, 40);
+    frames(screen, 2);
+    slideTo(screen, 10);
+    frames(screen, 40);
+    expect(getScrollOffset(screen)).toBe(10);
+  });
+
+  it("yields to a manual scroll mid-slide", () => {
+    const screen = filled(true);
+    slideTo(screen, 40);
+    frames(screen, 2);
+    const at = getScrollOffset(screen);
+    screen.scrollBy(1);
+    expect(getScrollOffset(screen)).toBe(at + 1);
+    // The abandoned animation must not keep pulling toward 40.
+    frames(screen, 40);
+    expect(getScrollOffset(screen)).toBe(at + 1);
+  });
+
+  it("settles to the target when content arrives mid-slide", () => {
+    const screen = filled(true);
+    slideTo(screen, 40);
+    frames(screen, 2);
+    screen.appendLines([{ body: "late", bodyStyle: "agent" }]);
+    // Settled at 40, then shifted by the one row that just landed, so the
+    // visible window stays anchored on the same content.
+    expect(getScrollOffset(screen)).toBe(41);
+    frames(screen, 40);
+    expect(getScrollOffset(screen)).toBe(41);
+  });
+
+  it("lands immediately when the slide is turned off", () => {
+    const screen = filled(false);
+    slideTo(screen, 40);
+    expect(getScrollOffset(screen)).toBe(40);
+  });
+
+  it("drops the animation timer on stop", () => {
+    const screen = filled(true);
+    // stop() is a no-op on a screen that was never started, and the timer
+    // teardown lives past that guard — so this has to exercise the real
+    // started → stopped path.
+    screen.start();
+    slideTo(screen, 40);
+    frames(screen, 1);
+    screen.stop();
+    const at = getScrollOffset(screen);
+    frames(screen, 40);
+    expect(getScrollOffset(screen)).toBe(at);
+  });
+
+  it("slides when a turn key has somewhere far to go", () => {
+    const screen = makeScreen({ turnSlide: true });
+    for (let t = 0; t < 6; t++) {
+      screen.appendLines([
+        { prefix: "▎ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
+      ]);
+      for (let i = 0; i < 40; i++) {
+        screen.appendLines([{ prefix: "  ", body: `a${t}${i}`, bodyStyle: "agent" }]);
+      }
+    }
+    screen.scrollToPrevTurn();
+    const landed = getScrollOffset(screen);
+    frames(screen, 40);
+    expect(getScrollOffset(screen)).toBeGreaterThan(landed);
+  });
+});
+
+describe("Screen turn keys under key repeat", () => {
+  function getScrollOffset(screen: Screen): number {
+    return (screen as unknown as { scrollOffset: number }).scrollOffset;
+  }
+
+  function makeTallTurns(turnSlide: boolean): Screen {
+    const screen = makeScreen({ turnSlide });
+    for (let t = 0; t < 8; t++) {
+      screen.appendLines([
+        { prefix: "▎ ", prefixStyle: "user", body: `u${t}`, bodyStyle: "user" },
+      ]);
+      for (let i = 0; i < 40; i++) {
+        screen.appendLines([{ prefix: "  ", body: `a${t}${i}`, bodyStyle: "agent" }]);
+      }
+    }
+    return screen;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("advances one stop per press even while a slide is in flight", () => {
+    const held = makeTallTurns(true);
+    const settled = makeTallTurns(false);
+    // Five presses arriving faster than a slide completes must cover the
+    // same ground as five presses with no animation at all.
+    for (let i = 0; i < 5; i++) {
+      held.scrollToPrevTurn();
+      vi.advanceTimersByTime(10);
+      settled.scrollToPrevTurn();
+    }
+    vi.advanceTimersByTime(2000);
+    expect(getScrollOffset(held)).toBe(getScrollOffset(settled));
+  });
+
+  it("reverses cleanly when the direction flips mid-slide", () => {
+    const screen = makeTallTurns(true);
+    screen.scrollToPrevTurn();
+    screen.scrollToPrevTurn();
+    vi.advanceTimersByTime(10);
+    const headed = (
+      screen as unknown as { slideTarget: number }
+    ).slideTarget;
+    screen.scrollToNextTurn();
+    vi.advanceTimersByTime(2000);
+    expect(getScrollOffset(screen)).toBeLessThan(headed);
   });
 });

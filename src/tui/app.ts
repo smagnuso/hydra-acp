@@ -868,6 +868,7 @@ const HELP_ENTRIES_TAIL: ReadonlyArray<readonly [string, string] | null> = [
   null,
   ["^R", "history reverse search (^S walks forward once engaged)"],
   ["PgUp / PgDn", "scroll scrollback"],
+  ["Alt+PgUp / Alt+PgDn", "step by turn (prompt to top row; long turns page)"],
   ["Mouse wheel", "scroll scrollback (when mouse capture is on)"],
   ["Middle-click", "paste PRIMARY selection (terminal-style)"],
   ["Double-click", "open file under cursor / sidebar file row (tui.openFileCommand, else $VISUAL/$EDITOR)"],
